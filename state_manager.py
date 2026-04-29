@@ -39,19 +39,19 @@ def load_state(ctx: Namespace) -> dict[str, str]:
     Raises:
         StateError: If the file exists but cannot be read or parsed.
     """
-    log_enter(ctx, "load_state")
+    log_enter(ctx, log, "load_state")
     state_file: Path = ctx.state_file
 
     if not state_file.exists():
         log.info("No state file at '%s' — starting fresh.", state_file)
-        log_exit(ctx, "load_state done (fresh)")
+        log_exit(ctx, log, "load_state done (fresh)")
         return {}
 
     try:
         with state_file.open(encoding="utf-8") as f:
             state: dict[str, str] = json.load(f)
         log.info("Loaded state: %d entry/entries from '%s'", len(state), state_file)
-        log_exit(ctx, "load_state done")
+        log_exit(ctx, log, "load_state done")
         return state
     except (OSError, json.JSONDecodeError) as exc:
         raise StateError(f"Cannot read state file '{state_file}'.") from exc
@@ -80,7 +80,7 @@ def save_state(ctx: Namespace, state: dict[str, str]) -> None:
     except OSError as exc:
         raise StateError(f"Cannot write state file '{state_file}'.") from exc
     finally:
-        log_exit(ctx, "save_state done")
+        log_exit(ctx, log, "save_state done")
 
 
 def is_new_or_updated(
