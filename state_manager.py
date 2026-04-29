@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rey_lib.ctx import AppContext
+from argparse import Namespace
 from rey_lib.error_utils import StateError
 from rey_lib.log_utils import log_enter, log_exit
 
@@ -24,14 +24,14 @@ __all__ = ["load_state", "save_state", "is_new_or_updated", "record_downloaded",
 log = logging.getLogger(__name__)
 
 
-def load_state(ctx: AppContext) -> dict[str, str]:
+def load_state(ctx: Namespace) -> dict[str, str]:
     """Load the download state from the JSON state file.
 
     Returns an empty dict if the file does not yet exist — this is the
     expected condition on the very first run.
 
     Args:
-        ctx: AppContext carrying the state_file path.
+        ctx: Namespace carrying the state_file path.
 
     Returns:
         Dict mapping '<remote_path>/<filename>' → ISO-8601 UTC timestamp string.
@@ -57,14 +57,14 @@ def load_state(ctx: AppContext) -> dict[str, str]:
         raise StateError(f"Cannot read state file '{state_file}'.") from exc
 
 
-def save_state(ctx: AppContext, state: dict[str, str]) -> None:
+def save_state(ctx: Namespace, state: dict[str, str]) -> None:
     """Persist the download state to the JSON state file.
 
     Creates parent directories if they do not exist.  Keys are written in
     sorted order to produce stable, diff-friendly output.
 
     Args:
-        ctx:   AppContext carrying the state_file path.
+        ctx:   Namespace carrying the state_file path.
         state: Current state dict to persist.
 
     Raises:
@@ -146,7 +146,7 @@ def record_downloaded(
         state[_STAMP_KEY] = _ensure_utc(modified_dt).isoformat()
 
 
-def load_last_stamp(ctx: AppContext, state: dict[str, str]) -> datetime | None:
+def load_last_stamp(ctx: Namespace, state: dict[str, str]) -> datetime | None:
     """Return the high-water mark timestamp for use as a download cutoff.
 
     Priority:
@@ -155,7 +155,7 @@ def load_last_stamp(ctx: AppContext, state: dict[str, str]) -> datetime | None:
     3. None — no cutoff, all files are eligible.
 
     Args:
-        ctx:   AppContext carrying initial_stamp.
+        ctx:   Namespace carrying initial_stamp.
         state: Current state dict loaded from disk.
 
     Returns:
@@ -166,25 +166,27 @@ def load_last_stamp(ctx: AppContext, state: dict[str, str]) -> datetime | None:
         log.debug("Using persisted high-water mark: %s", persisted.isoformat())
         return persisted
 
-    if ctx.initial_stamp is not None:
+    initial_stamp = getattr(ctx, "initial_stamp", None)
+
+    if initial_stamp is not None:
         log.info(
             "No persisted stamp found — using initial_stamp from config: %s",
-            ctx.initial_stamp.isoformat(),
+            initial_stamp.isoformat(),
         )
-        return ctx.initial_stamp
+        return initial_stamp
 
     log.info("No stamp available — all files are eligible for download.")
     return None
 
 
-def save_last_stamp(ctx: AppContext, state: dict[str, str]) -> None:
+def save_last_stamp(ctx: Namespace, state: dict[str, str]) -> None:
     """Log the current high-water mark after a completed run.
 
     The stamp itself is embedded in the state dict and persisted by save_state().
     This function only logs it for operator visibility.
 
     Args:
-        ctx:   AppContext (used for logging only).
+        ctx:   Namespace (used for logging only).
         state: State dict that already contains the updated stamp.
     """
     stamp = _read_stamp_from_state(state)

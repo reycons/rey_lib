@@ -58,6 +58,8 @@ class AppError(Exception):
 class ConfigError(AppError):
     """Raised when configuration is invalid, missing, or cannot be loaded."""
 
+class StateError(AppError):
+	pass
 
 # ---------------------------------------------------------------------------
 # Exception handler
