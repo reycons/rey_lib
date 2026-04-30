@@ -7,13 +7,18 @@ same engine can run against any number of FTP connections without modification.
 from __future__ import annotations
 
 import fnmatch
-import ftplib
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from rey_lib.ftp_client import download_file, ftp_session, list_remote_files
+from rey_lib.ftp_client import (
+    Session,
+    download_file,
+    ftp_session,
+    list_remote_dirs,
+    list_remote_files,
+)
 from rey_lib.state_manager import (
     add_to_retry_queue,
     is_new_or_updated,
@@ -61,16 +66,17 @@ def run_sync(ctx: Any, conn: Any) -> int:
     all_downloaded: list[str] = []
     all_failed: list[str]     = []
 
-    with ftp_session(conn.ftp) as ftp:
+    with ftp_session(conn.ftp) as session:
         # ── Pass 1: retry previously failed files regardless of stamp ──────
         if retry_queue:
-            retried, still_failed = _retry_failed(ctx, conn, ftp, retry_queue, state)
+            retried, still_failed = _retry_failed(ctx, conn, session, retry_queue, state)
             all_downloaded.extend(retried)
             all_failed.extend(still_failed)
 
-        # ── Pass 2: scan remote paths for new files ────────────────────────
-        for remote_path in conn.sync.remote_paths:
-            downloaded, failed = _sync_path(ctx, conn, ftp, remote_path, state, last_stamp)
+        # ── Pass 2: expand glob paths then scan each resolved directory ────
+        resolved_paths = _expand_remote_paths(session, conn.sync.remote_paths)
+        for remote_path in resolved_paths:
+            downloaded, failed = _sync_path(ctx, conn, session, remote_path, state, last_stamp)
             all_downloaded.extend(downloaded)
             all_failed.extend(failed)
 
@@ -88,7 +94,7 @@ def run_sync(ctx: Any, conn: Any) -> int:
 def _retry_failed(
     ctx: Any,
     conn: Any,
-    ftp: ftplib.FTP,
+    session: Session,
     retry_queue: list[dict],
     state: dict,
 ) -> tuple[list[str], list[str]]:
@@ -100,7 +106,7 @@ def _retry_failed(
     Args:
         ctx:         Global context.
         conn:        Per-connection Namespace.
-        ftp:         Authenticated FTP connection.
+        session:     Active Session from ftp_session().
         retry_queue: List of retry entry dicts (remote_path, filename, modified).
         state:       State dict mutated in place.
 
@@ -118,7 +124,7 @@ def _retry_failed(
         local_dir   = _local_dir_for_path(conn, remote_path)
 
         log.info("Retrying: %s/%s", remote_path, filename)
-        success = _download_one(ftp, remote_path, filename, modified_dt, local_dir, state)
+        success = _download_one(session, remote_path, filename, modified_dt, local_dir, state)
         if success:
             remove_from_retry_queue(state, remote_path, filename)
             downloaded.append(filename)
@@ -132,7 +138,7 @@ def _retry_failed(
 def _sync_path(
     ctx: Any,
     conn: Any,
-    ftp: ftplib.FTP,
+    session: Session,
     remote_path: str,
     state: dict[str, str],
     last_stamp: datetime | None,
@@ -142,7 +148,7 @@ def _sync_path(
     Args:
         ctx:         Global context.
         conn:        Per-connection Namespace.
-        ftp:         Authenticated FTP connection.
+        session:     Active Session from ftp_session().
         remote_path: Remote directory to process.
         state:       Current state dict, mutated in place as files are downloaded.
         last_stamp:  High-water mark — files at or before this are skipped.
@@ -153,7 +159,7 @@ def _sync_path(
     log_enter(ctx, f"_sync_path: {remote_path}", log)
     log.info("Scanning: %s", remote_path)
 
-    all_files = list_remote_files(ftp, remote_path)
+    all_files = list_remote_files(session, remote_path)
     log.info("Remote files found: %d", len(all_files))
 
     after_stamp = _filter_by_stamp(all_files, last_stamp)
@@ -169,7 +175,7 @@ def _sync_path(
     ]
     log.info("New or updated: %d", len(to_download))
 
-    downloaded, failed = _download_in_chunks(ctx, conn, ftp, remote_path, to_download, state)
+    downloaded, failed = _download_in_chunks(ctx, conn, session, remote_path, to_download, state)
     log_exit(ctx, f"_sync_path done: {len(downloaded)} downloaded, {len(failed)} failed", log)
     return downloaded, failed
 
@@ -177,7 +183,7 @@ def _sync_path(
 def _download_in_chunks(
     ctx: Any,
     conn: Any,
-    ftp: ftplib.FTP,
+    session: Session,
     remote_path: str,
     files: list[tuple[str, datetime]],
     state: dict[str, str],
@@ -187,7 +193,7 @@ def _download_in_chunks(
     Args:
         ctx:         Global context carrying chunk_size.
         conn:        Per-connection Namespace.
-        ftp:         Authenticated FTP connection.
+        session:     Active Session from ftp_session().
         remote_path: Remote directory the files live in.
         files:       List of (filename, modified_utc) tuples to download.
         state:       State dict mutated in place on each download attempt.
@@ -209,11 +215,10 @@ def _download_in_chunks(
             chunk_start + 1, chunk_end, len(files),
         )
         for filename, modified_dt in chunk:
-            success = _download_one(ftp, remote_path, filename, modified_dt, local_dir, state)
+            success = _download_one(session, remote_path, filename, modified_dt, local_dir, state)
             if success:
                 downloaded.append(filename)
             else:
-                # Add to retry queue so the file is not permanently lost.
                 add_to_retry_queue(state, remote_path, filename, modified_dt)
                 failed.append(filename)
 
@@ -222,7 +227,7 @@ def _download_in_chunks(
 
 
 def _download_one(
-    ftp: ftplib.FTP,
+    session: Session,
     remote_path: str,
     filename: str,
     modified_dt: datetime,
@@ -238,7 +243,7 @@ def _download_one(
         True on success, False on failure.
     """
     try:
-        download_file(ftp, remote_path, filename, local_dir)
+        download_file(session, remote_path, filename, local_dir)
         record_downloaded(state, remote_path, filename, modified_dt)
         return True
     except FtpDownloadError as exc:
@@ -271,6 +276,57 @@ def _log_summary(
             log.warning("  ✗ %s", filename)
 
     log.info("--- End summary ---")
+
+
+def _expand_remote_paths(
+    session: Session,
+    remote_paths: list[str],
+) -> list[str]:
+    """Expand any glob patterns in remote_paths to concrete directory paths.
+
+    Paths without glob characters are returned unchanged. Paths containing
+    '*', '?', or '[' are resolved by listing the parent directory and
+    matching subdirectory names against the pattern.
+
+    Example:
+        '/incoming/'          → ['/incoming/']
+        '/archive/2026-*/'    → ['/archive/2026-01/', '/archive/2026-02/', ...]
+
+    Args:
+        session:      Active Session from ftp_session().
+        remote_paths: Raw path list from config, may contain globs.
+
+    Returns:
+        Flat list of resolved concrete paths, preserving order.
+    """
+    resolved: list[str] = []
+    for path in remote_paths:
+        if not any(c in path for c in ("*", "?", "[")):
+            resolved.append(path)
+            continue
+
+        # Split into parent dir and glob pattern.
+        # e.g. '/archive/2026-*/' → parent='/archive/', pattern='2026-*'
+        pure       = PurePosixPath(path.rstrip("/"))
+        parent     = str(pure.parent) + "/"
+        pattern    = pure.name
+
+        log.debug("Expanding glob: parent=%s pattern=%s", parent, pattern)
+        try:
+            subdirs = list_remote_dirs(session, parent)
+        except Exception as exc:
+            log.warning("Cannot list '%s' for glob expansion: %s", parent, exc)
+            continue
+
+        matched = sorted(
+            f"{parent}{name}/"
+            for name in subdirs
+            if fnmatch.fnmatch(name, pattern)
+        )
+        log.info("Glob '%s' expanded to %d path(s): %s", path, len(matched), matched)
+        resolved.extend(matched)
+
+    return resolved
 
 
 def _filter_by_stamp(

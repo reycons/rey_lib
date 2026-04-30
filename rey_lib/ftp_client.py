@@ -1,138 +1,186 @@
-"""FTP connection management and low-level file operations.
+"""FTP/FTPS/SFTP connection management and file operations.
 
-Owns all direct ftplib interaction. No other module may call ftplib directly.
+Supports three protocols, selected via ftp_cfg.protocol:
+  - 'ftp'  — plain FTP (ftplib, stdlib)
+  - 'ftps' — FTP with TLS (ftplib.FTP_TLS, stdlib)
+  - 'sftp' — SSH File Transfer Protocol (paramiko, optional dependency)
 
-Provides:
-- ftp_session()       — context manager for an authenticated FTP connection.
-- list_remote_files() — list files with modification timestamps.
-- download_file()     — download a single file to a local directory.
+All callers receive an opaque Session object — protocol details are
+fully contained within this module. No other module imports ftplib or
+paramiko directly.
+
+Public API
+----------
+ftp_session(ftp_cfg)                    Context manager → Session
+list_remote_files(session, path)        List files with timestamps
+list_remote_dirs(session, path)         List subdirectory names (for glob expansion)
+download_file(session, path, name, dir) Download one file
 """
 
 from __future__ import annotations
 
+import fnmatch
 import ftplib
 import logging
+import stat as stat_module
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Generator
 
 from rey_lib.error_utils import FtpConnectionError, FtpDownloadError
 
-__all__ = ["ftp_session", "list_remote_files", "download_file"]
+__all__ = ["ftp_session", "list_remote_files", "list_remote_dirs", "download_file"]
 
 log = logging.getLogger(__name__)
 
-# Seconds to wait for the FTP server to respond before raising a timeout error.
 _FTP_TIMEOUT_SECONDS = 30
+_VALID_PROTOCOLS     = frozenset({"ftp", "ftps", "sftp"})
 
+
+# ── Session wrapper ───────────────────────────────────────────────────────────
+
+@dataclass
+class Session:
+    """Opaque wrapper around a live protocol connection.
+
+    Callers never access .conn or .protocol directly — they pass the Session
+    to the public functions in this module which handle all protocol dispatch.
+    """
+
+    protocol: str   # 'ftp' | 'ftps' | 'sftp'
+    conn: Any       # ftplib.FTP, ftplib.FTP_TLS, or paramiko.SFTPClient
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 @contextmanager
-def ftp_session(ftp_cfg: Any) -> Generator[ftplib.FTP, None, None]:
-    """Context manager that yields an authenticated FTP connection.
+def ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+    """Context manager that yields an authenticated Session.
 
-    The connection is always closed on exit, even when an exception occurs.
-    The caller must not close the connection manually.
+    Dispatches to the correct protocol handler based on ftp_cfg.protocol.
+    The session is always closed on exit, even when an exception occurs.
 
     Args:
-        ftp_cfg: Namespace carrying host, port, user, password.
-                 Typically conn.ftp from the per-connection config.
+        ftp_cfg: Namespace with host, port, user, password, protocol.
+                 protocol must be 'ftp', 'ftps', or 'sftp'.
 
     Yields:
-        An authenticated ftplib.FTP instance.
+        Session wrapping the live connection.
 
     Raises:
-        FtpConnectionError: If the connection or login fails.
+        FtpConnectionError: If the protocol is invalid or connection fails.
     """
-    log.debug("→ ftp_session → %s:%s", ftp_cfg.host, ftp_cfg.port)
-    ftp: ftplib.FTP | None = None
-    try:
-        ftp = ftplib.FTP()
-        ftp.connect(host=ftp_cfg.host, port=ftp_cfg.port, timeout=_FTP_TIMEOUT_SECONDS)
-        ftp.login(user=ftp_cfg.user, passwd=ftp_cfg.password)
-        log.info("FTP connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
-        yield ftp
-    except ftplib.all_errors as exc:
+    protocol = str(getattr(ftp_cfg, "protocol", "ftp")).lower()
+    if protocol not in _VALID_PROTOCOLS:
         raise FtpConnectionError(
-            f"Cannot connect to {ftp_cfg.host}:{ftp_cfg.port} — {exc}"
-        ) from exc
-    finally:
-        if ftp is not None:
-            _close_connection(ftp)
-        log.debug("← ftp_session closed")
+            f"Unknown protocol '{protocol}'. Must be one of: {sorted(_VALID_PROTOCOLS)}"
+        )
+
+    log.debug("→ ftp_session [%s] → %s:%s", protocol, ftp_cfg.host, ftp_cfg.port)
+
+    if protocol == "sftp":
+        yield from _sftp_session(ftp_cfg)
+    elif protocol == "ftps":
+        yield from _ftps_session(ftp_cfg)
+    else:
+        yield from _ftp_session(ftp_cfg)
 
 
 def list_remote_files(
-    ftp: ftplib.FTP,
+    session: Session,
     remote_path: str,
 ) -> list[tuple[str, datetime]]:
-    """Return all files in *remote_path* as a list of (filename, modified_utc) tuples.
+    """Return all files in *remote_path* as (filename, modified_utc) tuples.
 
-    Attempts MLSD first (RFC 3659); falls back to NLST + MDTM for older servers.
-    Subdirectories are excluded from the result.
+    Subdirectories are excluded. Protocol-aware.
 
     Args:
-        ftp:         Authenticated FTP connection.
-        remote_path: Absolute remote directory path to list.
+        session:     Active Session from ftp_session().
+        remote_path: Absolute remote directory path.
 
     Returns:
-        List of (filename, utc_datetime) tuples; empty list if the directory
-        is empty or does not exist.
+        List of (filename, utc_datetime) tuples; empty if directory is empty.
 
     Raises:
-        FtpConnectionError: If the listing command fails at the protocol level.
+        FtpConnectionError: If the listing command fails.
     """
-    log.debug("list_remote_files: %s", remote_path)
+    log.debug("list_remote_files [%s]: %s", session.protocol, remote_path)
     try:
-        result = _list_via_mlsd(ftp, remote_path)
-        if result is not None:
-            log.debug("MLSD listing for %s: %d file(s)", remote_path, len(result))
-            return result
-
-        result = _list_via_nlst_mdtm(ftp, remote_path)
-        log.debug("NLST+MDTM listing for %s: %d file(s)", remote_path, len(result))
-        return result
-
-    except ftplib.all_errors as exc:
+        if session.protocol == "sftp":
+            return _sftp_list_files(session.conn, remote_path)
+        return _ftp_list_files(session.conn, remote_path)
+    except Exception as exc:
         raise FtpConnectionError(
-            f"Failed to list remote path '{remote_path}': {exc}"
+            f"Failed to list '{remote_path}': {exc}"
+        ) from exc
+
+
+def list_remote_dirs(
+    session: Session,
+    remote_path: str,
+) -> list[str]:
+    """Return subdirectory names directly inside *remote_path*.
+
+    Used by sync_engine to expand glob patterns in remote_paths config.
+
+    Args:
+        session:     Active Session from ftp_session().
+        remote_path: Absolute remote directory to list.
+
+    Returns:
+        List of subdirectory names (basenames only, not full paths).
+
+    Raises:
+        FtpConnectionError: If the listing command fails.
+    """
+    log.debug("list_remote_dirs [%s]: %s", session.protocol, remote_path)
+    try:
+        if session.protocol == "sftp":
+            return _sftp_list_dirs(session.conn, remote_path)
+        return _ftp_list_dirs(session.conn, remote_path)
+    except Exception as exc:
+        raise FtpConnectionError(
+            f"Failed to list directories in '{remote_path}': {exc}"
         ) from exc
 
 
 def download_file(
-    ftp: ftplib.FTP,
+    session: Session,
     remote_path: str,
     filename: str,
     local_dir: Path,
 ) -> Path:
-    """Download a single file from the FTP server to *local_dir*.
+    """Download a single file to *local_dir*.
 
-    If the download fails, any partial local file is deleted before raising.
+    Partial files are deleted on failure. Protocol-aware.
 
     Args:
-        ftp:         Authenticated FTP connection.
+        session:     Active Session from ftp_session().
         remote_path: Absolute remote directory containing the file.
-        filename:    Name of the file to download (basename only).
+        filename:    Basename of the file to download.
         local_dir:   Local directory to save the file into (created if absent).
 
     Returns:
-        The local Path where the file was saved.
+        Local Path where the file was saved.
 
     Raises:
         FtpDownloadError: If the download fails for any reason.
     """
-    log.debug("download_file: %s", filename)
+    log.debug("download_file [%s]: %s", session.protocol, filename)
     remote_file = str(PurePosixPath(remote_path) / filename)
     local_file  = local_dir / filename
-
     local_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        with local_file.open("wb") as f:
-            ftp.retrbinary(f"RETR {remote_file}", f.write)
+        if session.protocol == "sftp":
+            _sftp_download(session.conn, remote_file, local_file)
+        else:
+            _ftp_download(session.conn, remote_file, local_file)
         log.info("Downloaded: %s → %s", remote_file, local_file)
         return local_file
-    except ftplib.all_errors as exc:
+    except Exception as exc:
         if local_file.exists():
             local_file.unlink()
         raise FtpDownloadError(
@@ -140,27 +188,156 @@ def download_file(
         ) from exc
 
 
-# ── Private helpers ───────────────────────────────────────────────────────────
+# ── FTP session ───────────────────────────────────────────────────────────────
+
+@contextmanager
+def _ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+    """Open a plain FTP connection."""
+    ftp: ftplib.FTP | None = None
+    try:
+        ftp = ftplib.FTP()
+        ftp.connect(host=ftp_cfg.host, port=int(ftp_cfg.port), timeout=_FTP_TIMEOUT_SECONDS)
+        ftp.login(user=ftp_cfg.user, passwd=ftp_cfg.password)
+        log.info("FTP connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
+        yield Session(protocol="ftp", conn=ftp)
+    except ftplib.all_errors as exc:
+        raise FtpConnectionError(
+            f"FTP connection failed {ftp_cfg.host}:{ftp_cfg.port} — {exc}"
+        ) from exc
+    finally:
+        if ftp is not None:
+            _close_ftp(ftp)
+        log.debug("← FTP session closed")
+
+
+# ── FTPS session ──────────────────────────────────────────────────────────────
+
+@contextmanager
+def _ftps_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+    """Open an FTP-over-TLS (FTPS) connection."""
+    ftp: ftplib.FTP_TLS | None = None
+    try:
+        ftp = ftplib.FTP_TLS()
+        ftp.connect(host=ftp_cfg.host, port=int(ftp_cfg.port), timeout=_FTP_TIMEOUT_SECONDS)
+        ftp.login(user=ftp_cfg.user, passwd=ftp_cfg.password)
+        # Switch data channel to TLS as well.
+        ftp.prot_p()
+        log.info("FTPS connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
+        yield Session(protocol="ftps", conn=ftp)
+    except ftplib.all_errors as exc:
+        raise FtpConnectionError(
+            f"FTPS connection failed {ftp_cfg.host}:{ftp_cfg.port} — {exc}"
+        ) from exc
+    finally:
+        if ftp is not None:
+            _close_ftp(ftp)
+        log.debug("← FTPS session closed")
+
+
+# ── SFTP session ──────────────────────────────────────────────────────────────
+
+@contextmanager
+def _sftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+    """Open an SSH/SFTP connection using paramiko."""
+    try:
+        import paramiko  # noqa: PLC0415 — optional dependency, imported on demand
+    except ImportError as exc:
+        raise FtpConnectionError(
+            "SFTP requires paramiko. Install it with: pip install paramiko"
+        ) from exc
+
+    ssh: paramiko.SSHClient | None = None
+    sftp: paramiko.SFTPClient | None = None
+    try:
+        ssh = paramiko.SSHClient()
+        # Accept host keys automatically — for stricter security, load known_hosts.
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=ftp_cfg.host,
+            port=int(ftp_cfg.port),
+            username=ftp_cfg.user,
+            password=ftp_cfg.password,
+            timeout=_FTP_TIMEOUT_SECONDS,
+        )
+        sftp = ssh.open_sftp()
+        log.info("SFTP connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
+        yield Session(protocol="sftp", conn=sftp)
+    except Exception as exc:
+        raise FtpConnectionError(
+            f"SFTP connection failed {ftp_cfg.host}:{ftp_cfg.port} — {exc}"
+        ) from exc
+    finally:
+        if sftp is not None:
+            sftp.close()
+        if ssh is not None:
+            ssh.close()
+        log.debug("← SFTP session closed")
+
+
+# ── FTP/FTPS file and directory operations ────────────────────────────────────
+
+def _ftp_list_files(
+    ftp: ftplib.FTP,
+    remote_path: str,
+) -> list[tuple[str, datetime]]:
+    """List files in remote_path via FTP. Tries MLSD first, falls back to NLST+MDTM."""
+    result = _list_via_mlsd(ftp, remote_path)
+    if result is not None:
+        return result
+    return _list_via_nlst_mdtm(ftp, remote_path)
+
+
+def _ftp_list_dirs(ftp: ftplib.FTP, remote_path: str) -> list[str]:
+    """List subdirectory names in remote_path via FTP."""
+    # Try MLSD first — it includes type facts.
+    try:
+        entries = list(ftp.mlsd(remote_path, facts=["type"]))
+        return [
+            name for name, facts in entries
+            if facts.get("type", "").lower() == "dir" and name not in (".", "..")
+        ]
+    except ftplib.error_perm:
+        pass
+
+    # Fallback: NLST then probe each entry with CWD.
+    dirs: list[str] = []
+    try:
+        names = ftp.nlst(remote_path)
+    except ftplib.all_errors:
+        return []
+
+    original_dir = ftp.pwd()
+    for full_path in names:
+        name = PurePosixPath(full_path).name
+        if name in (".", ".."):
+            continue
+        try:
+            ftp.cwd(full_path)
+            ftp.cwd(original_dir)
+            dirs.append(name)
+        except ftplib.all_errors:
+            pass
+    return dirs
+
+
+def _ftp_download(ftp: ftplib.FTP, remote_file: str, local_file: Path) -> None:
+    """Download a file via FTP retrbinary."""
+    with local_file.open("wb") as f:
+        ftp.retrbinary(f"RETR {remote_file}", f.write)
 
 
 def _list_via_mlsd(
     ftp: ftplib.FTP,
     remote_path: str,
 ) -> list[tuple[str, datetime]] | None:
-    """Attempt to list files using MLSD (RFC 3659).
-
-    Returns None if the server does not support MLSD so the caller can
-    fall back to NLST+MDTM.
-    """
+    """List files via MLSD (RFC 3659). Returns None if server does not support it."""
     try:
         entries = list(ftp.mlsd(remote_path, facts=["type", "modify"]))
     except ftplib.error_perm:
-        # Server replied with a permission/not-implemented error — no MLSD support.
         return None
 
     result: list[tuple[str, datetime]] = []
     for name, facts in entries:
-        # Skip directories and other non-file entries.
         if facts.get("type", "").lower() != "file":
             continue
         modified_dt = _parse_ftp_timestamp(facts.get("modify", ""))
@@ -172,37 +349,25 @@ def _list_via_nlst_mdtm(
     ftp: ftplib.FTP,
     remote_path: str,
 ) -> list[tuple[str, datetime]]:
-    """List files using NLST and retrieve each file's timestamp via MDTM.
-
-    Slower than MLSD because it requires one extra round-trip per file,
-    but works with older FTP servers that pre-date RFC 3659.
-    """
+    """List files via NLST + per-file MDTM. Slower but works on older servers."""
     names  = ftp.nlst(remote_path)
     result: list[tuple[str, datetime]] = []
     for full_path in names:
         filename = PurePosixPath(full_path).name
         try:
-            # MDTM response format: '213 YYYYMMDDHHMMSS'
             mdtm_response = ftp.sendcmd(f"MDTM {full_path}")
             timestamp_str = mdtm_response.split()[-1]
             modified_dt   = _parse_ftp_timestamp(timestamp_str)
         except ftplib.all_errors:
-            # If MDTM is unavailable, treat the file as epoch so it is
-            # always considered new and downloaded.
             modified_dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
         result.append((filename, modified_dt))
     return result
 
 
 def _parse_ftp_timestamp(timestamp_str: str) -> datetime:
-    """Parse a FTP MLSD/MDTM timestamp (YYYYMMDDHHMMSS[.sss]) into a UTC datetime.
-
-    Returns the Unix epoch (1970-01-01 UTC) if the string is blank or invalid
-    so that files with unparseable timestamps are always treated as new.
-    """
+    """Parse MLSD/MDTM timestamp (YYYYMMDDHHMMSS[.sss]) to UTC datetime."""
     if not timestamp_str:
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
-    # Strip optional sub-second component before parsing.
     timestamp_str = timestamp_str.split(".")[0]
     try:
         dt = datetime.strptime(timestamp_str, "%Y%m%d%H%M%S")
@@ -211,9 +376,38 @@ def _parse_ftp_timestamp(timestamp_str: str) -> datetime:
         return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def _close_connection(ftp: ftplib.FTP) -> None:
-    """Gracefully close an FTP connection, falling back to a hard close on error."""
+def _close_ftp(ftp: ftplib.FTP) -> None:
+    """Gracefully close an FTP/FTPS connection."""
     try:
         ftp.quit()
     except Exception:
         ftp.close()
+
+
+# ── SFTP file and directory operations ───────────────────────────────────────
+
+def _sftp_list_files(sftp: Any, remote_path: str) -> list[tuple[str, datetime]]:
+    """List files in remote_path via SFTP using listdir_attr."""
+    result: list[tuple[str, datetime]] = []
+    for attr in sftp.listdir_attr(remote_path):
+        # Skip directories.
+        if stat_module.S_ISDIR(attr.st_mode):
+            continue
+        mtime = attr.st_mtime or 0
+        modified_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        result.append((attr.filename, modified_dt))
+    return result
+
+
+def _sftp_list_dirs(sftp: Any, remote_path: str) -> list[str]:
+    """List subdirectory names in remote_path via SFTP."""
+    return [
+        attr.filename
+        for attr in sftp.listdir_attr(remote_path)
+        if stat_module.S_ISDIR(attr.st_mode) and attr.filename not in (".", "..")
+    ]
+
+
+def _sftp_download(sftp: Any, remote_file: str, local_file: Path) -> None:
+    """Download a file via SFTP get."""
+    sftp.get(remote_file, str(local_file))
