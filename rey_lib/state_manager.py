@@ -38,6 +38,9 @@ __all__ = [
     "load_retry_queue",
     "add_to_retry_queue",
     "remove_from_retry_queue",
+    "increment_retry_count",
+    "load_failed_files",
+    "abandon_to_failed_file",
 ]
 
 log = logging.getLogger(__name__)
@@ -234,32 +237,71 @@ def add_to_retry_queue(
     filename: str,
     modified_dt: datetime,
 ) -> None:
-    """Add a failed file to the retry queue.
+    """Add a failed file to the retry queue with retry_count = 1.
 
-    If the file is already in the queue its entry is updated in place so
-    there are no duplicates.
+    If the file is already in the queue its entry is updated in place —
+    use increment_retry_count() to advance the count on subsequent failures.
 
     Args:
         state:       State dict mutated in place.
         remote_path: Remote directory the file lives in.
         filename:    Basename of the failed file.
-        modified_dt: Modification timestamp — preserved so it can be recorded
-                     correctly when the file eventually succeeds.
+        modified_dt: Modification timestamp — preserved for recording on success.
     """
     queue: list[dict] = state.get(_RETRY_KEY, [])
 
-    # Remove any existing entry for this file before appending the updated one.
+    # Preserve existing retry_count if already queued.
+    existing = next(
+        (e for e in queue if e["remote_path"] == remote_path and e["filename"] == filename),
+        None,
+    )
+    retry_count = existing["retry_count"] if existing else 1
+
     queue = [
-        entry for entry in queue
-        if not (entry["remote_path"] == remote_path and entry["filename"] == filename)
+        e for e in queue
+        if not (e["remote_path"] == remote_path and e["filename"] == filename)
     ]
     queue.append({
-        "remote_path": remote_path,
-        "filename":    filename,
-        "modified":    _ensure_utc(modified_dt).isoformat(),
+        "remote_path":  remote_path,
+        "filename":     filename,
+        "modified":     _ensure_utc(modified_dt).isoformat(),
+        "retry_count":  retry_count,
     })
     state[_RETRY_KEY] = queue
-    log.warning("Added to retry queue: %s/%s (%d in queue)", remote_path, filename, len(queue))
+    log.warning(
+        "Added to retry queue: %s/%s (attempt %d)",
+        remote_path, filename, retry_count,
+    )
+
+
+def increment_retry_count(
+    state: dict,
+    remote_path: str,
+    filename: str,
+) -> int:
+    """Increment the retry_count for a queued file and return the new count.
+
+    Called after each failed retry attempt so the count accurately reflects
+    how many runs have attempted this file.
+
+    Args:
+        state:       State dict mutated in place.
+        remote_path: Remote directory the file lives in.
+        filename:    Basename of the file.
+
+    Returns:
+        Updated retry_count, or 0 if the entry was not found in the queue.
+    """
+    queue: list[dict] = state.get(_RETRY_KEY, [])
+    for entry in queue:
+        if entry["remote_path"] == remote_path and entry["filename"] == filename:
+            entry["retry_count"] = entry.get("retry_count", 1) + 1
+            log.debug(
+                "Retry count incremented: %s/%s → %d",
+                remote_path, filename, entry["retry_count"],
+            )
+            return entry["retry_count"]
+    return 0
 
 
 def remove_from_retry_queue(
@@ -267,7 +309,7 @@ def remove_from_retry_queue(
     remote_path: str,
     filename: str,
 ) -> None:
-    """Remove a file from the retry queue after it has been successfully downloaded.
+    """Remove a file from the retry queue after successful download.
 
     No-op if the file is not in the queue.
 
@@ -278,12 +320,91 @@ def remove_from_retry_queue(
     """
     queue: list[dict] = state.get(_RETRY_KEY, [])
     updated = [
-        entry for entry in queue
-        if not (entry["remote_path"] == remote_path and entry["filename"] == filename)
+        e for e in queue
+        if not (e["remote_path"] == remote_path and e["filename"] == filename)
     ]
     if len(updated) < len(queue):
         state[_RETRY_KEY] = updated
         log.info("Removed from retry queue: %s/%s", remote_path, filename)
+
+
+def load_failed_files(failed_file: Path) -> list[dict]:
+    """Load the abandoned files record from the per-connection failed_file.
+
+    Returns an empty list if the file does not exist.
+
+    Args:
+        failed_file: Path to the connection's .failed.json file.
+
+    Returns:
+        List of abandoned file entry dicts.
+
+    Raises:
+        StateError: If the file exists but cannot be read or parsed.
+    """
+    if not failed_file.exists():
+        return []
+    try:
+        with failed_file.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StateError(f"Cannot read failed file '{failed_file}'.") from exc
+
+
+def abandon_to_failed_file(
+    conn_name: str,
+    failed_file: Path,
+    remote_path: str,
+    filename: str,
+    modified_dt: datetime,
+    retry_count: int,
+    log_file: str,
+    state: dict,
+) -> None:
+    """Move a file from the retry queue to the permanent failed record.
+
+    Called when a file has exceeded max_retry_sessions. The entry is removed
+    from the retry queue in state and appended to the per-connection
+    failed_file JSON so operators have a clear actionable list.
+
+    Args:
+        conn_name:   Connection name (embedded in the failed record).
+        failed_file: Path to the connection's .failed.json file.
+        remote_path: Remote directory the file lives in.
+        filename:    Basename of the abandoned file.
+        modified_dt: File modification timestamp.
+        retry_count: Number of retry sessions attempted before abandoning.
+        log_file:    Path to the log file from the run that abandoned this file.
+        state:       State dict — the queue entry is removed in place.
+    """
+    # Remove from retry queue first.
+    remove_from_retry_queue(state, remote_path, filename)
+
+    # Build the failure record.
+    entry = {
+        "connection":  conn_name,
+        "remote_path": remote_path,
+        "filename":    filename,
+        "modified":    _ensure_utc(modified_dt).isoformat(),
+        "retry_count": retry_count,
+        "abandoned_at": datetime.now(tz=timezone.utc).isoformat(),
+        "log_file":    log_file,
+    }
+
+    # Append to the persistent failed file.
+    failed_file.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_failed_files(failed_file)
+    existing.append(entry)
+    try:
+        with failed_file.open("w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, sort_keys=True)
+    except OSError as exc:
+        raise StateError(f"Cannot write failed file '{failed_file}'.") from exc
+
+    log.error(
+        "ABANDONED after %d retries: %s/%s — see %s and %s",
+        retry_count, remote_path, filename, failed_file, log_file,
+    )
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

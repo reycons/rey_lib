@@ -20,8 +20,11 @@ from rey_lib.ftp_client import (
     list_remote_files,
 )
 from rey_lib.state_manager import (
+    abandon_to_failed_file,
     add_to_retry_queue,
+    increment_retry_count,
     is_new_or_updated,
+    load_failed_files,
     load_last_stamp,
     load_retry_queue,
     load_state,
@@ -65,13 +68,17 @@ def run_sync(ctx: Any, conn: Any) -> int:
 
     all_downloaded: list[str] = []
     all_failed: list[str]     = []
+    all_abandoned: list[str]  = []
 
     with ftp_session(conn.ftp) as session:
         # ── Pass 1: retry previously failed files regardless of stamp ──────
         if retry_queue:
-            retried, still_failed = _retry_failed(ctx, conn, session, retry_queue, state)
+            retried, still_failed, abandoned = _retry_failed(
+                ctx, conn, session, retry_queue, state
+            )
             all_downloaded.extend(retried)
             all_failed.extend(still_failed)
+            all_abandoned.extend(abandoned)
 
         # ── Pass 2: expand glob paths then scan each resolved directory ────
         resolved_paths = _expand_remote_paths(session, conn.sync.remote_paths)
@@ -83,7 +90,7 @@ def run_sync(ctx: Any, conn: Any) -> int:
     save_last_stamp(conn, state)
     save_state(conn, state)
 
-    _log_summary(conn.name, all_downloaded, all_failed)
+    _log_summary(conn.name, all_downloaded, all_failed, all_abandoned)
     log_exit(ctx, f"run_sync done: {conn.name}", log)
     return len(all_downloaded)
 
@@ -97,25 +104,31 @@ def _retry_failed(
     session: Session,
     retry_queue: list[dict],
     state: dict,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """Attempt to download all files in the retry queue.
 
-    Each entry is attempted once. Successes are recorded in state and removed
-    from the queue. Failures remain in the queue for the next run.
+    On success: recorded in state, removed from queue.
+    On failure: retry_count incremented. If retry_count >= max_retry_sessions
+    the file is abandoned to conn.sync.failed_file and removed from queue.
 
     Args:
-        ctx:         Global context.
+        ctx:         Global context (carries log_file path).
         conn:        Per-connection Namespace.
         session:     Active Session from ftp_session().
-        retry_queue: List of retry entry dicts (remote_path, filename, modified).
+        retry_queue: List of retry entry dicts.
         state:       State dict mutated in place.
 
     Returns:
-        Tuple of (downloaded filenames, still-failed filenames).
+        Tuple of (downloaded filenames, still-failing filenames, abandoned filenames).
     """
     log_enter(ctx, f"_retry_failed: {len(retry_queue)} file(s)", log)
-    downloaded: list[str] = []
+    downloaded: list[str]  = []
     still_failed: list[str] = []
+    abandoned: list[str]   = []
+
+    max_retries = int(getattr(conn.ftp, "max_retry_sessions", 3))
+    failed_file = Path(conn.sync.failed_file)
+    log_file    = getattr(ctx, "log_file", "unknown")
 
     for entry in retry_queue:
         remote_path = entry["remote_path"]
@@ -123,16 +136,37 @@ def _retry_failed(
         modified_dt = datetime.fromisoformat(entry["modified"])
         local_dir   = _local_dir_for_path(conn, remote_path)
 
-        log.info("Retrying: %s/%s", remote_path, filename)
+        log.info("Retrying: %s/%s (attempt %d of %d)",
+                 remote_path, filename, entry.get("retry_count", 1), max_retries)
+
         success = _download_one(session, remote_path, filename, modified_dt, local_dir, state)
         if success:
             remove_from_retry_queue(state, remote_path, filename)
             downloaded.append(filename)
         else:
-            still_failed.append(filename)
+            # Increment retry count for this entry.
+            new_count = increment_retry_count(state, remote_path, filename)
+            if new_count >= max_retries:
+                # Exceeded limit — abandon permanently.
+                abandon_to_failed_file(
+                    conn_name=conn.name,
+                    failed_file=failed_file,
+                    remote_path=remote_path,
+                    filename=filename,
+                    modified_dt=modified_dt,
+                    retry_count=new_count,
+                    log_file=log_file,
+                    state=state,
+                )
+                abandoned.append(filename)
+            else:
+                still_failed.append(filename)
 
-    log_exit(ctx, f"_retry_failed done: {len(downloaded)} recovered, {len(still_failed)} still failing", log)
-    return downloaded, still_failed
+    log_exit(ctx, (
+        f"_retry_failed done: {len(downloaded)} recovered, "
+        f"{len(still_failed)} still failing, {len(abandoned)} abandoned"
+    ), log)
+    return downloaded, still_failed, abandoned
 
 
 def _sync_path(
@@ -255,25 +289,34 @@ def _log_summary(
     connection_name: str,
     downloaded: list[str],
     failed: list[str],
+    abandoned: list[str],
 ) -> None:
-    """Log a clean end-of-run summary listing downloaded and failed files.
+    """Log a clean end-of-run summary listing downloaded, failed, and abandoned files.
 
     Args:
         connection_name: Name of the FTP connection for context.
         downloaded:      Filenames successfully downloaded this run.
         failed:          Filenames that failed and are queued for retry.
+        abandoned:       Filenames that exceeded max_retry_sessions and were
+                         moved to the connection's failed_file.
     """
     log.info("--- Summary for connection: %s ---", connection_name)
-    log.info("Downloaded this run : %d", len(downloaded))
+
+    log.info("Downloaded this run: %d", len(downloaded))
     for filename in downloaded:
         log.info("  ✓ %s", filename)
     if not downloaded:
         log.info("  (no new files)")
 
     if failed:
-        log.warning("Failed (queued for retry): %d", len(failed))
+        log.warning("Queued for retry: %d", len(failed))
         for filename in failed:
-            log.warning("  ✗ %s", filename)
+            log.warning("  ↻ %s", filename)
+
+    if abandoned:
+        log.error("Abandoned (exceeded max retries): %d", len(abandoned))
+        for filename in abandoned:
+            log.error("  ✗ %s", filename)
 
     log.info("--- End summary ---")
 

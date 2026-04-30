@@ -145,7 +145,11 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
-    ctx.log_level  = level_name
+    ctx.log_level = level_name
+    ctx.log_depth = getattr(ctx, "log_depth", 0)
+    # Store the resolved log file path on ctx so run_sync can embed it in
+    # abandoned file records for operator traceability.
+    setattr(ctx, "log_file", str(resolved_log))
     _current_depth = ctx.log_depth
 
 
