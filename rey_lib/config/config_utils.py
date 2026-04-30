@@ -8,20 +8,19 @@ that provides attribute-style access to every config value.
 Design principles
 -----------------
 - No application-specific knowledge — works for any project
-- Filename of config files is irrelevant — internal YAML hierarchy is
-  the source of truth for where values are merged
+- project_root is passed explicitly — this module never assumes its own
+  location on disk, which would break when installed as a pip package
 - All YAML files under config/ are loaded and deep-merged automatically
 - Adding a new config file requires only dropping a new YAML file into
   config/ — no code changes
 - Path values are resolved automatically based on key name suffix
 - Secrets are injected from .env — never from YAML
-- Secret injection is the caller's responsibility via inject_secrets() —
-  this module has no knowledge of which secrets any project requires
+- Secret injection is the caller's responsibility via inject_secrets()
 
 Config file locations
 ---------------------
-  config/config.{env}.yaml          Main config — singleton values only
-  config/**/*.yaml                  Additional config files — merged by hierarchy
+  <project_root>/config/config.{env}.yaml     Main config — singleton values only
+  <project_root>/config/**/*.yaml             Additional config files — merged by hierarchy
 
 Runtime state (not from YAML)
 ------------------------------
@@ -31,12 +30,11 @@ Runtime state (not from YAML)
 
 Public API
 ----------
-  build_ctx(env)              Build and return a fully populated Namespace.
-  inject_secrets(ctx, map)    Inject .env secrets into ctx at dot-separated paths.
-  get_config_path(env)        Return Path to the main config file for env.
-  save_config(data, env)      Write a dict back to the main config file.
-  print_ctx(ctx)              Log the full context at DEBUG level.
-  Namespace                   Attribute-access wrapper around a config dict.
+  build_ctx(env, project_root)    Build and return a fully populated Namespace.
+  inject_secrets(ctx, map)        Inject .env secrets into ctx at dot-separated paths.
+  save_config(data, env, ...)     Write a dict back to the main config file.
+  print_ctx(ctx)                  Log the full context at DEBUG level.
+  Namespace                       Attribute-access wrapper around a config dict.
 """
 
 from __future__ import annotations
@@ -56,33 +54,22 @@ _logger = logging.getLogger(__name__)
 __all__ = [
     "build_ctx",
     "inject_secrets",
-    "get_config_path",
     "save_config",
     "print_ctx",
     "Namespace",
 ]
 
-# ---------------------------------------------------------------------------
-# Path constants
-# ---------------------------------------------------------------------------
-
-_LIB_DIR      = Path(__file__).parent
-_PROJECT_ROOT = _LIB_DIR.parent
-_CONFIG_DIR   = _PROJECT_ROOT / "config"
-_ENV_FILE     = _PROJECT_ROOT / ".env"
+# Config directory name and main config filename pattern — constant across all projects.
+_CONFIG_DIR_NAME   = "config"
+_CONFIG_FILE_NAMES = {"dev": "config.dev.yaml", "prod": "config.prod.yaml"}
+_ENV_FILE_NAME     = ".env"
 
 # Keys whose string values are resolved to Path objects.
 _PATH_KEY_SUFFIXES = ("_path", "_dir", "_file")
 _PATH_KEY_NAMES    = ("path",)
 
-# Keys whose string values are treated as log path templates.
-# Placeholders ({operation}, {timestamp}) must survive resolution intact.
+# Keys whose string values are log path templates — placeholders must survive resolution.
 _LOG_PATH_KEYS = ("log_path",)
-
-_CONFIG_FILES: dict[str, str] = {
-    "dev":  "config.dev.yaml",
-    "prod": "config.prod.yaml",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -93,14 +80,9 @@ class Namespace:
     """
     Recursive attribute-access wrapper around a plain dict.
 
-    Supports both attribute access (ctx.config_key) and item access
-    (ctx["config_key"]) for nested values. Constructed recursively:
-    nested dicts become child Namespace objects, and lists are preserved
-    as lists while any dicts inside them are also wrapped as Namespace
-    objects.
-
-    Read-only after construction except for runtime state attributes
-    (log_level, log_depth) which are written by log_utils.
+    Supports both attribute access (ctx.key) and item access (ctx["key"]).
+    Nested dicts become child Namespace objects. Lists are preserved with
+    any dict items inside them also wrapped as Namespace objects.
     """
 
     def __init__(self, data: dict[str, Any]) -> None:
@@ -108,14 +90,12 @@ class Namespace:
             object.__setattr__(self, key, _wrap_config_value(value))
 
     def __getitem__(self, key: str) -> Any:
-        """Support dict-style access: ctx["config_key"]."""
         try:
             return object.__getattribute__(self, key)
         except AttributeError:
             raise KeyError(key)
 
     def __contains__(self, key: str) -> bool:
-        """Support `"config_key" in ctx`."""
         try:
             object.__getattribute__(self, key)
             return True
@@ -123,26 +103,21 @@ class Namespace:
             return False
 
     def keys(self) -> list[str]:
-        """Return all public attribute names."""
         return [k for k in self.__dict__ if not k.startswith("_")]
 
     def values(self) -> list[Any]:
-        """Return all attribute values."""
         return [object.__getattribute__(self, k) for k in self.keys()]
 
     def items(self) -> list[tuple[str, Any]]:
-        """Return (key, value) pairs — mirrors dict.items()."""
         return [(k, object.__getattribute__(self, k)) for k in self.keys()]
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Return attribute value or default if not present."""
         try:
             return object.__getattribute__(self, key)
         except AttributeError:
             return default
 
     def __repr__(self) -> str:
-        """Human-readable representation showing all keys."""
         pairs = ", ".join(f"{k}={repr(v)}" for k, v in self.items())
         return f"Namespace({pairs})"
 
@@ -151,12 +126,13 @@ class Namespace:
 # Public API
 # ---------------------------------------------------------------------------
 
-def build_ctx(env: str = "dev") -> Namespace:
+def build_ctx(env: str = "dev", project_root: Path | None = None) -> Namespace:
     """
     Build and return a fully populated Namespace for the given environment.
 
-    Loads the main config file, deep-merges all additional YAML config files,
-    resolves paths, and adds runtime state attributes.
+    Loads the main config file, deep-merges all additional YAML config files
+    found under <project_root>/config/, resolves paths, and adds runtime
+    state attributes.
 
     Secret injection is NOT performed here — call inject_secrets() separately
     after build_ctx() with a project-specific secret map.
@@ -165,35 +141,41 @@ def build_ctx(env: str = "dev") -> Namespace:
     ----------
     env : str
         Target environment. Must be 'dev' or 'prod'.
+    project_root : Path | None
+        Root directory of the calling project. config/ and .env are
+        resolved relative to this path. Defaults to Path.cwd() when None —
+        correct when the script is run from the project root.
 
     Returns
     -------
     Namespace
-        Fully populated context object. ctx.log_level is written later
-        by log_utils.setup_logging().
+        Fully populated context object.
 
     Raises
     ------
     ConfigError
         If the environment is invalid or the main config file is missing.
     """
+    if project_root is None:
+        project_root = Path.cwd()
+
+    project_root = Path(project_root).resolve()
+    config_dir   = project_root / _CONFIG_DIR_NAME
+    env_file     = project_root / _ENV_FILE_NAME
+
     env = validate_env(env)
+    _load_env_file(env_file)
 
-    # Load .env into os.environ so inject_secrets() can read from it.
-    _load_env_file()
-
-    raw = _load_main_config(env)
-    raw = _merge_config_files(raw)
-
-    base = get_config_path(env).parent
-    raw  = _resolve_paths(raw, base, parent_key="")
+    raw = _load_main_config(env, config_dir)
+    raw = _merge_config_files(raw, config_dir)
+    raw = _resolve_paths(raw, config_dir, parent_key="")
 
     ctx = Namespace(raw)
 
     # Runtime state — never from YAML.
     object.__setattr__(ctx, "env",       env)
-    object.__setattr__(ctx, "log_level", "INFO")  # overwritten by log_utils
-    object.__setattr__(ctx, "log_depth", 0)        # managed by log_enter/log_exit
+    object.__setattr__(ctx, "log_level", "INFO")   # overwritten by log_utils
+    object.__setattr__(ctx, "log_depth", 0)         # managed by log_enter/log_exit
 
     return ctx
 
@@ -202,11 +184,9 @@ def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
     """
     Read secrets from os.environ and inject them into ctx at their target paths.
 
-    Called by the application after build_ctx() with a project-specific map.
-    This module has no knowledge of which secrets any project requires.
-
-    If an intermediate key does not exist in ctx the secret is silently
-    skipped — the relevant provider may not be configured in this environment.
+    Target paths are dot-separated strings that walk Namespace attributes.
+    For dynamic injection (e.g. per-connection FTP passwords) inject directly
+    into the connection Namespace using object.__setattr__ after build_ctx().
 
     Parameters
     ----------
@@ -214,24 +194,12 @@ def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
         The fully built context object. Modified in-place.
     secret_map : dict[str, str]
         Mapping of env var name → dot-separated ctx path.
-        Example: {"FTP_PASSWORD_CLIENTA": "connections.0.ftp.password"}
-        For dynamic injection (e.g. per-connection passwords) call
-        this function once per secret rather than building the full map
-        upfront.
-
-    Example
-    -------
-    inject_secrets(ctx, {
-        "ANTHROPIC_API_KEY": "llm.claude.api_key",
-        "OPENAI_API_KEY":    "llm.gpt4o.api_key",
-    })
+        Example: {"ANTHROPIC_API_KEY": "llm.claude.api_key"}
     """
     for env_var, dotted_path in secret_map.items():
         secret_value = os.getenv(env_var, "")
         if not secret_value:
-            # Secret not set — skip rather than overwriting with empty string.
             continue
-
         parts  = dotted_path.split(".")
         target = ctx
         for part in parts[:-1]:
@@ -240,70 +208,37 @@ def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
             except AttributeError:
                 target = None
                 break
-
         if target is not None:
             object.__setattr__(target, parts[-1], secret_value)
 
 
-def get_config_path(env: str) -> Path:
-    """
-    Return the resolved Path to the main config file for the given environment.
-
-    Parameters
-    ----------
-    env : str
-        Target environment. Must be 'dev' or 'prod'.
-
-    Returns
-    -------
-    Path
-        Absolute path to the YAML config file.
-
-    Raises
-    ------
-    ConfigError
-        If the config file does not exist on disk.
-    """
-    filename = _CONFIG_FILES.get(env)
-    if not filename:
-        raise ConfigError(f"No config file defined for environment '{env}'.")
-    path = _CONFIG_DIR / filename
-    if not path.exists():
-        raise ConfigError(f"Config file not found: {path}")
-    return path
-
-
-def save_config(data: dict[str, Any], env: str = "dev") -> None:
+def save_config(
+    data: dict[str, Any],
+    env: str = "dev",
+    project_root: Path | None = None,
+) -> None:
     """
     Write a plain dict back to the main config file for the given environment.
 
     Parameters
     ----------
     data : dict
-        Full config structure to write. Must be PyYAML-serialisable.
+        Full config structure to write.
     env : str
-        Target environment. Determines which file is written.
-
-    Raises
-    ------
-    ConfigError
-        If the config file path cannot be resolved.
+        Target environment.
+    project_root : Path | None
+        Project root. Defaults to Path.cwd().
     """
-    config_path = get_config_path(env)
+    if project_root is None:
+        project_root = Path.cwd()
+    config_dir  = Path(project_root) / _CONFIG_DIR_NAME
+    config_path = _config_path(env, config_dir)
     with config_path.open("w", encoding="utf-8") as fh:
-        yaml.dump(data, fh, default_flow_style=False,
-                  sort_keys=False, allow_unicode=True)
+        yaml.dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
 def print_ctx(ctx: Namespace) -> None:
-    """
-    Log the full context hierarchy at DEBUG level for diagnostic use.
-
-    Parameters
-    ----------
-    ctx : Namespace
-        The context object to log.
-    """
+    """Log the full context hierarchy at DEBUG level for diagnostic use."""
     _logger.debug("=== ctx dump ===")
     _print_namespace(ctx, indent=0)
     _logger.debug("=== end ctx dump ===")
@@ -313,37 +248,36 @@ def print_ctx(ctx: Namespace) -> None:
 # Private — loading and merging
 # ---------------------------------------------------------------------------
 
-def _load_env_file() -> None:
-    """Load the .env file from the project root into os.environ."""
-    if _ENV_FILE.exists():
-        load_dotenv(dotenv_path=_ENV_FILE, override=False)
+def _load_env_file(env_file: Path) -> None:
+    """Load the .env file into os.environ if it exists."""
+    if env_file.exists():
+        load_dotenv(dotenv_path=env_file, override=False)
 
 
-def _load_main_config(env: str) -> dict[str, Any]:
+def _load_main_config(env: str, config_dir: Path) -> dict[str, Any]:
     """Load and return the main environment config file as a raw dict."""
-    return _load_yaml(get_config_path(env))
+    return _load_yaml(_config_path(env, config_dir))
 
 
-def _merge_config_files(base: dict[str, Any]) -> dict[str, Any]:
-    """
-    Load and deep-merge all non-main YAML files under config/ into base.
+def _config_path(env: str, config_dir: Path) -> Path:
+    """Return the resolved Path to the main config file for the given environment."""
+    filename = _CONFIG_FILE_NAMES.get(env)
+    if not filename:
+        raise ConfigError(f"No config file defined for environment '{env}'.")
+    path = config_dir / filename
+    if not path.exists():
+        raise ConfigError(f"Config file not found: {path}")
+    return path
 
-    Parameters
-    ----------
-    base : dict
-        Starting config dict from the main environment config file.
 
-    Returns
-    -------
-    dict
-        Merged config dict with all sub-config files applied.
-    """
+def _merge_config_files(base: dict[str, Any], config_dir: Path) -> dict[str, Any]:
+    """Load and deep-merge all non-main YAML files under config_dir into base."""
+    main_filenames = set(_CONFIG_FILE_NAMES.values())
     result = dict(base)
-    for config_file in sorted(_CONFIG_DIR.rglob("*.yaml")):
-        if config_file.name in _CONFIG_FILES.values():
+    for config_file in sorted(config_dir.rglob("*.yaml")):
+        if config_file.name in main_filenames:
             continue
-        config_raw = _load_yaml(config_file)
-        result = _deep_merge(result, config_raw)
+        result = _deep_merge(result, _load_yaml(config_file))
     return result
 
 
@@ -358,11 +292,9 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     """
     Recursively merge override into base, returning a new dict.
 
-    - Nested dicts are merged recursively.
-    - Lists are concatenated; dicts with a 'name' key are deduplicated
-      so two config files defining the same named entry do not produce
-      duplicate entries.
-    - All other values are overwritten by override.
+    Nested dicts are merged recursively. Lists are concatenated with
+    deduplication on named items (dicts with a 'name' key). All other
+    values are overwritten by override.
     """
     result = dict(base)
     for key, value in override.items():
@@ -377,10 +309,6 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
                 item for item in value
                 if not (isinstance(item, dict) and item.get("name") in existing_names)
             ]
-            if len(new_items) < len(value):
-                _logger.warning(
-                    "Config merge: duplicate named entries skipped for key '%s'", key
-                )
             result[key] = result[key] + new_items
         else:
             result[key] = value
@@ -392,19 +320,14 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 def _is_path_key(key: str) -> bool:
-    """Return True if the key name indicates a path value."""
-    return key in _PATH_KEY_NAMES or any(
-        key.endswith(suffix) for suffix in _PATH_KEY_SUFFIXES
-    )
+    return key in _PATH_KEY_NAMES or any(key.endswith(s) for s in _PATH_KEY_SUFFIXES)
 
 
 def _is_log_path_key(key: str) -> bool:
-    """Return True if the key holds a log path template with placeholders."""
     return key in _LOG_PATH_KEYS
 
 
 def _resolve_path_value(value: str, base: Path) -> Path:
-    """Resolve a path string to an absolute Path relative to base."""
     if value.startswith("~"):
         return Path(value).expanduser().resolve()
     p = Path(value)
@@ -412,7 +335,6 @@ def _resolve_path_value(value: str, base: Path) -> Path:
 
 
 def _resolve_log_path_value(value: str, base: Path) -> str:
-    """Resolve a log path template string, preserving {operation} and {timestamp}."""
     if value.startswith("~"):
         return str(Path(value).expanduser())
     p = Path(value)
@@ -429,8 +351,7 @@ def _resolve_paths(data: dict[str, Any], base: Path, parent_key: str) -> dict[st
             )
         elif isinstance(value, list):
             result[key] = [
-                _resolve_paths(item, base, parent_key)
-                if isinstance(item, dict) else item
+                _resolve_paths(item, base, parent_key) if isinstance(item, dict) else item
                 for item in value
             ]
         elif isinstance(value, str) and _is_log_path_key(key):
@@ -456,16 +377,15 @@ def _wrap_config_value(value: Any) -> Any:
 
 
 def _print_namespace(ns: Namespace, indent: int) -> None:
-    """Recursively log a Namespace at DEBUG level."""
+    """Recursively log a Namespace at DEBUG level, masking secrets."""
     prefix = "  " * indent
     for key, value in ns.items():
         if isinstance(value, Namespace):
             _logger.debug("%s%s:", prefix, key)
             _print_namespace(value, indent + 1)
         elif isinstance(value, list):
-            _logger.debug("%s%s: [%d items]", prefix, key, len(value))
+            _logger.debug("%s%s: [%d item(s)]", prefix, key, len(value))
         else:
-            # Mask secrets — any key containing 'password', 'key', or 'token'
             display = "***" if any(
                 s in key.lower() for s in ("password", "key", "token", "secret")
             ) else value
