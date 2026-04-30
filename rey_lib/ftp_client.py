@@ -1,6 +1,6 @@
 """FTP connection management and low-level file operations.
 
-Owns all direct ftplib interaction.  No other module may call ftplib directly.
+Owns all direct ftplib interaction. No other module may call ftplib directly.
 
 Provides:
 - ftp_session()       — context manager for an authenticated FTP connection.
@@ -15,9 +15,8 @@ import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Generator
+from typing import Any, Generator
 
-from rey_lib.ctx import AppContext
 from rey_lib.error_utils import FtpConnectionError, FtpDownloadError
 from rey_lib.log_utils import log_enter, log_exit
 
@@ -30,14 +29,14 @@ _FTP_TIMEOUT_SECONDS = 30
 
 
 @contextmanager
-def ftp_session(ctx: AppContext) -> Generator[ftplib.FTP, None, None]:
+def ftp_session(ctx: Any) -> Generator[ftplib.FTP, None, None]:
     """Context manager that yields an authenticated FTP connection.
 
     The connection is always closed on exit, even when an exception occurs.
     The caller must not close the connection manually.
 
     Args:
-        ctx: AppContext carrying ftp_host, ftp_port, ftp_user, ftp_password.
+        ctx: Namespace carrying ftp_host, ftp_port, ftp_user, ftp_password.
 
     Yields:
         An authenticated ftplib.FTP instance.
@@ -45,7 +44,7 @@ def ftp_session(ctx: AppContext) -> Generator[ftplib.FTP, None, None]:
     Raises:
         FtpConnectionError: If the connection or login fails.
     """
-    log_enter(ctx, f"ftp_session → {ctx.ftp_host}:{ctx.ftp_port}")
+    log_enter(ctx, f"ftp_session → {ctx.ftp_host}:{ctx.ftp_port}", log)
     ftp: ftplib.FTP | None = None
     try:
         ftp = ftplib.FTP()
@@ -60,11 +59,11 @@ def ftp_session(ctx: AppContext) -> Generator[ftplib.FTP, None, None]:
     finally:
         if ftp is not None:
             _close_connection(ftp)
-        log_exit(ctx, "ftp_session closed")
+        log_exit(ctx, "ftp_session closed", log)
 
 
 def list_remote_files(
-    ctx: AppContext,
+    ctx: Any,
     ftp: ftplib.FTP,
     remote_path: str,
 ) -> list[tuple[str, datetime]]:
@@ -74,7 +73,7 @@ def list_remote_files(
     Subdirectories are excluded from the result.
 
     Args:
-        ctx:         AppContext.
+        ctx:         Namespace context.
         ftp:         Authenticated FTP connection.
         remote_path: Absolute remote directory path to list.
 
@@ -85,19 +84,19 @@ def list_remote_files(
     Raises:
         FtpConnectionError: If the listing command fails at the protocol level.
     """
-    log_enter(ctx, f"list_remote_files: {remote_path}")
+    log_enter(ctx, f"list_remote_files: {remote_path}", log)
     try:
         # Try the modern MLSD command first — it returns type and timestamps.
         result = _list_via_mlsd(ftp, remote_path)
         if result is not None:
             log.debug("MLSD listing for %s: %d file(s)", remote_path, len(result))
-            log_exit(ctx, "list_remote_files done (MLSD)")
+            log_exit(ctx, "list_remote_files done (MLSD)", log)
             return result
 
         # Fall back to NLST + individual MDTM queries for each file.
         result = _list_via_nlst_mdtm(ftp, remote_path)
         log.debug("NLST+MDTM listing for %s: %d file(s)", remote_path, len(result))
-        log_exit(ctx, "list_remote_files done (NLST+MDTM)")
+        log_exit(ctx, "list_remote_files done (NLST+MDTM)", log)
         return result
 
     except ftplib.all_errors as exc:
@@ -107,7 +106,7 @@ def list_remote_files(
 
 
 def download_file(
-    ctx: AppContext,
+    ctx: Any,
     ftp: ftplib.FTP,
     remote_path: str,
     filename: str,
@@ -118,7 +117,7 @@ def download_file(
     If the download fails, any partial local file is deleted before raising.
 
     Args:
-        ctx:         AppContext.
+        ctx:         Namespace context.
         ftp:         Authenticated FTP connection.
         remote_path: Absolute remote directory containing the file.
         filename:    Name of the file to download (basename only).
@@ -130,9 +129,9 @@ def download_file(
     Raises:
         FtpDownloadError: If the download fails for any reason.
     """
-    log_enter(ctx, f"download_file: {filename}")
+    log_enter(ctx, f"download_file: {filename}", log)
     remote_file = str(PurePosixPath(remote_path) / filename)
-    local_file = local_dir / filename
+    local_file  = local_dir / filename
 
     # Create the destination directory tree if it does not already exist.
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -141,7 +140,7 @@ def download_file(
         with local_file.open("wb") as f:
             ftp.retrbinary(f"RETR {remote_file}", f.write)
         log.info("Downloaded: %s → %s", remote_file, local_file)
-        log_exit(ctx, "download_file done")
+        log_exit(ctx, "download_file done", log)
         return local_file
     except ftplib.all_errors as exc:
         # Remove the partial file so a retry starts from a clean state.
@@ -189,7 +188,7 @@ def _list_via_nlst_mdtm(
     Slower than MLSD because it requires one extra round-trip per file,
     but works with older FTP servers that pre-date RFC 3659.
     """
-    names = ftp.nlst(remote_path)
+    names  = ftp.nlst(remote_path)
     result: list[tuple[str, datetime]] = []
     for full_path in names:
         filename = PurePosixPath(full_path).name
@@ -197,7 +196,7 @@ def _list_via_nlst_mdtm(
             # MDTM response format: '213 YYYYMMDDHHMMSS'
             mdtm_response = ftp.sendcmd(f"MDTM {full_path}")
             timestamp_str = mdtm_response.split()[-1]
-            modified_dt = _parse_ftp_timestamp(timestamp_str)
+            modified_dt   = _parse_ftp_timestamp(timestamp_str)
         except ftplib.all_errors:
             # If MDTM is unavailable, treat the file as epoch so it is
             # always considered new and downloaded.

@@ -13,18 +13,24 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from argparse import Namespace
 from rey_lib.error_utils import StateError
 from rey_lib.log_utils import log_enter, log_exit
 
-__all__ = ["load_state", "save_state", "is_new_or_updated", "record_downloaded",
-           "load_last_stamp", "save_last_stamp"]
+__all__ = [
+    "load_state",
+    "save_state",
+    "is_new_or_updated",
+    "record_downloaded",
+    "load_last_stamp",
+    "save_last_stamp",
+]
 
 log = logging.getLogger(__name__)
 
 
-def load_state(ctx: Namespace) -> dict[str, str]:
+def load_state(ctx: Any) -> dict[str, str]:
     """Load the download state from the JSON state file.
 
     Returns an empty dict if the file does not yet exist — this is the
@@ -57,10 +63,10 @@ def load_state(ctx: Namespace) -> dict[str, str]:
         raise StateError(f"Cannot read state file '{state_file}'.") from exc
 
 
-def save_state(ctx: Namespace, state: dict[str, str]) -> None:
+def save_state(ctx: Any, state: dict[str, str]) -> None:
     """Persist the download state to the JSON state file.
 
-    Creates parent directories if they do not exist.  Keys are written in
+    Creates parent directories if they do not exist. Keys are written in
     sorted order to produce stable, diff-friendly output.
 
     Args:
@@ -114,7 +120,7 @@ def is_new_or_updated(
         return True
 
     # Ensure both timestamps are timezone-aware before comparing.
-    modified_dt = _ensure_utc(modified_dt)
+    modified_dt  = _ensure_utc(modified_dt)
     last_seen_dt = _ensure_utc(last_seen_dt)
 
     return modified_dt > last_seen_dt
@@ -137,7 +143,7 @@ def record_downloaded(
         filename:    Basename of the file.
         modified_dt: Modification timestamp to record.
     """
-    key = _state_key(remote_path, filename)
+    key        = _state_key(remote_path, filename)
     state[key] = _ensure_utc(modified_dt).isoformat()
 
     # Update high-water mark if this file is the newest seen so far.
@@ -146,7 +152,7 @@ def record_downloaded(
         state[_STAMP_KEY] = _ensure_utc(modified_dt).isoformat()
 
 
-def load_last_stamp(ctx: Namespace, state: dict[str, str]) -> datetime | None:
+def load_last_stamp(ctx: Any, state: dict[str, str]) -> datetime | None:
     """Return the high-water mark timestamp for use as a download cutoff.
 
     Priority:
@@ -167,7 +173,6 @@ def load_last_stamp(ctx: Namespace, state: dict[str, str]) -> datetime | None:
         return persisted
 
     initial_stamp = getattr(ctx, "initial_stamp", None)
-
     if initial_stamp is not None:
         log.info(
             "No persisted stamp found — using initial_stamp from config: %s",
@@ -179,10 +184,10 @@ def load_last_stamp(ctx: Namespace, state: dict[str, str]) -> datetime | None:
     return None
 
 
-def save_last_stamp(ctx: Namespace, state: dict[str, str]) -> None:
+def save_last_stamp(ctx: Any, state: dict[str, str]) -> None:
     """Log the current high-water mark after a completed run.
 
-    The stamp itself is embedded in the state dict and persisted by save_state().
+    The stamp is embedded in the state dict and persisted by save_state().
     This function only logs it for operator visibility.
 
     Args:

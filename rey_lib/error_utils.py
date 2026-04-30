@@ -10,12 +10,15 @@ error_utils.py and extend AppError from this module.
 
 Public API
 ----------
-AppError            Generic base exception — extend this in every project.
-ConfigError         Raised on invalid or missing configuration.
-handle_exception    Log and re-raise with chained traceback context.
-validate_env        Validate environment string ('dev' | 'prod').
-validate_path       Validate that a required path exists on disk.
-validate_required   Validate that a required string value is non-empty.
+AppError              Generic base exception — extend this in every project.
+ConfigError           Raised on invalid or missing configuration.
+StateError            Raised when a JSON state file cannot be read or written.
+FtpConnectionError    Raised when an FTP connection cannot be established.
+FtpDownloadError      Raised when a file download fails or is incomplete.
+handle_exception      Log and re-raise with chained traceback context.
+validate_env          Validate environment string ('dev' | 'prod').
+validate_path         Validate that a required path exists on disk.
+validate_required     Validate that a required string value is non-empty.
 """
 
 from __future__ import annotations
@@ -26,6 +29,9 @@ from typing import Any
 __all__ = [
     "AppError",
     "ConfigError",
+    "StateError",
+    "FtpConnectionError",
+    "FtpDownloadError",
     "handle_exception",
     "validate_env",
     "validate_path",
@@ -42,8 +48,8 @@ class AppError(Exception):
     Generic base exception for all rey_lib applications.
 
     Every project defines its own exception hierarchy by extending this class.
-    This allows callers to catch rey_lib exceptions at the base level while
-    still being able to narrow to project-specific types when needed.
+    This allows callers to catch all application errors at the base level while
+    still being able to narrow to specific types when needed.
 
     Example
     -------
@@ -58,8 +64,18 @@ class AppError(Exception):
 class ConfigError(AppError):
     """Raised when configuration is invalid, missing, or cannot be loaded."""
 
+
 class StateError(AppError):
-	pass
+    """Raised when a JSON state file cannot be read, parsed, or written."""
+
+
+class FtpConnectionError(AppError):
+    """Raised when an FTP connection cannot be established or is unexpectedly lost."""
+
+
+class FtpDownloadError(AppError):
+    """Raised when a file download fails or is incomplete."""
+
 
 # ---------------------------------------------------------------------------
 # Exception handler
