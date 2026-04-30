@@ -46,15 +46,14 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 
-def load_state(ctx: Any, conn: Any) -> dict[str, str]:
+def load_state(ctx: Any) -> dict[str, str]:
     """Load the download state from the JSON state file.
 
     Returns an empty dict if the file does not yet exist — this is the
     expected condition on the very first run.
 
     Args:
-        ctx:  Global context — used for logging only.
-        conn: Per-connection Namespace carrying conn.sync.state_file path.
+        ctx: Namespace carrying the state_file path.
 
     Returns:
         Dict mapping '<remote_path>/<filename>' → ISO-8601 UTC timestamp string.
@@ -63,7 +62,7 @@ def load_state(ctx: Any, conn: Any) -> dict[str, str]:
         StateError: If the file exists but cannot be read or parsed.
     """
     log_enter(ctx, "load_state", log)
-    state_file: Path = Path(conn.sync.state_file)
+    state_file: Path = ctx.state_file
 
     if not state_file.exists():
         log.info("No state file at '%s' — starting fresh.", state_file)
@@ -80,22 +79,21 @@ def load_state(ctx: Any, conn: Any) -> dict[str, str]:
         raise StateError(f"Cannot read state file '{state_file}'.") from exc
 
 
-def save_state(ctx: Any, conn: Any, state: dict[str, str]) -> None:
+def save_state(ctx: Any, state: dict[str, str]) -> None:
     """Persist the download state to the JSON state file.
 
     Creates parent directories if they do not exist. Keys are written in
     sorted order to produce stable, diff-friendly output.
 
     Args:
-        ctx:   Global context — used for logging only.
-        conn:  Per-connection Namespace carrying conn.sync.state_file path.
+        ctx:   Namespace carrying the state_file path.
         state: Current state dict to persist.
 
     Raises:
         StateError: If the file cannot be written.
     """
     log_enter(ctx, "save_state", log)
-    state_file: Path = Path(conn.sync.state_file)
+    state_file: Path = ctx.state_file
     state_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         with state_file.open("w", encoding="utf-8") as f:
@@ -170,7 +168,7 @@ def record_downloaded(
         state[_STAMP_KEY] = _ensure_utc(modified_dt).isoformat()
 
 
-def load_last_stamp(ctx: Any, conn: Any, state: dict[str, str]) -> datetime | None:
+def load_last_stamp(ctx: Any, state: dict[str, str]) -> datetime | None:
     """Return the high-water mark timestamp for use as a download cutoff.
 
     Priority:
@@ -179,8 +177,7 @@ def load_last_stamp(ctx: Any, conn: Any, state: dict[str, str]) -> datetime | No
     3. None — no cutoff, all files are eligible.
 
     Args:
-        ctx:   Global context — used for logging only.
-        conn:  Per-connection Namespace carrying conn.sync.initial_stamp.
+        ctx:   Namespace carrying initial_stamp.
         state: Current state dict loaded from disk.
 
     Returns:
@@ -191,7 +188,7 @@ def load_last_stamp(ctx: Any, conn: Any, state: dict[str, str]) -> datetime | No
         log.debug("Using persisted high-water mark: %s", persisted.isoformat())
         return persisted
 
-    initial_stamp = getattr(conn.sync, "initial_stamp", None)
+    initial_stamp = getattr(ctx, "initial_stamp", None)
     if initial_stamp is not None:
         log.info(
             "No persisted stamp found — using initial_stamp from config: %s",
@@ -203,7 +200,7 @@ def load_last_stamp(ctx: Any, conn: Any, state: dict[str, str]) -> datetime | No
     return None
 
 
-def save_last_stamp(ctx: Any, state: dict[str, str]) -> None:  # noqa: ARG001 ctx reserved for future logging
+def save_last_stamp(ctx: Any, state: dict[str, str]) -> None:
     """Log the current high-water mark after a completed run.
 
     The stamp is embedded in the state dict and persisted by save_state().
