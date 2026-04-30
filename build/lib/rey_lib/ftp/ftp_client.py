@@ -81,11 +81,14 @@ def ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
     log.debug("→ ftp_session [%s] → %s:%s", protocol, ftp_cfg.host, ftp_cfg.port)
 
     if protocol == "sftp":
-        yield from _sftp_session(ftp_cfg)
+        with _sftp_session(ftp_cfg) as session:
+            yield session
     elif protocol == "ftps":
-        yield from _ftps_session(ftp_cfg)
+        with _ftps_session(ftp_cfg) as session:
+            yield session
     else:
-        yield from _ftp_session(ftp_cfg)
+        with _ftp_session(ftp_cfg) as session:
+            yield session
 
 
 def list_remote_files(

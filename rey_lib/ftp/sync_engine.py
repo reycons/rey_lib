@@ -394,6 +394,7 @@ def _apply_filters(
     """Apply all config-driven filters from conn.filters in sequence."""
     result = files
     result = _filter_by_extension(conn, result)
+    result = _filter_by_exclude_extension(conn, result)
     result = _filter_by_name_pattern(conn, result)
     result = _filter_by_max_age(conn, result)
     return result
@@ -416,6 +417,26 @@ def _filter_by_extension(
         (name, dt)
         for name, dt in files
         if Path(name).suffix.lower() in normalised
+    ]
+
+
+
+def _filter_by_exclude_extension(
+    conn: Any,
+    files: list[tuple[str, datetime]],
+) -> list[tuple[str, datetime]]:
+    """Exclude files whose extension is in conn.filters.exclude_extensions."""
+    exclude = getattr(conn.filters, 'exclude_extensions', [])
+    if not exclude:
+        return files
+    normalised = {
+        e.lower() if e.startswith('.') else f'.{e.lower()}'
+        for e in exclude
+    }
+    return [
+        (name, dt)
+        for name, dt in files
+        if Path(name).suffix.lower() not in normalised
     ]
 
 
