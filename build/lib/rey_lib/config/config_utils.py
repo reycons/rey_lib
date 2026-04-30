@@ -126,13 +126,16 @@ class Namespace:
 # Public API
 # ---------------------------------------------------------------------------
 
-def build_ctx(env: str = "dev", project_root: Path | None = None) -> Namespace:
+def build_ctx(
+    env: str = "dev",
+    project_root: Path | None = None,
+    config_dir: Path | None = None,
+) -> Namespace:
     """
     Build and return a fully populated Namespace for the given environment.
 
     Loads the main config file, deep-merges all additional YAML config files
-    found under <project_root>/config/, resolves paths, and adds runtime
-    state attributes.
+    found under config_dir, resolves paths, and adds runtime state attributes.
 
     Secret injection is NOT performed here — call inject_secrets() separately
     after build_ctx() with a project-specific secret map.
@@ -142,9 +145,13 @@ def build_ctx(env: str = "dev", project_root: Path | None = None) -> Namespace:
     env : str
         Target environment. Must be 'dev' or 'prod'.
     project_root : Path | None
-        Root directory of the calling project. config/ and .env are
-        resolved relative to this path. Defaults to Path.cwd() when None —
-        correct when the script is run from the project root.
+        Root directory of the calling project. .env is resolved relative
+        to this path. Defaults to Path.cwd() when None.
+    config_dir : Path | None
+        Directory containing config YAML files. When provided, overrides
+        the default <project_root>/config/ location. Use this to point to
+        a shared config directory outside the project folder.
+        Reads APP_CONFIG_DIR from environment if neither is provided.
 
     Returns
     -------
@@ -160,10 +167,15 @@ def build_ctx(env: str = "dev", project_root: Path | None = None) -> Namespace:
         project_root = Path.cwd()
 
     project_root = Path(project_root).resolve()
-    config_dir   = project_root / _CONFIG_DIR_NAME
     env_file     = project_root / _ENV_FILE_NAME
 
-    env = validate_env(env)
+    # Config dir priority: explicit parameter > APP_CONFIG_DIR env var > default
+    if config_dir is None:
+        env_config_dir = os.getenv("APP_CONFIG_DIR")
+        config_dir = Path(env_config_dir) if env_config_dir else project_root / _CONFIG_DIR_NAME
+
+    config_dir = Path(config_dir).resolve()
+    env        = validate_env(env)
     _load_env_file(env_file)
 
     raw = _load_main_config(env, config_dir)

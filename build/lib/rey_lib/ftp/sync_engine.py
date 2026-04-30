@@ -9,7 +9,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from rey_lib.ftp.ftp_client import (
@@ -57,8 +57,8 @@ def run_sync(ctx: Any, conn: Any) -> int:
     log_enter(ctx, f"run_sync: {conn.name}", log)
     log.info("=== Starting sync for connection: %s ===", conn.name)
 
-    state      = load_state(conn)
-    last_stamp = load_last_stamp(conn, state)
+    state      = load_state(ctx, conn)
+    last_stamp = load_last_stamp(ctx, conn, state)
     retry_queue = load_retry_queue(state)
 
     if last_stamp is not None:
@@ -87,8 +87,8 @@ def run_sync(ctx: Any, conn: Any) -> int:
             all_downloaded.extend(downloaded)
             all_failed.extend(failed)
 
-    save_last_stamp(conn, state)
-    save_state(conn, state)
+    save_last_stamp(ctx, state)
+    save_state(ctx, conn, state)
 
     _log_summary(conn.name, all_downloaded, all_failed, all_abandoned)
     log_exit(ctx, f"run_sync done: {conn.name}", log)

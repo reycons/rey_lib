@@ -193,6 +193,14 @@ def load_last_stamp(ctx: Any, conn: Any, state: dict[str, str]) -> datetime | No
 
     initial_stamp = getattr(conn.sync, "initial_stamp", None)
     if initial_stamp is not None:
+        # YAML loads timestamps as strings — parse if needed.
+        if isinstance(initial_stamp, str):
+            try:
+                initial_stamp = datetime.fromisoformat(initial_stamp)
+            except ValueError:
+                log.warning("Invalid initial_stamp format '%s' — ignoring.", initial_stamp)
+                return None
+        initial_stamp = _ensure_utc(initial_stamp)
         log.info(
             "No persisted stamp found — using initial_stamp from config: %s",
             initial_stamp.isoformat(),
