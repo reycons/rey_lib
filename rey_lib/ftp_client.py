@@ -18,7 +18,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Generator
 
 from rey_lib.error_utils import FtpConnectionError, FtpDownloadError
-from rey_lib.log_utils import log_enter, log_exit
 
 __all__ = ["ftp_session", "list_remote_files", "download_file"]
 
@@ -29,14 +28,15 @@ _FTP_TIMEOUT_SECONDS = 30
 
 
 @contextmanager
-def ftp_session(ctx: Any) -> Generator[ftplib.FTP, None, None]:
+def ftp_session(ftp_cfg: Any) -> Generator[ftplib.FTP, None, None]:
     """Context manager that yields an authenticated FTP connection.
 
     The connection is always closed on exit, even when an exception occurs.
     The caller must not close the connection manually.
 
     Args:
-        ctx: Namespace carrying ftp_host, ftp_port, ftp_user, ftp_password.
+        ftp_cfg: Namespace carrying host, port, user, password.
+                 Typically conn.ftp from the per-connection config.
 
     Yields:
         An authenticated ftplib.FTP instance.
@@ -44,26 +44,25 @@ def ftp_session(ctx: Any) -> Generator[ftplib.FTP, None, None]:
     Raises:
         FtpConnectionError: If the connection or login fails.
     """
-    log_enter(ctx, f"ftp_session → {ctx.ftp_host}:{ctx.ftp_port}", log)
+    log.debug("→ ftp_session → %s:%s", ftp_cfg.host, ftp_cfg.port)
     ftp: ftplib.FTP | None = None
     try:
         ftp = ftplib.FTP()
-        ftp.connect(host=ctx.ftp_host, port=ctx.ftp_port, timeout=_FTP_TIMEOUT_SECONDS)
-        ftp.login(user=ctx.ftp_user, passwd=ctx.ftp_password)
-        log.info("FTP connected: %s@%s", ctx.ftp_user, ctx.ftp_host)
+        ftp.connect(host=ftp_cfg.host, port=ftp_cfg.port, timeout=_FTP_TIMEOUT_SECONDS)
+        ftp.login(user=ftp_cfg.user, passwd=ftp_cfg.password)
+        log.info("FTP connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
         yield ftp
     except ftplib.all_errors as exc:
         raise FtpConnectionError(
-            f"Cannot connect to {ctx.ftp_host}:{ctx.ftp_port} — {exc}"
+            f"Cannot connect to {ftp_cfg.host}:{ftp_cfg.port} — {exc}"
         ) from exc
     finally:
         if ftp is not None:
             _close_connection(ftp)
-        log_exit(ctx, "ftp_session closed", log)
+        log.debug("← ftp_session closed")
 
 
 def list_remote_files(
-    ctx: Any,
     ftp: ftplib.FTP,
     remote_path: str,
 ) -> list[tuple[str, datetime]]:
@@ -73,7 +72,6 @@ def list_remote_files(
     Subdirectories are excluded from the result.
 
     Args:
-        ctx:         Namespace context.
         ftp:         Authenticated FTP connection.
         remote_path: Absolute remote directory path to list.
 
@@ -84,19 +82,15 @@ def list_remote_files(
     Raises:
         FtpConnectionError: If the listing command fails at the protocol level.
     """
-    log_enter(ctx, f"list_remote_files: {remote_path}", log)
+    log.debug("list_remote_files: %s", remote_path)
     try:
-        # Try the modern MLSD command first — it returns type and timestamps.
         result = _list_via_mlsd(ftp, remote_path)
         if result is not None:
             log.debug("MLSD listing for %s: %d file(s)", remote_path, len(result))
-            log_exit(ctx, "list_remote_files done (MLSD)", log)
             return result
 
-        # Fall back to NLST + individual MDTM queries for each file.
         result = _list_via_nlst_mdtm(ftp, remote_path)
         log.debug("NLST+MDTM listing for %s: %d file(s)", remote_path, len(result))
-        log_exit(ctx, "list_remote_files done (NLST+MDTM)", log)
         return result
 
     except ftplib.all_errors as exc:
@@ -106,7 +100,6 @@ def list_remote_files(
 
 
 def download_file(
-    ctx: Any,
     ftp: ftplib.FTP,
     remote_path: str,
     filename: str,
@@ -117,7 +110,6 @@ def download_file(
     If the download fails, any partial local file is deleted before raising.
 
     Args:
-        ctx:         Namespace context.
         ftp:         Authenticated FTP connection.
         remote_path: Absolute remote directory containing the file.
         filename:    Name of the file to download (basename only).
@@ -129,21 +121,18 @@ def download_file(
     Raises:
         FtpDownloadError: If the download fails for any reason.
     """
-    log_enter(ctx, f"download_file: {filename}", log)
+    log.debug("download_file: %s", filename)
     remote_file = str(PurePosixPath(remote_path) / filename)
     local_file  = local_dir / filename
 
-    # Create the destination directory tree if it does not already exist.
     local_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with local_file.open("wb") as f:
             ftp.retrbinary(f"RETR {remote_file}", f.write)
         log.info("Downloaded: %s → %s", remote_file, local_file)
-        log_exit(ctx, "download_file done", log)
         return local_file
     except ftplib.all_errors as exc:
-        # Remove the partial file so a retry starts from a clean state.
         if local_file.exists():
             local_file.unlink()
         raise FtpDownloadError(

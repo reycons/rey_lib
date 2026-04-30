@@ -98,7 +98,7 @@ def _sync_path(
     log_enter(ctx, f"_sync_path: {remote_path}", log)
     log.info("Scanning: %s", remote_path)
 
-    all_files = list_remote_files(conn.ftp, ftp, remote_path)
+    all_files = list_remote_files(ftp, remote_path)
     log.info("Remote files found: %d", len(all_files))
 
     # Stamp cutoff first — eliminates bulk of already-seen files cheaply.
@@ -182,7 +182,7 @@ def _download_one(
         True on success, False on failure.
     """
     try:
-        download_file(conn.ftp, ftp, remote_path, filename, local_dir)
+        download_file(ftp, remote_path, filename, local_dir)
         record_downloaded(state, remote_path, filename, modified_dt)
         return True
     except FtpDownloadError as exc:
