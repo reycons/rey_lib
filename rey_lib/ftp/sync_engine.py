@@ -12,14 +12,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from rey_lib.ftp_client import (
+from rey_lib.ftp.ftp_client import (
     Session,
     download_file,
     ftp_session,
     list_remote_dirs,
     list_remote_files,
 )
-from rey_lib.state_manager import (
+from rey_lib.ftp.state_manager import (
     abandon_to_failed_file,
     add_to_retry_queue,
     increment_retry_count,
@@ -33,8 +33,8 @@ from rey_lib.state_manager import (
     save_last_stamp,
     save_state,
 )
-from rey_lib.error_utils import FtpDownloadError
-from rey_lib.log_utils import log_enter, log_exit
+from rey_lib.errors.error_utils import FtpDownloadError
+from rey_lib.logs.log_utils import log_enter, log_exit
 
 __all__ = ["run_sync"]
 

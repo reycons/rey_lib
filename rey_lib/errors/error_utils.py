@@ -54,7 +54,7 @@ class AppError(Exception):
     Example
     -------
     # In your project's error_utils.py:
-    from rey_lib.error_utils import AppError
+    from rey_lib.errors.error_utils import AppError
 
     class MyProjectError(AppError): ...
     class DataImportError(MyProjectError): ...

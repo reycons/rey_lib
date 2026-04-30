@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Generator
 
-from rey_lib.error_utils import FtpConnectionError, FtpDownloadError
+from rey_lib.errors.error_utils import FtpConnectionError, FtpDownloadError
 
 __all__ = ["ftp_session", "list_remote_files", "list_remote_dirs", "download_file"]
 

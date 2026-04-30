@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from rey_lib.error_utils import StateError
-from rey_lib.log_utils import log_enter, log_exit
+from rey_lib.errors.error_utils import StateError
+from rey_lib.logs.log_utils import log_enter, log_exit
 
 __all__ = [
     "load_state",

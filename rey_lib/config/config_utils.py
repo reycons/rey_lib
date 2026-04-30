@@ -49,7 +49,7 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-from rey_lib.error_utils import ConfigError, validate_env
+from rey_lib.errors.error_utils import ConfigError, validate_env
 
 _logger = logging.getLogger(__name__)
 
