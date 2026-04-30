@@ -1,10 +1,20 @@
 """Tracks which FTP files have already been downloaded using a JSON state file.
 
 State format:
-    { "<remote_path>/<filename>": "<ISO-8601 UTC timestamp>", ... }
+    {
+        "_last_downloaded_stamp": "<ISO-8601 UTC>",
+        "_retry_queue": [
+            {"remote_path": "/incoming/", "filename": "file.csv", "modified": "<ISO-8601 UTC>"},
+            ...
+        ],
+        "<remote_path>/<filename>": "<ISO-8601 UTC timestamp>",
+        ...
+    }
 
 A file is considered new if its key is absent from state.
 A file is considered updated if its remote modification time is later than stored.
+Failed downloads are placed in the retry queue and retried on every subsequent
+run regardless of the high-water mark stamp — preventing permanent data loss.
 """
 
 from __future__ import annotations
@@ -25,6 +35,9 @@ __all__ = [
     "record_downloaded",
     "load_last_stamp",
     "save_last_stamp",
+    "load_retry_queue",
+    "add_to_retry_queue",
+    "remove_from_retry_queue",
 ]
 
 log = logging.getLogger(__name__)
@@ -201,11 +214,84 @@ def save_last_stamp(ctx: Any, state: dict[str, str]) -> None:
         log.info("No files downloaded — high-water mark unchanged.")
 
 
+def load_retry_queue(state: dict) -> list[dict]:
+    """Return the current retry queue from state.
+
+    Each entry is a dict with keys: remote_path, filename, modified.
+
+    Args:
+        state: Current state dict.
+
+    Returns:
+        List of retry entries; empty list if none are queued.
+    """
+    return list(state.get(_RETRY_KEY, []))
+
+
+def add_to_retry_queue(
+    state: dict,
+    remote_path: str,
+    filename: str,
+    modified_dt: datetime,
+) -> None:
+    """Add a failed file to the retry queue.
+
+    If the file is already in the queue its entry is updated in place so
+    there are no duplicates.
+
+    Args:
+        state:       State dict mutated in place.
+        remote_path: Remote directory the file lives in.
+        filename:    Basename of the failed file.
+        modified_dt: Modification timestamp — preserved so it can be recorded
+                     correctly when the file eventually succeeds.
+    """
+    queue: list[dict] = state.get(_RETRY_KEY, [])
+
+    # Remove any existing entry for this file before appending the updated one.
+    queue = [
+        entry for entry in queue
+        if not (entry["remote_path"] == remote_path and entry["filename"] == filename)
+    ]
+    queue.append({
+        "remote_path": remote_path,
+        "filename":    filename,
+        "modified":    _ensure_utc(modified_dt).isoformat(),
+    })
+    state[_RETRY_KEY] = queue
+    log.warning("Added to retry queue: %s/%s (%d in queue)", remote_path, filename, len(queue))
+
+
+def remove_from_retry_queue(
+    state: dict,
+    remote_path: str,
+    filename: str,
+) -> None:
+    """Remove a file from the retry queue after it has been successfully downloaded.
+
+    No-op if the file is not in the queue.
+
+    Args:
+        state:       State dict mutated in place.
+        remote_path: Remote directory the file lives in.
+        filename:    Basename of the file.
+    """
+    queue: list[dict] = state.get(_RETRY_KEY, [])
+    updated = [
+        entry for entry in queue
+        if not (entry["remote_path"] == remote_path and entry["filename"] == filename)
+    ]
+    if len(updated) < len(queue):
+        state[_RETRY_KEY] = updated
+        log.info("Removed from retry queue: %s/%s", remote_path, filename)
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-# Reserved key inside the state dict where the high-water mark is stored.
-# Prefixed with underscore so it cannot collide with a real remote file path.
+# Reserved keys inside the state dict — prefixed with underscore so they
+# cannot collide with real remote file path keys.
 _STAMP_KEY = "_last_downloaded_stamp"
+_RETRY_KEY = "_retry_queue"
 
 
 def _state_key(remote_path: str, filename: str) -> str:
