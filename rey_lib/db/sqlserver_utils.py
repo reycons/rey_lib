@@ -54,7 +54,7 @@ from typing import Any, Optional
 
 import pyodbc
 
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import DatabaseError, ConfigError
 
 __all__ = [
     "init_db",
