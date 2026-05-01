@@ -183,7 +183,8 @@ def build_ctx(
     raw = _resolve_paths(raw, config_dir, parent_key="")
 
     ctx = Namespace(raw)
-
+    _inject_env_blocks(ctx)
+    
     # Runtime state — never from YAML.
     object.__setattr__(ctx, "env",       env)
     object.__setattr__(ctx, "log_level", "INFO")   # overwritten by log_utils
@@ -259,6 +260,55 @@ def print_ctx(ctx: Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Private — loading and merging
 # ---------------------------------------------------------------------------
+def _inject_env_blocks(ns: Namespace) -> None:
+    """
+    Recursively scan a Namespace for 'env:' child blocks and inject
+    os.environ values into the parent Namespace.
+
+    Any Namespace with an 'env' attribute is treated as a secret
+    injection map. Each key under 'env' is the target attribute name,
+    each value is the os.environ variable name to read.
+
+    Example YAML:
+        env:
+          password: SQLSERVER_NAVICONTROL_PASSWORD
+
+    Result: parent.password = os.getenv("SQLSERVER_NAVICONTROL_PASSWORD")
+    """
+    for key, value in ns.items():
+        if key == "env" and isinstance(value, Namespace):
+            # value is the env block — parent is the target Namespace.
+            # Walk up handled by caller passing the parent.
+            continue
+        if isinstance(value, Namespace):
+            env_block = getattr(value, "env", None)
+            if isinstance(env_block, Namespace):
+                for attr, env_var in env_block.items():
+                    secret = os.getenv(str(env_var), "")
+                    if secret:
+                        object.__setattr__(value, attr, secret)
+                    else:
+                        _logger.warning(
+                            "Secret not found for '%s' — expected env var '%s' in .env.",
+                            attr, env_var,
+                        )
+            _inject_env_blocks(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, Namespace):
+                    env_block = getattr(item, "env", None)
+                    if isinstance(env_block, Namespace):
+                        for attr, env_var in env_block.items():
+                            secret = os.getenv(str(env_var), "")
+                            if secret:
+                                object.__setattr__(item, attr, secret)
+                            else:
+                                _logger.warning(
+                                    "Secret not found for '%s' — expected env var '%s' in .env.",
+                                    attr, env_var,
+                                )
+                    _inject_env_blocks(item)
+
 
 def _load_env_file(env_file: Path) -> None:
     """Load the .env file into os.environ if it exists."""

@@ -714,8 +714,12 @@ def _build_connection_string(db_cfg: Any) -> str:
     """
     Build a pyodbc connection string from a db_cfg Namespace.
 
-    Uses Windows Authentication (Trusted_Connection=yes) when user is
-    absent or empty. Uses SQL Server Authentication otherwise.
+    Authentication is driven by the authentication.type key in the
+    connection config — never inferred from the absence of a user field.
+
+    Supported authentication types:
+        trusted_connection  — Windows Authentication (Trusted_Connection=yes)
+        sql_server          — SQL Server Authentication (UID/PWD from .env)
 
     Parameters
     ----------
@@ -726,12 +730,18 @@ def _build_connection_string(db_cfg: Any) -> str:
     -------
     str
         Fully-formed pyodbc connection string.
+
+    Raises
+    ------
+    ConfigError
+        If authentication.type is missing or not a recognised value.
     """
-    host   = str(db_cfg.host)
-    port   = int(getattr(db_cfg, "port", 1433))
-    db     = str(db_cfg.database)
-    driver = str(getattr(db_cfg, "driver", "ODBC Driver 17 for SQL Server"))
-    user   = str(getattr(db_cfg, "user", "")).strip()
+    host      = str(db_cfg.host)
+    port      = int(getattr(db_cfg, "port", 1433))
+    db        = str(db_cfg.database)
+    driver    = str(getattr(db_cfg, "driver", "ODBC Driver 17 for SQL Server"))
+    auth      = getattr(db_cfg, "authentication", None)
+    auth_type = str(getattr(auth, "type", "")).strip().lower()
 
     # Include port in server string only when non-default.
     server = f"{host},{port}" if port != 1433 else host
@@ -742,14 +752,20 @@ def _build_connection_string(db_cfg: Any) -> str:
         f"Database={db};"
     )
 
-    if user:
-        # SQL Server Authentication — password injected from .env.
-        password = str(getattr(db_cfg, "password", ""))
+    if auth_type == "trusted_connection":
+        return base + "Trusted_Connection=yes;"
+
+    if auth_type == "sql_server":
+        # Credentials injected from .env via env: block in YAML — never hardcoded.
+        user     = str(getattr(db_cfg, "user",     "")).strip()
+        password = str(getattr(db_cfg, "password", "")).strip()
         return base + f"UID={user};PWD={password};"
 
-    # Default for internal apps — Windows Authentication.
-    return base + "Trusted_Connection=yes;"
-
+    raise ConfigError(
+        f"Connection '{getattr(db_cfg, 'name', '?')}' has missing or unrecognised "
+        f"authentication.type '{auth_type}'. "
+        f"Must be 'trusted_connection' or 'sql_server'."
+    )
 
 def _connect_with_retry(conn_str: str, timeout: int) -> pyodbc.Connection:
     """
