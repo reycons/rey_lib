@@ -83,6 +83,14 @@ def load_files(
         source_dir    = _resolve_path(data_source.paths, load_cfg.source)
         pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version)
         pending       = input_files(source_dir, pattern)
+        max_files     = getattr(data_source, "max_files_per_run", None)
+        if max_files is not None:
+            pending   = pending[:int(max_files)]
+            _logger.info(
+                "max_files_per_run=%d applied — %d file(s) eligible this run",
+                max_files, len(pending),
+            )        
+            
         transform_cfg = _find_transform(
             data_source.transforms,
             load_cfg.name,
@@ -190,9 +198,31 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
             return 0
 
-        columns = list(rows[0].keys())
-        sqlserver_utils.bulk_insert(conn, schema, table, rows, columns)
-        conn.commit()
+        columns     = list(rows[0].keys())
+        column_defs = _build_column_defs(transform_cfg, columns, rows)
+
+        sqlserver_utils.create_staging_table_if_not_exists(
+            conn, schema, table, column_defs
+        )
+
+        try:
+            sqlserver_utils.bulk_insert(conn, schema, table, rows, columns)
+            conn.commit()
+        except DatabaseError as bulk_exc:
+            # Attempt to expand any truncated columns and retry once.
+            conn.rollback()
+            expanded = sqlserver_utils.expand_column_if_truncated(
+                conn, schema, table, bulk_exc, rows, column_defs
+            )
+            if expanded:
+                _logger.info(
+                    "Retrying bulk insert after column expansion: %s",
+                    file_path.name,
+                )
+                sqlserver_utils.bulk_insert(conn, schema, table, rows, columns)
+                conn.commit()
+            else:
+                raise
 
         _logger.info(
             "Loaded: %s → %s.%s  rows=%d",
@@ -215,9 +245,81 @@ def _load_one_file(
 
 
 # ---------------------------------------------------------------------------
+# Private — columns helpers
+# ---------------------------------------------------------------------------
+def _build_column_defs(
+    transform_cfg: Any,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """
+    Build a column definition list for staging table creation.
+
+    Maps each output column to an appropriate SQL Server type based on
+    its field_transform type. Varchar columns are sized to the maximum
+    observed value length in the current batch plus a 10-character buffer.
+
+    Parameters
+    ----------
+    transform_cfg : Any
+        Transform Namespace providing field_transforms.
+    columns : list[str]
+        Ordered list of output column names.
+    rows : list[dict[str, Any]]
+        Transformed rows — used to compute max varchar lengths.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Ordered list of (column_name, sql_type) tuples.
+    """
+    field_transforms = _namespace_to_dict(
+        getattr(transform_cfg, "field_transforms", None)
+    )
+
+    # Compute max observed length per column for varchar sizing.
+    max_lengths: dict[str, int] = {}
+    for row in rows:
+        for col, val in row.items():
+            length = len(str(val)) if val is not None else 0
+            if col not in max_lengths or length > max_lengths[col]:
+                max_lengths[col] = length
+
+    # Map transform type → SQL Server type.
+    _TRANSFORM_TYPE_MAP: dict[str, str] = {
+        "date":       "DATE",
+        "regex_date": "DATE",
+        "numeric":    "DECIMAL(18, 6)",
+    }
+
+    col_defs: list[tuple[str, str]] = []
+    for col in columns:
+        transform    = field_transforms.get(col, {})
+        transform_type = transform.get("type", "") if transform else ""
+        cast_to        = transform.get("cast_to", "") if transform else ""
+
+        if transform_type in _TRANSFORM_TYPE_MAP:
+            sql_type = _TRANSFORM_TYPE_MAP[transform_type]
+
+        elif transform_type == "regex_extract" and cast_to in ("float", "double"):
+            sql_type = "DECIMAL(18, 6)"
+
+        elif transform_type == "regex_extract" and cast_to in ("int", "integer"):
+            sql_type = "INT"
+
+        else:
+            # No transform or unknown — size varchar from observed data.
+            observed = max_lengths.get(col, 0)
+            size     = max(observed + 10, 20)   # minimum 20 chars
+            sql_type = f"NVARCHAR({size})"
+
+        col_defs.append((col, sql_type))
+
+    return col_defs
+
+# ---------------------------------------------------------------------------
 # Private — header validation
 # ---------------------------------------------------------------------------
-
 def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
     """
     Read the first non-blank line of a file and validate it against the
