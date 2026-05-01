@@ -1,10 +1,15 @@
 """
-Generic file loading pipeline for delimited file ingestion.
+Generic file transform and loading pipeline for delimited file ingestion.
 
-Reads transformed output files from a configured source path, applies
-column mapping and field transforms defined in a data source YAML config,
-injects runtime constants, and bulk inserts all rows into a SQL Server
-landing table via sqlserver_utils.
+Provides two independent pipeline stages driven entirely by YAML config:
+
+transform_files — reads raw files from inbox_path, validates headers,
+    applies column mapping and field transforms, writes clean output files
+    to processing_path, and moves source files per configured movements.
+
+load_files — reads transformed files from processing_path, injects runtime
+    constants, bulk inserts all rows into a SQL Server landing table, and
+    moves files per configured movements on success or failure.
 
 On success  — commits and executes configured success movements.
 On any error — rolls back, logs every row error, executes failure movements.
@@ -19,24 +24,40 @@ file_utils. No raw pyodbc or os calls anywhere in this module.
 
 Public API
 ----------
-load_files(ctx, conn, data_source, load_cfg)
+transform_files(ctx, data_source, transform_cfg)
+    Find and transform all pending inbox files for one transform config.
+    Returns total number of files successfully transformed.
+load_files(ctx, conn, data_source, load_cfg, on_reload)
     Find and load all pending files for one load configuration.
     Returns total rows loaded across all files processed.
+    batch_id is read from ctx.batch_id — set by start_batch() before calling.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 from rey_lib.db import sqlserver_utils
 from rey_lib.errors.error_utils import DatabaseError
-from rey_lib.files.file_utils import input_files, get_reader, move_file
-from rey_lib.files.transformer import transform_row, match_header, TransformError
+from rey_lib.files.file_utils import (
+    input_files,
+    get_reader,
+    move_file,
+    write_file,
+    converted_output_path,
+)
+from rey_lib.files.transformer import (
+    transform_row,
+    match_header,
+    TransformError,
+    parse_date_from_filename,
+)
 from rey_lib.logs.log_utils import log_enter, log_exit
 
-__all__ = ["load_files"]
+__all__ = ["transform_files", "load_files"]
 
 _logger = logging.getLogger(__name__)
 
@@ -45,12 +66,78 @@ _logger = logging.getLogger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
+def transform_files(
+    ctx: Any,
+    data_source: Any,
+    transform_cfg: Any,
+) -> int:
+    """
+    Find and transform all pending inbox files for one transform configuration.
+
+    Scans inbox_path for files matching file_pattern, validates the header,
+    applies column mapping and field transforms defined in the YAML config,
+    writes clean output files to processing_path, and moves source files
+    per configured movements.
+
+    On success — writes output file to processing_path, moves source file.
+    On failure — moves source file to rejected_path, logs all errors.
+
+    batch_id is read from ctx.batch_id and injected into every output row
+    via constants automatically — no explicit parameter needed.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context — ctx.batch_id must be set before calling.
+    data_source : Any
+        Namespace for one data_sources entry. Provides paths and max_files_per_run.
+    transform_cfg : Any
+        Namespace for one transforms entry. Provides file_pattern, header,
+        columns, field_transforms, constants, output, movements.
+
+    Returns
+    -------
+    int
+        Total number of files successfully transformed.
+    """
+    log_enter(
+        ctx,
+        f"transform_files: {transform_cfg.name} v{transform_cfg.version}",
+        _logger,
+    )
+    total = 0
+
+    try:
+        inbox_dir    = _resolve_path(data_source.paths, "inbox_path")
+        file_pattern = getattr(transform_cfg, "file_pattern", "*.csv")
+        glob_pattern = _pattern_to_glob(file_pattern)
+        pending      = input_files(inbox_dir, glob_pattern)
+
+        max_files = getattr(data_source, "max_files_per_run", None)
+        if max_files is not None:
+            pending = pending[:int(max_files)]
+
+        _logger.info(
+            "transform_files: %d file(s) pending in %s matching '%s'",
+            len(pending), inbox_dir, glob_pattern,
+        )
+
+        for file_path in pending:
+            success = _transform_one_file(ctx, data_source, transform_cfg, file_path)
+            if success:
+                total += 1
+
+    finally:
+        log_exit(ctx, f"transform_files done: {total} file(s) transformed", _logger)
+
+    return total
+
+
 def load_files(
     ctx: Any,
     conn: Any,
     data_source: Any,
     load_cfg: Any,
-    batch_id: Optional[int] = None,
     on_reload: Optional[callable] = None,
 ) -> int:
     """
@@ -60,10 +147,14 @@ def load_files(
     then loads each one independently. A failure on one file does not
     prevent processing of subsequent files.
 
+    batch_id is read from ctx.batch_id — set by start_batch() before this
+    function is called. It is stamped into every staging row via constants
+    and passed to expand_column_if_truncated for logging.
+
     Parameters
     ----------
     ctx : Any
-        Application context — used for logging and chunk_size.
+        Application context — ctx.batch_id must be set before calling.
     conn : pyodbc.Connection
         Open SQL Server connection. Caller manages the connection lifecycle.
     data_source : Any
@@ -72,9 +163,6 @@ def load_files(
     load_cfg : Any
         Namespace for one loads entry. Provides source path key,
         pickup_pattern, version, load destination, and movements.
-    batch_id : Optional[int]
-        BatchID of the active batch. Stamped into every staging row and
-        passed to expand_column_if_truncated for logging.
     on_reload : Optional[callable]
         Callback invoked when a file is found already in staging.
         Signature: (file_path, original_batch_id, new_batch_id) -> None
@@ -117,7 +205,7 @@ def load_files(
             rows_loaded = _load_one_file(
                 ctx, conn, file_path, transform_cfg,
                 load_cfg, data_source.paths, schema, table,
-                batch_id, on_reload,
+                on_reload,
             )
             total_rows += rows_loaded
 
@@ -132,8 +220,182 @@ def load_files(
 
 
 # ---------------------------------------------------------------------------
-# Private — file orchestration
+# Private — transform orchestration
 # ---------------------------------------------------------------------------
+
+def _transform_one_file(
+    ctx: Any,
+    data_source: Any,
+    transform_cfg: Any,
+    file_path: Path,
+) -> bool:
+    """
+    Transform one inbox file and write the output to processing_path.
+
+    Validates the header, reads and transforms all rows, writes the output
+    file, then moves the source file per configured movements.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+    data_source : Any
+        Data source Namespace providing paths.
+    transform_cfg : Any
+        Transform Namespace.
+    file_path : Path
+        Full path of the source file to transform.
+
+    Returns
+    -------
+    bool
+        True on success, False on any failure.
+    """
+    log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
+
+    try:
+        # Validate header before reading any rows.
+        if not _validate_header(file_path, transform_cfg):
+            _logger.error("Header mismatch — file rejected: %s", file_path.name)
+            _execute_movements(
+                transform_cfg.movements.failure, file_path, data_source.paths
+            )
+            log_exit(
+                ctx,
+                f"_transform_one_file rejected (header): {file_path.name}",
+                _logger,
+            )
+            return False
+
+        # Build runtime constants — batch_id resolved from ctx.batch_id.
+        constants = _build_constants(
+            ctx, transform_cfg.constants, file_path, data_source.paths
+        )
+
+        rows, errors = _read_and_transform(file_path, transform_cfg, constants)
+
+        if errors:
+            for row_num, col, err in errors:
+                _logger.error(
+                    "Transform error — file=%s row=%d col=%s: %s",
+                    file_path.name, row_num, col, err,
+                )
+            _execute_movements(
+                transform_cfg.movements.failure, file_path, data_source.paths
+            )
+            log_exit(
+                ctx,
+                f"_transform_one_file rejected (errors): {file_path.name}",
+                _logger,
+            )
+            return False
+
+        if not rows:
+            _logger.warning("No rows produced from file: %s", file_path.name)
+            _execute_movements(
+                transform_cfg.movements.failure, file_path, data_source.paths
+            )
+            log_exit(
+                ctx,
+                f"_transform_one_file rejected (empty): {file_path.name}",
+                _logger,
+            )
+            return False
+
+        # Build output path and write transformed file.
+        output_path = _build_output_path(data_source.paths, transform_cfg, file_path)
+        write_file(output_path, rows, file_type="CSV")
+
+        _logger.info(
+            "Transformed: %s → %s  rows=%d",
+            file_path.name, output_path.name, len(rows),
+        )
+
+        # Move source file per success movements.
+        _execute_movements(
+            transform_cfg.movements.success, file_path, data_source.paths
+        )
+        log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
+        return True
+
+    except Exception as exc:
+        _logger.error(
+            "Unexpected error transforming '%s': %s",
+            file_path.name, exc, exc_info=True,
+        )
+        _execute_movements(
+            transform_cfg.movements.failure, file_path, data_source.paths
+        )
+        log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
+        return False
+
+
+def _build_output_path(
+    paths: Any,
+    transform_cfg: Any,
+    source_file: Path,
+) -> Path:
+    """
+    Build the output file path from the transform output pattern.
+
+    Resolves {yyyymmdd} from the source filename using
+    parse_date_from_filename, and {version} from transform_cfg.version.
+    The output file is written to processing_path.
+
+    Parameters
+    ----------
+    paths : Any
+        Paths Namespace from the data source config.
+    transform_cfg : Any
+        Transform Namespace providing output.file.pattern and version.
+    source_file : Path
+        Source file — used to extract the date token.
+
+    Returns
+    -------
+    Path
+        Full path for the output file in processing_path.
+    """
+    processing_dir = _resolve_path(paths, "processing_path")
+    pattern        = transform_cfg.output.file.pattern
+    version        = getattr(transform_cfg, "version", "v01")
+
+    # Parse date from source filename for token substitution.
+    cfg_dict  = _namespace_to_dict(transform_cfg)
+    file_date = parse_date_from_filename(source_file.name, cfg_dict)
+    yyyymmdd  = file_date.strftime("%Y%m%d") if file_date else "00000000"
+
+    substitutions = {
+        "yyyymmdd": yyyymmdd,
+        "version":  version,
+    }
+
+    return converted_output_path(processing_dir, pattern, substitutions)
+
+
+def _pattern_to_glob(file_pattern: str) -> str:
+    """
+    Convert a file_pattern with date/version tokens to a glob pattern.
+
+    Replaces all {token} placeholders with * for filesystem globbing.
+
+    Parameters
+    ----------
+    file_pattern : str
+        Pattern from transform config e.g. 'tran_{yyyymmdd}.csv'.
+
+    Returns
+    -------
+    str
+        Glob pattern e.g. 'tran_*.csv'.
+    """
+    return re.sub(r"\{[^}]+\}", "*", file_pattern)
+
+
+# ---------------------------------------------------------------------------
+# Private — load orchestration
+# ---------------------------------------------------------------------------
+
 def _check_file_in_staging(
     conn: Any,
     schema: str,
@@ -280,6 +542,7 @@ def _invoke_on_reload(
             file_path.name, exc, exc_info=True,
         )
 
+
 def _load_one_file(
     ctx: Any,
     conn: Any,
@@ -289,7 +552,6 @@ def _load_one_file(
     paths: Any,
     schema: str,
     table: str,
-    batch_id: Optional[int] = None,
     on_reload: Optional[callable] = None,
 ) -> int:
     """
@@ -298,17 +560,19 @@ def _load_one_file(
     Before loading, checks whether rows for this file already exist in
     the staging table. If they do — indicating a previous run committed
     but the file move failed — the original batch is noted, staging rows
-    are deleted, and the file is reloaded under a new batch. The on_reload
-    callback is invoked so the caller can log BatchStep records.
+    are deleted, and the file is reloaded under the current batch. The
+    on_reload callback is invoked so the caller can log BatchStep records.
 
     Validates the header, reads and transforms all rows, bulk inserts,
     then executes the configured file movements. Full rollback on any
     error — every row error is logged before rollback.
 
+    batch_id is read from ctx.batch_id — set by start_batch() before calling.
+
     Parameters
     ----------
     ctx : Any
-        Application context.
+        Application context — ctx.batch_id must be set.
     conn : pyodbc.Connection
         Open SQL Server connection.
     file_path : Path
@@ -324,9 +588,6 @@ def _load_one_file(
         Target schema — may be 'database.schema' for cross-db inserts.
     table : str
         Target table name.
-    batch_id : Optional[int]
-        BatchID of the active batch. Stamped into every staging row and
-        passed to expand_column_if_truncated for logging.
     on_reload : Optional[callable]
         Callback invoked when a file is found already in staging.
         Signature: (file_path, original_batch_id, new_batch_id) -> None
@@ -339,11 +600,12 @@ def _load_one_file(
     """
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
-    try:
-        # Resolve restart-safety column names from load config.
-        file_id_col   = getattr(load_cfg.load, "file_id_column",  "incoming_file_name")
-        batch_id_col  = getattr(load_cfg.load, "batch_id_column",  "BatchID")
+    # Read batch_id from ctx — set by start_batch().
+    batch_id     = getattr(ctx, "batch_id", None)
+    file_id_col  = getattr(load_cfg.load, "file_id_column", "incoming_file_name")
+    batch_id_col = getattr(load_cfg.load, "batch_id_column", "BatchID")
 
+    try:
         # Check whether this file is already in staging — indicates a
         # previous run committed the insert but failed to move the file.
         original_batch_id = _check_file_in_staging(
@@ -355,11 +617,7 @@ def _load_one_file(
                 "File '%s' already in staging (BatchID=%s) — deleting and reloading.",
                 file_path.name, original_batch_id,
             )
-
-            # Notify the caller so it can log BatchStep records on both batches.
             _invoke_on_reload(on_reload, file_path, original_batch_id, batch_id)
-
-            # Delete the stale staging rows before reloading.
             _delete_staging_rows(conn, schema, table, file_id_col, file_path)
 
         # Validate header before reading any rows.
@@ -369,10 +627,8 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
-        # Build runtime constants — inject batch_id for staging row stamping.
+        # Build runtime constants — batch_id resolved from ctx.batch_id.
         constants = _build_constants(ctx, transform_cfg.constants, file_path, paths)
-        if batch_id is not None:
-            constants[batch_id_col] = str(batch_id)
 
         rows, errors = _read_and_transform(file_path, transform_cfg, constants)
 
@@ -383,7 +639,11 @@ def _load_one_file(
                     file_path.name, row_num, col, err,
                 )
             _execute_movements(load_cfg.movements.failure, file_path, paths)
-            log_exit(ctx, f"_load_one_file rejected (transform errors): {file_path.name}", _logger)
+            log_exit(
+                ctx,
+                f"_load_one_file rejected (transform errors): {file_path.name}",
+                _logger,
+            )
             return 0
 
         if not rows:
@@ -435,11 +695,12 @@ def _load_one_file(
         _execute_movements(load_cfg.movements.failure, file_path, paths)
         log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
         return 0
-    
+
 
 # ---------------------------------------------------------------------------
-# Private — columns helpers
+# Private — column helpers
 # ---------------------------------------------------------------------------
+
 def _build_column_defs(
     transform_cfg: Any,
     columns: list[str],
@@ -478,7 +739,6 @@ def _build_column_defs(
             if col not in max_lengths or length > max_lengths[col]:
                 max_lengths[col] = length
 
-    # Map transform type → SQL Server type.
     _TRANSFORM_TYPE_MAP: dict[str, str] = {
         "date":       "DATE",
         "regex_date": "DATE",
@@ -487,32 +747,30 @@ def _build_column_defs(
 
     col_defs: list[tuple[str, str]] = []
     for col in columns:
-        transform    = field_transforms.get(col, {})
+        transform      = field_transforms.get(col, {})
         transform_type = transform.get("type", "") if transform else ""
         cast_to        = transform.get("cast_to", "") if transform else ""
 
         if transform_type in _TRANSFORM_TYPE_MAP:
             sql_type = _TRANSFORM_TYPE_MAP[transform_type]
-
         elif transform_type == "regex_extract" and cast_to in ("float", "double"):
             sql_type = "DECIMAL(18, 6)"
-
         elif transform_type == "regex_extract" and cast_to in ("int", "integer"):
             sql_type = "INT"
-
         else:
-            # No transform or unknown — size varchar from observed data.
             observed = max_lengths.get(col, 0)
-            size     = max(observed + 10, 20)   # minimum 20 chars
+            size     = max(observed + 10, 20)
             sql_type = f"NVARCHAR({size})"
 
         col_defs.append((col, sql_type))
 
     return col_defs
 
+
 # ---------------------------------------------------------------------------
 # Private — header validation
 # ---------------------------------------------------------------------------
+
 def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
     """
     Read the first non-blank line of a file and validate it against the
@@ -577,12 +835,11 @@ def _read_and_transform(
     file_type = getattr(transform_cfg, "file_type", "CSV")
     encoding  = getattr(transform_cfg, "encoding",  "utf-8-sig")
 
-    # Build a plain dict config for the transformer — inject resolved constants.
     cfg_dict              = _namespace_to_dict(transform_cfg)
     cfg_dict["constants"] = constants
 
-    rows:   list[dict[str, Any]]        = []
-    errors: list[tuple[int, str, str]]  = []
+    rows:   list[dict[str, Any]]       = []
+    errors: list[tuple[int, str, str]] = []
 
     for row_num, raw_row in enumerate(
         get_reader(file_path, file_type=file_type, encoding=encoding),
@@ -591,7 +848,6 @@ def _read_and_transform(
         try:
             out_row = transform_row(raw_row, cfg_dict)
             if out_row is None:
-                # Row discarded by row_filter — not an error.
                 continue
             rows.append(out_row)
         except TransformError as exc:
@@ -613,20 +869,19 @@ def _execute_movements(
     Execute a list of file movement instructions from the YAML config.
 
     Each movement entry specifies an action (move or delete) and the
-    source and destination path keys. Path keys are resolved from the
-    data source paths Namespace.
+    source and destination path keys resolved from the paths Namespace.
 
     Supports:
-        - move:  from/to path keys
+        - move:   from/to path keys
         - delete: from path key
 
     Movement errors are logged but never raise — a movement failure
-    must not mask the original load error.
+    must not mask the original pipeline error.
 
     Parameters
     ----------
     movements : Any
-        List of movement instruction Namespaces from load_cfg.movements.
+        List of movement instruction Namespaces from transform/load cfg.
     file_path : Path
         The file to move or delete.
     paths : Any
@@ -636,7 +891,6 @@ def _execute_movements(
         return
 
     for instruction in movements:
-        # Each instruction is a Namespace with one key: 'move' or 'delete'.
         move   = getattr(instruction, "move",   None)
         delete = getattr(instruction, "delete", None)
 
@@ -644,9 +898,7 @@ def _execute_movements(
             dest_dir = _resolve_path(paths, move.to)
             try:
                 move_file(file_path, dest_dir)
-                _logger.debug(
-                    "Moved: %s → %s", file_path.name, dest_dir
-                )
+                _logger.debug("Moved: %s → %s", file_path.name, dest_dir)
             except OSError as exc:
                 _logger.error(
                     "Movement failed — could not move '%s' to '%s': %s",
@@ -764,8 +1016,8 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
 
     Examples
     --------
-    'Advantage_SCH.transaction'             → ('Advantage_SCH', 'transaction')
-    'NaviControl.Advantage_SCH.transaction' → ('NaviControl.Advantage_SCH', 'transaction')
+    'Advantage_SCH.transaction'           → ('Advantage_SCH', 'transaction')
+    'NaviStage.Advantage_SCH.transaction' → ('NaviStage.Advantage_SCH', 'transaction')
 
     Parameters
     ----------
@@ -794,7 +1046,7 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
 
 
 def _build_constants(
-    ctx: Any ,
+    ctx: Any,
     constants_cfg: Any,
     file_path: Path,
     paths: Any,
@@ -803,22 +1055,22 @@ def _build_constants(
     Build runtime constant values for one file.
 
     Resolves placeholder tokens in constant config values using the
-    actual file paths computed at load time. Values prefixed with 'ctx.'
+    actual file paths computed at run time. Values prefixed with 'ctx.'
     are resolved by walking the dot path on the ctx object — this allows
-    any ctx attribute to be injected as a constant without code changes.
-    Literal values pass through unchanged.
+    any ctx attribute (including ctx.batch_id and ctx.log_file) to be
+    injected as a constant without any code changes. Literal values pass
+    through unchanged.
 
     Parameters
     ----------
+    ctx : Any
+        Application context — always the first argument per contract.
     constants_cfg : Any
         Constants Namespace from the transform config.
     file_path : Path
-        Full path of the file currently being loaded.
+        Full path of the file currently being processed.
     paths : Any
         Paths Namespace from the data source config.
-    ctx : Any
-        Application context. When provided, values prefixed with 'ctx.'
-        are resolved against it.
 
     Returns
     -------
@@ -859,14 +1111,14 @@ def _resolve_ctx_path(ctx: Any, dotted_path: str) -> Any:
 
     Returns empty string if any segment is not found rather than
     raising — missing ctx values produce blank staging columns, not
-    load failures.
+    pipeline failures.
 
     Parameters
     ----------
     ctx : Any
         Application context Namespace.
     dotted_path : str
-        Dot-separated attribute path e.g. 'log_file' or 'db.batch_connection'.
+        Dot-separated attribute path e.g. 'batch_id' or 'log_file'.
 
     Returns
     -------
@@ -879,6 +1131,7 @@ def _resolve_ctx_path(ctx: Any, dotted_path: str) -> Any:
         if current is None:
             return ""
     return current if current is not None else ""
+
 
 def _namespace_to_dict(ns: Any) -> dict[str, Any]:
     """
