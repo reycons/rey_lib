@@ -38,11 +38,16 @@ call_proc(conn, proc_name, params)
     Execute a stored procedure by name.
 load_sql(name)
     Return the preloaded SQL string for a named query.
+create_staging_table_if_not_exists(conn, schema, table, column_defs)
+    Create a staging table if it does not already exist.
+expand_column_if_truncated(conn, schema, table, exc, rows, column_defs, batch_id)
+    Detect truncation error, expand offending column via proc, return True to retry.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -59,6 +64,8 @@ __all__ = [
     "bulk_insert",
     "call_proc",
     "load_sql",
+    "create_staging_table_if_not_exists",
+    "expand_column_if_truncated",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -74,6 +81,9 @@ _SQL: dict[str, str]  = {}
 # Retry settings for connection attempts.
 _MAX_CONNECT_ATTEMPTS: int   = 3
 _CONNECT_BACKOFF_BASE: float = 1.0   # seconds; doubles on each retry
+
+# SQL Server error code for string truncation.
+_TRUNCATION_ERROR: int = 8152
 
 
 # ---------------------------------------------------------------------------
@@ -196,16 +206,8 @@ def execute(
     DatabaseError
         If execution fails.
     """
-    sql    = load_sql(sql_name)
-    cursor = conn.cursor()
-    try:
-        cursor.execute(sql, params or [])
-        return cursor
-    except pyodbc.Error as exc:
-        cursor.close()
-        raise DatabaseError(
-            f"Query '{sql_name}' failed: {exc}"
-        ) from exc
+    sql = load_sql(sql_name)
+    return _run_cursor(conn, sql, params, error_context=f"Query '{sql_name}'")
 
 
 def fetch(
@@ -242,15 +244,7 @@ def fetch(
     """
     cursor = execute(conn, sql_name, params)
     try:
-        columns = [col[0] for col in cursor.description]
-        return [
-            dict(zip(columns, row))
-            for row in cursor.fetchall()
-        ]
-    except pyodbc.Error as exc:
-        raise DatabaseError(
-            f"Failed to fetch results for '{sql_name}': {exc}"
-        ) from exc
+        return _cursor_to_dicts(cursor)
     finally:
         cursor.close()
 
@@ -302,8 +296,7 @@ def bulk_insert(
         _logger.debug("bulk_insert: no rows to insert into %s.%s", schema, table)
         return 0
 
-    # Build INSERT statement from schema, table, and column list.
-    # All values are parameterized — no string formatting of data.
+    # Build INSERT statement — all values parameterized, no data interpolation.
     col_list     = ", ".join(columns)
     placeholders = ", ".join("?" * len(columns))
     sql          = (
@@ -323,10 +316,7 @@ def bulk_insert(
         cursor.fast_executemany = True
         cursor.executemany(sql, value_rows)
         row_count = len(rows)
-        _logger.debug(
-            "bulk_insert: %d row(s) → %s.%s",
-            row_count, schema, table,
-        )
+        _logger.debug("bulk_insert: %d row(s) → %s.%s", row_count, schema, table)
         return row_count
     except pyodbc.Error as exc:
         raise DatabaseError(
@@ -354,7 +344,7 @@ def call_proc(
         Open pyodbc connection.
     proc_name : str
         Fully-qualified procedure name
-        (e.g. 'NaviControl.dbo.pBCP_NewFiles').
+        (e.g. 'NaviControl.dbo.pUpd_StagingColumnLength').
     params : Optional[list[Any]]
         Positional input parameters. Pass None for zero-parameter procs.
 
@@ -368,26 +358,9 @@ def call_proc(
     DatabaseError
         If procedure execution fails.
     """
-    p            = params or []
-    placeholders = ", ".join("?" * len(p))
-    # ODBC escape syntax differs for zero vs. N parameters.
-    call_sql = (
-        f"{{CALL {proc_name} ({placeholders})}}"
-        if p
-        else f"{{CALL {proc_name}}}"
-    )
-    cursor = conn.cursor()
-    try:
-        cursor.execute(call_sql, p)
-        _logger.debug(
-            "call_proc: %s (%d param(s))", proc_name, len(p)
-        )
-        return cursor
-    except pyodbc.Error as exc:
-        cursor.close()
-        raise DatabaseError(
-            f"Stored procedure '{proc_name}' failed: {exc}"
-        ) from exc
+    p        = params or []
+    call_sql = _build_odbc_call(proc_name, len(p))
+    return _run_cursor(conn, call_sql, p, error_context=f"Stored procedure '{proc_name}'")
 
 
 def load_sql(name: str) -> str:
@@ -420,6 +393,186 @@ def load_sql(name: str) -> str:
     return _SQL[name]
 
 
+def create_staging_table_if_not_exists(
+    conn: pyodbc.Connection,
+    schema: str,
+    table: str,
+    column_defs: list[tuple[str, str]],
+) -> bool:
+    """
+    Create a staging table if it does not already exist in SQL Server.
+
+    Uses OBJECT_ID check — safe to call on every startup. All columns
+    are created nullable. Never modifies an existing table — if the
+    table exists it is left untouched regardless of column differences.
+
+    Identifiers are validated before interpolation into DDL to prevent
+    SQL injection. Only alphanumeric characters, underscores, dots, and
+    square brackets are permitted in schema, table, and column names.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open SQL Server connection.
+    schema : str
+        Target schema name (e.g. 'Staging_SCH').
+        May be 'database.schema' for cross-database targets.
+    table : str
+        Target table name.
+    column_defs : list[tuple[str, str]]
+        Ordered list of (column_name, sql_type) tuples.
+        e.g. [('trade_date', 'DATE'), ('account', 'NVARCHAR(35)')]
+        All columns are created as NULL.
+
+    Returns
+    -------
+    bool
+        True if the table was created, False if it already existed.
+
+    Raises
+    ------
+    DatabaseError
+        If an identifier is invalid or the DDL statement fails.
+    """
+    # Validate all identifiers before interpolation.
+    _validate_identifier(schema, "schema")
+    _validate_identifier(table, "table")
+    for col_name, _ in column_defs:
+        _validate_identifier(col_name, "column")
+
+    qualified = f"{schema}.{table}"
+
+    # Build column list — all nullable.
+    col_sql = ",\n        ".join(
+        f"[{col_name}] {sql_type} NULL"
+        for col_name, sql_type in column_defs
+    )
+
+    ddl = (
+        f"IF OBJECT_ID(N'{qualified}', N'U') IS NULL\n"
+        f"BEGIN\n"
+        f"    CREATE TABLE {qualified} (\n"
+        f"        {col_sql}\n"
+        f"    )\n"
+        f"END"
+    )
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(ddl)
+        conn.commit()
+
+        # Check if the table now exists to determine return value.
+        cursor.execute("SELECT OBJECT_ID(?, N'U')", [qualified])
+        row    = cursor.fetchone()
+        exists = row is not None and row[0] is not None
+
+        _logger.info("Staging table ready: %s", qualified)
+        return exists
+
+    except pyodbc.Error as exc:
+        conn.rollback()
+        raise DatabaseError(
+            f"Failed to create staging table '{qualified}': {exc}"
+        ) from exc
+    finally:
+        cursor.close()
+
+
+def expand_column_if_truncated(
+    conn: pyodbc.Connection,
+    schema: str,
+    table: str,
+    exc: Exception,
+    rows: list[dict[str, Any]],
+    column_defs: list[tuple[str, str]],
+    batch_id: Optional[int] = None,
+) -> bool:
+    """
+    Detect a column truncation error, expand offending columns via
+    pUpd_StagingColumnLength, and return True so the caller can retry.
+
+    SQL Server raises error 8152 when a value exceeds the column
+    definition length. This function scans all columns in the current
+    batch, calls the server-side proc for each column whose observed
+    max length exceeds its current definition, and commits after each
+    expansion. The proc handles type validation and never shrinks columns.
+
+    Returns False when the exception is not a truncation error so the
+    caller knows not to retry.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open SQL Server connection.
+    schema : str
+        Target schema — may be 'database.schema' for cross-db targets.
+    table : str
+        Target table name.
+    exc : Exception
+        The exception caught from the failed bulk insert.
+    rows : list[dict[str, Any]]
+        The rows that failed to insert — scanned for max lengths.
+    column_defs : list[tuple[str, str]]
+        Current column definitions — iterated for column names.
+    batch_id : Optional[int]
+        BatchID passed to pUpd_StagingColumnLength for logging via
+        pRun_LoggedSQL. Pass None when running outside a batch context.
+
+    Returns
+    -------
+    bool
+        True if at least one column was expanded and the caller should retry.
+        False if the error is not a truncation error.
+
+    Raises
+    ------
+    DatabaseError
+        If the proc call fails for any column.
+    """
+    if not _is_truncation_error(exc, _TRUNCATION_ERROR):
+        return False
+
+    _logger.warning(
+        "Truncation error on %s.%s — scanning for oversized columns.",
+        schema, table,
+    )
+
+    expanded_any         = False
+    db_name, schema_name = _split_database_schema(schema)
+
+    for col_name, _ in column_defs:
+        # Scan all columns — pUpd_StagingColumnLength validates type
+        # server-side and exits cleanly for non-varchar columns.
+        max_observed = _max_col_length(rows, col_name)
+        if max_observed == 0:
+            continue
+
+        # Expand to observed max plus 10-character buffer.
+        new_len = max_observed + 10
+
+        try:
+            cursor = call_proc(
+                conn,
+                "dbo.pUpd_StagingColumnLength",
+                [db_name, schema_name, table, col_name, new_len, batch_id],
+            )
+            cursor.close()
+            conn.commit()
+            _logger.info(
+                "Expanded column '%s' on %s.%s to NVARCHAR(%d)",
+                col_name, schema, table, new_len,
+            )
+            expanded_any = True
+        except DatabaseError as alter_exc:
+            conn.rollback()
+            raise DatabaseError(
+                f"Failed to expand column '{col_name}' on '{schema}.{table}': {alter_exc}"
+            ) from alter_exc
+
+    return expanded_any
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -430,6 +583,132 @@ def _require_init() -> None:
         raise RuntimeError(
             "sqlserver_utils.init_db() must be called before using the database."
         )
+
+
+def _run_cursor(
+    conn: pyodbc.Connection,
+    sql: str,
+    params: Optional[list[Any]],
+    error_context: str,
+) -> pyodbc.Cursor:
+    """
+    Open a cursor, execute SQL with params, and return the open cursor.
+
+    Wraps pyodbc.Error into DatabaseError using error_context as the
+    message prefix. Shared by execute() and call_proc() to eliminate
+    the duplicated cursor open/execute/error pattern.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open pyodbc connection.
+    sql : str
+        SQL string to execute — already loaded or built by the caller.
+    params : Optional[list[Any]]
+        Positional parameters. None is treated as empty list.
+    error_context : str
+        Human-readable prefix for the DatabaseError message
+        (e.g. "Query 'get_users'" or "Stored procedure 'dbo.pIns_Batch'").
+
+    Returns
+    -------
+    pyodbc.Cursor
+        Executed cursor. Caller must close it when done.
+
+    Raises
+    ------
+    DatabaseError
+        If execution fails.
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql, params or [])
+        _logger.debug("_run_cursor: %s", error_context)
+        return cursor
+    except pyodbc.Error as exc:
+        cursor.close()
+        raise DatabaseError(f"{error_context} failed: {exc}") from exc
+
+
+def _cursor_to_dicts(cursor: pyodbc.Cursor) -> list[dict[str, Any]]:
+    """
+    Convert all rows from an open cursor to a list of column-keyed dicts.
+
+    Column names are taken from cursor.description. The cursor is not
+    closed by this function — the caller is responsible for closing it.
+
+    Parameters
+    ----------
+    cursor : pyodbc.Cursor
+        An executed cursor with results available.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        All result rows as dicts. Empty list if no rows matched.
+
+    Raises
+    ------
+    DatabaseError
+        If fetching results fails.
+    """
+    try:
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    except pyodbc.Error as exc:
+        raise DatabaseError(f"Failed to fetch cursor results: {exc}") from exc
+
+
+def _build_odbc_call(proc_name: str, param_count: int) -> str:
+    """
+    Build an ODBC escape syntax call string for a stored procedure.
+
+    Uses {CALL proc_name (?,?,...)} syntax for maximum driver
+    compatibility. Produces {CALL proc_name} with no parens when
+    param_count is zero.
+
+    Parameters
+    ----------
+    proc_name : str
+        Fully-qualified procedure name.
+    param_count : int
+        Number of positional parameters.
+
+    Returns
+    -------
+    str
+        ODBC escape call string ready for cursor.execute().
+    """
+    if param_count == 0:
+        return f"{{CALL {proc_name}}}"
+    placeholders = ", ".join("?" * param_count)
+    return f"{{CALL {proc_name} ({placeholders})}}"
+
+
+def _max_col_length(rows: list[dict[str, Any]], col_name: str) -> int:
+    """
+    Return the maximum string length of a column's values across all rows.
+
+    None values and missing keys are treated as length 0. Used to
+    determine the required column width before calling
+    pUpd_StagingColumnLength.
+
+    Parameters
+    ----------
+    rows : list[dict[str, Any]]
+        Rows to scan.
+    col_name : str
+        Column name to inspect.
+
+    Returns
+    -------
+    int
+        Maximum observed length. 0 if all values are blank or missing.
+    """
+    return max(
+        (len(str(row.get(col_name, "") or "")) for row in rows),
+        default=0,
+    )
 
 
 def _build_connection_string(db_cfg: Any) -> str:
@@ -518,3 +797,84 @@ def _connect_with_retry(conn_str: str, timeout: int) -> pyodbc.Connection:
     raise DatabaseError(
         f"SQL Server connection failed after {_MAX_CONNECT_ATTEMPTS} attempts."
     ) from last_exc
+
+
+def _is_truncation_error(exc: Exception, error_code: int) -> bool:
+    """
+    Return True if exc is a pyodbc error with the given SQL Server error code.
+
+    Checks error args first, falls back to string match for drivers
+    that format error codes differently.
+
+    Parameters
+    ----------
+    exc : Exception
+        Exception to inspect.
+    error_code : int
+        SQL Server error code to match (e.g. 8152 for truncation).
+
+    Returns
+    -------
+    bool
+        True if the error code matches.
+    """
+    if not isinstance(exc, pyodbc.Error):
+        return False
+    args = getattr(exc, "args", ())
+    if len(args) >= 2:
+        try:
+            return int(args[1]) == error_code
+        except (ValueError, TypeError):
+            pass
+    return str(error_code) in str(exc)
+
+
+def _split_database_schema(schema: str) -> tuple[str, str]:
+    """
+    Split a 'database.schema' string into its two parts.
+
+    Returns ('', schema) when no dot is present — single-part schema
+    with no database prefix.
+
+    Parameters
+    ----------
+    schema : str
+        Schema string — either 'schema_name' or 'database.schema_name'.
+
+    Returns
+    -------
+    tuple[str, str]
+        (database_name, schema_name)
+    """
+    parts = schema.split(".", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return "", schema
+
+
+def _validate_identifier(name: str, label: str) -> None:
+    """
+    Validate a SQL identifier before interpolating into DDL.
+
+    Only allows alphanumeric characters, underscores, dots (for
+    schema.table references), and square brackets. Raises DatabaseError
+    on any character that could be used for SQL injection.
+
+    Parameters
+    ----------
+    name : str
+        Identifier to validate.
+    label : str
+        Human-readable label used in error messages.
+
+    Raises
+    ------
+    DatabaseError
+        If the identifier contains disallowed characters.
+    """
+    if not re.fullmatch(r"[\w\.\[\]]+", name):
+        raise DatabaseError(
+            f"Invalid SQL identifier for {label}: '{name}'. "
+            f"Only alphanumeric characters, underscores, dots, "
+            f"and square brackets are permitted."
+        )
