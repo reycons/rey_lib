@@ -279,7 +279,7 @@ def _invoke_on_reload(
             "on_reload callback failed for '%s': %s",
             file_path.name, exc, exc_info=True,
         )
-        
+
 def _load_one_file(
     ctx: Any,
     conn: Any,
@@ -370,7 +370,7 @@ def _load_one_file(
             return 0
 
         # Build runtime constants — inject batch_id for staging row stamping.
-        constants = _build_constants(transform_cfg.constants, file_path, paths)
+        constants = _build_constants(ctx, transform_cfg.constants, file_path, paths)
         if batch_id is not None:
             constants[batch_id_col] = str(batch_id)
 
@@ -794,6 +794,7 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
 
 
 def _build_constants(
+    ctx: Any ,
     constants_cfg: Any,
     file_path: Path,
     paths: Any,
@@ -802,8 +803,10 @@ def _build_constants(
     Build runtime constant values for one file.
 
     Resolves placeholder tokens in constant config values using the
-    actual file paths computed at load time. Placeholders are substituted
-    using the path keys defined in the data source paths config.
+    actual file paths computed at load time. Values prefixed with 'ctx.'
+    are resolved by walking the dot path on the ctx object — this allows
+    any ctx attribute to be injected as a constant without code changes.
+    Literal values pass through unchanged.
 
     Parameters
     ----------
@@ -813,6 +816,9 @@ def _build_constants(
         Full path of the file currently being loaded.
     paths : Any
         Paths Namespace from the data source config.
+    ctx : Any
+        Application context. When provided, values prefixed with 'ctx.'
+        are resolved against it.
 
     Returns
     -------
@@ -832,12 +838,47 @@ def _build_constants(
     result: dict[str, Any] = {}
     for col, template in _namespace_to_dict(constants_cfg).items():
         value = str(template)
+
+        # Resolve ctx.dot.path values directly from ctx.
+        if value.startswith("ctx.") and ctx is not None:
+            result[col] = _resolve_ctx_path(ctx, value[4:])
+            continue
+
+        # Substitute path tokens — e.g. {loaded_path}.
         for token, resolved in substitutions.items():
             value = value.replace(f"{{{token}}}", resolved)
+
         result[col] = value
 
     return result
 
+
+def _resolve_ctx_path(ctx: Any, dotted_path: str) -> Any:
+    """
+    Walk a dot-separated path on ctx and return the value.
+
+    Returns empty string if any segment is not found rather than
+    raising — missing ctx values produce blank staging columns, not
+    load failures.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context Namespace.
+    dotted_path : str
+        Dot-separated attribute path e.g. 'log_file' or 'db.batch_connection'.
+
+    Returns
+    -------
+    Any
+        Resolved value, or empty string if not found.
+    """
+    current = ctx
+    for part in dotted_path.split("."):
+        current = getattr(current, part, None)
+        if current is None:
+            return ""
+    return current if current is not None else ""
 
 def _namespace_to_dict(ns: Any) -> dict[str, Any]:
     """
