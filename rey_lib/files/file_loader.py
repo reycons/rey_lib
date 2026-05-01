@@ -356,7 +356,9 @@ def _build_output_path(
     Path
         Full path for the output file in processing_path.
     """
-    processing_dir = _resolve_path(paths, "processing_path")
+    output_path_key = getattr(transform_cfg.output, "path", "transformed_path")
+    output_dir      = _resolve_path(paths, output_path_key)
+    
     pattern        = transform_cfg.output.file.pattern
     version        = getattr(transform_cfg, "version", "v01")
 
@@ -370,7 +372,7 @@ def _build_output_path(
         "version":  version,
     }
 
-    return converted_output_path(processing_dir, pattern, substitutions)
+    return converted_output_path(output_dir, pattern, substitutions)
 
 
 def _pattern_to_glob(file_pattern: str) -> str:
