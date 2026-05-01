@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rey_lib.db import sqlserver_utils
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
     input_files,
     get_reader,
@@ -356,7 +356,12 @@ def _build_output_path(
     Path
         Full path for the output file in processing_path.
     """
-    output_path_key = getattr(transform_cfg.output, "path", "transformed_path")
+    output_path_key = getattr(transform_cfg.output, "output_dest", None)
+    if output_path_key is None:
+        raise ConfigError(
+            f"Transform '{transform_cfg.name}' v{transform_cfg.version} "
+            f"is missing output.output_dest — cannot determine where to write output files."
+    )
     output_dir      = _resolve_path(paths, output_path_key)
     
     pattern        = transform_cfg.output.file.pattern
