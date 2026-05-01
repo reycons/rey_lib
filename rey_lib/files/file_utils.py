@@ -35,6 +35,7 @@ __all__ = [
     "converted_output_path",
     "get_reader",
     "write_file",
+    "scan_column_lengths",
     "move_file",
 ]
 
@@ -173,6 +174,84 @@ def write_file(
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'. Must be 'CSV' or 'XLSX'.")
 
+def move_file(src: Path, dest_dir: Path) -> Path:
+    """
+    Move a file to a destination directory.
+
+    Creates the destination directory if it does not exist. If a file
+    with the same name already exists in dest_dir it is overwritten.
+
+    Parameters
+    ----------
+    src : Path
+        Full path of the file to move.
+    dest_dir : Path
+        Destination directory. Created if it does not exist.
+
+    Returns
+    -------
+    Path
+        Full path of the file in its new location.
+
+    Raises
+    ------
+    FileNotFoundError
+        If src does not exist.
+    OSError
+        If the move fails for any reason.
+    """
+    src      = Path(src)
+    dest_dir = Path(dest_dir)
+
+    if not src.exists():
+        raise FileNotFoundError(f"Source file not found: {src}")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    src.replace(dest)
+    _logger.debug("Moved: %s → %s", src, dest)
+    return dest
+
+
+def scan_column_lengths(
+    files: list[Path],
+    file_type: str = "CSV",
+    encoding: str = "utf-8-sig",
+) -> dict[str, int]:
+    """
+    Scan a list of files and return the maximum observed length per column.
+
+    Reads every row in every file and tracks the longest value seen for
+    each column name. Used to size VARCHAR columns when auto-creating a
+    staging table — caller adds a buffer before passing to DDL.
+
+    Returns an empty dict if files is empty or no rows are found.
+
+    Parameters
+    ----------
+    files : list[Path]
+        Files to scan. All must share the same column structure.
+    file_type : str
+        File format — 'CSV' or 'XLSX'. Case-insensitive.
+    encoding : str
+        Character encoding for CSV files.
+
+    Returns
+    -------
+    dict[str, int]
+        Mapping of column name → maximum observed value length in characters.
+        Columns with all-blank values have length 0.
+    """
+    max_lengths: dict[str, int] = {}
+
+    for file_path in files:
+        for row in get_reader(file_path, file_type=file_type, encoding=encoding):
+            for col, val in row.items():
+                length = len(val) if val else 0
+                if col not in max_lengths or length > max_lengths[col]:
+                    max_lengths[col] = length
+
+    return max_lengths
 
 # ---------------------------------------------------------------------------
 # Private — CSV reader / writer
@@ -237,43 +316,6 @@ def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
 # Private — XLSX reader / writer
 # ---------------------------------------------------------------------------
 
-def move_file(src: Path, dest_dir: Path) -> Path:
-    """
-    Move a file to a destination directory.
-
-    Creates the destination directory if it does not exist. If a file
-    with the same name already exists in dest_dir it is overwritten.
-
-    Parameters
-    ----------
-    src : Path
-        Full path of the file to move.
-    dest_dir : Path
-        Destination directory. Created if it does not exist.
-
-    Returns
-    -------
-    Path
-        Full path of the file in its new location.
-
-    Raises
-    ------
-    FileNotFoundError
-        If src does not exist.
-    OSError
-        If the move fails for any reason.
-    """
-    src      = Path(src)
-    dest_dir = Path(dest_dir)
-
-    if not src.exists():
-        raise FileNotFoundError(f"Source file not found: {src}")
-
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / src.name
-    src.replace(dest)
-    _logger.debug("Moved: %s → %s", src, dest)
-    return dest
 
 
 
