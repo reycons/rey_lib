@@ -165,7 +165,6 @@ def get_connection(db_cfg: Any) -> pyodbc.Connection:
     DatabaseError
         If all connection attempts are exhausted.
     """
-    _require_init()
     conn_str = _build_connection_string(db_cfg)
     timeout  = int(getattr(db_cfg, "timeout", 30))
     return _connect_with_retry(conn_str, timeout)
