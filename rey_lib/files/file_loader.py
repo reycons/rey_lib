@@ -336,48 +336,59 @@ def _build_output_path(
     source_file: Path,
 ) -> Path:
     """
-    Build the output file path from the transform output pattern.
+    Build the output file path from the transform output config.
 
-    Resolves {yyyymmdd} from the source filename using
-    parse_date_from_filename, and {version} from transform_cfg.version.
-    The output file is written to processing_path.
+    Substitutes {base_file_name} and {version} tokens into the filename
+    pattern defined in output.file.name. Output is written to the
+    directory named by output.output_dest.
+
+    Token substitutions:
+        {base_file_name} — stem of the source file e.g. 'tran_20260331'
+        {version}        — transform version from output.version e.g. 'v01'
 
     Parameters
     ----------
     paths : Any
         Paths Namespace from the data source config.
     transform_cfg : Any
-        Transform Namespace providing output.file.pattern and version.
+        Transform Namespace providing output.output_dest, output.version,
+        and output.file.name.
     source_file : Path
-        Source file — used to extract the date token.
+        Source file — stem used for {base_file_name} substitution.
 
     Returns
     -------
     Path
-        Full path for the output file in processing_path.
+        Full path for the output file.
+
+    Raises
+    ------
+    ConfigError
+        If output.output_dest or output.file.name is missing.
     """
     output_path_key = getattr(transform_cfg.output, "output_dest", None)
     if output_path_key is None:
         raise ConfigError(
             f"Transform '{transform_cfg.name}' v{transform_cfg.version} "
             f"is missing output.output_dest — cannot determine where to write output files."
+        )
+
+    file_name_pattern = getattr(transform_cfg.output.file, "name", None)
+    if file_name_pattern is None:
+        raise ConfigError(
+            f"Transform '{transform_cfg.name}' v{transform_cfg.version} "
+            f"is missing output.file.name — cannot determine output filename pattern."
+        )
+
+    output_dir = _resolve_path(paths, output_path_key)
+    version    = getattr(transform_cfg.output, "version", getattr(transform_cfg, "version", ""))
+
+    filename = file_name_pattern.format(
+        base_file_name=source_file.stem,
+        version=version,
     )
-    output_dir      = _resolve_path(paths, output_path_key)
-    
-    pattern        = transform_cfg.output.file.pattern
-    version        = getattr(transform_cfg, "version", "v01")
 
-    # Parse date from source filename for token substitution.
-    cfg_dict  = _namespace_to_dict(transform_cfg)
-    file_date = parse_date_from_filename(source_file.name, cfg_dict)
-    yyyymmdd  = file_date.strftime("%Y%m%d") if file_date else "00000000"
-
-    substitutions = {
-        "yyyymmdd": yyyymmdd,
-        "version":  version,
-    }
-
-    return converted_output_path(output_dir, pattern, substitutions)
+    return output_dir / filename
 
 
 def _pattern_to_glob(file_pattern: str) -> str:
