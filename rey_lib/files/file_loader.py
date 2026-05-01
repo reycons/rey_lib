@@ -1,0 +1,568 @@
+"""
+Generic file loading pipeline for delimited file ingestion.
+
+Reads transformed output files from a configured source path, applies
+column mapping and field transforms defined in a data source YAML config,
+injects runtime constants, and bulk inserts all rows into a SQL Server
+landing table via sqlserver_utils.
+
+On success  — commits and executes configured success movements.
+On any error — rolls back, logs every row error, executes failure movements.
+
+All configuration is driven by the YAML data source config — no table
+names, schema names, column names, or folder paths are hardcoded here.
+This module has no knowledge of any specific application, data model,
+or business rule.
+
+All DB calls go through sqlserver_utils. All file moves go through
+file_utils. No raw pyodbc or os calls anywhere in this module.
+
+Public API
+----------
+load_files(ctx, conn, data_source, load_cfg)
+    Find and load all pending files for one load configuration.
+    Returns total rows loaded across all files processed.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Optional
+
+from rey_lib.db import sqlserver_utils
+from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.files.file_utils import input_files, get_reader, move_file
+from rey_lib.files.transformer import transform_row, match_header, TransformError
+from rey_lib.logs.log_utils import log_enter, log_exit
+
+__all__ = ["load_files"]
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def load_files(
+    ctx: Any,
+    conn: Any,
+    data_source: Any,
+    load_cfg: Any,
+) -> int:
+    """
+    Find and load all pending files for one load configuration.
+
+    Scans the configured source path for files matching the pickup_pattern,
+    then loads each one independently. A failure on one file does not
+    prevent processing of subsequent files.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context — used for logging and chunk_size.
+    conn : pyodbc.Connection
+        Open SQL Server connection. Caller manages the connection lifecycle.
+    data_source : Any
+        Namespace for one data_sources entry from ctx. Provides paths,
+        transforms list, and constants.
+    load_cfg : Any
+        Namespace for one loads entry. Provides source path key,
+        pickup_pattern, version, load destination, and movements.
+
+    Returns
+    -------
+    int
+        Total number of rows successfully loaded across all files.
+    """
+    log_enter(ctx, f"load_files: {data_source.name} / {load_cfg.name}", _logger)
+    total_rows = 0
+
+    try:
+        source_dir    = _resolve_path(data_source.paths, load_cfg.source)
+        pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version)
+        pending       = input_files(source_dir, pattern)
+        transform_cfg = _find_transform(
+            data_source.transforms,
+            load_cfg.name,
+            load_cfg.version,
+        )
+        schema, table = _parse_destination(load_cfg.load.destination_table)
+
+        _logger.info(
+            "load_files: %d file(s) pending in %s matching '%s'",
+            len(pending), source_dir, pattern,
+        )
+
+        for file_path in pending:
+            rows_loaded = _load_one_file(
+                ctx, conn, file_path, transform_cfg,
+                load_cfg, data_source.paths, schema, table,
+            )
+            total_rows += rows_loaded
+
+    finally:
+        log_exit(
+            ctx,
+            f"load_files done: {total_rows} total row(s) loaded",
+            _logger,
+        )
+
+    return total_rows
+
+
+# ---------------------------------------------------------------------------
+# Private — file orchestration
+# ---------------------------------------------------------------------------
+
+def _load_one_file(
+    ctx: Any,
+    conn: Any,
+    file_path: Path,
+    transform_cfg: Any,
+    load_cfg: Any,
+    paths: Any,
+    schema: str,
+    table: str,
+) -> int:
+    """
+    Load one file into the landing table.
+
+    Validates the header, reads and transforms all rows, bulk inserts,
+    then executes the configured file movements. Full rollback on any
+    error — every row error is logged before rollback.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+    conn : pyodbc.Connection
+        Open SQL Server connection.
+    file_path : Path
+        Full path of the file to load.
+    transform_cfg : Any
+        Transform Namespace — provides header, columns, field_transforms,
+        constants, file_type, encoding.
+    load_cfg : Any
+        Load Namespace — provides movements config.
+    paths : Any
+        Paths Namespace from the data source config.
+    schema : str
+        Target schema — may be 'database.schema' for cross-db inserts.
+    table : str
+        Target table name.
+
+    Returns
+    -------
+    int
+        Number of rows loaded, or 0 on failure.
+    """
+    log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
+
+    try:
+        # Validate header before reading any rows.
+        if not _validate_header(file_path, transform_cfg):
+            _logger.error(
+                "Header mismatch — file rejected: %s", file_path.name
+            )
+            _execute_movements(load_cfg.movements.failure, file_path, paths)
+            log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
+            return 0
+
+        constants = _build_constants(transform_cfg.constants, file_path, paths)
+        rows, errors = _read_and_transform(file_path, transform_cfg, constants)
+
+        if errors:
+            # Log every row error before rolling back — per contract.
+            for row_num, col, err in errors:
+                _logger.error(
+                    "Transform error — file=%s row=%d col=%s: %s",
+                    file_path.name, row_num, col, err,
+                )
+            _execute_movements(load_cfg.movements.failure, file_path, paths)
+            log_exit(ctx, f"_load_one_file rejected (transform errors): {file_path.name}", _logger)
+            return 0
+
+        if not rows:
+            _logger.warning("No rows produced from file: %s", file_path.name)
+            _execute_movements(load_cfg.movements.failure, file_path, paths)
+            log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
+            return 0
+
+        columns = list(rows[0].keys())
+        sqlserver_utils.bulk_insert(conn, schema, table, rows, columns)
+        conn.commit()
+
+        _logger.info(
+            "Loaded: %s → %s.%s  rows=%d",
+            file_path.name, schema, table, len(rows),
+        )
+
+        _execute_movements(load_cfg.movements.success, file_path, paths)
+        log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
+        return len(rows)
+
+    except DatabaseError as exc:
+        conn.rollback()
+        _logger.error(
+            "Database error loading '%s' — rolled back: %s",
+            file_path.name, exc,
+        )
+        _execute_movements(load_cfg.movements.failure, file_path, paths)
+        log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Private — header validation
+# ---------------------------------------------------------------------------
+
+def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
+    """
+    Read the first non-blank line of a file and validate it against the
+    expected header defined in transform_cfg.
+
+    Parameters
+    ----------
+    file_path : Path
+        File to validate.
+    transform_cfg : Any
+        Transform Namespace providing the expected header string and encoding.
+
+    Returns
+    -------
+    bool
+        True if the header matches, False otherwise.
+    """
+    encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
+    try:
+        with file_path.open(encoding=encoding, errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    cfg_dict = _namespace_to_dict(transform_cfg)
+                    return match_header(stripped, cfg_dict)
+    except OSError as exc:
+        _logger.error("Cannot read file '%s': %s", file_path.name, exc)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Private — row reading and transformation
+# ---------------------------------------------------------------------------
+
+def _read_and_transform(
+    file_path: Path,
+    transform_cfg: Any,
+    constants: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
+    """
+    Read all rows from a file and apply column mapping, transforms,
+    and constant injection via the generic transformer.
+
+    Collects all row errors without stopping — returns both the clean
+    rows and the full error list so the caller can decide what to do.
+
+    Parameters
+    ----------
+    file_path : Path
+        File to read.
+    transform_cfg : Any
+        Transform Namespace — provides columns, field_transforms, constants,
+        file_type, encoding.
+    constants : dict[str, Any]
+        Runtime constants already resolved by _build_constants().
+
+    Returns
+    -------
+    tuple[list[dict], list[tuple[int, str, str]]]
+        (rows, errors) where errors are (row_num, column_name, message).
+    """
+    file_type = getattr(transform_cfg, "file_type", "CSV")
+    encoding  = getattr(transform_cfg, "encoding",  "utf-8-sig")
+
+    # Build a plain dict config for the transformer — inject resolved constants.
+    cfg_dict              = _namespace_to_dict(transform_cfg)
+    cfg_dict["constants"] = constants
+
+    rows:   list[dict[str, Any]]        = []
+    errors: list[tuple[int, str, str]]  = []
+
+    for row_num, raw_row in enumerate(
+        get_reader(file_path, file_type=file_type, encoding=encoding),
+        start=1,
+    ):
+        try:
+            out_row = transform_row(raw_row, cfg_dict)
+            if out_row is None:
+                # Row discarded by row_filter — not an error.
+                continue
+            rows.append(out_row)
+        except TransformError as exc:
+            errors.append((row_num, "", str(exc)))
+
+    return rows, errors
+
+
+# ---------------------------------------------------------------------------
+# Private — file movements
+# ---------------------------------------------------------------------------
+
+def _execute_movements(
+    movements: Any,
+    file_path: Path,
+    paths: Any,
+) -> None:
+    """
+    Execute a list of file movement instructions from the YAML config.
+
+    Each movement entry specifies an action (move or delete) and the
+    source and destination path keys. Path keys are resolved from the
+    data source paths Namespace.
+
+    Supports:
+        - move:  from/to path keys
+        - delete: from path key
+
+    Movement errors are logged but never raise — a movement failure
+    must not mask the original load error.
+
+    Parameters
+    ----------
+    movements : Any
+        List of movement instruction Namespaces from load_cfg.movements.
+    file_path : Path
+        The file to move or delete.
+    paths : Any
+        Paths Namespace from the data source config.
+    """
+    if not movements:
+        return
+
+    for instruction in movements:
+        # Each instruction is a Namespace with one key: 'move' or 'delete'.
+        move   = getattr(instruction, "move",   None)
+        delete = getattr(instruction, "delete", None)
+
+        if move is not None:
+            dest_dir = _resolve_path(paths, move.to)
+            try:
+                move_file(file_path, dest_dir)
+                _logger.debug(
+                    "Moved: %s → %s", file_path.name, dest_dir
+                )
+            except OSError as exc:
+                _logger.error(
+                    "Movement failed — could not move '%s' to '%s': %s",
+                    file_path.name, dest_dir, exc,
+                )
+
+        elif delete is not None:
+            try:
+                file_path.unlink(missing_ok=True)
+                _logger.debug("Deleted: %s", file_path.name)
+            except OSError as exc:
+                _logger.error(
+                    "Movement failed — could not delete '%s': %s",
+                    file_path.name, exc,
+                )
+
+
+# ---------------------------------------------------------------------------
+# Private — config helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_path(paths: Any, key: str) -> Path:
+    """
+    Resolve a named path from the paths Namespace.
+
+    Parameters
+    ----------
+    paths : Any
+        Paths Namespace from the data source config.
+    key : str
+        Attribute name — e.g. 'inbox_path', 'processing_path'.
+
+    Returns
+    -------
+    Path
+        Resolved Path object.
+
+    Raises
+    ------
+    ValueError
+        If the key is not found in the paths Namespace.
+    """
+    value = getattr(paths, key, None)
+    if value is None:
+        raise ValueError(
+            f"Path key '{key}' not found in data source paths config."
+        )
+    return Path(value)
+
+
+def _resolve_pattern(pickup_pattern: str, version: str) -> str:
+    """
+    Substitute {version} token in a pickup_pattern string.
+
+    Parameters
+    ----------
+    pickup_pattern : str
+        Pattern from load config — may contain {version} token.
+    version : str
+        Version string to substitute.
+
+    Returns
+    -------
+    str
+        Resolved glob pattern.
+    """
+    return pickup_pattern.replace("{version}", version)
+
+
+def _find_transform(
+    transforms: list[Any],
+    name: str,
+    version: str,
+) -> Any:
+    """
+    Find a transform config by name and version.
+
+    Parameters
+    ----------
+    transforms : list[Any]
+        List of transform Namespace objects from data_source.transforms.
+    name : str
+        Transform name to match.
+    version : str
+        Transform version to match.
+
+    Returns
+    -------
+    Any
+        Matching transform Namespace.
+
+    Raises
+    ------
+    ValueError
+        If no matching transform is found.
+    """
+    for t in transforms:
+        if (
+            getattr(t, "name",    None) == name
+            and getattr(t, "version", None) == version
+        ):
+            return t
+    raise ValueError(
+        f"No transform found with name='{name}' version='{version}'."
+    )
+
+
+def _parse_destination(destination_table: str) -> tuple[str, str]:
+    """
+    Parse a destination_table string into (schema, table).
+
+    Handles 2-part (schema.table) and 3-part (database.schema.table)
+    names. For 3-part names the database and schema are combined into
+    the schema argument so bulk_insert produces valid cross-db SQL.
+
+    Examples
+    --------
+    'Advantage_SCH.transaction'             → ('Advantage_SCH', 'transaction')
+    'NaviControl.Advantage_SCH.transaction' → ('NaviControl.Advantage_SCH', 'transaction')
+
+    Parameters
+    ----------
+    destination_table : str
+        Table reference from the load config.
+
+    Returns
+    -------
+    tuple[str, str]
+        (schema, table)
+
+    Raises
+    ------
+    ValueError
+        If the string does not contain at least one dot.
+    """
+    parts = destination_table.split(".")
+    if len(parts) < 2:
+        raise ValueError(
+            f"destination_table '{destination_table}' must be at least "
+            f"'schema.table' — got {len(parts)} part(s)."
+        )
+    table  = parts[-1]
+    schema = ".".join(parts[:-1])
+    return schema, table
+
+
+def _build_constants(
+    constants_cfg: Any,
+    file_path: Path,
+    paths: Any,
+) -> dict[str, Any]:
+    """
+    Build runtime constant values for one file.
+
+    Resolves placeholder tokens in constant config values using the
+    actual file paths computed at load time. Placeholders are substituted
+    using the path keys defined in the data source paths config.
+
+    Parameters
+    ----------
+    constants_cfg : Any
+        Constants Namespace from the transform config.
+    file_path : Path
+        Full path of the file currently being loaded.
+    paths : Any
+        Paths Namespace from the data source config.
+
+    Returns
+    -------
+    dict[str, Any]
+        Resolved constant values keyed by DB column name.
+    """
+    # Build substitution map from all named paths in config.
+    substitutions: dict[str, str] = {}
+    if paths is not None:
+        for key in _namespace_to_dict(paths).keys():
+            path_val = _resolve_path(paths, key)
+            substitutions[key] = str(path_val / file_path.name)
+
+    # Always provide the bare file path as a fallback substitution.
+    substitutions["incoming_file_name"] = str(file_path)
+
+    result: dict[str, Any] = {}
+    for col, template in _namespace_to_dict(constants_cfg).items():
+        value = str(template)
+        for token, resolved in substitutions.items():
+            value = value.replace(f"{{{token}}}", resolved)
+        result[col] = value
+
+    return result
+
+
+def _namespace_to_dict(ns: Any) -> dict[str, Any]:
+    """
+    Convert a Namespace object to a plain dict.
+
+    Returns an empty dict when ns is None — allows callers to treat
+    missing optional config sections uniformly.
+
+    Parameters
+    ----------
+    ns : Any
+        Namespace object, plain dict, or None.
+
+    Returns
+    -------
+    dict[str, Any]
+        Plain dict of the Namespace contents, or empty dict if None.
+    """
+    if ns is None:
+        return {}
+    if isinstance(ns, dict):
+        return ns
+    return {k: v for k, v in ns.items()}

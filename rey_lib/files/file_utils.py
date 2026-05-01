@@ -19,6 +19,8 @@ get_reader(infile, file_type, encoding, row_filter)
     Return a row iterator for the given file type.
 write_file(outfile, rows, file_type)
     Write rows to a file in the specified format.
+move_file(src, dest_dir)
+    Move a file to a destination directory, creating dest_dir if needed.    
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ __all__ = [
     "converted_output_path",
     "get_reader",
     "write_file",
+    "move_file",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -233,6 +236,46 @@ def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 # Private — XLSX reader / writer
 # ---------------------------------------------------------------------------
+
+def move_file(src: Path, dest_dir: Path) -> Path:
+    """
+    Move a file to a destination directory.
+
+    Creates the destination directory if it does not exist. If a file
+    with the same name already exists in dest_dir it is overwritten.
+
+    Parameters
+    ----------
+    src : Path
+        Full path of the file to move.
+    dest_dir : Path
+        Destination directory. Created if it does not exist.
+
+    Returns
+    -------
+    Path
+        Full path of the file in its new location.
+
+    Raises
+    ------
+    FileNotFoundError
+        If src does not exist.
+    OSError
+        If the move fails for any reason.
+    """
+    src      = Path(src)
+    dest_dir = Path(dest_dir)
+
+    if not src.exists():
+        raise FileNotFoundError(f"Source file not found: {src}")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    src.replace(dest)
+    _logger.debug("Moved: %s → %s", src, dest)
+    return dest
+
+
 
 def _xlsx_reader(
     infile: Path,
