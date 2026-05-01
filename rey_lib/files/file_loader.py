@@ -50,6 +50,8 @@ def load_files(
     conn: Any,
     data_source: Any,
     load_cfg: Any,
+    batch_id: Optional[int] = None,
+    on_reload: Optional[callable] = None,
 ) -> int:
     """
     Find and load all pending files for one load configuration.
@@ -70,6 +72,14 @@ def load_files(
     load_cfg : Any
         Namespace for one loads entry. Provides source path key,
         pickup_pattern, version, load destination, and movements.
+    batch_id : Optional[int]
+        BatchID of the active batch. Stamped into every staging row and
+        passed to expand_column_if_truncated for logging.
+    on_reload : Optional[callable]
+        Callback invoked when a file is found already in staging.
+        Signature: (file_path, original_batch_id, new_batch_id) -> None
+        Use this to log BatchStep records in the calling application.
+        Errors in the callback are logged and suppressed.
 
     Returns
     -------
@@ -89,8 +99,8 @@ def load_files(
             _logger.info(
                 "max_files_per_run=%d applied — %d file(s) eligible this run",
                 max_files, len(pending),
-            )        
-            
+            )
+
         transform_cfg = _find_transform(
             data_source.transforms,
             load_cfg.name,
@@ -107,6 +117,7 @@ def load_files(
             rows_loaded = _load_one_file(
                 ctx, conn, file_path, transform_cfg,
                 load_cfg, data_source.paths, schema, table,
+                batch_id, on_reload,
             )
             total_rows += rows_loaded
 
@@ -123,7 +134,152 @@ def load_files(
 # ---------------------------------------------------------------------------
 # Private — file orchestration
 # ---------------------------------------------------------------------------
+def _check_file_in_staging(
+    conn: Any,
+    schema: str,
+    table: str,
+    file_id_col: str,
+    batch_id_col: str,
+    file_path: Path,
+) -> Optional[int]:
+    """
+    Check whether rows for this file already exist in the staging table.
 
+    Returns the BatchID that loaded them if found, None otherwise.
+    Used at the start of each file load to detect restart conditions.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open SQL Server connection.
+    schema : str
+        Target schema — may be 'database.schema'.
+    table : str
+        Target table name.
+    file_id_col : str
+        Column name that holds the incoming file path.
+    batch_id_col : str
+        Column name that holds the BatchID.
+    file_path : Path
+        File being checked.
+
+    Returns
+    -------
+    Optional[int]
+        Original BatchID if rows exist, None if the file is not in staging.
+    """
+    sql = (
+        f"SELECT TOP 1 [{batch_id_col}] "
+        f"FROM {schema}.{table} "
+        f"WHERE [{file_id_col}] = ?"
+    )
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql, [str(file_path)])
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        val = row[0]
+        return int(val) if val is not None else None
+    except Exception as exc:
+        _logger.warning(
+            "Could not check staging for '%s': %s — assuming not present.",
+            file_path.name, exc,
+        )
+        return None
+    finally:
+        cursor.close()
+
+
+def _delete_staging_rows(
+    conn: Any,
+    schema: str,
+    table: str,
+    file_id_col: str,
+    file_path: Path,
+) -> None:
+    """
+    Delete all staging rows for a specific file.
+
+    Called before reloading a file whose rows are already in staging.
+    Commits immediately — the delete must be durable before the reload
+    begins so a subsequent failure does not leave duplicate rows.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open SQL Server connection.
+    schema : str
+        Target schema — may be 'database.schema'.
+    table : str
+        Target table name.
+    file_id_col : str
+        Column name that holds the incoming file path.
+    file_path : Path
+        File whose staging rows should be deleted.
+
+    Raises
+    ------
+    DatabaseError
+        If the DELETE fails.
+    """
+    sql = (
+        f"DELETE FROM {schema}.{table} "
+        f"WHERE [{file_id_col}] = ?"
+    )
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql, [str(file_path)])
+        deleted = cursor.rowcount
+        conn.commit()
+        _logger.info(
+            "Deleted %d staging row(s) for '%s' before reload.",
+            deleted, file_path.name,
+        )
+    except Exception as exc:
+        conn.rollback()
+        raise DatabaseError(
+            f"Failed to delete staging rows for '{file_path.name}': {exc}"
+        ) from exc
+    finally:
+        cursor.close()
+
+
+def _invoke_on_reload(
+    callback: Optional[callable],
+    file_path: Path,
+    original_batch_id: Optional[int],
+    new_batch_id: Optional[int],
+) -> None:
+    """
+    Invoke the on_reload callback safely.
+
+    Called when a file is found already in staging. The callback is
+    responsible for logging BatchStep records on both the original and
+    new batch. Errors are logged and suppressed — a callback failure
+    must never abort the reload.
+
+    Parameters
+    ----------
+    callback : Optional[callable]
+        Caller-supplied callback, or None.
+    file_path : Path
+        File being reloaded.
+    original_batch_id : Optional[int]
+        BatchID that originally loaded the file.
+    new_batch_id : Optional[int]
+        BatchID of the current reload run.
+    """
+    if callback is None:
+        return
+    try:
+        callback(file_path, original_batch_id, new_batch_id)
+    except Exception as exc:
+        _logger.error(
+            "on_reload callback failed for '%s': %s",
+            file_path.name, exc, exc_info=True,
+        )
+        
 def _load_one_file(
     ctx: Any,
     conn: Any,
@@ -133,9 +289,17 @@ def _load_one_file(
     paths: Any,
     schema: str,
     table: str,
+    batch_id: Optional[int] = None,
+    on_reload: Optional[callable] = None,
 ) -> int:
     """
     Load one file into the landing table.
+
+    Before loading, checks whether rows for this file already exist in
+    the staging table. If they do — indicating a previous run committed
+    but the file move failed — the original batch is noted, staging rows
+    are deleted, and the file is reloaded under a new batch. The on_reload
+    callback is invoked so the caller can log BatchStep records.
 
     Validates the header, reads and transforms all rows, bulk inserts,
     then executes the configured file movements. Full rollback on any
@@ -153,13 +317,20 @@ def _load_one_file(
         Transform Namespace — provides header, columns, field_transforms,
         constants, file_type, encoding.
     load_cfg : Any
-        Load Namespace — provides movements config.
+        Load Namespace — provides movements, file_id_column, batch_id_column.
     paths : Any
         Paths Namespace from the data source config.
     schema : str
         Target schema — may be 'database.schema' for cross-db inserts.
     table : str
         Target table name.
+    batch_id : Optional[int]
+        BatchID of the active batch. Stamped into every staging row and
+        passed to expand_column_if_truncated for logging.
+    on_reload : Optional[callable]
+        Callback invoked when a file is found already in staging.
+        Signature: (file_path, original_batch_id, new_batch_id) -> None
+        Errors in the callback are logged and suppressed.
 
     Returns
     -------
@@ -169,20 +340,43 @@ def _load_one_file(
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
     try:
+        # Resolve restart-safety column names from load config.
+        file_id_col   = getattr(load_cfg.load, "file_id_column",  "incoming_file_name")
+        batch_id_col  = getattr(load_cfg.load, "batch_id_column",  "BatchID")
+
+        # Check whether this file is already in staging — indicates a
+        # previous run committed the insert but failed to move the file.
+        original_batch_id = _check_file_in_staging(
+            conn, schema, table, file_id_col, batch_id_col, file_path
+        )
+
+        if original_batch_id is not None:
+            _logger.warning(
+                "File '%s' already in staging (BatchID=%s) — deleting and reloading.",
+                file_path.name, original_batch_id,
+            )
+
+            # Notify the caller so it can log BatchStep records on both batches.
+            _invoke_on_reload(on_reload, file_path, original_batch_id, batch_id)
+
+            # Delete the stale staging rows before reloading.
+            _delete_staging_rows(conn, schema, table, file_id_col, file_path)
+
         # Validate header before reading any rows.
         if not _validate_header(file_path, transform_cfg):
-            _logger.error(
-                "Header mismatch — file rejected: %s", file_path.name
-            )
+            _logger.error("Header mismatch — file rejected: %s", file_path.name)
             _execute_movements(load_cfg.movements.failure, file_path, paths)
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
+        # Build runtime constants — inject batch_id for staging row stamping.
         constants = _build_constants(transform_cfg.constants, file_path, paths)
+        if batch_id is not None:
+            constants[batch_id_col] = str(batch_id)
+
         rows, errors = _read_and_transform(file_path, transform_cfg, constants)
 
         if errors:
-            # Log every row error before rolling back — per contract.
             for row_num, col, err in errors:
                 _logger.error(
                     "Transform error — file=%s row=%d col=%s: %s",
@@ -209,10 +403,9 @@ def _load_one_file(
             sqlserver_utils.bulk_insert(conn, schema, table, rows, columns)
             conn.commit()
         except DatabaseError as bulk_exc:
-            # Attempt to expand any truncated columns and retry once.
             conn.rollback()
             expanded = sqlserver_utils.expand_column_if_truncated(
-                conn, schema, table, bulk_exc, rows, column_defs
+                conn, schema, table, bulk_exc, rows, column_defs, batch_id
             )
             if expanded:
                 _logger.info(
@@ -242,7 +435,7 @@ def _load_one_file(
         _execute_movements(load_cfg.movements.failure, file_path, paths)
         log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
         return 0
-
+    
 
 # ---------------------------------------------------------------------------
 # Private — columns helpers
