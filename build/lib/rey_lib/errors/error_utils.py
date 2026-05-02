@@ -12,6 +12,7 @@ Public API
 ----------
 AppError              Generic base exception — extend this in every project.
 ConfigError           Raised on invalid or missing configuration.
+DatabaseError         Raised when a database operation fails — connection, DDL, or DML.
 StateError            Raised when a JSON state file cannot be read or written.
 FtpConnectionError    Raised when an FTP connection cannot be established.
 FtpDownloadError      Raised when a file download fails or is incomplete.
@@ -29,6 +30,7 @@ from typing import Any
 __all__ = [
     "AppError",
     "ConfigError",
+    "DatabaseError",
     "StateError",
     "FtpConnectionError",
     "FtpDownloadError",
@@ -37,7 +39,6 @@ __all__ = [
     "validate_path",
     "validate_required",
 ]
-
 
 # ---------------------------------------------------------------------------
 # Generic exception hierarchy
@@ -60,9 +61,12 @@ class AppError(Exception):
     class DataImportError(MyProjectError): ...
     """
 
-
 class ConfigError(AppError):
     """Raised when configuration is invalid, missing, or cannot be loaded."""
+
+
+class DatabaseError(AppError):
+    """Raised when a database operation fails — connection, DDL, or DML."""
 
 
 class StateError(AppError):

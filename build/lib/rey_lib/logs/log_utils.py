@@ -69,10 +69,15 @@ class _IndentFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format a log record, prepending the current indentation prefix."""
-        indent = _INDENT * _current_depth
-        base   = super().format(record)
-        return f"{indent}{base}"
+        """Format a log record, indenting only the message portion.
+
+        Timestamp, level, and module name remain left-aligned and fixed width.
+        Only the message is indented to reflect call depth.
+        """
+        indent   = _INDENT * _current_depth
+        asctime  = self.formatTime(record, self.datefmt)
+        prefix   = f"{asctime}  {record.levelname:<8}  {record.name:<32}"
+        return f"{prefix}{indent}{record.getMessage()}"
 
 
 # Module-level depth mirror — kept in sync with ctx.log_depth.
@@ -114,7 +119,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     level_name = _ENV_LEVELS.get(ctx.env, "INFO")
     level      = _LEVEL_MAP.get(level_name, logging.INFO)
 
-    fmt     = "%(asctime)s | %(levelname)-8s | %(name)-30s | %(message)s"
+    fmt     = "%(asctime)s  %(levelname)-8s  %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
     formatter = _IndentFormatter(fmt=fmt, datefmt=datefmt)

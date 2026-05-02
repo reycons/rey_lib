@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: rey_lib
-Version: 0.7.0
+Version: 0.9.2
 Summary: Shared reusable library — config, logging, error handling, FTP, file I/O, DuckDB.
 Requires-Python: >=3.11
 Requires-Dist: pyyaml>=6.0.2
