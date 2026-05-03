@@ -180,6 +180,7 @@ def build_ctx(
 
     raw = _load_main_config(env, config_dir)
     raw = _merge_config_files(raw, config_dir)
+    raw = _resolve_env_references(raw)
     raw = _resolve_paths(raw, config_dir, parent_key="")
 
     ctx = Namespace(raw)
@@ -341,6 +342,85 @@ def _merge_config_files(base: dict[str, Any], config_dir: Path) -> dict[str, Any
             continue
         result = _deep_merge(result, _load_yaml(config_file))
     return result
+
+
+def _resolve_env_references(raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve values like 'env.key_name' using top-level env declarations.
+
+    Expected top-level format in main config:
+
+        env:
+          - name: account_encryption_key
+            env_var: ACCOUNT_ENCRYPTION_KEY
+            generate: true
+
+    Any string value exactly matching `env.<name>` is replaced with the
+    corresponding environment variable value.
+    """
+    env_map = _build_env_reference_map(raw)
+    if not env_map:
+        return raw
+
+    env_values: dict[str, str] = {}
+    for key_name, env_var in env_map.items():
+        value = os.getenv(env_var, "")
+        if not value:
+            _logger.warning(
+                "Secret not found for '%s' — expected env var '%s' in .env.",
+                key_name,
+                env_var,
+            )
+        env_values[key_name] = value
+
+    return _replace_env_refs(raw, env_values, is_root=True)
+
+
+def _build_env_reference_map(raw: dict[str, Any]) -> dict[str, str]:
+    """Build key_name -> env_var map from top-level env config entries."""
+    entries = raw.get("env", [])
+    if not isinstance(entries, list):
+        return {}
+
+    env_map: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key_name = str(entry.get("name", "")).strip()
+        env_var = str(entry.get("env_var", "")).strip()
+        if key_name and env_var:
+            env_map[key_name] = env_var
+    return env_map
+
+
+def _replace_env_refs(
+    value: Any,
+    env_values: dict[str, str],
+    *,
+    is_root: bool = False,
+) -> Any:
+    """Recursively replace strings matching env.<key_name> with secret values."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            # Preserve the top-level env declaration block as-is.
+            if is_root and key == "env":
+                result[key] = child
+            else:
+                result[key] = _replace_env_refs(child, env_values, is_root=False)
+        return result
+
+    if isinstance(value, list):
+        return [_replace_env_refs(item, env_values, is_root=False) for item in value]
+
+    if isinstance(value, str) and value.startswith("env."):
+        key_name = value[4:]
+        if key_name not in env_values:
+            raise ConfigError(
+                f"Unknown env reference '{value}' — no matching key name in top-level env block."
+            )
+        return env_values[key_name]
+
+    return value
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

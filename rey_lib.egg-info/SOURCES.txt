@@ -22,5 +22,7 @@ rey_lib/ftp/__init__.py
 rey_lib/ftp/ftp_client.py
 rey_lib/ftp/state_manager.py
 rey_lib/ftp/sync_engine.py
+rey_lib/llm/__init__.py
+rey_lib/llm/llm_utils.py
 rey_lib/logs/__init__.py
 rey_lib/logs/log_utils.py

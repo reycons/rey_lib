@@ -48,7 +48,7 @@ def run_sync(ctx: Any, conn: Any) -> int:
     then scans remote paths for new files. Saves state when complete.
 
     Args:
-        ctx:  Global context (chunk_size, log settings).
+        ctx:  Global context (log settings).
         conn: Per-connection Namespace (ftp credentials, paths, filters, state_file).
 
     Returns:
@@ -222,10 +222,10 @@ def _download_in_chunks(
     files: list[tuple[str, datetime]],
     state: dict[str, str],
 ) -> tuple[list[str], list[str]]:
-    """Download files in groups of ctx.sync.chunk_size.
+    """Download files in groups of per-connection chunk size.
 
     Args:
-        ctx:         Global context carrying chunk_size.
+        ctx:         Global context (fallback chunk_size source).
         conn:        Per-connection Namespace.
         session:     Active Session from ftp_session().
         remote_path: Remote directory the files live in.
@@ -239,7 +239,11 @@ def _download_in_chunks(
     local_dir   = _local_dir_for_path(conn, remote_path)
     downloaded: list[str] = []
     failed: list[str]     = []
-    chunk_size: int = ctx.sync.chunk_size
+    conn_sync = getattr(conn, "sync", None)
+    ctx_sync = getattr(ctx, "sync", None)
+    chunk_size: int = int(
+        getattr(conn_sync, "chunk_size", 0) or getattr(ctx_sync, "chunk_size", 100)
+    )
 
     for chunk_start in range(0, len(files), chunk_size):
         chunk     = files[chunk_start: chunk_start + chunk_size]

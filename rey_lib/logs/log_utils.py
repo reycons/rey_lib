@@ -116,8 +116,9 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     """
     global _current_depth
 
-    level_name = _ENV_LEVELS.get(ctx.env, "INFO")
-    level      = _LEVEL_MAP.get(level_name, logging.INFO)
+    # Prefer an explicit log_level in ctx (set via config), fall back to env default.
+    level_name = getattr(ctx, "log_level", None) or _ENV_LEVELS.get(ctx.env, "INFO")
+    level      = _LEVEL_MAP.get(level_name.upper(), logging.INFO)
 
     fmt     = "%(asctime)s  %(levelname)-8s  %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"

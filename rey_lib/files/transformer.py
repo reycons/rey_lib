@@ -25,6 +25,23 @@ prefix_map          Map a field value to a normalised value by matching
 strip_parens_suffix Remove trailing parenthesised tokens from a string
                     e.g. "(Cash)", "(Margin)", "(TICKER)" → clean description.
 not_blank           Pass-through — used by row_filter to discard blank values.
+encrypt             Symmetrically encrypt a field value using Fernet (AES-128-CBC
+                    with HMAC). The key is named by 'key_env' in the transform
+                    config and resolved from the environment. Output is a
+                    URL-safe base64 token string. Requires the 'cryptography'
+                    package: pip install cryptography.
+
+                    YAML example::
+
+                        field_transforms:
+                          account_number:
+                            type: encrypt
+                            key_env: TRADE_ENCRYPTION_KEY
+
+                    Generate a key once and store in .env::
+
+                        python -c "from cryptography.fernet import Fernet; \\
+                                   print(Fernet.generate_key().decode())"
 
 Constants and file_date injection
 ----------------------------------
@@ -219,11 +236,14 @@ def transform_row(
             out[date_col] = file_date
 
     # Step 4 — apply field transforms in definition order.
+    # Secrets (resolved env-var values for encrypt transforms) are injected
+    # into file_type_cfg by the caller (file_loader) before rows are read.
+    secrets = file_type_cfg.get("secrets", {})
     for db_col, transform_cfg in transforms.items():
         transform_type = transform_cfg.get("type", "")
         try:
             out[db_col] = _apply_transform(
-                db_col, out, raw_row, transform_cfg, transform_type
+                db_col, out, raw_row, transform_cfg, transform_type, secrets
             )
         except TransformError as exc:
             _logger.warning("Transform failed for column '%s': %s", db_col, exc)
@@ -285,6 +305,7 @@ def _apply_transform(
     raw_row: dict[str, str],
     cfg: dict,
     transform_type: str,
+    secrets: dict[str, str],
 ) -> Any:
     """
     Dispatch to the appropriate transform function.
@@ -303,6 +324,9 @@ def _apply_transform(
         Transform configuration dict.
     transform_type : str
         Transform type identifier string.
+    secrets : dict[str, str]
+        Resolved env-var values keyed by variable name. Populated by the
+        caller (file_loader) for encrypt transforms; empty otherwise.
 
     Returns
     -------
@@ -331,6 +355,9 @@ def _apply_transform(
 
     if transform_type == "regex_date":
         return _transform_regex_date(raw_row, cfg)
+
+    if transform_type == "encrypt":
+        return _transform_encrypt(out.get(db_col, ""), cfg, secrets)
 
     if transform_type == "not_blank":
         # Used only in row_filter — pass through if applied to a column.
@@ -612,6 +639,71 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[date]:
             f"Cannot parse '{date_str}' as date with format '{fmt}'."
         )
     return result
+
+
+def _transform_encrypt(value: str, cfg: dict, secrets: dict[str, str]) -> Optional[str]:
+    """
+    Encrypt a string value using Fernet symmetric encryption.
+
+    Blank values are returned unchanged. The encryption key is resolved
+    from the secrets dict using the key_env name specified in config.
+    Requires the 'cryptography' package.
+
+    Parameters
+    ----------
+    value : str
+        Plaintext value to encrypt.
+    cfg : dict
+        Transform config. Keys:
+            key_env — name of the environment variable holding the Fernet key.
+    secrets : dict[str, str]
+        Resolved env-var values keyed by variable name.
+
+    Returns
+    -------
+    Optional[str]
+        Fernet token string, or the original value if blank.
+
+    Raises
+    ------
+    TransformError
+        If key_env is missing, the key cannot be found, or encryption fails.
+    """
+    # Return blank values unchanged — nothing to encrypt.
+    if not value:
+        return value
+
+    key_env = cfg.get("key_env", "")
+    if not key_env:
+        raise TransformError(
+            "encrypt transform requires 'key_env' to be set in the transform config."
+        )
+
+    raw_key = secrets.get(key_env)
+    if not raw_key:
+        raise TransformError(
+            f"Encryption key '{key_env}' not found. "
+            f"Ensure {key_env} is set in the environment or .env file."
+        )
+
+    try:
+        from cryptography.fernet import Fernet  # noqa: PLC0415  lazy import
+    except ImportError as exc:
+        raise TransformError(
+            "The 'cryptography' package is required for encrypt transforms. "
+            "Install it: pip install cryptography"
+        ) from exc
+
+    try:
+        # Key must be bytes; encode if the env var value is a plain string.
+        key    = raw_key.encode("utf-8") if isinstance(raw_key, str) else raw_key
+        fernet = Fernet(key)
+        token  = fernet.encrypt(value.encode("utf-8"))
+        return token.decode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise TransformError(
+            f"Fernet encryption failed: {exc}"
+        ) from exc
 
 
 def _transform_strip_parens(value: str) -> str:

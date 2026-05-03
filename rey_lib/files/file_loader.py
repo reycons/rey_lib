@@ -855,6 +855,9 @@ def _read_and_transform(
 
     cfg_dict              = _namespace_to_dict(transform_cfg)
     cfg_dict["constants"] = constants
+    # Resolve env-var values for any encrypt transforms declared in this config.
+    # Done once per file, not per row, so the Fernet key is looked up only once.
+    cfg_dict["secrets"]   = _build_secrets(cfg_dict)
 
     rows:   list[dict[str, Any]]       = []
     errors: list[tuple[int, str, str]] = []
@@ -1173,3 +1176,46 @@ def _namespace_to_dict(ns: Any) -> dict[str, Any]:
     if isinstance(ns, dict):
         return ns
     return {k: v for k, v in ns.items()}
+
+
+def _build_secrets(cfg_dict: dict[str, Any]) -> dict[str, str]:
+    """
+    Resolve env-var values for all encrypt transforms in this file config.
+
+    Scans field_transforms for entries with ``type: encrypt`` and resolves
+    their ``key_env`` names from the current environment (already populated
+    by python-dotenv at startup). Each unique env-var name is resolved once.
+
+    Parameters
+    ----------
+    cfg_dict : dict
+        Already-converted config dict for this transform (from _namespace_to_dict).
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping of env-var name → key value, for every encrypt transform found.
+        Empty dict when no encrypt transforms are configured.
+    """
+    import os  # stdlib — imported here to keep the top-level import section clean
+
+    secrets: dict[str, str] = {}
+    field_transforms = cfg_dict.get("field_transforms") or {}
+
+    for _col, tfm in field_transforms.items():
+        # field_transforms values may be Namespace objects or plain dicts.
+        if not isinstance(tfm, dict):
+            tfm = {k: v for k, v in tfm.items()} if hasattr(tfm, "items") else {}
+        if tfm.get("type") != "encrypt":
+            continue
+        key_env = tfm.get("key_env", "")
+        if key_env and key_env not in secrets:
+            value = os.environ.get(key_env, "")
+            if value:
+                secrets[key_env] = value
+            else:
+                # Support resolved env references (e.g. key_env: env.foo)
+                # where build_ctx already replaced with the key literal.
+                secrets[key_env] = key_env
+
+    return secrets
