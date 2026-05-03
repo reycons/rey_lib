@@ -102,7 +102,7 @@ def transform_files(
     """
     log_enter(
         ctx,
-        f"transform_files: {transform_cfg.name} v{transform_cfg.version}",
+        f"transform_files: {transform_cfg.name} {transform_cfg.version}",
         _logger,
     )
     total = 0
@@ -369,14 +369,14 @@ def _build_output_path(
     output_path_key = getattr(transform_cfg.output, "output_dest", None)
     if output_path_key is None:
         raise ConfigError(
-            f"Transform '{transform_cfg.name}' v{transform_cfg.version} "
+            f"Transform '{transform_cfg.name}' {transform_cfg.version} "
             f"is missing output.output_dest — cannot determine where to write output files."
         )
 
     file_name_pattern = getattr(transform_cfg.output.file, "name", None)
     if file_name_pattern is None:
         raise ConfigError(
-            f"Transform '{transform_cfg.name}' v{transform_cfg.version} "
+            f"Transform '{transform_cfg.name}' {transform_cfg.version} "
             f"is missing output.file.name — cannot determine output filename pattern."
         )
 
