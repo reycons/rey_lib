@@ -25,7 +25,8 @@ file_utils. No raw pyodbc or os calls anywhere in this module.
 Public API
 ----------
 transform_files(ctx, data_source, transform_cfg)
-    Find and transform all pending inbox files for one transform config.
+    Find and transform all pending inbox files for one data source.
+    Accepts one transform config or a list of candidate transforms.
     Returns total number of files successfully transformed.
 load_files(ctx, conn, data_source, load_cfg, on_reload)
     Find and load all pending files for one load configuration.
@@ -43,6 +44,7 @@ from typing import Any, Optional
 from rey_lib.db import sqlserver_utils
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
+    apply_file_movements,
     input_files,
     get_reader,
     move_file,
@@ -72,12 +74,13 @@ def transform_files(
     transform_cfg: Any,
 ) -> int:
     """
-    Find and transform all pending inbox files for one transform configuration.
+    Find and transform all pending inbox files for one data source.
 
-    Scans inbox_path for files matching file_pattern, validates the header,
-    applies column mapping and field transforms defined in the YAML config,
-    writes clean output files to processing_path, and moves source files
-    per configured movements.
+    Scans inbox_path for files matching the configured file patterns, opens
+    each file once, and reads non-blank lines until one matches any declared
+    header signature. Only the matched transform config is then applied.
+    Files with no matching header across all candidate transforms are moved
+    to the failure destination.
 
     On success — writes output file to processing_path, moves source file.
     On failure — moves source file to rejected_path, logs all errors.
@@ -92,38 +95,82 @@ def transform_files(
     data_source : Any
         Namespace for one data_sources entry. Provides paths and max_files_per_run.
     transform_cfg : Any
-        Namespace for one transforms entry. Provides file_pattern, header,
-        columns, field_transforms, constants, output, movements.
+        One transform Namespace or a list of candidate transform Namespaces.
 
     Returns
     -------
     int
         Total number of files successfully transformed.
     """
+    transforms = _coerce_transform_cfgs(transform_cfg)
+    transform_desc = ", ".join(
+        f"{cfg.name} {cfg.version}" for cfg in transforms
+    )
+
     log_enter(
         ctx,
-        f"transform_files: {transform_cfg.name} {transform_cfg.version}",
+        f"transform_files: {data_source.name} / {transform_desc}",
         _logger,
     )
     total = 0
 
     try:
-        inbox_dir    = _resolve_path(data_source.paths, "inbox_path")
-        file_pattern = getattr(transform_cfg, "file_pattern", "*.csv")
-        glob_pattern = _pattern_to_glob(file_pattern)
-        pending      = input_files(inbox_dir, glob_pattern)
+        moved = _run_file_movements_pipeline(data_source)
+        if moved:
+            _logger.info(
+                "file_movements: moved %d file(s) into inbox for %s",
+                moved,
+                data_source.name,
+            )
+
+        inbox_dir = _resolve_path(data_source.paths, "inbox_path")
+
+        glob_patterns = sorted(
+            {
+                _pattern_to_glob(getattr(cfg, "file_pattern", "*.csv"))
+                for cfg in transforms
+            }
+        )
+        pending_map: dict[str, Path] = {}
+        for glob_pattern in glob_patterns:
+            for file_path in input_files(inbox_dir, glob_pattern):
+                pending_map[str(file_path)] = file_path
+        pending = sorted(pending_map.values())
 
         max_files = getattr(data_source, "max_files_per_run", None)
         if max_files is not None:
             pending = pending[:int(max_files)]
 
         _logger.info(
-            "transform_files: %d file(s) pending in %s matching '%s'",
-            len(pending), inbox_dir, glob_pattern,
+            "transform_files: %d file(s) pending in %s matching %s",
+            len(pending), inbox_dir, glob_patterns,
         )
 
         for file_path in pending:
-            success = _transform_one_file(ctx, data_source, transform_cfg, file_path)
+            matched_cfg, header_line = _match_transform(file_path, transforms)
+            if matched_cfg is None or header_line is None:
+                _logger.error(
+                    "No header match across %d transform(s) — file rejected: %s",
+                    len(transforms),
+                    file_path.name,
+                )
+                _reject_unmatched_file(data_source, transforms, file_path)
+                continue
+
+            _logger.debug(
+                "Matched header for '%s' → %s %s",
+                file_path.name,
+                matched_cfg.name,
+                matched_cfg.version,
+            )
+
+            success = _transform_one_file(
+                ctx,
+                data_source,
+                matched_cfg,
+                file_path,
+                header_line=header_line,
+            )
             if success:
                 total += 1
 
@@ -131,6 +178,86 @@ def transform_files(
         log_exit(ctx, f"transform_files done: {total} file(s) transformed", _logger)
 
     return total
+
+
+def _run_file_movements_pipeline(data_source: Any) -> int:
+    """Run pre-transform file movement pipeline for one data source.
+
+    If data_source has a file_movements block, files are moved (and optionally
+    renamed) before inbox scanning begins.
+    """
+    file_movements = getattr(data_source, "file_movements", None)
+    if file_movements is None:
+        return 0
+
+    try:
+        return apply_file_movements(data_source.paths, file_movements)
+    except ValueError as exc:
+        _logger.error(
+            "Invalid file_movements config for %s: %s",
+            getattr(data_source, "name", "<unknown>"),
+            exc,
+        )
+        return 0
+
+
+def _coerce_transform_cfgs(transform_cfg: Any) -> list[Any]:
+    """Return one or more transform configs as a plain list."""
+    if transform_cfg is None:
+        return []
+    if isinstance(transform_cfg, (list, tuple)):
+        return list(transform_cfg)
+    return [transform_cfg]
+
+
+def _match_transform(
+    file_path: Path,
+    transform_cfgs: list[Any],
+) -> tuple[Optional[Any], Optional[str]]:
+    """
+    Scan a file until one non-blank line matches a configured header.
+
+    Returns the matched transform config plus the exact header line read
+    from the file. If no header matches, both return values are None.
+    """
+    if not transform_cfgs:
+        return None, None
+
+    cfg_dicts = [
+        (cfg, _namespace_to_dict(cfg))
+        for cfg in transform_cfgs
+    ]
+    encoding = getattr(transform_cfgs[0], "encoding", "utf-8-sig")
+
+    try:
+        with file_path.open(encoding=encoding, errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                for cfg, cfg_dict in cfg_dicts:
+                    if match_header(stripped, cfg_dict):
+                        return cfg, stripped
+    except OSError as exc:
+        _logger.error("Cannot read file '%s': %s", file_path.name, exc)
+
+    return None, None
+
+
+def _reject_unmatched_file(
+    data_source: Any,
+    transform_cfgs: list[Any],
+    file_path: Path,
+) -> None:
+    """Move a file to the failure destination after no header matched."""
+    if transform_cfgs:
+        failure = getattr(getattr(transform_cfgs[0], "movements", None), "failure", None)
+        if failure:
+            _execute_movements(failure, file_path, data_source.paths)
+            return
+
+    rejected_dir = _resolve_path(data_source.paths, "rejected_path")
+    move_file(file_path, rejected_dir)
 
 
 def load_files(
@@ -228,6 +355,7 @@ def _transform_one_file(
     data_source: Any,
     transform_cfg: Any,
     file_path: Path,
+    header_line: Optional[str] = None,
 ) -> bool:
     """
     Transform one inbox file and write the output to processing_path.
@@ -245,6 +373,9 @@ def _transform_one_file(
         Transform Namespace.
     file_path : Path
         Full path of the source file to transform.
+    header_line : Optional[str]
+        Exact matched header line. When provided, header validation is
+        already complete and row reading starts from this line.
 
     Returns
     -------
@@ -254,8 +385,8 @@ def _transform_one_file(
     log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
 
     try:
-        # Validate header before reading any rows.
-        if not _validate_header(file_path, transform_cfg):
+        # Validate header before reading any rows when no prior match exists.
+        if header_line is None and not _validate_header(file_path, transform_cfg):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
             _execute_movements(
                 transform_cfg.movements.failure, file_path, data_source.paths
@@ -272,7 +403,12 @@ def _transform_one_file(
             ctx, transform_cfg.constants, file_path, data_source.paths
         )
 
-        rows, errors = _read_and_transform(file_path, transform_cfg, constants)
+        rows, errors = _read_and_transform(
+            file_path,
+            transform_cfg,
+            constants,
+            header_line=header_line,
+        )
 
         if errors:
             for row_num, col, err in errors:
@@ -827,6 +963,7 @@ def _read_and_transform(
     file_path: Path,
     transform_cfg: Any,
     constants: dict[str, Any],
+    header_line: Optional[str] = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
     """
     Read all rows from a file and apply column mapping, transforms,
@@ -844,6 +981,8 @@ def _read_and_transform(
         file_type, encoding.
     constants : dict[str, Any]
         Runtime constants already resolved by _build_constants().
+    header_line : Optional[str]
+        Exact header line to locate before reading rows.
 
     Returns
     -------
@@ -863,7 +1002,12 @@ def _read_and_transform(
     errors: list[tuple[int, str, str]] = []
 
     for row_num, raw_row in enumerate(
-        get_reader(file_path, file_type=file_type, encoding=encoding),
+        get_reader(
+            file_path,
+            file_type=file_type,
+            encoding=encoding,
+            header_line=header_line,
+        ),
         start=1,
     ):
         try:

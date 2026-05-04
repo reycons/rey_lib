@@ -8,6 +8,9 @@ entries under the top-level `env` block and generates missing keys only when
 
 from __future__ import annotations
 
+import getpass
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -52,10 +55,12 @@ def ensure_env_key(env_file: Path, env_var: str) -> bool:
     """
     existing_lines, existing_vars = _read_env_file(env_file)
     if env_var in existing_vars:
+        _secure_env_file_permissions(env_file)
         return False
 
     new_line = f"{env_var}={generate_fernet_key()}\n"
     _write_env_file(env_file, existing_lines, [new_line])
+    _secure_env_file_permissions(env_file)
     return True
 
 
@@ -158,3 +163,51 @@ def _write_env_file(
     content += "".join(new_lines)
 
     env_file.write_text(content, encoding="utf-8")
+
+
+def _secure_env_file_permissions(env_file: Path) -> None:
+    """Apply restrictive permissions to .env on Windows and POSIX systems.
+
+    On Linux and macOS, mode is forced to 0o600 (owner read/write only).
+    On Windows, ACL inheritance is disabled and explicit ACLs are granted to:
+    - current user (read/write)
+    - SYSTEM (full control)
+    - Administrators (full control)
+    """
+    if not env_file.exists():
+        return
+
+    if os.name == "nt":
+        _secure_env_file_permissions_windows(env_file)
+        return
+
+    _secure_env_file_permissions_posix(env_file)
+
+
+def _secure_env_file_permissions_posix(env_file: Path) -> None:
+    """Set .env mode to owner read/write only on POSIX platforms."""
+    try:
+        os.chmod(env_file, 0o600)
+    except OSError as exc:
+        raise ConfigError(f"Failed to set secure permissions on {env_file}: {exc}") from exc
+
+
+def _secure_env_file_permissions_windows(env_file: Path) -> None:
+    """Set restrictive ACLs on .env using icacls on Windows."""
+    user = getpass.getuser()
+
+    commands: list[list[str]] = [
+        ["icacls", str(env_file), "/inheritance:r"],
+        ["icacls", str(env_file), "/grant:r", f"{user}:(R,W)"],
+        ["icacls", str(env_file), "/grant:r", "*S-1-5-18:(F)"],
+        ["icacls", str(env_file), "/grant:r", "*S-1-5-32-544:(F)"],
+        ["icacls", str(env_file), "/remove:g", "*S-1-1-0", "*S-1-5-32-545", "*S-1-5-11"],
+    ]
+
+    for command in commands:
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ConfigError(
+                f"Failed to set secure ACLs on {env_file} with icacls: {exc}"
+            ) from exc

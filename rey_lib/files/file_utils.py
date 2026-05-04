@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import csv
 import logging
+from datetime import datetime
+from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Generator, Optional
+from typing import Any, Callable, Generator, Optional, TextIO
 
 __all__ = [
     "input_files",
@@ -37,6 +39,7 @@ __all__ = [
     "write_file",
     "scan_column_lengths",
     "move_file",
+    "apply_file_movements",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -102,6 +105,7 @@ def get_reader(
     file_type: str = "CSV",
     encoding: str = "utf-8-sig",
     row_filter: Optional[Callable[[dict[str, str]], bool]] = None,
+    header_line: Optional[str] = None,
 ) -> Generator[dict[str, str], None, None]:
     """
     Return a row iterator for the given file based on file_type.
@@ -121,6 +125,9 @@ def get_reader(
     row_filter : Optional[Callable[[dict[str, str]], bool]]
         Optional predicate. Called with each raw row dict; rows where
         this returns False are skipped. None means no filtering.
+    header_line : Optional[str]
+        Exact header line to locate before reading rows. When provided,
+        CSV reading begins only after this header is found in the file.
 
     Yields
     ------
@@ -134,7 +141,12 @@ def get_reader(
     """
     fmt = file_type.upper()
     if fmt == "CSV":
-        yield from _csv_reader(infile, encoding=encoding, row_filter=row_filter)
+        yield from _csv_reader(
+            infile,
+            encoding=encoding,
+            row_filter=row_filter,
+            header_line=header_line,
+        )
     elif fmt == "XLSX":
         yield from _xlsx_reader(infile, row_filter=row_filter)
     else:
@@ -174,7 +186,7 @@ def write_file(
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'. Must be 'CSV' or 'XLSX'.")
 
-def move_file(src: Path, dest_dir: Path) -> Path:
+def move_file(src: Path, dest_dir: Path, dest_name: Optional[str] = None) -> Path:
     """
     Move a file to a destination directory.
 
@@ -187,6 +199,8 @@ def move_file(src: Path, dest_dir: Path) -> Path:
         Full path of the file to move.
     dest_dir : Path
         Destination directory. Created if it does not exist.
+    dest_name : Optional[str]
+        Destination filename. If None, keeps src.name.
 
     Returns
     -------
@@ -207,10 +221,72 @@ def move_file(src: Path, dest_dir: Path) -> Path:
         raise FileNotFoundError(f"Source file not found: {src}")
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / src.name
+    dest = dest_dir / (dest_name if dest_name else src.name)
     src.replace(dest)
     _logger.debug("Moved: %s → %s", src, dest)
     return dest
+
+
+def apply_file_movements(paths: Any, file_movements: Any) -> int:
+    """Apply file movement rules for one data source.
+
+    This pipeline is independent from transform/load and is intended for
+    pre-transform intake (e.g. downloads folder -> inbox folder).
+
+    Supported name transforms:
+        - date_range_from_column
+
+    Parameters
+    ----------
+    paths : Any
+        Data-source paths namespace.
+    file_movements : Any
+        file_movements namespace containing filename_pattern, name_transforms,
+        and success movement instructions.
+
+    Returns
+    -------
+    int
+        Number of files moved.
+
+    Raises
+    ------
+    ValueError
+        If required movement config is missing or invalid.
+    """
+    if file_movements is None:
+        return 0
+
+    pattern: str = getattr(file_movements, "filename_pattern", "*")
+    success: Any = getattr(file_movements, "success", None)
+    if not success:
+        return 0
+
+    first_move = getattr(success[0], "move", None)
+    if first_move is None:
+        raise ValueError("file_movements.success[0].move is required.")
+
+    source_key = getattr(first_move, "from", None)
+    dest_key = getattr(first_move, "to", None)
+    if source_key is None or dest_key is None:
+        raise ValueError("file_movements.success[0].move requires 'from' and 'to'.")
+
+    source_dir = _resolve_path_key(paths, source_key)
+    dest_dir = _resolve_path_key(paths, dest_key)
+    files = input_files(source_dir, pattern)
+
+    if not files:
+        return 0
+
+    name_transforms: list[Any] = list(getattr(file_movements, "name_transforms", []) or [])
+
+    moved = 0
+    for file_path in files:
+        dest_name = _resolve_dest_name(file_path, name_transforms)
+        move_file(file_path, dest_dir, dest_name=dest_name)
+        moved += 1
+
+    return moved
 
 
 def scan_column_lengths(
@@ -261,6 +337,7 @@ def _csv_reader(
     infile: Path,
     encoding: str,
     row_filter: Optional[Callable[[dict[str, str]], bool]],
+    header_line: Optional[str],
 ) -> Generator[dict[str, str], None, None]:
     """
     Yield data rows from a CSV file.
@@ -269,13 +346,21 @@ def _csv_reader(
     when provided. The file handle is managed via a context manager.
     """
     with infile.open(newline="", encoding=encoding, errors="replace") as fh:
-        # Skip blank lines to find the first non-empty header line.
         header = ""
-        for line in fh:
-            stripped = line.strip()
-            if stripped:
-                header = stripped
-                break
+        if header_line is None:
+            # Skip blank lines to find the first non-empty header line.
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    header = stripped
+                    break
+        else:
+            # Scan until the matched header line is found.
+            for line in fh:
+                stripped = line.strip()
+                if stripped == header_line:
+                    header = stripped
+                    break
 
         if not header:
             return
@@ -284,8 +369,8 @@ def _csv_reader(
         reader     = csv.DictReader(fh, fieldnames=fieldnames)
 
         for row in reader:
-            # Skip blank rows.
-            if not any(v for v in row.values() if v):
+            # Skip blank rows, including rows that contain only whitespace.
+            if not any((v or "").strip() for v in row.values()):
                 continue
 
             # Skip repeated header rows embedded mid-file.
@@ -297,6 +382,91 @@ def _csv_reader(
                 continue
 
             yield row
+
+
+def _resolve_path_key(paths: Any, key: str) -> Path:
+    """Resolve a named path key from a data-source paths namespace."""
+    value = getattr(paths, key, None)
+    if value is None:
+        raise ValueError(f"Path key '{key}' not found in data source paths.")
+    return Path(value)
+
+
+def _resolve_dest_name(file_path: Path, name_transforms: list[Any]) -> str:
+    """Resolve final destination filename after applying name transforms."""
+    if not name_transforms:
+        return file_path.name
+
+    transform = name_transforms[0]
+    transform_type: str = getattr(transform, "type", "")
+
+    if transform_type == "date_range_from_column":
+        return _apply_date_range_from_column(file_path, transform)
+
+    raise ValueError(f"Unsupported name_transform type: '{transform_type}'.")
+
+
+def _apply_date_range_from_column(file_path: Path, transform: Any) -> str:
+    """Create destination filename using min/max date values from one CSV column."""
+    source_column: str = getattr(transform, "source_column")
+    date_format: str = getattr(transform, "date_format")
+    output_template: str = getattr(transform, "output_template")
+    output_format: str = getattr(transform, "output_format")
+
+    start_date, end_date = _read_date_range_from_column(
+        file_path=file_path,
+        source_column=source_column,
+        date_format=date_format,
+    )
+    return output_template.format(
+        start_date=start_date.strftime(output_format),
+        end_date=end_date.strftime(output_format),
+    )
+
+
+def _read_date_range_from_column(
+    file_path: Path,
+    source_column: str,
+    date_format: str,
+) -> tuple[datetime, datetime]:
+    """Read CSV rows and return (min_date, max_date) from source_column."""
+    dates: list[datetime] = []
+
+    with file_path.open(newline="", encoding="utf-8-sig", errors="replace") as fh:
+        reader = csv.DictReader(fh)
+        if source_column not in (reader.fieldnames or []):
+            fh.seek(0)
+            reader = _find_header_reader(fh, source_column)
+
+        for row in reader:
+            raw = (row.get(source_column, "") or "").strip()
+            if not raw:
+                continue
+            try:
+                dates.append(datetime.strptime(raw, date_format))
+            except ValueError:
+                _logger.debug(
+                    "Skipping unparseable %s value '%s' in %s",
+                    source_column,
+                    raw,
+                    file_path.name,
+                )
+
+    if not dates:
+        raise ValueError(
+            f"No parseable values found for column '{source_column}' in '{file_path.name}'."
+        )
+
+    return min(dates), max(dates)
+
+
+def _find_header_reader(fh: TextIO, source_column: str) -> csv.DictReader:
+    """Return DictReader positioned at the header line that contains source_column."""
+    for line in fh:
+        if source_column in line:
+            remaining = line + fh.read()
+            return csv.DictReader(StringIO(remaining))
+    raise ValueError(f"Column '{source_column}' not found in file.")
 
 
 def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:

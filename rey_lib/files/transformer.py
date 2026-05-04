@@ -357,7 +357,7 @@ def _apply_transform(
         return _transform_regex_date(raw_row, cfg)
 
     if transform_type == "encrypt":
-        return _transform_encrypt(out.get(db_col, ""), cfg, secrets)
+        return _transform_encrypt(out.get(db_col, ""), raw_row, cfg, secrets)
 
     if transform_type == "not_blank":
         # Used only in row_filter — pass through if applied to a column.
@@ -481,19 +481,21 @@ def _transform_regex_extract(raw_row: dict[str, str], cfg: dict) -> Any:
         Captured group value, cast to the configured type if specified.
         Returns the original value if no match; returns None on cast failure.
     """
-    source   = cfg.get("source", "")
-    pattern  = cfg.get("pattern", "")
-    group    = cfg.get("group", 1)
-    do_strip = cfg.get("strip", True)
+    source      = cfg.get("source", "")
+    pattern     = cfg.get("pattern", "")
+    group       = cfg.get("group", 1)
+    do_strip    = cfg.get("strip", True)
+    allow_blank = cfg.get("allow_blank", False)
 
     value = raw_row.get(source, "").strip()
     if not value or not pattern:
-        return ""
+        return None if allow_blank else ""
 
     m = re.search(pattern, value)
     if not m:
-        _logger.debug("Pattern '%s' did not match '%s'.", pattern, value)
-        return value   # return original if no match rather than blank
+        if not allow_blank:
+            _logger.debug("Pattern '%s' did not match '%s'.", pattern, value)
+        return None if allow_blank else value
 
     result = m.group(group)
     result = result.strip() if do_strip else result
@@ -641,7 +643,12 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[date]:
     return result
 
 
-def _transform_encrypt(value: str, cfg: dict, secrets: dict[str, str]) -> Optional[str]:
+def _transform_encrypt(
+    value: Any,
+    raw_row: dict[str, str],
+    cfg: dict,
+    secrets: dict[str, str],
+) -> Optional[str]:
     """
     Encrypt a string value using Fernet symmetric encryption.
 
@@ -651,8 +658,11 @@ def _transform_encrypt(value: str, cfg: dict, secrets: dict[str, str]) -> Option
 
     Parameters
     ----------
-    value : str
-        Plaintext value to encrypt.
+    value : Any
+        Plaintext value to encrypt (already mapped output value).
+    raw_row : dict[str, str]
+        Raw source row. Used when encrypt config also includes regex
+        extraction keys (source/pattern/group/strip).
     cfg : dict
         Transform config. Keys:
             key_env — name of the environment variable holding the Fernet key.
@@ -669,9 +679,20 @@ def _transform_encrypt(value: str, cfg: dict, secrets: dict[str, str]) -> Option
     TransformError
         If key_env is missing, the key cannot be found, or encryption fails.
     """
+    # Optional pre-extraction: when source/pattern are present, derive the
+    # plaintext from raw_row first, then encrypt the extracted value.
+    plaintext: Any = value
+    if cfg.get("source") and cfg.get("pattern"):
+        plaintext = _transform_regex_extract(raw_row, cfg)
+
+    if plaintext is None:
+        return None
+
+    plaintext_str = str(plaintext).strip()
+
     # Return blank values unchanged — nothing to encrypt.
-    if not value:
-        return value
+    if not plaintext_str:
+        return plaintext_str
 
     key_env = cfg.get("key_env", "")
     if not key_env:
@@ -698,7 +719,7 @@ def _transform_encrypt(value: str, cfg: dict, secrets: dict[str, str]) -> Option
         # Key must be bytes; encode if the env var value is a plain string.
         key    = raw_key.encode("utf-8") if isinstance(raw_key, str) else raw_key
         fernet = Fernet(key)
-        token  = fernet.encrypt(value.encode("utf-8"))
+        token  = fernet.encrypt(plaintext_str.encode("utf-8"))
         return token.decode("utf-8")
     except (TypeError, ValueError) as exc:
         raise TransformError(

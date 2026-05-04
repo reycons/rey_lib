@@ -1,323 +1,201 @@
 # YAML Configuration File Guide
 
-**Version:** 1.0  
+**Version:** 2.0  
 **Applies to:** All Python projects governed by the LLM Programming Contract
 
 ---
 
 ## Overview
 
-Every project uses a two-tier configuration system:
+Projects use a layered YAML configuration model under a `config/` directory:
 
-- **Main config files** — one per environment (`config.dev.yaml`, `config.prod.yaml`). Singleton values and global settings only. Never contains named instances (databases, data feeds, brokers, etc.).
-- **Sub-config files** — one file per named instance. Discovered automatically by `config_utils.py` at startup. Adding a new instance requires only dropping in a new file — no code changes.
+- **Main config files** — one per environment: `config/config.dev.yaml`, `config/config.prod.yaml`
+- **Sub-config files** — additional YAML files under named subfolders (for example `config/db/`, `config/data_feeds/`, `config/app/`)
 
-All config is assembled by `config_utils.py` into a single `ctx` (AppContext) object at startup. All subsequent code reads from `ctx` only — never from config files directly.
+At startup, `build_ctx(env=..., project_root=...)` loads and merges all YAML files into one runtime `ctx` object. Application code reads from `ctx` only.
 
 ---
 
-## File Naming Conventions
+## Required Directory Layout
 
-### Main Config Files
-
-```
-config.dev.yaml
-config.prod.yaml
-```
-
-One pair per project, at the project root. Environment is selected at runtime via CLI argument — never hard-coded.
-
-### Sub-Config Files
-
-```
-config.{section}.{name}.yaml
-```
-
-Examples:
-
-```
-config.db.SQLServer_NaviControl.yaml
-config.db.SQLServer_NaviStage.yaml
-config.data_source.advantage_trade.yaml
-config.stages.ftp_sync.yaml
+```text
+config/
+  config.dev.yaml
+  config.prod.yaml
+  db/
+  data_feeds/
+  app/
 ```
 
 Rules:
 
-- `{section}` — the logical category (e.g. `db`, `data_source`, `stages`, `broker`)
-- `{name}` — a unique identifier for this instance within the section (e.g. `SQLServer_NaviControl`, `advantage_trade`)
-- Use underscores within `{name}` — no spaces
-- File name is the only registration mechanism — `config_utils.py` discovers files by scanning for the `config.{section}.{name}.yaml` pattern
+- Main config files must be named exactly `config.dev.yaml` and `config.prod.yaml` inside `config/`
+- Additional config files belong in a named subfolder under `config/`
+- Keep one functional area per subfolder (`db`, `data_feeds`, `llm`, `stages`, etc.)
 
 ---
 
-## Main Config File Structure
+## Main Config File (`config/config.{env}.yaml`)
 
-The main config contains only singleton values — settings that have exactly one value per environment and do not vary by named instance.
+Main config files contain singleton settings and the environment key registry.
 
 ### Template
 
 ```yaml
-# =============================================================================
-# {Project Name} — Main Configuration ({env})
-#
-# Singleton values and global settings only.
-# Named instances live in sub-config files: config.{section}.{name}.yaml
-#
-# PATH RULES
-#   Paths starting with ~   are relative to your home directory
-#   All other paths         are treated as absolute
-# =============================================================================
+# Main config ({env})
 
-# -----------------------------------------------------------------------------
-# Logging
-# {operation} and {timestamp} are substituted at runtime.
-# Each run produces a distinct log file.
-# -----------------------------------------------------------------------------
+log_path: ~/python/logs/{project}.{operation}.{timestamp}.log
+log_level: INFO
 
-log_path: /path/to/logs/{project}.{operation}.{timestamp}.log
-
-# -----------------------------------------------------------------------------
-# Data handling
-# -----------------------------------------------------------------------------
-
-chunk_size: 500
+# Central environment key registry.
+env:
+  - name: service_api_key
+    env_var: SERVICE_API_KEY
+    generate: false
 ```
 
-### Rules
+Rules:
 
-- No named instance lists here — those go in sub-config files
-- `log_path` uses `{operation}` and `{timestamp}` tokens substituted at runtime by `log_utils.py`
-- `chunk_size` must always be present — it governs all chunked DB fetches and is read from `ctx.chunk_size`
-- Dev and prod values differ where needed (log paths, chunk sizes, etc.)
-- Do not add application-specific singleton values without updating `AppContext` in `ctx.py` first
-
-### Dev vs Prod Differences
-
-| Setting | Dev | Prod |
-|---|---|---|
-| `log_path` | `~/.{project}/logs/...` | Absolute path on server |
-| `chunk_size` | Smaller value acceptable for testing | Production-tuned value |
+- Keep only singleton values here (for example log defaults, app mode flags)
+- Use top-level `env` list to map logical key names to environment variables
+- Do not place passwords/tokens directly in YAML
 
 ---
 
-## Sub-Config File Structure
+## Environment Key Registry and `env.<name>` References
 
-Each sub-config file defines exactly one named instance within a section.
+Use the top-level `env` block in main config to declare all environment-backed values.
 
-### General Template
+### Registry declaration
 
 ```yaml
-# =============================================================================
-# {Section Label}: {Instance Description}
-# =============================================================================
-
-{section}:
-  {key}: {value}
-  {key}: {value}
+env:
+  - name: ftp_user_client01
+    env_var: FTP_USER_CLIENT01
+    generate: false
+  - name: ftp_password_client01
+    env_var: FTP_PASSWORD_CLIENT01
+    generate: false
 ```
 
-The top-level key must match the section name used in the file name. `config_utils.py` uses this key to merge the sub-config into `ctx` under the correct namespace.
-
----
-
-## Section Reference
-
-### `db` — Database Connections
-
-**File name:** `config.db.{provider}_{DatabaseName}.yaml`
-
-**Examples:** `config.db.SQLServer_NaviControl.yaml`, `config.db.MySQL_Reporting.yaml`
+### Usage in downstream YAML
 
 ```yaml
-# =============================================================================
-# Database Connection: {Provider} — {DatabaseName}
-# =============================================================================
-
-db:
-  connections:
-    - name:     {Provider}_{DatabaseName}_{host_alias}
-      provider: SQLServer                    # SQLServer | MySQL | PostgreSQL
-      database: {DatabaseName}
-      host:     {hostname_or_ip}
-      driver:   ODBC Driver 17 for SQL Server   # SQL Server only
-      port:     1433
-      # user and password injected from .env at startup via inject_secrets()
-      # {PROVIDER}_{DBNAME}_USER / {PROVIDER}_{DBNAME}_PASSWORD
-      # Omit user entirely to use Windows Authentication (SQL Server only)
-
-  # Optional — designates which connection owns batch and step logging.
-  # Include only in the db sub-config for the control/logging database.
-  batch_connection: {Provider}_{DatabaseName}_{host_alias}
+connections:
+  - name: client01
+    ftp:
+      user: env.ftp_user_client01
+      password: env.ftp_password_client01
 ```
 
-**Rules:**
+Behavior:
 
-- `name` must be unique across all db sub-configs in the project
-- `user` and `password` are never in YAML — they are injected from `.env` at startup
-- `batch_connection` appears in at most one db sub-config — the database that owns batch logging
-- Omit `user` entirely (do not set it to blank) when using Windows Authentication
-- One file per database — never combine two databases in one file
-
-**Supported providers:**
-
-| Provider | `provider` value | `driver` required |
-|---|---|---|
-| SQL Server | `SQLServer` | Yes — `ODBC Driver 17 for SQL Server` |
-| MySQL | `MySQL` | No |
-| PostgreSQL | `PostgreSQL` | No |
+- `build_ctx()` resolves `env.<name>` by looking up matching `name` in the main config `env` list
+- If `env_var` is missing in `.env`/environment, resolved value is empty string and a warning is logged
+- Unknown `env.<name>` references raise `ConfigError`
 
 ---
 
-### `data_source` — External Data Feed Definitions
+## `generate: true` for Managed Keys
 
-**File name:** `config.data_source.{name}.yaml`
+Use `generate: true` only for values the project is expected to generate automatically (for example Fernet keys).
 
-**Example:** `config.data_source.advantage_trade.yaml`
+Example:
 
 ```yaml
-# =============================================================================
-# Data Source: {Name}
-# =============================================================================
-
-data_source:
-  name:         {unique_identifier}
-  description:  {human readable description}
-  # Add source-specific fields below — file paths, schemas, delimiters, etc.
-  file_path:    /path/to/data/{name}/
-  file_pattern: "*[DateString]*.csv"
-  delimiter:    ","
+env:
+  - name: account_encryption_key
+    env_var: ACCOUNT_ENCRYPTION_KEY
+    generate: true
 ```
 
-**Rules:**
-
-- `name` must match the `{name}` portion of the file name exactly
-- All paths use the path rules from the main config (absolute or `~`-relative)
-- No credentials here — any auth values are injected from `.env`
+Key generation helpers in `rey_lib.encryption` create missing values in `.env` without overwriting existing ones.
 
 ---
 
-### `stages` — External Stage Runners
+## Sub-Config File Patterns
 
-**File name:** `config.stages.{name}.yaml`
+Use sub-config files for named collections and per-instance settings.
 
-**Example:** `config.stages.ftp_sync.yaml`
+### Database and load definitions (`config/db/*.yaml`)
 
 ```yaml
-# =============================================================================
-# Stage Runner: {Name}
-# =============================================================================
+connections:
+  - name: duckdb
+    provider: duckdb
+    path: ~/python/data/project/data.duckdb
 
-stages:
-  {name}:
-    # Absolute path to the stage's Python interpreter (its own venv)
-    python:   /path/to/{name}/venv/Scripts/python.exe
-    # Absolute path to the stage entry point
-    script:   /path/to/{name}/main.py
-    # Default args passed on every invocation — env is appended at runtime
-    args:
-      - --env
+loads:
+  - name: transaction
+    destination:
+      type: database
+      connection: duckdb
+      table: transaction
 ```
 
-**Rules:**
+### Data feed / connection definitions (`config/data_feeds/*.yaml`)
 
-- Each stage is a fully independent Python project with its own venv
-- `python` always points into the stage's own venv — never the orchestrator's interpreter
-- `args` lists fixed CLI arguments; the orchestrator appends the environment arg at runtime
-- `env` is always appended by the orchestrator — do not hard-code it here
+```yaml
+connections:
+  - name: client01
+    ftp:
+      host: ftp.client01.com
+      user: env.ftp_user_client01
+      password: env.ftp_password_client01
+    sync:
+      chunk_size: 50
+      remote_paths: [/incoming/]
+```
+
+Rules:
+
+- Put per-instance operational settings with the instance (for example `sync.chunk_size` per connection)
+- Do not keep per-connection settings as global singleton values unless all connections must share one value
 
 ---
 
-## Secrets and Credentials
+## Secrets Rules
 
-Credentials are **never** stored in YAML files. The pattern is:
-
-1. `.env` file at the project root holds raw credentials:
-   ```
-   SQLSERVER_NAVICONTROL_USER=sa
-   SQLSERVER_NAVICONTROL_PASSWORD=my_password
-   ```
-
-2. `config_utils.py` calls `inject_secrets()` at startup, which reads `.env` via `python-dotenv` and injects values into the relevant `ctx` attributes.
-
-3. The YAML file documents the expected env var names in a comment:
-   ```yaml
-   # user and password injected from .env at startup via inject_secrets()
-   # SQLSERVER_NAVICONTROL_USER / SQLSERVER_NAVICONTROL_PASSWORD
-   ```
-
-**Rules:**
-
-- `.env` is always in `.gitignore` — never commit it
-- Env var names follow the pattern: `{PROVIDER}_{DBNAME}_{FIELD}` — all uppercase, underscores only
-- If a field has no corresponding env var (e.g. Windows Auth with no user), omit the field from YAML entirely — do not set it to blank or null
+- Never store plaintext credentials in YAML
+- Keep `.env` out of source control (`.gitignore` must exclude it)
+- Store only logical references in YAML (`env.<name>`)
+- Do not use legacy `inject_secrets()` patterns in app code for new work; use `env` registry + `env.<name>` resolution
 
 ---
 
 ## Path Rules
 
-These rules apply to every path value in every config file:
+These apply to all YAML path values:
 
-| Path starts with | Interpretation |
+| Path form | Meaning |
 |---|---|
-| `~/` | Relative to the current user's home directory — use for dev |
-| Anything else | Treated as an absolute path — use for prod |
+| `~/...` | Relative to current user home directory |
+| absolute path | Used as-is |
 
-`config_utils.py` resolves `~` via `pathlib.Path.expanduser()` before populating `ctx`. All code reads the resolved absolute path from `ctx` — never raw path strings from config.
-
----
-
-## Adding a New Named Instance
-
-To add a new database, data source, broker, or other named instance:
-
-1. Create a new sub-config file following the naming convention: `config.{section}.{name}.yaml`
-2. Populate it using the appropriate template from this guide
-3. Add any required credentials to `.env`
-4. Restart the application
-
-No other files change. `config_utils.py` discovers the new file automatically on next startup.
+`build_ctx()` resolves paths before values are consumed by application code.
 
 ---
 
-## Adding a New Section
+## Adding New Config Safely
 
-If no existing section covers your use case, define a new one:
-
-1. Choose a short, lowercase section name (e.g. `broker`, `exchange`, `report`)
-2. Create the first sub-config file: `config.{section}.{name}.yaml`
-3. Update `AppContext` in `ctx.py` to include the new section's attributes with type hints
-4. Update `config_utils.py` to parse and populate the new section into `ctx`
-5. Add the section to this guide
-
-Do not reuse an existing section name for a different concept.
+1. Decide whether value is singleton or per-instance.
+2. For singleton values: place in `config/config.{env}.yaml`.
+3. For per-instance values: place in the corresponding file under `config/<area>/`.
+4. If value is secret-backed:
+   1. Add an entry to top-level `env` list in main config.
+   2. Reference it downstream as `env.<name>`.
+5. Restart application and verify `ctx` resolves expected values.
 
 ---
 
-## Complete File Name Reference
+## Checklist Before Commit
 
-| File | Purpose |
-|---|---|
-| `config.dev.yaml` | Main config — dev environment |
-| `config.prod.yaml` | Main config — prod environment |
-| `config.db.{Provider}_{DbName}.yaml` | One database connection |
-| `config.data_source.{name}.yaml` | One external data feed |
-| `config.stages.{name}.yaml` | One external stage runner |
-| `config.broker.{name}.yaml` | One broker definition (example of custom section) |
-
----
-
-## Checklist — Before Committing a New Config File
-
-- [ ] File name follows `config.{section}.{name}.yaml` exactly
-- [ ] Top-level YAML key matches the section name
-- [ ] No credentials, tokens, or passwords in the file
-- [ ] Credentials documented as comments with the expected env var names
-- [ ] All paths follow the path rules (absolute for prod, `~/` for dev)
-- [ ] `AppContext` in `ctx.py` has been updated if new attributes are introduced
-- [ ] `config_utils.py` parses the new section (if new section added)
-- [ ] `.env` updated with any new credentials
-- [ ] `.gitignore` excludes `.env`
+- [ ] Main config files are in `config/config.dev.yaml` and `config/config.prod.yaml`
+- [ ] New files are in a named `config/` subfolder
+- [ ] No secrets in YAML
+- [ ] Every `env.<name>` has a matching top-level `env` declaration
+- [ ] Per-instance operational settings are stored per instance (not globally)
+- [ ] `.env` remains gitignored
 
 ---
 
