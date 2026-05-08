@@ -512,12 +512,6 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
                         list(row_cols.keys()),
                     )
 
-                # Log the resolved batch_id so every run log contains a
-                # traceable identifier linking the log file to the Batch row.
-                batch_id = getattr(ctx, "batch_id", None)
-                if batch_id is not None:
-                    _logger.info("%s: batch_id=%s", data_source.name, batch_id)
-
             # Step 3: transform files.
             count = transform_files(ctx, data_source, data_source.transforms)
             total += count
@@ -2005,12 +1999,19 @@ def _build_constants(
     """
     Build runtime constant values for one file.
 
-    Resolves placeholder tokens in constant config values using the
-    actual file paths computed at run time. Values prefixed with 'ctx.'
-    are resolved by walking the dot path on the ctx object — this allows
-    any ctx attribute (including ctx.batch_id and ctx.log_file) to be
-    injected as a constant without any code changes. Literal values pass
-    through unchanged.
+    Stores the current file name and full path on ctx before resolving
+    constants.  Also stores each configured path key on ctx as
+    ``path_dir / file_name`` so constants can reference them via
+    ``ctx.<path_key>``.  All dynamic constant values use ``ctx.`` prefixes
+    in the YAML config — resolved by walking the dot path on ctx.
+    Literal values pass through unchanged.
+
+    ctx attributes set here (per-file, overwritten each call):
+        ctx.current_file_name  — bare filename, e.g. ``tran_20240304.csv``
+        ctx.current_file_path  — full source path as string
+        ctx.<path_key>         — each paths config key resolved as
+                                 ``path_dir / file_name``, e.g.
+                                 ``ctx.archive_path`` = archive dir + filename
 
     Parameters
     ----------
@@ -2028,41 +2029,53 @@ def _build_constants(
     dict[str, Any]
         Resolved constant values keyed by DB column name.
     """
-    # Build substitution map from all named paths in config.
-    substitutions: dict[str, str] = {}
+    # Store current file info on ctx.
+    object.__setattr__(ctx, "current_file_name", file_path.name)
+    object.__setattr__(ctx, "current_file_path", str(file_path))
+
+    # Store path + filename for each configured path key.
+    # e.g. archive_path dir + file_path.name → available as ctx.archive_path.
     if paths is not None:
-        for key in _namespace_to_dict(paths).keys():
-            path_val = _resolve_path(paths, key)
-            substitutions[key] = str(path_val / file_path.name)
+        for key, val in _namespace_to_dict(paths).items():
+            object.__setattr__(ctx, key, str(Path(str(val)) / file_path.name))
 
-    # Always provide the bare file path as a fallback substitution.
-    substitutions["incoming_file_name"] = str(file_path)
-
+    # Resolve each constant value.
+    # A constant may be a plain string or a structured dict with:
+    #   value: <string or ctx.* reference>
+    #   quote: <character to wrap the resolved value in, e.g. '"'>
     result: dict[str, Any] = {}
     for col, template in _namespace_to_dict(constants_cfg).items():
-        value = str(template)
+        # Extract structured value/quote pair if the entry is a dict or Namespace.
+        if isinstance(template, dict):
+            raw = str(template.get("value", ""))
+            quote_char = template.get("quote", None)
+        elif hasattr(template, "items"):
+            # Namespace — treat as dict.
+            tmpl_dict = dict(template.items())
+            raw = str(tmpl_dict.get("value", ""))
+            quote_char = tmpl_dict.get("quote", None)
+        else:
+            raw = str(template)
+            quote_char = None
 
-        # Resolve ctx.dot.path values directly from ctx.
-        if value.startswith("ctx.") and ctx is not None:
-            result[col] = _resolve_ctx_path(ctx, value[4:])
-            continue
+        # Resolve ctx.* references.
+        if raw.startswith("ctx.") and ctx is not None:
+            resolved = _resolve_ctx_path(ctx, raw[4:])
+        else:
+            resolved = raw
 
-        # Substitute path tokens — e.g. {loaded_path}.
-        for token, resolved in substitutions.items():
-            value = value.replace(f"{{{token}}}", resolved)
-
-        result[col] = value
+        # Wrap in the quote character if specified.
+        if quote_char:
+            result[col] = f"{quote_char}{resolved}{quote_char}"
+        else:
+            result[col] = resolved
 
     # Merge runtime-injected row columns from pre_transform hooks.
-    # These are set by run_transform after executing hooks that declare
-    # row_column on their output_params — e.g. a BatchID returned from a
-    # begin-batch stored procedure.  They override nothing that was
-    # explicitly declared in the transform constants config.
     injected = getattr(ctx, "_injected_row_columns", None)
     if injected:
-        for col, value in injected.items():
+        for col, val in injected.items():
             if col not in result:
-                result[col] = value
+                result[col] = val
 
     return result
 
