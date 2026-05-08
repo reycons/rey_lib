@@ -512,6 +512,12 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
                         list(row_cols.keys()),
                     )
 
+                # Log the resolved batch_id so every run log contains a
+                # traceable identifier linking the log file to the Batch row.
+                batch_id = getattr(ctx, "batch_id", None)
+                if batch_id is not None:
+                    _logger.info("%s: batch_id=%s", data_source.name, batch_id)
+
             # Step 3: transform files.
             count = transform_files(ctx, data_source, data_source.transforms)
             total += count
