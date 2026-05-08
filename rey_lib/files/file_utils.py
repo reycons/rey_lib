@@ -470,12 +470,23 @@ def _find_header_reader(fh: TextIO, source_column: str) -> csv.DictReader:
 
 
 def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
-    """Write rows to a CSV file using the key order of the first row."""
+    """Write rows to a CSV file using the key order of the first row.
+
+    Uses QUOTE_NONE so values are written exactly as-is — no extra quoting
+    or escaping is applied by the CSV writer. Values that already contain
+    quote characters (e.g. constants configured with quote: '"') are written
+    verbatim.
+    """
     outfile = Path(outfile)
     outfile.parent.mkdir(parents=True, exist_ok=True)
 
     with outfile.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=list(rows[0].keys()),
+            quoting=csv.QUOTE_NONE,
+            escapechar="\\",
+        )
         writer.writeheader()
         writer.writerows(rows)
 
