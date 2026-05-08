@@ -2040,35 +2040,14 @@ def _build_constants(
             object.__setattr__(ctx, key, str(Path(str(val)) / file_path.name))
 
     # Resolve each constant value.
-    # A constant may be a plain string or a structured dict with:
-    #   value: <string or ctx.* reference>
-    #   quote: <character to wrap the resolved value in, e.g. '"'>
     result: dict[str, Any] = {}
     for col, template in _namespace_to_dict(constants_cfg).items():
-        # Extract structured value/quote pair if the entry is a dict or Namespace.
-        if isinstance(template, dict):
-            raw = str(template.get("value", ""))
-            quote_char = template.get("quote", None)
-        elif hasattr(template, "items"):
-            # Namespace — treat as dict.
-            tmpl_dict = dict(template.items())
-            raw = str(tmpl_dict.get("value", ""))
-            quote_char = tmpl_dict.get("quote", None)
-        else:
-            raw = str(template)
-            quote_char = None
-
+        raw = str(template)
         # Resolve ctx.* references.
         if raw.startswith("ctx.") and ctx is not None:
-            resolved = _resolve_ctx_path(ctx, raw[4:])
+            result[col] = _resolve_ctx_path(ctx, raw[4:])
         else:
-            resolved = raw
-
-        # Wrap in the quote character if specified.
-        if quote_char:
-            result[col] = f"{quote_char}{resolved}{quote_char}"
-        else:
-            result[col] = resolved
+            result[col] = raw
 
     # Merge runtime-injected row columns from pre_transform hooks.
     injected = getattr(ctx, "_injected_row_columns", None)

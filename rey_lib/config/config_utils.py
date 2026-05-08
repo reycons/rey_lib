@@ -533,7 +533,7 @@ def _resolve_paths(data: dict[str, Any], base: Path, parent_key: str) -> dict[st
             ]
         elif isinstance(value, str) and _is_log_path_key(key):
             result[key] = _resolve_log_path_value(value, base)
-        elif isinstance(value, str) and _is_path_key(key):
+        elif isinstance(value, str) and _is_path_key(key) and not value.startswith("ctx."):
             result[key] = _resolve_path_value(value, base)
         else:
             result[key] = value
