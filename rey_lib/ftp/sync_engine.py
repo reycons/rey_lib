@@ -235,14 +235,9 @@ def _sync_path(
     log.info("New or updated: %d", len(to_download))
 
     # Honour per-run cap — truncate the candidate list if a limit is active.
-    # Sort oldest-first before truncating so the high-water mark only advances
-    # as far as files that were actually downloaded, preventing newer files from
-    # blocking older ones on the next run.
-    if limit is not None:
-        to_download.sort(key=lambda x: x[1])  # sort by modified_dt ascending
-        if len(to_download) > limit:
-            log.info("Capping to %d file(s) due to max_files_per_run", limit)
-            to_download = to_download[:limit]
+    if limit is not None and len(to_download) > limit:
+        log.info("Capping to %d file(s) due to max_files_per_run", limit)
+        to_download = to_download[:limit]
 
     downloaded, failed = _download_in_chunks(ctx, conn, session, remote_path, to_download, state)
     log_exit(ctx, f"_sync_path done: {len(downloaded)} downloaded, {len(failed)} failed", log)
