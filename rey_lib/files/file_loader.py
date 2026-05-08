@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from rey_lib.db import sqlserver_utils
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
@@ -59,9 +59,21 @@ from rey_lib.files.transformer import (
 )
 from rey_lib.logs.log_utils import log_enter, log_exit
 
-__all__ = ["transform_files", "load_files"]
+__all__ = ["transform_files", "load_files", "load_files_to_callback"]
 
 _logger = logging.getLogger(__name__)
+
+# Keep callback and file-pipeline failures non-fatal without using broad catches.
+_NON_FATAL_PIPELINE_ERRORS = (
+    ConfigError,
+    DatabaseError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    UnicodeError,
+    ValueError,
+    TransformError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +358,103 @@ def load_files(
     return total_rows
 
 
+def load_files_to_callback(
+    ctx: Any,
+    data_source: Any,
+    load_cfg: Any,
+    on_load_file: Callable[[Any, Any, Path, list[dict[str, str]]], int],
+) -> int:
+    """Load converted files by delegating persistence to a callback.
+
+    This variant is for apps that do not use sqlserver_utils staging logic.
+    It reads each converted CSV file, passes rows to on_load_file, and then
+    executes configured movement rules on success/failure.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context used for logging.
+    data_source : Any
+        One data source config namespace.
+    load_cfg : Any
+        One load config namespace.
+    on_load_file : Callable[[Any, Any, Path, list[dict[str, str]]], int]
+        Callback that persists one file and returns inserted row count.
+
+    Returns
+    -------
+    int
+        Total rows loaded across all processed files.
+    """
+    log_enter(ctx, f"load_files_to_callback: {data_source.name} / {load_cfg.name}", _logger)
+    total_rows = 0
+
+    try:
+        source_cfg = getattr(load_cfg, "source", None)
+        source_name = getattr(source_cfg, "name", "")
+        source_version = getattr(source_cfg, "version", "")
+        pickup_pattern = getattr(source_cfg, "pickup_pattern", "")
+
+        source_dir = _resolve_path(data_source.paths, "converted_path")
+        pattern = _resolve_callback_pattern(
+            pickup_pattern=pickup_pattern,
+            data_source_name=getattr(data_source, "name", ""),
+            source_name=source_name,
+            source_version=source_version,
+        )
+
+        pending = input_files(source_dir, pattern)
+
+        # Fallback for projects where pickup_pattern does not align with
+        # transformed filename conventions.
+        if not pending and source_version:
+            pending = input_files(source_dir, f"*_{source_version}.csv")
+
+        max_files = getattr(data_source, "max_files_per_run", None)
+        if max_files is not None:
+            pending = pending[:int(max_files)]
+
+        _logger.info(
+            "load_files_to_callback: %d file(s) pending in %s matching '%s'",
+            len(pending), source_dir, pattern,
+        )
+
+        for file_path in pending:
+            try:
+                rows = list(
+                    get_reader(
+                        file_path,
+                        file_type="CSV",
+                        encoding="utf-8-sig",
+                    )
+                )
+                rows_loaded = on_load_file(data_source, load_cfg, file_path, rows)
+                total_rows += rows_loaded
+                _execute_movements(load_cfg.movements.success, file_path, data_source.paths)
+                _logger.info(
+                    "Loaded via callback: %s rows=%d",
+                    file_path.name,
+                    rows_loaded,
+                )
+            except _NON_FATAL_PIPELINE_ERRORS as exc:
+                _logger.error(
+                    "Callback load failed for '%s': %s",
+                    file_path.name,
+                    exc,
+                    exc_info=True,
+                )
+                _execute_movements(load_cfg.movements.failure, file_path, data_source.paths)
+
+    finally:
+        log_exit(
+            ctx,
+            f"load_files_to_callback done: {total_rows} row(s) loaded",
+            _logger,
+        )
+
+    return total_rows
+
+
 # ---------------------------------------------------------------------------
 # Private — transform orchestration
 # ---------------------------------------------------------------------------
@@ -454,7 +563,7 @@ def _transform_one_file(
         log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
         return True
 
-    except Exception as exc:
+    except _NON_FATAL_PIPELINE_ERRORS as exc:
         _logger.error(
             "Unexpected error transforming '%s': %s",
             file_path.name, exc, exc_info=True,
@@ -597,7 +706,7 @@ def _check_file_in_staging(
             return None
         val = row[0]
         return int(val) if val is not None else None
-    except Exception as exc:
+    except _NON_FATAL_PIPELINE_ERRORS as exc:
         _logger.warning(
             "Could not check staging for '%s': %s — assuming not present.",
             file_path.name, exc,
@@ -652,7 +761,7 @@ def _delete_staging_rows(
             "Deleted %d staging row(s) for '%s' before reload.",
             deleted, file_path.name,
         )
-    except Exception as exc:
+    except _NON_FATAL_PIPELINE_ERRORS as exc:
         conn.rollback()
         raise DatabaseError(
             f"Failed to delete staging rows for '{file_path.name}': {exc}"
@@ -690,7 +799,7 @@ def _invoke_on_reload(
         return
     try:
         callback(file_path, original_batch_id, new_batch_id)
-    except Exception as exc:
+    except _NON_FATAL_PIPELINE_ERRORS as exc:
         _logger.error(
             "on_reload callback failed for '%s': %s",
             file_path.name, exc, exc_info=True,
@@ -1060,25 +1169,98 @@ def _execute_movements(
         delete = getattr(instruction, "delete", None)
 
         if move is not None:
+            from_key = getattr(move, "from", None)
+            src_path = _resolve_movement_source_path(paths, from_key, file_path)
             dest_dir = _resolve_path(paths, move.to)
             try:
-                move_file(file_path, dest_dir)
-                _logger.debug("Moved: %s → %s", file_path.name, dest_dir)
+                if not src_path.exists():
+                    _logger.debug("Movement skipped — source missing: %s", src_path)
+                    continue
+                move_file(src_path, dest_dir)
+                _logger.debug("Moved: %s → %s", src_path.name, dest_dir)
             except OSError as exc:
                 _logger.error(
                     "Movement failed — could not move '%s' to '%s': %s",
-                    file_path.name, dest_dir, exc,
+                    src_path.name, dest_dir, exc,
                 )
 
         elif delete is not None:
+            from_key = getattr(delete, "from", None)
+            src_path = _resolve_movement_source_path(paths, from_key, file_path)
             try:
-                file_path.unlink(missing_ok=True)
-                _logger.debug("Deleted: %s", file_path.name)
+                src_path.unlink(missing_ok=True)
+                _logger.debug("Deleted: %s", src_path.name)
             except OSError as exc:
                 _logger.error(
                     "Movement failed — could not delete '%s': %s",
-                    file_path.name, exc,
+                    src_path.name, exc,
                 )
+
+
+def _resolve_movement_source_path(
+    paths: Any,
+    from_key: Optional[str],
+    file_path: Path,
+) -> Path:
+    """
+    Resolve the physical source path for a movement instruction.
+
+    For load-stage movements, the active file may be a converted output
+    (for example, 'name_v01.csv') while the source file in processing has
+    the unversioned name ('name.csv'). This resolver first tries the exact
+    filename, then falls back to the unversioned variant when the filename
+    ends with a version suffix.
+
+    Parameters
+    ----------
+    paths : Any
+        Paths Namespace from the data source config.
+    from_key : Optional[str]
+        Optional source path key in the movement config.
+    file_path : Path
+        Current pipeline file path.
+
+    Returns
+    -------
+    Path
+        Best candidate source path for the movement operation.
+    """
+    if not from_key:
+        return file_path
+
+    base_dir = _resolve_path(paths, from_key)
+    exact = base_dir / file_path.name
+    if exact.exists():
+        return exact
+
+    unversioned_stem = re.sub(r"_v\d+$", "", file_path.stem)
+    if unversioned_stem != file_path.stem:
+        unversioned = base_dir / f"{unversioned_stem}{file_path.suffix}"
+        if unversioned.exists():
+            return unversioned
+
+    return exact
+
+
+def _resolve_callback_pattern(
+    pickup_pattern: str,
+    data_source_name: str,
+    source_name: str,
+    source_version: str,
+) -> str:
+    """Resolve callback-load pickup pattern from load.source config.
+
+    Supports replacement tokens: {data_source}, {name}, {version}.
+    """
+    if not pickup_pattern:
+        return f"*_{source_version}.csv" if source_version else "*.csv"
+
+    return (
+        pickup_pattern
+        .replace("{data_source}", data_source_name)
+        .replace("{name}", source_name)
+        .replace("{version}", source_version)
+    )
 
 
 # ---------------------------------------------------------------------------

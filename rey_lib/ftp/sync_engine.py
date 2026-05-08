@@ -47,6 +47,10 @@ def run_sync(ctx: Any, conn: Any) -> int:
     Loads persisted state, retries any previously failed files first,
     then scans remote paths for new files. Saves state when complete.
 
+    Respects conn.sync.max_files_per_run when set — stops downloading
+    once that many files have been pulled in this run. null / absent means
+    no limit.
+
     Args:
         ctx:  Global context (log settings).
         conn: Per-connection Namespace (ftp credentials, paths, filters, state_file).
@@ -61,6 +65,12 @@ def run_sync(ctx: Any, conn: Any) -> int:
     last_stamp = load_last_stamp(ctx, conn, state)
     retry_queue = load_retry_queue(state)
 
+    # Read optional per-run download cap (null / absent = unlimited).
+    _max_raw = getattr(getattr(conn, "sync", None), "max_files_per_run", None)
+    max_files: int | None = int(_max_raw) if _max_raw is not None else None
+    if max_files is not None:
+        log.info("max_files_per_run cap: %d", max_files)
+
     if last_stamp is not None:
         log.info("Download cutoff (high-water mark): %s", last_stamp.isoformat())
     if retry_queue:
@@ -73,8 +83,9 @@ def run_sync(ctx: Any, conn: Any) -> int:
     with ftp_session(conn.ftp) as session:
         # ── Pass 1: retry previously failed files regardless of stamp ──────
         if retry_queue:
+            remaining = None if max_files is None else max(0, max_files - len(all_downloaded))
             retried, still_failed, abandoned = _retry_failed(
-                ctx, conn, session, retry_queue, state
+                ctx, conn, session, retry_queue, state, limit=remaining
             )
             all_downloaded.extend(retried)
             all_failed.extend(still_failed)
@@ -83,7 +94,13 @@ def run_sync(ctx: Any, conn: Any) -> int:
         # ── Pass 2: expand glob paths then scan each resolved directory ────
         resolved_paths = _expand_remote_paths(session, conn.sync.remote_paths)
         for remote_path in resolved_paths:
-            downloaded, failed = _sync_path(ctx, conn, session, remote_path, state, last_stamp)
+            remaining = None if max_files is None else max(0, max_files - len(all_downloaded))
+            if remaining is not None and remaining == 0:
+                log.info("max_files_per_run reached — skipping remaining paths")
+                break
+            downloaded, failed = _sync_path(
+                ctx, conn, session, remote_path, state, last_stamp, limit=remaining
+            )
             all_downloaded.extend(downloaded)
             all_failed.extend(failed)
 
@@ -104,6 +121,7 @@ def _retry_failed(
     session: Session,
     retry_queue: list[dict],
     state: dict,
+    limit: int | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Attempt to download all files in the retry queue.
 
@@ -117,6 +135,7 @@ def _retry_failed(
         session:     Active Session from ftp_session().
         retry_queue: List of retry entry dicts.
         state:       State dict mutated in place.
+        limit:       Maximum files to download; None means unlimited.
 
     Returns:
         Tuple of (downloaded filenames, still-failing filenames, abandoned filenames).
@@ -131,6 +150,10 @@ def _retry_failed(
     log_file    = getattr(ctx, "log_file", "unknown")
 
     for entry in retry_queue:
+        if limit is not None and len(downloaded) >= limit:
+            log.info("max_files_per_run reached during retries — stopping")
+            break
+
         remote_path = entry["remote_path"]
         filename    = entry["filename"]
         modified_dt = datetime.fromisoformat(entry["modified"])
@@ -176,6 +199,7 @@ def _sync_path(
     remote_path: str,
     state: dict[str, str],
     last_stamp: datetime | None,
+    limit: int | None = None,
 ) -> tuple[list[str], list[str]]:
     """Sync a single remote directory.
 
@@ -186,6 +210,7 @@ def _sync_path(
         remote_path: Remote directory to process.
         state:       Current state dict, mutated in place as files are downloaded.
         last_stamp:  High-water mark — files at or before this are skipped.
+        limit:       Maximum files to download; None means unlimited.
 
     Returns:
         Tuple of (downloaded filenames, failed filenames).
@@ -208,6 +233,11 @@ def _sync_path(
         if is_new_or_updated(state, remote_path, name, dt)
     ]
     log.info("New or updated: %d", len(to_download))
+
+    # Honour per-run cap — truncate the candidate list if a limit is active.
+    if limit is not None and len(to_download) > limit:
+        log.info("Capping to %d file(s) due to max_files_per_run", limit)
+        to_download = to_download[:limit]
 
     downloaded, failed = _download_in_chunks(ctx, conn, session, remote_path, to_download, state)
     log_exit(ctx, f"_sync_path done: {len(downloaded)} downloaded, {len(failed)} failed", log)

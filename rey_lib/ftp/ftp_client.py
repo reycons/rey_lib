@@ -261,6 +261,8 @@ def _sftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
             username=ftp_cfg.user,
             password=ftp_cfg.password,
             timeout=_FTP_TIMEOUT_SECONDS,
+            look_for_keys=False,   # skip local SSH key search — use password only
+            allow_agent=False,     # skip SSH agent — use password only
         )
         sftp = ssh.open_sftp()
         log.info("SFTP connected: %s@%s", ftp_cfg.user, ftp_cfg.host)

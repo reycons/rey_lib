@@ -666,13 +666,15 @@ def _transform_encrypt(
     cfg : dict
         Transform config. Keys:
             key_env — name of the environment variable holding the Fernet key.
+            include_key_env — when True, output as '<key_env>:<token>'.
     secrets : dict[str, str]
         Resolved env-var values keyed by variable name.
 
     Returns
     -------
     Optional[str]
-        Fernet token string, or the original value if blank.
+        Fernet token string, or '<key_env>:<token>' when include_key_env is
+        True. Returns the original value if blank.
 
     Raises
     ------
@@ -720,7 +722,12 @@ def _transform_encrypt(
         key    = raw_key.encode("utf-8") if isinstance(raw_key, str) else raw_key
         fernet = Fernet(key)
         token  = fernet.encrypt(plaintext_str.encode("utf-8"))
-        return token.decode("utf-8")
+        token_text = token.decode("utf-8")
+
+        if cfg.get("include_key_env", False):
+            return f"{key_env}:{token_text}"
+
+        return token_text
     except (TypeError, ValueError) as exc:
         raise TransformError(
             f"Fernet encryption failed: {exc}"
