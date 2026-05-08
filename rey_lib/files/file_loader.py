@@ -59,7 +59,7 @@ from rey_lib.files.transformer import (
 )
 from rey_lib.logs.log_utils import log_enter, log_exit
 
-__all__ = ["transform_files", "load_files", "load_files_to_callback"]
+__all__ = ["transform_files", "load_files", "load_files_to_callback", "run_transform", "run_load"]
 
 _logger = logging.getLogger(__name__)
 
@@ -453,6 +453,604 @@ def load_files_to_callback(
         )
 
     return total_rows
+
+
+def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
+    """
+    Run the transform stage for every data source declared in ctx.
+
+    Iterates ``ctx.data_sources``, calling :func:`transform_files` for each
+    one.  Before transforming, executes any ``hooks.pre_transform`` sql_configs
+    declared on the data source.  Output params from those hooks that declare
+    ``row_column`` are automatically injected as extra columns into every
+    transformed row.  After transforming, executes ``hooks.post_transform``
+    sql_configs.
+
+    hook execution order per data source:
+    1. ``hooks.pre_transform`` — proc/file runs; output params written to ctx
+       and injected into every row as extra columns via ``row_column``
+    2. ``transform_files``
+    3. ``hooks.post_transform`` — proc/file runs; output params written to ctx
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context. Must have a ``data_sources`` iterable where
+        each entry exposes a ``transforms`` attribute.
+    sql_dir : Optional[Path]
+        Base directory for ``type: sql_file`` hook configs.
+
+    Returns
+    -------
+    int
+        Total number of files successfully transformed across all sources.
+    """
+    total = 0
+
+    for data_source in ctx.data_sources:
+        hooks_cfg = getattr(data_source, "hooks", None)
+        hook_conns: dict[str, Any] = {}
+
+        try:
+            # Step 1: clear any previously injected row columns for this source.
+            object.__setattr__(ctx, "_injected_row_columns", {})
+
+            # Step 2: execute pre_transform hooks; collect row_column injections.
+            if hooks_cfg:
+                row_cols = _execute_hooks(
+                    ctx,
+                    data_source,
+                    getattr(hooks_cfg, "pre_transform", None),
+                    hook_conns,
+                    sql_dir,
+                )
+                if row_cols:
+                    object.__setattr__(ctx, "_injected_row_columns", row_cols)
+                    _logger.debug(
+                        "%s: injecting row columns from pre_transform: %s",
+                        data_source.name,
+                        list(row_cols.keys()),
+                    )
+
+            # Step 3: transform files.
+            count = transform_files(ctx, data_source, data_source.transforms)
+            total += count
+            if count:
+                _logger.info("%s: %d file(s) transformed", data_source.name, count)
+
+            # Step 4: execute post_transform hooks.
+            if hooks_cfg:
+                _execute_hooks(
+                    ctx,
+                    data_source,
+                    getattr(hooks_cfg, "post_transform", None),
+                    hook_conns,
+                    sql_dir,
+                )
+
+        finally:
+            # Clear injected row columns so they don't bleed into the next source.
+            object.__setattr__(ctx, "_injected_row_columns", {})
+            for conn_name, conn in hook_conns.items():
+                try:
+                    conn.close()
+                    _logger.debug("Closed hook connection '%s'", conn_name)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    return total
+
+
+def run_load(
+    ctx: Any,
+    sql_dir: Optional[Path] = None,
+    on_reload: Optional[Callable] = None,
+) -> int:
+    """
+    Run the load stage for every data source and load config declared in ctx.
+
+    Iterates ``ctx.data_sources`` and each ``loads`` entry.  For each load
+    config the connection named by ``load_cfg.load.connection`` is resolved
+    from ``ctx.db.connections`` and opened automatically — no connection
+    management in the caller.  Connections are reused when multiple load
+    configs within the same data source share the same connection name, and
+    are all closed after that data source's ``post_load_sql`` files run.
+
+    All behaviour is driven entirely by YAML config.  No application-specific
+    knowledge belongs here.
+
+    YAML shape expected per loads entry::
+
+        - name:           my_load
+          version:        "v01"
+          source:         converted_path
+          pickup_pattern: "file_*_{version}.csv"
+          load:
+            connection:          SQLServer_MyDB_local
+            destination_table:   MyDB.dbo.my_table
+            file_id_column:      incoming_file_name
+            batch_id_column:     BatchID
+          movements:
+            success: ...
+            failure: ...
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.  Must have:
+        - ``ctx.data_sources`` — iterable of data source Namespaces
+        - ``ctx.db.connections`` — list of named connection Namespaces
+        - ``ctx.batch_id`` — set before calling (stamped into every row)
+    sql_dir : Optional[Path]
+        Base directory for resolving ``post_load_sql`` file names.
+        Pass ``None`` when no data source uses ``post_load_sql``.
+    on_reload : Optional[Callable]
+        Invoked when a file already present in staging is re-loaded.
+        Signature: ``(file_path, original_batch_id, new_batch_id) -> None``
+
+    Returns
+    -------
+    int
+        Total rows loaded across all data sources and load configs.
+
+    Raises
+    ------
+    ConfigError
+        If ``load.connection`` is missing or names an unknown connection.
+    """
+    from rey_lib.config.ctx import find_by_name  # local import — avoids circular dep
+
+    total = 0
+
+    for data_source in ctx.data_sources:
+        # Cache open connections by name so multiple load configs that share
+        # a connection only open it once per data source.
+        open_conns: dict[str, Any] = {}
+        last_conn: Any = None
+
+        try:
+            for load_cfg in getattr(data_source, "loads", []):
+                conn_name = getattr(getattr(load_cfg, "load", None), "connection", None)
+                if not conn_name:
+                    raise ConfigError(
+                        f"load.connection is not set for load '{load_cfg.name}' "
+                        f"in data source '{data_source.name}'. "
+                        "Add 'connection: <name>' under the load: section in YAML."
+                    )
+
+                if conn_name not in open_conns:
+                    db_cfg = find_by_name(
+                        getattr(getattr(ctx, "db", None), "connections", []),
+                        conn_name,
+                    )
+                    if db_cfg is None:
+                        raise ConfigError(
+                            f"Connection '{conn_name}' not found in ctx.db.connections. "
+                            "Check config/db/*.yaml for the connection definition."
+                        )
+                    open_conns[conn_name] = sqlserver_utils.get_connection(db_cfg)
+                    _logger.debug("Opened connection '%s'", conn_name)
+
+                conn = open_conns[conn_name]
+                last_conn = conn
+                rows = load_files(ctx, conn, data_source, load_cfg, on_reload)
+                total += rows
+
+            # post_load_sql runs on the last connection used for this source
+            # (backward-compat with existing post_load_sql YAML key).
+            if last_conn is not None:
+                _execute_post_load_sql(last_conn, data_source, sql_dir)
+
+            # hooks.post_load — may reference any connection, including ones
+            # different from the load connection.
+            hooks_cfg = getattr(data_source, "hooks", None)
+            if hooks_cfg:
+                _execute_hooks(
+                    ctx,
+                    data_source,
+                    getattr(hooks_cfg, "post_load", None),
+                    open_conns,
+                    sql_dir,
+                )
+
+        finally:
+            # Always close every connection opened for this data source.
+            for conn_name, conn in open_conns.items():
+                try:
+                    conn.close()
+                    _logger.debug("Closed connection '%s'", conn_name)
+                except Exception:  # noqa: BLE001 — close must never raise
+                    pass
+
+    return total
+
+
+def _execute_post_load_sql(conn: Any, data_source: Any, sql_dir: Optional[Path]) -> None:
+    """Execute each SQL file listed in data_source.post_load_sql.
+
+    Skips silently when ``post_load_sql`` is absent, empty, or ``sql_dir``
+    is ``None``.  Raises ``ConfigError`` when a declared file does not exist.
+    Each file is executed as a single statement — use semicolons within the
+    file to separate multiple statements where the driver supports it.
+
+    Parameters
+    ----------
+    conn : Any
+        Open database connection — must support ``conn.execute(sql)``.
+    data_source : Any
+        Data source Namespace; may have a ``post_load_sql`` list attribute.
+    sql_dir : Optional[Path]
+        Base directory for resolving SQL file names.
+    """
+    sql_files = getattr(data_source, "post_load_sql", None) or []
+    if not sql_files or sql_dir is None:
+        return
+
+    for sql_filename in sql_files:
+        sql_path = sql_dir / sql_filename
+        if not sql_path.exists():
+            raise ConfigError(
+                f"post_load_sql file not found: {sql_path} "
+                f"(data_source='{data_source.name}')"
+            )
+        sql_text = sql_path.read_text(encoding="utf-8")
+        conn.execute(sql_text)
+        _logger.info("post_load_sql executed: %s", sql_filename)
+
+
+# ---------------------------------------------------------------------------
+# Private — sql_config hook execution
+# ---------------------------------------------------------------------------
+
+def _normalize_hook_names(hook_ref: Any) -> list[str]:
+    """
+    Normalize a hook reference from YAML to a list of sql_config names.
+
+    Accepts a single name (string) or a list of names.  Returns an empty
+    list when the value is None or empty.
+
+    Parameters
+    ----------
+    hook_ref : Any
+        ``hooks.pre_transform`` / ``hooks.post_load`` value from the data
+        source YAML.  May be a string, list, or None.
+
+    Returns
+    -------
+    list[str]
+        Zero or more sql_config names to execute in order.
+    """
+    if not hook_ref:
+        return []
+    if isinstance(hook_ref, str):
+        return [hook_ref]
+    return list(hook_ref)
+
+
+def _find_sql_config(ctx: Any, name: str) -> Any:
+    """
+    Find a named sql_config entry in ctx.sql_configs.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.  Must have ``ctx.sql_configs`` list attribute.
+    name : str
+        Name of the sql_config to locate.
+
+    Returns
+    -------
+    Any
+        The matching sql_config Namespace.
+
+    Raises
+    ------
+    ConfigError
+        If ``ctx.sql_configs`` is absent or the name is not found.
+    """
+    from rey_lib.config.ctx import find_by_name  # local import — avoids circular dep
+
+    configs = getattr(ctx, "sql_configs", None)
+    if configs is None:
+        raise ConfigError(
+            f"sql_config '{name}' referenced in hooks but ctx.sql_configs is not "
+            "defined. Add a sql_configs section to your config YAML."
+        )
+    result = find_by_name(configs, name)
+    if result is None:
+        raise ConfigError(
+            f"sql_config '{name}' not found in ctx.sql_configs. "
+            "Check config/app/sql_configs.yaml."
+        )
+    return result
+
+
+def _resolve_hook_param_value(ctx: Any, data_source: Any, source: str) -> Any:
+    """
+    Resolve a sql_config param ``source`` value at runtime.
+
+    Supports three formats:
+
+    * ``ctx.<dotted_attr>``     — resolved by walking ctx attribute path
+    * ``data_source.<attr>``    — resolved from data_source Namespace
+    * anything else             — used as a literal string value
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+    data_source : Any
+        Current data source Namespace.
+    source : str
+        Source expression from config, e.g. ``'ctx.batch_id'`` or
+        ``'data_source.name'`` or ``'2026'``.
+
+    Returns
+    -------
+    Any
+        Resolved value.  Returns empty string if a ctx/data_source path
+        segment is missing rather than raising.
+    """
+    if source.startswith("ctx."):
+        return _resolve_ctx_path(ctx, source[4:])
+    if source.startswith("data_source."):
+        attr = source[len("data_source."):]
+        return getattr(data_source, attr, "")
+    return source
+
+
+def _execute_one_hook(
+    ctx: Any,
+    data_source: Any,
+    sql_cfg: Any,
+    open_conns: dict[str, Any],
+    sql_dir: Optional[Path],
+) -> dict[str, Any]:
+    """
+    Execute one sql_config hook and return any output-param row-column values.
+
+    Resolves and opens the connection (caching by name in ``open_conns``),
+    builds input param values, calls the procedure or SQL file, captures
+    output params, stores them in ``ctx`` via ``ctx_var``, and returns any
+    output params that have a ``row_column`` declared — these will be
+    injected as extra columns into every transformed row.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+    data_source : Any
+        Current data source Namespace.
+    sql_cfg : Any
+        A single sql_config Namespace (from ctx.sql_configs).
+    open_conns : dict[str, Any]
+        Shared connection cache — keyed by connection name.
+        Connections are opened on first use and closed by the caller.
+    sql_dir : Optional[Path]
+        Base directory for ``type: sql_file`` configs.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{column_name: value}`` for every output_param that declares
+        ``row_column``.  Empty dict when there are no such params.
+
+    Raises
+    ------
+    ConfigError
+        If the connection is not found or a required file is missing.
+    DatabaseError
+        If procedure or SQL execution fails.
+    """
+    from rey_lib.config.ctx import find_by_name  # local import
+
+    conn_name = getattr(sql_cfg, "connection", None)
+    if not conn_name:
+        raise ConfigError(
+            f"sql_config '{sql_cfg.name}' is missing 'connection'. "
+            "Add 'connection: <name>' to the sql_config entry."
+        )
+
+    # Resolve and cache the connection.
+    if conn_name not in open_conns:
+        db_cfg = find_by_name(
+            getattr(getattr(ctx, "db", None), "connections", []),
+            conn_name,
+        )
+        if db_cfg is None:
+            raise ConfigError(
+                f"Connection '{conn_name}' not found in ctx.db.connections "
+                f"(referenced by sql_config '{sql_cfg.name}')."
+            )
+        open_conns[conn_name] = sqlserver_utils.get_connection(db_cfg)
+        _logger.debug("Opened connection '%s' for hook '%s'", conn_name, sql_cfg.name)
+
+    conn = open_conns[conn_name]
+    hook_type = getattr(sql_cfg, "type", "procedure")
+    row_columns: dict[str, Any] = {}
+
+    if hook_type == "sql_file":
+        _execute_one_hook_sql_file(conn, sql_cfg, sql_dir)
+
+    else:
+        # Default: type == "procedure"
+        row_columns = _execute_one_hook_procedure(ctx, data_source, conn, sql_cfg)
+
+    return row_columns
+
+
+def _execute_one_hook_sql_file(
+    conn: Any,
+    sql_cfg: Any,
+    sql_dir: Optional[Path],
+) -> None:
+    """
+    Execute a sql_file hook: read the file and execute it on conn.
+
+    Parameters
+    ----------
+    conn : Any
+        Open database connection.
+    sql_cfg : Any
+        sql_config Namespace with ``file`` attribute.
+    sql_dir : Optional[Path]
+        Base directory for resolving the file name.
+
+    Raises
+    ------
+    ConfigError
+        If ``sql_dir`` is None or the file does not exist.
+    """
+    if sql_dir is None:
+        raise ConfigError(
+            f"sql_config '{sql_cfg.name}' is type 'sql_file' but no sql_dir "
+            "was provided to the pipeline call. Pass sql_dir to run_load/run_transform."
+        )
+    file_name = getattr(sql_cfg, "file", None)
+    if not file_name:
+        raise ConfigError(
+            f"sql_config '{sql_cfg.name}' is type 'sql_file' but 'file' is not set."
+        )
+    sql_path = sql_dir / file_name
+    if not sql_path.exists():
+        raise ConfigError(
+            f"sql_config '{sql_cfg.name}': file not found: {sql_path}"
+        )
+    sql_text = sql_path.read_text(encoding="utf-8")
+    conn.execute(sql_text)
+    _logger.info("Hook sql_file executed: %s (config='%s')", file_name, sql_cfg.name)
+
+
+def _execute_one_hook_procedure(
+    ctx: Any,
+    data_source: Any,
+    conn: Any,
+    sql_cfg: Any,
+) -> dict[str, Any]:
+    """
+    Execute a procedure hook, capture output params, write to ctx.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context — output params are written here via ``ctx_var``.
+    data_source : Any
+        Current data source Namespace — used to resolve ``data_source.*``
+        param sources.
+    conn : Any
+        Open SQL Server connection.
+    sql_cfg : Any
+        sql_config Namespace with ``proc``, ``params``, and optionally
+        ``output_params`` attributes.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{row_column: value}`` for each output_param that declares
+        ``row_column``.
+
+    Raises
+    ------
+    ConfigError
+        If ``proc`` is missing from the sql_config.
+    DatabaseError
+        If procedure execution fails.
+    """
+    proc_name = getattr(sql_cfg, "proc", None)
+    if not proc_name:
+        raise ConfigError(
+            f"sql_config '{sql_cfg.name}' is type 'procedure' but 'proc' is not set."
+        )
+
+    # Resolve input params: [(param_name, value), ...]
+    raw_params = getattr(sql_cfg, "params", None) or []
+    named_inputs: list[tuple[str, Any]] = [
+        (p.name, _resolve_hook_param_value(ctx, data_source, str(p.source)))
+        for p in raw_params
+    ]
+
+    # Resolve output param specs: [(param_name, sql_type), ...]
+    raw_outputs = getattr(sql_cfg, "output_params", None) or []
+    output_specs: list[tuple[str, str]] = [
+        (op.name, str(getattr(op, "sql_type", "NVARCHAR(MAX)")))
+        for op in raw_outputs
+    ]
+
+    if output_specs:
+        output_values = sqlserver_utils.call_proc_with_output(
+            conn, proc_name, named_inputs, output_specs
+        )
+    else:
+        sqlserver_utils.call_proc(conn, proc_name, [v for _n, v in named_inputs])
+        output_values = {}
+
+    _logger.info(
+        "Hook procedure executed: %s (config='%s') outputs=%s",
+        proc_name,
+        sql_cfg.name,
+        list(output_values.keys()),
+    )
+
+    # Write each output param to ctx via ctx_var, collect row_column mappings.
+    row_columns: dict[str, Any] = {}
+    for out_cfg in raw_outputs:
+        value = output_values.get(out_cfg.name)
+        ctx_var = getattr(out_cfg, "ctx_var", None)
+        if ctx_var:
+            object.__setattr__(ctx, ctx_var, value)
+            _logger.debug("Hook output: ctx.%s = %r", ctx_var, value)
+        row_col = getattr(out_cfg, "row_column", None)
+        if row_col:
+            row_columns[row_col] = value
+
+    return row_columns
+
+
+def _execute_hooks(
+    ctx: Any,
+    data_source: Any,
+    hook_ref: Any,
+    open_conns: dict[str, Any],
+    sql_dir: Optional[Path],
+) -> dict[str, Any]:
+    """
+    Execute a hook list (or single hook name) for a pipeline stage.
+
+    Resolves each name from ctx.sql_configs, executes in declaration order,
+    and collects any ``row_column`` output-param values to return.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+    data_source : Any
+        Current data source Namespace.
+    hook_ref : Any
+        A single sql_config name (str) or list of names, taken directly
+        from the data source YAML hooks section.
+    open_conns : dict[str, Any]
+        Connection cache shared across hooks for this pipeline run.
+        Caller is responsible for closing all connections in finally.
+    sql_dir : Optional[Path]
+        Base directory for sql_file hooks.
+
+    Returns
+    -------
+    dict[str, Any]
+        Merged ``{row_column: value}`` from all procedure hooks that
+        declared ``row_column`` output params.
+    """
+    names = _normalize_hook_names(hook_ref)
+    if not names:
+        return {}
+
+    row_columns: dict[str, Any] = {}
+    for name in names:
+        sql_cfg = _find_sql_config(ctx, name)
+        cols = _execute_one_hook(ctx, data_source, sql_cfg, open_conns, sql_dir)
+        row_columns.update(cols)
+
+    return row_columns
 
 
 # ---------------------------------------------------------------------------
@@ -1448,6 +2046,17 @@ def _build_constants(
             value = value.replace(f"{{{token}}}", resolved)
 
         result[col] = value
+
+    # Merge runtime-injected row columns from pre_transform hooks.
+    # These are set by run_transform after executing hooks that declare
+    # row_column on their output_params — e.g. a BatchID returned from a
+    # begin-batch stored procedure.  They override nothing that was
+    # explicitly declared in the transform constants config.
+    injected = getattr(ctx, "_injected_row_columns", None)
+    if injected:
+        for col, value in injected.items():
+            if col not in result:
+                result[col] = value
 
     return result
 

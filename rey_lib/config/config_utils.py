@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -52,6 +52,7 @@ from rey_lib.errors.error_utils import ConfigError, validate_env
 _logger = logging.getLogger(__name__)
 
 __all__ = [
+    "build_app_ctx",
     "build_ctx",
     "inject_secrets",
     "save_config",
@@ -249,6 +250,40 @@ def save_config(
     config_path = _config_path(env, config_dir)
     with config_path.open("w", encoding="utf-8") as fh:
         yaml.dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def build_app_ctx(
+    project_root: Path,
+    env: str,
+    log_level: Optional[str] = None,
+) -> Namespace:
+    """
+    Build application context from YAML config and .env.
+
+    Convenience wrapper around build_ctx() that optionally overrides the
+    log level after loading.  Suitable as the standard entry point for any
+    project's CLI startup.
+
+    Parameters
+    ----------
+    project_root : Path
+        Absolute path to the project root directory.
+    env : str
+        Runtime environment — ``'dev'`` or ``'prod'``.
+    log_level : str, optional
+        When provided, overrides the log level value from config with this
+        value (e.g. ``'DEBUG'``, ``'INFO'``).
+
+    Returns
+    -------
+    Namespace
+        Fully populated context object.
+    """
+    ctx = build_ctx(env=env, project_root=project_root)
+    if log_level is not None:
+        # Override whatever the config declared so the caller's --log-level flag wins.
+        object.__setattr__(ctx, "log_level", log_level.upper())
+    return ctx
 
 
 def print_ctx(ctx: Namespace) -> None:

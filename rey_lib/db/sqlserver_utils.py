@@ -36,6 +36,8 @@ bulk_insert(conn, schema, table, rows, columns)
     Insert a list of row dicts into any table using fast_executemany.
 call_proc(conn, proc_name, params)
     Execute a stored procedure by name.
+call_proc_with_output(conn, proc_name, named_input_params, output_param_specs)
+    Execute a stored procedure and capture named output parameter values.
 load_sql(name)
     Return the preloaded SQL string for a named query.
 create_staging_table_if_not_exists(conn, schema, table, column_defs)
@@ -63,6 +65,7 @@ __all__ = [
     "fetch",
     "bulk_insert",
     "call_proc",
+    "call_proc_with_output",
     "load_sql",
     "create_staging_table_if_not_exists",
     "expand_column_if_truncated",
@@ -360,6 +363,99 @@ def call_proc(
     p        = params or []
     call_sql = _build_odbc_call(proc_name, len(p))
     return _run_cursor(conn, call_sql, p, error_context=f"Stored procedure '{proc_name}'")
+
+
+def call_proc_with_output(
+    conn: pyodbc.Connection,
+    proc_name: str,
+    named_input_params: list[tuple[str, Any]],
+    output_param_specs: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """
+    Execute a stored procedure and capture named output parameter values.
+
+    Uses a DECLARE / EXEC ... OUTPUT / SELECT pattern to read output
+    parameter values back from the procedure. This approach works reliably
+    with the SQL Server ODBC driver via pyodbc without requiring bound
+    output-parameter types at the Python level.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open pyodbc connection.
+    proc_name : str
+        Fully-qualified procedure name
+        (e.g. 'NaviControl.dbo.usp_BatchLog_Begin').
+    named_input_params : list[tuple[str, Any]]
+        Input parameters as ``(param_name, value)`` pairs, in declaration
+        order. Parameter names must match the procedure's ``@`` parameter
+        names exactly (without the leading ``@``).
+    output_param_specs : list[tuple[str, str]]
+        Output parameters as ``(param_name, sql_type)`` pairs.
+        ``sql_type`` is any valid SQL Server type literal used in
+        ``DECLARE`` — e.g. ``'INT'``, ``'BIGINT'``, ``'NVARCHAR(100)'``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Output parameter values keyed by parameter name.
+        Values are as returned by pyodbc from the SELECT.
+
+    Raises
+    ------
+    DatabaseError
+        If procedure execution or result fetch fails.
+    """
+    # Build: DECLARE @ParamName sql_type = NULL;
+    declare_lines = [
+        f"DECLARE @{name} {sql_type} = NULL;"
+        for name, sql_type in output_param_specs
+    ]
+
+    # Build: EXEC proc_name @in1 = ?, ..., @out1 = @out1 OUTPUT, ...
+    input_bindings = [f"@{name} = ?" for name, _v in named_input_params]
+    output_bindings = [f"@{name} = @{name} OUTPUT" for name, _t in output_param_specs]
+    all_bindings = input_bindings + output_bindings
+    exec_line = f"EXEC {proc_name} {', '.join(all_bindings)};"
+
+    # Build: SELECT @out1 AS out1, ...
+    select_cols = [
+        f"@{name} AS {name}" for name, _t in output_param_specs
+    ]
+    select_line = "SELECT " + ", ".join(select_cols) + ";"
+
+    sql = "\n".join(declare_lines + [exec_line, select_line])
+    input_values = [value for _name, value in named_input_params]
+
+    _logger.debug(
+        "call_proc_with_output: %s  inputs=%s  output_params=%s",
+        proc_name,
+        [n for n, _ in named_input_params],
+        [n for n, _ in output_param_specs],
+    )
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql, input_values)
+        # Skip any result sets produced by the proc itself before reaching
+        # the final SELECT that returns the output parameter values.
+        while cursor.description is None:
+            if not cursor.nextset():
+                _logger.warning(
+                    "call_proc_with_output: no result set returned for '%s'",
+                    proc_name,
+                )
+                return {}
+        row = cursor.fetchone()
+        if row is None:
+            return {}
+        return {name: row[i] for i, (name, _t) in enumerate(output_param_specs)}
+    except pyodbc.Error as exc:
+        raise DatabaseError(
+            f"Stored procedure '{proc_name}' (with output) failed: {exc}"
+        ) from exc
+    finally:
+        cursor.close()
 
 
 def load_sql(name: str) -> str:
