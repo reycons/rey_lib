@@ -27,10 +27,31 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from rey_lib.db import duckdb_utils, sqlserver_utils
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["DBAdapter"]
+
+
+# ---------------------------------------------------------------------------
+# Lazy backend-module accessors
+#
+# Backend drivers are imported on first use rather than at module load. This
+# lets a deployment install only the driver it needs (e.g. pyodbc for a
+# SQL-Server-only client) without pulling in duckdb just because it's listed
+# as a supported provider. Python caches imports in sys.modules, so the
+# overhead after the first call is negligible.
+# ---------------------------------------------------------------------------
+
+def _sqlserver_utils() -> Any:
+    """Return ``rey_lib.db.sqlserver_utils``, importing on first use."""
+    from rey_lib.db import sqlserver_utils  # noqa: WPS433 — intentional lazy import
+    return sqlserver_utils
+
+
+def _duckdb_utils() -> Any:
+    """Return ``rey_lib.db.duckdb_utils``, importing on first use."""
+    from rey_lib.db import duckdb_utils  # noqa: WPS433 — intentional lazy import
+    return duckdb_utils
 
 
 class DBAdapter:
@@ -69,9 +90,9 @@ class DBAdapter:
         """
         provider = self._provider_for_cfg(db_cfg)
         if provider == "sqlserver":
-            return sqlserver_utils.get_connection(db_cfg)
+            return _sqlserver_utils().get_connection(db_cfg)
         if provider == "duckdb":
-            return duckdb_utils.get_connection()
+            return _duckdb_utils().get_connection()
         raise ConfigError(f"DBAdapter: unsupported provider '{provider}'.")
 
     # ------------------------------------------------------------------
@@ -108,7 +129,7 @@ class DBAdapter:
         """
         provider = self._provider_for_conn(conn)
         if provider == "sqlserver":
-            return sqlserver_utils.call_proc(conn, proc_name, params)
+            return _sqlserver_utils().call_proc(conn, proc_name, params)
         if provider == "duckdb":
             raise NotImplementedError(
                 "DBAdapter.call_proc: DuckDB has no stored procedures."
@@ -148,7 +169,7 @@ class DBAdapter:
         """
         provider = self._provider_for_conn(conn)
         if provider == "sqlserver":
-            return sqlserver_utils.call_proc_with_output(
+            return _sqlserver_utils().call_proc_with_output(
                 conn, proc_name, named_inputs, output_specs
             )
         if provider == "duckdb":
@@ -196,7 +217,7 @@ class DBAdapter:
         """
         provider = self._provider_for_conn(conn)
         if provider == "sqlserver":
-            return sqlserver_utils.create_staging_table_if_not_exists(
+            return _sqlserver_utils().create_staging_table_if_not_exists(
                 conn, schema, table, column_defs
             )
         raise NotImplementedError(
@@ -236,7 +257,7 @@ class DBAdapter:
         """
         provider = self._provider_for_conn(conn)
         if provider == "sqlserver":
-            return sqlserver_utils.bulk_insert(conn, schema, table, rows, columns)
+            return _sqlserver_utils().bulk_insert(conn, schema, table, rows, columns)
         if provider == "duckdb":
             # DuckDB has no native bulk-insert helper today — use executemany.
             if not rows:
@@ -292,7 +313,7 @@ class DBAdapter:
         """
         provider = self._provider_for_conn(conn)
         if provider == "sqlserver":
-            return sqlserver_utils.expand_column_if_truncated(
+            return _sqlserver_utils().expand_column_if_truncated(
                 conn, schema, table, exc, rows, column_defs, batch_id
             )
         if provider == "duckdb":
