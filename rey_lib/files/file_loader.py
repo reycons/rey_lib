@@ -1039,6 +1039,20 @@ def _execute_one_hook_procedure(
         for op in raw_outputs
     ]
 
+    # Log input params (resolved values) BEFORE the proc fires so the call
+    # can be reproduced from the log alone — useful when a proc misbehaves
+    # in production and you need to replay it in SSMS.
+    if named_inputs:
+        inputs_repr = ", ".join(f"{name}={value!r}" for name, value in named_inputs)
+    else:
+        inputs_repr = "(none)"
+    _logger.info(
+        "Hook procedure invoking: %s (config='%s') inputs=[%s]",
+        proc_name,
+        sql_cfg.name,
+        inputs_repr,
+    )
+
     if output_specs:
         output_values = sqlserver_utils.call_proc_with_output(
             conn, proc_name, named_inputs, output_specs
@@ -1047,21 +1061,36 @@ def _execute_one_hook_procedure(
         sqlserver_utils.call_proc(conn, proc_name, [v for _n, v in named_inputs])
         output_values = {}
 
+    # Format output params as name=value pairs for the log line so callers
+    # can see what each hook actually returned (BatchID, BatchStepID, etc.)
+    # without having to enable DEBUG-level logging.
+    if output_values:
+        outputs_repr = ", ".join(f"{k}={v!r}" for k, v in output_values.items())
+    else:
+        outputs_repr = "(none)"
     _logger.info(
-        "Hook procedure executed: %s (config='%s') outputs=%s",
+        "Hook procedure executed: %s (config='%s') outputs=[%s]",
         proc_name,
         sql_cfg.name,
-        list(output_values.keys()),
+        outputs_repr,
     )
 
     # Write each output param to ctx via ctx_var, collect row_column mappings.
+    # Each ctx assignment is logged at INFO so the resolved value is visible
+    # in the log file alongside the executed-procedure line.
     row_columns: dict[str, Any] = {}
     for out_cfg in raw_outputs:
         value = output_values.get(out_cfg.name)
         ctx_var = getattr(out_cfg, "ctx_var", None)
         if ctx_var:
             object.__setattr__(ctx, ctx_var, value)
-            _logger.debug("Hook output: ctx.%s = %r", ctx_var, value)
+            _logger.info(
+                "  → ctx.%s = %r  (from %s output '%s')",
+                ctx_var,
+                value,
+                sql_cfg.name,
+                out_cfg.name,
+            )
         row_col = getattr(out_cfg, "row_column", None)
         if row_col:
             row_columns[row_col] = value
