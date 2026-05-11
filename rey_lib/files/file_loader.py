@@ -720,13 +720,17 @@ def run_load(
           source:         converted_path
           pickup_pattern: "file_*_{version}.csv"
           load:
-            connection:          SQLServer_MyDB_local
-            destination_table:   MyDB.dbo.my_table
-            file_id_column:      incoming_file_name
-            batch_id_column:     BatchID
+            connection:          <db_connection_name>
+            destination_table:   <database>.<schema>.<table>
+            file_id_column:      <column_holding_source_filename>
+            batch_id_column:     <column_holding_batch_id>
           movements:
             success: ...
             failure: ...
+
+    Both ``file_id_column`` and ``batch_id_column`` are required — they
+    name app-specific columns on the destination table, so rey_lib has
+    no opinion about what they should be called.
 
     Parameters
     ----------
@@ -1662,8 +1666,18 @@ def _load_one_file(
 
     # Read batch_id from ctx — set by start_batch().
     batch_id     = getattr(ctx, "batch_id", None)
-    file_id_col  = getattr(load_cfg.load, "file_id_column", "incoming_file_name")
-    batch_id_col = getattr(load_cfg.load, "batch_id_column", "BatchID")
+    # file_id_column and batch_id_column are app-specific column names on
+    # the destination staging table — they must be declared in YAML. No
+    # defaults: rey_lib doesn't know what your schema looks like.
+    file_id_col  = getattr(load_cfg.load, "file_id_column", None)
+    batch_id_col = getattr(load_cfg.load, "batch_id_column", None)
+    if not file_id_col or not batch_id_col:
+        raise ConfigError(
+            f"load '{load_cfg.name}': both 'file_id_column' and "
+            "'batch_id_column' must be set under load.* in YAML. "
+            "These are app-specific staging-table column names and rey_lib "
+            "ships with no defaults."
+        )
 
     try:
         # Check whether this file is already in staging — indicates a
