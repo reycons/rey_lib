@@ -1,0 +1,8 @@
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.0.3
+python-dotenv==1.2.2
+PyYAML==6.0.3
+-e git+ssh://git@github.com/reycons/rey_lib.git@7a040f064b1c4aefe60578c32366e83202a09ee2#egg=rey_lib
