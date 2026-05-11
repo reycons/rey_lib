@@ -91,6 +91,7 @@ def transform_files(
     ctx: Any,
     data_source: Any,
     transform_cfg: Any,
+    sql_dir: Optional[Path] = None,
 ) -> int:
     """
     Find and transform all pending inbox files for one data source.
@@ -107,14 +108,32 @@ def transform_files(
     batch_id is read from ctx.batch_id and injected into every output row
     via constants automatically — no explicit parameter needed.
 
+    File-level hook phases
+    ----------------------
+    Before processing each file:
+      ``ctx.current_file_path`` and ``ctx.current_file_name`` are stamped,
+      then any ``transform_hooks`` binding whose ``hook`` field is
+      ``"hooks.pre_file_transform"`` fires. After the file is processed
+      (whether the transform succeeded, was rejected for header mismatch,
+      or otherwise failed), bindings at ``"hooks.post_file_transform"``
+      fire. This lets per-file logging (e.g. a BatchStep row per file)
+      reference the actual filename via ``source: ctx.current_file_name``.
+
     Parameters
     ----------
     ctx : Any
         Application context — ctx.batch_id must be set before calling.
     data_source : Any
-        Namespace for one data_sources entry. Provides paths and max_files_per_run.
+        Namespace for one data_sources entry. Provides paths and
+        max_files_per_run. May expose ``transform_hooks`` — a list of
+        binding entries used for both data-source-level and file-level
+        phases (filtered by each binding's ``hook`` field).
     transform_cfg : Any
         One transform Namespace or a list of candidate transform Namespaces.
+    sql_dir : Optional[Path]
+        Base directory for ``type: sql_file`` hook configs. Passed through
+        to file-level hook dispatch. May be ``None`` when no sql_file
+        hooks are declared.
 
     Returns
     -------
@@ -132,6 +151,12 @@ def transform_files(
         _logger,
     )
     total = 0
+
+    # Hook connection cache local to this transform_files call — covers
+    # per-file pre/post_file_transform bindings. Closed in finally so a
+    # crash mid-loop still cleans up.
+    file_hook_conns: dict[str, Any] = {}
+    bindings = getattr(data_source, "transform_hooks", None)
 
     try:
         moved = _run_file_movements_pipeline(data_source)
@@ -166,34 +191,73 @@ def transform_files(
         )
 
         for file_path in pending:
-            matched_cfg, header_line = _match_transform(file_path, transforms)
-            if matched_cfg is None or header_line is None:
-                _logger.error(
-                    "No header match across %d transform(s) — file rejected: %s",
-                    len(transforms),
-                    file_path.name,
+            # Stamp current-file attrs on ctx BEFORE pre_file_transform fires
+            # so bindings can resolve `source: ctx.current_file_name` etc.
+            # _build_constants will overwrite these later inside the
+            # transform pipeline; the values are identical so the second
+            # write is a no-op.
+            object.__setattr__(ctx, "current_file_path", str(file_path))
+            object.__setattr__(ctx, "current_file_name", file_path.name)
+
+            # Use a try/finally around the per-file body so that
+            # post_file_transform always fires, even if matching fails or
+            # the transform raises.
+            try:
+                _run_hook_bindings(
+                    ctx,
+                    data_source,
+                    bindings,
+                    "hooks.pre_file_transform",
+                    file_hook_conns,
+                    sql_dir,
                 )
-                _reject_unmatched_file(data_source, transforms, file_path)
-                continue
 
-            _logger.debug(
-                "Matched header for '%s' → %s %s",
-                file_path.name,
-                matched_cfg.name,
-                matched_cfg.version,
-            )
+                matched_cfg, header_line = _match_transform(file_path, transforms)
+                if matched_cfg is None or header_line is None:
+                    _logger.error(
+                        "No header match across %d transform(s) — file rejected: %s",
+                        len(transforms),
+                        file_path.name,
+                    )
+                    _reject_unmatched_file(data_source, transforms, file_path)
+                    continue
 
-            success = _transform_one_file(
-                ctx,
-                data_source,
-                matched_cfg,
-                file_path,
-                header_line=header_line,
-            )
-            if success:
-                total += 1
+                _logger.debug(
+                    "Matched header for '%s' → %s %s",
+                    file_path.name,
+                    matched_cfg.name,
+                    matched_cfg.version,
+                )
+
+                success = _transform_one_file(
+                    ctx,
+                    data_source,
+                    matched_cfg,
+                    file_path,
+                    header_line=header_line,
+                )
+                if success:
+                    total += 1
+
+            finally:
+                _run_hook_bindings(
+                    ctx,
+                    data_source,
+                    bindings,
+                    "hooks.post_file_transform",
+                    file_hook_conns,
+                    sql_dir,
+                )
 
     finally:
+        # Commit and close every connection opened by file-level hooks.
+        for conn_name, conn in file_hook_conns.items():
+            try:
+                conn.commit()
+                conn.close()
+                _logger.debug("Closed file-hook connection '%s'", conn_name)
+            except Exception:  # noqa: BLE001 — close must never raise
+                pass
         log_exit(ctx, f"transform_files done: {total} file(s) transformed", _logger)
 
     return total
@@ -522,8 +586,15 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
                     list(row_cols.keys()),
                 )
 
-            # Step 3: transform files.
-            count = transform_files(ctx, data_source, data_source.transforms)
+            # Step 3: transform files. sql_dir is threaded through so
+            # per-file hook bindings (hooks.pre_file_transform /
+            # hooks.post_file_transform) can resolve type: sql_file configs.
+            count = transform_files(
+                ctx,
+                data_source,
+                data_source.transforms,
+                sql_dir=sql_dir,
+            )
             total += count
             if count:
                 _logger.info("%s: %d file(s) transformed", data_source.name, count)
