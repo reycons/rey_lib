@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: rey_lib
-Version: 0.9.10
+Version: 0.9.12
 Summary: Shared reusable library — config, logging, error handling, FTP, file I/O, DuckDB.
 Requires-Python: >=3.11
 Requires-Dist: pyyaml>=6.0.2
@@ -13,6 +13,8 @@ Requires-Dist: duckdb>=0.10.0; extra == "duckdb"
 Provides-Extra: files
 Requires-Dist: pandas>=2.0.0; extra == "files"
 Requires-Dist: openpyxl>=3.1.0; extra == "files"
+Provides-Extra: encrypt
+Requires-Dist: cryptography>=41.0.0; extra == "encrypt"
 Provides-Extra: dev
 Requires-Dist: pytest>=8.2.0; extra == "dev"
 Requires-Dist: pytest-mock>=3.14.0; extra == "dev"

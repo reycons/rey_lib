@@ -2037,7 +2037,11 @@ def _build_constants(
     # e.g. archive_path dir + file_path.name → available as ctx.archive_path.
     if paths is not None:
         for key, val in _namespace_to_dict(paths).items():
-            object.__setattr__(ctx, key, str(Path(str(val)) / file_path.name))
+            # Always normalize to single backslashes for Windows paths
+            path_str = str(Path(str(val)) / file_path.name)
+            if "\\" in path_str:
+                path_str = path_str.replace("\\\\", "\\")
+            object.__setattr__(ctx, key, path_str)
 
     # Resolve each constant value.
     # A constant may be a plain string or a structured dict with:
@@ -2058,8 +2062,12 @@ def _build_constants(
             quote_char = None
 
         # Resolve ctx.* references.
+
         if raw.startswith("ctx.") and ctx is not None:
             resolved = _resolve_ctx_path(ctx, raw[4:])
+            # Normalize double backslashes in resolved path fields
+            if isinstance(resolved, str) and "\\" in resolved:
+                resolved = resolved.replace("\\\\", "\\")
         else:
             resolved = raw
 

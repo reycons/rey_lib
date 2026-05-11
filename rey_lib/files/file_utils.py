@@ -485,6 +485,7 @@ def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
             fh,
             fieldnames=list(rows[0].keys()),
             quoting=csv.QUOTE_NONE,
+            quotechar="\x00",
             escapechar="\\",
         )
         writer.writeheader()
