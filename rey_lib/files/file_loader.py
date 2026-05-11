@@ -59,7 +59,14 @@ from rey_lib.files.transformer import (
 )
 from rey_lib.logs.log_utils import log_enter, log_exit
 
-__all__ = ["transform_files", "load_files", "load_files_to_callback", "run_transform", "run_load"]
+__all__ = [
+    "transform_files",
+    "load_files",
+    "load_files_to_callback",
+    "run_transform",
+    "run_load",
+    "run_app_hooks",
+]
 
 _logger = logging.getLogger(__name__)
 
@@ -460,25 +467,28 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
     Run the transform stage for every data source declared in ctx.
 
     Iterates ``ctx.data_sources``, calling :func:`transform_files` for each
-    one.  Before transforming, executes any ``hooks.pre_transform`` sql_configs
-    declared on the data source.  Output params from those hooks that declare
-    ``row_column`` are automatically injected as extra columns into every
-    transformed row.  After transforming, executes ``hooks.post_transform``
-    sql_configs.
+    one. Hooks declared on the data source via ``transform_hooks:`` are
+    dispatched at two phases:
 
-    hook execution order per data source:
-    1. ``hooks.pre_transform`` — proc/file runs; output params written to ctx
-       and injected into every row as extra columns via ``row_column``
+    1. ``hooks.pre_transform``  — fires before transform_files. Output
+       params that declare ``row_column`` are auto-injected as extra
+       columns into every transformed row for this data source.
     2. ``transform_files``
-    3. ``hooks.post_transform`` — proc/file runs; output params written to ctx
+    3. ``hooks.post_transform`` — fires after transform_files.
+
+    The library does not interpret phase names — it filters bindings by
+    the ``hook`` field declared on each entry. Add or rename phases by
+    editing the YAML; the dispatcher is shape-agnostic.
 
     Parameters
     ----------
     ctx : Any
         Application context. Must have a ``data_sources`` iterable where
-        each entry exposes a ``transforms`` attribute.
+        each entry exposes a ``transforms`` attribute. Each data source
+        may declare a ``transform_hooks`` list of binding entries
+        (``{name, sql_config, hook}``); when absent no hooks fire.
     sql_dir : Optional[Path]
-        Base directory for ``type: sql_file`` hook configs.
+        Base directory for ``type: sql_file`` hook sql_configs.
 
     Returns
     -------
@@ -488,29 +498,29 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
     total = 0
 
     for data_source in ctx.data_sources:
-        hooks_cfg = getattr(data_source, "hooks", None)
+        bindings = getattr(data_source, "transform_hooks", None)
         hook_conns: dict[str, Any] = {}
 
         try:
             # Step 1: clear any previously injected row columns for this source.
             object.__setattr__(ctx, "_injected_row_columns", {})
 
-            # Step 2: execute pre_transform hooks; collect row_column injections.
-            if hooks_cfg:
-                row_cols = _execute_hooks(
-                    ctx,
-                    data_source,
-                    getattr(hooks_cfg, "pre_transform", None),
-                    hook_conns,
-                    sql_dir,
+            # Step 2: pre_transform bindings; collect row_column injections.
+            row_cols = _run_hook_bindings(
+                ctx,
+                data_source,
+                bindings,
+                "hooks.pre_transform",
+                hook_conns,
+                sql_dir,
+            )
+            if row_cols:
+                object.__setattr__(ctx, "_injected_row_columns", row_cols)
+                _logger.debug(
+                    "%s: injecting row columns from pre_transform: %s",
+                    data_source.name,
+                    list(row_cols.keys()),
                 )
-                if row_cols:
-                    object.__setattr__(ctx, "_injected_row_columns", row_cols)
-                    _logger.debug(
-                        "%s: injecting row columns from pre_transform: %s",
-                        data_source.name,
-                        list(row_cols.keys()),
-                    )
 
             # Step 3: transform files.
             count = transform_files(ctx, data_source, data_source.transforms)
@@ -518,27 +528,94 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
             if count:
                 _logger.info("%s: %d file(s) transformed", data_source.name, count)
 
-            # Step 4: execute post_transform hooks.
-            if hooks_cfg:
-                _execute_hooks(
-                    ctx,
-                    data_source,
-                    getattr(hooks_cfg, "post_transform", None),
-                    hook_conns,
-                    sql_dir,
-                )
+            # Step 4: post_transform bindings.
+            _run_hook_bindings(
+                ctx,
+                data_source,
+                bindings,
+                "hooks.post_transform",
+                hook_conns,
+                sql_dir,
+            )
 
         finally:
             # Clear injected row columns so they don't bleed into the next source.
             object.__setattr__(ctx, "_injected_row_columns", {})
             for conn_name, conn in hook_conns.items():
                 try:
+                    conn.commit()
                     conn.close()
                     _logger.debug("Closed hook connection '%s'", conn_name)
                 except Exception:  # noqa: BLE001
                     pass
 
     return total
+
+
+def run_app_hooks(
+    ctx: Any,
+    phase: str,
+    sql_dir: Optional[Path] = None,
+) -> None:
+    """
+    Run every app-level (run-scoped) hook binding declared on ``ctx.app_hooks``
+    whose ``hook`` field matches ``phase``.
+
+    Intended for lifecycle bookends — call once at the very start of a CLI
+    invocation with ``phase="hooks.pre_run"`` and once at the very end with
+    ``phase="hooks.post_run"``. The library does not interpret phase names,
+    so callers are free to define additional run-scoped phases (e.g.
+    ``hooks.pre_sync``) by declaring matching bindings in YAML.
+
+    Connections opened by bindings during this call are cached for the
+    duration of the call and closed (with commit) before returning. Hook
+    bindings declared on ``ctx.app_hooks`` follow the same shape as
+    ``transform_hooks`` and ``load_hooks``: each entry has ``name``,
+    ``sql_config``, and ``hook`` fields.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context. Reads ``ctx.app_hooks`` (absent is a no-op).
+    phase : str
+        Phase label to filter bindings by, e.g. ``"hooks.pre_run"``.
+    sql_dir : Optional[Path]
+        Base directory for ``type: sql_file`` sql_configs.
+
+    Notes
+    -----
+    App-level bindings are not expected to drive row injection — the run
+    has no current data source. If a binding declares ``row_column`` output
+    params they are logged at debug level but otherwise ignored.
+    """
+    bindings = getattr(ctx, "app_hooks", None)
+    if not bindings:
+        return
+
+    open_conns: dict[str, Any] = {}
+    try:
+        row_cols = _run_hook_bindings(
+            ctx,
+            None,            # no data source at run scope
+            bindings,
+            phase,
+            open_conns,
+            sql_dir,
+        )
+        if row_cols:
+            _logger.debug(
+                "app_hooks %s returned row_column values (ignored at run scope): %s",
+                phase,
+                list(row_cols.keys()),
+            )
+    finally:
+        for conn_name, conn in open_conns.items():
+            try:
+                conn.commit()
+                conn.close()
+                _logger.debug("Closed app-hook connection '%s'", conn_name)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def run_load(
@@ -604,12 +681,25 @@ def run_load(
 
     for data_source in ctx.data_sources:
         # Cache open connections by name so multiple load configs that share
-        # a connection only open it once per data source.
+        # a connection only open it once per data source. Hook bindings reuse
+        # this cache so they may share the load connection or open their own.
         open_conns: dict[str, Any] = {}
         last_conn: Any = None
 
         try:
             for load_cfg in getattr(data_source, "loads", []):
+                load_bindings = getattr(load_cfg, "load_hooks", None)
+
+                # pre_load bindings — fire before this load entry's data move.
+                _run_hook_bindings(
+                    ctx,
+                    data_source,
+                    load_bindings,
+                    "hooks.pre_load",
+                    open_conns,
+                    sql_dir,
+                )
+
                 conn_name = getattr(getattr(load_cfg, "load", None), "connection", None)
                 if not conn_name:
                     raise ConfigError(
@@ -636,22 +726,20 @@ def run_load(
                 rows = load_files(ctx, conn, data_source, load_cfg, on_reload)
                 total += rows
 
+                # post_load bindings — fire after this load entry completes.
+                _run_hook_bindings(
+                    ctx,
+                    data_source,
+                    load_bindings,
+                    "hooks.post_load",
+                    open_conns,
+                    sql_dir,
+                )
+
             # post_load_sql runs on the last connection used for this source
             # (backward-compat with existing post_load_sql YAML key).
             if last_conn is not None:
                 _execute_post_load_sql(last_conn, data_source, sql_dir)
-
-            # hooks.post_load — may reference any connection, including ones
-            # different from the load connection.
-            hooks_cfg = getattr(data_source, "hooks", None)
-            if hooks_cfg:
-                _execute_hooks(
-                    ctx,
-                    data_source,
-                    getattr(hooks_cfg, "post_load", None),
-                    open_conns,
-                    sql_dir,
-                )
 
         finally:
             # Always close every connection opened for this data source.
@@ -701,31 +789,6 @@ def _execute_post_load_sql(conn: Any, data_source: Any, sql_dir: Optional[Path])
 # ---------------------------------------------------------------------------
 # Private — sql_config hook execution
 # ---------------------------------------------------------------------------
-
-def _normalize_hook_names(hook_ref: Any) -> list[str]:
-    """
-    Normalize a hook reference from YAML to a list of sql_config names.
-
-    Accepts a single name (string) or a list of names.  Returns an empty
-    list when the value is None or empty.
-
-    Parameters
-    ----------
-    hook_ref : Any
-        ``hooks.pre_transform`` / ``hooks.post_load`` value from the data
-        source YAML.  May be a string, list, or None.
-
-    Returns
-    -------
-    list[str]
-        Zero or more sql_config names to execute in order.
-    """
-    if not hook_ref:
-        return []
-    if isinstance(hook_ref, str):
-        return [hook_ref]
-    return list(hook_ref)
-
 
 def _find_sql_config(ctx: Any, name: str) -> Any:
     """
@@ -1006,47 +1069,77 @@ def _execute_one_hook_procedure(
     return row_columns
 
 
-def _execute_hooks(
+def _run_hook_bindings(
     ctx: Any,
     data_source: Any,
-    hook_ref: Any,
+    bindings: Any,
+    phase: str,
     open_conns: dict[str, Any],
     sql_dir: Optional[Path],
 ) -> dict[str, Any]:
     """
-    Execute a hook list (or single hook name) for a pipeline stage.
+    Execute every hook binding in ``bindings`` whose ``hook`` field matches
+    ``phase``.
 
-    Resolves each name from ctx.sql_configs, executes in declaration order,
-    and collects any ``row_column`` output-param values to return.
+    The library stays abstract: it does not interpret phase names, it only
+    filters by string equality. Callers decide which phase labels exist
+    (e.g. ``"hooks.pre_run"``, ``"hooks.pre_transform"``,
+    ``"hooks.post_load"``) — bindings declare the phase they fire at via
+    their ``hook`` field in YAML.
+
+    Each binding is expected to expose:
+      - ``name``        — descriptive label (used in error messages)
+      - ``sql_config``  — name of an entry in ``ctx.sql_configs``
+      - ``hook``        — phase label this binding fires at
 
     Parameters
     ----------
     ctx : Any
-        Application context.
+        Application context. Must expose ``ctx.sql_configs``.
     data_source : Any
-        Current data source Namespace.
-    hook_ref : Any
-        A single sql_config name (str) or list of names, taken directly
-        from the data source YAML hooks section.
+        Current data source Namespace, or ``None`` for app-level bindings.
+        Passed through to ``_resolve_hook_param_value`` so bindings can
+        reference ``data_source.<attr>`` in their params.
+    bindings : Any
+        Iterable of binding Namespaces (from YAML), or ``None``/empty.
+    phase : str
+        Phase label to filter bindings by. Only bindings whose ``hook``
+        equals this string are executed; ordering follows YAML declaration.
     open_conns : dict[str, Any]
-        Connection cache shared across hooks for this pipeline run.
-        Caller is responsible for closing all connections in finally.
+        Connection cache shared across hooks for this scope. The caller
+        owns lifecycle — opens via the cache, closes in a ``finally``.
     sql_dir : Optional[Path]
-        Base directory for sql_file hooks.
+        Base directory for ``type: sql_file`` sql_configs.
 
     Returns
     -------
     dict[str, Any]
-        Merged ``{row_column: value}`` from all procedure hooks that
-        declared ``row_column`` output params.
-    """
-    names = _normalize_hook_names(hook_ref)
-    if not names:
-        return {}
+        Merged ``{row_column: value}`` from every binding's output params
+        that declared ``row_column``. Empty dict when nothing matched.
 
+    Raises
+    ------
+    ConfigError
+        If a matching binding has no ``sql_config`` field, or the named
+        sql_config is missing from ``ctx.sql_configs``.
+    """
     row_columns: dict[str, Any] = {}
-    for name in names:
-        sql_cfg = _find_sql_config(ctx, name)
+    if not bindings:
+        return row_columns
+
+    for binding in bindings:
+        if getattr(binding, "hook", None) != phase:
+            continue
+
+        sql_cfg_name = getattr(binding, "sql_config", None)
+        if not sql_cfg_name:
+            label = getattr(binding, "name", "<unnamed>")
+            raise ConfigError(
+                f"Hook binding '{label}' (phase '{phase}') is missing "
+                "'sql_config'. Add 'sql_config: <name>' to the binding."
+            )
+
+        sql_cfg = _find_sql_config(ctx, sql_cfg_name)
         cols = _execute_one_hook(ctx, data_source, sql_cfg, open_conns, sql_dir)
         row_columns.update(cols)
 
