@@ -1386,120 +1386,90 @@ def _max_string_len(rows: list[dict[str, Any]], col_name: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _transform_one_file(
-    ctx: Any,
-    data_source: Any,
-    transform_cfg: Any,
-    file_path: Path,
-    header_line: Optional[str] = None,
+	ctx: Any,
+	data_source: Any,
+	transform_cfg: Any,
+	file_path: Path,
+	header_line: Optional[str] = None,
 ) -> bool:
-    """
-    Transform one inbox file and write the output to processing_path.
+	log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
 
-    Validates the header, reads and transforms all rows, writes the output
-    file, then moves the source file per configured movements.
+	try:
+		if header_line is None and not _validate_header(file_path, transform_cfg):
+			_logger.error("Header mismatch — file rejected: %s", file_path.name)
+			_execute_movements(
+				transform_cfg.movements.failure, file_path, data_source.paths
+			)
+			log_exit(
+				ctx,
+				f"_transform_one_file rejected (header): {file_path.name}",
+				_logger,
+			)
+			return False
 
-    Parameters
-    ----------
-    ctx : Any
-        Application context.
-    data_source : Any
-        Data source Namespace providing paths.
-    transform_cfg : Any
-        Transform Namespace.
-    file_path : Path
-        Full path of the source file to transform.
-    header_line : Optional[str]
-        Exact matched header line. When provided, header validation is
-        already complete and row reading starts from this line.
+		constants = _build_constants(
+			ctx, transform_cfg.constants, file_path, data_source.paths
+		)
 
-    Returns
-    -------
-    bool
-        True on success, False on any failure.
-    """
-    log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
+		rows, errors = _read_and_transform(
+			file_path,
+			transform_cfg,
+			constants,
+			header_line=header_line,
+		)
 
-    try:
-        # Validate header before reading any rows when no prior match exists.
-        if header_line is None and not _validate_header(file_path, transform_cfg):
-            _logger.error("Header mismatch — file rejected: %s", file_path.name)
-            _execute_movements(
-                transform_cfg.movements.failure, file_path, data_source.paths
-            )
-            log_exit(
-                ctx,
-                f"_transform_one_file rejected (header): {file_path.name}",
-                _logger,
-            )
-            return False
+		if errors:
+			for row_num, col, err in errors:
+				_logger.error(
+					"Transform error — file=%s row=%d col=%s: %s",
+					file_path.name, row_num, col, err,
+				)
+			_execute_movements(
+				transform_cfg.movements.failure, file_path, data_source.paths
+			)
+			log_exit(
+				ctx,
+				f"_transform_one_file rejected (errors): {file_path.name}",
+				_logger,
+			)
+			return False
 
+		if not rows:
+			_logger.warning("No rows produced from file: %s", file_path.name)
+			_execute_movements(
+				transform_cfg.movements.failure, file_path, data_source.paths
+			)
+			log_exit(
+				ctx,
+				f"_transform_one_file rejected (empty): {file_path.name}",
+				_logger,
+			)
+			return False
 
-        constants = _build_constants(
-            ctx, transform_cfg.constants, file_path, data_source.paths
-        )
+		output_path = _build_output_path(data_source.paths, transform_cfg, file_path)
+		write_file(output_path, rows, file_type="CSV")
 
-        rows, errors = _read_and_transform(
-            file_path,
-            transform_cfg,
-            constants,
-            header_line=header_line,
-        )
+		_logger.info(
+			"Transformed: %s → %s  rows=%d",
+			file_path.name, output_path.name, len(rows),
+		)
 
-        if errors:
-            for row_num, col, err in errors:
-                _logger.error(
-                    "Transform error — file=%s row=%d col=%s: %s",
-                    file_path.name, row_num, col, err,
-                )
-            _execute_movements(
-                transform_cfg.movements.failure, file_path, data_source.paths
-            )
-            log_exit(
-                ctx,
-                f"_transform_one_file rejected (errors): {file_path.name}",
-                _logger,
-            )
-            return False
+		_execute_movements(
+			transform_cfg.movements.success, file_path, data_source.paths
+		)
+		log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
+		return True
 
-        if not rows:
-            _logger.warning("No rows produced from file: %s", file_path.name)
-            _execute_movements(
-                transform_cfg.movements.failure, file_path, data_source.paths
-            )
-            log_exit(
-                ctx,
-                f"_transform_one_file rejected (empty): {file_path.name}",
-                _logger,
-            )
-            return False
-
-        # Build output path and write transformed file.
-        output_path = _build_output_path(data_source.paths, transform_cfg, file_path)
-        write_file(output_path, rows, file_type="CSV")
-
-        _logger.info(
-            "Transformed: %s → %s  rows=%d",
-            file_path.name, output_path.name, len(rows),
-        )
-
-        # Move source file per success movements.
-        _execute_movements(
-            transform_cfg.movements.success, file_path, data_source.paths
-        )
-        log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
-        return True
-
-    except _NON_FATAL_PIPELINE_ERRORS as exc:
-        _logger.error(
-            "Unexpected error transforming '%s': %s",
-            file_path.name, exc, exc_info=True,
-        )
-        _execute_movements(
-            transform_cfg.movements.failure, file_path, data_source.paths
-        )
-        log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
-        return False
-
+	except _NON_FATAL_PIPELINE_ERRORS as exc:
+		_logger.error(
+			"Unexpected error transforming '%s': %s",
+			file_path.name, exc, exc_info=True,
+		)
+		_execute_movements(
+			transform_cfg.movements.failure, file_path, data_source.paths
+		)
+		log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
+		return False
 
 def _build_output_path(
     paths: Any,
@@ -1787,34 +1757,41 @@ Note: this must be updated to use datatypes that are universal in SQL standars n
 # ---------------------------------------------------------------------------
 
 def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
-    """
-    Read the first non-blank line of a file and validate it against the
-    expected header defined in transform_cfg.
+	"""
+	Read the first non-blank line of a file and validate it against the
+	expected header defined in transform_cfg.
+	"""
+	encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
 
-    Parameters
-    ----------
-    file_path : Path
-        File to validate.
-    transform_cfg : Any
-        Transform Namespace providing the expected header string and encoding.
+	try:
+		with file_path.open(encoding=encoding, errors="replace") as fh:
+			for line in fh:
+				stripped = line.strip()
 
-    Returns
-    -------
-    bool
-        True if the header matches, False otherwise.
-    """
-    encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
-    try:
-        with file_path.open(encoding=encoding, errors="replace") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped:
-                    cfg_dict = _namespace_to_dict(transform_cfg)
-                    return match_header(stripped, cfg_dict)
-    except OSError as exc:
-        _logger.error("Cannot read file '%s': %s", file_path.name, exc)
-    return False
+				if stripped:
+					cfg_dict = _namespace_to_dict(transform_cfg)
 
+					matched = match_header(stripped, cfg_dict)
+
+					if not matched:
+
+						expected = cfg_dict.get("header")
+
+						_logger.error(
+							"Header validation failed for '%s'\n"
+							"Expected:\n%s\n\n"
+							"Actual:\n%s",
+							file_path.name,
+							expected,
+							stripped,
+						)
+
+					return matched
+
+	except OSError as exc:
+		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
+
+	return False
 
 # ---------------------------------------------------------------------------
 # Private — row reading and transformation
