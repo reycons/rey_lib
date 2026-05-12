@@ -1607,11 +1607,15 @@ def _load_one_file(
 
     try:
         # Validate header before reading any rows.
-        if not _validate_header(file_path, transform_cfg):
+        expected_columns = _db_adapter.get_table_columns(conn, schema, table)
+        encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
+
+        if not _validate_load_header(file_path, expected_columns, encoding):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
             _execute_movements(load_cfg.movements.failure, file_path, paths)
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
+
 
         constants = _build_constants(ctx, transform_cfg.constants, file_path, paths)
 
@@ -1755,6 +1759,42 @@ Note: this must be updated to use datatypes that are universal in SQL standars n
 # ---------------------------------------------------------------------------
 # Private — header validation
 # ---------------------------------------------------------------------------
+def _validate_load_header(
+	file_path: Path,
+	expected_columns: list[str],
+	encoding: str = "utf-8-sig",
+) -> bool:
+	"""
+	Validate converted-file header against destination table columns.
+	"""
+	try:
+		with file_path.open(encoding=encoding, errors="replace") as fh:
+			for line in fh:
+				actual_header = line.strip()
+
+				if not actual_header:
+					continue
+
+				actual_columns = actual_header.split(",")
+
+				if actual_columns == expected_columns:
+					return True
+
+				_logger.error(
+					"Load header validation failed for '%s'\n"
+					"Expected table columns:\n%s\n\n"
+					"Actual file columns:\n%s",
+					file_path.name,
+					",".join(expected_columns),
+					actual_header,
+				)
+				return False
+
+	except OSError as exc:
+		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
+
+	return False
+
 
 def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
 	"""

@@ -181,6 +181,60 @@ class DBAdapter:
     # ------------------------------------------------------------------
     # Staging / bulk insert
     # ------------------------------------------------------------------
+    def get_table_columns(
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> list[str]:
+        """
+        Return columns in ordinal order.
+
+        Supports:
+            schema.table
+            database.schema.table
+        """
+
+        database_name = None
+        schema_name = schema
+
+        if "." in schema:
+            parts = schema.split(".", 1)
+
+            database_name = parts[0]
+            schema_name = parts[1]
+
+        if database_name:
+            sql = f"""
+                SELECT
+                    c.name
+                FROM [{database_name}].sys.columns c
+                    INNER JOIN [{database_name}].sys.tables t
+                        ON c.object_id = t.object_id
+                    INNER JOIN [{database_name}].sys.schemas s
+                        ON t.schema_id = s.schema_id
+                WHERE s.name = ?
+                    AND t.name = ?
+                ORDER BY c.column_id
+            """
+        else:
+            sql = """
+                SELECT
+                    c.name
+                FROM sys.columns c
+                    INNER JOIN sys.tables t
+                        ON c.object_id = t.object_id
+                    INNER JOIN sys.schemas s
+                        ON t.schema_id = s.schema_id
+                WHERE s.name = ?
+                    AND t.name = ?
+                ORDER BY c.column_id
+            """
+
+        cur = conn.cursor()
+        cur.execute(sql, schema_name, table)
+
+        return [row[0] for row in cur.fetchall()]
+    
 
     def create_staging_table_if_not_exists(
         self,
@@ -306,6 +360,8 @@ class DBAdapter:
         except Exception:  # noqa: BLE001 — backend module unavailable
             pass
         return False
+
+
 
     # ------------------------------------------------------------------
     # Private — provider resolution

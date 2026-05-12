@@ -459,6 +459,53 @@ def call_proc_with_output(
     finally:
         cursor.close()
 
+def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
+	"""
+	Return SQL Server table columns in ordinal order.
+
+	``schema`` may be either:
+	- schema
+	- database.schema
+	"""
+	database_name = None
+	schema_name = schema
+
+	if "." in schema:
+		parts = schema.split(".", 1)
+		database_name = parts[0]
+		schema_name = parts[1]
+
+	if database_name:
+		sql = f"""
+			SELECT
+				c.name
+			FROM {quote_identifier(database_name)}.sys.columns c
+				INNER JOIN {quote_identifier(database_name)}.sys.tables t
+					ON c.object_id = t.object_id
+				INNER JOIN {quote_identifier(database_name)}.sys.schemas s
+					ON t.schema_id = s.schema_id
+			WHERE s.name = ?
+				AND t.name = ?
+			ORDER BY c.column_id
+		"""
+	else:
+		sql = """
+			SELECT
+				c.name
+			FROM sys.columns c
+				INNER JOIN sys.tables t
+					ON c.object_id = t.object_id
+				INNER JOIN sys.schemas s
+					ON t.schema_id = s.schema_id
+			WHERE s.name = ?
+				AND t.name = ?
+			ORDER BY c.column_id
+		"""
+
+	cur = conn.cursor()
+	cur.execute(sql, schema_name, table)
+	return [row[0] for row in cur.fetchall()]
+
 
 def load_sql(name: str) -> str:
     """
