@@ -28,7 +28,7 @@ transform_files(ctx, data_source, transform_cfg)
     Find and transform all pending inbox files for one data source.
     Accepts one transform config or a list of candidate transforms.
     Returns total number of files successfully transformed.
-load_files(ctx, conn, data_source, load_cfg, on_reload)
+load_files(ctx, conn, data_source, load_cfg)
     Find and load all pending files for one load configuration.
     Returns total rows loaded across all files processed.
     batch_id is read from ctx.batch_id — set by start_batch() before calling.
@@ -790,7 +790,7 @@ def run_load(
 
                 conn = open_conns[conn_name]
                 last_conn = conn
-                rows = load_files(ctx, conn, data_source, load_cfg, on_reload)
+                rows = load_files(ctx, conn, data_source, load_cfg)
                 total += rows
 
                 # post_load bindings — fire after this load entry completes.
