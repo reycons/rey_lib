@@ -252,111 +252,87 @@ def fetch(
     finally:
         cursor.close()
 
-
 def bulk_insert(
-    conn: pyodbc.Connection,
-    schema: str,
-    table: str,
-    rows: list[dict[str, Any]],
-    columns: list[str],
+	conn: pyodbc.Connection,
+	schema: str,
+	table: str,
+	rows: list[dict[str, Any]],
+	columns: list[str],
 ) -> int:
-    """
-    Insert a list of row dicts into any table using fast_executemany.
+	"""
+	Insert a list of row dicts into any table using fast_executemany.
 
-    All rows are inserted in a single server round-trip. The caller is
-    responsible for commit() and rollback() — this function does not
-    commit. On failure the exception is raised and the caller must
-    rollback to leave the table in a consistent state.
+	All rows are inserted in a single server round-trip. The caller is
+	responsible for commit() and rollback() — this function does not
+	commit. On failure the exception is raised and the caller must
+	rollback to leave the table in a consistent state.
 
-    Column order is determined by the columns parameter — values are
-    extracted from each row dict in that order. This decouples the
-    dict key order from the INSERT column list.
+	Column order is determined by the columns parameter — values are
+	extracted from each row dict in that order. This decouples the
+	dict key order from the INSERT column list.
+	"""
+	if not rows:
+		_logger.debug(
+			"bulk_insert: no rows to insert into %s.%s",
+			schema,
+			table,
+		)
+		return 0
 
-    Parameters
-    ----------
-    conn : pyodbc.Connection
-        Open pyodbc connection with autocommit disabled.
-    schema : str
-        Target schema name (e.g. 'Staging_SCH').
-    table : str
-        Target table name (e.g. 'FileLanding').
-    rows : list[dict[str, Any]]
-        Rows to insert. Each dict must contain all keys listed in columns.
-    columns : list[str]
-        Ordered list of column names to insert. Determines both the
-        INSERT column list and the value extraction order from each row.
+	col_list = ", ".join(columns)
+	placeholders = ", ".join("?" * len(columns))
 
-    Returns
-    -------
-    int
-        Number of rows inserted.
+	sql = (
+		f"INSERT INTO {schema}.{table} ({col_list}) "
+		f"VALUES ({placeholders})"
+	)
 
-    Raises
-    ------
-    DatabaseError
-        If the bulk insert fails for any reason.
-    """
-    if not rows:
-        _logger.debug("bulk_insert: no rows to insert into %s.%s", schema, table)
-        return 0
+	value_rows = _prepare_bulk_insert_rows(rows, columns)
 
-    # Build INSERT statement — all values parameterized, no data interpolation.
-    col_list     = ", ".join(columns)
-    placeholders = ", ".join("?" * len(columns))
-    sql          = (
-        f"INSERT INTO {schema}.{table} ({col_list}) "
-        f"VALUES ({placeholders})"
-    )
+	cursor = conn.cursor()
 
-    # Extract values from each row in column order.
-    value_rows = _prepare_bulk_insert_rows(rows, columns)
+	try:
+		cursor.fast_executemany = True
+		cursor.executemany(sql, value_rows)
 
-    cursor = conn.cursor()
+		row_count = len(rows)
 
-    try:
-        cursor.fast_executemany = True
-        cursor.executemany(sql, value_rows)
+		_logger.debug(
+			"bulk_insert: %d row(s) → %s.%s",
+			row_count,
+			schema,
+			table,
+		)
 
-        row_count = len(rows)
+		return row_count
 
-        _logger.debug(
-            "bulk_insert: %d row(s) → %s.%s",
-            row_count,
-            schema,
-            table,
-        )
+	except pyodbc.Error as exc:
+		_logger.error(
+			"bulk_insert failed table=%s.%s",
+			schema,
+			table,
+		)
 
-        return row_count
+		_logger.error(
+			"bulk_insert columns=%s",
+			columns,
+		)
 
-    except pyodbc.Error as exc:
+		if value_rows:
+			for col, val in zip(columns, value_rows[0]):
+				_logger.error(
+					"bulk_insert first_row column=%s value=%r",
+					col,
+					val,
+				)
 
-        _logger.error(
-            "bulk_insert failed table=%s.%s",
-            schema,
-            table,
-        )
+		raise DatabaseError(
+			f"bulk_insert failed for {schema}.{table}: {exc}"
+		) from exc
 
-        _logger.error(
-            "bulk_insert columns=%s",
-            columns,
-        )
-
-    if rows:
-        for col, val in zip(columns, value_rows[0]):
-            _logger.error(
-                "bulk_insert first_row column=%s value=%r",
-                col,
-                val,
-            )
-            
-
-        raise DatabaseError(
-            f"bulk_insert failed for {schema}.{table}: {exc}"
-        ) from exc
-
-    finally:
-        cursor.close()
-
+	finally:
+		cursor.close()
+          
 
 def call_proc(
     conn: pyodbc.Connection,
