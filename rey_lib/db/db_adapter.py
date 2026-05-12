@@ -182,59 +182,24 @@ class DBAdapter:
     # Staging / bulk insert
     # ------------------------------------------------------------------
     def get_table_columns(
+        self,
         conn: Any,
         schema: str,
         table: str,
     ) -> list[str]:
         """
-        Return columns in ordinal order.
-
-        Supports:
-            schema.table
-            database.schema.table
+        Return table columns in ordinal order for the connection backend.
         """
+        provider = self._provider_for_conn(conn)
 
-        database_name = None
-        schema_name = schema
+        if provider == "sqlserver":
+            return _sqlserver_utils().get_table_columns(conn, schema, table)
 
-        if "." in schema:
-            parts = schema.split(".", 1)
+        if provider == "duckdb":
+            return _duckdb_utils().get_table_columns(conn, schema, table)
 
-            database_name = parts[0]
-            schema_name = parts[1]
+        raise ConfigError(f"DBAdapter: unsupported provider '{provider}'.")
 
-        if database_name:
-            sql = f"""
-                SELECT
-                    c.name
-                FROM [{database_name}].sys.columns c
-                    INNER JOIN [{database_name}].sys.tables t
-                        ON c.object_id = t.object_id
-                    INNER JOIN [{database_name}].sys.schemas s
-                        ON t.schema_id = s.schema_id
-                WHERE s.name = ?
-                    AND t.name = ?
-                ORDER BY c.column_id
-            """
-        else:
-            sql = """
-                SELECT
-                    c.name
-                FROM sys.columns c
-                    INNER JOIN sys.tables t
-                        ON c.object_id = t.object_id
-                    INNER JOIN sys.schemas s
-                        ON t.schema_id = s.schema_id
-                WHERE s.name = ?
-                    AND t.name = ?
-                ORDER BY c.column_id
-            """
-
-        cur = conn.cursor()
-        cur.execute(sql, schema_name, table)
-
-        return [row[0] for row in cur.fetchall()]
-    
 
     def create_staging_table_if_not_exists(
         self,
