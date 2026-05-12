@@ -168,86 +168,69 @@ def parse_date_from_filename(filename: str, file_type_cfg: dict) -> Optional[dat
         return None
 
 
-def transform_row(
-    raw_row: dict[str, str],
-    file_type_cfg: dict,
-    file_date: Optional[date] = None,
-) -> Optional[dict[str, Any]]:
+def _transform_date(value: str, cfg: dict) -> Optional[date]:
     """
-    Apply column mapping, constants, transforms, and file_date injection
-    to one raw CSV row.
+    Parse a date string using the configured format.
 
-    Returns a new dict whose keys are database column names, or None if
-    the row fails the row_filter check and should be discarded.
-
-    Application-specific values such as source_file or batch_id must be
-    provided via the 'constants' section of file_type_cfg — they are
-    never injected by this function directly.
+    Tries the primary format first, then a set of common fallback formats
+    to handle broker-specific date quirks without requiring explicit config.
 
     Parameters
     ----------
-    raw_row : dict[str, str]
-        Raw row from the CSV reader — keys are source file column names.
-    file_type_cfg : dict
-        A single file_types entry from the data source config. Expected
-        keys: columns, constants, field_transforms, row_filter,
-        file_date_column (optional).
-    file_date : Optional[date]
-        Date parsed from the filename by parse_date_from_filename().
-        Injected into the column named by file_type_cfg['file_date_column']
-        when that key is present and non-empty.
+    value : str
+        Raw string value from the mapped column.
+    cfg : dict
+        Transform config. Keys: format (required), allow_blank (optional).
 
     Returns
     -------
-    Optional[dict[str, Any]]
-        Transformed row dict, or None if the row should be discarded.
+    Optional[date]
+        Parsed date, or None if blank and allow_blank is True.
 
     Raises
     ------
     TransformError
-        If a required field fails to transform and has no default.
+        If the value cannot be parsed.
     """
-    # Apply row filter first — discard non-data rows silently.
-    if not _passes_row_filter(raw_row, file_type_cfg):
-        return None
+    value = value.strip()
 
-    columns    = file_type_cfg.get("columns",         {})
-    constants  = file_type_cfg.get("constants",        {})
-    transforms = file_type_cfg.get("field_transforms", {})
+    # ---------------------------------------------------------------
+    # Blank handling is config-driven.
+    # ---------------------------------------------------------------
+    if not value:
+        if cfg.get("allow_blank", False):
+            return None
 
-    out: dict[str, Any] = {}
+        raise TransformError(
+            "Empty date value and allow_blank is False."
+        )
 
-    # Step 1 — column mapping: db_col → raw value from source column.
-    for db_col, src_col in columns.items():
-        raw_val     = raw_row.get(src_col)
-        out[db_col] = raw_val.strip() if raw_val is not None else ""
+    fmt    = cfg.get("format", "%m/%d/%Y")
+    result = _try_parse_date(value, fmt)
 
+    # ---------------------------------------------------------------
+    # Fallback formats for common broker date variants.
+    # ---------------------------------------------------------------
+    if result is None:
+        for fallback in (
+             "%m/%d/%y"
+            ,"%-m/%-d/%y"
+            ,"%-m/%-d/%Y"
+        ):
+            result = _try_parse_date(value, fallback)
 
-    for db_col, value in constants.items():
-        out[db_col] = value
+            if result is not None:
+                break
 
-    # Step 3 — inject file_date into the configured column when provided.
-    # The target column name is config-driven — no column names hardcoded here.
-    if file_date is not None:
-        date_col = file_type_cfg.get("file_date_column", "")
-        if date_col:
-            out[date_col] = file_date
+    # ---------------------------------------------------------------
+    # Hard failure on invalid nonblank dates.
+    # ---------------------------------------------------------------
+    if result is None:
+        raise TransformError(
+            f"Cannot parse '{value}' as date with format '{fmt}'."
+        )
 
-    # Step 4 — apply field transforms in definition order.
-    # Secrets (resolved env-var values for encrypt transforms) are injected
-    # into file_type_cfg by the caller (file_loader) before rows are read.
-    secrets = file_type_cfg.get("secrets", {})
-    for db_col, transform_cfg in transforms.items():
-        transform_type = transform_cfg.get("type", "")
-        try:
-            out[db_col] = _apply_transform(
-                db_col, out, raw_row, transform_cfg, transform_type, secrets
-            )
-        except TransformError as exc:
-            _logger.warning("Transform failed for column '%s': %s", db_col, exc)
-            out[db_col] = None
-
-    return out
+    return result
 
 
 # ---------------------------------------------------------------------------
