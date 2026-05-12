@@ -1616,24 +1616,13 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
-
-        constants = _build_constants(ctx, transform_cfg.constants, file_path, paths)
-
-        rows, errors = _read_and_transform(file_path, transform_cfg, constants)
-
-        if errors:
-            for row_num, col, err in errors:
-                _logger.error(
-                    "Transform error — file=%s row=%d col=%s: %s",
-                    file_path.name, row_num, col, err,
-                )
-            _execute_movements(load_cfg.movements.failure, file_path, paths)
-            log_exit(
-                ctx,
-                f"_load_one_file rejected (transform errors): {file_path.name}",
-                _logger,
+        rows = list(
+            get_reader(
+                file_path,
+                file_type="CSV",
+                encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
             )
-            return 0
+        )
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
