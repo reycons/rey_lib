@@ -467,45 +467,43 @@ def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
 	- schema
 	- database.schema
 	"""
+
 	database_name = None
 	schema_name = schema
 
 	if "." in schema:
 		parts = schema.split(".", 1)
+
 		database_name = parts[0]
 		schema_name = parts[1]
 
 	if database_name:
 		sql = f"""
 			SELECT
-				c.name
-			FROM {quote_identifier(database_name)}.sys.columns c
-				INNER JOIN {quote_identifier(database_name)}.sys.tables t
-					ON c.object_id = t.object_id
-				INNER JOIN {quote_identifier(database_name)}.sys.schemas s
-					ON t.schema_id = s.schema_id
-			WHERE s.name = ?
-				AND t.name = ?
-			ORDER BY c.column_id
+				column_name
+			FROM {database_name}.information_schema.columns
+			WHERE table_schema = ?
+				AND table_name = ?
+			ORDER BY ordinal_position
 		"""
 	else:
 		sql = """
 			SELECT
-				c.name
-			FROM sys.columns c
-				INNER JOIN sys.tables t
-					ON c.object_id = t.object_id
-				INNER JOIN sys.schemas s
-					ON t.schema_id = s.schema_id
-			WHERE s.name = ?
-				AND t.name = ?
-			ORDER BY c.column_id
+				column_name
+			FROM information_schema.columns
+			WHERE table_schema = ?
+				AND table_name = ?
+			ORDER BY ordinal_position
 		"""
 
 	cur = conn.cursor()
+
 	cur.execute(sql, schema_name, table)
+
 	return [row[0] for row in cur.fetchall()]
 
+def quote_identifier(value: str) -> str:
+	return "[" + value.replace("]", "]]") + "]"
 
 def load_sql(name: str) -> str:
     """
