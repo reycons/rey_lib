@@ -315,20 +315,48 @@ def bulk_insert(
     ]
 
     cursor = conn.cursor()
+
     try:
-        # fast_executemany batches all rows into a single server round-trip.
         cursor.fast_executemany = True
         cursor.executemany(sql, value_rows)
+
         row_count = len(rows)
-        _logger.debug("bulk_insert: %d row(s) → %s.%s", row_count, schema, table)
+
+        _logger.debug(
+            "bulk_insert: %d row(s) → %s.%s",
+            row_count,
+            schema,
+            table,
+        )
+
         return row_count
+
     except pyodbc.Error as exc:
+
+        _logger.error(
+            "bulk_insert failed table=%s.%s",
+            schema,
+            table,
+        )
+
+        _logger.error(
+            "bulk_insert columns=%s",
+            columns,
+        )
+
+        if value_rows:
+            _logger.error(
+                "bulk_insert first_row=%r",
+                value_rows[0],
+            )
+
         raise DatabaseError(
             f"bulk_insert failed for {schema}.{table}: {exc}"
         ) from exc
+
     finally:
         cursor.close()
-
+        
 
 def call_proc(
     conn: pyodbc.Connection,

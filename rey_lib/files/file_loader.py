@@ -41,6 +41,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from rey_lib.logs.log_utils import log_enter, log_exit
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
@@ -57,7 +58,6 @@ from rey_lib.files.transformer import (
     TransformError,
     parse_date_from_filename,
 )
-from rey_lib.logs.log_utils import log_enter, log_exit
 
 # Module-level DBAdapter instance. All DB calls in this module go through
 # the adapter, which dispatches to the right backend implementation based
@@ -1419,11 +1419,16 @@ def _transform_one_file(
 		)
 
 		if errors:
-			for row_num, col, err in errors:
+			for row_num, col, raw_value, err in errors:
 				_logger.error(
-					"Transform error — file=%s row=%d col=%s: %s",
-					file_path.name, row_num, col, err,
+					"Transform error — file=%s row=%d col=%s value=%r: %s",
+					file_path.name,
+					row_num,
+					col,
+					raw_value,
+					err,
 				)
+
 			_execute_movements(
 				transform_cfg.movements.failure, file_path, data_source.paths
 			)
@@ -1470,7 +1475,7 @@ def _transform_one_file(
 		)
 		log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
 		return False
-
+    
 def _build_output_path(
     paths: Any,
     transform_cfg: Any,
@@ -1559,7 +1564,6 @@ def _pattern_to_glob(file_pattern: str) -> str:
 
 
 
-
 def _load_one_file(
     ctx: Any,
     conn: Any,
@@ -1642,6 +1646,8 @@ def _load_one_file(
             conn.commit()
         except DatabaseError as bulk_exc:
             conn.rollback()
+            column_types = dict(column_defs)
+
             if not _db_adapter.is_truncation_error(bulk_exc):
                 raise
             if not _alter_oversized_columns(
@@ -1883,7 +1889,13 @@ def _read_and_transform(
                 continue
             rows.append(out_row)
         except TransformError as exc:
-            errors.append((row_num, "", str(exc)))
+            raw_value = ""
+
+            if getattr(exc, "column", None):
+                raw_value = raw_row.get(exc.column, "")
+
+            errors.append((row_num, getattr(exc, "column", ""), raw_value, str(exc)))
+            
 
     return rows, errors
 

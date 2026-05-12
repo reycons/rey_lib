@@ -223,3 +223,20 @@ def log_exit(ctx: Any, msg: str, logger: logging.Logger) -> None:
     ctx.log_depth   = max(0, ctx.log_depth - 1)
     _current_depth  = ctx.log_depth
     logger.debug("← %s", msg)
+
+def log_row_values(
+	logger: logging.Logger,
+	message: str,
+	row_num: int,
+	row: dict[str, Any],
+	column_types: dict[str, str],
+) -> None:
+	logger.error("%s row=%d", message, row_num)
+
+	for col, value in row.items():
+		logger.error(
+			"  col=%s datatype=%s value=%r",
+			col,
+			column_types.get(col, "UNKNOWN"),
+			value,
+		)
