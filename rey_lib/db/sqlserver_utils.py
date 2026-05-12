@@ -341,11 +341,14 @@ def bulk_insert(
             columns,
         )
 
-        if value_rows:
+    if rows:
+        for col, val in zip(columns, value_rows[0]):
             _logger.error(
-                "bulk_insert first_row=%r",
-                value_rows[0],
+                "bulk_insert first_row column=%s value=%r",
+                col,
+                val,
             )
+            
 
         raise DatabaseError(
             f"bulk_insert failed for {schema}.{table}: {exc}"
