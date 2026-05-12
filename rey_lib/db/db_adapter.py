@@ -281,7 +281,7 @@ class DBAdapter:
         exc: Exception,
         rows: list[dict[str, Any]],
         column_defs: list[tuple[str, str]],
-        batch_id: Optional[int] = None,
+
     ) -> bool:
         """
         On a bulk-insert truncation error, widen the offending column and
@@ -314,7 +314,7 @@ class DBAdapter:
         provider = self._provider_for_conn(conn)
         if provider == "sqlserver":
             return _sqlserver_utils().expand_column_if_truncated(
-                conn, schema, table, exc, rows, column_defs, batch_id
+                conn, schema, table, exc, rows, column_defs
             )
         if provider == "duckdb":
             # DuckDB columns auto-expand — never a truncation error to handle.
