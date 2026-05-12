@@ -309,10 +309,7 @@ def bulk_insert(
     )
 
     # Extract values from each row in column order.
-    value_rows = [
-        [row.get(col) for col in columns]
-        for row in rows
-    ]
+    value_rows = _prepare_bulk_insert_rows(rows, columns)
 
     cursor = conn.cursor()
 
@@ -356,7 +353,7 @@ def bulk_insert(
 
     finally:
         cursor.close()
-        
+
 
 def call_proc(
     conn: pyodbc.Connection,
@@ -930,6 +927,24 @@ def _split_database_schema(schema: str) -> tuple[str, str]:
         return parts[0], parts[1]
     return "", schema
 
+def _normalize_db_nulls(value: Any) -> Any:
+	if value == "":
+		return None
+
+	return value
+
+
+def _prepare_bulk_insert_rows(
+	rows: list[dict[str, Any]],
+	columns: list[str],
+) -> list[list[Any]]:
+	return [
+		[
+			_normalize_db_nulls(row.get(col))
+			for col in columns
+		]
+		for row in rows
+	]
 
 def _validate_identifier(name: str, label: str) -> None:
     """
