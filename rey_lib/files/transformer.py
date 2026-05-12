@@ -168,69 +168,94 @@ def parse_date_from_filename(filename: str, file_type_cfg: dict) -> Optional[dat
         return None
 
 
-def _transform_date(value: str, cfg: dict) -> Optional[date]:
+def transform_row(
+    raw_row: dict[str, str],
+    file_type_cfg: dict,
+    file_date: Optional[date] = None,
+) -> Optional[dict[str, Any]]:
     """
-    Parse a date string using the configured format.
+    Apply column mapping, constants, transforms, and file_date injection
+    to one raw CSV row.
 
-    Tries the primary format first, then a set of common fallback formats
-    to handle broker-specific date quirks without requiring explicit config.
+    Returns a new dict whose keys are database column names, or None if
+    the row fails the row_filter check and should be discarded.
+
+    Application-specific values such as source_file or batch_id must be
+    provided via the 'constants' section of file_type_cfg — they are
+    never injected by this function directly.
 
     Parameters
     ----------
-    value : str
-        Raw string value from the mapped column.
-    cfg : dict
-        Transform config. Keys: format (required), allow_blank (optional).
+    raw_row : dict[str, str]
+        Raw row from the CSV reader — keys are source file column names.
+    file_type_cfg : dict
+        A single file_types entry from the data source config. Expected
+        keys: columns, constants, field_transforms, row_filter,
+        file_date_column (optional).
+    file_date : Optional[date]
+        Date parsed from the filename by parse_date_from_filename().
+        Injected into the column named by file_type_cfg['file_date_column']
+        when that key is present and non-empty.
 
     Returns
     -------
-    Optional[date]
-        Parsed date, or None if blank and allow_blank is True.
+    Optional[dict[str, Any]]
+        Transformed row dict, or None if the row should be discarded.
 
     Raises
     ------
     TransformError
-        If the value cannot be parsed.
+        If a required field fails to transform.
     """
-    value = value.strip()
+    # Apply row filter first — discard non-data rows silently.
+    if not _passes_row_filter(raw_row, file_type_cfg):
+        return None
 
-    # ---------------------------------------------------------------
-    # Blank handling is config-driven.
-    # ---------------------------------------------------------------
-    if not value:
-        if cfg.get("allow_blank", False):
-            return None
+    columns    = file_type_cfg.get("columns", {})
+    constants  = file_type_cfg.get("constants", {})
+    transforms = file_type_cfg.get("field_transforms", {})
 
-        raise TransformError(
-            "Empty date value and allow_blank is False."
+    out: dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Step 1 — column mapping
+    # ------------------------------------------------------------------
+    for db_col, src_col in columns.items():
+        raw_val     = raw_row.get(src_col)
+        out[db_col] = raw_val.strip() if raw_val is not None else ""
+
+    # ------------------------------------------------------------------
+    # Step 2 — inject constants
+    # ------------------------------------------------------------------
+    for db_col, value in constants.items():
+        out[db_col] = value
+
+    # ------------------------------------------------------------------
+    # Step 3 — inject file_date
+    # ------------------------------------------------------------------
+    if file_date is not None:
+        date_col = file_type_cfg.get("file_date_column", "")
+        if date_col:
+            out[date_col] = file_date
+
+    # ------------------------------------------------------------------
+    # Step 4 — apply transforms
+    # ------------------------------------------------------------------
+    secrets = file_type_cfg.get("secrets", {})
+
+    for db_col, transform_cfg in transforms.items():
+        transform_type = transform_cfg.get("type", "")
+
+        out[db_col] = _apply_transform(
+            db_col,
+            out,
+            raw_row,
+            transform_cfg,
+            transform_type,
+            secrets,
         )
 
-    fmt    = cfg.get("format", "%m/%d/%Y")
-    result = _try_parse_date(value, fmt)
-
-    # ---------------------------------------------------------------
-    # Fallback formats for common broker date variants.
-    # ---------------------------------------------------------------
-    if result is None:
-        for fallback in (
-             "%m/%d/%y"
-            ,"%-m/%-d/%y"
-            ,"%-m/%-d/%Y"
-        ):
-            result = _try_parse_date(value, fallback)
-
-            if result is not None:
-                break
-
-    # ---------------------------------------------------------------
-    # Hard failure on invalid nonblank dates.
-    # ---------------------------------------------------------------
-    if result is None:
-        raise TransformError(
-            f"Cannot parse '{value}' as date with format '{fmt}'."
-        )
-
-    return result
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -375,30 +400,47 @@ def _transform_date(value: str, cfg: dict) -> Optional[date]:
     Raises
     ------
     TransformError
-        If the value cannot be parsed and allow_blank is False.
+        If the value cannot be parsed.
     """
     value = value.strip()
+
+    # ---------------------------------------------------------------
+    # Blank handling is config-driven.
+    # ---------------------------------------------------------------
     if not value:
         if cfg.get("allow_blank", False):
             return None
-        raise TransformError("Empty date value (allow_blank not set).")
+
+        raise TransformError(
+            "Empty date value and allow_blank is False."
+        )
 
     fmt    = cfg.get("format", "%m/%d/%Y")
     result = _try_parse_date(value, fmt)
 
+    # ---------------------------------------------------------------
     # Fallback formats for common broker date variants.
+    # ---------------------------------------------------------------
     if result is None:
-        for fallback in ("%m/%d/%y", "%-m/%-d/%y", "%-m/%-d/%Y"):
+        for fallback in (
+             "%m/%d/%y"
+            ,"%-m/%-d/%y"
+            ,"%-m/%-d/%Y"
+        ):
             result = _try_parse_date(value, fallback)
+
             if result is not None:
                 break
 
+    # ---------------------------------------------------------------
+    # Hard failure on invalid nonblank dates.
+    # ---------------------------------------------------------------
     if result is None:
         raise TransformError(
             f"Cannot parse '{value}' as date with format '{fmt}'."
         )
-    return result
 
+    return result
 
 def _transform_numeric(value: str, cfg: dict) -> Optional[float]:
     """
