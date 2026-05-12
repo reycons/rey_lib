@@ -222,9 +222,7 @@ def transform_row(
         raw_val     = raw_row.get(src_col)
         out[db_col] = raw_val.strip() if raw_val is not None else ""
 
-    # Step 2 — inject constants from config.
-    # All application-specific values (source_file, batch_id, etc.)
-    # must be defined here in the caller's config — never hardcoded below.
+
     for db_col, value in constants.items():
         out[db_col] = value
 

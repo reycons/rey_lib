@@ -273,53 +273,39 @@ class DBAdapter:
             return len(rows)
         raise ConfigError(f"DBAdapter: unsupported provider '{provider}'.")
 
-    def expand_column_if_truncated(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-        exc: Exception,
-        rows: list[dict[str, Any]],
-        column_defs: list[tuple[str, str]],
-
-    ) -> bool:
+    def is_truncation_error(self, exc: Exception) -> bool:
         """
-        On a bulk-insert truncation error, widen the offending column and
-        signal whether a retry is appropriate.
+        Return ``True`` if ``exc`` is a backend-recognized "value too wide
+        for this column" error — the kind the caller can recover from by
+        widening one or more columns and retrying the bulk insert.
+
+        The actual remediation (which proc / SQL to run to widen a
+        column) is not in this module: callers wire it up via a
+        configured sql_config so the library stays free of app-specific
+        schema knowledge. This method only classifies the exception.
 
         Parameters
         ----------
-        conn : Any
-            Open backend connection.
-        schema : str
-            Target schema (or database.schema).
-        table : str
-            Target table name.
         exc : Exception
-            The original bulk-insert exception to introspect.
-        rows : list[dict[str, Any]]
-            Rows that failed to insert (used to compute the needed length).
-        column_defs : list[tuple[str, str]]
-            Column definitions for the staging table.
-        batch_id : Optional[int]
-            Batch identifier stamped on widening operations for audit.
+            The exception raised by a prior ``bulk_insert`` call.
 
         Returns
         -------
         bool
-            ``True`` if a column was widened and the caller should retry the
-            bulk insert; ``False`` if the exception was not a truncation error
-            this adapter can handle.
+            ``True`` if the exception is a recoverable truncation error
+            for some supported backend; ``False`` otherwise.
         """
-        provider = self._provider_for_conn(conn)
-        if provider == "sqlserver":
-            return _sqlserver_utils().expand_column_if_truncated(
-                conn, schema, table, exc, rows, column_defs
-            )
-        if provider == "duckdb":
-            # DuckDB columns auto-expand — never a truncation error to handle.
-            return False
-        raise ConfigError(f"DBAdapter: unsupported provider '{provider}'.")
+        # Truncation classification is provider-agnostic from the
+        # caller's perspective — try each backend until one claims it.
+        # No need to know which provider produced the exception ahead of
+        # time. Backends that don't have a truncation concept always
+        # return False.
+        try:
+            if _sqlserver_utils().is_truncation_error(exc):
+                return True
+        except Exception:  # noqa: BLE001 — backend module unavailable
+            pass
+        return False
 
     # ------------------------------------------------------------------
     # Private — provider resolution

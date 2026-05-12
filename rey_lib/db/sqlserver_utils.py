@@ -42,8 +42,10 @@ load_sql(name)
     Return the preloaded SQL string for a named query.
 create_staging_table_if_not_exists(conn, schema, table, column_defs)
     Create a staging table if it does not already exist.
-expand_column_if_truncated(conn, schema, table, exc, rows, column_defs, batch_id)
-    Detect truncation error, expand offending column via proc, return True to retry.
+is_truncation_error(exc)
+    Return True when exc is the SQL Server truncation error (8152) — the
+    caller decides what remediation (proc / SQL) to run, driven by
+    config.
 """
 
 from __future__ import annotations
@@ -68,7 +70,7 @@ __all__ = [
     "call_proc_with_output",
     "load_sql",
     "create_staging_table_if_not_exists",
-    "expand_column_if_truncated",
+    "is_truncation_error",
 ]
 
 _logger = logging.getLogger(__name__)
@@ -385,7 +387,7 @@ def call_proc_with_output(
         Open pyodbc connection.
     proc_name : str
         Fully-qualified procedure name
-        (e.g. 'NaviControl.dbo.usp_BatchLog_Begin').
+
     named_input_params : list[tuple[str, Any]]
         Input parameters as ``(param_name, value)`` pairs, in declaration
         order. Parameter names must match the procedure's ``@`` parameter
@@ -574,98 +576,17 @@ def create_staging_table_if_not_exists(
         cursor.close()
 
 
-def expand_column_if_truncated(
-    conn: pyodbc.Connection,
-    schema: str,
-    table: str,
-    exc: Exception,
-    rows: list[dict[str, Any]],
-    column_defs: list[tuple[str, str]],
-    batch_id: Optional[int] = None,
-) -> bool:
+def is_truncation_error(exc: Exception) -> bool:
     """
-    Detect a column truncation error, expand offending columns via
-    pUpd_StagingColumnLength, and return True so the caller can retry.
+    Return True if ``exc`` is the SQL Server truncation error (8152).
 
-    SQL Server raises error 8152 when a value exceeds the column
-    definition length. This function scans all columns in the current
-    batch, calls the server-side proc for each column whose observed
-    max length exceeds its current definition, and commits after each
-    expansion. The proc handles type validation and never shrinks columns.
-
-    Returns False when the exception is not a truncation error so the
-    caller knows not to retry.
-
-    Parameters
-    ----------
-    conn : pyodbc.Connection
-        Open SQL Server connection.
-    schema : str
-        Target schema — may be 'database.schema' for cross-db targets.
-    table : str
-        Target table name.
-    exc : Exception
-        The exception caught from the failed bulk insert.
-    rows : list[dict[str, Any]]
-        The rows that failed to insert — scanned for max lengths.
-    column_defs : list[tuple[str, str]]
-        Current column definitions — iterated for column names.
-    batch_id : Optional[int]
-        BatchID passed to pUpd_StagingColumnLength for logging via
-        pRun_LoggedSQL. Pass None when running outside a batch context.
-
-    Returns
-    -------
-    bool
-        True if at least one column was expanded and the caller should retry.
-        False if the error is not a truncation error.
-
-    Raises
-    ------
-    DatabaseError
-        If the proc call fails for any column.
+    Used by DBAdapter to surface a backend-neutral signal that a failing
+    bulk insert is recoverable by widening one or more columns. The
+    actual remediation (which proc / SQL to run) is driven by the app
+    via a configured sql_config — this function only classifies the
+    exception.
     """
-    if not _is_truncation_error(exc, _TRUNCATION_ERROR):
-        return False
-
-    _logger.warning(
-        "Truncation error on %s.%s — scanning for oversized columns.",
-        schema, table,
-    )
-
-    expanded_any         = False
-    db_name, schema_name = _split_database_schema(schema)
-
-    for col_name, _ in column_defs:
-        # Scan all columns — pUpd_StagingColumnLength validates type
-        # server-side and exits cleanly for non-varchar columns.
-        max_observed = _max_col_length(rows, col_name)
-        if max_observed == 0:
-            continue
-
-        # Expand to observed max plus 10-character buffer.
-        new_len = max_observed + 10
-
-        try:
-            cursor = call_proc(
-                conn,
-                "dbo.pUpd_StagingColumnLength",
-                [db_name, schema_name, table, col_name, new_len, batch_id],
-            )
-            cursor.close()
-            conn.commit()
-            _logger.info(
-                "Expanded column '%s' on %s.%s to NVARCHAR(%d)",
-                col_name, schema, table, new_len,
-            )
-            expanded_any = True
-        except DatabaseError as alter_exc:
-            conn.rollback()
-            raise DatabaseError(
-                f"Failed to expand column '{col_name}' on '{schema}.{table}': {alter_exc}"
-            ) from alter_exc
-
-    return expanded_any
+    return _is_truncation_error(exc, _TRUNCATION_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -778,32 +699,6 @@ def _build_odbc_call(proc_name: str, param_count: int) -> str:
         return f"{{CALL {proc_name}}}"
     placeholders = ", ".join("?" * param_count)
     return f"{{CALL {proc_name} ({placeholders})}}"
-
-
-def _max_col_length(rows: list[dict[str, Any]], col_name: str) -> int:
-    """
-    Return the maximum string length of a column's values across all rows.
-
-    None values and missing keys are treated as length 0. Used to
-    determine the required column width before calling
-    pUpd_StagingColumnLength.
-
-    Parameters
-    ----------
-    rows : list[dict[str, Any]]
-        Rows to scan.
-    col_name : str
-        Column name to inspect.
-
-    Returns
-    -------
-    int
-        Maximum observed length. 0 if all values are blank or missing.
-    """
-    return max(
-        (len(str(row.get(col_name, "") or "")) for row in rows),
-        default=0,
-    )
 
 
 def _build_connection_string(db_cfg: Any) -> str:

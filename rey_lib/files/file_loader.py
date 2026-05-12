@@ -354,7 +354,6 @@ def load_files(
     conn: Any,
     data_source: Any,
     load_cfg: Any,
-    on_reload: Optional[callable] = None,
 ) -> int:
     """
     Find and load all pending files for one load configuration.
@@ -363,27 +362,20 @@ def load_files(
     then loads each one independently. A failure on one file does not
     prevent processing of subsequent files.
 
-    batch_id is read from ctx.batch_id — set by start_batch() before this
-    function is called. It is stamped into every staging row via constants
-    and passed to expand_column_if_truncated for logging.
+
 
     Parameters
     ----------
     ctx : Any
-        Application context — ctx.batch_id must be set before calling.
-    conn : pyodbc.Connection
-        Open SQL Server connection. Caller manages the connection lifecycle.
+
+    conn : Any
+        Open backend connection. Caller manages the connection lifecycle.
     data_source : Any
         Namespace for one data_sources entry from ctx. Provides paths,
         transforms list, and constants.
     load_cfg : Any
         Namespace for one loads entry. Provides source path key,
         pickup_pattern, version, load destination, and movements.
-    on_reload : Optional[callable]
-        Callback invoked when a file is found already in staging.
-        Signature: (file_path, original_batch_id, new_batch_id) -> None
-        Use this to log BatchStep records in the calling application.
-        Errors in the callback are logged and suppressed.
 
     Returns
     -------
@@ -421,7 +413,6 @@ def load_files(
             rows_loaded = _load_one_file(
                 ctx, conn, file_path, transform_cfg,
                 load_cfg, data_source.paths, schema, table,
-                on_reload,
             )
             total_rows += rows_loaded
 
@@ -698,20 +689,23 @@ def run_app_hooks(
 def run_load(
     ctx: Any,
     sql_dir: Optional[Path] = None,
-    on_reload: Optional[Callable] = None,
 ) -> int:
     """
     Run the load stage for every data source and load config declared in ctx.
 
-    Iterates ``ctx.data_sources`` and each ``loads`` entry.  For each load
+    Iterates ``ctx.data_sources`` and each ``loads`` entry. For each load
     config the connection named by ``load_cfg.load.connection`` is resolved
     from ``ctx.db.connections`` and opened automatically — no connection
-    management in the caller.  Connections are reused when multiple load
-    configs within the same data source share the same connection name, and
-    are all closed after that data source's ``post_load_sql`` files run.
+    management in the caller. Connections are reused when multiple load
+    configs within the same data source share the same connection name,
+    and are all closed after that data source's ``post_load_sql`` files
+    run.
 
-    All behaviour is driven entirely by YAML config.  No application-specific
-    knowledge belongs here.
+    All behaviour is driven entirely by YAML config. No app-specific
+    schema knowledge lives here: the library just bulk-inserts the rows
+    that the transform produced. Per-file idempotency, dedup, or reload
+    semantics belong in the calling application (or in the destination
+    schema, via constraints).
 
     YAML shape expected per loads entry::
 
@@ -722,29 +716,21 @@ def run_load(
           load:
             connection:          <db_connection_name>
             destination_table:   <database>.<schema>.<table>
-            file_id_column:      <column_holding_source_filename>
-            batch_id_column:     <column_holding_batch_id>
           movements:
             success: ...
             failure: ...
 
-    Both ``file_id_column`` and ``batch_id_column`` are required — they
-    name app-specific columns on the destination table, so rey_lib has
-    no opinion about what they should be called.
-
     Parameters
     ----------
     ctx : Any
-        Application context.  Must have:
+        Application context. Must have:
         - ``ctx.data_sources`` — iterable of data source Namespaces
         - ``ctx.db.connections`` — list of named connection Namespaces
-        - ``ctx.batch_id`` — set before calling (stamped into every row)
+
     sql_dir : Optional[Path]
-        Base directory for resolving ``post_load_sql`` file names.
-        Pass ``None`` when no data source uses ``post_load_sql``.
-    on_reload : Optional[Callable]
-        Invoked when a file already present in staging is re-loaded.
-        Signature: ``(file_path, original_batch_id, new_batch_id) -> None``
+        Base directory for resolving ``post_load_sql`` file names and
+        ``type: sql_file`` hook configs. Pass ``None`` when no data
+        source uses either.
 
     Returns
     -------
@@ -926,7 +912,7 @@ def _resolve_hook_param_value(ctx: Any, data_source: Any, source: str) -> Any:
     data_source : Any
         Current data source Namespace.
     source : str
-        Source expression from config, e.g. ``'ctx.batch_id'`` or
+
         ``'data_source.name'`` or ``'2026'``.
 
     Returns
@@ -1142,9 +1128,7 @@ def _execute_one_hook_procedure(
         _db_adapter.call_proc(conn, proc_name, [v for _n, v in named_inputs])
         output_values = {}
 
-    # Format output params as name=value pairs for the log line so callers
-    # can see what each hook actually returned (BatchID, BatchStepID, etc.)
-    # without having to enable DEBUG-level logging.
+
     if output_values:
         outputs_repr = ", ".join(f"{k}={v!r}" for k, v in output_values.items())
     else:
@@ -1257,6 +1241,147 @@ def _run_hook_bindings(
 
 
 # ---------------------------------------------------------------------------
+# Private — recovery from bulk-insert column-width failures
+#
+# The actual ALTER COLUMN statement is not in this module. The library
+# only:
+#   1. asks the DBAdapter whether the bulk-insert exception is a
+#      truncation-class error (backend-specific check, lives in the
+#      adapter),
+#   2. computes a new SQL DataType string for each column whose observed
+#      value length exceeds its declared length,
+#   3. populates ctx.alter_table / alter_column / alter_data_type and
+#      runs the configured ``alter_column_data_type`` sql_config — the
+#      app decides which proc / SQL that is, via ctx.sql_configs.
+# ---------------------------------------------------------------------------
+
+# Buffer added to the observed max length when widening a string column,
+# so a one-character overflow doesn't immediately trigger another resize.
+_COLUMN_EXPAND_BUFFER = 10
+
+# Pre-compiled regexes for the only two type families the library knows
+# how to widen automatically. Any other declared type is skipped — the
+# app must size those correctly up front.
+_WIDENABLE_TYPE_PATTERNS = (
+    ("NVARCHAR", re.compile(r"^NVARCHAR\((\d+)\)$")),
+    ("VARCHAR",  re.compile(r"^VARCHAR\((\d+)\)$")),
+)
+
+
+def _alter_oversized_columns(
+    ctx: Any,
+    schema: str,
+    table: str,
+    rows: list[dict[str, Any]],
+    column_defs: list[tuple[str, str]],
+) -> bool:
+    """
+note:: this function must call a configure stored procedure or sql file. no DDL should ever be contained on this file.
+
+    Widen any columns whose values exceeded their declared length by
+    running the configured ``alter_column_data_type`` sql_config once
+    per affected column.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context. Must expose ``ctx.sql_configs`` containing
+        an entry named ``alter_column_data_type``.
+    schema : str
+        Target schema — may be ``database.schema`` for cross-db inserts.
+    table : str
+        Target table name.
+    rows : list[dict[str, Any]]
+        Rows that failed to insert — scanned for observed string lengths.
+    column_defs : list[tuple[str, str]]
+        Current ``(column_name, sql_type)`` pairs for the staging table.
+
+    Returns
+    -------
+    bool
+        ``True`` if at least one column was altered and the caller should
+        retry the bulk insert. ``False`` if no column needed widening or
+        the affected columns were of unsupported type families.
+
+    Raises
+    ------
+    ConfigError
+        When ctx has no ``alter_column_data_type`` sql_config configured.
+    """
+    sql_cfg      = _find_sql_config(ctx, "alter_column_data_type")
+    fq_table     = f"{schema}.{table}"
+    expanded_any = False
+    open_conns: dict[str, Any] = {}
+
+    try:
+        for col_name, col_type in column_defs:
+            new_type = _compute_expanded_type(
+                col_type, _max_string_len(rows, col_name)
+            )
+            if new_type is None:
+                continue
+
+            # The sql_config's params point at these ctx attrs — set them
+            # immediately before the call so each invocation widens the
+            # right column.
+            object.__setattr__(ctx, "alter_table",     fq_table)
+            object.__setattr__(ctx, "alter_column",    col_name)
+            object.__setattr__(ctx, "alter_data_type", new_type)
+
+            _execute_one_hook(ctx, None, sql_cfg, open_conns, None)
+            _logger.info(
+                "Altered column '%s.%s' to %s", fq_table, col_name, new_type,
+            )
+            expanded_any = True
+    finally:
+        for conn in open_conns.values():
+            try:
+                conn.commit()
+                conn.close()
+            except Exception:  # noqa: BLE001 — close must never raise
+                pass
+
+    return expanded_any
+
+
+def _compute_expanded_type(
+    current_type: str,
+    max_observed: int,
+) -> Optional[str]:
+    """
+    Return the new DataType string for a column that overflowed, or
+    ``None`` when no expansion is needed or possible.
+
+    Recognizes NVARCHAR(n) and VARCHAR(n) only. Any other declared type
+    is the app's responsibility to size correctly up front — rey_lib
+    will not invent type conversions.
+    """
+    if max_observed <= 0:
+        return None
+    upper = (current_type or "").upper().strip()
+    for prefix, pattern in _WIDENABLE_TYPE_PATTERNS:
+        m = pattern.match(upper)
+        if not m:
+            continue
+        current_len = int(m.group(1))
+        if max_observed <= current_len:
+            return None
+        return f"{prefix}({max_observed + _COLUMN_EXPAND_BUFFER})"
+    return None
+
+
+def _max_string_len(rows: list[dict[str, Any]], col_name: str) -> int:
+    """
+    Maximum string length of ``col_name`` across all rows. None values and
+    missing keys count as length 0.
+    """
+    return max(
+        (len(str(row.get(col_name, "") or "")) for row in rows),
+        default=0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Private — transform orchestration
 # ---------------------------------------------------------------------------
 
@@ -1308,7 +1433,7 @@ def _transform_one_file(
             )
             return False
 
-        # Build runtime constants — batch_id resolved from ctx.batch_id.
+
         constants = _build_constants(
             ctx, transform_cfg.constants, file_path, data_source.paths
         )
@@ -1460,151 +1585,9 @@ def _pattern_to_glob(file_pattern: str) -> str:
 # Private — load orchestration
 # ---------------------------------------------------------------------------
 
-def _check_file_in_staging(
-    conn: Any,
-    schema: str,
-    table: str,
-    file_id_col: str,
-    batch_id_col: str,
-    file_path: Path,
-) -> Optional[int]:
-    """
-    Check whether rows for this file already exist in the staging table.
-
-    Returns the BatchID that loaded them if found, None otherwise.
-    Used at the start of each file load to detect restart conditions.
-
-    Parameters
-    ----------
-    conn : pyodbc.Connection
-        Open SQL Server connection.
-    schema : str
-        Target schema — may be 'database.schema'.
-    table : str
-        Target table name.
-    file_id_col : str
-        Column name that holds the incoming file path.
-    batch_id_col : str
-        Column name that holds the BatchID.
-    file_path : Path
-        File being checked.
-
-    Returns
-    -------
-    Optional[int]
-        Original BatchID if rows exist, None if the file is not in staging.
-    """
-    sql = (
-        f"SELECT TOP 1 [{batch_id_col}] "
-        f"FROM {schema}.{table} "
-        f"WHERE [{file_id_col}] = ?"
-    )
-    cursor = conn.cursor()
-    try:
-        cursor.execute(sql, [str(file_path)])
-        row = cursor.fetchone()
-        if row is None:
-            return None
-        val = row[0]
-        return int(val) if val is not None else None
-    except _NON_FATAL_PIPELINE_ERRORS as exc:
-        _logger.warning(
-            "Could not check staging for '%s': %s — assuming not present.",
-            file_path.name, exc,
-        )
-        return None
-    finally:
-        cursor.close()
 
 
-def _delete_staging_rows(
-    conn: Any,
-    schema: str,
-    table: str,
-    file_id_col: str,
-    file_path: Path,
-) -> None:
-    """
-    Delete all staging rows for a specific file.
 
-    Called before reloading a file whose rows are already in staging.
-    Commits immediately — the delete must be durable before the reload
-    begins so a subsequent failure does not leave duplicate rows.
-
-    Parameters
-    ----------
-    conn : pyodbc.Connection
-        Open SQL Server connection.
-    schema : str
-        Target schema — may be 'database.schema'.
-    table : str
-        Target table name.
-    file_id_col : str
-        Column name that holds the incoming file path.
-    file_path : Path
-        File whose staging rows should be deleted.
-
-    Raises
-    ------
-    DatabaseError
-        If the DELETE fails.
-    """
-    sql = (
-        f"DELETE FROM {schema}.{table} "
-        f"WHERE [{file_id_col}] = ?"
-    )
-    cursor = conn.cursor()
-    try:
-        cursor.execute(sql, [str(file_path)])
-        deleted = cursor.rowcount
-        conn.commit()
-        _logger.info(
-            "Deleted %d staging row(s) for '%s' before reload.",
-            deleted, file_path.name,
-        )
-    except _NON_FATAL_PIPELINE_ERRORS as exc:
-        conn.rollback()
-        raise DatabaseError(
-            f"Failed to delete staging rows for '{file_path.name}': {exc}"
-        ) from exc
-    finally:
-        cursor.close()
-
-
-def _invoke_on_reload(
-    callback: Optional[callable],
-    file_path: Path,
-    original_batch_id: Optional[int],
-    new_batch_id: Optional[int],
-) -> None:
-    """
-    Invoke the on_reload callback safely.
-
-    Called when a file is found already in staging. The callback is
-    responsible for logging BatchStep records on both the original and
-    new batch. Errors are logged and suppressed — a callback failure
-    must never abort the reload.
-
-    Parameters
-    ----------
-    callback : Optional[callable]
-        Caller-supplied callback, or None.
-    file_path : Path
-        File being reloaded.
-    original_batch_id : Optional[int]
-        BatchID that originally loaded the file.
-    new_batch_id : Optional[int]
-        BatchID of the current reload run.
-    """
-    if callback is None:
-        return
-    try:
-        callback(file_path, original_batch_id, new_batch_id)
-    except _NON_FATAL_PIPELINE_ERRORS as exc:
-        _logger.error(
-            "on_reload callback failed for '%s': %s",
-            file_path.name, exc, exc_info=True,
-        )
 
 
 def _load_one_file(
@@ -1616,46 +1599,34 @@ def _load_one_file(
     paths: Any,
     schema: str,
     table: str,
-    on_reload: Optional[callable] = None,
 ) -> int:
     """
     Load one file into the landing table.
-
-    Before loading, checks whether rows for this file already exist in
-    the staging table. If they do — indicating a previous run committed
-    but the file move failed — the original batch is noted, staging rows
-    are deleted, and the file is reloaded under the current batch. The
-    on_reload callback is invoked so the caller can log BatchStep records.
 
     Validates the header, reads and transforms all rows, bulk inserts,
     then executes the configured file movements. Full rollback on any
     error — every row error is logged before rollback.
 
-    batch_id is read from ctx.batch_id — set by start_batch() before calling.
 
     Parameters
     ----------
     ctx : Any
-        Application context — ctx.batch_id must be set.
-    conn : pyodbc.Connection
-        Open SQL Server connection.
+
+    conn : Any
+        Open backend connection.
     file_path : Path
         Full path of the file to load.
     transform_cfg : Any
         Transform Namespace — provides header, columns, field_transforms,
         constants, file_type, encoding.
     load_cfg : Any
-        Load Namespace — provides movements, file_id_column, batch_id_column.
+        Load Namespace — provides movements.
     paths : Any
         Paths Namespace from the data source config.
     schema : str
         Target schema — may be 'database.schema' for cross-db inserts.
     table : str
         Target table name.
-    on_reload : Optional[callable]
-        Callback invoked when a file is found already in staging.
-        Signature: (file_path, original_batch_id, new_batch_id) -> None
-        Errors in the callback are logged and suppressed.
 
     Returns
     -------
@@ -1664,36 +1635,7 @@ def _load_one_file(
     """
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
-    # Read batch_id from ctx — set by start_batch().
-    batch_id     = getattr(ctx, "batch_id", None)
-    # file_id_column and batch_id_column are app-specific column names on
-    # the destination staging table — they must be declared in YAML. No
-    # defaults: rey_lib doesn't know what your schema looks like.
-    file_id_col  = getattr(load_cfg.load, "file_id_column", None)
-    batch_id_col = getattr(load_cfg.load, "batch_id_column", None)
-    if not file_id_col or not batch_id_col:
-        raise ConfigError(
-            f"load '{load_cfg.name}': both 'file_id_column' and "
-            "'batch_id_column' must be set under load.* in YAML. "
-            "These are app-specific staging-table column names and rey_lib "
-            "ships with no defaults."
-        )
-
     try:
-        # Check whether this file is already in staging — indicates a
-        # previous run committed the insert but failed to move the file.
-        original_batch_id = _check_file_in_staging(
-            conn, schema, table, file_id_col, batch_id_col, file_path
-        )
-
-        if original_batch_id is not None:
-            _logger.warning(
-                "File '%s' already in staging (BatchID=%s) — deleting and reloading.",
-                file_path.name, original_batch_id,
-            )
-            _invoke_on_reload(on_reload, file_path, original_batch_id, batch_id)
-            _delete_staging_rows(conn, schema, table, file_id_col, file_path)
-
         # Validate header before reading any rows.
         if not _validate_header(file_path, transform_cfg):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
@@ -1701,7 +1643,6 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
-        # Build runtime constants — batch_id resolved from ctx.batch_id.
         constants = _build_constants(ctx, transform_cfg.constants, file_path, paths)
 
         rows, errors = _read_and_transform(file_path, transform_cfg, constants)
@@ -1738,18 +1679,18 @@ def _load_one_file(
             conn.commit()
         except DatabaseError as bulk_exc:
             conn.rollback()
-            expanded = _db_adapter.expand_column_if_truncated(
-                conn, schema, table, bulk_exc, rows, column_defs, batch_id
-            )
-            if expanded:
-                _logger.info(
-                    "Retrying bulk insert after column expansion: %s",
-                    file_path.name,
-                )
-                _db_adapter.bulk_insert(conn, schema, table, rows, columns)
-                conn.commit()
-            else:
+            if not _db_adapter.is_truncation_error(bulk_exc):
                 raise
+            if not _alter_oversized_columns(
+                ctx, schema, table, rows, column_defs,
+            ):
+                raise
+            _logger.info(
+                "Retrying bulk insert after column alterations: %s",
+                file_path.name,
+            )
+            _db_adapter.bulk_insert(conn, schema, table, rows, columns)
+            conn.commit()
 
         _logger.info(
             "Loaded: %s → %s.%s  rows=%d",
@@ -1781,11 +1722,11 @@ def _build_column_defs(
     rows: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     """
+Note: this must be updated to use datatypes that are universal in SQL standars not SQL Server specific types.
+
     Build a column definition list for staging table creation.
 
-    Maps each output column to an appropriate SQL Server type based on
-    its field_transform type. Varchar columns are sized to the maximum
-    observed value length in the current batch plus a 10-character buffer.
+
 
     Parameters
     ----------
@@ -2220,7 +2161,7 @@ def _build_constants(
     Literal values pass through unchanged.
 
     ctx attributes set here (per-file, overwritten each call):
-        ctx.current_file_name  — bare filename, e.g. ``tran_20240304.csv``
+        ctx.current_file_name  — bare filename, 
         ctx.current_file_path  — full source path as string
         ctx.<path_key>         — each paths config key resolved as
                                  ``path_dir / file_name``, e.g.
@@ -2313,7 +2254,7 @@ def _resolve_ctx_path(ctx: Any, dotted_path: str) -> Any:
     ctx : Any
         Application context Namespace.
     dotted_path : str
-        Dot-separated attribute path e.g. 'batch_id' or 'log_file'.
+
 
     Returns
     -------
