@@ -91,8 +91,9 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class TransformError(AppError):
-    """Raised when a field transformation fails and cannot be recovered."""
-
+	def __init__(self, message: str, column: str = ""):
+		super().__init__(message)
+		self.column = column
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -306,141 +307,81 @@ def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _apply_transform(
-    db_col: str,
-    out: dict[str, Any],
-    raw_row: dict[str, str],
-    cfg: dict,
-    transform_type: str,
-    secrets: dict[str, str],
+	db_col: str,
+	out: dict[str, Any],
+	raw_row: dict[str, str],
+	cfg: dict,
+	transform_type: str,
+	secrets: dict[str, str],
 ) -> Any:
-    """
-    Dispatch to the appropriate transform function.
+	try:
+		if transform_type == "date":
+			return _transform_date(out.get(db_col, ""), cfg)
 
-    Parameters
-    ----------
-    db_col : str
-        The database column name being transformed.
-    out : dict
-        Current output row — may be read by transforms that reference
-        already-mapped columns (e.g. prefix_map's strip_from).
-    raw_row : dict
-        Original raw CSV row — used by transforms that need the source
-        value directly (e.g. regex_extract, prefix_map).
-    cfg : dict
-        Transform configuration dict.
-    transform_type : str
-        Transform type identifier string.
-    secrets : dict[str, str]
-        Resolved env-var values keyed by variable name. Populated by the
-        caller (file_loader) for encrypt transforms; empty otherwise.
+		if transform_type == "numeric":
+			return _transform_numeric(out.get(db_col, ""), cfg)
 
-    Returns
-    -------
-    Any
-        Transformed value.
+		if transform_type == "regex_extract":
+			return _transform_regex_extract(raw_row, cfg)
 
-    Raises
-    ------
-    TransformError
-        If the transform cannot produce a valid value.
-    """
-    if transform_type == "date":
-        return _transform_date(out.get(db_col, ""), cfg)
+		if transform_type == "prefix_map":
+			return _transform_prefix_map(db_col, out, raw_row, cfg)
 
-    if transform_type == "numeric":
-        return _transform_numeric(out.get(db_col, ""), cfg)
+		if transform_type == "strip_parens_suffix":
+			return _transform_strip_parens(out.get(db_col, ""))
 
-    if transform_type == "regex_extract":
-        return _transform_regex_extract(raw_row, cfg)
+		if transform_type == "regex_date":
+			return _transform_regex_date(raw_row, cfg)
 
-    if transform_type == "prefix_map":
-        return _transform_prefix_map(db_col, out, raw_row, cfg)
+		if transform_type == "encrypt":
+			return _transform_encrypt(out.get(db_col, ""), raw_row, cfg, secrets)
 
-    if transform_type == "strip_parens_suffix":
-        return _transform_strip_parens(out.get(db_col, ""))
+		if transform_type == "not_blank":
+			return out.get(db_col, "")
 
-    if transform_type == "regex_date":
-        return _transform_regex_date(raw_row, cfg)
+		raise TransformError(
+			f"Unknown transform type '{transform_type}' for column '{db_col}'",
+			column=db_col,
+		)
 
-    if transform_type == "encrypt":
-        return _transform_encrypt(out.get(db_col, ""), raw_row, cfg, secrets)
-
-    if transform_type == "not_blank":
-        # Used only in row_filter — pass through if applied to a column.
-        return out.get(db_col, "")
-
-    raise TransformError(
-        f"Unknown transform type '{transform_type}' for column '{db_col}'"
-    )
-
+	except TransformError as exc:
+		if not getattr(exc, "column", ""):
+			exc.column = db_col
+		raise
+     
 
 # ---------------------------------------------------------------------------
 # Private — individual transform implementations
 # ---------------------------------------------------------------------------
-
 def _transform_date(value: str, cfg: dict) -> Optional[date]:
-    """
-    Parse a date string using the configured format.
+	value = value.strip()
 
-    Tries the primary format first, then a set of common fallback formats
-    to handle broker-specific date quirks without requiring explicit config.
+	if not value:
+		if cfg.get("allow_blank", False):
+			return None
 
-    Parameters
-    ----------
-    value : str
-        Raw string value from the mapped column.
-    cfg : dict
-        Transform config. Keys: format (required), allow_blank (optional).
+		raise TransformError("Empty date value and allow_blank is False.")
 
-    Returns
-    -------
-    Optional[date]
-        Parsed date, or None if blank and allow_blank is True.
+	fmt    = cfg.get("format", "%m/%d/%Y")
+	result = _try_parse_date(value, fmt)
 
-    Raises
-    ------
-    TransformError
-        If the value cannot be parsed.
-    """
-    value = value.strip()
+	if result is None:
+		for fallback in (
+			 "%m/%d/%y"
+			,"%-m/%-d/%y"
+			,"%-m/%-d/%Y"
+		):
+			result = _try_parse_date(value, fallback)
 
-    # ---------------------------------------------------------------
-    # Blank handling is config-driven.
-    # ---------------------------------------------------------------
-    if not value:
-        if cfg.get("allow_blank", False):
-            return None
+			if result is not None:
+				break
 
-        raise TransformError(
-            "Empty date value and allow_blank is False."
-        )
+	if result is None:
+		raise TransformError(
+			f"Cannot parse '{value}' as date with format '{fmt}'."
+		)
 
-    fmt    = cfg.get("format", "%m/%d/%Y")
-    result = _try_parse_date(value, fmt)
-
-    # ---------------------------------------------------------------
-    # Fallback formats for common broker date variants.
-    # ---------------------------------------------------------------
-    if result is None:
-        for fallback in (
-             "%m/%d/%y"
-            ,"%-m/%-d/%y"
-            ,"%-m/%-d/%Y"
-        ):
-            result = _try_parse_date(value, fallback)
-
-            if result is not None:
-                break
-
-    # ---------------------------------------------------------------
-    # Hard failure on invalid nonblank dates.
-    # ---------------------------------------------------------------
-    if result is None:
-        raise TransformError(
-            f"Cannot parse '{value}' as date with format '{fmt}'."
-        )
-
-    return result
+	return result
 
 def _transform_numeric(value: str, cfg: dict) -> Optional[float]:
     """
