@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -75,6 +76,22 @@ __all__ = [
 ]
 
 _logger = logging.getLogger(__name__)
+
+# Fixed schema for the rejection table — created on first use via
+# create_staging_table_if_not_exists. Table name comes from ctx.rejection.table.
+# Types use the neutral vocabulary understood by all backends (see db_adapter).
+_REJECTION_COLUMN_DEFS: list[tuple[str, str]] = [
+    ("FileName",     "VARCHAR"),
+    ("RowNum",       "INTEGER"),
+    ("ColumnName",   "VARCHAR"),
+    ("RawValue",     "TEXT"),
+    ("ErrorMessage", "TEXT"),
+    ("BatchID",      "INTEGER"),
+    ("RejectedDT",   "TIMESTAMP"),
+]
+
+# Matches {ctx.attr} and {data_source.attr} tokens in LLM prompt templates.
+_PROMPT_TOKEN_RE = re.compile(r"\{(ctx|data_source)\.([^}]+)\}")
 
 # Keep callback and file-pipeline failures non-fatal without using broad catches.
 _NON_FATAL_PIPELINE_ERRORS = (
@@ -497,6 +514,13 @@ def load_files_to_callback(
                     )
                 )
                 rows_loaded = on_load_file(data_source, load_cfg, file_path, rows)
+                if rows_loaded != len(rows):
+                    _logger.warning(
+                        "Row count mismatch for '%s': file had %d rows, callback inserted %d",
+                        file_path.name,
+                        len(rows),
+                        rows_loaded,
+                    )
                 total_rows += rows_loaded
                 _execute_movements(load_cfg.movements.success, file_path, data_source.paths)
                 _logger.info(
@@ -793,6 +817,10 @@ def run_load(
                 rows = load_files(ctx, conn, data_source, load_cfg)
                 total += rows
 
+                # Write row count to ctx so post_load hooks (e.g. end_batch_step)
+                # can stamp RecordCount on the BatchStep row.
+                object.__setattr__(ctx, "step_record_count", rows)
+
                 # post_load bindings — fire after this load entry completes.
                 _run_hook_bindings(
                     ctx,
@@ -893,6 +921,136 @@ def _find_sql_config(ctx: Any, name: str) -> Any:
             "Check config/app/sql_configs.yaml."
         )
     return result
+
+
+def _find_llm_config(ctx: Any, name: str) -> Any:
+    """
+    Find a named llm_config entry in ctx.llm_configs.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context. Must have ``ctx.llm_configs`` list attribute.
+    name : str
+        Name of the llm_config to locate.
+
+    Returns
+    -------
+    Any
+        The matching llm_config Namespace.
+
+    Raises
+    ------
+    ConfigError
+        If ``ctx.llm_configs`` is absent or the name is not found.
+    """
+    from rey_lib.config.ctx import find_by_name  # local import — avoids circular dep
+
+    configs = getattr(ctx, "llm_configs", None)
+    if configs is None:
+        raise ConfigError(
+            f"llm_config '{name}' referenced in hooks but ctx.llm_configs is not "
+            "defined. Add a llm_configs section to your config YAML."
+        )
+    result = find_by_name(configs, name)
+    if result is None:
+        raise ConfigError(
+            f"llm_config '{name}' not found in ctx.llm_configs. "
+            "Check config/app/llm_configs.yaml."
+        )
+    return result
+
+
+def _render_prompt(template: str, ctx: Any, data_source: Any) -> str:
+    """
+    Render an LLM prompt template by substituting {ctx.attr} and
+    {data_source.attr} tokens with live values.
+
+    Unresolved tokens are left in place so the LLM still receives a
+    readable prompt rather than silently losing context.
+
+    Parameters
+    ----------
+    template : str
+        Prompt template string with ``{ctx.attr}`` / ``{data_source.attr}``
+        tokens.
+    ctx : Any
+        Application context — source for ``ctx.*`` tokens.
+    data_source : Any
+        Current data source Namespace, or ``None`` for run-scoped hooks.
+
+    Returns
+    -------
+    str
+        Rendered prompt text.
+    """
+    def _replace(m: re.Match) -> str:
+        scope, attr = m.group(1), m.group(2)
+        obj = ctx if scope == "ctx" else data_source
+        if obj is None:
+            return m.group(0)
+        return str(getattr(obj, attr, m.group(0)))
+
+    return _PROMPT_TOKEN_RE.sub(_replace, template)
+
+
+def _execute_one_hook_llm(
+    ctx: Any,
+    data_source: Any,
+    llm_cfg: Any,
+) -> dict[str, Any]:
+    """
+    Execute one llm_config hook and return any row-column values.
+
+    Renders the prompt template, calls the configured LLM, writes the
+    response to ctx via any declared output_params, and returns any params
+    that declare ``row_column`` so they can be injected into transformed rows.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context. Must expose ``ctx.llm`` with at least one
+        configured LLM instance.
+    data_source : Any
+        Current data source Namespace, or ``None`` for run-scoped hooks.
+    llm_cfg : Any
+        A single llm_config Namespace from ctx.llm_configs.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{column_name: value}`` for every output_param that declares
+        ``row_column``. Empty dict when there are no such params.
+
+    Raises
+    ------
+    ConfigError
+        If ctx.llm is absent or the named LLM instance is not configured.
+    """
+    from rey_lib.llm.llm_utils import ask, default_llm  # local import — llm is optional dep
+
+    llm_name      = getattr(llm_cfg, "llm", None) or default_llm(ctx)
+    system_prompt = getattr(llm_cfg, "system_prompt", None)
+    max_tokens    = int(getattr(llm_cfg, "max_tokens", 500))
+    template      = getattr(llm_cfg, "prompt_template", "") or ""
+
+    prompt = _render_prompt(template, ctx, data_source)
+
+    _logger.debug("LLM hook '%s': calling '%s'", llm_cfg.name, llm_name)
+    response = ask(ctx, prompt, llm=llm_name, max_tokens=max_tokens, system_prompt=system_prompt)
+    _logger.info("LLM hook '%s' response (truncated): %.200s", llm_cfg.name, response)
+
+    row_columns: dict[str, Any] = {}
+    for param in (getattr(llm_cfg, "output_params", None) or []):
+        ctx_var = getattr(param, "ctx_var", None)
+        row_col = getattr(param, "row_column", None)
+        if ctx_var:
+            object.__setattr__(ctx, ctx_var, response)
+            _logger.debug("LLM hook '%s': wrote ctx.%s", llm_cfg.name, ctx_var)
+        if row_col:
+            row_columns[row_col] = response
+
+    return row_columns
 
 
 def _resolve_hook_param_value(ctx: Any, data_source: Any, source: str) -> Any:
@@ -1226,15 +1384,21 @@ def _run_hook_bindings(
             continue
 
         sql_cfg_name = getattr(binding, "sql_config", None)
-        if not sql_cfg_name:
+        llm_cfg_name = getattr(binding, "llm_config", None)
+
+        if sql_cfg_name:
+            sql_cfg = _find_sql_config(ctx, sql_cfg_name)
+            cols = _execute_one_hook(ctx, data_source, sql_cfg, open_conns, sql_dir)
+        elif llm_cfg_name:
+            llm_cfg = _find_llm_config(ctx, llm_cfg_name)
+            cols = _execute_one_hook_llm(ctx, data_source, llm_cfg)
+        else:
             label = getattr(binding, "name", "<unnamed>")
             raise ConfigError(
-                f"Hook binding '{label}' (phase '{phase}') is missing "
-                "'sql_config'. Add 'sql_config: <name>' to the binding."
+                f"Hook binding '{label}' (phase '{phase}') has neither "
+                "'sql_config' nor 'llm_config'. Add one to the binding."
             )
 
-        sql_cfg = _find_sql_config(ctx, sql_cfg_name)
-        cols = _execute_one_hook(ctx, data_source, sql_cfg, open_conns, sql_dir)
         row_columns.update(cols)
 
     return row_columns
@@ -1385,6 +1549,96 @@ def _max_string_len(rows: list[dict[str, Any]], col_name: str) -> int:
 # Private — transform orchestration
 # ---------------------------------------------------------------------------
 
+def _write_rejections(
+	ctx: Any,
+	file_path: Path,
+	errors: list[tuple[int, str, Any, Exception]],
+) -> None:
+	"""Write transform row errors to the configured rejection table.
+
+	Reads ctx.rejection.connection and ctx.rejection.table. If either is
+	absent the call is a no-op — rejection logging is optional. Failures
+	are logged as warnings and never re-raised so they cannot mask the
+	original transform failure.
+
+	Parameters
+	----------
+	ctx : Any
+	    Application context. Must carry ctx.rejection if rejection logging
+	    is desired.
+	file_path : Path
+	    Source file that produced the errors — name is stored per row.
+	errors : list[tuple[int, str, Any, Exception]]
+	    4-tuples of (row_num, column, raw_value, exception) from transform.
+	"""
+	rejection_cfg = getattr(ctx, "rejection", None)
+	if rejection_cfg is None:
+		return
+
+	conn_name  = getattr(rejection_cfg, "connection", None)
+	table_name = getattr(rejection_cfg, "table", None)
+	if not conn_name or not table_name:
+		_logger.warning(
+			"ctx.rejection is configured but missing connection or table — "
+			"skipping rejection write for %s",
+			file_path.name,
+		)
+		return
+
+	from rey_lib.config.ctx import find_by_name  # local import — avoids circular dep
+
+	sql_cfgs = getattr(ctx, "sql_configs", None)
+	conn_cfg = find_by_name(sql_cfgs, conn_name) if sql_cfgs else None
+	if conn_cfg is None:
+		_logger.warning(
+			"Rejection connection '%s' not found in sql_configs — "
+			"skipping rejection write for %s",
+			conn_name,
+			file_path.name,
+		)
+		return
+
+	schema, table = _parse_destination(table_name)
+	batch_id      = getattr(ctx, "batch_id", None)
+	rejected_dt   = datetime.now()
+
+	rows = [
+		{
+			"FileName":     file_path.name,
+			"RowNum":       row_num,
+			"ColumnName":   col,
+			"RawValue":     str(raw_value) if raw_value is not None else None,
+			"ErrorMessage": str(err),
+			"BatchID":      batch_id,
+			"RejectedDT":   rejected_dt,
+		}
+		for row_num, col, raw_value, err in errors
+	]
+
+	columns = [col for col, _ in _REJECTION_COLUMN_DEFS]
+	try:
+		with _db_adapter.get_connection(conn_cfg) as conn:
+			_db_adapter.create_staging_table_if_not_exists(
+				conn, schema, table, _REJECTION_COLUMN_DEFS
+			)
+			_db_adapter.bulk_insert(conn, schema, table, rows, columns)
+			conn.commit()
+		_logger.info(
+			"Wrote %d rejection row(s) for '%s' → %s.%s",
+			len(rows),
+			file_path.name,
+			schema,
+			table,
+		)
+	except Exception as exc:  # noqa: BLE001 — rejection write must never mask transform error
+		_logger.warning(
+			"Failed to write rejection rows for '%s': %s",
+			file_path.name,
+			exc,
+			exc_info=True,
+		)
+
+
 def _transform_one_file(
 	ctx: Any,
 	data_source: Any,
@@ -1429,6 +1683,7 @@ def _transform_one_file(
 					err,
 				)
 
+			_write_rejections(ctx, file_path, errors)
 			_execute_movements(
 				transform_cfg.movements.failure, file_path, data_source.paths
 			)
@@ -1453,6 +1708,10 @@ def _transform_one_file(
 
 		output_path = _build_output_path(data_source.paths, transform_cfg, file_path)
 		write_file(output_path, rows, file_type="CSV")
+
+		# Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
+		# can stamp RecordCount on the BatchStep row.
+		object.__setattr__(ctx, "step_record_count", len(rows))
 
 		_logger.info(
 			"Transformed: %s → %s  rows=%d",
@@ -1691,11 +1950,11 @@ def _build_column_defs(
     rows: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     """
-Note: this must be updated to use datatypes that are universal in SQL standars not SQL Server specific types.
-
     Build a column definition list for staging table creation.
 
-
+    All types use the neutral vocabulary understood by every backend via
+    db_adapter (VARCHAR(n), INTEGER, DECIMAL(p,s), DATE). Backend-specific
+    mapping happens in sqlserver_utils / duckdb_utils, not here.
 
     Parameters
     ----------
@@ -1740,11 +1999,11 @@ Note: this must be updated to use datatypes that are universal in SQL standars n
         elif transform_type == "regex_extract" and cast_to in ("float", "double"):
             sql_type = "DECIMAL(18, 6)"
         elif transform_type == "regex_extract" and cast_to in ("int", "integer"):
-            sql_type = "INT"
+            sql_type = "INTEGER"
         else:
             observed = max_lengths.get(col, 0)
             size     = max(observed + 10, 20)
-            sql_type = f"NVARCHAR({size})"
+            sql_type = f"VARCHAR({size})"
 
         col_defs.append((col, sql_type))
 
@@ -1884,7 +2143,7 @@ def _read_and_transform(
         start=1,
     ):
         try:
-            out_row = transform_row(raw_row, cfg_dict)
+            out_row = transform_row(raw_row, cfg_dict, row_num=row_num)
             if out_row is None:
                 continue
             rows.append(out_row)

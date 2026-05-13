@@ -94,17 +94,18 @@ def ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
 def list_remote_files(
     session: Session,
     remote_path: str,
-) -> list[tuple[str, datetime]]:
-    """Return all files in *remote_path* as (filename, modified_utc) tuples.
+) -> list[tuple[str, datetime, int]]:
+    """Return all files in *remote_path* as (filename, modified_utc, size) tuples.
 
-    Subdirectories are excluded. Protocol-aware.
+    Subdirectories are excluded. Protocol-aware. Size is in bytes; -1 means
+    the server did not report a size and verification will be skipped.
 
     Args:
         session:     Active Session from ftp_session().
         remote_path: Absolute remote directory path.
 
     Returns:
-        List of (filename, utc_datetime) tuples; empty if directory is empty.
+        List of (filename, utc_datetime, size_bytes) tuples; empty if directory is empty.
 
     Raises:
         FtpConnectionError: If the listing command fails.
@@ -154,22 +155,27 @@ def download_file(
     remote_path: str,
     filename: str,
     local_dir: Path,
+    expected_size: int = -1,
 ) -> Path:
-    """Download a single file to *local_dir*.
+    """Download a single file to *local_dir* and verify its size.
 
-    Partial files are deleted on failure. Protocol-aware.
+    Partial or corrupt files are deleted on failure. Protocol-aware.
+    Size verification is skipped when expected_size is -1 (server did not
+    report a size).
 
     Args:
-        session:     Active Session from ftp_session().
-        remote_path: Absolute remote directory containing the file.
-        filename:    Basename of the file to download.
-        local_dir:   Local directory to save the file into (created if absent).
+        session:       Active Session from ftp_session().
+        remote_path:   Absolute remote directory containing the file.
+        filename:      Basename of the file to download.
+        local_dir:     Local directory to save the file into (created if absent).
+        expected_size: Expected file size in bytes from the remote listing.
+                       Pass -1 to skip verification.
 
     Returns:
         Local Path where the file was saved.
 
     Raises:
-        FtpDownloadError: If the download fails for any reason.
+        FtpDownloadError: If the download fails or the size does not match.
     """
     log.debug("download_file [%s]: %s", session.protocol, filename)
     remote_file = str(PurePosixPath(remote_path) / filename)
@@ -181,6 +187,16 @@ def download_file(
             _sftp_download(session.conn, remote_file, local_file)
         else:
             _ftp_download(session.conn, remote_file, local_file)
+
+        if expected_size >= 0:
+            actual_size = local_file.stat().st_size
+            if actual_size != expected_size:
+                local_file.unlink()
+                raise FtpDownloadError(
+                    f"Size mismatch for '{remote_file}': "
+                    f"expected {expected_size} bytes, got {actual_size} bytes."
+                )
+
         log.info("Downloaded: %s → %s", remote_file, local_file)
         return local_file
     except Exception as exc:
@@ -284,7 +300,7 @@ def _sftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
 def _ftp_list_files(
     ftp: ftplib.FTP,
     remote_path: str,
-) -> list[tuple[str, datetime]]:
+) -> list[tuple[str, datetime, int]]:
     """List files in remote_path via FTP. Tries MLSD first, falls back to NLST+MDTM."""
     result = _list_via_mlsd(ftp, remote_path)
     if result is not None:
@@ -334,29 +350,30 @@ def _ftp_download(ftp: ftplib.FTP, remote_file: str, local_file: Path) -> None:
 def _list_via_mlsd(
     ftp: ftplib.FTP,
     remote_path: str,
-) -> list[tuple[str, datetime]] | None:
+) -> list[tuple[str, datetime, int]] | None:
     """List files via MLSD (RFC 3659). Returns None if server does not support it."""
     try:
-        entries = list(ftp.mlsd(remote_path, facts=["type", "modify"]))
+        entries = list(ftp.mlsd(remote_path, facts=["type", "modify", "size"]))
     except ftplib.error_perm:
         return None
 
-    result: list[tuple[str, datetime]] = []
+    result: list[tuple[str, datetime, int]] = []
     for name, facts in entries:
         if facts.get("type", "").lower() != "file":
             continue
         modified_dt = _parse_ftp_timestamp(facts.get("modify", ""))
-        result.append((name, modified_dt))
+        size        = int(facts["size"]) if "size" in facts else -1
+        result.append((name, modified_dt, size))
     return result
 
 
 def _list_via_nlst_mdtm(
     ftp: ftplib.FTP,
     remote_path: str,
-) -> list[tuple[str, datetime]]:
-    """List files via NLST + per-file MDTM. Slower but works on older servers."""
+) -> list[tuple[str, datetime, int]]:
+    """List files via NLST + per-file MDTM + SIZE. Slower but works on older servers."""
     names  = ftp.nlst(remote_path)
-    result: list[tuple[str, datetime]] = []
+    result: list[tuple[str, datetime, int]] = []
     for full_path in names:
         filename = PurePosixPath(full_path).name
         try:
@@ -365,7 +382,12 @@ def _list_via_nlst_mdtm(
             modified_dt   = _parse_ftp_timestamp(timestamp_str)
         except ftplib.all_errors:
             modified_dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
-        result.append((filename, modified_dt))
+        try:
+            size = ftp.size(full_path)
+            size = size if size is not None else -1
+        except ftplib.all_errors:
+            size = -1
+        result.append((filename, modified_dt, size))
     return result
 
 
@@ -391,16 +413,17 @@ def _close_ftp(ftp: ftplib.FTP) -> None:
 
 # ── SFTP file and directory operations ───────────────────────────────────────
 
-def _sftp_list_files(sftp: Any, remote_path: str) -> list[tuple[str, datetime]]:
+def _sftp_list_files(sftp: Any, remote_path: str) -> list[tuple[str, datetime, int]]:
     """List files in remote_path via SFTP using listdir_attr."""
-    result: list[tuple[str, datetime]] = []
+    result: list[tuple[str, datetime, int]] = []
     for attr in sftp.listdir_attr(remote_path):
         # Skip directories.
         if stat_module.S_ISDIR(attr.st_mode):
             continue
-        mtime = attr.st_mtime or 0
+        mtime       = attr.st_mtime or 0
         modified_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
-        result.append((attr.filename, modified_dt))
+        size        = attr.st_size if attr.st_size is not None else -1
+        result.append((attr.filename, modified_dt, size))
     return result
 
 

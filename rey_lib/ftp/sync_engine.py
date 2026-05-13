@@ -41,7 +41,7 @@ __all__ = ["run_sync"]
 log = logging.getLogger(__name__)
 
 
-def run_sync(ctx: Any, conn: Any) -> int:
+def run_sync(ctx: Any, conn: Any, resync: bool = True) -> int:
     """Execute a complete FTP sync run for a single connection.
 
     Loads persisted state, retries any previously failed files first,
@@ -51,9 +51,16 @@ def run_sync(ctx: Any, conn: Any) -> int:
     once that many files have been pulled in this run. null / absent means
     no limit.
 
+    In resync mode the high-water mark stamp is ignored and every remote
+    file is checked individually against state. Files already downloaded
+    at the same modification timestamp are still skipped — only genuinely
+    missing or updated files are re-downloaded.
+
     Args:
-        ctx:  Global context (log settings).
-        conn: Per-connection Namespace (ftp credentials, paths, filters, state_file).
+        ctx:    Global context (log settings).
+        conn:   Per-connection Namespace (ftp credentials, paths, filters, state_file).
+        resync: When True, bypass the stamp filter and check all remote files
+                against state individually.
 
     Returns:
         Total number of files successfully downloaded in this run.
@@ -64,6 +71,10 @@ def run_sync(ctx: Any, conn: Any) -> int:
     state      = load_state(ctx, conn)
     last_stamp = load_last_stamp(ctx, conn, state)
     retry_queue = load_retry_queue(state)
+
+    if resync:
+        log.info("RESYNC mode — high-water mark ignored, checking all remote files against state")
+        last_stamp = None
 
     # Read optional per-run download cap (null / absent = unlimited).
     _max_raw = getattr(getattr(conn, "sync", None), "max_files_per_run", None)
@@ -157,12 +168,13 @@ def _retry_failed(
         remote_path = entry["remote_path"]
         filename    = entry["filename"]
         modified_dt = datetime.fromisoformat(entry["modified"])
+        size        = entry.get("size", -1)
         local_dir   = _local_dir_for_path(conn, remote_path)
 
         log.info("Retrying: %s/%s (attempt %d of %d)",
                  remote_path, filename, entry.get("retry_count", 1), max_retries)
 
-        success = _download_one(session, remote_path, filename, modified_dt, local_dir, state)
+        success = _download_one(session, remote_path, filename, modified_dt, local_dir, state, size)
         if success:
             remove_from_retry_queue(state, remote_path, filename)
             downloaded.append(filename)
@@ -228,8 +240,8 @@ def _sync_path(
     log.info("After config filters: %d", len(filtered))
 
     to_download = [
-        (name, dt)
-        for name, dt in filtered
+        (name, dt, size)
+        for name, dt, size in filtered
         if is_new_or_updated(state, remote_path, name, dt)
     ]
     log.info("New or updated: %d", len(to_download))
@@ -282,12 +294,12 @@ def _download_in_chunks(
             "Processing chunk: files %d–%d of %d",
             chunk_start + 1, chunk_end, len(files),
         )
-        for filename, modified_dt in chunk:
-            success = _download_one(session, remote_path, filename, modified_dt, local_dir, state)
+        for filename, modified_dt, size in chunk:
+            success = _download_one(session, remote_path, filename, modified_dt, local_dir, state, size)
             if success:
                 downloaded.append(filename)
             else:
-                add_to_retry_queue(state, remote_path, filename, modified_dt)
+                add_to_retry_queue(state, remote_path, filename, modified_dt, size)
                 failed.append(filename)
 
     log_exit(ctx, "_download_in_chunks done", log)
@@ -301,6 +313,7 @@ def _download_one(
     modified_dt: datetime,
     local_dir: Path,
     state: dict[str, str],
+    expected_size: int = -1,
 ) -> bool:
     """Download a single file and record it in state on success.
 
@@ -311,7 +324,7 @@ def _download_one(
         True on success, False on failure.
     """
     try:
-        download_file(session, remote_path, filename, local_dir)
+        download_file(session, remote_path, filename, local_dir, expected_size)
         record_downloaded(state, remote_path, filename, modified_dt)
         return True
     except FtpDownloadError as exc:
@@ -407,24 +420,24 @@ def _expand_remote_paths(
 
 
 def _filter_by_stamp(
-    files: list[tuple[str, datetime]],
+    files: list[tuple[str, datetime, int]],
     last_stamp: datetime | None,
-) -> list[tuple[str, datetime]]:
+) -> list[tuple[str, datetime, int]]:
     """Discard files at or before the high-water mark."""
     if last_stamp is None:
         return files
-    result: list[tuple[str, datetime]] = []
-    for name, dt in files:
+    result: list[tuple[str, datetime, int]] = []
+    for name, dt, size in files:
         dt_aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
         if dt_aware > last_stamp:
-            result.append((name, dt))
+            result.append((name, dt, size))
     return result
 
 
 def _apply_filters(
     conn: Any,
-    files: list[tuple[str, datetime]],
-) -> list[tuple[str, datetime]]:
+    files: list[tuple[str, datetime, int]],
+) -> list[tuple[str, datetime, int]]:
     """Apply all config-driven filters from conn.filters in sequence."""
     result = files
     result = _filter_by_extension(conn, result)
@@ -436,29 +449,27 @@ def _apply_filters(
 
 def _filter_by_extension(
     conn: Any,
-    files: list[tuple[str, datetime]],
-) -> list[tuple[str, datetime]]:
+    files: list[tuple[str, datetime, int]],
+) -> list[tuple[str, datetime, int]]:
     """Retain only files whose extension is in conn.filters.extensions."""
     extensions = getattr(conn.filters, "extensions", [])
     if not extensions:
         return files
-    # Normalise to lowercase with leading dot.
     normalised = {
         e.lower() if e.startswith(".") else f".{e.lower()}"
         for e in extensions
     }
     return [
-        (name, dt)
-        for name, dt in files
+        (name, dt, size)
+        for name, dt, size in files
         if Path(name).suffix.lower() in normalised
     ]
 
 
-
 def _filter_by_exclude_extension(
     conn: Any,
-    files: list[tuple[str, datetime]],
-) -> list[tuple[str, datetime]]:
+    files: list[tuple[str, datetime, int]],
+) -> list[tuple[str, datetime, int]]:
     """Exclude files whose extension is in conn.filters.exclude_extensions."""
     exclude = getattr(conn.filters, 'exclude_extensions', [])
     if not exclude:
@@ -468,42 +479,42 @@ def _filter_by_exclude_extension(
         for e in exclude
     }
     return [
-        (name, dt)
-        for name, dt in files
+        (name, dt, size)
+        for name, dt, size in files
         if Path(name).suffix.lower() not in normalised
     ]
 
 
 def _filter_by_name_pattern(
     conn: Any,
-    files: list[tuple[str, datetime]],
-) -> list[tuple[str, datetime]]:
+    files: list[tuple[str, datetime, int]],
+) -> list[tuple[str, datetime, int]]:
     """Retain only files matching conn.filters.name_pattern (glob)."""
     pattern = getattr(conn.filters, "name_pattern", None)
     if not pattern:
         return files
     pattern = pattern.lower()
     return [
-        (name, dt)
-        for name, dt in files
+        (name, dt, size)
+        for name, dt, size in files
         if fnmatch.fnmatch(name.lower(), pattern)
     ]
 
 
 def _filter_by_max_age(
     conn: Any,
-    files: list[tuple[str, datetime]],
-) -> list[tuple[str, datetime]]:
+    files: list[tuple[str, datetime, int]],
+) -> list[tuple[str, datetime, int]]:
     """Retain only files within conn.filters.max_age_days."""
     max_age_days = getattr(conn.filters, "max_age_days", None)
     if max_age_days is None:
         return files
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=int(max_age_days))
-    result: list[tuple[str, datetime]] = []
-    for name, dt in files:
+    result: list[tuple[str, datetime, int]] = []
+    for name, dt, size in files:
         dt_aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
         if dt_aware >= cutoff:
-            result.append((name, dt))
+            result.append((name, dt, size))
     return result
 
 

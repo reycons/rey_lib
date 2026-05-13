@@ -18,12 +18,86 @@ ask(ctx, prompt, llm, max_tokens)
 
 from __future__ import annotations
 
+from typing import Optional
+
 from rey_lib.config.config_utils import Namespace
 
 __all__ = [
     "default_llm",
     "ask",
+    "direct_ask",
 ]
+
+
+def direct_ask(
+    prompt:        str,
+    model:         str,
+    provider:      str,
+    api_key:       str,
+    max_tokens:    int           = 4000,
+    system_prompt: Optional[str] = None,
+    temperature:   float         = 0.0,
+) -> str:
+    """Call an LLM directly without an app context.
+
+    Intended for standalone tools that have no app ctx available.
+    Credentials and model are supplied explicitly rather than read from ctx.
+
+    Parameters
+    ----------
+    prompt : str
+        User-facing prompt text to send.
+    model : str
+        Model identifier (e.g. 'claude-opus-4-5', 'gpt-4o').
+    provider : str
+        Provider name: 'anthropic' or 'openai'.
+    api_key : str
+        API key for the provider.
+    max_tokens : int
+        Maximum tokens in the response.
+    system_prompt : Optional[str]
+        Optional system-level instruction.
+    temperature : float
+        Sampling temperature.  Defaults to 0.0 for deterministic output.
+
+    Returns
+    -------
+    str
+        LLM response text.
+    """
+    provider = provider.lower()
+
+    if provider == "anthropic":
+        import anthropic  # noqa: PLC0415
+        client = anthropic.Anthropic(api_key=api_key)
+        kwargs: dict = dict(
+            model       = model,
+            max_tokens  = max_tokens,
+            temperature = temperature,
+            messages    = [{"role": "user", "content": prompt}],
+        )
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        return client.messages.create(**kwargs).content[0].text.strip()
+
+    if provider in ("openai", "chatgpt"):
+        import openai  # noqa: PLC0415
+        messages: list[dict] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        client   = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model       = model,
+            max_tokens  = max_tokens,
+            temperature = temperature,
+            messages    = messages,
+        )
+        return response.choices[0].message.content.strip()
+
+    raise ValueError(
+        f"Unknown provider '{provider}'. Valid providers: anthropic, openai."
+    )
 
 
 def default_llm(ctx: Namespace) -> str:
@@ -39,6 +113,7 @@ def _anthropic_ask(
     prompt: str,
     max_tokens: int,
     llm_instance: str = "claude",
+    system_prompt: Optional[str] = None,
 ) -> str:
     """Call the Anthropic API for the given llm_instance config."""
     import anthropic  # noqa: PLC0415
@@ -51,11 +126,14 @@ def _anthropic_ask(
             "Add ANTHROPIC_API_KEY to .env"
         )
     client = anthropic.Anthropic(api_key=key)
-    msg = client.messages.create(
+    kwargs: dict = dict(
         model      = llm_cfg.model,
         max_tokens = max_tokens,
         messages   = [{"role": "user", "content": prompt}],
     )
+    if system_prompt:
+        kwargs["system"] = system_prompt
+    msg = client.messages.create(**kwargs)
     return msg.content[0].text.strip()
 
 
@@ -64,6 +142,7 @@ def _openai_ask(
     prompt: str,
     max_tokens: int,
     llm_instance: str = "gpt4o",
+    system_prompt: Optional[str] = None,
 ) -> str:
     """Call the OpenAI API for the given llm_instance config."""
     import openai  # noqa: PLC0415
@@ -75,11 +154,16 @@ def _openai_ask(
             "OpenAI API key not set.\n"
             "Add OPENAI_API_KEY to .env"
         )
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
     client   = openai.OpenAI(api_key=key)
     response = client.chat.completions.create(
         model      = llm_cfg.model,
         max_tokens = max_tokens,
-        messages   = [{"role": "user", "content": prompt}],
+        messages   = messages,
     )
     return response.choices[0].message.content.strip()
 
@@ -89,6 +173,7 @@ def ask(
     prompt: str,
     llm: str,
     max_tokens: int = 450,
+    system_prompt: Optional[str] = None,
 ) -> str:
     """
     Dispatch a prompt to the selected LLM provider and return the response.
@@ -101,11 +186,15 @@ def ask(
     ctx : Namespace
         Application context. ctx.llm must contain the named instance config.
     prompt : str
-        Full prompt text to send.
+        User-facing prompt text to send.
     llm : str
         LLM instance name from config (e.g. 'claude', 'gpt4o').
     max_tokens : int
         Maximum tokens in the response.
+    system_prompt : Optional[str]
+        Optional system-level instruction passed separately from the user
+        prompt. Supported by Anthropic and OpenAI; ignored silently by
+        providers that do not support it.
 
     Returns
     -------
@@ -125,9 +214,9 @@ def ask(
         provider = llm.lower()
 
     if provider == "anthropic":
-        return _anthropic_ask(ctx, prompt, max_tokens, llm_instance=llm)
+        return _anthropic_ask(ctx, prompt, max_tokens, llm_instance=llm, system_prompt=system_prompt)
     if provider in ("openai", "chatgpt"):
-        return _openai_ask(ctx, prompt, max_tokens, llm_instance=llm)
+        return _openai_ask(ctx, prompt, max_tokens, llm_instance=llm, system_prompt=system_prompt)
     raise ValueError(
         f"Unknown LLM provider '{provider}' for instance '{llm}'. "
         f"Check config/llm/llm.*.yaml"

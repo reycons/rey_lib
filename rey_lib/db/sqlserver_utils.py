@@ -76,6 +76,37 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Neutral → SQL Server type map
+#
+# Callers may pass backend-neutral type names (e.g. 'TEXT', 'TIMESTAMP').
+# Anything not in this map is used as-is, so native SQL Server types
+# (e.g. 'NVARCHAR(150)') already produced by _build_column_defs continue
+# to work without change.
+# ---------------------------------------------------------------------------
+
+_NEUTRAL_TYPE_MAP: dict[str, str] = {
+    "TEXT":      "NVARCHAR(MAX)",
+    "VARCHAR":   "NVARCHAR(500)",
+    "TIMESTAMP": "DATETIME2",
+    "INTEGER":   "INT",
+}
+
+# Matches VARCHAR(n) with an explicit length, e.g. VARCHAR(150).
+_VARCHAR_N_RE = re.compile(r"^VARCHAR\s*\((\d+)\)$", re.IGNORECASE)
+
+
+def _map_type(sql_type: str) -> str:
+    """Return the SQL Server equivalent of a neutral type, or the type unchanged."""
+    upper = sql_type.strip().upper()
+    if upper in _NEUTRAL_TYPE_MAP:
+        return _NEUTRAL_TYPE_MAP[upper]
+    m = _VARCHAR_N_RE.match(upper)
+    if m:
+        return f"NVARCHAR({m.group(1)})"
+    return sql_type
+
+
+# ---------------------------------------------------------------------------
 # Module-level state — set once at startup by init_db()
 # ---------------------------------------------------------------------------
 
@@ -588,9 +619,9 @@ def create_staging_table_if_not_exists(
 
     qualified = f"{schema}.{table}"
 
-    # Build column list — all nullable.
+    # Build column list — all nullable. Neutral types are mapped to SQL Server equivalents.
     col_sql = ",\n        ".join(
-        f"[{col_name}] {sql_type} NULL"
+        f"[{col_name}] {_map_type(sql_type)} NULL"
         for col_name, sql_type in column_defs
     )
 

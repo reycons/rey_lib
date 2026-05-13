@@ -43,6 +43,26 @@ encrypt             Symmetrically encrypt a field value using Fernet (AES-128-CB
                         python -c "from cryptography.fernet import Fernet; \\
                                    print(Fernet.generate_key().decode())"
 
+Hash columns
+------------
+hash                Compute a deterministic hash across a fixed set of output
+                    columns and inject the result as a new column. Useful as
+                    a surrogate link key in the database.
+
+                    YAML example::
+
+                        hash:
+                          name:      file_key
+                          hash_type: sha256   # sha256 | sha1 | md5 (default sha256)
+                          columns:
+                            - trade_date
+                            - account
+                            - card_order_no
+
+                    Values are stringified and joined with '|' before hashing.
+                    None / blank values are treated as empty strings so the hash
+                    is always deterministic and never raises.
+
 Constants and file_date injection
 ----------------------------------
 Application-specific values (e.g. source_file, batch_id) must be injected
@@ -69,6 +89,7 @@ TransformError
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import date, datetime
@@ -173,6 +194,7 @@ def transform_row(
     raw_row: dict[str, str],
     file_type_cfg: dict,
     file_date: Optional[date] = None,
+    row_num: int = 0,
 ) -> Optional[dict[str, Any]]:
     """
     Apply column mapping, constants, transforms, and file_date injection
@@ -184,6 +206,9 @@ def transform_row(
     Application-specific values such as source_file or batch_id must be
     provided via the 'constants' section of file_type_cfg — they are
     never injected by this function directly.
+
+    Constants whose YAML value is the sentinel ``ctx.row_num`` are resolved
+    to the current 1-based row number supplied via the ``row_num`` parameter.
 
     Parameters
     ----------
@@ -197,6 +222,9 @@ def transform_row(
         Date parsed from the filename by parse_date_from_filename().
         Injected into the column named by file_type_cfg['file_date_column']
         when that key is present and non-empty.
+    row_num : int
+        1-based row counter for the current file.  Injected into any
+        constant whose configured value is the sentinel ``ctx.row_num``.
 
     Returns
     -------
@@ -229,7 +257,7 @@ def transform_row(
     # Step 2 — inject constants
     # ------------------------------------------------------------------
     for db_col, value in constants.items():
-        out[db_col] = value
+        out[db_col] = row_num if value == "ctx.row_num" else value
 
     # ------------------------------------------------------------------
     # Step 3 — inject file_date
@@ -255,6 +283,13 @@ def transform_row(
             transform_type,
             secrets,
         )
+
+    # ------------------------------------------------------------------
+    # Step 5 — inject hash column
+    # ------------------------------------------------------------------
+    hash_cfg = file_type_cfg.get("hash")
+    if hash_cfg:
+        out[hash_cfg["name"]] = _compute_hash(out, hash_cfg)
 
     return out
 
@@ -728,6 +763,48 @@ def _transform_strip_parens(value: str) -> str:
 # ---------------------------------------------------------------------------
 # Private — helpers
 # ---------------------------------------------------------------------------
+
+def _compute_hash(out: dict[str, Any], hash_cfg: dict) -> str:
+    """Compute a deterministic hash over the specified output columns.
+
+    Values are stringified and joined with '|' before hashing.  None values
+    and missing keys become empty strings so the result is always stable.
+
+    Parameters
+    ----------
+    out : dict[str, Any]
+        The fully-transformed output row (all earlier steps already applied).
+    hash_cfg : dict
+        The 'hash' section from the file-type config.  Expected keys:
+            name      — output column name (used by the caller, not here)
+            hash_type — algorithm name accepted by hashlib (default 'sha256')
+            columns   — list of output column names to include in the hash
+
+    Returns
+    -------
+    str
+        Hex-digest string.
+
+    Raises
+    ------
+    TransformError
+        If the requested hash_type is not available in hashlib.
+    """
+    algorithm = hash_cfg.get("hash_type", "sha256")
+    columns   = hash_cfg.get("columns", [])
+
+    parts = (str(out.get(col, "") or "") for col in columns)
+    payload = "|".join(parts).encode("utf-8")
+
+    try:
+        digest = hashlib.new(algorithm, payload)
+    except ValueError as exc:
+        raise TransformError(
+            f"Unsupported hash_type '{algorithm}': {exc}"
+        ) from exc
+
+    return digest.hexdigest()
+
 
 def _normalise_header(header: str) -> str:
     """

@@ -247,6 +247,7 @@ def add_to_retry_queue(
     remote_path: str,
     filename: str,
     modified_dt: datetime,
+    size: int = -1,
 ) -> None:
     """Add a failed file to the retry queue with retry_count = 1.
 
@@ -258,6 +259,7 @@ def add_to_retry_queue(
         remote_path: Remote directory the file lives in.
         filename:    Basename of the failed file.
         modified_dt: Modification timestamp — preserved for recording on success.
+        size:        Expected file size in bytes for verification on retry; -1 if unknown.
     """
     queue: list[dict] = state.get(_RETRY_KEY, [])
 
@@ -277,6 +279,7 @@ def add_to_retry_queue(
         "filename":     filename,
         "modified":     _ensure_utc(modified_dt).isoformat(),
         "retry_count":  retry_count,
+        "size":         size,
     })
     state[_RETRY_KEY] = queue
     log.warning(

@@ -21,6 +21,7 @@ DB_PATH                             Public alias to the current database file pa
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,9 +34,42 @@ __all__ = [
     "execute",
     "fetch",
     "load_sql",
+    "bulk_insert",
+    "create_staging_table_if_not_exists",
 ]
 
 _logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Neutral → DuckDB type map
+#
+# Callers may pass backend-neutral type names (e.g. 'TEXT', 'NVARCHAR(MAX)').
+# Anything not in this map is used as-is.
+# ---------------------------------------------------------------------------
+
+_NEUTRAL_TYPE_MAP: dict[str, str] = {
+    "TEXT":         "VARCHAR",
+    "NVARCHAR":     "VARCHAR",
+    "TIMESTAMP":    "TIMESTAMP",
+    "INTEGER":      "INTEGER",
+    "INT":          "INTEGER",
+    "DATE":         "DATE",
+}
+
+# Pattern that matches NVARCHAR(n) / VARCHAR(n) with an explicit length.
+_NVARCHAR_RE = re.compile(r"^N?VARCHAR\s*\(\s*\d+\s*\)$", re.IGNORECASE)
+_NVARCHAR_MAX_RE = re.compile(r"^N?VARCHAR\s*\(\s*MAX\s*\)$", re.IGNORECASE)
+
+
+def _map_type(sql_type: str) -> str:
+    """Return the DuckDB equivalent of a neutral or SQL Server type."""
+    upper = sql_type.strip().upper()
+    if upper in _NEUTRAL_TYPE_MAP:
+        return _NEUTRAL_TYPE_MAP[upper]
+    if _NVARCHAR_MAX_RE.match(upper) or _NVARCHAR_RE.match(upper):
+        return "VARCHAR"
+    return sql_type
+
 
 # ---------------------------------------------------------------------------
 # Module-level state — set once at startup by init_db()
@@ -97,9 +131,12 @@ def init_db(db_path: Path, sql_dir: Path) -> None:
     )
 
 
-def get_connection() -> duckdb.DuckDBPyConnection:
+def get_connection(db_cfg: Any = None) -> duckdb.DuckDBPyConnection:
     """
     Return an open DuckDB connection.
+
+    ``db_cfg`` is accepted for interface compatibility with other backends
+    but ignored — DuckDB uses the path set by ``init_db()``.
 
     Creates the database file and its parent directories if they do not
     exist. No schema DDL is run — that is the application's responsibility.
@@ -203,6 +240,104 @@ def load_sql(name: str) -> str:
             f"Available: {sorted(_SQL.keys())}"
         )
     return _SQL[name]
+
+
+def bulk_insert(
+    conn: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> int:
+    """
+    Insert rows into schema.table using executemany.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open DuckDB connection.
+    schema : str
+        Target schema name (e.g. 'main').
+    table : str
+        Target table name.
+    rows : list[dict[str, Any]]
+        Row dicts; keys must include every entry of columns.
+    columns : list[str]
+        Column names defining insert order.
+
+    Returns
+    -------
+    int
+        Number of rows inserted.
+    """
+    if not rows:
+        return 0
+    placeholders = ", ".join(["?" ] * len(columns))
+    col_list     = ", ".join(f'"{c}"' for c in columns)
+    sql          = (
+        f'INSERT INTO "{schema}"."{table}" ({col_list}) '
+        f'VALUES ({placeholders})'
+    )
+    values = [tuple(row[c] for c in columns) for row in rows]
+    conn.executemany(sql, values)
+    return len(rows)
+
+
+def create_staging_table_if_not_exists(
+    conn: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+    column_defs: list[tuple[str, str]],
+) -> bool:
+    """
+    Create a table in DuckDB if it does not already exist.
+
+    All columns are created nullable. Neutral type names (TEXT, TIMESTAMP,
+    etc.) are mapped to DuckDB equivalents; SQL Server types are also
+    normalised so mixed callers work without changes.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open DuckDB connection.
+    schema : str
+        Target schema name (e.g. 'main').
+    table : str
+        Target table name.
+    column_defs : list[tuple[str, str]]
+        Ordered list of (column_name, sql_type) tuples.
+
+    Returns
+    -------
+    bool
+        True if the table was created on this call; False if it already existed.
+    """
+    existed = _table_exists(conn, schema, table)
+    if existed:
+        return False
+
+    col_sql = ",\n    ".join(
+        f'"{col}" {_map_type(sql_type)}'
+        for col, sql_type in column_defs
+    )
+    ddl = f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (\n    {col_sql}\n)'
+    conn.execute(ddl)
+    _logger.info("Staging table ready: %s.%s", schema, table)
+    return True
+
+
+def _table_exists(
+    conn: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+) -> bool:
+    """Return True if schema.table exists in the DuckDB catalog."""
+    rows = conn.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = ? AND table_name = ?",
+        [schema, table],
+    ).fetchall()
+    return len(rows) > 0
 
 
 # ---------------------------------------------------------------------------
