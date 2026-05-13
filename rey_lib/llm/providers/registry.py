@@ -78,7 +78,7 @@ def resolve(name: str, api_key: str = "") -> BaseProvider:
     """Return or construct a provider by logical name.
 
     Checks the registry first.  If not found, constructs a built-in
-    provider (anthropic, openai, mock) using the supplied api_key.
+    provider (anthropic, openai, ollama, mock) using the supplied api_key.
 
     Parameters
     ----------
@@ -113,8 +113,12 @@ def resolve(name: str, api_key: str = "") -> BaseProvider:
         from rey_lib.llm.providers.mock import MockProvider  # noqa: PLC0415
         return MockProvider()
 
+    if normalised == "ollama":
+        from rey_lib.llm.providers.ollama import OllamaProvider  # noqa: PLC0415
+        return OllamaProvider()
+
     raise ConfigurationFailure(
         f"Unknown provider '{name}'. "
-        "Known built-ins: anthropic, openai, mock. "
+        "Known built-ins: anthropic, openai, ollama, mock. "
         "Register custom providers with registry.register() before use."
     )

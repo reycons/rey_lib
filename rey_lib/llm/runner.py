@@ -261,6 +261,7 @@ def _resolve_api_key(provider: str) -> str:
         "anthropic": "ANTHROPIC_API_KEY",
         "openai":    "OPENAI_API_KEY",
         "chatgpt":   "OPENAI_API_KEY",
+        "ollama":    "",
         "mock":      "",
     }
     env_var = env_map.get(provider.lower())

@@ -11,6 +11,7 @@ base        BaseProvider interface, ProviderCapabilities, Message, ProviderRespo
 registry    Module-level provider registry for named provider lookup.
 anthropic   Anthropic (Claude) provider implementation.
 openai      OpenAI (GPT) provider implementation.
+ollama      Ollama local LLM provider implementation.
 mock        Deterministic mock provider for testing.
 """
 
