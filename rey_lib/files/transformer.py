@@ -193,24 +193,18 @@ def parse_date_from_filename(filename: str, file_type_cfg: dict) -> Optional[dat
 def transform_row(
     raw_row: dict[str, str],
     file_type_cfg: dict,
-    file_date: Optional[date] = None,
     row_num: int = 0,
     ctx: Any = None,
 ) -> Optional[dict[str, Any]]:
     """
     Apply column mapping and transforms to one raw CSV row.
 
-    Routes to the new list-based shape (v2) when ``columns`` is a list,
-    or falls back to the legacy dict-based shape otherwise.
-
     Parameters
     ----------
     raw_row : dict[str, str]
         Raw row from the CSV reader.
     file_type_cfg : dict
-        A single file type config entry.
-    file_date : Optional[date]
-        Date parsed from the filename (legacy shape only).
+        A single file type config entry. ``columns`` must be a list.
     row_num : int
         1-based row counter for the current file.
     ctx : Any
@@ -226,59 +220,7 @@ def transform_row(
     TransformError
         If a required field fails to transform.
     """
-    columns_cfg = file_type_cfg.get("columns", {})
-    if isinstance(columns_cfg, list):
-        return _transform_row_v2(raw_row, file_type_cfg, row_num=row_num, ctx=ctx)
-    return _transform_row_legacy(raw_row, file_type_cfg, file_date=file_date, row_num=row_num)
-
-
-def _transform_row_legacy(
-    raw_row: dict[str, str],
-    file_type_cfg: dict,
-    file_date: Optional[date] = None,
-    row_num: int = 0,
-) -> Optional[dict[str, Any]]:
-    """Legacy dict-based column shape."""
-    if not _passes_row_filter(raw_row, file_type_cfg):
-        return None
-
-    columns    = file_type_cfg.get("columns", {})
-    constants  = file_type_cfg.get("constants", {})
-    transforms = file_type_cfg.get("field_transforms", {})
-
-    out: dict[str, Any] = {}
-
-    for db_col, src_col in columns.items():
-        raw_val     = raw_row.get(src_col)
-        out[db_col] = raw_val.strip() if raw_val is not None else ""
-
-    for db_col, value in constants.items():
-        out[db_col] = value
-
-    if file_date is not None:
-        date_col = file_type_cfg.get("file_date_column", "")
-        if date_col:
-            out[date_col] = file_date
-
-    secrets = file_type_cfg.get("secrets", {})
-
-    for db_col, transform_cfg in transforms.items():
-        transform_type = transform_cfg.get("type", "")
-        out[db_col] = _apply_transform(
-            db_col,
-            out,
-            raw_row,
-            transform_cfg,
-            transform_type,
-            secrets,
-            row_num=row_num,
-        )
-
-    hash_cfg = file_type_cfg.get("hash")
-    if hash_cfg:
-        out[hash_cfg["name"]] = _compute_hash(out, hash_cfg)
-
-    return out
+    return _transform_row_v2(raw_row, file_type_cfg, row_num=row_num, ctx=ctx)
 
 
 def _transform_row_v2(
@@ -484,58 +426,6 @@ def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
     _logger.debug("Unknown row_filter type '%s' — passing row through.", filter_type)
     return True
 
-
-# ---------------------------------------------------------------------------
-# Private — transform dispatcher
-# ---------------------------------------------------------------------------
-
-def _apply_transform(
-	db_col: str,
-	out: dict[str, Any],
-	raw_row: dict[str, str],
-	cfg: dict,
-	transform_type: str,
-	secrets: dict[str, str],
-	row_num: int = 0,
-) -> Any:
-	try:
-		if transform_type == "row_num":
-			return row_num
-
-		if transform_type == "date":
-			return _transform_date(out.get(db_col, ""), cfg)
-
-		if transform_type == "numeric":
-			return _transform_numeric(out.get(db_col, ""), cfg)
-
-		if transform_type == "regex_extract":
-			return _transform_regex_extract(raw_row, cfg)
-
-		if transform_type == "prefix_map":
-			return _transform_prefix_map(db_col, out, raw_row, cfg)
-
-		if transform_type == "strip_parens_suffix":
-			return _transform_strip_parens(out.get(db_col, ""))
-
-		if transform_type == "regex_date":
-			return _transform_regex_date(raw_row, cfg)
-
-		if transform_type == "encrypt":
-			return _transform_encrypt(out.get(db_col, ""), raw_row, cfg, secrets)
-
-		if transform_type == "not_blank":
-			return out.get(db_col, "")
-
-		raise TransformError(
-			f"Unknown transform type '{transform_type}' for column '{db_col}'",
-			column=db_col,
-		)
-
-	except TransformError as exc:
-		if not getattr(exc, "column", ""):
-			exc.column = db_col
-		raise
-     
 
 # ---------------------------------------------------------------------------
 # Private — individual transform implementations
