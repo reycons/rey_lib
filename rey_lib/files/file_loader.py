@@ -1662,7 +1662,7 @@ def _transform_one_file(
 			return False
 
 		constants = _build_constants(
-			ctx, transform_cfg.constants, file_path, data_source.paths
+			ctx, getattr(transform_cfg, "constants", None), file_path, data_source.paths
 		)
 
 		rows, errors = _read_and_transform(
@@ -1670,6 +1670,7 @@ def _transform_one_file(
 			transform_cfg,
 			constants,
 			header_line=header_line,
+			ctx=ctx,
 		)
 
 		if errors:
@@ -2096,6 +2097,7 @@ def _read_and_transform(
     transform_cfg: Any,
     constants: dict[str, Any],
     header_line: Optional[str] = None,
+    ctx: Any = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
     """
     Read all rows from a file and apply column mapping, transforms,
@@ -2143,7 +2145,7 @@ def _read_and_transform(
         start=1,
     ):
         try:
-            out_row = transform_row(raw_row, cfg_dict, row_num=row_num)
+            out_row = transform_row(raw_row, cfg_dict, row_num=row_num, ctx=ctx)
             if out_row is None:
                 continue
             rows.append(out_row)

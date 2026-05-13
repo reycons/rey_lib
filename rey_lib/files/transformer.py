@@ -195,36 +195,26 @@ def transform_row(
     file_type_cfg: dict,
     file_date: Optional[date] = None,
     row_num: int = 0,
+    ctx: Any = None,
 ) -> Optional[dict[str, Any]]:
     """
-    Apply column mapping, constants, transforms, and file_date injection
-    to one raw CSV row.
+    Apply column mapping and transforms to one raw CSV row.
 
-    Returns a new dict whose keys are database column names, or None if
-    the row fails the row_filter check and should be discarded.
-
-    Application-specific values such as source_file or batch_id must be
-    provided via the 'constants' section of file_type_cfg — they are
-    never injected by this function directly.
-
-    Constants whose YAML value is the sentinel ``ctx.row_num`` are resolved
-    to the current 1-based row number supplied via the ``row_num`` parameter.
+    Routes to the new list-based shape (v2) when ``columns`` is a list,
+    or falls back to the legacy dict-based shape otherwise.
 
     Parameters
     ----------
     raw_row : dict[str, str]
-        Raw row from the CSV reader — keys are source file column names.
+        Raw row from the CSV reader.
     file_type_cfg : dict
-        A single file_types entry from the data source config. Expected
-        keys: columns, constants, field_transforms, row_filter,
-        file_date_column (optional).
+        A single file type config entry.
     file_date : Optional[date]
-        Date parsed from the filename by parse_date_from_filename().
-        Injected into the column named by file_type_cfg['file_date_column']
-        when that key is present and non-empty.
+        Date parsed from the filename (legacy shape only).
     row_num : int
-        1-based row counter for the current file.  Injected into any
-        constant whose configured value is the sentinel ``ctx.row_num``.
+        1-based row counter for the current file.
+    ctx : Any
+        Application context — required for ``context`` transform type.
 
     Returns
     -------
@@ -236,7 +226,19 @@ def transform_row(
     TransformError
         If a required field fails to transform.
     """
-    # Apply row filter first — discard non-data rows silently.
+    columns_cfg = file_type_cfg.get("columns", {})
+    if isinstance(columns_cfg, list):
+        return _transform_row_v2(raw_row, file_type_cfg, row_num=row_num, ctx=ctx)
+    return _transform_row_legacy(raw_row, file_type_cfg, file_date=file_date, row_num=row_num)
+
+
+def _transform_row_legacy(
+    raw_row: dict[str, str],
+    file_type_cfg: dict,
+    file_date: Optional[date] = None,
+    row_num: int = 0,
+) -> Optional[dict[str, Any]]:
+    """Legacy dict-based column shape."""
     if not _passes_row_filter(raw_row, file_type_cfg):
         return None
 
@@ -246,35 +248,22 @@ def transform_row(
 
     out: dict[str, Any] = {}
 
-    # ------------------------------------------------------------------
-    # Step 1 — column mapping
-    # ------------------------------------------------------------------
     for db_col, src_col in columns.items():
         raw_val     = raw_row.get(src_col)
         out[db_col] = raw_val.strip() if raw_val is not None else ""
 
-    # ------------------------------------------------------------------
-    # Step 2 — inject constants
-    # ------------------------------------------------------------------
     for db_col, value in constants.items():
         out[db_col] = value
 
-    # ------------------------------------------------------------------
-    # Step 3 — inject file_date
-    # ------------------------------------------------------------------
     if file_date is not None:
         date_col = file_type_cfg.get("file_date_column", "")
         if date_col:
             out[date_col] = file_date
 
-    # ------------------------------------------------------------------
-    # Step 4 — apply transforms
-    # ------------------------------------------------------------------
     secrets = file_type_cfg.get("secrets", {})
 
     for db_col, transform_cfg in transforms.items():
         transform_type = transform_cfg.get("type", "")
-
         out[db_col] = _apply_transform(
             db_col,
             out,
@@ -285,14 +274,172 @@ def transform_row(
             row_num=row_num,
         )
 
-    # ------------------------------------------------------------------
-    # Step 5 — inject hash column
-    # ------------------------------------------------------------------
     hash_cfg = file_type_cfg.get("hash")
     if hash_cfg:
         out[hash_cfg["name"]] = _compute_hash(out, hash_cfg)
 
     return out
+
+
+def _transform_row_v2(
+    raw_row: dict[str, str],
+    file_type_cfg: dict,
+    row_num: int = 0,
+    ctx: Any = None,
+) -> Optional[dict[str, Any]]:
+    """New list-based column shape — each output field defined in one place."""
+    if not _passes_row_filter(raw_row, file_type_cfg):
+        return None
+
+    file_type = _normalize_file_type(file_type_cfg.get("file_type", "delimited_header"))
+    secrets   = file_type_cfg.get("secrets", {})
+    out:      dict[str, Any] = {}
+    deferred: list[dict]     = []
+
+    for col_cfg in file_type_cfg.get("columns", []):
+        name          = col_cfg["name"]
+        transform_cfg = col_cfg.get("transform") or {}
+
+        if transform_cfg.get("type") == "hash":
+            deferred.append(col_cfg)
+            continue
+
+        raw_value  = _resolve_source_value(raw_row, col_cfg, file_type)
+        out[name]  = _apply_transform_v2(
+            name, raw_value, transform_cfg, out, raw_row, secrets,
+            row_num=row_num, ctx=ctx,
+        )
+
+    for col_cfg in deferred:
+        out[col_cfg["name"]] = _compute_hash(out, col_cfg["transform"])
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Private — new-shape helpers
+# ---------------------------------------------------------------------------
+
+_FILE_TYPE_ALIASES: dict[str, str] = {
+    "CSV":              "delimited_header",
+    "CSVPositional":    "delimited_no_header",
+    "FixedWidth":       "fixed_width",
+    "FixedWidthHeader": "fixed_width_header",
+    "MultiFormat":      "multi_format",
+}
+
+
+def _normalize_file_type(file_type: str) -> str:
+    """Resolve legacy file_type names to canonical values."""
+    return _FILE_TYPE_ALIASES.get(file_type, file_type)
+
+
+def _resolve_context_value(value_str: str, ctx: Any = None, row_num: int = 0) -> Any:
+    """Resolve a ``ctx.*`` reference string to its runtime value."""
+    if value_str == "ctx.row_num":
+        return row_num
+    if value_str.startswith("ctx.") and ctx is not None:
+        current = ctx
+        for part in value_str[4:].split("."):
+            current = getattr(current, part, None)
+            if current is None:
+                return ""
+        return current if current is not None else ""
+    return value_str
+
+
+def _resolve_source_value(
+    raw_row: Any,
+    col_cfg: dict,
+    file_type: str,
+) -> Any:
+    """Extract the raw source value for one column from the raw row."""
+    source = col_cfg.get("source")
+    if source is None:
+        return None
+
+    if file_type in ("delimited_header", "CSV"):
+        return raw_row.get(str(source))
+
+    if file_type == "delimited_no_header":
+        idx = int(source) - 1
+        if isinstance(raw_row, (list, tuple)):
+            return raw_row[idx] if idx < len(raw_row) else None
+        return raw_row.get(idx)
+
+    if file_type in ("fixed_width", "fixed_width_header"):
+        if isinstance(source, dict):
+            start = int(source.get("start", 1)) - 1
+            end   = int(source.get("end", start + 1))
+            line  = raw_row if isinstance(raw_row, str) else ""
+            return line[start:end]
+        return None
+
+    return raw_row.get(str(source))
+
+
+def _apply_transform_v2(
+    db_col: str,
+    value: Any,
+    transform_cfg: dict,
+    out: dict[str, Any],
+    raw_row: Any,
+    secrets: dict[str, str],
+    row_num: int = 0,
+    ctx: Any = None,
+) -> Any:
+    """Transform dispatcher for the new list-based column shape."""
+    if not transform_cfg:
+        return value.strip() if isinstance(value, str) else value
+
+    transform_type = transform_cfg.get("type", "")
+
+    try:
+        if transform_type == "constant":
+            return transform_cfg.get("value")
+
+        if transform_type == "context":
+            return _resolve_context_value(
+                transform_cfg.get("value", ""), ctx=ctx, row_num=row_num,
+            )
+
+        if transform_type == "date":
+            return _transform_date(
+                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
+            )
+
+        if transform_type == "numeric":
+            return _transform_numeric(
+                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
+            )
+
+        if transform_type == "regex_extract":
+            return _transform_regex_extract(raw_row, transform_cfg)
+
+        if transform_type == "prefix_map":
+            return _transform_prefix_map(db_col, out, raw_row, transform_cfg)
+
+        if transform_type == "strip_parens_suffix":
+            return _transform_strip_parens((value or "") if isinstance(value, str) else "")
+
+        if transform_type == "regex_date":
+            return _transform_regex_date(raw_row, transform_cfg)
+
+        if transform_type == "encrypt":
+            return _transform_encrypt(value, raw_row, transform_cfg, secrets)
+
+        if transform_type == "not_blank":
+            return out.get(db_col, "")
+
+        raise TransformError(
+            f"Unknown transform type '{transform_type}' for column '{db_col}'",
+            column=db_col,
+        )
+
+    except TransformError as exc:
+        if not getattr(exc, "column", ""):
+            exc.column = db_col
+        raise
 
 
 # ---------------------------------------------------------------------------
