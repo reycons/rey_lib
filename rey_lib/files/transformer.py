@@ -323,7 +323,7 @@ def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
 
     column      = row_filter.get("column", "")
     filter_type = row_filter.get("type", "")
-    value       = raw_row.get(column, "").strip()
+    value       = (raw_row.get(column) or "").strip()
 
     if filter_type == "date":
         fmt = row_filter.get("format", "%m/%d/%Y")
