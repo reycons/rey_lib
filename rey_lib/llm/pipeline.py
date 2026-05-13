@@ -1,26 +1,31 @@
 """
 Multi-stage LLM workflow pipeline.
 
-A Pipeline is an ordered list of Stage definitions.  Each stage evaluates
-data against a contract and produces an EvaluationResult.  Stages can
-require human approval before the next stage runs, enforcing review gates
-that the contract system guarantees in writing.
+A Pipeline is an ordered list of Stage definitions.  Each stage runs
+via runner.run() and produces a RunResponse.  Stages that require approval
+pause the pipeline by returning a RunResponse with status='pending_approval'
+rather than raising an exception — the caller checks the status and arranges
+for human review before calling resume().
 
-The output of one stage feeds the next via an optional ``transform``
-callable.  When no transform is provided the full result dict from the
-previous stage is serialised as text and used as the next stage's input.
-
-All results from every stage are appended to a single JSONL log so the
-full execution history is preserved in one place.
+Approval workflow
+-----------------
+1. Stage sets requires_approval=True.
+2. pipeline.run() executes the stage successfully.
+3. Return RunResponse with status='pending_approval' — pipeline stops here.
+4. Human calls records.approve(record, reviewer) → (updated_record, approval).
+5. Human calls records.store_record(updated, log) and records.store_approval(approval, path).
+6. pipeline.resume() reads the log, sees status='approved', continues.
 
 Public API
 ----------
 Stage
-    Dataclass defining one pipeline stage.
+    Definition of one pipeline stage.
 Pipeline
     Ordered collection of stages with a shared log.
-Pipeline.run(initial_data)
-    Execute all stages in sequence and return all EvaluationResults.
+Pipeline.run(initial_data, pipeline_id)
+    Execute all stages in sequence, returning all RunResponses.
+Pipeline.resume(initial_data, pipeline_id)
+    Re-execute, skipping stages whose latest record is 'approved'.
 """
 
 from __future__ import annotations
@@ -31,9 +36,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from rey_lib.errors.error_utils import ConfigError
-from rey_lib.llm import result as result_module
-from rey_lib.llm.result import EvaluationResult
+from rey_lib.llm.api import RunRequest, RunResponse
+from rey_lib.llm.records import (
+    STATUS_APPROVED,
+    STATUS_PENDING_APPROVAL,
+    load_latest_record,
+)
+from rey_lib.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
 from rey_lib.llm.runner import run
 
 __all__ = ["Stage", "Pipeline"]
@@ -47,41 +56,44 @@ class Stage:
 
     Attributes
     ----------
-    use_case : str
-        Logical use case name (stored in the EvaluationResult envelope).
-    stage : str
-        Stage name (e.g. 'criteria_extraction', 'sql_generation').
+    stage_id : str
+        Stage identifier stored in the ExecutionRecord.
     contract_path : Path
         Path to the versioned contract markdown file.
     requires_approval : bool
-        When True, the pipeline checks that the previous stage result has
-        review_status == 'approved' before executing this stage.  Raises
-        PipelineGateError if the check fails.
+        When True, the pipeline pauses after this stage with
+        status='pending_approval' until a human approves the result.
     transform : Optional[Callable[[dict], Any]]
-        Called with the previous stage's result dict.  The return value is
-        passed as ``data`` to runner.run() for this stage.  When omitted,
-        the full previous result dict is JSON-serialised and used as input.
+        Called with the previous stage's parsed_response.  Return value
+        is passed as input_data to this stage.  When omitted, the full
+        previous parsed_response is JSON-serialised and used as input.
     output_schema : Optional[dict]
-        JSON Schema for validating this stage's LLM output.  When omitted,
-        the runner looks for a sidecar .schema.json file.
+        JSON Schema for output validation.  When omitted, the runner
+        looks for a sidecar .schema.json file.
+    schema_version : str
+        Schema version tag stored in the execution record.
     max_tokens : int
-        Maximum LLM response tokens for this stage.
+        Maximum tokens the provider may generate.
     max_rows : int
-        Maximum rows when the stage input is a list of dicts.
+        Maximum rows when input is a list of dicts.
+    retry_policy : RetryPolicy
+        Retry behaviour for this stage.
+    classification : str
+        Data classification tag stored in the execution record.
     """
 
-    use_case:          str
-    stage:             str
+    stage_id:          str
     contract_path:     Path
-    requires_approval: bool                             = False
-    transform:         Optional[Callable[[dict], Any]] = None
-    output_schema:     Optional[dict[str, Any]]        = None
+    requires_approval: bool                              = False
+    transform:         Optional[Callable[[dict], Any]]  = None
+    output_schema:     Optional[dict[str, Any]]         = None
+    schema_version:    str                              = ""
     max_tokens:        int                              = 4000
     max_rows:          int                              = 200
-
-
-class PipelineGateError(Exception):
-    """Raised when a stage requires approval but the previous result is not approved."""
+    retry_policy:      RetryPolicy                      = field(
+        default_factory=lambda: DEFAULT_RETRY_POLICY
+    )
+    classification:    str                              = ""
 
 
 class Pipeline:
@@ -92,12 +104,12 @@ class Pipeline:
     stages : list[Stage]
         Ordered stage definitions.
     log : Path
-        JSONL file where all stage results are appended.
-    provider : Optional[str]
-        LLM provider override for all stages.
-    model : Optional[str]
+        JSONL file where all ExecutionRecords are appended.
+    provider : str
+        Provider override for all stages.
+    model : str
         Model override for all stages.
-    api_key : Optional[str]
+    api_key : str
         API key override for all stages.
     """
 
@@ -105,13 +117,13 @@ class Pipeline:
         self,
         stages:   list[Stage],
         log:      Path,
-        provider: Optional[str] = None,
-        model:    Optional[str] = None,
-        api_key:  Optional[str] = None,
+        provider: str = "",
+        model:    str = "",
+        api_key:  str = "",
     ) -> None:
         """Initialise the pipeline."""
         if not stages:
-            raise ConfigError("Pipeline requires at least one stage.")
+            raise ValueError("Pipeline requires at least one stage.")
         self._stages   = stages
         self._log      = Path(log)
         self._provider = provider
@@ -121,152 +133,157 @@ class Pipeline:
     def run(
         self,
         initial_data: Union[str, list[dict[str, Any]]],
-    ) -> list[EvaluationResult]:
+        pipeline_id:  str,
+    ) -> list[RunResponse]:
         """Execute all stages in sequence.
 
-        The first stage receives ``initial_data``.  Each subsequent stage
-        receives either the transformed output of the previous stage (if
-        ``transform`` is set) or the full previous result dict as JSON text.
+        Stops and returns early if a stage sets requires_approval=True after
+        succeeding — the last RunResponse in the list will have
+        status='pending_approval'.  Call resume() after approval to continue.
 
         Parameters
         ----------
         initial_data : str | list[dict]
-            Starting input — typically a SQL result set or plain text.
+            Starting input for the first stage.
+        pipeline_id : str
+            Logical pipeline identifier stored in every ExecutionRecord.
 
         Returns
         -------
-        list[EvaluationResult]
-            One result per stage in execution order.
-
-        Raises
-        ------
-        PipelineGateError
-            If a stage has requires_approval=True and the preceding result
-            has not been approved.
+        list[RunResponse]
+            One response per executed stage.  May be shorter than the full
+            stage list if the pipeline paused for approval.
         """
-        results: list[EvaluationResult] = []
-        data: Any = initial_data
-
-        for i, stage in enumerate(self._stages):
-            _logger.info(
-                "pipeline: running stage %d/%d — %s/%s",
-                i + 1, len(self._stages), stage.use_case, stage.stage,
-            )
-
-            if stage.requires_approval and results:
-                prev = results[-1]
-                if prev.review_status != "approved":
-                    raise PipelineGateError(
-                        f"Stage '{stage.stage}' requires approval of "
-                        f"'{prev.stage}' (evaluation_id={prev.evaluation_id}, "
-                        f"status='{prev.review_status}'). "
-                        "Approve the result with result_module.approve() and "
-                        "store it before re-running the pipeline."
-                    )
-
-            evaluation = run(
-                data          = data,
-                contract_path = stage.contract_path,
-                use_case      = stage.use_case,
-                stage         = stage.stage,
-                max_tokens    = stage.max_tokens,
-                max_rows      = stage.max_rows,
-                provider      = self._provider,
-                model         = self._model,
-                api_key       = self._api_key,
-                output_schema = stage.output_schema,
-                log           = self._log,
-            )
-
-            results.append(evaluation)
-
-            if i + 1 < len(self._stages):
-                next_stage = self._stages[i + 1]
-                data = _prepare_next_input(evaluation, next_stage.transform)
-
-        _logger.info(
-            "pipeline: completed %d stage(s), log → %s",
-            len(results), self._log,
+        return self._execute(
+            stages       = self._stages,
+            initial_data = initial_data,
+            pipeline_id  = pipeline_id,
+            skip_approved = False,
         )
-        return results
 
     def resume(
         self,
         initial_data: Union[str, list[dict[str, Any]]],
-    ) -> list[EvaluationResult]:
-        """Re-run the pipeline, skipping stages that already have an approved result.
+        pipeline_id:  str,
+    ) -> list[RunResponse]:
+        """Re-execute the pipeline, skipping stages already approved in the log.
 
-        Reads the JSONL log and skips any stage whose latest result for the
-        matching use_case+stage has review_status='approved'.  Useful after a
-        human has reviewed and approved intermediate results.
+        Reads the JSONL log and skips any stage whose latest ExecutionRecord
+        for this pipeline_id + stage_id has status='approved'.
 
         Parameters
         ----------
         initial_data : str | list[dict]
             Starting input (same as run()).
+        pipeline_id : str
+            Must match the pipeline_id used in the original run() call.
 
         Returns
         -------
-        list[EvaluationResult]
-            Results for each stage — loaded from log for approved stages,
-            freshly evaluated for pending/rejected stages.
+        list[RunResponse]
+            Results for each stage.
         """
-        results: list[EvaluationResult] = []
+        return self._execute(
+            stages        = self._stages,
+            initial_data  = initial_data,
+            pipeline_id   = pipeline_id,
+            skip_approved = True,
+        )
+
+    # ---------------------------------------------------------------------------
+    # Private
+    # ---------------------------------------------------------------------------
+
+    def _execute(
+        self,
+        stages:        list[Stage],
+        initial_data:  Union[str, list[dict[str, Any]]],
+        pipeline_id:   str,
+        skip_approved: bool,
+    ) -> list[RunResponse]:
+        """Shared execution loop for run() and resume()."""
+        responses: list[RunResponse] = []
         data: Any = initial_data
 
-        for i, stage in enumerate(self._stages):
-            existing = result_module.load_latest(
-                self._log, stage.use_case, stage.stage
+        for i, stage in enumerate(stages):
+            _logger.info(
+                "pipeline: stage %d/%d — pipeline=%s stage=%s",
+                i + 1, len(stages), pipeline_id, stage.stage_id,
             )
 
-            if existing and existing.review_status == "approved":
-                _logger.info(
-                    "pipeline.resume: skipping approved stage %d/%d — %s/%s",
-                    i + 1, len(self._stages), stage.use_case, stage.stage,
-                )
-                results.append(existing)
-                data = _prepare_next_input(existing, stage.transform)
-                continue
-
-            if stage.requires_approval and results:
-                prev = results[-1]
-                if prev.review_status != "approved":
-                    raise PipelineGateError(
-                        f"Stage '{stage.stage}' requires approval of "
-                        f"'{prev.stage}' (status='{prev.review_status}')."
+            # Skip approved stages when resuming.
+            if skip_approved:
+                existing = load_latest_record(self._log, pipeline_id, stage.stage_id)
+                if existing and existing.status == STATUS_APPROVED:
+                    _logger.info(
+                        "pipeline.resume: skipping approved stage %s/%s",
+                        pipeline_id, stage.stage_id,
                     )
+                    responses.append(RunResponse(
+                        run_id          = existing.run_id,
+                        status          = existing.status,
+                        parsed_response = existing.parsed_response,
+                        record          = existing,
+                    ))
+                    data = _prepare_next_input(existing.parsed_response, stage.transform)
+                    continue
 
-            evaluation = run(
-                data          = data,
+            # Check approval gate before running this stage.
+            if stage.requires_approval and responses:
+                prev = responses[-1]
+                if prev.status != STATUS_APPROVED:
+                    _logger.info(
+                        "pipeline: stage %s requires approval of '%s' — pausing",
+                        stage.stage_id,
+                        stages[i - 1].stage_id,
+                    )
+                    responses.append(RunResponse(
+                        run_id = "",
+                        status = STATUS_PENDING_APPROVAL,
+                        errors = [
+                            f"Stage '{stage.stage_id}' requires approval of "
+                            f"'{stages[i - 1].stage_id}' "
+                            f"(run_id={prev.run_id}, status='{prev.status}')."
+                        ],
+                    ))
+                    return responses
+
+            request = RunRequest(
+                pipeline_id   = pipeline_id,
+                stage_id      = stage.stage_id,
                 contract_path = stage.contract_path,
-                use_case      = stage.use_case,
-                stage         = stage.stage,
-                max_tokens    = stage.max_tokens,
-                max_rows      = stage.max_rows,
+                input_data    = data,
                 provider      = self._provider,
                 model         = self._model,
                 api_key       = self._api_key,
                 output_schema = stage.output_schema,
+                schema_version = stage.schema_version,
+                max_tokens    = stage.max_tokens,
+                max_rows      = stage.max_rows,
+                retry_policy  = stage.retry_policy,
+                classification = stage.classification,
                 log           = self._log,
             )
-            results.append(evaluation)
 
-            if i + 1 < len(self._stages):
-                next_stage = self._stages[i + 1]
-                data = _prepare_next_input(evaluation, next_stage.transform)
+            response = run(request)
+            responses.append(response)
 
-        return results
+            # Prepare input for the next stage if there is one.
+            if i + 1 < len(stages):
+                data = _prepare_next_input(response.parsed_response, stages[i + 1].transform)
 
+        _logger.info(
+            "pipeline: completed %d stage(s), log → %s",
+            len(responses), self._log,
+        )
+        return responses
 
-# ---------------------------------------------------------------------------
-# Private helpers
-# ---------------------------------------------------------------------------
 
 def _prepare_next_input(
-    evaluation: EvaluationResult,
-    transform:  Optional[Callable[[dict], Any]],
+    parsed:    Optional[dict[str, Any]],
+    transform: Optional[Callable[[dict], Any]],
 ) -> Any:
-    """Extract or format the output of one stage as input for the next."""
-    if transform is not None:
-        return transform(evaluation.result)
-    return json.dumps(evaluation.result, indent=2, default=str)
+    """Format one stage's output as input for the next stage."""
+    if transform is not None and parsed is not None:
+        return transform(parsed)
+    return json.dumps(parsed or {}, indent=2, default=str)

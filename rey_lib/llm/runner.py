@@ -1,40 +1,27 @@
 """
-Standalone LLM workflow runner.
+LLM stage runner — the execution heart of the orchestration framework.
 
-The runner has one job: take data and a contract, send it to an LLM via the
-provider abstraction layer, and return a structured result.  It knows nothing
-about any application, database connection, or config system.
+The runner accepts a RunRequest, calls the provider, validates the output,
+and returns a RunResponse backed by a persisted ExecutionRecord.
 
-Provider selection
-------------------
-The provider and model are resolved in order:
+Failure semantics
+-----------------
+ParseFailure        Retried up to RetryPolicy.max_attempts.
+ProviderFailure     Retried up to RetryPolicy.max_attempts.
+SchemaMismatch      Fails immediately — schema failures are not transient.
 
-1. Explicit ``provider`` / ``model`` arguments to run().
-2. LLM_PROVIDER / LLM_MODEL environment variables.
-3. Built-in defaults (anthropic / claude-opus-4-5).
-
-The API key is resolved from ANTHROPIC_API_KEY or OPENAI_API_KEY unless a
-pre-registered provider is used (which carries its own credentials).
-
-Output schema
--------------
-If a ``<contract_stem>.schema.json`` file exists alongside the contract, it
-is loaded automatically and used to validate the parsed JSON response.  The
-caller can also pass a schema dict explicitly via the ``output_schema``
-parameter.  Validation failures are treated the same as JSON parse failures
-and trigger a retry.
-
-Token budget
-------------
-The runner estimates input token count (~4 chars per token) and warns when
-the input exceeds 80% of the model's known context window.
+Provider resolution order
+--------------------------
+1. RunRequest.provider / model / api_key
+2. LLM_PROVIDER / LLM_MODEL environment variables
+3. Built-in defaults defined in config constants below
 
 Public API
 ----------
-run(data, contract_path, ...)
-    Evaluate data against a contract and return an EvaluationResult.
+run(request)
+    Execute a RunRequest and return a RunResponse.
 run_from_file(data_path, contract_path, ...)
-    Convenience wrapper that loads data from a CSV, Excel, or text file.
+    Convenience wrapper: load data from a file then call run().
 """
 
 from __future__ import annotations
@@ -43,24 +30,42 @@ import hashlib
 import json
 import logging
 import os
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
 
 from rey_lib.llm import document_loader
-from rey_lib.llm import result as result_module
-from rey_lib.llm.contract import load as load_contract
-from rey_lib.llm.exceptions import ParseFailure, ProviderFailure, SchemaMismatch
+from rey_lib.llm.api import RunRequest, RunResponse
+from rey_lib.llm.contract import Contract, load as load_contract
+from rey_lib.llm.exceptions import (
+    ConfigurationFailure,
+    ParseFailure,
+    ProviderFailure,
+    SchemaMismatch,
+)
 from rey_lib.llm.providers.base import BaseProvider, Message
 from rey_lib.llm.providers.registry import resolve as resolve_provider
-from rey_lib.llm.result import EvaluationResult
+from rey_lib.llm.records import (
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+    ExecutionRecord,
+    load_all_records,
+    store_record,
+)
+from rey_lib.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
 
 __all__ = ["run", "run_from_file"]
 
 _logger = logging.getLogger(__name__)
 
-_DEFAULT_PROVIDER = "anthropic"
-_DEFAULT_MODEL    = "claude-opus-4-5"
-_MAX_RETRIES      = 3
+# Fallback defaults — only used when RunRequest fields AND env vars are empty.
+_ENV_PROVIDER = "LLM_PROVIDER"
+_ENV_MODEL    = "LLM_MODEL"
+_FALLBACK_PROVIDER = "anthropic"
+_FALLBACK_MODEL    = "claude-opus-4-5"
 
 # Approximate context window limits by model prefix (tokens).
 _CONTEXT_LIMITS: dict[str, int] = {
@@ -77,141 +82,128 @@ _CONTEXT_LIMITS: dict[str, int] = {
 _WARN_THRESHOLD  = 0.80
 _CHARS_PER_TOKEN = 4
 
+# ---------------------------------------------------------------------------
+# Internal grouping types — not part of the public API.
+# ---------------------------------------------------------------------------
 
-def run(
-    data:          Union[str, list[dict[str, Any]]],
-    contract_path: Path,
-    *,
-    use_case:      str                      = "evaluation",
-    stage:         str                      = "analysis",
-    max_tokens:    int                      = 4000,
-    max_rows:      int                      = 200,
-    provider:      Optional[str]            = None,
-    model:         Optional[str]            = None,
-    api_key:       Optional[str]            = None,
-    output_schema: Optional[dict[str, Any]] = None,
-    log:           Optional[Path]           = None,
-) -> EvaluationResult:
-    """Evaluate data against a versioned contract.
+@dataclass
+class _ProviderConfig:
+    """Resolved provider name, model, and initialised provider instance."""
 
-    The caller supplies data as either a plain string (already formatted)
-    or a list of row dicts (e.g. from a SQL query).  The runner formats
-    row dicts as a markdown table, loads the contract, calls the LLM, and
-    returns a structured EvaluationResult.
+    name:     str
+    model:    str
+    provider: BaseProvider
+
+
+@dataclass
+class _ExecuteResult:
+    """Output of the retry loop — always populated, status encodes outcome."""
+
+    parsed:            Optional[dict[str, Any]]
+    raw:               str
+    tokens_in:         int
+    tokens_out:        int
+    retry_count:       int
+    validation_errors: list[str]
+    status:            str  # STATUS_SUCCESS or STATUS_FAILED
+
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+def run(request: RunRequest) -> RunResponse:
+    """Execute a RunRequest and return a RunResponse.
 
     Parameters
     ----------
-    data : str | list[dict]
-        Input data.  A string is sent as-is.  A list of dicts is formatted
-        as a markdown table (up to max_rows rows).
-    contract_path : Path
-        Path to the versioned contract markdown file.
-    use_case : str
-        Logical use case name stored in the result audit envelope.
-    stage : str
-        Stage name within the use case (e.g. 'analysis', 'review').
-    max_tokens : int
-        Maximum LLM response tokens.
-    max_rows : int
-        Maximum rows included when data is a list of dicts.
-    provider : Optional[str]
-        LLM provider override.  Falls back to LLM_PROVIDER env var, then
-        'anthropic'.
-    model : Optional[str]
-        Model override.  Falls back to LLM_MODEL env var, then
-        'claude-opus-4-5'.
-    api_key : Optional[str]
-        API key override.  Falls back to the provider's environment variable.
-    output_schema : Optional[dict]
-        JSON Schema dict for validating the parsed LLM response.  When
-        omitted, the runner looks for a ``<contract_stem>.schema.json``
-        file alongside the contract.
-    log : Optional[Path]
-        If provided, the EvaluationResult is appended to this JSONL file.
+    request : RunRequest
+        Fully describes the stage to execute.
 
     Returns
     -------
-    EvaluationResult
-        Evaluation with full audit envelope and structured result payload.
+    RunResponse
+        Stable response envelope.  status == STATUS_SUCCESS on success.
     """
-    contract_path = Path(contract_path)
-    contract      = load_contract(contract_path)
+    # 1. Idempotency check before doing any work.
+    idempotency_response = _check_idempotency(request)
+    if idempotency_response is not None:
+        return idempotency_response
 
-    resolved_provider = provider or os.environ.get("LLM_PROVIDER", _DEFAULT_PROVIDER)
-    resolved_model    = model    or os.environ.get("LLM_MODEL",    _DEFAULT_MODEL)
-    resolved_key      = api_key  or _resolve_api_key(resolved_provider)
+    contract      = _load_contract(request.contract_path)
+    provider_cfg  = _resolve_provider_config(request)
+    input_text, input_hash = _prepare_input(request)
+    schema        = _load_schema(request)
+    schema_hash   = _hash_schema(schema)
+    prompt_hash   = _hash_text(contract.body)
 
-    schema = output_schema or _load_sidecar_schema(contract_path)
+    _warn_token_budget(input_text, provider_cfg.model)
 
-    if isinstance(data, list):
-        input_text, input_hash = document_loader.from_query_result(data, max_rows=max_rows)
-    else:
-        input_text, input_hash = document_loader.from_string(data)
+    messages            = _build_messages(input_text, contract.body)
+    rendered_prompt_hash = _hash_messages(messages)
 
-    _warn_token_budget(input_text, resolved_model)
+    # 2. Capability check before touching the provider.
+    _check_capabilities(provider_cfg.provider, messages)
+
+    policy    = request.retry_policy or DEFAULT_RETRY_POLICY
+    started_at = datetime.now(timezone.utc).isoformat()
+    t0         = time.monotonic()
 
     _logger.info(
-        "runner.run: use_case=%s stage=%s contract=%s v%s provider=%s model=%s",
-        use_case, stage, contract.name, contract.version,
-        resolved_provider, resolved_model,
+        "runner.run: pipeline=%s stage=%s contract=%s v%s provider=%s model=%s",
+        request.pipeline_id, request.stage_id,
+        contract.name, contract.version,
+        provider_cfg.name, provider_cfg.model,
     )
 
-    llm_provider = resolve_provider(resolved_provider, api_key=resolved_key)
-
-    parsed, raw, retry_count, tokens_in, tokens_out, prompt_hash, validation_errors = (
-        _call_with_retry(
-            input_text    = input_text,
-            system_prompt = contract.body,
-            provider      = llm_provider,
-            model         = resolved_model,
-            max_tokens    = max_tokens,
-            schema        = schema,
-        )
+    result = _execute_with_retry(
+        provider  = provider_cfg.provider,
+        messages  = messages,
+        model     = provider_cfg.model,
+        max_tokens = request.max_tokens,
+        schema    = schema,
+        policy    = policy,
     )
 
-    if parsed is None:
-        _logger.error(
-            "runner.run: all retries failed for %s/%s — storing raw response",
-            use_case, stage,
-        )
-        payload: dict[str, Any] = {"raw_response": raw, "parse_error": True}
-    else:
-        payload = parsed
-
-    evaluation = result_module.new(
-        use_case          = use_case,
-        stage             = stage,
-        contract_name     = contract.name,
-        contract_version  = contract.version,
-        contract_hash     = contract.hash,
-        model             = resolved_model,
-        input_hash        = input_hash,
-        result            = payload,
-        provider          = resolved_provider,
-        tokens_in         = tokens_in,
-        tokens_out        = tokens_out,
-        retry_count       = retry_count,
-        prompt_hash       = prompt_hash,
-        raw_response      = raw,
-        validation_errors = validation_errors,
+    record = _build_record(
+        request              = request,
+        contract             = contract,
+        provider_cfg         = provider_cfg,
+        started_at           = started_at,
+        t0                   = t0,
+        input_hash           = input_hash,
+        schema_hash          = schema_hash,
+        prompt_hash          = prompt_hash,
+        rendered_prompt_hash = rendered_prompt_hash,
+        result               = result,
+        schema_version       = request.schema_version,
+        policy               = policy,
     )
 
-    if log:
-        result_module.store(evaluation, Path(log))
-        _logger.info("runner.run: result stored → %s", log)
+    if request.log:
+        store_record(record, request.log)
+        _logger.info("runner.run: record stored → %s", request.log)
 
-    return evaluation
+    return RunResponse(
+        run_id          = record.run_id,
+        status          = record.status,
+        parsed_response = record.parsed_response,
+        errors          = record.validation_errors,
+        record          = record,
+    )
 
 
 def run_from_file(
     data_path:     Path,
     contract_path: Path,
+    pipeline_id:   str,
+    stage_id:      str,
     *,
     sheet:         Optional[str] = None,
     max_rows:      int           = 200,
     **kwargs: Any,
-) -> EvaluationResult:
-    """Load data from a file then evaluate against a contract.
+) -> RunResponse:
+    """Load data from a file then execute against a contract.
 
     Supported file types: .csv, .xlsx, .xls, .txt, .md.
 
@@ -221,17 +213,20 @@ def run_from_file(
         Path to the data file.
     contract_path : Path
         Path to the versioned contract markdown file.
+    pipeline_id : str
+        Logical pipeline identifier.
+    stage_id : str
+        Stage identifier.
     sheet : Optional[str]
         Excel sheet name (ignored for non-Excel files).
     max_rows : int
         Maximum rows to include from tabular files.
     **kwargs
-        Forwarded to run() (use_case, stage, max_tokens, provider, model,
-        api_key, output_schema, log).
+        Forwarded to RunRequest (provider, model, api_key, log, etc.).
 
     Returns
     -------
-    EvaluationResult
+    RunResponse
     """
     data_path = Path(data_path)
     suffix    = data_path.suffix.lower()
@@ -243,40 +238,355 @@ def run_from_file(
     elif suffix in (".txt", ".md"):
         text, _ = document_loader.from_text(data_path)
     else:
-        raise ValueError(
+        raise ConfigurationFailure(
             f"Unsupported file type '{suffix}'. "
             "Supported: .csv, .xlsx, .xls, .txt, .md"
         )
 
-    return run(text, contract_path, max_rows=max_rows, **kwargs)
+    return run(RunRequest(
+        pipeline_id   = pipeline_id,
+        stage_id      = stage_id,
+        contract_path = contract_path,
+        input_data    = text,
+        max_rows      = max_rows,
+        **kwargs,
+    ))
 
 
 # ---------------------------------------------------------------------------
-# Private helpers
+# Private — execution pipeline
 # ---------------------------------------------------------------------------
 
-def _resolve_api_key(provider: str) -> str:
-    """Read the API key for the given provider from environment variables."""
-    env_map = {
+def _check_idempotency(request: RunRequest) -> Optional[RunResponse]:
+    """Return a cached RunResponse if an idempotency match is found.
+
+    Raises LockConflict if mode is 'fail_if_exists' and a match exists.
+    Returns None when no match or when rerun_always is set.
+    """
+    from rey_lib.llm.api import (  # noqa: PLC0415
+        IDEMPOTENCY_FAIL_IF_EXISTS,
+        IDEMPOTENCY_REUSE_SUCCESS,
+    )
+    from rey_lib.llm.exceptions import LockConflict  # noqa: PLC0415
+
+    if not request.idempotency_key or not request.log:
+        return None
+
+    records = load_all_records(request.log)
+    for record in reversed(records):
+        if record.idempotency_key != request.idempotency_key:
+            continue
+
+        if request.idempotency_mode == IDEMPOTENCY_FAIL_IF_EXISTS:
+            raise LockConflict(
+                f"Idempotency key '{request.idempotency_key}' already exists "
+                f"(run_id={record.run_id}, status={record.status})."
+            )
+
+        if request.idempotency_mode == IDEMPOTENCY_REUSE_SUCCESS:
+            if record.status == STATUS_SUCCESS:
+                _logger.info(
+                    "runner: idempotency hit — reusing run_id=%s", record.run_id
+                )
+                return RunResponse(
+                    run_id          = record.run_id,
+                    status          = record.status,
+                    parsed_response = record.parsed_response,
+                    errors          = [],
+                    record          = record,
+                )
+
+        # rerun_always — fall through to execute
+        break
+
+    return None
+
+
+def _load_contract(contract_path: Path) -> Contract:
+    """Load and return the versioned contract, raising ConfigurationFailure on error."""
+    try:
+        return load_contract(contract_path)
+    except Exception as exc:
+        raise ConfigurationFailure(
+            f"Failed to load contract '{contract_path}': {exc}"
+        ) from exc
+
+
+def _resolve_provider_config(request: RunRequest) -> _ProviderConfig:
+    """Resolve provider name, model, and construct the provider instance.
+
+    If the provider name is already registered in the registry, the
+    registered instance is used directly and no API key is required.
+    Otherwise a built-in provider is constructed from the resolved API key.
+    """
+    from rey_lib.llm.providers import registry as _reg  # noqa: PLC0415
+
+    provider_name = (
+        request.provider
+        or os.environ.get(_ENV_PROVIDER, "")
+        or _FALLBACK_PROVIDER
+    )
+    model = (
+        request.model
+        or os.environ.get(_ENV_MODEL, "")
+        or _FALLBACK_MODEL
+    )
+
+    # Prefer a pre-registered instance — it carries its own credentials.
+    try:
+        provider = _reg.get(provider_name)
+        return _ProviderConfig(name=provider_name, model=model, provider=provider)
+    except ConfigurationFailure:
+        pass  # Not pre-registered; construct a built-in from API key.
+
+    api_key = request.api_key or _resolve_api_key(provider_name)
+    provider = resolve_provider(provider_name, api_key=api_key)
+    return _ProviderConfig(name=provider_name, model=model, provider=provider)
+
+
+def _resolve_api_key(provider_name: str) -> str:
+    """Read the API key from environment variables for the given provider."""
+    # Providers that do not require an API key.
+    _NO_KEY = {"ollama", "mock"}
+    if provider_name.lower() in _NO_KEY:
+        return ""
+
+    _ENV_MAP = {
         "anthropic": "ANTHROPIC_API_KEY",
         "openai":    "OPENAI_API_KEY",
         "chatgpt":   "OPENAI_API_KEY",
-        "ollama":    "",
-        "mock":      "",
     }
-    env_var = env_map.get(provider.lower())
-    if env_var is None:
-        # Unknown provider — attempt a generic env lookup, fall back to empty.
-        return os.environ.get(f"{provider.upper()}_API_KEY", "")
-    if not env_var:
-        return ""
-    key = os.environ.get(env_var, "")
+    env_var = _ENV_MAP.get(provider_name.lower(), f"{provider_name.upper()}_API_KEY")
+    key     = os.environ.get(env_var, "")
     if not key:
         raise ProviderFailure(
-            f"API key not found. Set the {env_var} environment variable."
+            f"API key not found for provider '{provider_name}'. "
+            f"Set the {env_var} environment variable."
         )
     return key
 
+
+def _prepare_input(request: RunRequest) -> tuple[str, str]:
+    """Format input_data as text and return (text, sha256_hash)."""
+    if isinstance(request.input_data, list):
+        return document_loader.from_query_result(
+            request.input_data, max_rows=request.max_rows
+        )
+    return document_loader.from_string(request.input_data)
+
+
+def _load_schema(request: RunRequest) -> Optional[dict[str, Any]]:
+    """Return the output schema from the request or a sidecar file."""
+    if request.output_schema:
+        return request.output_schema
+    return _load_sidecar_schema(Path(request.contract_path))
+
+
+def _build_messages(input_text: str, system_prompt: str) -> list[Message]:
+    """Construct the message array sent to the provider."""
+    user_content = (
+        input_text
+        + "\n\nRespond with a single valid JSON object. "
+        "Return only the JSON — no explanation or markdown wrapper."
+    )
+    return [
+        Message(role="system", content=system_prompt),
+        Message(role="user",   content=user_content),
+    ]
+
+
+def _check_capabilities(provider: BaseProvider, messages: list[Message]) -> None:
+    """Raise ConfigurationFailure if the provider cannot handle the message array."""
+    caps       = provider.capabilities
+    has_system = any(m.role == "system" for m in messages)
+
+    if has_system and not caps.supports_system_messages:
+        raise ConfigurationFailure(
+            f"{type(provider).__name__} does not support system messages. "
+            "The contract body is always sent as a system prompt."
+        )
+
+
+def _execute_with_retry(
+    provider:   BaseProvider,
+    messages:   list[Message],
+    model:      str,
+    max_tokens: int,
+    schema:     Optional[dict[str, Any]],
+    policy:     RetryPolicy,
+) -> _ExecuteResult:
+    """Run the provider call up to policy.max_attempts times.
+
+    SchemaMismatch is never retried.  ParseFailure and ProviderFailure are
+    retried only if they appear in policy.retry_on.
+
+    Returns an _ExecuteResult with status=STATUS_SUCCESS or STATUS_FAILED.
+    """
+    raw        = ""
+    tokens_in  = 0
+    tokens_out = 0
+    last_errors: list[str] = []
+
+    for attempt in range(policy.max_attempts):
+        raw, tokens_in, tokens_out, exc = _single_provider_call(
+            provider, messages, model, max_tokens
+        )
+
+        if exc is not None:
+            last_errors = [str(exc)]
+            if type(exc) not in policy.retry_on:
+                return _ExecuteResult(
+                    parsed=None, raw=raw, tokens_in=tokens_in,
+                    tokens_out=tokens_out, retry_count=attempt,
+                    validation_errors=last_errors, status=STATUS_FAILED,
+                )
+            _logger.warning(
+                "runner: attempt %d/%d failed (provider): %s",
+                attempt + 1, policy.max_attempts, exc,
+            )
+            continue
+
+        parsed, parse_exc = _attempt_parse(raw)
+        if parse_exc is not None:
+            last_errors = [str(parse_exc)]
+            if ParseFailure not in policy.retry_on:
+                return _ExecuteResult(
+                    parsed=None, raw=raw, tokens_in=tokens_in,
+                    tokens_out=tokens_out, retry_count=attempt,
+                    validation_errors=last_errors, status=STATUS_FAILED,
+                )
+            _logger.warning(
+                "runner: attempt %d/%d failed (parse): %s",
+                attempt + 1, policy.max_attempts, parse_exc,
+            )
+            continue
+
+        # Schema validation: immediate failure, never retried.
+        if schema:
+            schema_errors = _validate_schema(parsed, schema)  # type: ignore[arg-type]
+            if schema_errors:
+                _logger.error(
+                    "runner: schema validation failed — not retrying: %s",
+                    "; ".join(schema_errors[:3]),
+                )
+                return _ExecuteResult(
+                    parsed=None, raw=raw, tokens_in=tokens_in,
+                    tokens_out=tokens_out, retry_count=attempt,
+                    validation_errors=schema_errors, status=STATUS_FAILED,
+                )
+
+        return _ExecuteResult(
+            parsed=parsed, raw=raw, tokens_in=tokens_in,
+            tokens_out=tokens_out, retry_count=attempt,
+            validation_errors=[], status=STATUS_SUCCESS,
+        )
+
+    _logger.error(
+        "runner: all %d attempts failed. Last error: %s",
+        policy.max_attempts, last_errors[0] if last_errors else "unknown",
+    )
+    return _ExecuteResult(
+        parsed=None, raw=raw, tokens_in=tokens_in,
+        tokens_out=tokens_out, retry_count=policy.max_attempts - 1,
+        validation_errors=last_errors, status=STATUS_FAILED,
+    )
+
+
+def _single_provider_call(
+    provider:   BaseProvider,
+    messages:   list[Message],
+    model:      str,
+    max_tokens: int,
+) -> tuple[str, int, int, Optional[ProviderFailure]]:
+    """Make one provider call. Returns (raw, tokens_in, tokens_out, exc_or_None)."""
+    try:
+        resp = provider.run(messages=messages, model=model, max_tokens=max_tokens, temperature=0.0)
+        return resp.content, resp.tokens_in, resp.tokens_out, None
+    except ProviderFailure as exc:
+        return str(exc), 0, 0, exc
+
+
+def _attempt_parse(raw: str) -> tuple[Optional[dict[str, Any]], Optional[ParseFailure]]:
+    """Parse JSON from provider response. Returns (parsed, exc_or_None)."""
+    try:
+        return json.loads(_strip_code_fences(raw)), None
+    except (json.JSONDecodeError, ValueError) as exc:
+        return None, ParseFailure(f"JSON parse error: {exc}")
+
+
+def _validate_schema(
+    parsed: dict[str, Any],
+    schema: dict[str, Any],
+) -> list[str]:
+    """Validate parsed dict against a JSON Schema. Returns list of error messages."""
+    try:
+        import jsonschema  # noqa: PLC0415
+        errors = list(jsonschema.Draft7Validator(schema).iter_errors(parsed))
+        return [e.message for e in errors]
+    except ImportError:
+        _logger.warning(
+            "runner: jsonschema not installed — skipping schema validation. "
+            "Run: pip install jsonschema"
+        )
+        return []
+
+
+def _build_record(
+    request:              RunRequest,
+    contract:             Contract,
+    provider_cfg:         _ProviderConfig,
+    started_at:           str,
+    t0:                   float,
+    input_hash:           str,
+    schema_hash:          str,
+    prompt_hash:          str,
+    rendered_prompt_hash: str,
+    result:               _ExecuteResult,
+    schema_version:       str,
+    policy:               RetryPolicy,
+) -> ExecutionRecord:
+    """Assemble an ExecutionRecord from all collected execution metadata."""
+    ended_at   = datetime.now(timezone.utc).isoformat()
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+    return ExecutionRecord(
+        run_id               = str(uuid.uuid4()),
+        pipeline_id          = request.pipeline_id,
+        stage_id             = request.stage_id,
+        contract_name        = contract.name,
+        contract_version     = contract.version,
+        contract_hash        = contract.hash,
+        schema_version       = schema_version,
+        schema_hash          = schema_hash,
+        provider             = provider_cfg.name,
+        model                = provider_cfg.model,
+        provider_endpoint    = "",
+        input_hash           = input_hash,
+        prompt_hash          = prompt_hash,
+        rendered_prompt_hash = rendered_prompt_hash,
+        started_at           = started_at,
+        ended_at             = ended_at,
+        elapsed_ms           = elapsed_ms,
+        tokens_in            = result.tokens_in,
+        tokens_out           = result.tokens_out,
+        cost                 = 0.0,
+        status               = result.status,
+        raw_response         = result.raw,
+        parsed_response      = result.parsed,
+        validation_errors    = result.validation_errors,
+        retry_count          = result.retry_count,
+        retry_policy         = repr(policy),
+        idempotency_key      = request.idempotency_key or "",
+        classification       = request.classification,
+        artifact_uris        = [],
+        approved_by          = "",
+        approved_at          = "",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Private — utilities
+# ---------------------------------------------------------------------------
 
 def _load_sidecar_schema(contract_path: Path) -> Optional[dict[str, Any]]:
     """Load a JSON Schema file named <contract_stem>.schema.json if it exists."""
@@ -287,136 +597,55 @@ def _load_sidecar_schema(contract_path: Path) -> Optional[dict[str, Any]]:
     return None
 
 
-def _validate_schema(data: dict[str, Any], schema: dict[str, Any]) -> list[str]:
-    """Validate data against a JSON Schema.  Returns a list of error messages."""
-    try:
-        import jsonschema  # noqa: PLC0415
-        errors = list(jsonschema.Draft7Validator(schema).iter_errors(data))
-        return [e.message for e in errors]
-    except ImportError:
-        _logger.warning(
-            "runner: jsonschema not installed — skipping schema validation. "
-            "Run: pip install jsonschema"
-        )
-        return []
+def _strip_code_fences(text: str) -> str:
+    """Remove markdown code fences if the LLM wrapped its JSON response."""
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    inner = lines[1:]
+    if inner and inner[-1].strip() == "```":
+        inner = inner[:-1]
+    return "\n".join(inner).strip()
+
+
+def _hash_text(text: str) -> str:
+    """Return the SHA-256 hex digest of a UTF-8 string."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _hash_messages(messages: list[Message]) -> str:
+    """Return the SHA-256 hex digest of the serialised message array."""
+    serialised = json.dumps(
+        [{"role": m.role, "content": m.content} for m in messages],
+        sort_keys=True,
+    )
+    return _hash_text(serialised)
+
+
+def _hash_schema(schema: Optional[dict[str, Any]]) -> str:
+    """Return the SHA-256 hex digest of a JSON Schema dict, or empty string."""
+    if not schema:
+        return ""
+    return _hash_text(json.dumps(schema, sort_keys=True))
 
 
 def _warn_token_budget(text: str, model: str) -> None:
-    """Log a warning if the estimated input token count is large."""
-    estimated_tokens = len(text) // _CHARS_PER_TOKEN
-    limit = next(
+    """Log a warning when estimated input token count approaches the context limit."""
+    estimated = len(text) // _CHARS_PER_TOKEN
+    limit      = next(
         (v for k, v in _CONTEXT_LIMITS.items() if model.startswith(k)),
         None,
     )
-    if limit is None:
-        return
-    if estimated_tokens > limit * _WARN_THRESHOLD:
+    if limit and estimated > limit * _WARN_THRESHOLD:
         _logger.warning(
             "runner: input is ~%s estimated tokens (%.0f%% of %s limit: %s). "
-            "Consider pre-aggregating in SQL to reduce the dataset.",
-            f"{estimated_tokens:,}",
-            (estimated_tokens / limit) * 100,
+            "Consider pre-aggregating before evaluation.",
+            f"{estimated:,}",
+            (estimated / limit) * 100,
             model,
             f"{limit:,}",
         )
-
-
-def _hash_prompt(prompt: str) -> str:
-    """Return the SHA-256 hex digest of a rendered prompt string."""
-    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-
-
-def _call_with_retry(
-    input_text:    str,
-    system_prompt: str,
-    provider:      BaseProvider,
-    model:         str,
-    max_tokens:    int,
-    schema:        Optional[dict[str, Any]],
-) -> tuple[Optional[dict[str, Any]], str, int, int, int, str, list[str]]:
-    """Call the provider up to _MAX_RETRIES times until a valid response arrives.
-
-    Returns
-    -------
-    tuple of:
-        parsed          — dict or None if all retries failed
-        raw             — last raw response text
-        retry_count     — number of retries (0 = succeeded on first attempt)
-        tokens_in       — input tokens from the last successful call
-        tokens_out      — output tokens from the last successful call
-        prompt_hash     — SHA-256 of the rendered prompt
-        validation_errors — errors from the last failed attempt (empty on success)
-    """
-    prompt = (
-        input_text
-        + "\n\nRespond with a single valid JSON object. "
-        "Return only the JSON — no explanation or markdown wrapper."
-    )
-    prompt_hash = _hash_prompt(prompt)
-
-    messages = [
-        Message(role="system", content=system_prompt),
-        Message(role="user",   content=prompt),
-    ]
-
-    raw               = ""
-    tokens_in         = 0
-    tokens_out        = 0
-    validation_errors: list[str] = []
-
-    for attempt in range(1, _MAX_RETRIES + 1):
-        try:
-            response = provider.run(
-                messages    = messages,
-                model       = model,
-                max_tokens  = max_tokens,
-                temperature = 0.0,
-            )
-        except ProviderFailure as exc:
-            _logger.warning(
-                "runner: provider failure on attempt %d/%d: %s", attempt, _MAX_RETRIES, exc
-            )
-            raw = str(exc)
-            continue
-
-        raw        = response.content
-        tokens_in  = response.tokens_in
-        tokens_out = response.tokens_out
-
-        try:
-            parsed = json.loads(_extract_json(raw))
-        except (json.JSONDecodeError, ValueError):
-            _logger.warning(
-                "runner: JSON parse failed on attempt %d/%d", attempt, _MAX_RETRIES
-            )
-            validation_errors = ["JSON parse failure"]
-            continue
-
-        if schema:
-            validation_errors = _validate_schema(parsed, schema)
-            if validation_errors:
-                _logger.warning(
-                    "runner: schema validation failed on attempt %d/%d: %s",
-                    attempt, _MAX_RETRIES, "; ".join(validation_errors[:3]),
-                )
-                continue
-
-        retry_count = attempt - 1
-        return parsed, raw, retry_count, tokens_in, tokens_out, prompt_hash, []
-
-    return None, raw, _MAX_RETRIES - 1, tokens_in, tokens_out, prompt_hash, validation_errors
-
-
-def _extract_json(text: str) -> str:
-    """Strip markdown code fences if the LLM wrapped its response in them."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        inner = lines[1:]
-        if inner and inner[-1].strip() == "```":
-            inner = inner[:-1]
-        return "\n".join(inner).strip()
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -432,74 +661,67 @@ def _cli() -> None:
         prog        = "rey_lib.llm.runner",
         description = "Evaluate data against an LLM contract.",
     )
-    parser.add_argument(
-        "--data", required=True,
-        help="Path to data file (.csv, .xlsx, .txt, .md) or '-' to read stdin as text",
-    )
-    parser.add_argument(
-        "--contract", required=True,
-        help="Path to the contract markdown file",
-    )
-    parser.add_argument("--use-case",   default="evaluation",    help="Use case name")
-    parser.add_argument("--stage",      default="analysis",      help="Stage name")
-    parser.add_argument("--max-tokens", default=4000, type=int,  help="Max LLM tokens")
-    parser.add_argument("--max-rows",   default=200,  type=int,  help="Max table rows")
-    parser.add_argument("--provider",   default=None,            help="LLM provider")
-    parser.add_argument("--model",      default=None,            help="LLM model")
-    parser.add_argument("--schema",     default=None,            help="Path to JSON Schema file")
-    parser.add_argument("--log",        default=None,            help="JSONL output path")
-    parser.add_argument("--quiet",      action="store_true",     help="Suppress JSON output")
+    parser.add_argument("--data",        required=True)
+    parser.add_argument("--contract",    required=True)
+    parser.add_argument("--pipeline-id", default="cli")
+    parser.add_argument("--stage-id",    default="analysis")
+    parser.add_argument("--max-tokens",  default=4000, type=int)
+    parser.add_argument("--max-rows",    default=200,  type=int)
+    parser.add_argument("--provider",    default="")
+    parser.add_argument("--model",       default="")
+    parser.add_argument("--schema",      default=None)
+    parser.add_argument("--log",         default=None)
+    parser.add_argument("--quiet",       action="store_true")
     args = parser.parse_args()
 
     schema: Optional[dict[str, Any]] = None
     if args.schema:
         schema = json.loads(Path(args.schema).read_text(encoding="utf-8"))
 
-    # Exit codes per design contract:
-    # 0=success, 1=general, 2=validation, 3=provider, 6=configuration
+    input_data: Union[str, list[dict[str, Any]]]
+    if args.data == "-":
+        input_data = sys.stdin.read()
+    else:
+        input_data = Path(args.data).read_text(encoding="utf-8")
+
+    from rey_lib.llm.exceptions import (  # noqa: PLC0415
+        CancellationFailure,
+        ConfigurationFailure,
+        ProviderFailure,
+        SchemaMismatch,
+    )
+
+    # Exit codes per design contract: 0=success 2=validation 3=provider 6=config
     try:
-        if args.data == "-":
-            raw_text   = sys.stdin.read()
-            evaluation = run(
-                data          = raw_text,
-                contract_path = Path(args.contract),
-                use_case      = args.use_case,
-                stage         = args.stage,
-                max_tokens    = args.max_tokens,
-                max_rows      = args.max_rows,
-                provider      = args.provider,
-                model         = args.model,
-                output_schema = schema,
-                log           = Path(args.log) if args.log else None,
-            )
-        else:
-            evaluation = run_from_file(
-                data_path     = Path(args.data),
-                contract_path = Path(args.contract),
-                use_case      = args.use_case,
-                stage         = args.stage,
-                max_tokens    = args.max_tokens,
-                max_rows      = args.max_rows,
-                provider      = args.provider,
-                model         = args.model,
-                output_schema = schema,
-                log           = Path(args.log) if args.log else None,
-            )
+        response = run(RunRequest(
+            pipeline_id   = args.pipeline_id,
+            stage_id      = args.stage_id,
+            contract_path = Path(args.contract),
+            input_data    = input_data,
+            provider      = args.provider,
+            model         = args.model,
+            max_tokens    = args.max_tokens,
+            max_rows      = args.max_rows,
+            output_schema = schema,
+            log           = Path(args.log) if args.log else None,
+        ))
+    except ConfigurationFailure as exc:
+        _logger.error("configuration failure: %s", exc)
+        sys.exit(6)
     except ProviderFailure as exc:
         _logger.error("provider failure: %s", exc)
         sys.exit(3)
     except SchemaMismatch as exc:
         _logger.error("schema mismatch: %s", exc)
         sys.exit(2)
-    except ParseFailure as exc:
-        _logger.error("parse failure: %s", exc)
-        sys.exit(2)
     except Exception as exc:
         _logger.error("unexpected error: %s", exc)
         sys.exit(1)
 
-    if not args.quiet:
-        print(json.dumps(evaluation.result, indent=2, default=str))
+    if not args.quiet and response.parsed_response:
+        print(json.dumps(response.parsed_response, indent=2, default=str))
+
+    sys.exit(0 if response.status == STATUS_SUCCESS else 1)
 
 
 if __name__ == "__main__":
