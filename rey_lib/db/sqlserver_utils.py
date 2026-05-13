@@ -283,6 +283,34 @@ def fetch(
     finally:
         cursor.close()
 
+
+def fetch_dicts(
+    conn:     pyodbc.Connection,
+    sql_name: str,
+    params:   Optional[list[Any]] = None,
+) -> list[dict[str, Any]]:
+    """Execute a named SQL query and return all rows as a list of dicts.
+
+    Alias for ``fetch()`` — provided so DBAdapter can call a uniform
+    ``fetch_dicts`` across all backends without backend-specific branches.
+
+    Parameters
+    ----------
+    conn : pyodbc.Connection
+        Open pyodbc connection.
+    sql_name : str
+        SQL filename stem without .sql extension.
+    params : Optional[list[Any]]
+        Positional parameters.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        All result rows as column → value dicts.
+    """
+    return fetch(conn, sql_name, params)
+
+
 def bulk_insert(
 	conn: pyodbc.Connection,
 	schema: str,

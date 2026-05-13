@@ -76,6 +76,10 @@ class RunRequest:
         Maximum tokens the provider may generate.
     max_rows : int
         Maximum rows included when input_data is a list of dicts.
+    requires_approval : bool
+        When True, the runner stores this stage's record as 'pending_approval'
+        on success rather than 'success'.  The pipeline halts at this point.
+        Use records.approve() + pipeline.resume() to continue.
     retry_policy : RetryPolicy
         Retry behaviour for this stage.
     """
@@ -99,6 +103,11 @@ class RunRequest:
     classification:    str            = ""
     max_tokens:        int            = 4000
     max_rows:          int            = 200
+
+    # When True the runner stores the record as 'pending_approval' on success
+    # instead of 'success'.  The pipeline halts at this stage until the record
+    # is approved via records.approve() and a resume() call is made.
+    requires_approval: bool           = False
 
     retry_policy:      RetryPolicy    = field(default_factory=lambda: DEFAULT_RETRY_POLICY)
 

@@ -22,7 +22,9 @@ from rey_lib.llm.providers.base import (
 
 __all__ = ["OllamaProvider"]
 
-_DEFAULT_ENDPOINT = "http://localhost:11434"
+# Exposed as constants so callers can reference them without magic strings.
+DEFAULT_ENDPOINT = "http://localhost:11434"
+DEFAULT_TIMEOUT  = 120
 
 _CAPABILITIES = ProviderCapabilities(
     supports_tools           = False,
@@ -43,9 +45,14 @@ class OllamaProvider(BaseProvider):
         Base URL for the Ollama server.  Defaults to http://localhost:11434.
     """
 
-    def __init__(self, endpoint: str = _DEFAULT_ENDPOINT) -> None:
-        """Initialise the Ollama provider with a server endpoint."""
+    def __init__(
+        self,
+        endpoint: str = DEFAULT_ENDPOINT,
+        timeout:  int = DEFAULT_TIMEOUT,
+    ) -> None:
+        """Initialise the Ollama provider with a server endpoint and HTTP timeout."""
         self._endpoint = endpoint.rstrip("/")
+        self._timeout  = timeout
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -110,8 +117,10 @@ class OllamaProvider(BaseProvider):
                     "temperature": temperature,
                 },
             )
-        except Exception as exc:
-            raise ProviderFailure(f"Ollama SDK error: {exc}") from exc
+        except ollama.ResponseError as exc:
+            raise ProviderFailure(f"Ollama response error: {exc}") from exc
+        except OSError as exc:
+            raise ProviderFailure(f"Ollama connection error: {exc}") from exc
 
         content    = response.message.content.strip()
         usage      = getattr(response, "usage", None)
@@ -162,13 +171,15 @@ class OllamaProvider(BaseProvider):
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.URLError as exc:
             raise ProviderFailure(
                 f"Ollama server unreachable at {self._endpoint}: {exc}"
             ) from exc
-        except Exception as exc:
+        except json.JSONDecodeError as exc:
+            raise ProviderFailure(f"Ollama returned invalid JSON: {exc}") from exc
+        except OSError as exc:
             raise ProviderFailure(f"Ollama HTTP error: {exc}") from exc
 
         message    = data.get("message", {})

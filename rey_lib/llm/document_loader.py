@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,6 +48,9 @@ def from_csv(
     """
     Load a CSV file and format it as a markdown table.
 
+    Reads only up to max_rows data rows — the file is not fully loaded into
+    memory regardless of size.
+
     Parameters
     ----------
     path : Path
@@ -62,10 +64,16 @@ def from_csv(
         (markdown_table, sha256_hex)
     """
     path = Path(path)
-    raw = path.read_text(encoding="utf-8-sig")
-    reader = csv.DictReader(io.StringIO(raw))
-    rows = list(reader)
-    return _rows_to_markdown(rows, max_rows, source=path.name)
+    rows: list[dict[str, Any]] = []
+    truncated = False
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            if len(rows) >= max_rows:
+                truncated = True
+                break
+            rows.append(dict(row))
+    return _rows_to_markdown(rows, source=path.name, truncated=truncated)
 
 
 def from_excel(
@@ -75,6 +83,11 @@ def from_excel(
 ) -> tuple[str, str]:
     """
     Load an Excel file and format it as a markdown table.
+
+    Iterates rows lazily using openpyxl read-only mode — the full sheet is
+    not materialised in memory.  Reads up to max_rows data rows after the
+    detected header.  Pre-header rows (metadata, blank rows) are buffered
+    only until the header is found.
 
     Scans for the first row that looks like a header (all non-empty string
     values). Skips leading blank rows and metadata rows automatically.
@@ -99,36 +112,55 @@ def from_excel(
     wb   = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws   = wb[sheet] if sheet else wb.active
 
-    all_rows = list(ws.iter_rows(values_only=True))
+    headers:        Optional[list[str]]         = None
+    pre_header_buf: list[tuple]                 = []
+    rows:           list[dict[str, Any]]        = []
+    truncated = False
+
+    for raw_row in ws.iter_rows(values_only=True):
+        if headers is None:
+            pre_header_buf.append(raw_row)
+            # Proper header: every non-None cell is a non-empty string.
+            if raw_row and all(
+                isinstance(c, str) and c.strip()
+                for c in raw_row
+                if c is not None
+            ):
+                headers = [str(c).strip() if c is not None else "" for c in raw_row]
+        else:
+            if any(c is not None for c in raw_row):
+                if len(rows) >= max_rows:
+                    truncated = True
+                    break
+                rows.append(
+                    {headers[j]: (raw_row[j] if j < len(raw_row) else None)
+                     for j in range(len(headers))}
+                )
+
     wb.close()
 
-    # Find header row: first row where every cell is a non-empty string.
-    header_idx = None
-    for i, row in enumerate(all_rows):
-        if row and all(isinstance(c, str) and c.strip() for c in row if c is not None):
-            header_idx = i
-            break
-
-    if header_idx is None:
-        # Fall back to first non-blank row.
-        for i, row in enumerate(all_rows):
-            if any(c is not None for c in row):
-                header_idx = i
+    # Fallback: use first non-blank row in the pre-header buffer as the header,
+    # then collect the remaining buffered rows as data.
+    if headers is None:
+        for i, buf_row in enumerate(pre_header_buf):
+            if any(c is not None for c in buf_row):
+                headers = [str(c).strip() if c is not None else "" for c in buf_row]
+                for data_row in pre_header_buf[i + 1:]:
+                    if any(c is not None for c in data_row):
+                        if len(rows) >= max_rows:
+                            truncated = True
+                            break
+                        rows.append(
+                            {headers[j]: (data_row[j] if j < len(data_row) else None)
+                             for j in range(len(headers))}
+                        )
                 break
 
-    if header_idx is None:
+    if headers is None:
         text = f"Source: {path.name}\n\n(empty sheet)"
         return text, _hash(text)
 
-    headers     = [str(c).strip() if c is not None else "" for c in all_rows[header_idx]]
-    data_rows   = all_rows[header_idx + 1:]
-    dict_rows   = [
-        {headers[j]: (row[j] if j < len(row) else None) for j in range(len(headers))}
-        for row in data_rows
-        if any(c is not None for c in row)
-    ]
-
-    return _rows_to_markdown(dict_rows, max_rows, source=path.name)
+    return _rows_to_markdown(rows, source=path.name, truncated=truncated)
 
 
 def from_query_result(
@@ -142,7 +174,7 @@ def from_query_result(
     Parameters
     ----------
     rows : list[dict[str, Any]]
-        Query result rows.
+        Query result rows. Sliced to max_rows before formatting.
     max_rows : int
         Maximum rows to include.
     label : str
@@ -153,7 +185,8 @@ def from_query_result(
     tuple[str, str]
         (markdown_table, sha256_hex)
     """
-    return _rows_to_markdown(rows, max_rows, source=label)
+    truncated = len(rows) > max_rows
+    return _rows_to_markdown(rows[:max_rows], source=label, truncated=truncated)
 
 
 def from_text(path: Path) -> tuple[str, str]:
@@ -205,33 +238,31 @@ def _hash(text: str) -> str:
 
 
 def _rows_to_markdown(
-    rows:     list[dict[str, Any]],
-    max_rows: int,
-    source:   str,
+    rows:      list[dict[str, Any]],
+    source:    str,
+    truncated: bool = False,
 ) -> tuple[str, str]:
-    """Format a list of row dicts as a markdown table with a source header."""
+    """Format a pre-sliced list of row dicts as a markdown table with a source header.
+
+    Callers are responsible for slicing to max_rows before calling.
+    truncated=True appends a note indicating the source was cut short.
+    """
     if not rows:
         text = f"Source: {source}\n\nTotal rows: 0\n\n(no data)"
         return text, _hash(text)
 
-    total   = len(rows)
-    sample  = rows[:max_rows]
-    headers = list(sample[0].keys())
-
-    # Markdown table
+    headers = list(rows[0].keys())
     sep  = "| " + " | ".join("---" for _ in headers) + " |"
     head = "| " + " | ".join(str(h) for h in headers) + " |"
     body = "\n".join(
         "| " + " | ".join(_cell(row.get(h)) for h in headers) + " |"
-        for row in sample
+        for row in rows
     )
-
     note = (
-        f"\n\n_Showing {len(sample)} of {total} rows._"
-        if total > max_rows else
-        f"\n\nTotal rows: {total}"
+        f"\n\n_Showing {len(rows)} rows (truncated — source has more)._"
+        if truncated else
+        f"\n\nTotal rows: {len(rows)}"
     )
-
     text = f"Source: {source}\n\n{head}\n{sep}\n{body}{note}"
     return text, _hash(text)
 

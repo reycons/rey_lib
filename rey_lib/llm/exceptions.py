@@ -25,6 +25,8 @@ OrchestratorError
 
 from __future__ import annotations
 
+from rey_lib.errors.error_utils import AppError, ConfigError
+
 __all__ = [
     "OrchestratorError",
     "ProviderFailure",
@@ -44,7 +46,7 @@ __all__ = [
 ]
 
 
-class OrchestratorError(Exception):
+class OrchestratorError(AppError):
     """Base class for all orchestrator failures."""
 
 
@@ -72,7 +74,7 @@ class ContractViolation(OrchestratorError):
     """Provider output violated an explicit constraint declared in the contract."""
 
 
-class ConfigurationFailure(OrchestratorError):
+class ConfigurationFailure(OrchestratorError, ConfigError):
     """Orchestrator or provider configuration is missing, invalid, or inconsistent."""
 
 

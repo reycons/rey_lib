@@ -212,6 +212,32 @@ def fetch(
     return conn.execute(load_sql(sql_name), params or []).fetchall()
 
 
+def fetch_dicts(
+    conn: duckdb.DuckDBPyConnection,
+    sql_name: str,
+    params: Optional[list[Any]] = None,
+) -> list[dict[str, Any]]:
+    """Execute a named SQL query and return all rows as a list of dicts.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open DuckDB connection.
+    sql_name : str
+        SQL filename stem without .sql extension.
+    params : Optional[list[Any]]
+        Positional query parameters.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        All result rows as column → value dicts. Empty list if no rows matched.
+    """
+    result    = conn.execute(load_sql(sql_name), params or [])
+    col_names = [d[0] for d in result.description]
+    return [dict(zip(col_names, row)) for row in result.fetchall()]
+
+
 def load_sql(name: str) -> str:
     """
     Return the preloaded SQL string for a named query.

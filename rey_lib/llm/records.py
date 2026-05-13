@@ -64,6 +64,7 @@ __all__ = [
     "ApprovalRecord",
     # Record operations
     "approve",
+    "cancel",
     "reject",
     # Persistence
     "store_record",
@@ -309,6 +310,33 @@ def approve(
         approved_at = now,
     )
     return updated, approval
+
+
+def cancel(
+    record: ExecutionRecord,
+    reason: str = "",
+) -> ExecutionRecord:
+    """Mark an execution record as cancelled.
+
+    Returns an updated record with status='cancelled'.  The caller is
+    responsible for persisting it via store_record().
+
+    Parameters
+    ----------
+    record : ExecutionRecord
+        The record to cancel.
+    reason : str
+        Optional cancellation reason stored in validation_errors.
+
+    Returns
+    -------
+    ExecutionRecord
+        Updated record with status='cancelled'.
+    """
+    errors = list(record.validation_errors)
+    if reason:
+        errors.append(f"Cancelled: {reason}")
+    return dataclasses.replace(record, status=STATUS_CANCELLED, validation_errors=errors)
 
 
 def reject(

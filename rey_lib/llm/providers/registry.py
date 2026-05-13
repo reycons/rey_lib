@@ -20,15 +20,15 @@ resolve(name, api_key)
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 from rey_lib.llm.exceptions import ConfigurationFailure
 from rey_lib.llm.providers.base import BaseProvider
+from rey_lib.logs.log_utils import get_logger
 
 __all__ = ["register", "get", "resolve"]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 # Maps logical name → registered provider instance.
 _registry: dict[str, BaseProvider] = {}
@@ -74,7 +74,12 @@ def get(name: str) -> BaseProvider:
     return provider
 
 
-def resolve(name: str, api_key: str = "") -> BaseProvider:
+def resolve(
+    name:     str,
+    api_key:  str = "",
+    endpoint: str = "",
+    timeout:  int = 0,
+) -> BaseProvider:
     """Return or construct a provider by logical name.
 
     Checks the registry first.  If not found, constructs a built-in
@@ -85,7 +90,11 @@ def resolve(name: str, api_key: str = "") -> BaseProvider:
     name : str
         Logical provider name.
     api_key : str
-        API key for built-in providers.  Ignored for 'mock'.
+        API key for built-in providers.  Ignored for 'mock' and 'ollama'.
+    endpoint : str
+        Endpoint URL override.  Only used for 'ollama'; ignored otherwise.
+    timeout : int
+        HTTP timeout in seconds.  Only used for 'ollama'; 0 uses the default.
 
     Returns
     -------
@@ -114,8 +123,15 @@ def resolve(name: str, api_key: str = "") -> BaseProvider:
         return MockProvider()
 
     if normalised == "ollama":
-        from rey_lib.llm.providers.ollama import OllamaProvider  # noqa: PLC0415
-        return OllamaProvider()
+        from rey_lib.llm.providers.ollama import (  # noqa: PLC0415
+            DEFAULT_ENDPOINT,
+            DEFAULT_TIMEOUT,
+            OllamaProvider,
+        )
+        return OllamaProvider(
+            endpoint = endpoint or DEFAULT_ENDPOINT,
+            timeout  = timeout  or DEFAULT_TIMEOUT,
+        )
 
     raise ConfigurationFailure(
         f"Unknown provider '{name}'. "

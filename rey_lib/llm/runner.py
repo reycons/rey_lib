@@ -14,12 +14,14 @@ Provider resolution order
 --------------------------
 1. RunRequest.provider / model / api_key
 2. LLM_PROVIDER / LLM_MODEL environment variables
-3. Built-in defaults defined in config constants below
+3. ConfigurationFailure raised — no hardcoded fallback.
 
 Public API
 ----------
 run(request)
     Execute a RunRequest and return a RunResponse.
+run_batch(requests)
+    Execute a list of RunRequests sequentially.
 run_from_file(data_path, contract_path, ...)
     Convenience wrapper: load data from a file then call run().
 """
@@ -28,8 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -37,8 +37,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.llm import document_loader
 from rey_lib.llm.api import RunRequest, RunResponse
+from rey_lib.llm.artifacts import ArtifactStore
 from rey_lib.llm.contract import Contract, load as load_contract
 from rey_lib.llm.exceptions import (
     ConfigurationFailure,
@@ -50,34 +52,32 @@ from rey_lib.llm.providers.base import BaseProvider, Message
 from rey_lib.llm.providers.registry import resolve as resolve_provider
 from rey_lib.llm.records import (
     STATUS_FAILED,
+    STATUS_PENDING_APPROVAL,
     STATUS_SUCCESS,
     ExecutionRecord,
     load_all_records,
     store_record,
 )
+from rey_lib.llm.redaction import NoopRedactor, RedactionFilter
 from rey_lib.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
+from rey_lib.logs.log_utils import get_logger
 
-__all__ = ["run", "run_from_file"]
+__all__ = ["run", "run_batch", "run_from_file"]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
-# Fallback defaults — only used when RunRequest fields AND env vars are empty.
-_ENV_PROVIDER = "LLM_PROVIDER"
-_ENV_MODEL    = "LLM_MODEL"
-_FALLBACK_PROVIDER = "anthropic"
-_FALLBACK_MODEL    = "claude-opus-4-5"
 
 # Approximate context window limits by model prefix (tokens).
 _CONTEXT_LIMITS: dict[str, int] = {
-    "claude-opus-4":    200_000,
-    "claude-sonnet-4":  200_000,
-    "claude-haiku-4":   200_000,
-    "claude-3-5":       200_000,
-    "claude-3":         200_000,
-    "gpt-4o":           128_000,
-    "gpt-4-turbo":      128_000,
-    "gpt-4":              8_192,
-    "gpt-3.5":           16_385,
+    "claude-opus-4":   200_000,
+    "claude-sonnet-4": 200_000,
+    "claude-haiku-4":  200_000,
+    "claude-3-5":      200_000,
+    "claude-3":        200_000,
+    "gpt-4o":          128_000,
+    "gpt-4-turbo":     128_000,
+    "gpt-4":             8_192,
+    "gpt-3.5":          16_385,
 }
 _WARN_THRESHOLD  = 0.80
 _CHARS_PER_TOKEN = 4
@@ -112,40 +112,59 @@ class _ExecuteResult:
 # Public entry points
 # ---------------------------------------------------------------------------
 
-def run(request: RunRequest) -> RunResponse:
+def run(
+    request:          RunRequest,
+    *,
+    redaction_filter: Optional[RedactionFilter] = None,
+    artifact_store:   Optional[ArtifactStore]   = None,
+) -> RunResponse:
     """Execute a RunRequest and return a RunResponse.
 
     Parameters
     ----------
     request : RunRequest
         Fully describes the stage to execute.
+    redaction_filter : Optional[RedactionFilter]
+        When provided, applied to input text before it is sent to the
+        provider.  Use to mask PII or confidential data.
+    artifact_store : Optional[ArtifactStore]
+        When provided, the parsed_response is written to the store after
+        a successful execution and the URI is recorded in artifact_uris.
 
     Returns
     -------
     RunResponse
-        Stable response envelope.  status == STATUS_SUCCESS on success.
+        Stable response envelope.  status is one of the STATUS_* constants.
+        A stage with requires_approval=True that succeeds returns
+        status='pending_approval', not 'success'.
     """
     # 1. Idempotency check before doing any work.
     idempotency_response = _check_idempotency(request)
     if idempotency_response is not None:
         return idempotency_response
 
-    contract      = _load_contract(request.contract_path)
-    provider_cfg  = _resolve_provider_config(request)
-    input_text, input_hash = _prepare_input(request)
-    schema        = _load_schema(request)
-    schema_hash   = _hash_schema(schema)
-    prompt_hash   = _hash_text(contract.body)
+    contract     = _load_contract(request.contract_path)
+    provider_cfg = _resolve_provider_config(request)
+
+    raw_text, input_hash = _prepare_input(request)
+
+    # 2. Apply redaction before any provider interaction.
+    redactor   = redaction_filter or NoopRedactor()
+    input_text = redactor.redact(raw_text)
+
+    schema               = _load_schema(request)
+    schema_hash          = _hash_schema(schema)
+    prompt_hash          = _hash_text(contract.body)
 
     _warn_token_budget(input_text, provider_cfg.model)
 
-    messages            = _build_messages(input_text, contract.body)
+    messages             = _build_messages(input_text, contract.body)
     rendered_prompt_hash = _hash_messages(messages)
 
-    # 2. Capability check before touching the provider.
+    # 3. Capability check before touching the provider.
     _check_capabilities(provider_cfg.provider, messages)
 
-    policy    = request.retry_policy or DEFAULT_RETRY_POLICY
+    policy     = request.retry_policy or DEFAULT_RETRY_POLICY
     started_at = datetime.now(timezone.utc).isoformat()
     t0         = time.monotonic()
 
@@ -157,13 +176,33 @@ def run(request: RunRequest) -> RunResponse:
     )
 
     result = _execute_with_retry(
-        provider  = provider_cfg.provider,
-        messages  = messages,
-        model     = provider_cfg.model,
+        provider   = provider_cfg.provider,
+        messages   = messages,
+        model      = provider_cfg.model,
         max_tokens = request.max_tokens,
-        schema    = schema,
-        policy    = policy,
+        schema     = schema,
+        policy     = policy,
     )
+
+    # 4. Resolve the final stored status once.
+    # A successful stage that requires human approval is stored as
+    # pending_approval — not success.  This is the single point of truth;
+    # the pipeline never patches the record after storage.
+    final_status = result.status
+    if result.status == STATUS_SUCCESS and request.requires_approval:
+        final_status = STATUS_PENDING_APPROVAL
+
+    # 5. Generate the run_id now so the artifact URI embeds the real ID.
+    run_id = str(uuid.uuid4())
+
+    artifact_uris: list[str] = []
+    if artifact_store is not None and result.parsed is not None:
+        uri = artifact_store.write(
+            run_id   = run_id,
+            stage_id = request.stage_id,
+            data     = result.parsed,
+        )
+        artifact_uris.append(uri)
 
     record = _build_record(
         request              = request,
@@ -178,6 +217,9 @@ def run(request: RunRequest) -> RunResponse:
         result               = result,
         schema_version       = request.schema_version,
         policy               = policy,
+        final_status         = final_status,
+        artifact_uris        = artifact_uris,
+        run_id               = run_id,
     )
 
     if request.log:
@@ -191,6 +233,45 @@ def run(request: RunRequest) -> RunResponse:
         errors          = record.validation_errors,
         record          = record,
     )
+
+
+def run_batch(
+    requests:         list[RunRequest],
+    *,
+    redaction_filter: Optional[RedactionFilter] = None,
+    artifact_store:   Optional[ArtifactStore]   = None,
+) -> list[RunResponse]:
+    """Execute a list of RunRequests sequentially and return all responses.
+
+    Each request is independent — a failure in one does not stop the others.
+    The response list is the same length as the request list and in the same order.
+
+    Parameters
+    ----------
+    requests : list[RunRequest]
+        Requests to execute in order.
+    redaction_filter : Optional[RedactionFilter]
+        Applied to each request's input.  Shared across all items in the batch.
+    artifact_store : Optional[ArtifactStore]
+        Artifact backend used for each successful execution in the batch.
+
+    Returns
+    -------
+    list[RunResponse]
+        One response per request, in input order.
+    """
+    responses: list[RunResponse] = []
+    for i, request in enumerate(requests):
+        _logger.info(
+            "runner.run_batch: item %d/%d — pipeline=%s stage=%s",
+            i + 1, len(requests), request.pipeline_id, request.stage_id,
+        )
+        responses.append(run(
+            request,
+            redaction_filter = redaction_filter,
+            artifact_store   = artifact_store,
+        ))
+    return responses
 
 
 def run_from_file(
@@ -306,64 +387,41 @@ def _load_contract(contract_path: Path) -> Contract:
     """Load and return the versioned contract, raising ConfigurationFailure on error."""
     try:
         return load_contract(contract_path)
-    except Exception as exc:
+    except (ConfigError, OSError) as exc:
         raise ConfigurationFailure(
             f"Failed to load contract '{contract_path}': {exc}"
         ) from exc
 
 
 def _resolve_provider_config(request: RunRequest) -> _ProviderConfig:
-    """Resolve provider name, model, and construct the provider instance.
+    """Construct the provider instance from the fully-populated RunRequest.
 
-    If the provider name is already registered in the registry, the
-    registered instance is used directly and no API key is required.
-    Otherwise a built-in provider is constructed from the resolved API key.
+    All three fields — provider, model, api_key — must be supplied by the
+    caller.  The library does not read environment variables or apply defaults.
+    If the provider name is pre-registered in the registry, that instance is
+    used directly and api_key is ignored.
     """
     from rey_lib.llm.providers import registry as _reg  # noqa: PLC0415
 
-    provider_name = (
-        request.provider
-        or os.environ.get(_ENV_PROVIDER, "")
-        or _FALLBACK_PROVIDER
-    )
-    model = (
-        request.model
-        or os.environ.get(_ENV_MODEL, "")
-        or _FALLBACK_MODEL
-    )
-
-    # Prefer a pre-registered instance — it carries its own credentials.
-    try:
-        provider = _reg.get(provider_name)
-        return _ProviderConfig(name=provider_name, model=model, provider=provider)
-    except ConfigurationFailure:
-        pass  # Not pre-registered; construct a built-in from API key.
-
-    api_key = request.api_key or _resolve_api_key(provider_name)
-    provider = resolve_provider(provider_name, api_key=api_key)
-    return _ProviderConfig(name=provider_name, model=model, provider=provider)
-
-
-def _resolve_api_key(provider_name: str) -> str:
-    """Read the API key from environment variables for the given provider."""
-    # Providers that do not require an API key.
-    _NO_KEY = {"ollama", "mock"}
-    if provider_name.lower() in _NO_KEY:
-        return ""
-
-    _ENV_MAP = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai":    "OPENAI_API_KEY",
-        "chatgpt":   "OPENAI_API_KEY",
-    }
-    env_var = _ENV_MAP.get(provider_name.lower(), f"{provider_name.upper()}_API_KEY")
-    key     = os.environ.get(env_var, "")
-    if not key:
-        raise ProviderFailure(
-            f"API key not found for provider '{provider_name}'. "
-            f"Set the {env_var} environment variable."
+    if not request.provider:
+        raise ConfigurationFailure(
+            "RunRequest.provider is required. Set it to the provider name "
+            "(e.g. 'anthropic', 'openai', 'ollama')."
         )
-    return key
+    if not request.model:
+        raise ConfigurationFailure(
+            "RunRequest.model is required. Set it to the model identifier."
+        )
+
+    # Pre-registered providers carry their own credentials.
+    try:
+        provider = _reg.get(request.provider)
+        return _ProviderConfig(name=request.provider, model=request.model, provider=provider)
+    except ConfigurationFailure:
+        pass
+
+    provider = resolve_provider(request.provider, api_key=request.api_key)
+    return _ProviderConfig(name=request.provider, model=request.model, provider=provider)
 
 
 def _prepare_input(request: RunRequest) -> tuple[str, str]:
@@ -544,13 +602,20 @@ def _build_record(
     result:               _ExecuteResult,
     schema_version:       str,
     policy:               RetryPolicy,
+    final_status:         str                  = "",
+    artifact_uris:        Optional[list[str]]  = None,
+    run_id:               str                  = "",
 ) -> ExecutionRecord:
-    """Assemble an ExecutionRecord from all collected execution metadata."""
+    """Assemble an ExecutionRecord from all collected execution metadata.
+
+    final_status overrides result.status when set (used for pending_approval).
+    run_id is pre-generated by the caller so artifact URIs can embed it.
+    """
     ended_at   = datetime.now(timezone.utc).isoformat()
     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
     return ExecutionRecord(
-        run_id               = str(uuid.uuid4()),
+        run_id               = run_id or str(uuid.uuid4()),
         pipeline_id          = request.pipeline_id,
         stage_id             = request.stage_id,
         contract_name        = contract.name,
@@ -570,7 +635,7 @@ def _build_record(
         tokens_in            = result.tokens_in,
         tokens_out           = result.tokens_out,
         cost                 = 0.0,
-        status               = result.status,
+        status               = final_status or result.status,
         raw_response         = result.raw,
         parsed_response      = result.parsed,
         validation_errors    = result.validation_errors,
@@ -578,7 +643,7 @@ def _build_record(
         retry_policy         = repr(policy),
         idempotency_key      = request.idempotency_key or "",
         classification       = request.classification,
-        artifact_uris        = [],
+        artifact_uris        = artifact_uris or [],
         approved_by          = "",
         approved_at          = "",
     )
@@ -648,81 +713,6 @@ def _warn_token_budget(text: str, model: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-def _cli() -> None:
-    """python -m rey_lib.llm.runner --data <file> --contract <file> [options]."""
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(
-        prog        = "rey_lib.llm.runner",
-        description = "Evaluate data against an LLM contract.",
-    )
-    parser.add_argument("--data",        required=True)
-    parser.add_argument("--contract",    required=True)
-    parser.add_argument("--pipeline-id", default="cli")
-    parser.add_argument("--stage-id",    default="analysis")
-    parser.add_argument("--max-tokens",  default=4000, type=int)
-    parser.add_argument("--max-rows",    default=200,  type=int)
-    parser.add_argument("--provider",    default="")
-    parser.add_argument("--model",       default="")
-    parser.add_argument("--schema",      default=None)
-    parser.add_argument("--log",         default=None)
-    parser.add_argument("--quiet",       action="store_true")
-    args = parser.parse_args()
-
-    schema: Optional[dict[str, Any]] = None
-    if args.schema:
-        schema = json.loads(Path(args.schema).read_text(encoding="utf-8"))
-
-    input_data: Union[str, list[dict[str, Any]]]
-    if args.data == "-":
-        input_data = sys.stdin.read()
-    else:
-        input_data = Path(args.data).read_text(encoding="utf-8")
-
-    from rey_lib.llm.exceptions import (  # noqa: PLC0415
-        CancellationFailure,
-        ConfigurationFailure,
-        ProviderFailure,
-        SchemaMismatch,
-    )
-
-    # Exit codes per design contract: 0=success 2=validation 3=provider 6=config
-    try:
-        response = run(RunRequest(
-            pipeline_id   = args.pipeline_id,
-            stage_id      = args.stage_id,
-            contract_path = Path(args.contract),
-            input_data    = input_data,
-            provider      = args.provider,
-            model         = args.model,
-            max_tokens    = args.max_tokens,
-            max_rows      = args.max_rows,
-            output_schema = schema,
-            log           = Path(args.log) if args.log else None,
-        ))
-    except ConfigurationFailure as exc:
-        _logger.error("configuration failure: %s", exc)
-        sys.exit(6)
-    except ProviderFailure as exc:
-        _logger.error("provider failure: %s", exc)
-        sys.exit(3)
-    except SchemaMismatch as exc:
-        _logger.error("schema mismatch: %s", exc)
-        sys.exit(2)
-    except Exception as exc:
-        _logger.error("unexpected error: %s", exc)
-        sys.exit(1)
-
-    if not args.quiet and response.parsed_response:
-        print(json.dumps(response.parsed_response, indent=2, default=str))
-
-    sys.exit(0 if response.status == STATUS_SUCCESS else 1)
-
-
 if __name__ == "__main__":
-    _cli()
+    from rey_lib.llm.cli import main  # noqa: PLC0415
+    main()

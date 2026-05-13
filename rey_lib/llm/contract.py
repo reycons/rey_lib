@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from rey_lib.errors.error_utils import ConfigError
 
@@ -34,14 +37,10 @@ _FRONTMATTER_RE = re.compile(
     re.DOTALL,
 )
 
-# Matches simple key: value lines inside the frontmatter block.
-_KV_RE = re.compile(r"^(\w+)\s*:\s*(.+)$", re.MULTILINE)
-
 
 @dataclass(frozen=True)
 class Contract:
-    """
-    A parsed, versioned LLM instruction contract.
+    """A parsed, versioned LLM instruction contract.
 
     Attributes
     ----------
@@ -58,23 +57,27 @@ class Contract:
         Used as a tamper-evident fingerprint in stored results.
     path : Path
         Absolute path the contract was loaded from.
+    raw_frontmatter : dict[str, Any]
+        Full parsed frontmatter as a Python dict. Consumers (e.g. analysis.py)
+        read domain-specific fields from here without this module knowing them.
     """
 
-    name:           str
-    version:        str
-    effective_date: date
-    body:           str
-    hash:           str
-    path:           Path
+    name:            str
+    version:         str
+    effective_date:  date
+    body:            str
+    hash:            str
+    path:            Path
+    raw_frontmatter: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 def load(path: Path) -> Contract:
-    """
-    Parse a contract markdown file and return a Contract instance.
+    """Parse a contract markdown file and return a Contract instance.
 
     The file must begin with a YAML frontmatter block containing at least
     ``name``, ``version``, and ``effective_date``. Everything after the
-    closing ``---`` is the instruction body.
+    closing ``---`` is the instruction body.  Nested YAML structures (lists,
+    dicts) are fully parsed and available via ``Contract.raw_frontmatter``.
 
     Parameters
     ----------
@@ -96,7 +99,7 @@ def load(path: Path) -> Contract:
     if not path.exists():
         raise ConfigError(f"Contract file not found: {path}")
 
-    raw = path.read_text(encoding="utf-8")
+    raw          = path.read_text(encoding="utf-8")
     content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     m = _FRONTMATTER_RE.match(raw)
@@ -107,30 +110,39 @@ def load(path: Path) -> Contract:
         )
 
     frontmatter_text = m.group(1)
-    body = raw[m.end():].strip()
+    body             = raw[m.end():].strip()
 
-    fields: dict[str, str] = dict(_KV_RE.findall(frontmatter_text))
+    try:
+        fields: dict[str, Any] = yaml.safe_load(frontmatter_text) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(
+            f"Contract '{path.name}' has invalid YAML frontmatter: {exc}"
+        ) from exc
 
     for required in ("name", "version", "effective_date"):
         if required not in fields:
             raise ConfigError(
-                f"Contract '{path.name}' frontmatter is missing required "
-                f"field '{required}'."
+                f"Contract '{path.name}' frontmatter is missing required field '{required}'."
             )
 
+    raw_date = fields["effective_date"]
     try:
-        effective_date = date.fromisoformat(fields["effective_date"].strip())
+        effective_date = (
+            raw_date if isinstance(raw_date, date)
+            else date.fromisoformat(str(raw_date).strip())
+        )
     except ValueError as exc:
         raise ConfigError(
-            f"Contract '{path.name}': effective_date '{fields['effective_date']}' "
+            f"Contract '{path.name}': effective_date '{raw_date}' "
             "is not a valid ISO date (YYYY-MM-DD)."
         ) from exc
 
     return Contract(
-        name           = fields["name"].strip(),
-        version        = fields["version"].strip(),
-        effective_date = effective_date,
-        body           = body,
-        hash           = content_hash,
-        path           = path,
+        name            = str(fields["name"]).strip(),
+        version         = str(fields["version"]).strip(),
+        effective_date  = effective_date,
+        body            = body,
+        hash            = content_hash,
+        path            = path,
+        raw_frontmatter = fields,
     )

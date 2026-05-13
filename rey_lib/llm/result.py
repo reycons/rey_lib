@@ -25,3 +25,16 @@ from rey_lib.llm.records import (  # noqa: F401
 
 # Alias for code that still references EvaluationResult.
 EvaluationResult = ExecutionRecord
+
+__all__ = [
+    "ApprovalRecord",
+    "EvaluationResult",
+    "ExecutionRecord",
+    "approve",
+    "load_all",
+    "load_all_approvals",
+    "load_latest",
+    "reject",
+    "store",
+    "store_approval",
+]

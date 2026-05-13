@@ -49,18 +49,19 @@ __all__ = ["DBAdapter"]
 # ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, str] = {
-    "sqlserver": "rey_lib.db.sqlserver_utils",
-    "duckdb":    "rey_lib.db.duckdb_utils",
+	"sqlserver": "rey_lib.db.sqlserver_utils",
+	"duckdb":    "rey_lib.db.duckdb_utils",
+	"mysql":     "rey_lib.db.mysql_utils",
 }
 
 # Maps connection object module prefix → provider name.
 # Used by _provider_for_conn when conn.provider is not set.
 # Add one entry here per new backend.
 _MODULE_PREFIXES: dict[str, str] = {
-    "pyodbc":  "sqlserver",
-    "duckdb":  "duckdb",
+	"pyodbc":          "sqlserver",
+	"duckdb":          "duckdb",
+	"mysql.connector": "mysql",
 }
-
 
 def _backend(provider: str) -> Any:
     """Return the backend module for provider, importing lazily on first use."""
@@ -107,6 +108,37 @@ class DBAdapter:
             If the provider is missing, unknown, or cannot be inferred.
         """
         return _backend(self._provider_for_cfg(db_cfg)).get_connection(db_cfg)
+
+    # ------------------------------------------------------------------
+    # Query
+    # ------------------------------------------------------------------
+
+    def fetch_dicts(
+        self,
+        conn:     Any,
+        sql_name: str,
+        params:   Optional[list[Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """Execute a named SQL query and return all rows as a list of dicts.
+
+        Delegates to the backend's ``fetch_dicts`` implementation so the
+        return type is always ``list[dict[str, Any]]`` regardless of backend.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        sql_name : str
+            SQL filename stem without .sql extension.
+        params : Optional[list[Any]]
+            Positional query parameters.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            All result rows as column → value dicts.
+        """
+        return _backend(self._provider_for_conn(conn)).fetch_dicts(conn, sql_name, params)
 
     # ------------------------------------------------------------------
     # Stored procedures
@@ -292,74 +324,87 @@ class DBAdapter:
     # Private — provider resolution
     # ------------------------------------------------------------------
 
-    def _provider_for_cfg(self, db_cfg: Any) -> str:
-        """
-        Resolve provider name from a connection config.
+def _provider_for_cfg(self, db_cfg: Any) -> str:
+	"""
+	Resolve provider name from a connection config.
 
-        Honors ``db_cfg.provider`` when present (case-insensitive). Falls back
-        to inferring from ``db_cfg.driver`` so older configs that pre-date the
-        provider field keep working: any driver string containing
-        ``"sql server"`` resolves to ``sqlserver``.
+	Honors ``db_cfg.provider`` when present (case-insensitive). Falls back
+	to inferring from ``db_cfg.driver`` so older configs that pre-date the
+	provider field keep working.
 
-        Parameters
-        ----------
-        db_cfg : Any
-            Connection config Namespace.
+	Parameters
+	----------
+	db_cfg : Any
+		Connection config Namespace.
 
-        Returns
-        -------
-        str
-            Lowercase provider name (e.g. ``"sqlserver"``, ``"duckdb"``).
+	Returns
+	-------
+	str
+		Lowercase provider name.
 
-        Raises
-        ------
-        ConfigError
-            When neither ``provider`` nor a recognizable ``driver`` is set.
-        """
-        provider = (getattr(db_cfg, "provider", None) or "").strip().lower()
-        if provider:
-            return provider
-        driver = (getattr(db_cfg, "driver", None) or "").lower()
-        if "sql server" in driver:
-            return "sqlserver"
-        name = getattr(db_cfg, "name", "<unnamed>")
-        raise ConfigError(
-            f"DBAdapter: connection '{name}' has no 'provider' field and "
-            "no recognizable 'driver'. Add 'provider: sqlserver' (or the "
-            "appropriate backend name) to the connection config."
-        )
+	Raises
+	------
+	ConfigError
+		When neither ``provider`` nor a recognizable ``driver`` is set.
+	"""
+	provider = (getattr(db_cfg, "provider", None) or "").strip().lower()
 
-    def _provider_for_conn(self, conn: Any) -> str:
-        """
-        Resolve provider name from an already-open connection object.
+	if provider:
+		return provider
 
-        Checks for an explicit ``provider`` attribute first, then falls back
-        to matching the connection's module name against ``_MODULE_PREFIXES``.
+	driver = (getattr(db_cfg, "driver", None) or "").lower()
 
-        Parameters
-        ----------
-        conn : Any
-            An open backend connection.
+	if "sql server" in driver:
+		return "sqlserver"
 
-        Returns
-        -------
-        str
-            Lowercase provider name.
+	if "mysql" in driver:
+		return "mysql"
 
-        Raises
-        ------
-        ConfigError
-            When the provider cannot be determined.
-        """
-        explicit = getattr(conn, "provider", None)
-        if explicit:
-            return str(explicit).lower()
-        module = type(conn).__module__ or ""
-        for prefix, provider in _MODULE_PREFIXES.items():
-            if module.startswith(prefix):
-                return provider
-        raise ConfigError(
-            f"DBAdapter: cannot determine provider for connection of type "
-            f"{type(conn).__name__} (module={module!r}). "
-            f"Add an entry to _MODULE_PREFIXES in db_adapter.py."
-        )
+	if "duckdb" in driver:
+		return "duckdb"
+
+	name = getattr(db_cfg, "name", "<unnamed>")
+
+	raise ConfigError(
+		f"DBAdapter: connection '{name}' has no 'provider' field and "
+		"no recognizable 'driver'. Add 'provider' to the connection config."
+	)
+
+def _provider_for_conn(self, conn: Any) -> str:
+	"""
+	Resolve provider name from an already-open connection object.
+
+	Checks for an explicit ``provider`` attribute first, then falls back
+	to matching the connection's module name against ``_MODULE_PREFIXES``.
+
+	Parameters
+	----------
+	conn : Any
+		An open backend connection.
+
+	Returns
+	-------
+	str
+		Lowercase provider name.
+
+	Raises
+	------
+	ConfigError
+		When the provider cannot be determined.
+	"""
+	explicit = getattr(conn, "provider", None)
+
+	if explicit:
+		return str(explicit).lower()
+
+	module = type(conn).__module__ or ""
+
+	for prefix, provider in _MODULE_PREFIXES.items():
+		if module.startswith(prefix):
+			return provider
+
+	raise ConfigError(
+		f"DBAdapter: cannot determine provider for connection of type "
+		f"{type(conn).__name__} (module={module!r}). "
+		f"Add an entry to _MODULE_PREFIXES in db_adapter.py."
+	)

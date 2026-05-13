@@ -4,7 +4,42 @@ Application-context adapters for the LLM framework.
 Core modules (runner, pipeline, providers) must never depend on
 application-specific context objects.  This module is the approved
 boundary for code that reads provider config and credentials from
-a rey_lib Namespace ctx.
+a rey_lib Namespace ctx built by config_utils.build_ctx().
+
+Expected YAML config shape
+--------------------------
+LLM profiles live under the ``llm:`` key in any config YAML file under the
+project's ``config/`` directory.  config_utils.build_ctx() auto-loads,
+merges, and resolves secrets — ctx.llm is fully populated before it
+reaches this module::
+
+    llm:
+      claude:
+        provider: anthropic
+        model: claude-sonnet-4-6
+        max_tokens: 4000
+        temperature: 0.0
+        env:
+          api_key: ANTHROPIC_API_KEY
+
+      gpt4o:
+        provider: openai
+        model: gpt-4o
+        max_tokens: 4000
+        temperature: 0.0
+        env:
+          api_key: OPENAI_API_KEY
+
+      local:
+        provider: ollama
+        model: llama3
+        max_tokens: 4000
+        temperature: 0.0
+        endpoint: http://localhost:11434
+
+The ``env:`` sub-block is the config_utils secret injection convention.
+By the time ctx reaches this adapter, ctx.llm.claude.api_key is already
+the resolved secret value — no extra injection step is needed.
 
 Public API
 ----------

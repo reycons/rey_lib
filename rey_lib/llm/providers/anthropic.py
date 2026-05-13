@@ -109,7 +109,13 @@ class AnthropicProvider(BaseProvider):
         try:
             client   = anthropic.Anthropic(api_key=self._api_key)
             response = client.messages.create(**kwargs)
-        except Exception as exc:
+        except anthropic.APIStatusError as exc:
+            raise ProviderFailure(
+                f"Anthropic API error {exc.status_code}: {exc.message}"
+            ) from exc
+        except anthropic.APIConnectionError as exc:
+            raise ProviderFailure(f"Anthropic connection error: {exc}") from exc
+        except anthropic.APIError as exc:
             raise ProviderFailure(f"Anthropic API error: {exc}") from exc
 
         content    = response.content[0].text.strip()

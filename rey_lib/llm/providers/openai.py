@@ -99,7 +99,13 @@ class OpenAIProvider(BaseProvider):
                 temperature = temperature,
                 messages    = api_messages,
             )
-        except Exception as exc:
+        except openai.APIStatusError as exc:
+            raise ProviderFailure(
+                f"OpenAI API error {exc.status_code}: {exc.message}"
+            ) from exc
+        except openai.APIConnectionError as exc:
+            raise ProviderFailure(f"OpenAI connection error: {exc}") from exc
+        except openai.OpenAIError as exc:
             raise ProviderFailure(f"OpenAI API error: {exc}") from exc
 
         content    = response.choices[0].message.content.strip()
