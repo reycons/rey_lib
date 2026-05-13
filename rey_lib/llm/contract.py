@@ -1,0 +1,136 @@
+"""
+Contract loading and versioning for LLM workflow.
+
+A contract is a markdown file with a YAML frontmatter block that declares
+name, version, and effective_date. The body is the instruction text sent
+to the LLM as its system prompt.
+
+Contracts are immutable once results exist against them. Changing a contract
+requires bumping the version. The content hash provides a tamper-evident
+check — if a file is edited without bumping the version the hash will differ
+from the stored value and the discrepancy can be detected at audit time.
+
+Public API
+----------
+load(path)
+    Parse a contract file and return a Contract instance.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+
+from rey_lib.errors.error_utils import ConfigError
+
+__all__ = ["Contract", "load"]
+
+# Matches a YAML frontmatter block at the top of the file.
+_FRONTMATTER_RE = re.compile(
+    r"^---\s*\n(.*?)\n---\s*\n",
+    re.DOTALL,
+)
+
+# Matches simple key: value lines inside the frontmatter block.
+_KV_RE = re.compile(r"^(\w+)\s*:\s*(.+)$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class Contract:
+    """
+    A parsed, versioned LLM instruction contract.
+
+    Attributes
+    ----------
+    name : str
+        Contract identifier, matches the filename stem by convention.
+    version : str
+        Semantic version string (e.g. '1.0.0').
+    effective_date : date
+        Date this version became active.
+    body : str
+        Instruction text — sent to the LLM as the system prompt.
+    hash : str
+        SHA-256 hex digest of the full file content (frontmatter + body).
+        Used as a tamper-evident fingerprint in stored results.
+    path : Path
+        Absolute path the contract was loaded from.
+    """
+
+    name:           str
+    version:        str
+    effective_date: date
+    body:           str
+    hash:           str
+    path:           Path
+
+
+def load(path: Path) -> Contract:
+    """
+    Parse a contract markdown file and return a Contract instance.
+
+    The file must begin with a YAML frontmatter block containing at least
+    ``name``, ``version``, and ``effective_date``. Everything after the
+    closing ``---`` is the instruction body.
+
+    Parameters
+    ----------
+    path : Path
+        Absolute path to the contract markdown file.
+
+    Returns
+    -------
+    Contract
+        Parsed and validated contract.
+
+    Raises
+    ------
+    ConfigError
+        If the file is missing, has no frontmatter, or is missing required
+        frontmatter fields.
+    """
+    path = Path(path).resolve()
+    if not path.exists():
+        raise ConfigError(f"Contract file not found: {path}")
+
+    raw = path.read_text(encoding="utf-8")
+    content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    m = _FRONTMATTER_RE.match(raw)
+    if not m:
+        raise ConfigError(
+            f"Contract '{path.name}' has no frontmatter block. "
+            "Add a '---' delimited block with name, version, and effective_date."
+        )
+
+    frontmatter_text = m.group(1)
+    body = raw[m.end():].strip()
+
+    fields: dict[str, str] = dict(_KV_RE.findall(frontmatter_text))
+
+    for required in ("name", "version", "effective_date"):
+        if required not in fields:
+            raise ConfigError(
+                f"Contract '{path.name}' frontmatter is missing required "
+                f"field '{required}'."
+            )
+
+    try:
+        effective_date = date.fromisoformat(fields["effective_date"].strip())
+    except ValueError as exc:
+        raise ConfigError(
+            f"Contract '{path.name}': effective_date '{fields['effective_date']}' "
+            "is not a valid ISO date (YYYY-MM-DD)."
+        ) from exc
+
+    return Contract(
+        name           = fields["name"].strip(),
+        version        = fields["version"].strip(),
+        effective_date = effective_date,
+        body           = body,
+        hash           = content_hash,
+        path           = path,
+    )

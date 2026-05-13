@@ -1,19 +1,21 @@
 """
-Generic LLM dispatch layer.
+LLM dispatch utilities.
+
+All provider calls route through the provider abstraction layer so no
+application code ever imports an SDK directly.
 
 Supports Anthropic (Claude) and OpenAI (GPT) via a common ask() interface.
 The provider is selected by the llm argument, which is resolved against the
-ctx.llm config. All credentials come entirely from ctx — no hardcoded keys.
-
-Adding a new LLM provider requires only a new config/llm/llm.{name}.yaml
-file and the corresponding .env key.
+ctx.llm config.  All credentials come from ctx — no hardcoded keys.
 
 Public API
 ----------
 default_llm(ctx)
     Return the name of the default LLM instance from ctx.llm config.
-ask(ctx, prompt, llm, max_tokens)
+ask(ctx, prompt, llm, max_tokens, system_prompt)
     Dispatch a prompt to the selected LLM provider and return the response.
+direct_ask(prompt, model, provider, api_key, ...)
+    Call an LLM directly without an app context.
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ from __future__ import annotations
 from typing import Optional
 
 from rey_lib.config.config_utils import Namespace
+from rey_lib.llm.exceptions import ConfigurationFailure
+from rey_lib.llm.providers.base import Message
+from rey_lib.llm.providers.registry import resolve as resolve_provider
 
 __all__ = [
     "default_llm",
@@ -42,6 +47,7 @@ def direct_ask(
 
     Intended for standalone tools that have no app ctx available.
     Credentials and model are supplied explicitly rather than read from ctx.
+    All SDK access is delegated to the provider abstraction layer.
 
     Parameters
     ----------
@@ -64,122 +70,61 @@ def direct_ask(
     -------
     str
         LLM response text.
+
+    Raises
+    ------
+    ConfigurationFailure
+        If the provider name is not recognised.
+    ProviderFailure
+        If the provider API call fails.
     """
-    provider = provider.lower()
+    messages: list[Message] = []
+    if system_prompt:
+        messages.append(Message(role="system", content=system_prompt))
+    messages.append(Message(role="user", content=prompt))
 
-    if provider == "anthropic":
-        import anthropic  # noqa: PLC0415
-        client = anthropic.Anthropic(api_key=api_key)
-        kwargs: dict = dict(
-            model       = model,
-            max_tokens  = max_tokens,
-            temperature = temperature,
-            messages    = [{"role": "user", "content": prompt}],
-        )
-        if system_prompt:
-            kwargs["system"] = system_prompt
-        return client.messages.create(**kwargs).content[0].text.strip()
-
-    if provider in ("openai", "chatgpt"):
-        import openai  # noqa: PLC0415
-        messages: list[dict] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        client   = openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model       = model,
-            max_tokens  = max_tokens,
-            temperature = temperature,
-            messages    = messages,
-        )
-        return response.choices[0].message.content.strip()
-
-    raise ValueError(
-        f"Unknown provider '{provider}'. Valid providers: anthropic, openai."
+    llm_provider = resolve_provider(provider, api_key=api_key)
+    response     = llm_provider.run(
+        messages    = messages,
+        model       = model,
+        max_tokens  = max_tokens,
+        temperature = temperature,
     )
+    return response.content
 
 
 def default_llm(ctx: Namespace) -> str:
-    """Return the name of the default LLM instance from ctx.llm config."""
+    """Return the name of the default LLM instance from ctx.llm config.
+
+    Parameters
+    ----------
+    ctx : Namespace
+        Application context with a populated ctx.llm mapping.
+
+    Returns
+    -------
+    str
+        The key of the default LLM config entry, or 'claude' as a fallback.
+    """
     return next(
         (name for name, cfg in ctx.llm.items() if cfg.get("default")),
         "claude",
     )
 
 
-def _anthropic_ask(
-    ctx: Namespace,
-    prompt: str,
-    max_tokens: int,
-    llm_instance: str = "claude",
-    system_prompt: Optional[str] = None,
-) -> str:
-    """Call the Anthropic API for the given llm_instance config."""
-    import anthropic  # noqa: PLC0415
-
-    llm_cfg = ctx.llm[llm_instance]
-    key     = llm_cfg.get("api_key", "")
-    if not key:
-        raise EnvironmentError(
-            "Anthropic API key not set.\n"
-            "Add ANTHROPIC_API_KEY to .env"
-        )
-    client = anthropic.Anthropic(api_key=key)
-    kwargs: dict = dict(
-        model      = llm_cfg.model,
-        max_tokens = max_tokens,
-        messages   = [{"role": "user", "content": prompt}],
-    )
-    if system_prompt:
-        kwargs["system"] = system_prompt
-    msg = client.messages.create(**kwargs)
-    return msg.content[0].text.strip()
-
-
-def _openai_ask(
-    ctx: Namespace,
-    prompt: str,
-    max_tokens: int,
-    llm_instance: str = "gpt4o",
-    system_prompt: Optional[str] = None,
-) -> str:
-    """Call the OpenAI API for the given llm_instance config."""
-    import openai  # noqa: PLC0415
-
-    llm_cfg = ctx.llm[llm_instance]
-    key     = llm_cfg.get("api_key", "")
-    if not key:
-        raise EnvironmentError(
-            "OpenAI API key not set.\n"
-            "Add OPENAI_API_KEY to .env"
-        )
-    messages: list[dict] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-
-    client   = openai.OpenAI(api_key=key)
-    response = client.chat.completions.create(
-        model      = llm_cfg.model,
-        max_tokens = max_tokens,
-        messages   = messages,
-    )
-    return response.choices[0].message.content.strip()
-
-
 def ask(
-    ctx: Namespace,
-    prompt: str,
-    llm: str,
-    max_tokens: int = 450,
+    ctx:           Namespace,
+    prompt:        str,
+    llm:           str,
+    max_tokens:    int           = 450,
     system_prompt: Optional[str] = None,
 ) -> str:
     """
     Dispatch a prompt to the selected LLM provider and return the response.
 
-    The provider is resolved from ctx.llm[llm].provider so dispatch never
-    depends on hardcoded strings. Supports 'anthropic' and 'openai'/'chatgpt'.
+    The provider and model are resolved from ctx.llm[llm] so dispatch never
+    depends on hardcoded strings.  All SDK access is delegated to the provider
+    abstraction layer.
 
     Parameters
     ----------
@@ -193,8 +138,7 @@ def ask(
         Maximum tokens in the response.
     system_prompt : Optional[str]
         Optional system-level instruction passed separately from the user
-        prompt. Supported by Anthropic and OpenAI; ignored silently by
-        providers that do not support it.
+        prompt.
 
     Returns
     -------
@@ -203,21 +147,38 @@ def ask(
 
     Raises
     ------
-    ValueError
-        If the provider resolved from config is not recognised.
-    EnvironmentError
-        If the required API key is not set in ctx.
+    ConfigurationFailure
+        If the LLM instance is not found in ctx or the provider is unknown.
+    ProviderFailure
+        If the provider API call fails.
     """
-    if llm in ctx.llm:
-        provider = ctx.llm[llm].provider.lower()
-    else:
-        provider = llm.lower()
+    if llm not in ctx.llm:
+        raise ConfigurationFailure(
+            f"LLM instance '{llm}' not found in ctx.llm. "
+            "Check your config/llm/*.yaml files."
+        )
 
-    if provider == "anthropic":
-        return _anthropic_ask(ctx, prompt, max_tokens, llm_instance=llm, system_prompt=system_prompt)
-    if provider in ("openai", "chatgpt"):
-        return _openai_ask(ctx, prompt, max_tokens, llm_instance=llm, system_prompt=system_prompt)
-    raise ValueError(
-        f"Unknown LLM provider '{provider}' for instance '{llm}'. "
-        f"Check config/llm/llm.*.yaml"
+    llm_cfg  = ctx.llm[llm]
+    provider = llm_cfg.provider.lower()
+    model    = llm_cfg.model
+    api_key  = llm_cfg.get("api_key", "")
+
+    if not api_key:
+        raise ConfigurationFailure(
+            f"API key not set for LLM instance '{llm}'. "
+            "Check your .env file."
+        )
+
+    messages: list[Message] = []
+    if system_prompt:
+        messages.append(Message(role="system", content=system_prompt))
+    messages.append(Message(role="user", content=prompt))
+
+    llm_provider = resolve_provider(provider, api_key=api_key)
+    response     = llm_provider.run(
+        messages    = messages,
+        model       = model,
+        max_tokens  = max_tokens,
+        temperature = 0.0,
     )
+    return response.content
