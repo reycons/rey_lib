@@ -2125,6 +2125,7 @@ def _read_and_transform(
     """
     file_type = getattr(transform_cfg, "file_type", "CSV")
     encoding  = getattr(transform_cfg, "encoding",  "utf-8-sig")
+    delimiter = getattr(transform_cfg, "delimiter", ",")
 
     cfg_dict              = _namespace_to_dict(transform_cfg)
     cfg_dict["constants"] = constants
@@ -2141,6 +2142,7 @@ def _read_and_transform(
             file_type=file_type,
             encoding=encoding,
             header_line=header_line,
+            delimiter=delimiter,
         ),
         start=1,
     ):

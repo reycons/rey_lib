@@ -106,6 +106,7 @@ def get_reader(
     encoding: str = "utf-8-sig",
     row_filter: Optional[Callable[[dict[str, str]], bool]] = None,
     header_line: Optional[str] = None,
+    delimiter: str = ",",
 ) -> Generator[dict[str, str], None, None]:
     """
     Return a row iterator for the given file based on file_type.
@@ -128,6 +129,8 @@ def get_reader(
     header_line : Optional[str]
         Exact header line to locate before reading rows. When provided,
         CSV reading begins only after this header is found in the file.
+    delimiter : str
+        Field delimiter character. Defaults to ','.
 
     Yields
     ------
@@ -146,6 +149,7 @@ def get_reader(
             encoding=encoding,
             row_filter=row_filter,
             header_line=header_line,
+            delimiter=delimiter,
         )
     elif fmt == "XLSX":
         yield from _xlsx_reader(infile, row_filter=row_filter)
@@ -338,6 +342,7 @@ def _csv_reader(
     encoding: str,
     row_filter: Optional[Callable[[dict[str, str]], bool]],
     header_line: Optional[str],
+    delimiter: str = ",",
 ) -> Generator[dict[str, str], None, None]:
     """
     Yield data rows from a CSV file.
@@ -365,8 +370,8 @@ def _csv_reader(
         if not header:
             return
 
-        fieldnames = [c.strip() for c in header.split(",")]
-        reader     = csv.DictReader(fh, fieldnames=fieldnames)
+        fieldnames = [c.strip() for c in header.split(delimiter)]
+        reader     = csv.DictReader(fh, fieldnames=fieldnames, delimiter=delimiter)
 
         for row in reader:
             # Skip blank rows, including rows that contain only whitespace.
