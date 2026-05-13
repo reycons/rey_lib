@@ -257,7 +257,7 @@ def transform_row(
     # Step 2 — inject constants
     # ------------------------------------------------------------------
     for db_col, value in constants.items():
-        out[db_col] = row_num if value == "ctx.row_num" else value
+        out[db_col] = value
 
     # ------------------------------------------------------------------
     # Step 3 — inject file_date
@@ -282,6 +282,7 @@ def transform_row(
             transform_cfg,
             transform_type,
             secrets,
+            row_num=row_num,
         )
 
     # ------------------------------------------------------------------
@@ -348,8 +349,12 @@ def _apply_transform(
 	cfg: dict,
 	transform_type: str,
 	secrets: dict[str, str],
+	row_num: int = 0,
 ) -> Any:
 	try:
+		if transform_type == "row_num":
+			return row_num
+
 		if transform_type == "date":
 			return _transform_date(out.get(db_col, ""), cfg)
 
