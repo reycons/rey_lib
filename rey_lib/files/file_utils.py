@@ -142,8 +142,10 @@ def get_reader(
     ValueError
         If file_type is not 'CSV' or 'XLSX'.
     """
+    _DELIMITED = {"CSV", "DELIMITED_HEADER", "DELIMITED_NO_HEADER"}
+
     fmt = file_type.upper()
-    if fmt == "CSV":
+    if fmt in _DELIMITED:
         yield from _csv_reader(
             infile,
             encoding=encoding,
@@ -154,7 +156,7 @@ def get_reader(
     elif fmt == "XLSX":
         yield from _xlsx_reader(infile, row_filter=row_filter)
     else:
-        raise ValueError(f"Unsupported file_type '{file_type}'. Must be 'CSV' or 'XLSX'.")
+        raise ValueError(f"Unsupported file_type '{file_type}'.")
 
 
 def write_file(
