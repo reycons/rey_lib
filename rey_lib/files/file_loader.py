@@ -216,9 +216,8 @@ def transform_files(
         for file_path in pending:
             # Stamp current-file attrs on ctx BEFORE pre_file_transform fires
             # so bindings can resolve `source: ctx.current_file_name` etc.
-            # _build_constants will overwrite these later inside the
-            # transform pipeline; the values are identical so the second
-            # write is a no-op.
+            # _setup_file_ctx will overwrite these inside the transform
+            # pipeline; values are identical so the second write is a no-op.
             object.__setattr__(ctx, "current_file_path", str(file_path))
             object.__setattr__(ctx, "current_file_name", file_path.name)
 
@@ -1661,14 +1660,11 @@ def _transform_one_file(
 			)
 			return False
 
-		constants = _build_constants(
-			ctx, getattr(transform_cfg, "constants", None), file_path, data_source.paths
-		)
+		_setup_file_ctx(ctx, file_path, data_source.paths)
 
 		rows, errors = _read_and_transform(
 			file_path,
 			transform_cfg,
-			constants,
 			header_line=header_line,
 			ctx=ctx,
 		)
@@ -2095,13 +2091,11 @@ def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
 def _read_and_transform(
     file_path: Path,
     transform_cfg: Any,
-    constants: dict[str, Any],
     header_line: Optional[str] = None,
     ctx: Any = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
     """
-    Read all rows from a file and apply column mapping, transforms,
-    and constant injection via the generic transformer.
+    Read all rows from a file and apply column mapping and transforms.
 
     Collects all row errors without stopping — returns both the clean
     rows and the full error list so the caller can decide what to do.
@@ -2111,12 +2105,11 @@ def _read_and_transform(
     file_path : Path
         File to read.
     transform_cfg : Any
-        Transform Namespace — provides columns, field_transforms, constants,
-        file_type, encoding.
-    constants : dict[str, Any]
-        Runtime constants already resolved by _build_constants().
+        Transform Namespace — provides columns, file_type, encoding.
     header_line : Optional[str]
         Exact header line to locate before reading rows.
+    ctx : Any
+        Application context passed through to transform_row.
 
     Returns
     -------
@@ -2127,11 +2120,11 @@ def _read_and_transform(
     encoding  = getattr(transform_cfg, "encoding",  "utf-8-sig")
     delimiter = getattr(transform_cfg, "delimiter", ",")
 
-    cfg_dict              = _namespace_to_dict(transform_cfg)
-    cfg_dict["constants"] = constants
-    # Resolve env-var values for any encrypt transforms declared in this config.
-    # Done once per file, not per row, so the Fernet key is looked up only once.
-    cfg_dict["secrets"]   = _build_secrets(cfg_dict)
+    cfg_dict             = _namespace_to_dict(transform_cfg)
+    # Resolve env-var keys for any encrypt transforms — done once per file.
+    cfg_dict["secrets"]  = _build_secrets(cfg_dict)
+
+    injected: dict[str, Any] = getattr(ctx, "_injected_row_columns", None) or {}
 
     rows:   list[dict[str, Any]]       = []
     errors: list[tuple[int, str, str]] = []
@@ -2150,6 +2143,8 @@ def _read_and_transform(
             out_row = transform_row(raw_row, cfg_dict, row_num=row_num, ctx=ctx)
             if out_row is None:
                 continue
+            if injected:
+                out_row.update(injected)
             rows.append(out_row)
         except TransformError as exc:
             raw_value = ""
@@ -2425,101 +2420,32 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
     return schema, table
 
 
-def _build_constants(
-    ctx: Any,
-    constants_cfg: Any,
-    file_path: Path,
-    paths: Any,
-) -> dict[str, Any]:
+def _setup_file_ctx(ctx: Any, file_path: Path, paths: Any) -> None:
     """
-    Build runtime constant values for one file.
+    Stamp per-file attributes on ctx before transform begins.
 
-    Stores the current file name and full path on ctx before resolving
-    constants.  Also stores each configured path key on ctx as
-    ``path_dir / file_name`` so constants can reference them via
-    ``ctx.<path_key>``.  All dynamic constant values use ``ctx.`` prefixes
-    in the YAML config — resolved by walking the dot path on ctx.
-    Literal values pass through unchanged.
-
-    ctx attributes set here (per-file, overwritten each call):
-        ctx.current_file_name  — bare filename, 
-        ctx.current_file_path  — full source path as string
-        ctx.<path_key>         — each paths config key resolved as
-                                 ``path_dir / file_name``, e.g.
-                                 ``ctx.archive_path`` = archive dir + filename
+    Sets ctx.current_file_name, ctx.current_file_path, and one attribute
+    per paths key (e.g. ctx.archive_path) so context transforms can
+    resolve them via ``ctx.*`` references.
 
     Parameters
     ----------
     ctx : Any
-        Application context — always the first argument per contract.
-    constants_cfg : Any
-        Constants Namespace from the transform config.
+        Application context.
     file_path : Path
         Full path of the file currently being processed.
     paths : Any
         Paths Namespace from the data source config.
-
-    Returns
-    -------
-    dict[str, Any]
-        Resolved constant values keyed by DB column name.
     """
-    # Store current file info on ctx.
     object.__setattr__(ctx, "current_file_name", file_path.name)
     object.__setattr__(ctx, "current_file_path", str(file_path))
 
-    # Store path + filename for each configured path key.
-    # e.g. archive_path dir + file_path.name → available as ctx.archive_path.
     if paths is not None:
         for key, val in _namespace_to_dict(paths).items():
-            # Always normalize to single backslashes for Windows paths
             path_str = str(Path(str(val)) / file_path.name)
             if "\\" in path_str:
                 path_str = path_str.replace("\\\\", "\\")
             object.__setattr__(ctx, key, path_str)
-
-    # Resolve each constant value.
-    # A constant may be a plain string or a structured dict with:
-    #   value: <string or ctx.* reference>
-    #   quote: <character to wrap the resolved value in, e.g. '"'>
-    result: dict[str, Any] = {}
-    for col, template in _namespace_to_dict(constants_cfg).items():
-        # Structured entry: {value: ..., quote: ...}
-        if isinstance(template, dict):
-            raw = str(template.get("value", ""))
-            quote_char = template.get("quote", None)
-        elif hasattr(template, "items"):
-            tmpl_dict = dict(template.items())
-            raw = str(tmpl_dict.get("value", ""))
-            quote_char = tmpl_dict.get("quote", None)
-        else:
-            raw = str(template)
-            quote_char = None
-
-        # Resolve ctx.* references.
-
-        if raw.startswith("ctx.") and ctx is not None:
-            resolved = _resolve_ctx_path(ctx, raw[4:])
-            # Normalize double backslashes in resolved path fields
-            if isinstance(resolved, str) and "\\" in resolved:
-                resolved = resolved.replace("\\\\", "\\")
-        else:
-            resolved = raw
-
-        # Wrap in the quote character if specified.
-        if quote_char:
-            result[col] = f"{quote_char}{resolved}{quote_char}"
-        else:
-            result[col] = resolved
-
-    # Merge runtime-injected row columns from pre_transform hooks.
-    injected = getattr(ctx, "_injected_row_columns", None)
-    if injected:
-        for col, val in injected.items():
-            if col not in result:
-                result[col] = val
-
-    return result
 
 
 def _resolve_ctx_path(ctx: Any, dotted_path: str) -> Any:
@@ -2578,40 +2504,34 @@ def _build_secrets(cfg_dict: dict[str, Any]) -> dict[str, str]:
     """
     Resolve env-var values for all encrypt transforms in this file config.
 
-    Scans field_transforms for entries with ``type: encrypt`` and resolves
-    their ``key_env`` names from the current environment (already populated
-    by python-dotenv at startup). Each unique env-var name is resolved once.
+    Scans the columns list for entries with ``transform.type: encrypt`` and
+    resolves their ``key_env`` names from the current environment. Each
+    unique env-var name is resolved once per file.
 
     Parameters
     ----------
     cfg_dict : dict
-        Already-converted config dict for this transform (from _namespace_to_dict).
+        Already-converted config dict for this transform.
 
     Returns
     -------
     dict[str, str]
-        Mapping of env-var name → key value, for every encrypt transform found.
+        Mapping of env-var name → key value for every encrypt transform found.
         Empty dict when no encrypt transforms are configured.
     """
     import os  # stdlib — imported here to keep the top-level import section clean
 
     secrets: dict[str, str] = {}
-    field_transforms = cfg_dict.get("field_transforms") or {}
 
-    for _col, tfm in field_transforms.items():
-        # field_transforms values may be Namespace objects or plain dicts.
-        if not isinstance(tfm, dict):
-            tfm = {k: v for k, v in tfm.items()} if hasattr(tfm, "items") else {}
+    for col_cfg in cfg_dict.get("columns") or []:
+        if not isinstance(col_cfg, dict):
+            continue
+        tfm = col_cfg.get("transform") or {}
         if tfm.get("type") != "encrypt":
             continue
         key_env = tfm.get("key_env", "")
         if key_env and key_env not in secrets:
             value = os.environ.get(key_env, "")
-            if value:
-                secrets[key_env] = value
-            else:
-                # Support resolved env references (e.g. key_env: env.foo)
-                # where build_ctx already replaced with the key literal.
-                secrets[key_env] = key_env
+            secrets[key_env] = value if value else key_env
 
     return secrets
