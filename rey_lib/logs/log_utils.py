@@ -27,6 +27,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rey_lib.logs.jsonl_handler import JsonlHandler
+
 __all__ = [
     "setup_logging",
     "get_logger",
@@ -138,7 +140,6 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     console_handler.setFormatter(formatter)
     root.addHandler(console_handler)
 
-    # File handler — one file per run.
     timestamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
     resolved_log = Path(
         ctx.log_path.format(operation=operation, timestamp=timestamp)
@@ -146,17 +147,26 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
 
     resolved_log.parent.mkdir(parents=True, exist_ok=True)
 
-    file_handler = logging.FileHandler(filename=str(resolved_log), encoding="utf-8")
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
-
     ctx.log_level = level_name
     ctx.log_depth = getattr(ctx, "log_depth", 0)
-    # Store the resolved log file path on ctx so run_sync can embed it in
-    # abandoned file records for operator traceability.
-    setattr(ctx, "log_file", str(resolved_log))
     _current_depth = ctx.log_depth
+
+    # JSONL handler — derive path from log_path by replacing the suffix.
+    # The JSONL file is the structured source of truth; the human-readable
+    # log can be generated from it after the fact by a converter.
+    jsonl_path = resolved_log.with_suffix(".jsonl")
+    jsonl_handler = JsonlHandler(
+        jsonl_path = jsonl_path,
+        context    = {"env": getattr(ctx, "env", "")},
+        ctx        = ctx,
+        ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
+    )
+    jsonl_handler.setLevel(level)
+    root.addHandler(jsonl_handler)
+
+    # Expose the JSONL path on ctx so hooks (e.g. begin_batch) can pass it
+    # to the database as the canonical log file reference for this run.
+    setattr(ctx, "log_file", str(jsonl_path))
 
 
 # ---------------------------------------------------------------------------
