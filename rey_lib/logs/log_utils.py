@@ -148,7 +148,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
 
     if getattr(ctx, "log_path", None):
         resolved_log = Path(
-            ctx.log_path.format(operation=operation, timestamp=timestamp)
+            str(ctx.log_path).format(operation=operation, timestamp=timestamp)
         ).expanduser().resolve()
         resolved_log.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(filename=str(resolved_log), encoding="utf-8")
@@ -159,7 +159,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
 
     if getattr(ctx, "jsonl_path", None):
         jsonl_path = Path(
-            ctx.jsonl_path.format(operation=operation, timestamp=timestamp)
+            str(ctx.jsonl_path).format(operation=operation, timestamp=timestamp)
         ).expanduser().resolve()
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         jsonl_handler = JsonlHandler(
