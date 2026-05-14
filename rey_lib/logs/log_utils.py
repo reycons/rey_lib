@@ -94,25 +94,27 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     """
     Initialise logging for the application.
 
-    Sets up two handlers:
+    Sets up handlers based on what is configured in ctx:
       - Console (stderr): always active, respects log level.
-      - JSONL: one file per run, named using ctx.jsonl_path template.
+      - Human-readable file: when ctx.log_path is present.
+      - JSONL: when ctx.jsonl_path is present.
 
     Both path templates support two placeholders:
       {operation}  — the current operation name (e.g. 'scan', 'import')
       {timestamp}  — run start time as YYYYMMDD_HHMMSS
 
-    Each run produces a distinct JSONL file regardless of restarts or
-    parallel executions on the same day. ctx.log_file is set to the
-    resolved JSONL path so hooks (e.g. begin_batch) can pass it to the DB.
+    When both are configured both handlers are active. When only one is
+    configured only that handler is added. ctx.log_file is set to the
+    JSONL path when present, otherwise the human-readable log path.
 
     The resolved log level is written back to ctx.log_level.
 
     Parameters
     ----------
     ctx : Any
-        Application context Namespace. Must have .env, .log_path, and
-        .jsonl_path. ctx.log_level and ctx.log_file are updated in-place.
+        Application context Namespace. Must have .env. Optionally has
+        .log_path and/or .jsonl_path. ctx.log_level and ctx.log_file
+        are updated in-place after setup.
     operation : str
         Current operation name. Substituted into path templates.
         Defaults to 'app'.
@@ -141,28 +143,43 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     console_handler.setFormatter(formatter)
     root.addHandler(console_handler)
 
-    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    jsonl_path = Path(
-        ctx.jsonl_path.format(operation=operation, timestamp=timestamp)
-    ).expanduser().resolve()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file  = None
 
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    if getattr(ctx, "log_path", None):
+        resolved_log = Path(
+            ctx.log_path.format(operation=operation, timestamp=timestamp)
+        ).expanduser().resolve()
+        resolved_log.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(filename=str(resolved_log), encoding="utf-8")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+        log_file = str(resolved_log)
+
+    if getattr(ctx, "jsonl_path", None):
+        jsonl_path = Path(
+            ctx.jsonl_path.format(operation=operation, timestamp=timestamp)
+        ).expanduser().resolve()
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        jsonl_handler = JsonlHandler(
+            jsonl_path = jsonl_path,
+            context    = {"env": getattr(ctx, "env", "")},
+            ctx        = ctx,
+            ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
+        )
+        jsonl_handler.setLevel(level)
+        root.addHandler(jsonl_handler)
+        log_file = str(jsonl_path)  # JSONL takes precedence for ctx.log_file
 
     ctx.log_level = level_name
     ctx.log_depth = getattr(ctx, "log_depth", 0)
     _current_depth = ctx.log_depth
-    jsonl_handler = JsonlHandler(
-        jsonl_path = jsonl_path,
-        context    = {"env": getattr(ctx, "env", "")},
-        ctx        = ctx,
-        ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
-    )
-    jsonl_handler.setLevel(level)
-    root.addHandler(jsonl_handler)
 
-    # Expose the JSONL path on ctx so hooks (e.g. begin_batch) can pass it
-    # to the database as the canonical log file reference for this run.
-    setattr(ctx, "log_file", str(jsonl_path))
+    # ctx.log_file used by hooks (e.g. begin_batch) to record the log path.
+    # JSONL path takes precedence when both are configured.
+    if log_file:
+        setattr(ctx, "log_file", log_file)
 
 
 # ---------------------------------------------------------------------------
