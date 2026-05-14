@@ -96,24 +96,25 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
 
     Sets up two handlers:
       - Console (stderr): always active, respects log level.
-      - File: one file per run, named using ctx.log_path template.
+      - JSONL: one file per run, named using ctx.jsonl_path template.
 
-    The log file path template (ctx.log_path) supports two placeholders:
+    Both path templates support two placeholders:
       {operation}  — the current operation name (e.g. 'scan', 'import')
       {timestamp}  — run start time as YYYYMMDD_HHMMSS
 
-    Each run produces a distinct log file regardless of restarts or
-    parallel executions on the same day.
+    Each run produces a distinct JSONL file regardless of restarts or
+    parallel executions on the same day. ctx.log_file is set to the
+    resolved JSONL path so hooks (e.g. begin_batch) can pass it to the DB.
 
     The resolved log level is written back to ctx.log_level.
 
     Parameters
     ----------
     ctx : Any
-        Application context Namespace. Must have .env and .log_path.
-        ctx.log_level is updated in-place after setup.
+        Application context Namespace. Must have .env, .log_path, and
+        .jsonl_path. ctx.log_level and ctx.log_file are updated in-place.
     operation : str
-        Current operation name. Substituted into {operation} in log_path.
+        Current operation name. Substituted into path templates.
         Defaults to 'app'.
     """
     global _current_depth
@@ -140,21 +141,16 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     console_handler.setFormatter(formatter)
     root.addHandler(console_handler)
 
-    timestamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    resolved_log = Path(
-        ctx.log_path.format(operation=operation, timestamp=timestamp)
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    jsonl_path = Path(
+        ctx.jsonl_path.format(operation=operation, timestamp=timestamp)
     ).expanduser().resolve()
 
-    resolved_log.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
     ctx.log_level = level_name
     ctx.log_depth = getattr(ctx, "log_depth", 0)
     _current_depth = ctx.log_depth
-
-    # JSONL handler — derive path from log_path by replacing the suffix.
-    # The JSONL file is the structured source of truth; the human-readable
-    # log can be generated from it after the fact by a converter.
-    jsonl_path = resolved_log.with_suffix(".jsonl")
     jsonl_handler = JsonlHandler(
         jsonl_path = jsonl_path,
         context    = {"env": getattr(ctx, "env", "")},
