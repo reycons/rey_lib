@@ -235,6 +235,8 @@ def transform_files(
                 )
 
                 matched_cfg, header_line = _match_transform(file_path, transforms)
+                if matched_cfg is not None:
+                    object.__setattr__(ctx, "transforms", matched_cfg)
                 if matched_cfg is None or header_line is None:
                     _logger.error(
                         "No header match across %d transform(s) — file rejected: %s",
@@ -582,6 +584,7 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
     total = 0
 
     for data_source in ctx.data_sources:
+        object.__setattr__(ctx, "data_sources", data_source)
         bindings = getattr(data_source, "transform_hooks", None)
         hook_conns: dict[str, Any] = {}
 
@@ -770,6 +773,7 @@ def run_load(
     total = 0
 
     for data_source in ctx.data_sources:
+        object.__setattr__(ctx, "data_sources", data_source)
         # Cache open connections by name so multiple load configs that share
         # a connection only open it once per data source. Hook bindings reuse
         # this cache so they may share the load connection or open their own.
@@ -778,6 +782,7 @@ def run_load(
 
         try:
             for load_cfg in getattr(data_source, "loads", []):
+                object.__setattr__(ctx, "loads", load_cfg)
                 load_bindings = getattr(load_cfg, "load_hooks", None)
 
                 # pre_load bindings — fire before this load entry's data move.
@@ -2147,6 +2152,8 @@ def _read_and_transform(
         ),
         start=1,
     ):
+        if ctx is not None:
+            object.__setattr__(ctx, "row_num", row_num)
         try:
             out_row = transform_row(raw_row, cfg_dict, row_num=row_num, ctx=ctx)
             if out_row is None:

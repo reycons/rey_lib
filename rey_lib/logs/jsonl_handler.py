@@ -44,6 +44,11 @@ _STANDARD_ATTRS: frozenset[str] = frozenset({
     "stack_info", "thread", "threadName", "taskName",
 })
 
+# Extra keys considered SQL diagnostic data — excluded when dump_sql is false.
+_SQL_EXTRA_KEYS: frozenset[str] = frozenset({
+    "sql", "proc", "query", "params", "inputs", "sql_type",
+})
+
 
 class JsonlHandler(logging.Handler):
     """
@@ -163,6 +168,42 @@ class JsonlHandler(logging.Handler):
             if d > depth:
                 del self._depth_seq[d]
 
+    def _walk_ctx_path(self, path: str) -> Any:
+        """Walk a dot-separated attribute path on ctx. Returns None if any segment is missing."""
+        obj = self._ctx
+        for part in path.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                return None
+        return obj
+
+    def _diagnostics_level(self, level_key: str) -> Any:
+        """Return the diagnostics Namespace for ``level_key``, or ``None``.
+
+        Reads ``ctx.diagnostics.{level_key}`` at emit time so env-override
+        changes take effect without restarting. Returns ``None`` when
+        ``ctx.diagnostics`` is absent — all behaviour falls back to defaults.
+        """
+        if self._ctx is None:
+            return None
+        diag = getattr(self._ctx, "diagnostics", None)
+        if diag is None:
+            return None
+        return getattr(diag, level_key, None)
+
+    def _resolve_ctx_fields(self, diag_level: Any) -> tuple[str, ...]:
+        """Return ctx fields to snapshot.
+
+        When diagnostics config is present, reads ``ctx_fields`` from it.
+        Falls back to the constructor-supplied ``ctx_fields`` tuple so
+        existing callers that pass fields at construction keep working.
+        """
+        if diag_level is not None:
+            fields = getattr(diag_level, "ctx_fields", None)
+            if fields is not None:
+                return tuple(fields)
+        return self._ctx_fields
+
     def _build_record(
         self,
         record:     logging.LogRecord,
@@ -188,18 +229,44 @@ class JsonlHandler(logging.Handler):
         # Session context
         out.update(self._context)
 
-        # ctx snapshot — runtime state at emit time
-        if self._ctx is not None:
-            for field in self._ctx_fields:
-                out[field] = getattr(self._ctx, field, None)
+        # Resolve diagnostics config for this severity level.
+        level_key  = record.levelname.lower()
+        diag_level = self._diagnostics_level(level_key)
+        ctx_fields = self._resolve_ctx_fields(diag_level)
 
-        # Per-event extras — any caller-supplied extra={} fields
+        # ctx snapshot — whitelisted fields only.
+        # When diagnostics config is present: nest under ctx_dump (structured).
+        # When falling back to constructor ctx_fields: write flat (legacy behaviour).
+        if self._ctx is not None and ctx_fields:
+            if diag_level is not None and getattr(diag_level, "dump_ctx", False):
+                ctx_dump = {
+                    f: self._walk_ctx_path(f)
+                    for f in ctx_fields
+                    if self._walk_ctx_path(f) is not None
+                }
+                if ctx_dump:
+                    out["ctx_dump"] = ctx_dump
+            elif diag_level is None:
+                # Legacy: flat fields from constructor ctx_fields.
+                for field in ctx_fields:
+                    out[field] = self._walk_ctx_path(field)
+
+        # Per-event extras — caller-supplied extra={} fields.
+        # SQL-related keys are suppressed when dump_sql is explicitly false.
+        dump_sql = getattr(diag_level, "dump_sql", True) if diag_level is not None else True
         for key, val in record.__dict__.items():
-            if key not in _STANDARD_ATTRS and not key.startswith("_"):
-                out.setdefault(key, val)
+            if key in _STANDARD_ATTRS or key.startswith("_"):
+                continue
+            if not dump_sql and key in _SQL_EXTRA_KEYS:
+                continue
+            out.setdefault(key, val)
 
-        # Exception info
-        if record.exc_info and record.exc_info[0] is not None:
+        # Exception info — controlled by dump_stack_trace (default true).
+        dump_stack_trace = (
+            getattr(diag_level, "dump_stack_trace", True)
+            if diag_level is not None else True
+        )
+        if dump_stack_trace and record.exc_info and record.exc_info[0] is not None:
             out["exception"] = logging.Formatter().formatException(record.exc_info)
 
         # Field renaming
