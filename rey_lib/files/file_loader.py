@@ -1665,6 +1665,7 @@ def _transform_one_file(
 		file_name_date = parse_date_from_filename(file_path.name, _namespace_to_dict(transform_cfg))
 		object.__setattr__(ctx, "file_name_date", file_name_date)
 		_stamp_date_parts(ctx, "file_name_date", file_name_date)
+		object.__setattr__(ctx, "transform_version", getattr(transform_cfg, "version", ""))
 
 		rows, errors = _read_and_transform(
 			file_path,
