@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -1662,8 +1662,9 @@ def _transform_one_file(
 
 		_setup_file_ctx(ctx, file_path, data_source.paths)
 
-		file_date = parse_date_from_filename(file_path.name, _namespace_to_dict(transform_cfg))
-		object.__setattr__(ctx, "file_date", file_date)
+		file_name_date = parse_date_from_filename(file_path.name, _namespace_to_dict(transform_cfg))
+		object.__setattr__(ctx, "file_name_date", file_name_date)
+		_stamp_date_parts(ctx, "file_name_date", file_name_date)
 
 		rows, errors = _read_and_transform(
 			file_path,
@@ -2423,13 +2424,26 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
     return schema, table
 
 
+def _stamp_date_parts(ctx: Any, prefix: str, d: Optional[date]) -> None:
+    """Stamp ``{prefix}_yyyy``, ``_mm``, ``_dd``, ``_yyyymm``, ``_yyyymmdd`` on ctx."""
+    if d is None:
+        for suffix in ("yyyy", "mm", "dd", "yyyymm", "yyyymmdd"):
+            object.__setattr__(ctx, f"{prefix}_{suffix}", None)
+        return
+    object.__setattr__(ctx, f"{prefix}_yyyy",     d.strftime("%Y"))
+    object.__setattr__(ctx, f"{prefix}_mm",       d.strftime("%m"))
+    object.__setattr__(ctx, f"{prefix}_dd",       d.strftime("%d"))
+    object.__setattr__(ctx, f"{prefix}_yyyymm",   d.strftime("%Y%m"))
+    object.__setattr__(ctx, f"{prefix}_yyyymmdd", d.strftime("%Y%m%d"))
+
+
 def _setup_file_ctx(ctx: Any, file_path: Path, paths: Any) -> None:
     """
     Stamp per-file attributes on ctx before transform begins.
 
-    Sets ctx.current_file_name, ctx.current_file_path, and one attribute
-    per paths key (e.g. ctx.archive_path) so context transforms can
-    resolve them via ``ctx.*`` references.
+    Sets file metadata (name, stem, extension, size, created/modified dates
+    and their parts) and one attribute per paths key so context transforms
+    can resolve them via ``ctx.*`` references.
 
     Parameters
     ----------
@@ -2440,8 +2454,23 @@ def _setup_file_ctx(ctx: Any, file_path: Path, paths: Any) -> None:
     paths : Any
         Paths Namespace from the data source config.
     """
+    stat = file_path.stat()
+
     object.__setattr__(ctx, "current_file_name", file_path.name)
     object.__setattr__(ctx, "current_file_path", str(file_path))
+    object.__setattr__(ctx, "file_name",         file_path.name)
+    object.__setattr__(ctx, "file_stem",         file_path.stem)
+    object.__setattr__(ctx, "file_extension",    file_path.suffix)
+    object.__setattr__(ctx, "file_size_bytes",   stat.st_size)
+
+    created_date  = datetime.fromtimestamp(stat.st_ctime).date()
+    modified_date = datetime.fromtimestamp(stat.st_mtime).date()
+
+    object.__setattr__(ctx, "file_created_date",  created_date)
+    object.__setattr__(ctx, "file_modified_date", modified_date)
+
+    _stamp_date_parts(ctx, "file_created_date",  created_date)
+    _stamp_date_parts(ctx, "file_modified_date", modified_date)
 
     if paths is not None:
         for key, val in _namespace_to_dict(paths).items():
