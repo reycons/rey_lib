@@ -1666,6 +1666,7 @@ def _transform_one_file(
 		object.__setattr__(ctx, "file_name_date", file_name_date)
 		_stamp_date_parts(ctx, "file_name_date", file_name_date)
 		object.__setattr__(ctx, "transform_version", getattr(transform_cfg, "version", ""))
+		object.__setattr__(ctx, "file_checksum", _hash_file(file_path))
 
 		rows, errors = _read_and_transform(
 			file_path,
@@ -2465,6 +2466,16 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
     table  = parts[-1]
     schema = ".".join(parts[:-1])
     return schema, table
+
+
+def _hash_file(file_path: Path, algorithm: str = "sha256") -> str:
+    """Return a hex digest of the file content using the specified algorithm."""
+    import hashlib
+    h = hashlib.new(algorithm)
+    with file_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _stamp_date_parts(ctx: Any, prefix: str, d: Optional[date]) -> None:

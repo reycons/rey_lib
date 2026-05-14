@@ -402,6 +402,9 @@ def _apply_transform_v2(
         if transform_type == "encrypt":
             return _transform_encrypt(value, raw_row, transform_cfg, secrets)
 
+        if transform_type == "file_hash":
+            return _resolve_context_value("ctx.file_checksum", ctx=ctx)
+
         if transform_type == "not_blank":
             return out.get(db_col, "")
 
