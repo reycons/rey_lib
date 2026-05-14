@@ -1662,6 +1662,9 @@ def _transform_one_file(
 
 		_setup_file_ctx(ctx, file_path, data_source.paths)
 
+		file_date = parse_date_from_filename(file_path.name, _namespace_to_dict(transform_cfg))
+		object.__setattr__(ctx, "file_date", file_date)
+
 		rows, errors = _read_and_transform(
 			file_path,
 			transform_cfg,

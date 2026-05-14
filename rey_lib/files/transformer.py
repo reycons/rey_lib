@@ -149,9 +149,11 @@ def parse_date_from_filename(filename: str, file_type_cfg: dict) -> Optional[dat
     """
     Extract the date embedded in a filename using the configured pattern.
 
-    The pattern uses {date} as a placeholder for the date string portion.
-    Example: "tran_{date}.csv" with date_format "%Y%m%d" matches
-    "tran_20261231.csv" and returns date(2026, 12, 31).
+    The pattern uses any single ``{token}`` placeholder for the date portion —
+    e.g. ``bal_{yyyymmdd}.csv``, ``tran_{date}.csv``. The ``date_format`` field
+    accepts either Excel/Java-style tokens (``yyyymmdd``, ``yyyymm``) or Python
+    strptime strings (``%Y%m%d``). Whichever style is used, the same function
+    converts it to strptime before parsing.
 
     Parameters
     ----------
@@ -166,28 +168,58 @@ def parse_date_from_filename(filename: str, file_type_cfg: dict) -> Optional[dat
     Optional[date]
         Parsed date, or None if the pattern does not match or is absent.
     """
-    # Support both key names used across projects.
     pattern = file_type_cfg.get("file_pattern") or file_type_cfg.get("filename_pattern", "")
-    fmt     = file_type_cfg.get("date_format", "%Y%m%d")
+    fmt_raw = file_type_cfg.get("date_format", "yyyymmdd")
 
     if not pattern:
         return None
 
-    # Convert the glob-style pattern to a regex by escaping everything
-    # except the {date} placeholder, which becomes a named capture group.
-    regex = re.escape(pattern).replace(r"\{date\}", r"(?P<date>.+)")
+    # Split on the first {token} placeholder, escape each literal part,
+    # then reassemble with a named capture group — avoids double-escaping.
+    parts = re.split(r"\{[^}]+\}", pattern, maxsplit=1)
+    if len(parts) == 2:
+        regex = re.escape(parts[0]) + r"(?P<date>[^./\\]+)" + re.escape(parts[1])
+    else:
+        return None
     m     = re.fullmatch(regex, filename)
     if not m:
         return None
 
+    fmt = _to_strptime_format(fmt_raw)
     try:
         return datetime.strptime(m.group("date"), fmt).date()
     except ValueError:
         _logger.debug(
-            "Could not parse date '%s' from filename '%s'",
-            m.group("date"), filename,
+            "Could not parse date '%s' from filename '%s' using format '%s'",
+            m.group("date"), filename, fmt,
         )
         return None
+
+
+# Ordered longest-first so 'yyyy' matches before 'yy', 'dd' before 'd'.
+_DATE_FORMAT_TOKENS: list[tuple[str, str]] = [
+    ("yyyy", "%Y"),
+    ("yy",   "%y"),
+    ("MM",   "%m"),
+    ("mm",   "%m"),
+    ("dd",   "%d"),
+]
+
+
+def _to_strptime_format(fmt: str) -> str:
+    """Convert an Excel/Java-style date format string to a Python strptime format.
+
+    If ``fmt`` already contains ``%`` it is returned unchanged, so strptime
+    format strings from older configs continue to work without modification.
+
+    Examples: ``yyyymmdd`` → ``%Y%m%d``, ``yyyymm`` → ``%Y%m``.
+    """
+    if "%" in fmt:
+        return fmt
+    result = fmt
+    for token, replacement in _DATE_FORMAT_TOKENS:
+        result = result.replace(token, replacement)
+    return result
 
 
 def transform_row(
