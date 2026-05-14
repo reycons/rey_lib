@@ -200,7 +200,7 @@ class JsonlHandler(logging.Handler):
 
         # Exception info
         if record.exc_info and record.exc_info[0] is not None:
-            out["exception"] = self.formatException(record.exc_info)
+            out["exception"] = logging.Formatter().formatException(record.exc_info)
 
         # Field renaming
         for canonical, output_name in self._field_map.items():

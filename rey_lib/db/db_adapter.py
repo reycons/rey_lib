@@ -324,87 +324,87 @@ class DBAdapter:
     # Private — provider resolution
     # ------------------------------------------------------------------
 
-def _provider_for_cfg(self, db_cfg: Any) -> str:
-	"""
-	Resolve provider name from a connection config.
+    def _provider_for_cfg(self, db_cfg: Any) -> str:
+        """
+        Resolve provider name from a connection config.
 
-	Honors ``db_cfg.provider`` when present (case-insensitive). Falls back
-	to inferring from ``db_cfg.driver`` so older configs that pre-date the
-	provider field keep working.
+        Honors ``db_cfg.provider`` when present (case-insensitive). Falls back
+        to inferring from ``db_cfg.driver`` so older configs that pre-date the
+        provider field keep working.
 
-	Parameters
-	----------
-	db_cfg : Any
-		Connection config Namespace.
+        Parameters
+        ----------
+        db_cfg : Any
+            Connection config Namespace.
 
-	Returns
-	-------
-	str
-		Lowercase provider name.
+        Returns
+        -------
+        str
+            Lowercase provider name.
 
-	Raises
-	------
-	ConfigError
-		When neither ``provider`` nor a recognizable ``driver`` is set.
-	"""
-	provider = (getattr(db_cfg, "provider", None) or "").strip().lower()
+        Raises
+        ------
+        ConfigError
+            When neither ``provider`` nor a recognizable ``driver`` is set.
+        """
+        provider = (getattr(db_cfg, "provider", None) or "").strip().lower()
 
-	if provider:
-		return provider
+        if provider:
+            return provider
 
-	driver = (getattr(db_cfg, "driver", None) or "").lower()
+        driver = (getattr(db_cfg, "driver", None) or "").lower()
 
-	if "sql server" in driver:
-		return "sqlserver"
+        if "sql server" in driver:
+            return "sqlserver"
 
-	if "mysql" in driver:
-		return "mysql"
+        if "mysql" in driver:
+            return "mysql"
 
-	if "duckdb" in driver:
-		return "duckdb"
+        if "duckdb" in driver:
+            return "duckdb"
 
-	name = getattr(db_cfg, "name", "<unnamed>")
+        name = getattr(db_cfg, "name", "<unnamed>")
 
-	raise ConfigError(
-		f"DBAdapter: connection '{name}' has no 'provider' field and "
-		"no recognizable 'driver'. Add 'provider' to the connection config."
-	)
+        raise ConfigError(
+            f"DBAdapter: connection '{name}' has no 'provider' field and "
+            "no recognizable 'driver'. Add 'provider' to the connection config."
+        )
 
-def _provider_for_conn(self, conn: Any) -> str:
-	"""
-	Resolve provider name from an already-open connection object.
+    def _provider_for_conn(self, conn: Any) -> str:
+        """
+        Resolve provider name from an already-open connection object.
 
-	Checks for an explicit ``provider`` attribute first, then falls back
-	to matching the connection's module name against ``_MODULE_PREFIXES``.
+        Checks for an explicit ``provider`` attribute first, then falls back
+        to matching the connection's module name against ``_MODULE_PREFIXES``.
 
-	Parameters
-	----------
-	conn : Any
-		An open backend connection.
+        Parameters
+        ----------
+        conn : Any
+            An open backend connection.
 
-	Returns
-	-------
-	str
-		Lowercase provider name.
+        Returns
+        -------
+        str
+            Lowercase provider name.
 
-	Raises
-	------
-	ConfigError
-		When the provider cannot be determined.
-	"""
-	explicit = getattr(conn, "provider", None)
+        Raises
+        ------
+        ConfigError
+            When the provider cannot be determined.
+        """
+        explicit = getattr(conn, "provider", None)
 
-	if explicit:
-		return str(explicit).lower()
+        if explicit:
+            return str(explicit).lower()
 
-	module = type(conn).__module__ or ""
+        module = type(conn).__module__ or ""
 
-	for prefix, provider in _MODULE_PREFIXES.items():
-		if module.startswith(prefix):
-			return provider
+        for prefix, provider in _MODULE_PREFIXES.items():
+            if module.startswith(prefix):
+                return provider
 
-	raise ConfigError(
-		f"DBAdapter: cannot determine provider for connection of type "
-		f"{type(conn).__name__} (module={module!r}). "
-		f"Add an entry to _MODULE_PREFIXES in db_adapter.py."
-	)
+        raise ConfigError(
+            f"DBAdapter: cannot determine provider for connection of type "
+            f"{type(conn).__name__} (module={module!r}). "
+            f"Add an entry to _MODULE_PREFIXES in db_adapter.py."
+        )
