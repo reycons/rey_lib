@@ -190,7 +190,7 @@ def transform_files(
                 data_source.name,
             )
 
-        inbox_dir = _resolve_path(data_source.paths, "inbox_path")
+        inbox_dir = _resolve_path(data_source.paths, "inbox_path", ctx=ctx)
 
         glob_patterns = sorted(
             {
@@ -402,8 +402,8 @@ def load_files(
     total_rows = 0
 
     try:
-        source_dir    = _resolve_path(data_source.paths, load_cfg.source)
-        pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version)
+        source_dir    = _resolve_path(data_source.paths, load_cfg.source, ctx=ctx)
+        pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version, ctx=ctx)
         pending       = input_files(source_dir, pattern)
         max_files     = getattr(data_source, "max_files_per_run", None)
         if max_files is not None:
@@ -521,7 +521,7 @@ def load_files_to_callback(
                         rows_loaded,
                     )
                 total_rows += rows_loaded
-                _execute_movements(load_cfg.movements.success, file_path, data_source.paths)
+                _execute_movements(load_cfg.movements.success, file_path, data_source.paths, ctx=ctx)
                 _logger.info(
                     "Loaded via callback: %s rows=%d",
                     file_path.name,
@@ -534,7 +534,7 @@ def load_files_to_callback(
                     exc,
                     exc_info=True,
                 )
-                _execute_movements(load_cfg.movements.failure, file_path, data_source.paths)
+                _execute_movements(load_cfg.movements.failure, file_path, data_source.paths, ctx=ctx)
 
     finally:
         log_exit(
@@ -1651,7 +1651,7 @@ def _transform_one_file(
 		if header_line is None and not _validate_header(file_path, transform_cfg):
 			_logger.error("Header mismatch — file rejected: %s", file_path.name)
 			_execute_movements(
-				transform_cfg.movements.failure, file_path, data_source.paths
+				transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
 			)
 			log_exit(
 				ctx,
@@ -1686,7 +1686,7 @@ def _transform_one_file(
 
 			_write_rejections(ctx, file_path, errors)
 			_execute_movements(
-				transform_cfg.movements.failure, file_path, data_source.paths
+				transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
 			)
 			log_exit(
 				ctx,
@@ -1698,7 +1698,7 @@ def _transform_one_file(
 		if not rows:
 			_logger.warning("No rows produced from file: %s", file_path.name)
 			_execute_movements(
-				transform_cfg.movements.failure, file_path, data_source.paths
+				transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
 			)
 			log_exit(
 				ctx,
@@ -1707,7 +1707,7 @@ def _transform_one_file(
 			)
 			return False
 
-		output_path = _build_output_path(data_source.paths, transform_cfg, file_path)
+		output_path = _build_output_path(data_source.paths, transform_cfg, file_path, ctx=ctx)
 		write_file(output_path, rows, file_type="CSV")
 
 		# Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
@@ -1720,7 +1720,7 @@ def _transform_one_file(
 		)
 
 		_execute_movements(
-			transform_cfg.movements.success, file_path, data_source.paths
+			transform_cfg.movements.success, file_path, data_source.paths, ctx=ctx
 		)
 		log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
 		return True
@@ -1731,7 +1731,7 @@ def _transform_one_file(
 			file_path.name, exc, exc_info=True,
 		)
 		_execute_movements(
-			transform_cfg.movements.failure, file_path, data_source.paths
+			transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
 		)
 		log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
 		return False
@@ -1740,6 +1740,7 @@ def _build_output_path(
     paths: Any,
     transform_cfg: Any,
     source_file: Path,
+    ctx: Any = None,
 ) -> Path:
     """
     Build the output file path from the transform output config.
@@ -1786,9 +1787,10 @@ def _build_output_path(
             f"is missing output.file.name — cannot determine output filename pattern."
         )
 
-    output_dir = _resolve_path(paths, output_path_key)
+    output_dir = _resolve_path(paths, output_path_key, ctx=ctx)
     version    = getattr(transform_cfg.output, "version", getattr(transform_cfg, "version", ""))
 
+    file_name_pattern = resolve_ctx_tokens(file_name_pattern, ctx)
     filename = file_name_pattern.format(
         base_file_name=source_file.stem,
         version=version,
@@ -1876,7 +1878,7 @@ def _load_one_file(
 
         if not _validate_load_header(file_path, expected_columns, encoding):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
-            _execute_movements(load_cfg.movements.failure, file_path, paths)
+            _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
@@ -1890,7 +1892,7 @@ def _load_one_file(
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
-            _execute_movements(load_cfg.movements.failure, file_path, paths)
+            _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
             log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
             return 0
 
@@ -1926,7 +1928,7 @@ def _load_one_file(
             file_path.name, schema, table, len(rows),
         )
 
-        _execute_movements(load_cfg.movements.success, file_path, paths)
+        _execute_movements(load_cfg.movements.success, file_path, paths, ctx=ctx)
         log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
         return len(rows)
 
@@ -1936,7 +1938,7 @@ def _load_one_file(
             "Database error loading '%s' — rolled back: %s",
             file_path.name, exc,
         )
-        _execute_movements(load_cfg.movements.failure, file_path, paths)
+        _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
         log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
         return 0
 
@@ -2170,6 +2172,7 @@ def _execute_movements(
     movements: Any,
     file_path: Path,
     paths: Any,
+    ctx: Any = None,
 ) -> None:
     """
     Execute a list of file movement instructions from the YAML config.
@@ -2203,7 +2206,7 @@ def _execute_movements(
         if move is not None:
             from_key = getattr(move, "from", None)
             src_path = _resolve_movement_source_path(paths, from_key, file_path)
-            dest_dir = _resolve_path(paths, move.to)
+            dest_dir = _resolve_path(paths, move.to, ctx=ctx)
             try:
                 if not src_path.exists():
                     _logger.debug("Movement skipped — source missing: %s", src_path)
@@ -2299,9 +2302,43 @@ def _resolve_callback_pattern(
 # Private — config helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_path(paths: Any, key: str) -> Path:
+def resolve_ctx_tokens(value: str, ctx: Any) -> str:
+    """Replace ``{ctx.attr}`` tokens in ``value`` with the live ctx attribute.
+
+    Only tokens of the form ``{ctx.something}`` are substituted — all other
+    tokens (``{version}``, ``{base_file_name}``, etc.) are left untouched
+    so existing format logic continues to work unchanged.
+
+    Returns ``value`` unchanged when ``ctx`` is ``None`` or no ``{ctx.``
+    tokens are present.
+
+    Parameters
+    ----------
+    value : str
+        String that may contain ``{ctx.attr}`` tokens.
+    ctx : Any
+        Application context. Missing attributes resolve to empty string.
+
+    Returns
+    -------
+    str
+        String with all ``{ctx.attr}`` tokens replaced.
+    """
+    if ctx is None or "{ctx." not in value:
+        return value
+
+    def _replace(m: re.Match) -> str:
+        return str(getattr(ctx, m.group(1), "") or "")
+
+    return re.sub(r"\{ctx\.([^}]+)\}", _replace, value)
+
+
+def _resolve_path(paths: Any, key: str, ctx: Any = None) -> Path:
     """
     Resolve a named path from the paths Namespace.
+
+    Applies ``{ctx.attr}`` token substitution to the path value before
+    converting to a Path — all other tokens are left unchanged.
 
     Parameters
     ----------
@@ -2309,6 +2346,8 @@ def _resolve_path(paths: Any, key: str) -> Path:
         Paths Namespace from the data source config.
     key : str
         Attribute name — e.g. 'inbox_path', 'processing_path'.
+    ctx : Any, optional
+        Application context for ``{ctx.attr}`` substitution.
 
     Returns
     -------
@@ -2325,26 +2364,29 @@ def _resolve_path(paths: Any, key: str) -> Path:
         raise ValueError(
             f"Path key '{key}' not found in data source paths config."
         )
-    return Path(value)
+    return Path(resolve_ctx_tokens(str(value), ctx))
 
 
-def _resolve_pattern(pickup_pattern: str, version: str) -> str:
+def _resolve_pattern(pickup_pattern: str, version: str, ctx: Any = None) -> str:
     """
-    Substitute {version} token in a pickup_pattern string.
+    Substitute ``{version}`` and ``{ctx.attr}`` tokens in a pickup_pattern.
 
     Parameters
     ----------
     pickup_pattern : str
-        Pattern from load config — may contain {version} token.
+        Pattern from load config.
     version : str
-        Version string to substitute.
+        Version string to substitute for ``{version}``.
+    ctx : Any, optional
+        Application context for ``{ctx.attr}`` substitution.
 
     Returns
     -------
     str
         Resolved glob pattern.
     """
-    return pickup_pattern.replace("{version}", version)
+    resolved = pickup_pattern.replace("{version}", version)
+    return resolve_ctx_tokens(resolved, ctx)
 
 
 def _find_transform(
