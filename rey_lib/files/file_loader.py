@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -1994,6 +1994,8 @@ def _build_column_defs(
 
     _TRANSFORM_TYPE_MAP: dict[str, str] = {
         "date":       "DATE",
+        "datetime":   "DATETIME2",
+        "time":       "TIME",
         "regex_date": "DATE",
         "numeric":    "DECIMAL(18, 6)",
     }
@@ -2524,8 +2526,8 @@ def _setup_file_ctx(ctx: Any, file_path: Path, paths: Any) -> None:
     object.__setattr__(ctx, "file_extension",    file_path.suffix)
     object.__setattr__(ctx, "file_size_bytes",   stat.st_size)
 
-    created_date  = datetime.fromtimestamp(stat.st_ctime).date()
-    modified_date = datetime.fromtimestamp(stat.st_mtime).date()
+    created_date  = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).date()
+    modified_date = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).date()
 
     object.__setattr__(ctx, "file_created_date",  created_date)
     object.__setattr__(ctx, "file_modified_date", modified_date)

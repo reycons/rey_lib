@@ -13,6 +13,9 @@ Transformation types
 --------------------
 date                Parse a string into a date using a specified format.
                     Supports fallback formats for common broker quirks.
+datetime            Parse a string into a datetime (date + time).
+                    Falls back to common datetime formats automatically.
+time                Parse a string into a time-of-day value.
 numeric             Strip unwanted characters and cast to float.
                     Handles parenthesised negatives: (1234.56) → -1234.56.
 regex_extract       Extract a capture group from a source field using a regex.
@@ -92,7 +95,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Optional
 
 from rey_lib.errors.error_utils import AppError
@@ -196,30 +199,69 @@ def parse_date_from_filename(filename: str, file_type_cfg: dict) -> Optional[dat
         return None
 
 
-# Ordered longest-first so 'yyyy' matches before 'yy', 'dd' before 'd'.
-_DATE_FORMAT_TOKENS: list[tuple[str, str]] = [
-    ("yyyy", "%Y"),
-    ("yy",   "%y"),
-    ("MM",   "%m"),
-    ("mm",   "%m"),
-    ("dd",   "%d"),
-]
+# Regex alternation — longest token first to prevent partial matches.
+# Follows Java/Excel standard convention:
+#   MM  → months   (uppercase)
+#   mm  → minutes  (lowercase)
+#   dd  → days     HH → 24-hour   hh → 12-hour   ss → seconds
+_DATE_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"yyyy|yy|MMMM|MMM|MM|M|dd|d|HH|hh|H|h|mm|ss|SSS|SS|S|a|Z"
+)
+
+_DATE_TOKEN_MAP: dict[str, str] = {
+    # Year
+    "yyyy": "%Y",   # 2026
+    "yy":   "%y",   # 26
+    # Month — uppercase
+    "MMMM": "%B",   # January
+    "MMM":  "%b",   # Jan
+    "MM":   "%m",   # 05
+    "M":    "%m",   # 5
+    # Day
+    "dd":   "%d",   # 14
+    "d":    "%d",   # 4
+    # Hour
+    "HH":   "%H",   # 19  (24-hour)
+    "hh":   "%I",   # 07  (12-hour)
+    "H":    "%H",
+    "h":    "%I",
+    # Minute — lowercase
+    "mm":   "%M",   # 20
+    # Second
+    "ss":   "%S",   # 52
+    # Fractional seconds
+    "SSS":  "%f",   # microseconds
+    "SS":   "%f",
+    "S":    "%f",
+    # AM/PM
+    "a":    "%p",   # AM / PM
+    # Timezone offset
+    "Z":    "%z",   # +0000 / -0500
+}
 
 
 def _to_strptime_format(fmt: str) -> str:
     """Convert an Excel/Java-style date format string to a Python strptime format.
 
-    If ``fmt`` already contains ``%`` it is returned unchanged, so strptime
-    format strings from older configs continue to work without modification.
+    Accepts both double-token (``MM``, ``dd``) and single-token (``M``, ``d``)
+    variants. If ``fmt`` already contains ``%`` it is returned unchanged so
+    existing strptime strings in config continue to work.
 
-    Examples: ``yyyymmdd`` → ``%Y%m%d``, ``yyyymm`` → ``%Y%m``.
+    Follows Java/Excel standard: ``MM`` = months (uppercase), ``mm`` = minutes
+    (lowercase). Existing strptime strings (containing ``%``) pass through unchanged.
+
+    Examples
+    --------
+    ``MM/dd/yyyy``           → ``%m/%d/%Y``
+    ``M/d/yy``               → ``%m/%d/%y``
+    ``yyyyMMdd``             → ``%Y%m%d``
+    ``yyyy-MM-dd``           → ``%Y-%m-%d``
+    ``dd-MMM-yyyy``          → ``%d-%b-%Y``
+    ``yyyy-MM-ddTHH:mm:ss``  → ``%Y-%m-%dT%H:%M:%S``
     """
     if "%" in fmt:
         return fmt
-    result = fmt
-    for token, replacement in _DATE_FORMAT_TOKENS:
-        result = result.replace(token, replacement)
-    return result
+    return _DATE_TOKEN_RE.sub(lambda tok: _DATE_TOKEN_MAP[tok.group()], fmt)
 
 
 def transform_row(
@@ -382,6 +424,16 @@ def _apply_transform_v2(
                 (value or "").strip() if isinstance(value, str) else "", transform_cfg,
             )
 
+        if transform_type == "datetime":
+            return _transform_datetime(
+                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
+            )
+
+        if transform_type == "time":
+            return _transform_time(
+                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
+            )
+
         if transform_type == "numeric":
             return _transform_numeric(
                 (value or "").strip() if isinstance(value, str) else "", transform_cfg,
@@ -451,7 +503,7 @@ def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
     value       = (raw_row.get(column) or "").strip()
 
     if filter_type == "date":
-        fmt = row_filter.get("format", "%m/%d/%Y")
+        fmt = _to_strptime_format(row_filter.get("format", "%m/%d/%Y"))
         return _try_parse_date(value, fmt) is not None
 
     if filter_type == "not_blank":
@@ -462,29 +514,85 @@ def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
     return True
 
 
+# ANSI standard output formats — used when output_format is not configured.
+_ANSI_DATE_FMT:     str = "%Y-%m-%d"
+_ANSI_DATETIME_FMT: str = "%Y-%m-%d %H:%M:%S"
+_ANSI_TIME_FMT:     str = "%H:%M:%S"
+
+
+def _apply_output_format(
+    parsed: date | datetime | time | None,
+    cfg:    dict,
+    ansi_fmt: str,
+) -> Optional[str]:
+    """Format a parsed date/datetime/time to a string.
+
+    Uses ``output_format`` from config when present (token syntax supported),
+    otherwise falls back to the ANSI standard format for the type.
+    Returns None when ``parsed`` is None.
+    """
+    if parsed is None:
+        return None
+    raw_out = cfg.get("output_format")
+    fmt     = _to_strptime_format(raw_out) if raw_out else ansi_fmt
+    return parsed.strftime(fmt)
+
+
 # ---------------------------------------------------------------------------
 # Private — individual transform implementations
 # ---------------------------------------------------------------------------
-def _transform_date(value: str, cfg: dict) -> Optional[date]:
+def _transform_date(value: str, cfg: dict) -> Optional[str]:
+	"""Parse a date string using the configured format with fallback support.
+
+	Tries ``format`` first. If that fails, tries ``fallback_formats`` from the
+	field config (for uncommon or feed-specific formats), then the built-in
+	unambiguous fallbacks. Ambiguous formats (e.g. day/month vs month/day)
+	must be declared explicitly via ``fallback_formats`` — they are never
+	auto-detected.
+
+	Output defaults to ANSI standard ``yyyy-MM-dd``. Override with
+	``output_format`` using the same token syntax as ``format``.
+
+	Config keys
+	-----------
+	format           : str  — input parse format (default ``MM/dd/yyyy``)
+	output_format    : str  — output string format (default ANSI ``yyyy-MM-dd``)
+	fallback_formats : list — additional formats to try before built-in fallbacks
+	allow_blank      : bool — return None on empty instead of raising
+	"""
 	value = value.strip()
 
 	if not value:
 		if cfg.get("allow_blank", False):
 			return None
-
 		raise TransformError("Empty date value and allow_blank is False.")
 
-	fmt    = cfg.get("format", "%m/%d/%Y")
+	fmt    = _to_strptime_format(cfg.get("format", "%m/%d/%Y"))
 	result = _try_parse_date(value, fmt)
 
 	if result is None:
+		field_fallbacks = cfg.get("fallback_formats") or []
+		for fallback in field_fallbacks:
+			result = _try_parse_date(value, _to_strptime_format(fallback))
+			if result is not None:
+				break
+
+	if result is None:
 		for fallback in (
-			 "%m/%d/%y"
-			,"%-m/%-d/%y"
-			,"%-m/%-d/%Y"
+			"%m/%d/%y",              # US short year
+			"%m/%d/%Y",              # US long year
+			"%Y-%m-%d",              # ISO 8601 date
+			"%Y%m%d",                # compact ISO
+			"%Y/%m/%d",              # ISO slash
+			"%Y-%m-%dT%H:%M:%S",    # ISO 8601 datetime
+			"%Y-%m-%d %H:%M:%S",    # ISO datetime space
+			"%m/%d/%Y %H:%M:%S",    # US datetime
+			"%d-%b-%Y",              # 14-May-2026
+			"%d-%b-%y",              # 14-May-26
+			"%d %b %Y",              # 14 May 2026
+			"%b %d, %Y",             # May 14, 2026
 		):
 			result = _try_parse_date(value, fallback)
-
 			if result is not None:
 				break
 
@@ -493,7 +601,110 @@ def _transform_date(value: str, cfg: dict) -> Optional[date]:
 			f"Cannot parse '{value}' as date with format '{fmt}'."
 		)
 
-	return result
+	return _apply_output_format(result, cfg, _ANSI_DATE_FMT)
+
+
+def _transform_datetime(value: str, cfg: dict) -> Optional[str]:
+	"""Parse a datetime string — preserves both date and time components.
+
+	Output defaults to ANSI standard ``yyyy-MM-dd HH:mm:ss``. Override with
+	``output_format`` using the same token syntax as ``format``.
+
+	Config keys
+	-----------
+	format           : str  — input parse format (default ``yyyy-MM-dd HH:mm:ss``)
+	output_format    : str  — output string format (default ANSI)
+	fallback_formats : list — additional formats to try before built-in fallbacks
+	allow_blank      : bool — return None on empty instead of raising
+	"""
+	value = value.strip()
+
+	if not value:
+		if cfg.get("allow_blank", False):
+			return None
+		raise TransformError("Empty datetime value and allow_blank is False.")
+
+	fmt    = _to_strptime_format(cfg.get("format", "yyyy-MM-dd HH:mm:ss"))
+	result = _try_parse_datetime(value, fmt)
+
+	if result is None:
+		field_fallbacks = cfg.get("fallback_formats") or []
+		for fallback in field_fallbacks:
+			result = _try_parse_datetime(value, _to_strptime_format(fallback))
+			if result is not None:
+				break
+
+	if result is None:
+		for fallback in (
+			"%Y-%m-%dT%H:%M:%S",    # ISO 8601
+			"%Y-%m-%d %H:%M:%S",    # ISO space
+			"%Y-%m-%dT%H:%M:%S.%f", # ISO with microseconds
+			"%Y-%m-%d %H:%M:%S.%f", # ISO space with microseconds
+			"%m/%d/%Y %H:%M:%S",    # US datetime
+			"%m/%d/%y %H:%M:%S",    # US short year
+			"%Y%m%d%H%M%S",         # compact
+		):
+			result = _try_parse_datetime(value, fallback)
+			if result is not None:
+				break
+
+	if result is None:
+		raise TransformError(
+			f"Cannot parse '{value}' as datetime with format '{fmt}'."
+		)
+
+	return _apply_output_format(result, cfg, _ANSI_DATETIME_FMT)
+
+
+def _transform_time(value: str, cfg: dict) -> Optional[str]:
+	"""Parse a time-of-day string — discards any date component.
+
+	Output defaults to ANSI standard ``HH:mm:ss``. Override with
+	``output_format`` using the same token syntax as ``format``.
+
+	Config keys
+	-----------
+	format           : str  — input parse format (default ``HH:mm:ss``)
+	output_format    : str  — output string format (default ANSI)
+	fallback_formats : list — additional formats to try before built-in fallbacks
+	allow_blank      : bool — return None on empty instead of raising
+	"""
+	value = value.strip()
+
+	if not value:
+		if cfg.get("allow_blank", False):
+			return None
+		raise TransformError("Empty time value and allow_blank is False.")
+
+	fmt    = _to_strptime_format(cfg.get("format", "HH:mm:ss"))
+	result = _try_parse_time(value, fmt)
+
+	if result is None:
+		field_fallbacks = cfg.get("fallback_formats") or []
+		for fallback in field_fallbacks:
+			result = _try_parse_time(value, _to_strptime_format(fallback))
+			if result is not None:
+				break
+
+	if result is None:
+		for fallback in (
+			"%H:%M:%S",      # 19:20:52
+			"%H:%M",         # 19:20
+			"%I:%M:%S %p",   # 07:20:52 AM
+			"%I:%M %p",      # 07:20 AM
+			"%H%M%S",        # 192052 compact
+		):
+			result = _try_parse_time(value, fallback)
+			if result is not None:
+				break
+
+	if result is None:
+		raise TransformError(
+			f"Cannot parse '{value}' as time with format '{fmt}'."
+		)
+
+	return _apply_output_format(result, cfg, _ANSI_TIME_FMT)
+
 
 def _transform_numeric(value: str, cfg: dict) -> Optional[float]:
     """
@@ -655,7 +866,7 @@ def _transform_prefix_map(
     return default
 
 
-def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[date]:
+def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[str]:
     """
     Extract a date string from a source field via regex then parse it.
 
@@ -663,22 +874,26 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[date]:
     useful when a date is embedded within a larger string such as an
     option symbol (e.g. AAPL240119C00150000 → 2024-01-19).
 
+    Output defaults to ANSI standard ``yyyy-MM-dd``. Override with
+    ``output_format`` using the same token syntax as ``format``.
+
     Parameters
     ----------
     raw_row : dict[str, str]
         Original raw CSV row.
     cfg : dict
         Transform config. Keys:
-            source      — source column name
-            pattern     — regex with optional capture group(s)
-            format      — strptime format for the extracted date string
-            group       — capture group index (default 1); use 0 for full match
-            allow_blank — if True, return None on no-match instead of raising
+            source        — source column name
+            pattern       — regex with optional capture group(s)
+            format        — input format for the extracted date string
+            output_format — output string format (default ANSI ``yyyy-MM-dd``)
+            group         — capture group index (default 1); use 0 for full match
+            allow_blank   — if True, return None on no-match instead of raising
 
     Returns
     -------
-    Optional[date]
-        Parsed date, or None if no match or allow_blank is True.
+    Optional[str]
+        Formatted date string, or None if no match or allow_blank is True.
 
     Raises
     ------
@@ -688,7 +903,7 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[date]:
     """
     source      = cfg.get("source", "")
     pattern     = cfg.get("pattern", "")
-    fmt         = cfg.get("format", "%y%m%d")
+    fmt         = _to_strptime_format(cfg.get("format", "%y%m%d"))
     group       = cfg.get("group", 1)
     allow_blank = cfg.get("allow_blank", False)
 
@@ -716,7 +931,7 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[date]:
         raise TransformError(
             f"Cannot parse '{date_str}' as date with format '{fmt}'."
         )
-    return result
+    return _apply_output_format(result, cfg, _ANSI_DATE_FMT)
 
 
 def _transform_encrypt(
@@ -904,22 +1119,24 @@ def _normalise_header(header: str) -> str:
 
 
 def _try_parse_date(value: str, fmt: str) -> Optional[date]:
-    """
-    Attempt to parse a date string, returning None on failure.
-
-    Parameters
-    ----------
-    value : str
-        Date string to parse.
-    fmt : str
-        strptime format string.
-
-    Returns
-    -------
-    Optional[date]
-        Parsed date or None.
-    """
+    """Attempt to parse a date string, returning None on failure."""
     try:
         return datetime.strptime(value.strip(), fmt).date()
+    except ValueError:
+        return None
+
+
+def _try_parse_datetime(value: str, fmt: str) -> Optional[datetime]:
+    """Attempt to parse a datetime string, returning None on failure."""
+    try:
+        return datetime.strptime(value.strip(), fmt)
+    except ValueError:
+        return None
+
+
+def _try_parse_time(value: str, fmt: str) -> Optional[time]:
+    """Attempt to parse a time string, returning None on failure."""
+    try:
+        return datetime.strptime(value.strip(), fmt).time()
     except ValueError:
         return None
