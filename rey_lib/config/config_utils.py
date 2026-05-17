@@ -54,6 +54,7 @@ _logger = get_logger(__name__)
 __all__ = [
     "build_app_ctx",
     "build_ctx",
+    "build_ctx_from_path",
     "inject_secrets",
     "save_config",
     "print_ctx",
@@ -250,6 +251,51 @@ def save_config(
     config_path = _config_path(env, config_dir)
     with config_path.open("w", encoding="utf-8") as fh:
         yaml.dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def build_ctx_from_path(
+    config_path: Path,
+    project_root: Path | None = None,
+) -> Namespace:
+    """Build context directly from a config file path.
+
+    Derives ``env`` and ``config_dir`` from ``config_path`` so the caller
+    does not need to pass ``--env`` separately.  Relative paths inside the
+    config file resolve relative to the config file's parent directory.
+
+    Parameters
+    ----------
+    config_path : Path
+        Path to a config file following the naming pattern
+        ``config.<env>.yaml`` (e.g. ``config.dev.yaml``).
+    project_root : Path | None
+        Root directory of the calling project. Defaults to ``Path.cwd()``.
+
+    Returns
+    -------
+    Namespace
+        Fully populated context object.
+
+    Raises
+    ------
+    ConfigError
+        If the file does not exist or the filename does not match
+        ``config.<env>.yaml``.
+    """
+    config_path = Path(config_path).expanduser().resolve()
+    if not config_path.exists():
+        raise ConfigError(f"Config file not found: {config_path}")
+
+    # Derive env from filename — must be config.<env>.yaml
+    stem   = config_path.stem         # e.g. "config.dev"
+    parts  = stem.split(".", 1)
+    if len(parts) != 2 or parts[0] != "config":
+        raise ConfigError(
+            f"Config filename must follow 'config.<env>.yaml', got: {config_path.name}"
+        )
+    env = parts[1]
+
+    return build_ctx(env=env, project_root=project_root, config_dir=config_path.parent)
 
 
 def build_app_ctx(
