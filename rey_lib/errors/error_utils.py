@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from rey_lib.logs import get_logger
+
 __all__ = [
     "AppError",
     "ConfigError",
@@ -39,6 +41,8 @@ __all__ = [
     "validate_path",
     "validate_required",
 ]
+
+_logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Generic exception hierarchy
