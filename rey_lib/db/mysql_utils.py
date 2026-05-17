@@ -8,7 +8,6 @@ this module.
 
 from __future__ import annotations
 
-import logging
 import re
 import time
 from pathlib import Path
@@ -18,6 +17,7 @@ import mysql.connector
 from mysql.connector import Error as MySQLError
 
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
+from rey_lib.logs import get_logger
 
 __all__ = [
 	"init_db",
@@ -35,7 +35,7 @@ __all__ = [
 	"is_truncation_error",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 _NEUTRAL_TYPE_MAP: dict[str, str] = {
 	"TEXT":      "TEXT",

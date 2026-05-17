@@ -20,12 +20,13 @@ DB_PATH                             Public alias to the current database file pa
 
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
 from typing import Any, Optional
 
 import duckdb
+
+from rey_lib.logs import get_logger
 
 __all__ = [
     "DB_PATH",
@@ -38,7 +39,7 @@ __all__ = [
     "create_staging_table_if_not_exists",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Neutral → DuckDB type map

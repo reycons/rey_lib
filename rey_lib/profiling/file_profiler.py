@@ -14,12 +14,13 @@ infer_col_type   Infer the dominant data type for a column's values.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
+
+from rey_lib.logs import get_logger
 
 __all__ = ["profile_rows", "infer_col_type"]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 # Number of representative distinct values to include per column.
 _SAMPLE_DISTINCT_VALUES: int = 5

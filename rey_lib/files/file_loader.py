@@ -36,13 +36,12 @@ load_files(ctx, conn, data_source, load_cfg)
 
 from __future__ import annotations
 
-import logging
 import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from rey_lib.logs.log_utils import log_enter, log_exit
+from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
@@ -75,7 +74,7 @@ __all__ = [
     "run_app_hooks",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 # Fixed schema for the rejection table — created on first use via
 # create_staging_table_if_not_exists. Table name comes from ctx.rejection.table.

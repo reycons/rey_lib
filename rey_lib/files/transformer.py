@@ -93,12 +93,12 @@ TransformError
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 from datetime import date, datetime, time
 from typing import Any, Optional
 
 from rey_lib.errors.error_utils import AppError
+from rey_lib.logs import get_logger
 
 __all__ = [
     "transform_row",
@@ -107,7 +107,7 @@ __all__ = [
     "TransformError",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -13,14 +13,14 @@ RedactionRegistry   Stateful registry mapping originals to replacements.
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
+from rey_lib.logs import get_logger
 from rey_lib.redaction.char_utils import analyze_pattern, generate_replacement
 
 __all__ = ["RedactionRegistry"]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 class RedactionRegistry:

@@ -39,7 +39,6 @@ Public API
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
@@ -48,8 +47,9 @@ import yaml
 from dotenv import load_dotenv
 
 from rey_lib.errors.error_utils import ConfigError, validate_env
+from rey_lib.logs import get_logger
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 __all__ = [
     "build_app_ctx",

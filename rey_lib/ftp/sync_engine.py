@@ -7,7 +7,6 @@ same engine can run against any number of FTP connections without modification.
 from __future__ import annotations
 
 import fnmatch
-import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -34,11 +33,11 @@ from rey_lib.ftp.state_manager import (
     save_state,
 )
 from rey_lib.errors.error_utils import FtpDownloadError
-from rey_lib.logs.log_utils import log_enter, log_exit
+from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
 
 __all__ = ["run_sync"]
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def run_sync(ctx: Any, conn: Any, resync: bool = True) -> int:

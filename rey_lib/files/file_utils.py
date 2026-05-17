@@ -26,11 +26,12 @@ move_file(src, dest_dir)
 from __future__ import annotations
 
 import csv
-import logging
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Generator, Optional, TextIO
+
+from rey_lib.logs import get_logger
 
 __all__ = [
     "input_files",
@@ -42,7 +43,7 @@ __all__ = [
     "apply_file_movements",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import fnmatch
 import ftplib
-import logging
 import stat as stat_module
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,10 +29,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Generator
 
 from rey_lib.errors.error_utils import FtpConnectionError, FtpDownloadError
+from rey_lib.logs import get_logger
 
 __all__ = ["ftp_session", "list_remote_files", "list_remote_dirs", "download_file"]
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 _FTP_TIMEOUT_SECONDS = 30
 _VALID_PROTOCOLS     = frozenset({"ftp", "ftps", "sftp"})
