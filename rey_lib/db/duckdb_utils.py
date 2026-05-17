@@ -34,6 +34,7 @@ __all__ = [
     "get_connection",
     "execute",
     "fetch",
+    "run_sql",
     "load_sql",
     "bulk_insert",
     "create_staging_table_if_not_exists",
@@ -267,6 +268,35 @@ def load_sql(name: str) -> str:
             f"Available: {sorted(_SQL.keys())}"
         )
     return _SQL[name]
+
+
+def run_sql(
+    conn: duckdb.DuckDBPyConnection,
+    sql_text: str,
+    params: Optional[list[Any]] = None,
+) -> Any:
+    """
+    Execute an ad hoc SQL statement and return the raw DuckDB result.
+
+    Use for diagnostic, introspection, or user-supplied SQL where a named
+    query file is not appropriate. Execution still goes through the managed
+    connection obtained from get_connection().
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open DuckDB connection.
+    sql_text : str
+        SQL statement to execute.
+    params : Optional[list[Any]]
+        Positional query parameters.
+
+    Returns
+    -------
+    Any
+        Raw DuckDB result.
+    """
+    return conn.execute(sql_text, params or [])
 
 
 def bulk_insert(
