@@ -17,6 +17,7 @@ from typing import Optional
 
 from rey_lib.logs import get_logger
 from rey_lib.redaction.char_utils import analyze_pattern, generate_replacement
+from rey_lib.redaction.masks import apply_mask
 
 __all__ = ["RedactionRegistry"]
 
@@ -48,10 +49,26 @@ class RedactionRegistry:
     'BAAAA'
     """
 
-    def __init__(self, columns: list[str]) -> None:
-        """Initialise a namespace for each column."""
+    def __init__(
+        self,
+        columns:    list[str],
+        mask_types: dict[str, str] | None = None,
+    ) -> None:
+        """Initialise a namespace for each column.
+
+        Parameters
+        ----------
+        columns : list[str]
+            Column names that will be redacted.
+        mask_types : dict[str, str] | None
+            Optional mapping of column name → mask type string.  When a
+            column has a mask type its values are replaced using the
+            type-aware mask function instead of the default
+            characteristic-preserving replacement.
+        """
+        mt = mask_types or {}
         self._namespaces: dict[str, _Namespace] = {
-            col: _Namespace(col) for col in columns
+            col: _Namespace(col, mt.get(col)) for col in columns
         }
 
     def redact(self, column: str, value: str) -> str:
@@ -95,10 +112,11 @@ class RedactionRegistry:
 class _Namespace:
     """Holds the value→replacement map and counter for one column."""
 
-    def __init__(self, name: str) -> None:
-        self.name:    str               = name
-        self.count:   int               = 0
-        self._map:    dict[str, str]    = {}
+    def __init__(self, name: str, mask_type: str | None = None) -> None:
+        self.name:      str            = name
+        self.count:     int            = 0
+        self.mask_type: str | None     = mask_type
+        self._map:      dict[str, str] = {}
 
     def get_or_create(self, value: str) -> str:
         """Return existing replacement or generate and store a new one."""
@@ -106,15 +124,19 @@ class _Namespace:
             return self._map[value]
 
         self.count += 1
-        pattern     = analyze_pattern(value)
-        replacement = generate_replacement(pattern, self.count)
 
-        if len(replacement) != len(value):
-            _logger.warning(
-                "Replacement length mismatch for column '%s': "
-                "original=%d replacement=%d value=%r",
-                self.name, len(value), len(replacement), value,
-            )
+        if self.mask_type:
+            replacement = apply_mask(self.mask_type, value, self.count)
+        else:
+            pattern     = analyze_pattern(value)
+            replacement = generate_replacement(pattern, self.count)
+
+            if len(replacement) != len(value):
+                _logger.warning(
+                    "Replacement length mismatch for column '%s': "
+                    "original=%d replacement=%d value=%r",
+                    self.name, len(value), len(replacement), value,
+                )
 
         self._map[value] = replacement
         return replacement
