@@ -130,7 +130,7 @@ def handle_exception(
 # Input validation helpers
 # ---------------------------------------------------------------------------
 
-_VALID_ENVS = frozenset({"dev", "prod"})
+_VALID_ENVS = frozenset({"dev", "test", "prod"})
 
 
 def validate_env(env: str) -> str:
