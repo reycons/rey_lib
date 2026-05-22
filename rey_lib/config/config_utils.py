@@ -66,7 +66,7 @@ __all__ = [
 
 # Config directory name and main config filename pattern — constant across all projects.
 _CONFIG_DIR_NAME   = "config"
-_CONFIG_FILE_NAMES = {"dev": "config.dev.yaml", "prod": "config.prod.yaml"}
+_CONFIG_FILE_NAMES = {"dev": "config.dev.yaml", "test": "config.test.yaml", "prod": "config.prod.yaml"}
 _ENV_FILE_NAME     = ".env"
 
 # Keys whose string values are resolved to Path objects.
