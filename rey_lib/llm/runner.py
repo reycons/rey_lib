@@ -182,6 +182,7 @@ def run(
         max_tokens = request.max_tokens,
         schema     = schema,
         policy     = policy,
+        raw_output = getattr(request, "raw_output", False),
     )
 
     # 4. Resolve the final stored status once.
@@ -230,6 +231,7 @@ def run(
         run_id          = record.run_id,
         status          = record.status,
         parsed_response = record.parsed_response,
+        raw_text        = result.raw if getattr(request, "raw_output", False) else None,
         errors          = record.validation_errors,
         record          = record,
     )
@@ -472,6 +474,7 @@ def _execute_with_retry(
     max_tokens: int,
     schema:     Optional[dict[str, Any]],
     policy:     RetryPolicy,
+    raw_output: bool = False,
 ) -> _ExecuteResult:
     """Run the provider call up to policy.max_attempts times.
 
@@ -503,6 +506,13 @@ def _execute_with_retry(
                 attempt + 1, policy.max_attempts, exc,
             )
             continue
+
+        if raw_output:
+            return _ExecuteResult(
+                parsed=None, raw=raw, tokens_in=tokens_in,
+                tokens_out=tokens_out, retry_count=attempt,
+                validation_errors=[], status=STATUS_SUCCESS,
+            )
 
         parsed, parse_exc = _attempt_parse(raw)
         if parse_exc is not None:

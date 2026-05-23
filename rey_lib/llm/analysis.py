@@ -130,6 +130,7 @@ class AnalysisContractSpec:
     sampling_seed:    Optional[int]            = None
     redaction:        list[dict[str, str]]     = field(default_factory=list)
     output_schema:    Optional[dict[str, Any]] = None
+    output_format:    str                      = "json"
 
 
 @dataclass(frozen=True)
@@ -192,12 +193,13 @@ class AnalysisResult:
         Full execution record for callers that need audit detail.
     """
 
-    run_id:   str
-    status:   str
-    data:     Optional[dict[str, Any]]
-    prepared: PreparedInput
-    errors:   list[str]
-    record:   Optional[ExecutionRecord]
+    run_id:    str
+    status:    str
+    data:      Optional[dict[str, Any]]
+    raw_text:  Optional[str]
+    prepared:  PreparedInput
+    errors:    list[str]
+    record:    Optional[ExecutionRecord]
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +265,7 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
         sampling_seed    = sampling_seed,
         redaction        = list(fm.get("redaction") or []),
         output_schema    = fm.get("output_schema"),
+        output_format    = str(fm.get("output_format", "json")).lower(),
     )
 
     return AnalysisContract(base=base, spec=spec)
@@ -407,6 +410,7 @@ class Analyzer:
             output_schema     = spec.output_schema,
             log               = self._log,
             requires_approval = self._requires_approval,
+            raw_output        = spec.output_format == "raw",
         )
 
         response: RunResponse = run(
@@ -426,6 +430,7 @@ class Analyzer:
             run_id   = response.run_id,
             status   = response.status,
             data     = response.parsed_response,
+            raw_text = response.raw_text,
             prepared = prepared,
             errors   = response.errors,
             record   = response.record,

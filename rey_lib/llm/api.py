@@ -109,6 +109,10 @@ class RunRequest:
     # is approved via records.approve() and a resume() call is made.
     requires_approval: bool           = False
 
+    # When True the runner skips JSON parsing and returns the raw LLM text.
+    # Use for contracts that output YAML, SQL, or other non-JSON formats.
+    raw_output:        bool           = False
+
     retry_policy:      RetryPolicy    = field(default_factory=lambda: DEFAULT_RETRY_POLICY)
 
 
@@ -138,5 +142,6 @@ class RunResponse:
     run_id:          str
     status:          str
     parsed_response: Optional[dict[str, Any]]    = None
+    raw_text:        Optional[str]               = None
     errors:          list[str]                   = field(default_factory=list)
     record:          Optional[ExecutionRecord]   = None
