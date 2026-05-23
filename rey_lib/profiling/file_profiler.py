@@ -32,6 +32,7 @@ def profile_rows(
     layout:      str,
     *,
     redacted_columns: list[str] | None = None,
+    type_rows:        list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a structured profile from a list of parsed rows.
 
@@ -45,6 +46,10 @@ def profile_rows(
         One of ``delimited``, ``fixed_width``, ``excel``.
     redacted_columns : list[str] | None
         Column names that were redacted — noted in the profile.
+    type_rows : list[dict[str, Any]] | None
+        Optional unredacted rows used only for type inference. This keeps
+        representative samples redacted while preserving integer/decimal/date
+        inference.
 
     Returns
     -------
@@ -65,14 +70,17 @@ def profile_rows(
 
     columns = list(rows[0].keys())
     col_profiles: list[dict[str, Any]] = []
+    type_source = type_rows or rows
 
     for col in columns:
-        values      = [str(row.get(col, "") or "") for row in rows]
-        non_blank   = [v for v in values if v.strip()]
+        values         = [str(row.get(col, "") or "") for row in rows]
+        type_values    = [str(row.get(col, "") or "") for row in type_source]
+        non_blank      = [v for v in values if v.strip()]
+        type_non_blank = [v for v in type_values if v.strip()]
         blank_count = len(values) - len(non_blank)
         lengths     = [len(v) for v in non_blank] if non_blank else [0]
 
-        col_type = infer_col_type(non_blank)
+        col_type = infer_col_type(type_non_blank)
         distinct  = _distinct_sample(non_blank)
 
         col_profiles.append({

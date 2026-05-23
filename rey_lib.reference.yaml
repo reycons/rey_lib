@@ -1,0 +1,65 @@
+# =============================================================================
+# REY LIB — Configuration Reference
+#
+# rey_lib is a shared library. It has installation metadata but no app runtime
+# config files of its own in the ccc installation tree.
+# =============================================================================
+
+# Config file names used by this app:
+#   app.yaml
+
+
+# =============================================================================
+# FILE: app.yaml
+# =============================================================================
+
+name: rey_lib
+# Required. Must be rey_lib.
+
+enabled: true
+# Options: true, false.
+
+version: v01
+# Informational version label.
+
+
+# =============================================================================
+# Shared config shapes supplied by rey_lib to apps
+# =============================================================================
+
+env:
+  - name: openai_api_key
+    env_var: OPENAI_API_KEY
+    generate: false
+# Optional environment declarations used by config tooling.
+# generate options: true, false.
+
+log_path: ~/logs/{app_name}/{app_name}.{operation}.{timestamp}.log
+jsonl_path: ~/logs/{app_name}/{app_name}.{operation}.{timestamp}.jsonl
+# Common log path tokens:
+#   {operation}
+#   {timestamp}
+
+jsonl_ctx_fields:
+  - source_name
+  - current_file
+# Optional JSONL context fields.
+
+diagnostics:
+  info:
+    enabled: true
+    dump_ctx: false
+  warning:
+    enabled: true
+    dump_ctx: true
+  error:
+    enabled: true
+    dump_ctx: true
+    dump_stack_trace: true
+# Diagnostics options:
+#   enabled: true | false
+#   dump_ctx: true | false
+#   dump_stack_trace: true | false
+#   dump_sql: true | false
+#   dump_rows_on_error: integer
+#   ctx_fields: list of ctx dotted paths

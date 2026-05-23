@@ -82,6 +82,15 @@ def build_ctx_for_app(
     if not _config_path.exists():
         raise ConfigError(f"Installation config not found: {_config_path}")
 
+    if _config_path.is_dir():
+        matches = sorted(_config_path.glob("config.*.yaml"))
+        if len(matches) != 1:
+            raise ConfigError(
+                f"Expected exactly one config.*.yaml in '{_config_path}', "
+                f"found {len(matches)}."
+            )
+        _config_path = matches[0]
+
     installation_raw = _load_yaml(_config_path)
     _config_root     = _config_path.parent
 
