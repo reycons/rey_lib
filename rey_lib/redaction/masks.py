@@ -26,6 +26,7 @@ _TEXT_WORDS: list[str] = [
 
 KNOWN_MASKS: frozenset[str] = frozenset({
     "ssn", "phone", "email", "name", "text", "date", "zip", "account",
+    "integer", "decimal",
 })
 
 
@@ -81,7 +82,7 @@ def _mask_email(value: str, counter: int) -> str:
 
 def _mask_name(value: str, counter: int) -> str:
     """Replace with a sequentially numbered placeholder name."""
-    return f"Name{counter}"
+    return _fit_width(f"Name{counter}", value)
 
 
 def _mask_text(value: str, counter: int) -> str:
@@ -117,6 +118,44 @@ def _mask_account(value: str, counter: int) -> str:
     return "".join(result)
 
 
+def _mask_integer(value: str, counter: int) -> str:
+    """Replace integer digits with deterministic random digits."""
+    return _randomize_digits(value, counter)
+
+
+def _mask_decimal(value: str, counter: int) -> str:
+    """Replace decimal digits while preserving decimal scale and separators."""
+    return _randomize_digits(value, counter)
+
+
+def _randomize_digits(value: str, counter: int) -> str:
+    """Return ``value`` with every digit replaced by deterministic randomness."""
+    rng = random.Random(f"{counter}:{value.count('.')}")
+    result: list[str] = []
+    first_digit = True
+
+    for ch in value:
+        if not ch.isdigit():
+            result.append(ch)
+            continue
+
+        if first_digit:
+            result.append(str(rng.randint(1, 9)))
+            first_digit = False
+        else:
+            result.append(str(rng.randint(0, 9)))
+
+    return "".join(result)
+
+
+def _fit_width(replacement: str, value: str) -> str:
+    """Pad or trim a replacement to match the original field width."""
+    width = len(value)
+    if len(replacement) > width:
+        return replacement[:width]
+    return replacement.ljust(width)
+
+
 _HANDLERS: dict[str, object] = {
     "ssn":     _mask_ssn,
     "phone":   _mask_phone,
@@ -126,4 +165,6 @@ _HANDLERS: dict[str, object] = {
     "date":    _mask_date,
     "zip":     _mask_zip,
     "account": _mask_account,
+    "integer": _mask_integer,
+    "decimal": _mask_decimal,
 }

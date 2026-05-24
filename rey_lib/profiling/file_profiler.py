@@ -82,8 +82,9 @@ def profile_rows(
 
         col_type = infer_col_type(type_non_blank)
         distinct  = _distinct_sample(non_blank)
+        numeric_profile = _numeric_profile(type_non_blank, col_type)
 
-        col_profiles.append({
+        col_profile = {
             "name":          col,
             "redacted":      col in redacted_set,
             "type":          col_type,
@@ -92,7 +93,9 @@ def profile_rows(
             "min_length":    min(lengths),
             "max_length":    max(lengths),
             "distinct_sample": distinct,
-        })
+        }
+        col_profile.update(numeric_profile)
+        col_profiles.append(col_profile)
 
     return {
         "source":           source_name,
@@ -203,3 +206,33 @@ def _distinct_sample(values: list[str]) -> list[str]:
         if len(seen) >= _SAMPLE_DISTINCT_VALUES:
             break
     return seen
+
+
+def _numeric_profile(values: list[str], col_type: str) -> dict[str, int]:
+    """Return precision metadata for integer and decimal columns."""
+    if col_type not in {"integer", "decimal"}:
+        return {}
+
+    decimal_places = [_decimal_places(v) for v in values if v.strip()]
+    integer_digits = [_integer_digits(v) for v in values if v.strip()]
+
+    return {
+        "min_decimal_places": min(decimal_places) if decimal_places else 0,
+        "max_decimal_places": max(decimal_places) if decimal_places else 0,
+        "max_integer_digits": max(integer_digits) if integer_digits else 0,
+    }
+
+
+def _decimal_places(value: str) -> int:
+    """Return the number of digits after the decimal point."""
+    cleaned = value.strip()
+    if "." not in cleaned:
+        return 0
+    return len(cleaned.rsplit(".", 1)[1])
+
+
+def _integer_digits(value: str) -> int:
+    """Return digit count before the decimal point, ignoring sign and commas."""
+    cleaned = value.strip().lstrip("+-")
+    whole = cleaned.split(".", 1)[0]
+    return sum(1 for ch in whole if ch.isdigit())

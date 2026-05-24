@@ -49,10 +49,16 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
         r"|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}"  # MM/DD/YY or MM/DD/YYYY
     )),
 
-    # ZIP — 5-digit or ZIP+4
+    # decimal — optional sign, commas, and required fractional component
+    ("decimal", re.compile(r"[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)\.\d+")),
+
+    # integer — optional sign and commas
+    ("integer", re.compile(r"[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)")),
+
+    # ZIP — 5-digit or ZIP+4. Explicit redact_masks can still request zip.
     ("zip",     re.compile(r"\d{5}(-\d{4})?")),
 
-    # account — 8-20 consecutive digits (catches account/ID numbers)
+    # account — 8-20 consecutive digits. Explicit redact_masks can still request account.
     ("account", re.compile(r"\d{8,20}")),
 
     # name — 1-4 title-case words (first/last name or full name)
