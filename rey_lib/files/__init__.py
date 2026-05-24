@@ -1,6 +1,7 @@
 from rey_lib.files.file_utils import (
     discover_inbox_files,
     input_files,
+    input_tree_files,
     matches_file_pattern,
     move_to_failed,
     move_to_processing,
@@ -23,6 +24,7 @@ from rey_lib.files.file_loader import load_files
 __all__ = [
     "discover_inbox_files",
     "input_files",
+    "input_tree_files",
     "matches_file_pattern",
     "move_to_failed",
     "move_to_processing",

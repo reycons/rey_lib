@@ -40,6 +40,7 @@ from rey_lib.logs import get_logger
 __all__ = [
     "discover_inbox_files",
     "input_files",
+    "input_tree_files",
     "matches_file_pattern",
     "move_to_failed",
     "move_to_processing",
@@ -65,7 +66,7 @@ _logger = get_logger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
-def input_files(folder: Path, pattern: str | Iterable[str]) -> list[Path]:
+def input_files(folder: Path, pattern: str | Iterable[str], *, recursive: bool = False) -> list[Path]:
     """
     Return a sorted list of files matching one or more glob patterns in folder.
 
@@ -77,6 +78,8 @@ def input_files(folder: Path, pattern: str | Iterable[str]) -> list[Path]:
         Glob pattern or patterns (e.g. '*.csv' or ['*.ps1', '*.tr1']).
         Any ``{token}`` placeholders are converted to ``*`` before globbing,
         matching rey_loader transform-file behavior.
+    recursive : bool
+        When true, patterns are matched recursively under folder.
 
     Returns
     -------
@@ -91,10 +94,30 @@ def input_files(folder: Path, pattern: str | Iterable[str]) -> list[Path]:
 
     matches: dict[str, Path] = {}
     for glob_pattern in _coerce_glob_patterns(pattern):
-        for file_path in folder.glob(glob_pattern):
+        iterator = folder.rglob(glob_pattern) if recursive else folder.glob(glob_pattern)
+        for file_path in iterator:
             if file_path.is_file():
                 matches[str(file_path)] = file_path
     return sorted(matches.values())
+
+
+def input_tree_files(
+    folder: Path,
+    *,
+    skip_suffixes: Iterable[str] = (".yaml", ".yml"),
+) -> list[Path]:
+    """Return non-hidden input files recursively under ``folder``."""
+    root = Path(folder)
+    if not root.exists():
+        _logger.debug("input_tree_files: folder does not exist: %s", root)
+        return []
+    suffixes = {suffix.lower() for suffix in skip_suffixes}
+    return sorted(
+        path for path in root.rglob("*")
+        if path.is_file()
+        and not path.name.startswith(".")
+        and path.suffix.lower() not in suffixes
+    )
 
 
 def pattern_to_glob(file_pattern: str) -> str:

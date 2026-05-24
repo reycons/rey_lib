@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from rey_lib.files.file_utils import (
     discover_inbox_files,
     input_files,
+    input_tree_files,
     matches_file_pattern,
     move_to_failed,
     move_to_processing,
@@ -48,6 +49,28 @@ def test_input_files_expands_pattern_tokens(tmp_path: Path) -> None:
     files = input_files(tmp_path, "tran_{yyyymmdd}.csv")
 
     assert [path.name for path in files] == ["tran_20260501.csv"]
+
+
+def test_input_files_can_recurse(tmp_path: Path) -> None:
+    nested = tmp_path / "client"
+    nested.mkdir()
+    (nested / "feed.csv").write_text("x", encoding="utf-8")
+
+    files = input_files(tmp_path, "*.csv", recursive=True)
+
+    assert [path.relative_to(tmp_path).as_posix() for path in files] == ["client/feed.csv"]
+
+
+def test_input_tree_files_skips_hidden_and_yaml(tmp_path: Path) -> None:
+    nested = tmp_path / "client"
+    nested.mkdir()
+    (nested / "feed.csv").write_text("x", encoding="utf-8")
+    (nested / "redact.yaml").write_text("x", encoding="utf-8")
+    (nested / ".hidden.csv").write_text("x", encoding="utf-8")
+
+    files = input_tree_files(tmp_path)
+
+    assert [path.name for path in files] == ["feed.csv"]
 
 
 def test_matches_file_pattern_accepts_multiple_patterns_and_relative_paths(tmp_path: Path) -> None:
