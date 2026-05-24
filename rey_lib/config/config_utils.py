@@ -31,6 +31,7 @@ Runtime state (not from YAML)
 Public API
 ----------
   build_ctx(env, project_root)    Build and return a fully populated Namespace.
+  build_config_sources_yaml(...)  Return source-annotated YAML loaded by build_ctx().
   inject_secrets(ctx, map)        Inject .env secrets into ctx at dot-separated paths.
   save_config(data, env, ...)     Write a dict back to the main config file.
   print_ctx(ctx)                  Log the full context at DEBUG level.
@@ -54,6 +55,8 @@ _logger = get_logger(__name__)
 
 __all__ = [
     "build_app_ctx",
+    "build_config_sources_yaml",
+    "build_config_sources_yaml_from_path",
     "build_ctx",
     "build_ctx_from_path",
     "inject_secrets",
@@ -192,10 +195,8 @@ def build_ctx(
     env        = validate_env(env)
     _load_env_file(env_file)
 
-    raw = _load_main_config(env, config_dir)
-    raw = _merge_config_files(raw, config_dir)
-    raw = _resolve_env_references(raw)
-    raw = _resolve_paths(raw, config_dir, parent_key="")
+    raw = _read_config_yaml(env, config_dir)
+    raw = _assemble_ctx_data(raw, config_dir)
 
     ctx = Namespace(raw)
     _inject_env_blocks(ctx)
@@ -298,16 +299,59 @@ def build_ctx_from_path(
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
 
-    # Derive env from filename — must be config.<env>.yaml
-    stem   = config_path.stem         # e.g. "config.dev"
-    parts  = stem.split(".", 1)
-    if len(parts) != 2 or parts[0] != "config":
-        raise ConfigError(
-            f"Config filename must follow 'config.<env>.yaml', got: {config_path.name}"
-        )
-    env = parts[1]
+    env = _env_from_config_path(config_path)
 
     return build_ctx(env=env, project_root=project_root, config_dir=config_path.parent)
+
+
+def build_config_sources_yaml(
+    env: str = "dev",
+    project_root: Path | None = None,
+    config_dir: Path | None = None,
+) -> str:
+    """Return source-annotated YAML files loaded for a config context.
+
+    This follows the same config-file selection as ``build_ctx()``: the
+    environment-specific main config first, then every non-main ``*.yaml``
+    file under ``config_dir`` in sorted order. The function intentionally
+    returns text, not a context object, so logs and UIs can show exactly which
+    YAML sources were available to the loader without reimplementing config
+    assembly in each app.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+
+    if config_dir is None:
+        env_config_dir = os.getenv("APP_CONFIG_DIR")
+        config_dir = Path(env_config_dir) if env_config_dir else Path(project_root) / _CONFIG_DIR_NAME
+
+    config_dir = Path(config_dir).expanduser().resolve()
+    env = validate_env(env)
+    sources = _read_config_yaml_sources(env, config_dir)
+
+    docs: list[str] = []
+    for path, _data in sources:
+        docs.append(_source_yaml_document(config_dir, path))
+
+    return "\n".join(docs).rstrip() + "\n"
+
+
+def build_config_sources_yaml_from_path(
+    config_path: Path,
+    project_root: Path | None = None,
+) -> str:
+    """Return source-annotated YAML files loaded for ``config_path``.
+
+    ``config_path`` follows the same ``config.<env>.yaml`` convention as
+    ``build_ctx_from_path()``.
+    """
+    config_path = Path(config_path).expanduser().resolve()
+    env = _env_from_config_path(config_path)
+    return build_config_sources_yaml(
+        env=env,
+        project_root=project_root,
+        config_dir=config_path.parent,
+    )
 
 
 def build_app_ctx(
@@ -558,11 +602,6 @@ def _load_env_file(env_file: Path) -> None:
         load_dotenv(dotenv_path=env_file, override=False)
 
 
-def _load_main_config(env: str, config_dir: Path) -> dict[str, Any]:
-    """Load and return the main environment config file as a raw dict."""
-    return _load_yaml(_config_path(env, config_dir))
-
-
 def _config_path(env: str, config_dir: Path) -> Path:
     """Return the resolved Path to the main config file for the given environment."""
     filename = _CONFIG_FILE_NAMES.get(env)
@@ -574,15 +613,70 @@ def _config_path(env: str, config_dir: Path) -> Path:
     return path
 
 
-def _merge_config_files(base: dict[str, Any], config_dir: Path) -> dict[str, Any]:
-    """Load and deep-merge all non-main YAML files under config_dir into base."""
-    main_filenames = set(_CONFIG_FILE_NAMES.values())
-    result = dict(base)
-    for config_file in sorted(config_dir.rglob("*.yaml")):
-        if config_file.name in main_filenames:
-            continue
-        result = _deep_merge(result, _load_yaml(config_file))
+def _read_config_yaml(env: str, config_dir: Path) -> dict[str, Any]:
+    """Read all YAML files for a context and return the merged raw dict."""
+    sources = _read_config_yaml_sources(env, config_dir)
+    result: dict[str, Any] = {}
+    for _path, data in sources:
+        result = _deep_merge(result, data)
     return result
+
+
+def _assemble_ctx_data(raw: dict[str, Any], config_dir: Path) -> dict[str, Any]:
+    """Apply the non-file transformations needed before Namespace wrapping."""
+    raw = _resolve_env_references(raw)
+    raw = _resolve_paths(raw, config_dir, parent_key="")
+    return raw
+
+
+def _read_config_yaml_sources(env: str, config_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Read the exact YAML source files used by ``build_ctx()``."""
+    return [
+        (config_file, _load_yaml(config_file))
+        for config_file in _config_source_files(env, config_dir)
+    ]
+
+
+def _config_source_files(env: str, config_dir: Path) -> list[Path]:
+    """Return YAML files in the same order ``build_ctx()`` loads them."""
+    return [_config_path(env, config_dir), *_additional_config_files(config_dir)]
+
+
+def _additional_config_files(config_dir: Path) -> list[Path]:
+    """Return all non-main YAML files under ``config_dir`` in load order."""
+    main_filenames = set(_CONFIG_FILE_NAMES.values())
+    return [
+        config_file
+        for config_file in sorted(config_dir.rglob("*.yaml"))
+        if config_file.name not in main_filenames
+    ]
+
+
+def _source_yaml_document(config_dir: Path, path: Path) -> str:
+    """Return one source-annotated YAML document."""
+    relative = path.relative_to(config_dir).as_posix()
+    text = path.read_text(encoding="utf-8").rstrip()
+    return (
+        "---\n"
+        "# =============================================================================\n"
+        f"# SOURCE: {relative}\n"
+        "# =============================================================================\n"
+        f"{text}\n"
+    )
+
+
+def _env_from_config_path(config_path: Path) -> str:
+    """Derive and validate env from a ``config.<env>.yaml`` path."""
+    if not config_path.exists():
+        raise ConfigError(f"Config file not found: {config_path}")
+
+    stem = config_path.stem
+    parts = stem.split(".", 1)
+    if len(parts) != 2 or parts[0] != "config":
+        raise ConfigError(
+            f"Config filename must follow 'config.<env>.yaml', got: {config_path.name}"
+        )
+    return validate_env(parts[1])
 
 
 def _resolve_env_references(raw: dict[str, Any]) -> dict[str, Any]:
