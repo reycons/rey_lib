@@ -26,17 +26,26 @@ move_file(src, dest_dir)
 from __future__ import annotations
 
 import csv
+from fnmatch import fnmatch
 import json
+import re
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Generator, Iterator, Optional, TextIO
+from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
 from rey_lib.logs import get_logger
 
 __all__ = [
+    "discover_inbox_files",
     "input_files",
+    "matches_file_pattern",
+    "move_to_failed",
+    "move_to_processing",
+    "move_to_stage",
+    "move_to_success",
+    "pattern_to_glob",
     "converted_output_path",
     "get_reader",
     "write_file",
@@ -56,16 +65,18 @@ _logger = get_logger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
-def input_files(folder: Path, pattern: str) -> list[Path]:
+def input_files(folder: Path, pattern: str | Iterable[str]) -> list[Path]:
     """
-    Return a sorted list of files matching a glob pattern in folder.
+    Return a sorted list of files matching one or more glob patterns in folder.
 
     Parameters
     ----------
     folder : Path
         Directory to scan.
-    pattern : str
-        Glob pattern (e.g. '*.csv').
+    pattern : str | Iterable[str]
+        Glob pattern or patterns (e.g. '*.csv' or ['*.ps1', '*.tr1']).
+        Any ``{token}`` placeholders are converted to ``*`` before globbing,
+        matching rey_loader transform-file behavior.
 
     Returns
     -------
@@ -77,7 +88,89 @@ def input_files(folder: Path, pattern: str) -> list[Path]:
     if not folder.exists():
         _logger.debug("input_files: folder does not exist: %s", folder)
         return []
-    return sorted(folder.glob(pattern))
+
+    matches: dict[str, Path] = {}
+    for glob_pattern in _coerce_glob_patterns(pattern):
+        for file_path in folder.glob(glob_pattern):
+            if file_path.is_file():
+                matches[str(file_path)] = file_path
+    return sorted(matches.values())
+
+
+def pattern_to_glob(file_pattern: str) -> str:
+    """
+    Convert a configured file pattern with tokens to a filesystem glob.
+
+    Examples
+    --------
+    ``tran_{yyyymmdd}.csv`` becomes ``tran_*.csv``.
+    ``*.csv`` remains ``*.csv``.
+    """
+    return re.sub(r"\{[^}]+\}", "*", file_pattern)
+
+
+def matches_file_pattern(
+    file_path: Path,
+    pattern: str | Iterable[str],
+    base_dir: Path | None = None,
+) -> bool:
+    """Return true when ``file_path`` matches one configured file pattern."""
+    names = [file_path.name]
+    if base_dir is not None:
+        try:
+            names.append(file_path.relative_to(base_dir).as_posix())
+        except ValueError:
+            pass
+
+    for glob_pattern in _coerce_glob_patterns(pattern):
+        if any(fnmatch(name, glob_pattern) for name in names):
+            return True
+    return False
+
+
+def discover_inbox_files(source_cfg: Any) -> list[Path]:
+    """Return files in ``source_cfg.paths.inbox_path`` matching ``file_pattern``."""
+    inbox = Path(source_cfg.paths.inbox_path).expanduser().resolve()
+    inbox.mkdir(parents=True, exist_ok=True)
+    pattern = getattr(source_cfg, "file_pattern", "*")
+    return input_files(inbox, pattern)
+
+
+def move_to_processing(file_path: Path, source_cfg: Any) -> Path:
+    """Move ``file_path`` to ``source_cfg.paths.processing_path``."""
+    return move_to_stage(file_path, source_cfg, "processing")
+
+
+def move_to_success(file_path: Path, source_cfg: Any) -> Path:
+    """Move ``file_path`` to ``source_cfg.paths.success_path``."""
+    return move_to_stage(file_path, source_cfg, "success")
+
+
+def move_to_failed(file_path: Path, source_cfg: Any) -> Path:
+    """Move ``file_path`` to ``source_cfg.paths.failed_path``."""
+    return move_to_stage(file_path, source_cfg, "failed")
+
+
+def move_to_stage(file_path: Path, source_cfg: Any, stage: str) -> Path:
+    """Move ``file_path`` to a configured stage path on ``source_cfg.paths``."""
+    dest_dir = Path(getattr(source_cfg.paths, f"{stage}_path")).expanduser().resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return move_file(file_path, dest_dir)
+
+
+def _coerce_glob_patterns(pattern: str | Iterable[str]) -> list[str]:
+    """Normalize one or more configured file patterns to glob strings."""
+    if isinstance(pattern, str):
+        raw_patterns = [pattern]
+    else:
+        raw_patterns = [str(item) for item in pattern]
+
+    glob_patterns = {
+        pattern_to_glob(item.strip())
+        for item in raw_patterns
+        if item and item.strip()
+    }
+    return sorted(glob_patterns or {"*"})
 
 
 def converted_output_path(

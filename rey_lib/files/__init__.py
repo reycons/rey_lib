@@ -1,5 +1,12 @@
 from rey_lib.files.file_utils import (
+    discover_inbox_files,
     input_files,
+    matches_file_pattern,
+    move_to_failed,
+    move_to_processing,
+    move_to_stage,
+    move_to_success,
+    pattern_to_glob,
     converted_output_path,
     get_reader,
     write_file,
@@ -14,7 +21,14 @@ from rey_lib.files.transformer import (
 from rey_lib.files.file_loader import load_files
 
 __all__ = [
+    "discover_inbox_files",
     "input_files",
+    "matches_file_pattern",
+    "move_to_failed",
+    "move_to_processing",
+    "move_to_stage",
+    "move_to_success",
+    "pattern_to_glob",
     "converted_output_path",
     "get_reader",
     "write_file",

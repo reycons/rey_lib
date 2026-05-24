@@ -47,6 +47,7 @@ from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
     apply_file_movements,
     input_files,
+    pattern_to_glob,
     get_reader,
     move_file,
     write_file,
@@ -193,7 +194,7 @@ def transform_files(
 
         glob_patterns = sorted(
             {
-                _pattern_to_glob(getattr(cfg, "file_pattern", "*.csv"))
+                pattern_to_glob(getattr(cfg, "file_pattern", "*.csv"))
                 for cfg in transforms
             }
         )
@@ -1803,25 +1804,6 @@ def _build_output_path(
     )
 
     return output_dir / filename
-
-
-def _pattern_to_glob(file_pattern: str) -> str:
-    """
-    Convert a file_pattern with date/version tokens to a glob pattern.
-
-    Replaces all {token} placeholders with * for filesystem globbing.
-
-    Parameters
-    ----------
-    file_pattern : str
-        Pattern from transform config e.g. 'tran_{yyyymmdd}.csv'.
-
-    Returns
-    -------
-    str
-        Glob pattern e.g. 'tran_*.csv'.
-    """
-    return re.sub(r"\{[^}]+\}", "*", file_pattern)
 
 
 # ---------------------------------------------------------------------------
