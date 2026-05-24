@@ -419,12 +419,20 @@ class Analyzer:
             artifact_store   = self._artifact_store,
         )
 
-        _logger.info(
-            "analyzer: analysis_id=%s status=%s run_id=%s",
-            analysis_id,
-            response.status,
-            response.run_id,
-        )
+        if response.status == "failed":
+            _logger.warning(
+                "analyzer: analysis_id=%s failed run_id=%s errors=%s",
+                analysis_id,
+                response.run_id,
+                "; ".join(response.errors) if response.errors else "unknown",
+            )
+        else:
+            _logger.info(
+                "analyzer: analysis_id=%s status=%s run_id=%s",
+                analysis_id,
+                response.status,
+                response.run_id,
+            )
 
         return AnalysisResult(
             run_id   = response.run_id,

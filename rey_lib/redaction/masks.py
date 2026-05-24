@@ -119,33 +119,71 @@ def _mask_account(value: str, counter: int) -> str:
 
 
 def _mask_integer(value: str, counter: int) -> str:
-    """Replace integer digits with deterministic random digits."""
-    return _randomize_digits(value, counter)
+    """Replace integer digits with a safe same-scale numeric sentinel."""
+    return _sentinel_integer(value)
 
 
 def _mask_decimal(value: str, counter: int) -> str:
-    """Replace decimal digits while preserving decimal scale and separators."""
-    return _randomize_digits(value, counter)
+    """Replace decimal digits while preserving integer width and decimal scale."""
+    return _sentinel_decimal(value)
 
 
-def _randomize_digits(value: str, counter: int) -> str:
-    """Return ``value`` with every digit replaced by deterministic randomness."""
-    rng = random.Random(f"{counter}:{value.count('.')}")
+def _sentinel_integer(value: str) -> str:
+    """Return an integer like 12567 -> 10000, preserving sign and separators."""
+    return _format_sentinel_number(value, fractional_digits=0)
+
+
+def _sentinel_decimal(value: str) -> str:
+    """Return a decimal like 12567.09999 -> 10000.00001."""
+    scale = _fractional_width(value)
+    return _format_sentinel_number(value, fractional_digits=scale)
+
+
+def _fractional_width(value: str) -> int:
+    """Return the count of digits after the decimal point."""
+    if "." not in value:
+        return 0
+    return sum(1 for ch in value.rsplit(".", 1)[1] if ch.isdigit())
+
+
+def _format_sentinel_number(value: str, fractional_digits: int) -> str:
+    """Build a same-shape numeric sentinel from a source value."""
+    stripped = value.strip()
+    sign = "-" if stripped.startswith("-") else "+" if stripped.startswith("+") else ""
+    unsigned = stripped[1:] if sign else stripped
+    whole = unsigned.split(".", 1)[0]
+    integer_digit_count = sum(1 for ch in whole if ch.isdigit())
+    integer_digits = _sentinel_digits(integer_digit_count)
+    integer_text = _apply_integer_grouping(whole, integer_digits)
+
+    if fractional_digits <= 0:
+        return f"{sign}{integer_text}"
+
+    fractional_text = "0" * (fractional_digits - 1) + "1"
+    return f"{sign}{integer_text}.{fractional_text}"
+
+
+def _sentinel_digits(width: int) -> str:
+    """Return same-width sentinel digits with a non-zero leading digit."""
+    if width <= 0:
+        return "0"
+    return "1" + ("0" * (width - 1))
+
+
+def _apply_integer_grouping(template: str, digits: str) -> str:
+    """Place sentinel digits into the original integer punctuation shape."""
     result: list[str] = []
-    first_digit = True
-
-    for ch in value:
-        if not ch.isdigit():
-            result.append(ch)
-            continue
-
-        if first_digit:
-            result.append(str(rng.randint(1, 9)))
-            first_digit = False
+    digit_iter = iter(digits)
+    for ch in template:
+        if ch.isdigit():
+            result.append(next(digit_iter))
         else:
-            result.append(str(rng.randint(0, 9)))
+            result.append(ch)
 
-    return "".join(result)
+    if any(ch.isdigit() for ch in template):
+        return "".join(result)
+
+    return digits
 
 
 def _fit_width(replacement: str, value: str) -> str:

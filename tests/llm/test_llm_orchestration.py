@@ -26,12 +26,13 @@ import pytest
 from rey_lib.llm.api import RunRequest, RunResponse
 from rey_lib.llm.artifacts import ArtifactStore, LocalArtifactStore
 from rey_lib.llm.document_loader import from_csv
-from rey_lib.llm.exceptions import LockConflict
+from rey_lib.llm.exceptions import LockConflict, TimeoutFailure
 from rey_lib.llm.locking import PipelineLock
 from rey_lib.llm.pipeline import Pipeline, PipelineHooks, Stage
 from rey_lib.llm.records import (
     STATUS_APPROVED,
     STATUS_CANCELLED,
+    STATUS_FAILED,
     STATUS_PENDING_APPROVAL,
     STATUS_REJECTED,
     STATUS_SUCCESS,
@@ -520,6 +521,38 @@ class TestRunnerRedaction:
         messages  = call_args[1]["messages"] if call_args[1] else call_args[0][0]
         all_content = " ".join(m.content for m in messages)
         assert "SECRET" not in all_content
+
+
+class TestRunnerProviderTimeouts:
+    """Tests for provider timeout retry behaviour."""
+
+    def test_timeout_attempts_log_warnings_and_fail_after_retry_limit(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Repeated provider timeouts are warnings until the retry limit fails the run."""
+        contract = _write_contract(tmp_path)
+        provider = _make_mock_provider()
+        provider.run.side_effect = TimeoutFailure("provider timed out")
+
+        request = RunRequest(
+            pipeline_id   = "test-pipe",
+            stage_id      = "stage1",
+            contract_path = contract,
+            input_data    = "test input",
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(name="mock", model="mock-model", provider=provider),
+        ):
+            response = run(request)
+
+        assert response.status == STATUS_FAILED
+        assert provider.run.call_count == 3
+        assert "attempt 1/3 timed out" in caplog.text
+        assert "too many provider timeouts (3 attempts)" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ infer_col_type   Infer the dominant data type for a column's values.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from rey_lib.logs import get_logger
@@ -208,19 +209,35 @@ def _distinct_sample(values: list[str]) -> list[str]:
     return seen
 
 
-def _numeric_profile(values: list[str], col_type: str) -> dict[str, int]:
+def _numeric_profile(values: list[str], col_type: str) -> dict[str, Any]:
     """Return precision metadata for integer and decimal columns."""
     if col_type not in {"integer", "decimal"}:
         return {}
 
-    decimal_places = [_decimal_places(v) for v in values if v.strip()]
-    integer_digits = [_integer_digits(v) for v in values if v.strip()]
+    numeric_values = [v for v in values if v.strip()]
+    decimal_places = [_decimal_places(v) for v in numeric_values]
+    integer_digits = [_integer_digits(v) for v in numeric_values]
+    digit_counts = Counter(integer_digits)
 
     return {
         "min_decimal_places": min(decimal_places) if decimal_places else 0,
         "max_decimal_places": max(decimal_places) if decimal_places else 0,
+        "min_integer_digits": min(integer_digits) if integer_digits else 0,
         "max_integer_digits": max(integer_digits) if integer_digits else 0,
+        "common_integer_digits": _most_common_integer_digits(digit_counts),
+        "integer_digit_counts": {
+            str(digits): count for digits, count in sorted(digit_counts.items())
+        },
+        "has_leading_zero": any(_has_leading_zero(v) for v in numeric_values),
+        "has_negative": any(_has_negative(v) for v in numeric_values),
     }
+
+
+def _most_common_integer_digits(digit_counts: Counter[int]) -> int:
+    """Return the most common integer digit width, preferring the wider tie."""
+    if not digit_counts:
+        return 0
+    return max(digit_counts.items(), key=lambda item: (item[1], item[0]))[0]
 
 
 def _decimal_places(value: str) -> int:
@@ -236,3 +253,21 @@ def _integer_digits(value: str) -> int:
     cleaned = value.strip().lstrip("+-")
     whole = cleaned.split(".", 1)[0]
     return sum(1 for ch in whole if ch.isdigit())
+
+
+def _has_leading_zero(value: str) -> bool:
+    """Return True when the whole-number part starts with a meaningful zero."""
+    whole_digits = _whole_digits(value)
+    return len(whole_digits) > 1 and whole_digits.startswith("0")
+
+
+def _has_negative(value: str) -> bool:
+    """Return True when the numeric value is explicitly negative."""
+    return value.strip().startswith("-")
+
+
+def _whole_digits(value: str) -> str:
+    """Return digits before the decimal point, ignoring sign and separators."""
+    cleaned = value.strip().lstrip("+-")
+    whole = cleaned.split(".", 1)[0]
+    return "".join(ch for ch in whole if ch.isdigit())

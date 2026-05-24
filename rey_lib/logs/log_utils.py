@@ -82,6 +82,25 @@ class _IndentFormatter(logging.Formatter):
         return f"{prefix}{indent}{record.getMessage()}"
 
 
+class _ProviderWarningFilter(logging.Filter):
+    """Promote provider back-pressure messages that libraries log too softly."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return True after promoting known provider warning messages."""
+        message = record.getMessage()
+        if _is_too_many_requests_record(record.name, message):
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        return True
+
+
+def _is_too_many_requests_record(logger_name: str, message: str) -> bool:
+    """Return True when a provider HTTP log record is a rate-limit response."""
+    if logger_name != "httpx":
+        return False
+    return "429" in message and "Too Many Requests" in message
+
+
 # Module-level depth mirror — kept in sync with ctx.log_depth.
 _current_depth: int = 0
 
@@ -141,6 +160,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     console_handler = logging.StreamHandler()
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(_ProviderWarningFilter())
     root.addHandler(console_handler)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -154,6 +174,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
         file_handler = logging.FileHandler(filename=str(resolved_log), encoding="utf-8")
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(_ProviderWarningFilter())
         root.addHandler(file_handler)
         log_file = str(resolved_log)
 
@@ -169,6 +190,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
             ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
         )
         jsonl_handler.setLevel(level)
+        jsonl_handler.addFilter(_ProviderWarningFilter())
         root.addHandler(jsonl_handler)
         log_file = str(jsonl_path)  # JSONL takes precedence for ctx.log_file
 

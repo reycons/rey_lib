@@ -66,7 +66,7 @@ class ParseFailure(OrchestratorError):
     """Provider response could not be parsed into the expected structure."""
 
 
-class TimeoutFailure(OrchestratorError):
+class TimeoutFailure(ProviderFailure):
     """Provider call or stage execution exceeded the configured timeout."""
 
 

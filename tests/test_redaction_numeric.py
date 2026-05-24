@@ -16,35 +16,33 @@ def test_detector_recognizes_integer_values() -> None:
 
 
 def test_decimal_mask_preserves_scale_and_separators() -> None:
-    """Decimal redaction preserves format but changes the digits."""
+    """Decimal redaction keeps scale with a safe sentinel value."""
     masked = apply_mask("decimal", "-1,234.500", 7)
 
-    assert masked != "-1,234.500"
-    assert masked[0] == "-"
-    assert masked[2] == ","
-    assert masked[-4] == "."
-    assert len(masked.rsplit(".", 1)[1]) == 3
+    assert masked == "-1,000.001"
+
+
+def test_decimal_mask_preserves_largest_number_shape() -> None:
+    """A wide decimal is redacted as same-width integer part and same scale."""
+    assert apply_mask("decimal", "12567.09999", 1) == "10000.00001"
 
 
 def test_integer_mask_preserves_width_and_sign() -> None:
-    """Integer redaction keeps numeric shape without zero-filling values."""
+    """Integer redaction keeps width and sign using a safe sentinel."""
     masked = apply_mask("integer", "-001234", 3)
 
-    assert masked != "-001234"
-    assert masked.startswith("-")
-    assert len(masked) == len("-001234")
-    assert masked[1:].isdigit()
+    assert masked == "-100000"
 
 
 def test_registry_keeps_numeric_replacements_stable() -> None:
-    """The same original value maps to the same random-looking number."""
+    """The same original value maps to the same sentinel number."""
     registry = RedactionRegistry(["AMOUNT"], mask_types={"AMOUNT": "decimal"})
 
     first = registry.redact("AMOUNT", "99.00")
     second = registry.redact("AMOUNT", "99.00")
 
     assert first == second
-    assert first != "99.00"
+    assert first == "10.01"
     assert len(first.rsplit(".", 1)[1]) == 2
 
 

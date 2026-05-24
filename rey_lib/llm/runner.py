@@ -47,6 +47,7 @@ from rey_lib.llm.exceptions import (
     ParseFailure,
     ProviderFailure,
     SchemaMismatch,
+    TimeoutFailure,
 )
 from rey_lib.llm.providers.base import BaseProvider, Message
 from rey_lib.llm.providers.registry import resolve as resolve_provider
@@ -495,16 +496,22 @@ def _execute_with_retry(
 
         if exc is not None:
             last_errors = [str(exc)]
-            if type(exc) not in policy.retry_on:
+            if not isinstance(exc, policy.retry_on):
                 return _ExecuteResult(
                     parsed=None, raw=raw, tokens_in=tokens_in,
                     tokens_out=tokens_out, retry_count=attempt,
                     validation_errors=last_errors, status=STATUS_FAILED,
                 )
-            _logger.warning(
-                "runner: attempt %d/%d failed (provider): %s",
-                attempt + 1, policy.max_attempts, exc,
-            )
+            if isinstance(exc, TimeoutFailure):
+                _logger.warning(
+                    "runner: attempt %d/%d timed out: %s",
+                    attempt + 1, policy.max_attempts, exc,
+                )
+            else:
+                _logger.warning(
+                    "runner: attempt %d/%d failed (provider): %s",
+                    attempt + 1, policy.max_attempts, exc,
+                )
             continue
 
         if raw_output:
@@ -549,10 +556,17 @@ def _execute_with_retry(
             validation_errors=[], status=STATUS_SUCCESS,
         )
 
-    _logger.error(
-        "runner: all %d attempts failed. Last error: %s",
-        policy.max_attempts, last_errors[0] if last_errors else "unknown",
-    )
+    last_error = last_errors[0] if last_errors else "unknown"
+    if "timeout" in last_error.lower() or "timed out" in last_error.lower():
+        _logger.error(
+            "runner: too many provider timeouts (%d attempts). Last error: %s",
+            policy.max_attempts, last_error,
+        )
+    else:
+        _logger.error(
+            "runner: all %d attempts failed. Last error: %s",
+            policy.max_attempts, last_error,
+        )
     return _ExecuteResult(
         parsed=None, raw=raw, tokens_in=tokens_in,
         tokens_out=tokens_out, retry_count=policy.max_attempts - 1,
