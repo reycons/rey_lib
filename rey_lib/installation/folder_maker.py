@@ -326,8 +326,9 @@ def scaffold_installation(
 def scaffold_config_root(config_root: Path, force: bool = False) -> FolderMakerResult:
     """Create the standard app folder layout inside a single config root.
 
-    Creates (folder contract):
+Creates (folder contract):
         app.yaml
+        shared/
         _draft/  _approved/  _archive/
         <app_name>/app.yaml
         <app_name>/<subfolder>/
@@ -349,6 +350,16 @@ def scaffold_config_root(config_root: Path, force: bool = False) -> FolderMakerR
     _ensure_yaml(
         config_root / "app.yaml",
         {"name": config_root.name, "version": "v01"},
+        result,
+        force=force,
+    )
+
+    # Installation-level shared configs used by multiple apps.
+    shared_path = config_root / "shared"
+    _ensure_dir(shared_path, result)
+    _ensure_yaml(
+        shared_path / "app_registry.yaml",
+        {"apps": []},
         result,
         force=force,
     )

@@ -26,10 +26,12 @@ move_file(src, dest_dir)
 from __future__ import annotations
 
 import csv
+import json
 from datetime import datetime
+from datetime import timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Generator, Optional, TextIO
+from typing import Any, Callable, Generator, Iterator, Optional, TextIO
 
 from rey_lib.logs import get_logger
 
@@ -40,6 +42,10 @@ __all__ = [
     "write_file",
     "scan_column_lengths",
     "move_file",
+    "file_movement_log_path",
+    "find_original_relative_path",
+    "iter_file_movements",
+    "log_file_move",
     "apply_file_movements",
 ]
 
@@ -193,7 +199,18 @@ def write_file(
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'. Must be 'CSV' or 'XLSX'.")
 
-def move_file(src: Path, dest_dir: Path, dest_name: Optional[str] = None) -> Path:
+def move_file(
+    src: Path,
+    dest_dir: Path,
+    dest_name: Optional[str] = None,
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: str | None = None,
+    reason: str = "",
+    original_source: Path | str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
     """
     Move a file to a destination directory.
 
@@ -208,6 +225,9 @@ def move_file(src: Path, dest_dir: Path, dest_name: Optional[str] = None) -> Pat
         Destination directory. Created if it does not exist.
     dest_name : Optional[str]
         Destination filename. If None, keeps src.name.
+    state_ctx : Any
+        Optional context with ``config_root``. When provided, a movement
+        record is appended after the move succeeds.
 
     Returns
     -------
@@ -231,7 +251,121 @@ def move_file(src: Path, dest_dir: Path, dest_name: Optional[str] = None) -> Pat
     dest = dest_dir / (dest_name if dest_name else src.name)
     src.replace(dest)
     _logger.debug("Moved: %s → %s", src, dest)
+    if state_ctx is not None:
+        try:
+            log_file_move(
+                state_ctx,
+                app=app,
+                pipeline=pipeline,
+                source=src,
+                destination=dest,
+                reason=reason,
+                original_source=original_source,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Could not write file movement state for '%s': %s", src.name, exc)
     return dest
+
+
+def file_movement_log_path(ctx: Any) -> Path:
+    """Return the installation-level movement JSONL path for ``ctx``."""
+    state = getattr(ctx, "state", None)
+    configured = getattr(state, "file_movements_path", None) if state else None
+    if configured:
+        return Path(str(configured)).expanduser()
+
+    config_root = getattr(ctx, "config_root", None)
+    if not config_root:
+        raise ValueError("ctx.config_root is required to locate the movement state log.")
+
+    config_root_path = Path(str(config_root)).expanduser().resolve()
+    installation_root = config_root_path.parent.parent
+    return installation_root / "state" / config_root_path.name / "file_movements.jsonl"
+
+
+def log_file_move(
+    ctx: Any,
+    *,
+    source: Path | str,
+    destination: Path | str,
+    app: str = "",
+    pipeline: str | None = None,
+    action: str = "move",
+    reason: str = "",
+    original_source: Path | str | None = None,
+    run_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append one successful movement event to the installation JSONL state."""
+    src = Path(source).expanduser()
+    dest = Path(destination).expanduser()
+    original = Path(original_source).expanduser() if original_source else src
+    environment_root = _environment_root(ctx)
+
+    record: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "app": app,
+        "pipeline": pipeline or getattr(ctx, "pipeline_name", None),
+        "action": action,
+        "reason": reason,
+        "source": _display_path(src, environment_root),
+        "destination": _display_path(dest, environment_root),
+        "original_source": _display_path(original, environment_root),
+        "source_abs": str(src.resolve()),
+        "destination_abs": str(dest.resolve()),
+        "original_source_abs": str(original.resolve()),
+    }
+    if run_id:
+        record["run_id"] = run_id
+    if metadata:
+        record["metadata"] = metadata
+
+    path = file_movement_log_path(ctx)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    return record
+
+
+def iter_file_movements(ctx: Any) -> Iterator[dict[str, Any]]:
+    """Yield movement state records, skipping blank or malformed lines."""
+    path = file_movement_log_path(ctx)
+    if not path.exists():
+        return
+
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                yield record
+
+
+def find_original_relative_path(ctx: Any, *, pipeline: str, file_name: str) -> Path | None:
+    """Find the latest original inbox-relative path for ``file_name``."""
+    suffix = f"data/pipelines/{pipeline}/inbox/"
+    found: Path | None = None
+
+    for record in iter_file_movements(ctx):
+        if record.get("pipeline") not in {pipeline, None, ""}:
+            continue
+        for key in ("original_source", "original_source_abs", "source", "source_abs"):
+            raw = str(record.get(key, ""))
+            if not raw.endswith(file_name):
+                continue
+            normalized = raw.replace("\\", "/")
+            if suffix not in normalized:
+                continue
+            relative = normalized.split(suffix, 1)[1]
+            if relative and "/" in relative:
+                found = Path(relative)
+
+    return found
 
 
 def apply_file_movements(paths: Any, file_movements: Any) -> int:
@@ -475,6 +609,27 @@ def _find_header_reader(fh: TextIO, source_column: str) -> csv.DictReader:
             remaining = line + fh.read()
             return csv.DictReader(StringIO(remaining))
     raise ValueError(f"Column '{source_column}' not found in file.")
+
+
+def _environment_root(ctx: Any) -> Path | None:
+    value = getattr(ctx, "environment_root", None)
+    if value:
+        return Path(str(value)).expanduser().resolve()
+
+    config_root = getattr(ctx, "config_root", None)
+    if not config_root:
+        return None
+    return Path(str(config_root)).expanduser().resolve().parents[3]
+
+
+def _display_path(path: Path, environment_root: Path | None) -> str:
+    resolved = path.resolve()
+    if environment_root is not None:
+        try:
+            return resolved.relative_to(environment_root).as_posix()
+        except ValueError:
+            pass
+    return str(resolved)
 
 
 def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:

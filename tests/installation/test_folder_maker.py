@@ -56,6 +56,12 @@ class TestScaffoldConfigRoot:
         for lf in ["_draft", "_approved", "_archive"]:
             assert (cr / lf).is_dir()
 
+    def test_creates_shared_config_folder(self, tmp_path):
+        cr = tmp_path / "v01"
+        scaffold_config_root(cr)
+        assert (cr / "shared").is_dir()
+        assert (cr / "shared" / "app_registry.yaml").exists()
+
     def test_creates_app_subfolders(self, tmp_path):
         cr = tmp_path / "v01"
         scaffold_config_root(cr)

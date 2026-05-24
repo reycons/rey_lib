@@ -56,6 +56,10 @@ def build_ctx_for_app(
         App registry with each entry's ``config_path`` resolved to an
         absolute ``Path``.  Used by delegation:
         ``ctx.apps.rey_loader.config_path``.
+    ``ctx.shared_configs``
+        Installation-level shared YAML loaded from ``shared_configs:`` in
+        the installation config.  These are intended for cross-app metadata
+        such as the app registry.
 
     Parameters
     ----------
@@ -93,6 +97,8 @@ def build_ctx_for_app(
 
     installation_raw = _load_yaml(_config_path)
     _config_root     = _config_path.parent
+    _installation_root = _config_root.parent.parent
+    _environment_root = _installation_root.parent.parent
 
     installation_name: str = installation_raw.get("installation", "")
     if not installation_name:
@@ -151,15 +157,48 @@ def build_ctx_for_app(
         )
         apps_dict[name] = {"config_path": resolved}
 
+    shared_configs, shared_config_paths = _load_shared_configs(
+        installation_raw,
+        _config_root,
+    )
+
     # Stamp installation metadata — runs last so these are never overridden
     # by any same-named key that build_ctx pulled from the app config.
-    object.__setattr__(ctx, "config_path",  _config_path)
-    object.__setattr__(ctx, "config_root",  _config_root)
-    object.__setattr__(ctx, "installation", installation_name)
-    object.__setattr__(ctx, "environment",  ctx.env)
-    object.__setattr__(ctx, "apps",         Namespace(apps_dict))
+    object.__setattr__(ctx, "config_path",         _config_path)
+    object.__setattr__(ctx, "config_root",         _config_root)
+    object.__setattr__(ctx, "installation_root",   _installation_root)
+    object.__setattr__(ctx, "environment_root",    _environment_root)
+    object.__setattr__(ctx, "installation",        installation_name)
+    object.__setattr__(ctx, "environment",         ctx.env)
+    object.__setattr__(ctx, "apps",                Namespace(apps_dict))
+    object.__setattr__(ctx, "shared_configs",      Namespace(shared_configs))
+    object.__setattr__(ctx, "shared_config_paths", Namespace(shared_config_paths))
 
     return ctx
+
+
+def _load_shared_configs(
+    installation_raw: dict[str, Any],
+    config_root: Path,
+) -> tuple[dict[str, Any], dict[str, dict[str, Path]]]:
+    """Load installation-level shared config files declared by the root config."""
+    entries = installation_raw.get("shared_configs", {})
+    if not isinstance(entries, dict):
+        return {}, {}
+
+    configs: dict[str, Any] = {}
+    paths: dict[str, dict[str, Path]] = {}
+    for name, raw_path in entries.items():
+        if not raw_path:
+            continue
+        path = Path(str(raw_path))
+        resolved = (config_root / path).resolve() if not path.is_absolute() else path.expanduser().resolve()
+        if not resolved.exists():
+            raise ConfigError(f"Shared config not found: {resolved}")
+        configs[str(name)] = _load_yaml(resolved)
+        paths[str(name)] = {"path": resolved}
+
+    return configs, paths
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
