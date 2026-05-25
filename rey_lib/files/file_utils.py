@@ -38,9 +38,12 @@ from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextI
 from rey_lib.logs import get_logger
 
 __all__ = [
+    "bounded_text_preview",
     "discover_inbox_files",
+    "folder_children",
     "input_files",
     "input_tree_files",
+    "is_hidden_path",
     "matches_file_pattern",
     "move_to_failed",
     "move_to_processing",
@@ -57,6 +60,8 @@ __all__ = [
     "iter_file_movements",
     "log_file_move",
     "apply_file_movements",
+    "resolve_safe_file",
+    "visible_files",
 ]
 
 _logger = get_logger(__name__)
@@ -66,7 +71,12 @@ _logger = get_logger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
-def input_files(folder: Path, pattern: str | Iterable[str], *, recursive: bool = False) -> list[Path]:
+def input_files(
+    folder: Path,
+    pattern: str | Iterable[str],
+    *,
+    recursive: bool = False,
+) -> list[Path]:
     """
     Return a sorted list of files matching one or more glob patterns in folder.
 
@@ -101,6 +111,25 @@ def input_files(folder: Path, pattern: str | Iterable[str], *, recursive: bool =
     return sorted(matches.values())
 
 
+def visible_files(
+    folder: Path,
+    pattern: str | Iterable[str] = "*",
+    *,
+    recursive: bool = True,
+) -> list[Path]:
+    """Return non-hidden files in ``folder`` matching one or more glob patterns."""
+    root = Path(folder)
+    if not root.exists():
+        _logger.debug("visible_files: folder does not exist: %s", root)
+        return []
+
+    return [
+        path
+        for path in input_files(root, pattern, recursive=recursive)
+        if not is_hidden_path(path, root)
+    ]
+
+
 def input_tree_files(
     folder: Path,
     *,
@@ -118,6 +147,87 @@ def input_tree_files(
         and not path.name.startswith(".")
         and path.suffix.lower() not in suffixes
     )
+
+
+def is_hidden_path(path: Path, root_path: Path) -> bool:
+    """Return true when ``path`` has hidden relative path segments."""
+    return any(part.startswith(".") for part in Path(path).relative_to(root_path).parts)
+
+
+def folder_children(path: Path, root_path: Path | None = None) -> list[dict[str, Any]]:
+    """Return a recursive non-hidden folder tree for display or inspection."""
+    root = Path(root_path) if root_path is not None else Path(path)
+    children: list[dict[str, Any]] = []
+
+    children_iter = sorted(
+        Path(path).iterdir(),
+        key=lambda item: (item.is_file(), item.name.lower()),
+    )
+    for child in children_iter:
+        if child.name.startswith("."):
+            continue
+
+        relative_path = child.relative_to(root).as_posix()
+        if child.is_dir():
+            children.append(
+                {
+                    "type": "directory",
+                    "name": child.name,
+                    "path": str(child),
+                    "relative_path": relative_path,
+                    "file_count": len(visible_files(child)),
+                    "children": folder_children(child, root),
+                }
+            )
+        elif child.is_file():
+            children.append(
+                {
+                    "type": "file",
+                    "name": child.name,
+                    "path": str(child),
+                    "relative_path": relative_path,
+                }
+            )
+
+    return children
+
+
+def resolve_safe_file(raw_path: Path | str, root_path: Path | str) -> Path:
+    """Resolve a file path and require it to live under ``root_path``."""
+    root = Path(root_path).expanduser().resolve()
+    path = Path(raw_path).expanduser().resolve()
+
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Path is outside root: {path}") from exc
+
+    if not path.exists():
+        raise FileNotFoundError(f"Path does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"Path is not a file: {path}")
+    return path
+
+
+def bounded_text_preview(
+    path: Path | str,
+    max_bytes: int,
+    *,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Return a bounded text preview for one file."""
+    file_path = Path(path)
+    data = file_path.read_bytes()
+    truncated = len(data) > max_bytes
+    content = data[:max_bytes].decode(encoding, errors="replace")
+
+    return {
+        "name": file_path.name,
+        "path": str(file_path),
+        "size_bytes": len(data),
+        "truncated": truncated,
+        "content": content,
+    }
 
 
 def pattern_to_glob(file_pattern: str) -> str:

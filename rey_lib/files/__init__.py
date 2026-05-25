@@ -1,7 +1,10 @@
 from rey_lib.files.file_utils import (
+    bounded_text_preview,
     discover_inbox_files,
+    folder_children,
     input_files,
     input_tree_files,
+    is_hidden_path,
     matches_file_pattern,
     move_to_failed,
     move_to_processing,
@@ -12,6 +15,8 @@ from rey_lib.files.file_utils import (
     get_reader,
     write_file,
     move_file,
+    resolve_safe_file,
+    visible_files,
 )
 from rey_lib.files.transformer import (
     transform_row,
@@ -23,8 +28,11 @@ from rey_lib.files.file_loader import load_files
 
 __all__ = [
     "discover_inbox_files",
+    "bounded_text_preview",
+    "folder_children",
     "input_files",
     "input_tree_files",
+    "is_hidden_path",
     "matches_file_pattern",
     "move_to_failed",
     "move_to_processing",
@@ -35,6 +43,8 @@ __all__ = [
     "get_reader",
     "write_file",
     "move_file",
+    "resolve_safe_file",
+    "visible_files",
     "transform_row",
     "match_header",
     "parse_date_from_filename",

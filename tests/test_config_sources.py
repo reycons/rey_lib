@@ -8,6 +8,7 @@ from rey_lib.config.config_utils import (
     build_config_sources_yaml,
     build_config_sources_yaml_from_path,
     build_ctx,
+    config_path,
 )
 
 
@@ -48,3 +49,13 @@ def test_config_sources_from_path_uses_config_parent(tmp_path: Path) -> None:
 
     assert "# SOURCE: config.prod.yaml" in assembled
     assert "app_name: sample" in assembled
+
+
+def test_config_path_returns_environment_config_path(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.test.yaml").write_text("app_name: sample\n", encoding="utf-8")
+
+    path = config_path("test", config_dir)
+
+    assert path == config_dir.resolve() / "config.test.yaml"

@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 from pathlib import Path
-
 from types import SimpleNamespace
 
+import pytest
+
 from rey_lib.files.file_utils import (
+    bounded_text_preview,
     discover_inbox_files,
+    folder_children,
     input_files,
     input_tree_files,
+    is_hidden_path,
     matches_file_pattern,
     move_to_failed,
     move_to_processing,
     move_to_success,
     pattern_to_glob,
+    resolve_safe_file,
+    visible_files,
 )
 
 
@@ -71,6 +77,56 @@ def test_input_tree_files_skips_hidden_and_yaml(tmp_path: Path) -> None:
     files = input_tree_files(tmp_path)
 
     assert [path.name for path in files] == ["feed.csv"]
+
+
+def test_visible_files_skips_hidden_segments(tmp_path: Path) -> None:
+    nested = tmp_path / "client"
+    hidden = tmp_path / ".hidden"
+    nested.mkdir()
+    hidden.mkdir()
+    (nested / "feed.csv").write_text("x", encoding="utf-8")
+    (hidden / "secret.csv").write_text("x", encoding="utf-8")
+
+    files = visible_files(tmp_path, "*.csv")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in files] == ["client/feed.csv"]
+    assert is_hidden_path(hidden / "secret.csv", tmp_path) is True
+
+
+def test_folder_children_returns_recursive_tree(tmp_path: Path) -> None:
+    nested = tmp_path / "client"
+    nested.mkdir()
+    (nested / "feed.csv").write_text("x", encoding="utf-8")
+
+    tree = folder_children(tmp_path)
+
+    assert tree[0]["type"] == "directory"
+    assert tree[0]["file_count"] == 1
+    assert tree[0]["children"][0]["relative_path"] == "client/feed.csv"
+
+
+def test_resolve_safe_file_rejects_outside_root(tmp_path: Path) -> None:
+    file_path = tmp_path / "allowed.txt"
+    file_path.write_text("x", encoding="utf-8")
+
+    assert resolve_safe_file(file_path, tmp_path) == file_path.resolve()
+
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError):
+        resolve_safe_file(outside, tmp_path)
+    outside.unlink(missing_ok=True)
+
+
+def test_bounded_text_preview_truncates_content(tmp_path: Path) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("abcdef", encoding="utf-8")
+
+    result = bounded_text_preview(file_path, 3)
+
+    assert result["name"] == "sample.txt"
+    assert result["content"] == "abc"
+    assert result["truncated"] is True
 
 
 def test_matches_file_pattern_accepts_multiple_patterns_and_relative_paths(tmp_path: Path) -> None:

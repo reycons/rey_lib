@@ -59,6 +59,7 @@ __all__ = [
     "build_config_sources_yaml_from_path",
     "build_ctx",
     "build_ctx_from_path",
+    "config_path",
     "inject_secrets",
     "save_config",
     "print_ctx",
@@ -69,7 +70,11 @@ __all__ = [
 
 # Config directory name and main config filename pattern — constant across all projects.
 _CONFIG_DIR_NAME   = "config"
-_CONFIG_FILE_NAMES = {"dev": "config.dev.yaml", "test": "config.test.yaml", "prod": "config.prod.yaml"}
+_CONFIG_FILE_NAMES = {
+    "dev": "config.dev.yaml",
+    "test": "config.test.yaml",
+    "prod": "config.prod.yaml",
+}
 _ENV_FILE_NAME     = ".env"
 
 # Keys whose string values are resolved to Path objects.
@@ -323,7 +328,11 @@ def build_config_sources_yaml(
 
     if config_dir is None:
         env_config_dir = os.getenv("APP_CONFIG_DIR")
-        config_dir = Path(env_config_dir) if env_config_dir else Path(project_root) / _CONFIG_DIR_NAME
+        config_dir = (
+            Path(env_config_dir)
+            if env_config_dir
+            else Path(project_root) / _CONFIG_DIR_NAME
+        )
 
     config_dir = Path(config_dir).expanduser().resolve()
     env = validate_env(env)
@@ -352,6 +361,11 @@ def build_config_sources_yaml_from_path(
         project_root=project_root,
         config_dir=config_path.parent,
     )
+
+
+def config_path(env: str, config_dir: Path) -> Path:
+    """Return the main config file path for ``env`` under ``config_dir``."""
+    return _config_path(validate_env(env), Path(config_dir).expanduser().resolve())
 
 
 def build_app_ctx(
@@ -417,11 +431,21 @@ def validate_yaml_file(path: str | Path) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
     except Exception as exc:
-        _add_validation_issue(result, severity="error", file_path=path, message=f"Unable to read file: {exc}")
+        _add_validation_issue(
+            result,
+            severity="error",
+            file_path=path,
+            message=f"Unable to read file: {exc}",
+        )
         return result
 
     if not text.strip():
-        _add_validation_issue(result, severity="warning", file_path=path, message="YAML file is empty.")
+        _add_validation_issue(
+            result,
+            severity="warning",
+            file_path=path,
+            message="YAML file is empty.",
+        )
         return result
 
     try:
@@ -431,7 +455,14 @@ def validate_yaml_file(path: str | Path) -> dict:
         if hasattr(exc, "problem_mark") and exc.problem_mark:
             line   = exc.problem_mark.line + 1
             column = exc.problem_mark.column + 1
-        _add_validation_issue(result, severity="error", file_path=path, message=str(exc), line=line, column=column)
+        _add_validation_issue(
+            result,
+            severity="error",
+            file_path=path,
+            message=str(exc),
+            line=line,
+            column=column,
+        )
         return result
 
     env_refs = sorted(_find_yaml_env_refs(data))
