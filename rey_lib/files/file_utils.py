@@ -670,16 +670,7 @@ def file_movement_log_path(ctx: Any) -> Path:
             ctx,
         )
 
-    if config_root_path is None:
-        raise ValueError("ctx.config_root is required to locate the movement state log.")
-
-    return (
-        installation_root
-        / "state"
-        / "file_movements"
-        / config_root_path.name
-        / "file_movements.jsonl"
-    )
+    raise ValueError("state.file_movements_path is required to locate the movement state log.")
 
 
 def log_file_move(

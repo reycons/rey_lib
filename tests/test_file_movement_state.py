@@ -20,11 +20,14 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         config_root=config_root,
         environment_root=tmp_path / "test",
         installation="ccc",
+        state=SimpleNamespace(
+            file_movements_path="state/file_movements/{config_root}/file_movements.jsonl"
+        ),
     )
 
 
-def test_default_log_path_resolves_under_state_file_movements(tmp_path: Path) -> None:
-    """The default movement state path lives under the installation state folder."""
+def test_configured_log_path_resolves_under_state_file_movements(tmp_path: Path) -> None:
+    """Movement state path must come from ctx.state.file_movements_path."""
     ctx = _ctx(tmp_path)
     assert file_movement_log_path(ctx) == (
         tmp_path
@@ -54,6 +57,18 @@ def test_configured_log_path_is_relative_to_installation_root(tmp_path: Path) ->
         / "v01"
         / "moves.jsonl"
     )
+
+
+def test_missing_state_path_raises(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    delattr(ctx, "state")
+
+    try:
+        file_movement_log_path(ctx)
+    except ValueError as exc:
+        assert "state.file_movements_path" in str(exc)
+    else:
+        raise AssertionError("Expected missing state path to raise.")
 
 
 def test_move_file_writes_jsonl_after_successful_move(tmp_path: Path) -> None:
