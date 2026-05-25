@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 from fnmatch import fnmatch
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -39,11 +40,14 @@ from rey_lib.logs import get_logger
 
 __all__ = [
     "bounded_text_preview",
+    "bytes_sha256",
     "discover_inbox_files",
     "folder_children",
     "input_files",
     "input_tree_files",
     "is_hidden_path",
+    "file_sha256",
+    "matched_tree_files",
     "matches_file_pattern",
     "move_to_failed",
     "move_to_processing",
@@ -56,11 +60,14 @@ __all__ = [
     "scan_column_lengths",
     "move_file",
     "file_movement_log_path",
+    "find_named_files",
     "find_original_relative_path",
     "iter_file_movements",
     "log_file_move",
     "apply_file_movements",
     "resolve_safe_file",
+    "read_text_file",
+    "read_bytes_file",
     "visible_files",
 ]
 
@@ -144,9 +151,67 @@ def input_tree_files(
     return sorted(
         path for path in root.rglob("*")
         if path.is_file()
-        and not path.name.startswith(".")
+        and not is_hidden_path(path, root)
         and path.suffix.lower() not in suffixes
     )
+
+
+def matched_tree_files(
+    folder: Path,
+    pattern: str | Iterable[str],
+    *,
+    base_dir: Path | None = None,
+    skip_suffixes: Iterable[str] = (".yaml", ".yml"),
+) -> list[Path]:
+    """Return recursive non-hidden files matching configured file patterns."""
+    match_base = Path(base_dir) if base_dir is not None else Path(folder)
+    return [
+        file_path
+        for file_path in input_tree_files(folder, skip_suffixes=skip_suffixes)
+        if matches_file_pattern(file_path, pattern, match_base)
+    ]
+
+
+def find_named_files(folder: Path, filename: str) -> list[Path]:
+    """Return recursive non-hidden files with the exact filename."""
+    root = Path(folder)
+    if not root.exists():
+        _logger.debug("find_named_files: folder does not exist: %s", root)
+        return []
+    return [
+        path
+        for path in sorted(root.rglob(filename))
+        if path.is_file() and not is_hidden_path(path, root)
+    ]
+
+
+def file_sha256(path: Path | str) -> str:
+    """Return the SHA-256 hex digest for a file."""
+    hasher = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def bytes_sha256(data: bytes) -> str:
+    """Return the SHA-256 hex digest for raw bytes."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_text_file(
+    path: Path | str,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+) -> str:
+    """Read a text file through the shared file utility boundary."""
+    return Path(path).read_text(encoding=encoding, errors=errors)
+
+
+def read_bytes_file(path: Path | str) -> bytes:
+    """Read raw file bytes through the shared file utility boundary."""
+    return Path(path).read_bytes()
 
 
 def is_hidden_path(path: Path, root_path: Path) -> bool:
@@ -496,18 +561,34 @@ def move_file(
 
 def file_movement_log_path(ctx: Any) -> Path:
     """Return the installation-level movement JSONL path for ``ctx``."""
+    config_root = getattr(ctx, "config_root", None)
+    config_root_path = (
+        Path(str(config_root)).expanduser().resolve()
+        if config_root
+        else None
+    )
+    installation_root = _installation_root(ctx, config_root_path)
+
     state = getattr(ctx, "state", None)
     configured = getattr(state, "file_movements_path", None) if state else None
     if configured:
-        return Path(str(configured)).expanduser()
+        return _resolve_movement_log_config(
+            str(configured),
+            installation_root,
+            config_root_path,
+            ctx,
+        )
 
-    config_root = getattr(ctx, "config_root", None)
-    if not config_root:
+    if config_root_path is None:
         raise ValueError("ctx.config_root is required to locate the movement state log.")
 
-    config_root_path = Path(str(config_root)).expanduser().resolve()
-    installation_root = config_root_path.parent.parent
-    return installation_root / "state" / config_root_path.name / "file_movements.jsonl"
+    return (
+        installation_root
+        / "logs"
+        / "file_movements"
+        / config_root_path.name
+        / "file_movements.jsonl"
+    )
 
 
 def log_file_move(
@@ -846,6 +927,43 @@ def _environment_root(ctx: Any) -> Path | None:
     if not config_root:
         return None
     return Path(str(config_root)).expanduser().resolve().parents[3]
+
+
+def _installation_root(ctx: Any, config_root_path: Path | None = None) -> Path:
+    """Return the installation root that owns the active config root."""
+    configured = getattr(ctx, "installation_root", None)
+    if configured:
+        return Path(str(configured)).expanduser().resolve()
+
+    if config_root_path is not None:
+        return config_root_path.parent.parent
+
+    raise ValueError("ctx.config_root is required to locate the installation root.")
+
+
+def _resolve_movement_log_config(
+    raw_path: str,
+    installation_root: Path,
+    config_root_path: Path | None,
+    ctx: Any,
+) -> Path:
+    """Resolve configured movement log path relative to the installation root."""
+    config_root_name = config_root_path.name if config_root_path is not None else ""
+    tokens = {
+        "config_root": config_root_name,
+        "config_root_name": config_root_name,
+        "installation": getattr(ctx, "installation", ""),
+    }
+    rendered = raw_path.format_map(_SafeFormatMap(tokens))
+    path = Path(rendered).expanduser()
+    return path if path.is_absolute() else installation_root / path
+
+
+class _SafeFormatMap(dict):
+    """Keep unknown config path tokens intact instead of raising KeyError."""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
 
 
 def _display_path(path: Path, environment_root: Path | None) -> str:

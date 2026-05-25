@@ -8,10 +8,11 @@ Hierarchy
 ---------
 OrchestratorError
     ProviderFailure
+        TimeoutFailure
+        RateLimitFailure
     ValidationFailure
     SchemaMismatch
     ParseFailure
-    TimeoutFailure
     ContractViolation
     ConfigurationFailure
     LockConflict
@@ -34,6 +35,7 @@ __all__ = [
     "SchemaMismatch",
     "ParseFailure",
     "TimeoutFailure",
+    "RateLimitFailure",
     "ContractViolation",
     "ConfigurationFailure",
     "LockConflict",
@@ -68,6 +70,10 @@ class ParseFailure(OrchestratorError):
 
 class TimeoutFailure(ProviderFailure):
     """Provider call or stage execution exceeded the configured timeout."""
+
+
+class RateLimitFailure(ProviderFailure):
+    """Provider returned a rate-limit response (HTTP 429 or equivalent)."""
 
 
 class ContractViolation(OrchestratorError):

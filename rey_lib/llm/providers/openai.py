@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.llm.exceptions import ProviderFailure, TimeoutFailure
+from rey_lib.llm.exceptions import ProviderFailure, RateLimitFailure, TimeoutFailure
 from rey_lib.llm.providers.base import (
     BaseProvider,
     Message,
@@ -101,10 +101,18 @@ class OpenAIProvider(BaseProvider):
             )
         except openai.APITimeoutError as exc:
             raise TimeoutFailure(f"OpenAI timeout: {exc}") from exc
+        except openai.RateLimitError as exc:
+            raise RateLimitFailure(
+                f"OpenAI rate-limit {exc.status_code}: {exc.message}"
+            ) from exc
         except openai.APIStatusError as exc:
             if exc.status_code == 408:
                 raise TimeoutFailure(
                     f"OpenAI timeout {exc.status_code}: {exc.message}"
+                ) from exc
+            if exc.status_code == 429:
+                raise RateLimitFailure(
+                    f"OpenAI rate-limit {exc.status_code}: {exc.message}"
                 ) from exc
             raise ProviderFailure(
                 f"OpenAI API error {exc.status_code}: {exc.message}"

@@ -53,6 +53,7 @@ from rey_lib.files.file_utils import (
     write_file,
     converted_output_path,
 )
+from rey_lib.profiling.file_profiler import infer_sql_type
 from rey_lib.files.transformer import (
     transform_row,
     match_header,
@@ -1994,9 +1995,18 @@ def _build_column_defs(
         elif transform_type == "regex_extract" and cast_to in ("int", "integer"):
             sql_type = "INTEGER"
         else:
-            observed = max_lengths.get(col, 0)
-            size     = max(observed + 10, 20)
-            sql_type = f"VARCHAR({size})"
+            col_values = [
+                str(row.get(col, "") or "").strip()
+                for row in rows
+                if str(row.get(col, "") or "").strip()
+            ]
+            inferred = infer_sql_type(col_values) if col_values else None
+            if inferred:
+                sql_type = inferred
+            else:
+                observed = max_lengths.get(col, 0)
+                size     = max(observed + 10, 20)
+                sql_type = f"VARCHAR({size})"
 
         col_defs.append((col, sql_type))
 
@@ -2116,7 +2126,7 @@ def _read_and_transform(
     encoding  = getattr(transform_cfg, "encoding",  "utf-8-sig")
     delimiter = getattr(transform_cfg, "delimiter", ",")
 
-    cfg_dict             = _namespace_to_dict(transform_cfg)
+    cfg_dict             = _normalized_transform_config(transform_cfg, ctx=ctx)
     # Resolve env-var keys for any encrypt transforms — done once per file.
     cfg_dict["secrets"]  = _build_secrets(cfg_dict)
 
@@ -2502,6 +2512,9 @@ def _setup_file_ctx(ctx: Any, file_path: Path, paths: Any) -> None:
 
     object.__setattr__(ctx, "current_file_name", file_path.name)
     object.__setattr__(ctx, "current_file_path", str(file_path))
+    object.__setattr__(ctx, "incoming_file_name", file_path.name)
+    object.__setattr__(ctx, "incoming_file_path", str(file_path))
+    object.__setattr__(ctx, "base_file_name", file_path.stem)
     object.__setattr__(ctx, "file_name",         file_path.name)
     object.__setattr__(ctx, "file_stem",         file_path.stem)
     object.__setattr__(ctx, "file_extension",    file_path.suffix)
@@ -2574,6 +2587,131 @@ def _namespace_to_dict(ns: Any) -> dict[str, Any]:
     if isinstance(ns, dict):
         return ns
     return {k: v for k, v in ns.items()}
+
+
+def _normalized_transform_config(transform_cfg: Any, ctx: Any = None) -> dict[str, Any]:
+    """
+    Return the row-transform config in the internal list-based column shape.
+
+    Loader YAML is intentionally human-facing: ``columns`` may be a mapping
+    of output column to source column, with transform rules collected under
+    ``field_transforms``. The transformer uses one list of column definitions,
+    so this adapter keeps that conversion centralized in ``rey_lib``.
+    """
+    cfg_dict = _namespace_to_plain(transform_cfg)
+    cfg_dict["columns"] = _normalized_columns(
+        cfg_dict.get("columns"),
+        cfg_dict.get("field_transforms"),
+    )
+    cfg_dict.pop("field_transforms", None)
+
+    constants = _namespace_to_plain(cfg_dict.get("constants")) or {}
+    cfg_dict["columns"].extend(_constant_column_configs(constants, ctx=ctx))
+    return cfg_dict
+
+
+def _namespace_to_plain(value: Any) -> Any:
+    """
+    Recursively convert Namespace-like values to plain Python containers.
+
+    The config loader returns Namespace objects for mappings. The transformer
+    expects normal dict/list structures, especially for nested transform rules.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {key: _namespace_to_plain(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_namespace_to_plain(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_namespace_to_plain(item) for item in value)
+    if hasattr(value, "items"):
+        return {key: _namespace_to_plain(val) for key, val in value.items()}
+    return value
+
+
+def _normalized_columns(columns_cfg: Any, transforms_cfg: Any) -> list[dict[str, Any]]:
+    """Normalize supported column config shapes to transformer column defs."""
+    columns = _namespace_to_plain(columns_cfg)
+    transforms = _namespace_to_plain(transforms_cfg) or {}
+    if not isinstance(transforms, dict):
+        transforms = {}
+
+    if isinstance(columns, list):
+        return [
+            _normalized_column_config(col_cfg, transforms)
+            for col_cfg in columns
+            if isinstance(col_cfg, dict)
+        ]
+
+    if isinstance(columns, dict):
+        return [
+            _mapped_column_config(name, source, transforms.get(name, {}))
+            for name, source in columns.items()
+        ]
+
+    return []
+
+
+def _normalized_column_config(
+    col_cfg: dict[str, Any],
+    transforms: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize one already-list-shaped column config."""
+    normalized = dict(col_cfg)
+    name = str(normalized.get("name", ""))
+    if name and "transform" not in normalized and name in transforms:
+        normalized["transform"] = transforms[name]
+    return normalized
+
+
+def _mapped_column_config(
+    name: str,
+    source: Any,
+    transform_cfg: Any,
+) -> dict[str, Any]:
+    """Build one internal column config from output-name/source mapping."""
+    col_cfg = {
+        "name": str(name),
+        "source": source,
+    }
+    if transform_cfg:
+        col_cfg["transform"] = transform_cfg
+    return col_cfg
+
+
+def _constant_column_configs(constants: dict[str, Any], ctx: Any = None) -> list[dict[str, Any]]:
+    """Build internal column configs for configured constant output columns."""
+    return [
+        {
+            "name": str(name),
+            "transform": {
+                "type": "constant",
+                "value": _resolve_constant_value(value, ctx=ctx),
+            },
+        }
+        for name, value in constants.items()
+    ]
+
+
+def _resolve_constant_value(value: Any, ctx: Any = None) -> Any:
+    """Resolve runtime tokens in a constant config value."""
+    if not isinstance(value, str):
+        return value
+    if ctx is None:
+        return value
+    return value.format_map(_CtxFormatMap(ctx))
+
+
+class _CtxFormatMap(dict):
+    """Format-map adapter that resolves token names against ctx attributes."""
+
+    def __init__(self, ctx: Any) -> None:
+        super().__init__()
+        self._ctx = ctx
+
+    def __missing__(self, key: str) -> str:
+        return str(getattr(self._ctx, key, ""))
 
 
 def _build_secrets(cfg_dict: dict[str, Any]) -> dict[str, str]:

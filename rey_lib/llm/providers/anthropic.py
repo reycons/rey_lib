@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.llm.exceptions import ProviderFailure
+from rey_lib.llm.exceptions import ProviderFailure, RateLimitFailure, TimeoutFailure
 from rey_lib.llm.providers.base import (
     BaseProvider,
     Message,
@@ -109,7 +109,17 @@ class AnthropicProvider(BaseProvider):
         try:
             client   = anthropic.Anthropic(api_key=self._api_key)
             response = client.messages.create(**kwargs)
+        except anthropic.RateLimitError as exc:
+            raise RateLimitFailure(
+                f"Anthropic rate-limit {exc.status_code}: {exc.message}"
+            ) from exc
+        except anthropic.APITimeoutError as exc:
+            raise TimeoutFailure(f"Anthropic timeout: {exc}") from exc
         except anthropic.APIStatusError as exc:
+            if exc.status_code == 408:
+                raise TimeoutFailure(
+                    f"Anthropic timeout {exc.status_code}: {exc.message}"
+                ) from exc
             raise ProviderFailure(
                 f"Anthropic API error {exc.status_code}: {exc.message}"
             ) from exc

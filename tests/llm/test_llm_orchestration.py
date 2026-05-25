@@ -26,7 +26,8 @@ import pytest
 from rey_lib.llm.api import RunRequest, RunResponse
 from rey_lib.llm.artifacts import ArtifactStore, LocalArtifactStore
 from rey_lib.llm.document_loader import from_csv
-from rey_lib.llm.exceptions import LockConflict, TimeoutFailure
+from rey_lib.llm.exceptions import LockConflict, RateLimitFailure, TimeoutFailure
+from rey_lib.llm.retry import RetryPolicy
 from rey_lib.llm.locking import PipelineLock
 from rey_lib.llm.pipeline import Pipeline, PipelineHooks, Stage
 from rey_lib.llm.records import (
@@ -553,6 +554,96 @@ class TestRunnerProviderTimeouts:
         assert provider.run.call_count == 3
         assert "attempt 1/3 timed out" in caplog.text
         assert "too many provider timeouts (3 attempts)" in caplog.text
+
+    def test_timeout_limit_promotes_to_failure_before_max_attempts(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A timeout_limit shorter than max_attempts short-circuits the run early."""
+        contract = _write_contract(tmp_path)
+        provider = _make_mock_provider()
+        provider.run.side_effect = TimeoutFailure("provider timed out")
+
+        policy  = RetryPolicy(max_attempts=5, timeout_limit=2)
+        request = RunRequest(
+            pipeline_id   = "test-pipe",
+            stage_id      = "stage1",
+            contract_path = contract,
+            input_data    = "test input",
+            retry_policy  = policy,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(name="mock", model="mock-model", provider=provider),
+        ):
+            response = run(request)
+
+        assert response.status == STATUS_FAILED
+        assert provider.run.call_count == 2
+        assert "timeout threshold reached (2/5 attempts)" in caplog.text
+
+
+class TestRunnerRateLimits:
+    """Tests for provider rate-limit retry behaviour."""
+
+    def test_rate_limit_attempts_log_warnings_and_fail_after_retry_limit(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Repeated rate-limit responses are logged as warnings; run fails after exhausting retries."""
+        contract = _write_contract(tmp_path)
+        provider = _make_mock_provider()
+        provider.run.side_effect = RateLimitFailure("rate limited")
+
+        request = RunRequest(
+            pipeline_id   = "test-pipe",
+            stage_id      = "stage1",
+            contract_path = contract,
+            input_data    = "test input",
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(name="mock", model="mock-model", provider=provider),
+        ):
+            response = run(request)
+
+        assert response.status == STATUS_FAILED
+        assert provider.run.call_count == 3
+        assert "attempt 1/3 rate-limited" in caplog.text
+        assert "too many rate-limit responses (3/3 attempts)" in caplog.text
+
+    def test_rate_limit_limit_promotes_to_failure_before_max_attempts(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A rate_limit_limit shorter than max_attempts short-circuits the run early."""
+        contract = _write_contract(tmp_path)
+        provider = _make_mock_provider()
+        provider.run.side_effect = RateLimitFailure("rate limited")
+
+        policy  = RetryPolicy(max_attempts=5, rate_limit_limit=2)
+        request = RunRequest(
+            pipeline_id   = "test-pipe",
+            stage_id      = "stage1",
+            contract_path = contract,
+            input_data    = "test input",
+            retry_policy  = policy,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(name="mock", model="mock-model", provider=provider),
+        ):
+            response = run(request)
+
+        assert response.status == STATUS_FAILED
+        assert provider.run.call_count == 2
+        assert "rate-limit threshold reached (2/5 attempts)" in caplog.text
 
 
 # ---------------------------------------------------------------------------

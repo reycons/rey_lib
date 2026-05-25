@@ -9,16 +9,22 @@ import pytest
 
 from rey_lib.files.file_utils import (
     bounded_text_preview,
+    bytes_sha256,
     discover_inbox_files,
+    file_sha256,
+    find_named_files,
     folder_children,
     input_files,
     input_tree_files,
     is_hidden_path,
+    matched_tree_files,
     matches_file_pattern,
     move_to_failed,
     move_to_processing,
     move_to_success,
     pattern_to_glob,
+    read_bytes_file,
+    read_text_file,
     resolve_safe_file,
     visible_files,
 )
@@ -77,6 +83,45 @@ def test_input_tree_files_skips_hidden_and_yaml(tmp_path: Path) -> None:
     files = input_tree_files(tmp_path)
 
     assert [path.name for path in files] == ["feed.csv"]
+
+
+def test_matched_tree_files_filters_by_relative_pattern(tmp_path: Path) -> None:
+    nested = tmp_path / "client"
+    nested.mkdir()
+    (nested / "feed.csv").write_text("x", encoding="utf-8")
+    (nested / "feed.txt").write_text("x", encoding="utf-8")
+
+    files = matched_tree_files(tmp_path, "client/*.csv")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in files] == ["client/feed.csv"]
+
+
+def test_find_named_files_skips_hidden_paths(tmp_path: Path) -> None:
+    nested = tmp_path / "client"
+    hidden = tmp_path / ".hidden"
+    nested.mkdir()
+    hidden.mkdir()
+    (nested / "redact.yaml").write_text("x", encoding="utf-8")
+    (hidden / "redact.yaml").write_text("x", encoding="utf-8")
+
+    files = find_named_files(tmp_path, "redact.yaml")
+
+    assert [path.relative_to(tmp_path).as_posix() for path in files] == ["client/redact.yaml"]
+
+
+def test_file_hash_helpers_use_shared_sha256(tmp_path: Path) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("abc", encoding="utf-8")
+
+    assert file_sha256(file_path) == bytes_sha256(b"abc")
+
+
+def test_read_text_file_reads_through_shared_boundary(tmp_path: Path) -> None:
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("hello", encoding="utf-8")
+
+    assert read_text_file(file_path) == "hello"
+    assert read_bytes_file(file_path) == b"hello"
 
 
 def test_visible_files_skips_hidden_segments(tmp_path: Path) -> None:

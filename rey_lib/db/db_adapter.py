@@ -107,7 +107,13 @@ class DBAdapter:
         ConfigError
             If the provider is missing, unknown, or cannot be inferred.
         """
-        return _backend(self._provider_for_cfg(db_cfg)).get_connection(db_cfg)
+        provider = self._provider_for_cfg(db_cfg)
+        conn = _backend(provider).get_connection(db_cfg)
+        try:
+            setattr(conn, "provider", provider)
+        except (AttributeError, TypeError):
+            pass
+        return conn
 
     # ------------------------------------------------------------------
     # Query
@@ -394,8 +400,8 @@ class DBAdapter:
         """
         explicit = getattr(conn, "provider", None)
 
-        if explicit:
-            return str(explicit).lower()
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip().lower()
 
         module = type(conn).__module__ or ""
 

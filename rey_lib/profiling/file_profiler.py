@@ -19,12 +19,50 @@ from typing import Any
 
 from rey_lib.logs import get_logger
 
-__all__ = ["profile_rows", "infer_col_type"]
+__all__ = ["profile_rows", "infer_col_type", "infer_sql_type"]
 
 _logger = get_logger(__name__)
 
 # Number of representative distinct values to include per column.
 _SAMPLE_DISTINCT_VALUES: int = 5
+
+
+def infer_sql_type(values: list[str]) -> str | None:
+    """Return the most precise SQL type for a column's values.
+
+    Uses ``infer_col_type`` for classification then derives precision from
+    the observed data so callers avoid the generic ``DECIMAL(20, 8)`` fallback.
+
+    Parameters
+    ----------
+    values : list[str]
+        Non-blank string values from a single column.
+
+    Returns
+    -------
+    str | None
+        ``'INTEGER'``, ``'DECIMAL(p, s)'``, ``'DATE'``, or ``None`` when
+        VARCHAR is the appropriate fallback.
+    """
+    non_blank = [v.strip() for v in values if v and v.strip()]
+    if not non_blank:
+        return None
+
+    col_type = infer_col_type(non_blank)
+
+    if col_type == "integer":
+        return "INTEGER"
+
+    if col_type == "decimal":
+        scale     = max((_decimal_places(v) for v in non_blank), default=0)
+        int_digs  = max((_integer_digits(v) for v in non_blank), default=1)
+        precision = max(int_digs + scale, 1)
+        return f"DECIMAL({precision}, {scale})"
+
+    if col_type == "date":
+        return "DATE"
+
+    return None
 
 
 def profile_rows(

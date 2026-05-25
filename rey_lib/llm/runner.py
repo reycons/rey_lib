@@ -46,6 +46,7 @@ from rey_lib.llm.exceptions import (
     ConfigurationFailure,
     ParseFailure,
     ProviderFailure,
+    RateLimitFailure,
     SchemaMismatch,
     TimeoutFailure,
 )
@@ -488,6 +489,8 @@ def _execute_with_retry(
     tokens_in  = 0
     tokens_out = 0
     last_errors: list[str] = []
+    timeout_count    = 0
+    rate_limit_count = 0
 
     for attempt in range(policy.max_attempts):
         raw, tokens_in, tokens_out, exc = _single_provider_call(
@@ -502,11 +505,38 @@ def _execute_with_retry(
                     tokens_out=tokens_out, retry_count=attempt,
                     validation_errors=last_errors, status=STATUS_FAILED,
                 )
-            if isinstance(exc, TimeoutFailure):
+            if isinstance(exc, RateLimitFailure):
+                rate_limit_count += 1
+                _logger.warning(
+                    "runner: attempt %d/%d rate-limited: %s",
+                    attempt + 1, policy.max_attempts, exc,
+                )
+                if policy.rate_limit_limit is not None and rate_limit_count >= policy.rate_limit_limit:
+                    _logger.error(
+                        "runner: rate-limit threshold reached (%d/%d attempts). Last error: %s",
+                        rate_limit_count, policy.max_attempts, exc,
+                    )
+                    return _ExecuteResult(
+                        parsed=None, raw=raw, tokens_in=tokens_in,
+                        tokens_out=tokens_out, retry_count=attempt,
+                        validation_errors=last_errors, status=STATUS_FAILED,
+                    )
+            elif isinstance(exc, TimeoutFailure):
+                timeout_count += 1
                 _logger.warning(
                     "runner: attempt %d/%d timed out: %s",
                     attempt + 1, policy.max_attempts, exc,
                 )
+                if policy.timeout_limit is not None and timeout_count >= policy.timeout_limit:
+                    _logger.error(
+                        "runner: timeout threshold reached (%d/%d attempts). Last error: %s",
+                        timeout_count, policy.max_attempts, exc,
+                    )
+                    return _ExecuteResult(
+                        parsed=None, raw=raw, tokens_in=tokens_in,
+                        tokens_out=tokens_out, retry_count=attempt,
+                        validation_errors=last_errors, status=STATUS_FAILED,
+                    )
             else:
                 _logger.warning(
                     "runner: attempt %d/%d failed (provider): %s",
@@ -557,7 +587,12 @@ def _execute_with_retry(
         )
 
     last_error = last_errors[0] if last_errors else "unknown"
-    if "timeout" in last_error.lower() or "timed out" in last_error.lower():
+    if rate_limit_count > 0:
+        _logger.error(
+            "runner: too many rate-limit responses (%d/%d attempts). Last error: %s",
+            rate_limit_count, policy.max_attempts, last_error,
+        )
+    elif "timeout" in last_error.lower() or "timed out" in last_error.lower():
         _logger.error(
             "runner: too many provider timeouts (%d attempts). Last error: %s",
             policy.max_attempts, last_error,

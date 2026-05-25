@@ -20,6 +20,7 @@ DEFAULT_RETRY_POLICY
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from rey_lib.llm.exceptions import ParseFailure, ProviderFailure
 
@@ -38,13 +39,21 @@ class RetryPolicy:
         Exception types that trigger a retry.  Any exception type not in
         this tuple causes immediate failure.  SchemaMismatch must never
         appear here — schema failures are not retryable by design.
+    timeout_limit : Optional[int]
+        Maximum TimeoutFailure occurrences before the run is promoted to
+        failure, regardless of remaining attempts.  None = no separate limit.
+    rate_limit_limit : Optional[int]
+        Maximum RateLimitFailure occurrences before the run is promoted to
+        failure, regardless of remaining attempts.  None = no separate limit.
     """
 
-    max_attempts: int                          = 3
-    retry_on:     tuple[type[Exception], ...] = field(
+    max_attempts:     int                          = 3
+    retry_on:         tuple[type[Exception], ...] = field(
         # ParseFailure and ProviderFailure are transient; SchemaMismatch is not.
         default=(ProviderFailure, ParseFailure)
     )
+    timeout_limit:    Optional[int]               = None
+    rate_limit_limit: Optional[int]               = None
 
     def __post_init__(self) -> None:
         """Validate the policy on construction."""
@@ -57,6 +66,14 @@ class RetryPolicy:
             raise ValueError(
                 "SchemaMismatch must not appear in RetryPolicy.retry_on. "
                 "Schema failures are execution failures, not transient errors."
+            )
+        if self.timeout_limit is not None and self.timeout_limit < 1:
+            raise ValueError(
+                f"RetryPolicy.timeout_limit must be >= 1, got {self.timeout_limit}."
+            )
+        if self.rate_limit_limit is not None and self.rate_limit_limit < 1:
+            raise ValueError(
+                f"RetryPolicy.rate_limit_limit must be >= 1, got {self.rate_limit_limit}."
             )
 
 
