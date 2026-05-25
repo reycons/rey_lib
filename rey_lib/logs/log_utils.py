@@ -37,6 +37,7 @@ __all__ = [
     "log_file_metadata",
     "log_enter",
     "log_exit",
+    "format_jsonl_records",
     "read_jsonl_records",
 ]
 
@@ -384,8 +385,53 @@ def read_jsonl_records(
         "records_returned": len(limited_records),
         "truncated_file": truncated_file,
         "parse_errors": parse_errors,
+        "rendered_text": format_jsonl_records(limited_records),
         **log_file_metadata(path),
     }
+
+
+def format_jsonl_records(records: list[dict[str, Any]]) -> str:
+    """Return a compact human-readable rendering of JSONL log records."""
+    lines: list[str] = []
+    for record in records:
+        timestamp = str(record.get("timestamp") or record.get("asctime") or "")
+        level = str(record.get("level") or record.get("levelname") or "").upper()
+        source = str(record.get("source") or record.get("name") or "")
+        message = str(record.get("message") or "")
+        prefix = "  ".join(part for part in (timestamp, level, source) if part)
+        lines.append(f"{prefix}  {message}" if prefix else message)
+
+        details = _record_detail_lines(record)
+        if details:
+            lines.extend(f"  {line}" for line in details)
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def _record_detail_lines(record: dict[str, Any]) -> list[str]:
+    """Return stable detail lines for non-envelope JSONL fields."""
+    envelope = {
+        "asctime",
+        "created",
+        "depth",
+        "level",
+        "levelname",
+        "message",
+        "name",
+        "parent_sequence",
+        "sequence",
+        "source",
+        "timestamp",
+    }
+    lines: list[str] = []
+    for key in sorted(k for k in record if k not in envelope):
+        value = record[key]
+        if value in (None, "", [], {}):
+            continue
+        rendered = json.dumps(value, default=str, sort_keys=True)
+        lines.append(f"{key}: {rendered}")
+    return lines
 
 
 def _derived_jsonl_path(path: Path, jsonl_stems: set[str]) -> str:

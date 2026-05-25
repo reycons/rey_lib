@@ -1,6 +1,7 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
 from rey_lib.logs.log_utils import (
     add_jsonl_handler,
+    format_jsonl_records,
     get_logger,
     log_enter,
     log_exit,
@@ -12,6 +13,7 @@ from rey_lib.logs.log_utils import (
 __all__ = [
     "JsonlHandler",
     "add_jsonl_handler",
+    "format_jsonl_records",
     "get_logger",
     "log_enter",
     "log_exit",

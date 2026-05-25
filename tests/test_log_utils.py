@@ -107,6 +107,8 @@ def test_read_jsonl_records_filters_errors(tmp_path) -> None:
     assert result["authoritative"] is True
     assert result["records_matched"] == 1
     assert result["records"][0]["message"] == "failed"
+    assert "ERROR" in result["rendered_text"]
+    assert "failed" in result["rendered_text"]
 
 
 def test_read_jsonl_records_rejects_text_logs(tmp_path) -> None:
