@@ -2213,7 +2213,14 @@ def _execute_movements(
                 if not src_path.exists():
                     _logger.debug("Movement skipped — source missing: %s", src_path)
                     continue
-                move_file(src_path, dest_dir)
+                move_file(
+                    src_path,
+                    dest_dir,
+                    state_ctx=ctx,
+                    app=getattr(ctx, "app_name", "") if ctx is not None else "",
+                    pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
+                    reason=str(move.to),
+                )
                 _logger.debug("Moved: %s → %s", src_path.name, dest_dir)
             except OSError as exc:
                 _logger.error(

@@ -334,26 +334,55 @@ def discover_inbox_files(source_cfg: Any) -> list[Path]:
     return input_files(inbox, pattern)
 
 
-def move_to_processing(file_path: Path, source_cfg: Any) -> Path:
+def move_to_processing(
+    file_path: Path,
+    source_cfg: Any,
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: "str | None" = None,
+) -> Path:
     """Move ``file_path`` to ``source_cfg.paths.processing_path``."""
-    return move_to_stage(file_path, source_cfg, "processing")
+    return move_to_stage(file_path, source_cfg, "processing", state_ctx=state_ctx, app=app, pipeline=pipeline)
 
 
-def move_to_success(file_path: Path, source_cfg: Any) -> Path:
+def move_to_success(
+    file_path: Path,
+    source_cfg: Any,
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: "str | None" = None,
+) -> Path:
     """Move ``file_path`` to ``source_cfg.paths.success_path``."""
-    return move_to_stage(file_path, source_cfg, "success")
+    return move_to_stage(file_path, source_cfg, "success", state_ctx=state_ctx, app=app, pipeline=pipeline)
 
 
-def move_to_failed(file_path: Path, source_cfg: Any) -> Path:
+def move_to_failed(
+    file_path: Path,
+    source_cfg: Any,
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: "str | None" = None,
+) -> Path:
     """Move ``file_path`` to ``source_cfg.paths.failed_path``."""
-    return move_to_stage(file_path, source_cfg, "failed")
+    return move_to_stage(file_path, source_cfg, "failed", state_ctx=state_ctx, app=app, pipeline=pipeline)
 
 
-def move_to_stage(file_path: Path, source_cfg: Any, stage: str) -> Path:
+def move_to_stage(
+    file_path: Path,
+    source_cfg: Any,
+    stage: str,
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: "str | None" = None,
+) -> Path:
     """Move ``file_path`` to a configured stage path on ``source_cfg.paths``."""
     dest_dir = Path(getattr(source_cfg.paths, f"{stage}_path")).expanduser().resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    return move_file(file_path, dest_dir)
+    return move_file(file_path, dest_dir, state_ctx=state_ctx, app=app, pipeline=pipeline, reason=stage)
 
 
 def _coerce_glob_patterns(pattern: str | Iterable[str]) -> list[str]:
