@@ -64,6 +64,7 @@ __all__ = [
     "find_original_relative_path",
     "iter_file_movements",
     "log_file_move",
+    "open_text_file",
     "apply_file_movements",
     "resolve_safe_file",
     "read_text_file",
@@ -212,6 +213,22 @@ def read_text_file(
 def read_bytes_file(path: Path | str) -> bytes:
     """Read raw file bytes through the shared file utility boundary."""
     return Path(path).read_bytes()
+
+
+def open_text_file(
+    path: Path | str,
+    mode: str = "r",
+    *,
+    encoding: str = "utf-8",
+    errors: str | None = None,
+) -> TextIO:
+    """Open a text file through the shared file utility boundary."""
+    file_path = Path(path).expanduser()
+    if any(flag in mode for flag in ("a", "w", "x", "+")):
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+    if errors is None:
+        return file_path.open(mode, encoding=encoding)
+    return file_path.open(mode, encoding=encoding, errors=errors)
 
 
 def is_hidden_path(path: Path, root_path: Path) -> bool:
@@ -658,7 +675,7 @@ def file_movement_log_path(ctx: Any) -> Path:
 
     return (
         installation_root
-        / "logs"
+        / "state"
         / "file_movements"
         / config_root_path.name
         / "file_movements.jsonl"

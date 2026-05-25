@@ -22,6 +22,7 @@ log_exit(ctx, msg, logger)      Log function exit and decrement ctx.log_depth.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -31,9 +32,12 @@ from rey_lib.logs.jsonl_handler import JsonlHandler
 
 __all__ = [
     "setup_logging",
+    "add_jsonl_handler",
     "get_logger",
+    "log_file_metadata",
     "log_enter",
     "log_exit",
+    "read_jsonl_records",
 ]
 
 # ---------------------------------------------------------------------------
@@ -94,6 +98,24 @@ class _ProviderWarningFilter(logging.Filter):
         return True
 
 
+class _TextFileHandler(logging.StreamHandler):
+    """Human-readable log handler whose file stream is opened by file_utils."""
+
+    def __init__(self, path: Path) -> None:
+        from rey_lib.files.file_utils import open_text_file
+
+        self._rey_stream = open_text_file(path, "a", encoding="utf-8")
+        super().__init__(self._rey_stream)
+
+    def close(self) -> None:
+        """Flush and close the file stream owned by this handler."""
+        try:
+            self.flush()
+            self._rey_stream.close()
+        finally:
+            super().close()
+
+
 def _is_too_many_requests_record(logger_name: str, message: str) -> bool:
     """Return True when a provider HTTP log record is a rate-limit response."""
     if logger_name != "httpx":
@@ -116,7 +138,8 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     Sets up handlers based on what is configured in ctx:
       - Console (stderr): always active, respects log level.
       - Human-readable file: when ctx.log_path is present.
-      - JSONL: when ctx.jsonl_path is present.
+      - JSONL: active by default unless disabled in ctx.logging.jsonl_enabled
+        or ctx.jsonl_enabled.
 
     Both path templates support two placeholders:
       {operation}  — the current operation name (e.g. 'scan', 'import')
@@ -155,6 +178,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     # Remove any pre-existing handlers to avoid duplicate output.
     for handler in root.handlers[:]:
         root.removeHandler(handler)
+        handler.close()
 
     # Console handler — always present.
     console_handler = logging.StreamHandler()
@@ -166,23 +190,18 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file  = None
 
-    if getattr(ctx, "log_path", None):
-        resolved_log = Path(
-            str(ctx.log_path).format(operation=operation, timestamp=timestamp)
-        ).expanduser().resolve()
-        resolved_log.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(filename=str(resolved_log), encoding="utf-8")
+    resolved_log: Path | None = None
+    if getattr(ctx, "log_path", None) and _log_bool(ctx, "readable_enabled", True):
+        resolved_log = _resolve_log_path(ctx.log_path, ctx, operation, timestamp)
+        file_handler = _TextFileHandler(resolved_log)
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         file_handler.addFilter(_ProviderWarningFilter())
         root.addHandler(file_handler)
         log_file = str(resolved_log)
 
-    if getattr(ctx, "jsonl_path", None):
-        jsonl_path = Path(
-            str(ctx.jsonl_path).format(operation=operation, timestamp=timestamp)
-        ).expanduser().resolve()
-        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    if _log_bool(ctx, "jsonl_enabled", True):
+        jsonl_path = _resolve_jsonl_path(ctx, operation, timestamp, resolved_log)
         jsonl_handler = JsonlHandler(
             jsonl_path = jsonl_path,
             context    = {"env": getattr(ctx, "env", "")},
@@ -202,6 +221,65 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     # JSONL path takes precedence when both are configured.
     if log_file:
         setattr(ctx, "log_file", log_file)
+
+
+def _log_bool(ctx: Any, key: str, default: bool) -> bool:
+    """Read a boolean logging option from ctx.logging first, then ctx."""
+    logging_cfg = getattr(ctx, "logging", None)
+    for source in (logging_cfg, ctx):
+        if source is None:
+            continue
+        value = getattr(source, key, None)
+        if value is not None:
+            return _coerce_bool(value)
+    return default
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Return a conservative bool for YAML/env friendly values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _resolve_log_path(template: Any, ctx: Any, operation: str, timestamp: str) -> Path:
+    """Resolve a configured log path template against ctx values."""
+    return Path(
+        str(template).format_map(_LogPathValues(ctx, operation, timestamp))
+    ).expanduser().resolve()
+
+
+def _resolve_jsonl_path(
+    ctx: Any,
+    operation: str,
+    timestamp: str,
+    resolved_log: Path | None,
+) -> Path:
+    """Resolve the authoritative JSONL path, defaulting beside readable logs."""
+    if getattr(ctx, "jsonl_path", None):
+        return _resolve_log_path(ctx.jsonl_path, ctx, operation, timestamp)
+    if resolved_log is not None:
+        return resolved_log.with_suffix(".jsonl")
+
+    app_name = getattr(ctx, "app_name", None) or getattr(ctx, "name", None) or "app"
+    template = f"~/logs/{app_name}/{app_name}.{{operation}}.{{timestamp}}.jsonl"
+    return _resolve_log_path(template, ctx, operation, timestamp)
+
+
+class _LogPathValues(dict[str, Any]):
+    """Path format values backed by operation, timestamp, and ctx attrs."""
+
+    def __init__(self, ctx: Any, operation: str, timestamp: str) -> None:
+        super().__init__(operation=operation, timestamp=timestamp)
+        self._ctx = ctx
+
+    def __missing__(self, key: str) -> str:
+        value = getattr(self._ctx, key, None)
+        if value is None:
+            return "unknown"
+        return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +304,111 @@ def get_logger(name: str) -> logging.Logger:
         A configured logger instance.
     """
     return logging.getLogger(name)
+
+
+def add_jsonl_handler(
+    logger_name: str,
+    jsonl_path: Path,
+    *,
+    context: dict[str, Any],
+    ctx: Any = None,
+    ctx_fields: tuple[str, ...] = (),
+    level: int | None = None,
+) -> JsonlHandler:
+    """Attach a JSONL handler through the shared logging utility boundary."""
+    handler = JsonlHandler(
+        jsonl_path=jsonl_path,
+        context=context,
+        ctx=ctx,
+        ctx_fields=ctx_fields,
+    )
+    if level is not None:
+        handler.setLevel(level)
+    handler.addFilter(_ProviderWarningFilter())
+    get_logger(logger_name).addHandler(handler)
+    return handler
+
+
+def log_file_metadata(path: Path, jsonl_stems: set[str] | None = None) -> dict[str, Any]:
+    """Return JSONL-authority metadata for one log file path."""
+    log_type = "jsonl" if path.suffix == ".jsonl" else "readable"
+    return {
+        "log_type": log_type,
+        "authoritative": log_type == "jsonl",
+        "derived": log_type != "jsonl",
+        "derived_from": _derived_jsonl_path(path, jsonl_stems or set()),
+    }
+
+
+def read_jsonl_records(
+    path: Path,
+    content: str,
+    *,
+    filters: dict[str, str] | None = None,
+    max_records: int = 250,
+    truncated_file: bool = False,
+) -> dict[str, Any]:
+    """Parse and filter authoritative JSONL log records."""
+    if path.suffix != ".jsonl":
+        return {
+            "path": str(path),
+            "records": [],
+            "records_matched": 0,
+            "records_returned": 0,
+            "truncated_file": truncated_file,
+            "parse_errors": [],
+            "error": "Structured log records are available only for JSONL logs.",
+            **log_file_metadata(path),
+        }
+
+    selected_filters = filters or {}
+    records: list[dict[str, Any]] = []
+    parse_errors: list[str] = []
+
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            parse_errors.append(f"line {line_number}: {exc}")
+            continue
+        if _record_matches(record, selected_filters):
+            records.append(record)
+
+    limited_records = records[:max_records]
+    return {
+        "path": str(path),
+        "records": limited_records,
+        "records_matched": len(records),
+        "records_returned": len(limited_records),
+        "truncated_file": truncated_file,
+        "parse_errors": parse_errors,
+        **log_file_metadata(path),
+    }
+
+
+def _derived_jsonl_path(path: Path, jsonl_stems: set[str]) -> str:
+    """Return matching JSONL source path for a readable log when present."""
+    if path.suffix == ".jsonl":
+        return ""
+    stem = path.with_suffix("").as_posix()
+    return f"{stem}.jsonl" if stem in jsonl_stems else ""
+
+
+def _record_matches(record: dict[str, Any], filters: dict[str, str]) -> bool:
+    """Return true when a JSONL record matches all requested filters."""
+    if filters.get("errors_only") == "true":
+        level = str(record.get("level", record.get("levelname", ""))).upper()
+        if level not in {"ERROR", "CRITICAL"}:
+            return False
+
+    for key in ("level", "app", "pipeline_run_id", "pipeline_step_name", "batch_id", "file_name"):
+        expected = filters.get(key)
+        if expected and str(record.get(key, "")) != expected:
+            return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -101,9 +101,10 @@ class JsonlHandler(logging.Handler):
         # Used to resolve parent_sequence without requiring explicit span calls.
         self._depth_seq: dict[int, int] = {}
 
+        from rey_lib.files.file_utils import open_text_file
+
         resolved = Path(jsonl_path).expanduser().resolve()
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = resolved.open("a", encoding="utf-8")
+        self._fh = open_text_file(resolved, "a", encoding="utf-8")
 
     # ------------------------------------------------------------------
     # logging.Handler interface

@@ -174,6 +174,10 @@ def build_ctx_for_app(
     object.__setattr__(ctx, "shared_configs",      Namespace(shared_configs))
     object.__setattr__(ctx, "shared_config_paths", Namespace(shared_config_paths))
 
+    installation_state = installation_raw.get("state", None)
+    if installation_state and isinstance(installation_state, dict):
+        object.__setattr__(ctx, "state", Namespace(installation_state))
+
     return ctx
 
 

@@ -28,6 +28,8 @@ from rey_lib.errors.error_utils import StateError
 from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
 
 __all__ = [
+    "get_failed_file_path",
+    "get_state_file_path",
     "load_state",
     "save_state",
     "is_new_or_updated",
@@ -43,6 +45,64 @@ __all__ = [
 ]
 
 log = get_logger(__name__)
+
+
+def get_state_file_path(ctx: Any, conn: Any) -> Path:
+    """Return the state file path for a connection.
+
+    Uses conn.sync.state_file when explicitly configured. Otherwise derives
+    the path from ctx.state.ftp_dir and the connection name.
+
+    Args:
+        ctx:  Global context carrying ctx.installation_root and ctx.state.ftp_dir.
+        conn: Per-connection Namespace.
+
+    Returns:
+        Resolved absolute Path to the state JSON file.
+
+    Raises:
+        ValueError: If neither conn.sync.state_file nor ctx.state.ftp_dir is set.
+    """
+    configured = getattr(getattr(conn, "sync", None), "state_file", None)
+    if configured:
+        p = Path(str(configured)).expanduser()
+        return p if p.is_absolute() else _installation_root_path(ctx) / p
+    ftp_dir = getattr(getattr(ctx, "state", None), "ftp_dir", None)
+    if not ftp_dir:
+        raise ValueError(
+            "ctx.state.ftp_dir is not configured. "
+            "Add 'state: ftp_dir:' to the installation config."
+        )
+    return _installation_root_path(ctx) / ftp_dir / f"{conn.name}.state.json"
+
+
+def get_failed_file_path(ctx: Any, conn: Any) -> Path:
+    """Return the failed-downloads file path for a connection.
+
+    Uses conn.sync.failed_file when explicitly configured. Otherwise derives
+    the path from ctx.state.ftp_dir and the connection name.
+
+    Args:
+        ctx:  Global context carrying ctx.installation_root and ctx.state.ftp_dir.
+        conn: Per-connection Namespace.
+
+    Returns:
+        Resolved absolute Path to the failed downloads JSON file.
+
+    Raises:
+        ValueError: If neither conn.sync.failed_file nor ctx.state.ftp_dir is set.
+    """
+    configured = getattr(getattr(conn, "sync", None), "failed_file", None)
+    if configured:
+        p = Path(str(configured)).expanduser()
+        return p if p.is_absolute() else _installation_root_path(ctx) / p
+    ftp_dir = getattr(getattr(ctx, "state", None), "ftp_dir", None)
+    if not ftp_dir:
+        raise ValueError(
+            "ctx.state.ftp_dir is not configured. "
+            "Add 'state: ftp_dir:' to the installation config."
+        )
+    return _installation_root_path(ctx) / ftp_dir / f"{conn.name}.failed.json"
 
 
 def load_state(ctx: Any, conn: Any) -> dict[str, str]:
@@ -62,7 +122,7 @@ def load_state(ctx: Any, conn: Any) -> dict[str, str]:
         StateError: If the file exists but cannot be read or parsed.
     """
     log_enter(ctx, "load_state", log)
-    state_file: Path = Path(conn.sync.state_file)
+    state_file: Path = get_state_file_path(ctx, conn)
 
     if not state_file.exists():
         log.info("No state file at '%s' — starting fresh.", state_file)
@@ -94,7 +154,7 @@ def save_state(ctx: Any, conn: Any, state: dict[str, str]) -> None:
         StateError: If the file cannot be written.
     """
     log_enter(ctx, "save_state", log)
-    state_file: Path = Path(conn.sync.state_file)
+    state_file: Path = get_state_file_path(ctx, conn)
     state_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         with state_file.open("w", encoding="utf-8") as f:
@@ -456,3 +516,11 @@ def _read_stamp_from_state(state: dict[str, str]) -> datetime | None:
         return _ensure_utc(dt)
     except ValueError:
         return None
+
+
+def _installation_root_path(ctx: Any) -> Path:
+    """Return the installation root path from ctx."""
+    configured = getattr(ctx, "installation_root", None)
+    if not configured:
+        raise ValueError("ctx.installation_root is required to resolve FTP state paths.")
+    return Path(str(configured)).expanduser().resolve()

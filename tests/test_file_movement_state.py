@@ -23,15 +23,15 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-def test_default_log_path_is_installation_logs_version(tmp_path: Path) -> None:
+def test_default_log_path_resolves_under_state_file_movements(tmp_path: Path) -> None:
+    """The default movement state path lives under the installation state folder."""
     ctx = _ctx(tmp_path)
-
     assert file_movement_log_path(ctx) == (
         tmp_path
         / "test"
         / "installations"
         / "ccc"
-        / "logs"
+        / "state"
         / "file_movements"
         / "v01"
         / "file_movements.jsonl"
@@ -41,7 +41,7 @@ def test_default_log_path_is_installation_logs_version(tmp_path: Path) -> None:
 def test_configured_log_path_is_relative_to_installation_root(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     ctx.state = SimpleNamespace(
-        file_movements_path="logs/state/{config_root}/moves.jsonl"
+        file_movements_path="state/app/{config_root}/moves.jsonl"
     )
 
     assert file_movement_log_path(ctx) == (
@@ -49,8 +49,8 @@ def test_configured_log_path_is_relative_to_installation_root(tmp_path: Path) ->
         / "test"
         / "installations"
         / "ccc"
-        / "logs"
         / "state"
+        / "app"
         / "v01"
         / "moves.jsonl"
     )

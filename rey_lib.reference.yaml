@@ -39,6 +39,17 @@ jsonl_path: ~/logs/{app_name}/{app_name}.{operation}.{timestamp}.jsonl
 # Common log path tokens:
 #   {operation}
 #   {timestamp}
+#   {app_name}
+# JSONL logs are written by default through rey_lib.logs. If jsonl_path is
+# omitted, setup_logging writes the authoritative JSONL beside log_path using
+# the same stem and a .jsonl extension. Human-readable .log output is a
+# configured readable view.
+
+logging:
+  jsonl_enabled: true
+  readable_enabled: true
+# jsonl_enabled may be set false only for explicitly configured exceptions.
+# readable_enabled controls whether log_path produces a human-readable log.
 
 jsonl_ctx_fields:
   - source_name
@@ -46,10 +57,10 @@ jsonl_ctx_fields:
 # Optional JSONL context fields.
 
 state:
-  file_movements_path: logs/file_movements/{config_root}/file_movements.jsonl
+  file_movements_path: state/file_movements/{config_root}/file_movements.jsonl
 # Optional movement-state JSONL path, relative to the installation root
 # when not absolute. Default:
-#   logs/file_movements/{config_root}/file_movements.jsonl
+#   state/file_movements/{config_root}/file_movements.jsonl
 # Supported tokens:
 #   {config_root}       active config root folder name, e.g. v01
 #   {config_root_name}  alias for {config_root}

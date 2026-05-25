@@ -21,6 +21,7 @@ from rey_lib.ftp.ftp_client import (
 from rey_lib.ftp.state_manager import (
     abandon_to_failed_file,
     add_to_retry_queue,
+    get_failed_file_path,
     increment_retry_count,
     is_new_or_updated,
     load_failed_files,
@@ -156,7 +157,7 @@ def _retry_failed(
     abandoned: list[str]   = []
 
     max_retries = int(getattr(conn.ftp, "max_retry_sessions", 3))
-    failed_file = Path(conn.sync.failed_file)
+    failed_file = get_failed_file_path(ctx, conn)
     log_file    = getattr(ctx, "log_file", "unknown")
 
     for entry in retry_queue:
