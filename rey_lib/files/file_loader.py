@@ -1716,7 +1716,15 @@ def _transform_one_file(
 			return False
 
 		output_path = _build_output_path(data_source.paths, transform_cfg, file_path, ctx=ctx)
-		write_file(output_path, rows, file_type="CSV")
+		write_file(
+			output_path,
+			rows,
+			file_type="CSV",
+			state_ctx=ctx,
+			app=getattr(ctx, "app_name", "") if ctx is not None else "",
+			pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
+			reason="transformed",
+		)
 
 		# Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
 		# can stamp RecordCount on the BatchStep row.

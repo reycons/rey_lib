@@ -17,8 +17,8 @@ converted_output_path(base_dir, filename_pattern, substitutions)
     Construct an output path by substituting tokens into a filename pattern.
 get_reader(infile, file_type, encoding, row_filter)
     Return a row iterator for the given file type.
-write_file(outfile, rows, file_type)
-    Write rows to a file in the specified format.
+write_file(outfile, content, file_type)
+    Write content to a file and log the creation to the movement state.
 move_file(src, dest_dir)
     Move a file to a destination directory, creating dest_dir if needed.    
 """
@@ -488,36 +488,81 @@ def get_reader(
 
 def write_file(
     outfile: Path,
-    rows: list[dict[str, Any]],
+    content: Any,
     file_type: str = "CSV",
-) -> None:
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: "str | None" = None,
+    reason: str = "",
+) -> Path:
     """
-    Write rows to a file in the specified format.
+    Write content to a file and log the creation to the movement state.
 
     Parameters
     ----------
     outfile : Path
         Destination file path. Parent directories are created if needed.
-    rows : list[dict[str, Any]]
-        Rows to write. Must be non-empty.
+    content : Any
+        Content to write. ``list[dict]`` for CSV/XLSX; ``str`` for TEXT;
+        any JSON-serialisable value for JSON.
     file_type : str
-        Output format — 'CSV' or 'XLSX'. Case-insensitive.
+        Output format — 'CSV', 'XLSX', 'TEXT', or 'JSON'. Case-insensitive.
+    state_ctx : Any
+        Optional context with ``config_root``. When provided, a creation
+        record is appended to the movement state log after the file is written.
+    app : str
+        App name stamped on the state record.
+    pipeline : str | None
+        Pipeline name stamped on the state record.
+    reason : str
+        Reason label stamped on the state record.
+
+    Returns
+    -------
+    Path
+        Absolute path of the written file.
 
     Raises
     ------
     ValueError
-        If file_type is not 'CSV' or 'XLSX', or rows is empty.
+        If file_type is unsupported or content is empty for tabular formats.
     """
-    if not rows:
-        raise ValueError("write_file called with empty rows list.")
-
+    outfile = Path(outfile)
     fmt = file_type.upper()
-    if fmt == "CSV":
-        _csv_writer(outfile, rows)
-    elif fmt == "XLSX":
-        _xlsx_writer(outfile, rows)
+
+    if fmt in ("CSV", "XLSX"):
+        if not content:
+            raise ValueError("write_file called with empty rows list.")
+        if fmt == "CSV":
+            _csv_writer(outfile, content)
+        else:
+            _xlsx_writer(outfile, content)
+    elif fmt == "TEXT":
+        outfile.parent.mkdir(parents=True, exist_ok=True)
+        outfile.write_text(str(content), encoding="utf-8")
+    elif fmt == "JSON":
+        outfile.parent.mkdir(parents=True, exist_ok=True)
+        outfile.write_text(json.dumps(content, default=str, indent=2), encoding="utf-8")
     else:
-        raise ValueError(f"Unsupported file_type '{file_type}'. Must be 'CSV' or 'XLSX'.")
+        raise ValueError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
+
+    if state_ctx is not None:
+        try:
+            log_file_move(
+                state_ctx,
+                app=app,
+                pipeline=pipeline,
+                source=outfile,
+                destination=outfile,
+                action="create",
+                reason=reason,
+                original_source=outfile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Could not write file creation state for '%s': %s", outfile.name, exc)
+
+    return outfile.resolve()
 
 def move_file(
     src: Path,
