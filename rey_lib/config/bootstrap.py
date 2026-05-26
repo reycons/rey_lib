@@ -178,6 +178,10 @@ def build_ctx_for_app(
     if installation_state and isinstance(installation_state, dict):
         object.__setattr__(ctx, "state", Namespace(installation_state))
 
+    installation_messaging = installation_raw.get("messaging", None)
+    if installation_messaging and isinstance(installation_messaging, dict):
+        object.__setattr__(ctx, "messaging", Namespace(installation_messaging))
+
     return ctx
 
 

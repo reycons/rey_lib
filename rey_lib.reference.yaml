@@ -67,6 +67,81 @@ state:
 #   {config_root_name}  alias for {config_root}
 #   {installation}      installation name when available
 
+messaging:
+  archive_path: ~/Rey Apps/test/state/v01/messages.jsonl
+  text_max_length: 160
+  delivery:
+    dry_run: true
+  pipeline_summary:
+    audience: internal
+    record_limit: 500
+    subject: "Pipeline $pipeline_name: $pipeline_status"
+    body: |
+      # Pipeline $pipeline_name
+
+      Status: $pipeline_status
+      Run ID: $run_id
+      Batch ID: $batch_id
+      Log file: $log_file
+
+      $overall_summary
+
+      ## Errors
+      $error_summary
+
+      ## Warnings
+      $warning_summary
+
+      Failed steps: $failed_steps
+  approvals:
+    required_audiences:
+      - external
+    required_message_types: []
+    required_channels: []
+  recipient_groups:
+    - name: internal_ops
+      description: Internal operations notifications.
+      email:
+        to:
+          - ops@example.com
+          - support@example.com
+        cc: []
+        bcc: []
+        reply_to: ""
+      phone:
+        to: []
+      slack:
+        channels: []
+        users: []
+  providers:
+    email:
+      provider: smtp
+      host: smtp.example.com
+      port: 587
+      from_address: no-reply@example.com
+      starttls: true
+      username: ""
+      password: ""
+      timeout_seconds: 30
+# Optional shared messaging configuration. Applications submit message
+# requests through rey_lib.messaging and must not directly send email, text,
+# webhook, or external notifications.
+# archive_path is optional file-backed JSONL persistence for message snapshots
+# and lifecycle events. JSONL logs remain the authoritative audit trail.
+# delivery.dry_run allows beta pipeline messaging to exercise the full
+# lifecycle without contacting a provider.
+# pipeline_summary controls the deterministic log-to-message template used
+# by rey_messaging finalizer steps.
+# approvals are deterministic policy controls; LLM generation may draft content
+# but never recipients, provider routing, timing, or approval requirements.
+# recipient_groups are deterministic, channel-shaped delivery targets. Apps pass
+# recipient_group + channel; rey_lib.messaging resolves to email.to/cc/bcc,
+# phone.to, or slack channels/users.
+# v1 channels:
+#   email   — dry-run and SMTP provider
+#   text    — dry-run only; provider dispatch reserved
+#   webhook — dry-run only; provider dispatch reserved
+
 diagnostics:
   info:
     enabled: true
