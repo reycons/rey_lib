@@ -87,6 +87,17 @@ class _IndentFormatter(logging.Formatter):
         return f"{prefix}{indent}{record.getMessage()}"
 
 
+class _TimestampFilter(logging.Filter):
+    """Stamp every LogRecord with a pre-computed ISO-8601 UTC timestamp."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return True after setting record.timestamp to an ISO UTC string."""
+        record.timestamp = datetime.fromtimestamp(  # type: ignore[attr-defined]
+            record.created, tz=timezone.utc
+        ).isoformat(timespec="milliseconds")
+        return True
+
+
 class _ProviderWarningFilter(logging.Filter):
     """Promote provider back-pressure messages that libraries log too softly."""
 
@@ -175,6 +186,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
 
     root = logging.getLogger()
     root.setLevel(level)
+    root.addFilter(_TimestampFilter())
 
     # Remove any pre-existing handlers to avoid duplicate output.
     for handler in root.handlers[:]:

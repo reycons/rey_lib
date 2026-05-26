@@ -213,9 +213,9 @@ class JsonlHandler(logging.Handler):
         depth:      int,
     ) -> dict[str, Any]:
         """Assemble the full JSON record and apply field renaming."""
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(
-            timespec="milliseconds"
-        )
+        ts = getattr(record, "timestamp", None) or datetime.fromtimestamp(
+            record.created, tz=timezone.utc
+        ).isoformat(timespec="milliseconds")
 
         out: dict[str, Any] = {
             "sequence":        seq,
