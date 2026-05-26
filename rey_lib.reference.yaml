@@ -57,10 +57,11 @@ jsonl_ctx_fields:
 # Optional JSONL context fields.
 
 state:
-  file_movements_path: state/file_movements/{config_root}/file_movements.jsonl
-# Optional movement-state JSONL path, relative to the installation root
-# when not absolute. Default:
-#   state/file_movements/{config_root}/file_movements.jsonl
+  file_operations_path: state/{config_root}/file_operations.jsonl
+# Optional file-operation state JSONL path. This records files moved, created,
+# copied, deleted, or otherwise managed by applications. Paths may be absolute
+# or relative to the installation root.
+# Deprecated compatibility key: file_movements_path.
 # Supported tokens:
 #   {config_root}       active config root folder name, e.g. v01
 #   {config_root_name}  alias for {config_root}

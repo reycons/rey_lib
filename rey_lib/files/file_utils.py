@@ -18,7 +18,7 @@ converted_output_path(base_dir, filename_pattern, substitutions)
 get_reader(infile, file_type, encoding, row_filter)
     Return a row iterator for the given file type.
 write_file(outfile, content, file_type)
-    Write content to a file and log the creation to the movement state.
+    Write content to a file and log the creation to the file-operation state.
 move_file(src, dest_dir)
     Move a file to a destination directory, creating dest_dir if needed.    
 """
@@ -30,6 +30,7 @@ from fnmatch import fnmatch
 import hashlib
 import json
 import re
+import uuid
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
@@ -59,10 +60,13 @@ __all__ = [
     "write_file",
     "scan_column_lengths",
     "move_file",
+    "file_operation_log_path",
     "file_movement_log_path",
     "find_named_files",
     "find_original_relative_path",
+    "iter_file_operations",
     "iter_file_movements",
+    "log_file_operation",
     "log_file_move",
     "open_text_file",
     "apply_file_movements",
@@ -514,7 +518,7 @@ def write_file(
     reason: str = "",
 ) -> Path:
     """
-    Write content to a file and log the creation to the movement state.
+    Write content to a file and log the creation to the file-operation state.
 
     Parameters
     ----------
@@ -527,7 +531,7 @@ def write_file(
         Output format — 'CSV', 'XLSX', 'TEXT', or 'JSON'. Case-insensitive.
     state_ctx : Any
         Optional context with ``config_root``. When provided, a creation
-        record is appended to the movement state log after the file is written.
+        record is appended to the file-operation state log after the file is written.
     app : str
         App name stamped on the state record.
     pipeline : str | None
@@ -566,7 +570,7 @@ def write_file(
 
     if state_ctx is not None:
         try:
-            log_file_move(
+            log_file_operation(
                 state_ctx,
                 app=app,
                 pipeline=pipeline,
@@ -608,7 +612,7 @@ def move_file(
     dest_name : Optional[str]
         Destination filename. If None, keeps src.name.
     state_ctx : Any
-        Optional context with ``config_root``. When provided, a movement
+        Optional context with ``config_root``. When provided, a file-operation
         record is appended after the move succeeds.
 
     Returns
@@ -635,7 +639,7 @@ def move_file(
     _logger.debug("Moved: %s → %s", src, dest)
     if state_ctx is not None:
         try:
-            log_file_move(
+            log_file_operation(
                 state_ctx,
                 app=app,
                 pipeline=pipeline,
@@ -650,8 +654,8 @@ def move_file(
     return dest
 
 
-def file_movement_log_path(ctx: Any) -> Path:
-    """Return the installation-level movement JSONL path for ``ctx``."""
+def file_operation_log_path(ctx: Any) -> Path:
+    """Return the configured file-operation JSONL path for ``ctx``."""
     config_root = getattr(ctx, "config_root", None)
     config_root_path = (
         Path(str(config_root)).expanduser().resolve()
@@ -661,16 +665,71 @@ def file_movement_log_path(ctx: Any) -> Path:
     installation_root = _installation_root(ctx, config_root_path)
 
     state = getattr(ctx, "state", None)
-    configured = getattr(state, "file_movements_path", None) if state else None
+    configured = getattr(state, "file_operations_path", None) if state else None
+    configured = configured or (getattr(state, "file_movements_path", None) if state else None)
     if configured:
-        return _resolve_movement_log_config(
+        return _resolve_file_operation_config(
             str(configured),
             installation_root,
             config_root_path,
             ctx,
         )
 
-    raise ValueError("state.file_movements_path is required to locate the movement state log.")
+    raise ValueError(
+        "state.file_operations_path is required to locate the file-operation state log."
+    )
+
+
+def file_movement_log_path(ctx: Any) -> Path:
+    """Compatibility alias for the configured file-operation JSONL path."""
+    return file_operation_log_path(ctx)
+
+
+def log_file_operation(
+    ctx: Any,
+    *,
+    source: Path | str,
+    destination: Path | str,
+    app: str = "",
+    pipeline: str | None = None,
+    action: str = "move",
+    reason: str = "",
+    original_source: Path | str | None = None,
+    run_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append one successful file operation event to the configured JSONL state."""
+    src = Path(source).expanduser()
+    dest = Path(destination).expanduser()
+    original = Path(original_source).expanduser() if original_source else src
+    environment_root = _environment_root(ctx)
+
+    record: dict[str, Any] = {
+        "operation_id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "app": app,
+        "pipeline": pipeline or getattr(ctx, "pipeline_name", None),
+        "operation": action,
+        "action": action,
+        "reason": reason,
+        "source": _display_path(src, environment_root),
+        "destination": _display_path(dest, environment_root),
+        "original_source": _display_path(original, environment_root),
+        "source_abs": str(src.resolve()),
+        "destination_abs": str(dest.resolve()),
+        "original_source_abs": str(original.resolve()),
+        "file_fingerprint": _file_operation_fingerprint(dest if dest.exists() else src),
+    }
+    if run_id:
+        record["run_id"] = run_id
+    if metadata:
+        record["metadata"] = metadata
+
+    path = file_operation_log_path(ctx)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    return record
 
 
 def log_file_move(
@@ -686,40 +745,24 @@ def log_file_move(
     run_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Append one successful movement event to the installation JSONL state."""
-    src = Path(source).expanduser()
-    dest = Path(destination).expanduser()
-    original = Path(original_source).expanduser() if original_source else src
-    environment_root = _environment_root(ctx)
-
-    record: dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "app": app,
-        "pipeline": pipeline or getattr(ctx, "pipeline_name", None),
-        "action": action,
-        "reason": reason,
-        "source": _display_path(src, environment_root),
-        "destination": _display_path(dest, environment_root),
-        "original_source": _display_path(original, environment_root),
-        "source_abs": str(src.resolve()),
-        "destination_abs": str(dest.resolve()),
-        "original_source_abs": str(original.resolve()),
-    }
-    if run_id:
-        record["run_id"] = run_id
-    if metadata:
-        record["metadata"] = metadata
-
-    path = file_movement_log_path(ctx)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
-    return record
+    """Compatibility alias for ``log_file_operation``."""
+    return log_file_operation(
+        ctx,
+        source=source,
+        destination=destination,
+        app=app,
+        pipeline=pipeline,
+        action=action,
+        reason=reason,
+        original_source=original_source,
+        run_id=run_id,
+        metadata=metadata,
+    )
 
 
-def iter_file_movements(ctx: Any) -> Iterator[dict[str, Any]]:
-    """Yield movement state records, skipping blank or malformed lines."""
-    path = file_movement_log_path(ctx)
+def iter_file_operations(ctx: Any) -> Iterator[dict[str, Any]]:
+    """Yield file-operation state records, skipping blank or malformed lines."""
+    path = file_operation_log_path(ctx)
     if not path.exists():
         return
 
@@ -732,7 +775,34 @@ def iter_file_movements(ctx: Any) -> Iterator[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(record, dict):
+                if "operation" not in record and "action" in record:
+                    record["operation"] = record["action"]
                 yield record
+
+
+def iter_file_movements(ctx: Any) -> Iterator[dict[str, Any]]:
+    """Compatibility alias for file-operation state records."""
+    yield from iter_file_operations(ctx)
+
+
+def _file_operation_fingerprint(path: Path) -> dict[str, Any]:
+    """Return a stable fingerprint for a file-operation target when available."""
+    file_path = Path(path).expanduser()
+    fingerprint: dict[str, Any] = {
+        "name": file_path.name,
+        "exists": file_path.exists(),
+    }
+    if not file_path.is_file():
+        return fingerprint
+
+    stat = file_path.stat()
+    fingerprint.update(
+        {
+            "size_bytes": stat.st_size,
+            "sha256": file_sha256(file_path),
+        }
+    )
+    return fingerprint
 
 
 def find_original_relative_path(ctx: Any, *, pipeline: str, file_name: str) -> Path | None:
@@ -1023,13 +1093,13 @@ def _installation_root(ctx: Any, config_root_path: Path | None = None) -> Path:
     raise ValueError("ctx.config_root is required to locate the installation root.")
 
 
-def _resolve_movement_log_config(
+def _resolve_file_operation_config(
     raw_path: str,
     installation_root: Path,
     config_root_path: Path | None,
     ctx: Any,
 ) -> Path:
-    """Resolve configured movement log path relative to the installation root."""
+    """Resolve configured file-operation state path relative to the installation root."""
     config_root_name = config_root_path.name if config_root_path is not None else ""
     tokens = {
         "config_root": config_root_name,
