@@ -8,10 +8,14 @@ from typing import Any
 from rey_lib.messaging.errors import MessageValidationError
 
 __all__ = [
+    "delivery_dry_run",
     "message_archive_path",
     "message_provider",
     "messaging_config",
+    "resolve_message_definition",
+    "resolve_message_set",
     "resolve_recipient_group",
+    "resolve_template_definition",
 ]
 
 
@@ -79,6 +83,109 @@ def resolve_recipient_group(ctx: Any, group_name: str, channel: str) -> dict[str
         return dict(channel_cfg) if isinstance(channel_cfg, dict) else {}
 
     raise MessageValidationError(f"Recipient group not found: {group_name}")
+
+
+def resolve_message_set(ctx: Any, name: str) -> list[str]:
+    """Return the ordered list of message names belonging to a named message set.
+
+    Expected YAML shape::
+
+        messaging:
+          message_sets:
+            - name: pipeline_run_complete
+              messages:
+                - pipeline_run_email_summary
+                - pipeline_run_sms_alert
+
+    Raises
+    ------
+    MessageValidationError
+        If the message set is not found or has no messages.
+    """
+    if not name:
+        raise MessageValidationError("message_set name is required.")
+    cfg = messaging_config(ctx)
+    sets = getattr(cfg, "message_sets", []) if cfg else []
+    for entry in sets or []:
+        if _value(entry, "name") != name:
+            continue
+        messages = _list_value(entry, "messages")
+        if not messages:
+            raise MessageValidationError(
+                f"Message set '{name}' is configured but has no messages."
+            )
+        return messages
+    raise MessageValidationError(f"Message set not found: '{name}'.")
+
+
+def resolve_message_definition(ctx: Any, name: str) -> Any:
+    """Return the message definition entry for a named message.
+
+    Expected YAML shape::
+
+        messaging:
+          messages:
+            - name: pipeline_run_email_summary
+              enabled: true
+              channel: email
+              recipient_group: internal_ops
+              template: pipeline_run_summary
+              body_builder:
+                type: llm_log_summary
+                ...
+
+    Raises
+    ------
+    MessageValidationError
+        If the message definition is not found.
+    """
+    if not name:
+        raise MessageValidationError("message name is required.")
+    cfg = messaging_config(ctx)
+    messages = getattr(cfg, "messages", []) if cfg else []
+    for entry in messages or []:
+        if _value(entry, "name") == name:
+            return entry
+    raise MessageValidationError(f"Message definition not found: '{name}'.")
+
+
+def resolve_template_definition(ctx: Any, name: str) -> Any | None:
+    """Return the template definition entry for a named template, or None.
+
+    Expected YAML shape::
+
+        messaging:
+          templates:
+            - name: pipeline_run_summary
+              subject: "Run Summary: $source_name — $status"
+              body: |
+                # $source_name
+                Status: $status
+                $body
+    """
+    if not name:
+        return None
+    cfg = messaging_config(ctx)
+    templates = getattr(cfg, "templates", []) if cfg else []
+    for entry in templates or []:
+        if _value(entry, "name") == name:
+            return entry
+    return None
+
+
+def delivery_dry_run(ctx: Any) -> bool:
+    """Return the configured dry_run flag from ``messaging.delivery.dry_run``.
+
+    Raises
+    ------
+    MessageValidationError
+        If ``messaging.delivery.dry_run`` is not configured.
+    """
+    cfg = messaging_config(ctx)
+    delivery = getattr(cfg, "delivery", None) if cfg else None
+    if delivery is None or not hasattr(delivery, "dry_run"):
+        raise MessageValidationError("messaging.delivery.dry_run is required.")
+    return bool(getattr(delivery, "dry_run"))
 
 
 def _value(source: Any, key: str, default: Any = None) -> Any:

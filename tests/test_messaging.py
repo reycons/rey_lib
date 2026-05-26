@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from rey_lib.config.config_utils import Namespace
-from rey_lib.messaging import approve_message, create_message, send_message, send_pipeline_summary
+from rey_lib.messaging import approve_message, create_message, execute_message_set, send_message
 from rey_lib.messaging.errors import MessageApprovalError, MessageValidationError
 from rey_lib.messaging.models import Attachment, MessageContent, MessageRequest
 from rey_lib.messaging.repository import FileMessageRepository
@@ -42,12 +42,35 @@ def _ctx(tmp_path: Path) -> Namespace:
                     }
                 },
                 "delivery": {"dry_run": True},
-                "pipeline_summary": {
-                    "audience": "internal",
-                    "record_limit": 500,
-                    "subject": "Pipeline $pipeline_name: $pipeline_status",
-                    "body": "# Pipeline $pipeline_name\n\n$overall_summary\n\n## Errors\n$error_summary\n",
-                },
+                "messages": [
+                    {
+                        "name": "test_email_summary",
+                        "enabled": True,
+                        "channel": "email",
+                        "recipient_group": "internal_ops",
+                        "template": "test_summary",
+                        "body_builder": {
+                            "type": "llm_log_summary",
+                            "filters": {
+                                "levels": ["WARNING", "ERROR", "CRITICAL"],
+                                "record_limit": 500,
+                            },
+                        },
+                    }
+                ],
+                "message_sets": [
+                    {
+                        "name": "test_run_complete",
+                        "messages": ["test_email_summary"],
+                    }
+                ],
+                "templates": [
+                    {
+                        "name": "test_summary",
+                        "subject": "Run Summary",
+                        "body": "## Errors\n$error_summary\n\n## Warnings\n$warning_summary\n",
+                    }
+                ],
             }
         }
     )
@@ -123,8 +146,8 @@ def test_email_recipient_group_allows_explicit_empty_overrides(tmp_path: Path) -
     assert message.request.reply_to == "reply@example.com"
 
 
-def test_pipeline_summary_uses_log_and_recipient_group(tmp_path: Path) -> None:
-    """Pipeline summary reads JSONL log content and delegates delivery to messaging."""
+def test_execute_message_set_uses_log_and_recipient_group(tmp_path: Path) -> None:
+    """execute_message_set reads JSONL log content and delegates delivery to messaging."""
     log_file = tmp_path / "pipeline.jsonl"
     log_file.write_text(
         "\n".join(
@@ -144,19 +167,19 @@ def test_pipeline_summary_uses_log_and_recipient_group(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = send_pipeline_summary(
+    results = execute_message_set(
         _ctx(tmp_path),
-        log_file=log_file,
-        pipeline_name="daily",
-        pipeline_status="failed",
-        run_id="run-1",
-        recipient_group="internal_ops",
+        message_set_name="test_run_complete",
+        context_file=log_file,
+        context_type="jsonl_log",
     )
 
-    assert result["delivery_status"] == "sent"
+    assert len(results) == 1
+    result = results[0]
+    assert result["status"] == "sent"
     assert result["dry_run"] is True
-    assert result["warning_count"] == "1"
-    assert result["error_count"] == "1"
+    assert result["channel"] == "email"
+    assert result["message_name"] == "test_email_summary"
 
 
 def test_external_audience_requires_approval_before_send(tmp_path: Path) -> None:

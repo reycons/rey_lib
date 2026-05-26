@@ -9,6 +9,7 @@ from rey_lib.messaging.models import (
     MessageEvent,
     MessageRequest,
 )
+from rey_lib.messaging.orchestrator import execute_message_set
 from rey_lib.messaging.router import (
     approve_message,
     create_message,
@@ -16,7 +17,6 @@ from rey_lib.messaging.router import (
     send_message,
     validate_message,
 )
-from rey_lib.messaging.pipeline_summary import send_pipeline_summary
 
 __all__ = [
     "Attachment",
@@ -28,8 +28,8 @@ __all__ = [
     "MessageRequest",
     "approve_message",
     "create_message",
+    "execute_message_set",
     "render_message",
     "send_message",
-    "send_pipeline_summary",
     "validate_message",
 ]
