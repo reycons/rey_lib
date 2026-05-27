@@ -281,7 +281,7 @@ def build_ctx_from_path(
 
     # Step 1 — root config only; no rglob yet.
     root_raw: dict[str, Any] = _load_yaml(config_path)
-    _logger.debug("config_loader root=%s app=%s", config_path, app_name or "(none)")
+    _logger.info("config_loader root=%s app=%s", config_path, app_name or "(none)")
 
     # Step 2 — preliminary resolver so include path tokens can be expanded.
     prelim_resolver = _build_path_resolver(root_raw.get("paths", []))
@@ -300,6 +300,7 @@ def build_ctx_from_path(
         folder_files = _yaml_files_in_folder(folder, config_path)
         for yaml_file in folder_files:
             raw = _deep_merge(raw, _load_yaml(yaml_file))
+            _logger.debug("config_loader   file=%s", yaml_file)
         _logger.info("config_loader include=%s files=%d", folder, len(folder_files))
 
     # Backward-compat: if paths list is still missing, search parent directories.
