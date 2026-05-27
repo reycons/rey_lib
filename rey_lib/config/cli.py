@@ -6,9 +6,10 @@ declarations that are otherwise duplicated across every Rey app.
 
 Public API
 ----------
-  preparse_config_args()    Pre-parse --config-path/--config-dir and call load_dotenv.
-  add_config_args(parser)   Add shared config/pipeline args to a parser.
-  apply_env_overrides(items) Write --set KEY=VALUE pairs into os.environ.
+  preparse_config_args()              Pre-parse --config-path/--config-dir and call load_dotenv.
+  add_config_args(parser)             Add shared config/pipeline args to a parser.
+  apply_env_overrides(items)          Write --set KEY=VALUE pairs into os.environ.
+  build_ctx_from_args(args, app_name) Build ctx from parsed args and app identity.
 """
 
 from __future__ import annotations
@@ -16,14 +17,18 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from rey_lib.config.config_utils import Namespace
 
 __all__ = [
     "preparse_config_args",
     "add_config_args",
     "apply_env_overrides",
+    "build_ctx_from_args",
 ]
 
 def preparse_config_args() -> None:
@@ -131,6 +136,41 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
         help="Shared pipeline JSONL log file path.",
     )
 
+
+
+def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
+    """Build app context from parsed CLI args and the app's own identity.
+
+    Validates that ``--config-path`` was supplied, resolves the path, and
+    delegates to :func:`rey_lib.config.config_utils.build_ctx_from_path` with
+    ``app_name`` so the correct include folders are selected.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed argument namespace.  Must have a ``config_path`` attribute
+        (added by :func:`add_config_args`).
+    app_name : str
+        The app's own identity constant (e.g. ``"rey_console"``).
+
+    Returns
+    -------
+    Namespace
+        Fully populated context with ``ctx.config_path`` and ``ctx.app_name``.
+
+    Raises
+    ------
+    SystemExit
+        If ``--config-path`` was not provided.
+    """
+    from rey_lib.config.config_utils import build_ctx_from_path
+
+    if not getattr(args, "config_path", None):
+        raise SystemExit("--config-path is required.")
+    return build_ctx_from_path(
+        Path(args.config_path).expanduser().resolve(),
+        app_name=app_name,
+    )
 
 
 def apply_env_overrides(overrides: list[str]) -> None:
