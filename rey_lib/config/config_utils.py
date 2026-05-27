@@ -1,30 +1,42 @@
 """
 Generic configuration loader.
 
-Reads a config.yaml (or app.yaml) and all YAML files in the same directory,
-deep-merges them into a single hierarchy, resolves the paths: list into a
-PathResolver, and returns a Namespace with attribute-style access.
+Loads the installation root config.yaml, resolves the app-scoped include
+list from ``config_loading.apps``, deep-merges all include-folder YAML
+files in declared order, resolves the ``paths:`` list into a PathResolver,
+and returns a Namespace with attribute-style access.
 
 Design principles
 -----------------
 - No application-specific knowledge — works for any project
 - One config.yaml per installation owns ALL physical paths via paths: list
-- Apps use app.yaml with {logicalname} references resolved by PathResolver
+- Apps identify themselves; config utilities decide what to load
+- Include folders are declared in the root config, not guessed by apps
 - Path values are resolved automatically based on key name suffix
 - Secrets are injected from environment variables via env: blocks in YAML
 
+Loading order
+-------------
+  1. root config.yaml only
+  2. Build preliminary PathResolver for token expansion
+  3. Resolve include folder list for the app
+  4. Walk each include folder (sorted rglob *.yaml) and merge in order
+  5. Assemble Namespace, inject env blocks, finalise PathResolver
+
 Runtime state (not from YAML)
 ------------------------------
+  ctx.config_path  str   — absolute path to the root config.yaml
+  ctx.app_name     str   — app name passed to build_ctx_from_path
   ctx.log_level    str   — written by log_utils.setup_logging()
   ctx.log_depth    int   — incremented/decremented by log_enter/log_exit
 
 Public API
 ----------
-  build_ctx_from_path(config_path)  Build context from a config.yaml or app.yaml.
-  inject_secrets(ctx, map)          Inject env secrets into ctx at dot-separated paths.
-  print_ctx(ctx)                    Log the full context at DEBUG level.
-  Namespace                         Attribute-access wrapper around a config dict.
-  PathResolver                      Named-path resolver built from paths: list.
+  build_ctx_from_path(config_path, app_name)  Build context from a config.yaml.
+  inject_secrets(ctx, map)                    Inject env secrets into ctx.
+  print_ctx(ctx)                              Log the full context at DEBUG level.
+  Namespace                                   Attribute-access wrapper around a dict.
+  PathResolver                                Named-path resolver built from paths: list.
 """
 
 from __future__ import annotations
@@ -214,34 +226,48 @@ def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
 
 def build_ctx_from_path(
     config_path: Path,
+    app_name: str | None = None,
     project_root: Path | None = None,
 ) -> Namespace:
-    """Build context from a ``config.yaml`` file.
+    """Build context from an installation ``config.yaml`` using app-scoped includes.
 
-    Loads the config, deep-merges all additional YAML files in the same
-    directory, resolves the ``paths:`` named-path list into ``ctx.paths``,
-    and returns a fully populated Namespace.
-
-    If the specified file does not contain a ``paths:`` list, parent directories
-    are searched for a ``config.yaml`` that does, and its ``paths:`` is merged in
-    so the PathResolver is always available.
+    Loading order
+    -------------
+    1. Load the root ``config.yaml`` only.
+    2. Build a preliminary ``PathResolver`` from its ``paths:`` list so that
+       ``{configs}`` and other tokens can be expanded in include entries.
+    3. Resolve the ordered include folder list from
+       ``config_loading.apps.<app_name>.include``.  Falls back to a full
+       rglob of the config directory when ``app_name`` is not provided or
+       has no include block (``default_behavior: full_folder``).
+    4. Walk each include folder in declared order; within each folder load
+       all ``*.yaml`` files sorted by path.
+    5. Merge root config then each include folder's files deterministically.
+    6. Assemble the final ``Namespace``: env injection, ``PathResolver``,
+       logical-path substitution.
 
     Parameters
     ----------
     config_path : Path
-        Path to the ``config.yaml`` file (top-level install config or app-specific).
+        Path to the installation root ``config.yaml``.
+    app_name : str | None
+        The app's own identity string (e.g. ``"rey_console"``).  Used to
+        select the include list from ``config_loading.apps``.  When omitted
+        the full config folder is loaded for backward compatibility.
     project_root : Path | None
         Defaults to ``Path.cwd()``.
 
     Returns
     -------
     Namespace
-        Fully populated context object with resolved ``ctx.paths``.
+        Fully populated context with resolved ``ctx.paths``,
+        ``ctx.config_path``, and ``ctx.app_name`` (when provided).
 
     Raises
     ------
     ConfigError
-        If the file does not exist.
+        If the root file does not exist or a declared include folder is
+        missing from disk.
     """
     config_path = Path(config_path).expanduser().resolve()
     if not config_path.exists():
@@ -253,25 +279,41 @@ def build_ctx_from_path(
 
     _load_env_file(config_dir / _ENV_FILE_NAME)
 
-    raw: dict[str, Any] = _load_yaml(config_path)
-    for extra in sorted(config_dir.rglob("*.yaml")):
-        if extra == config_path:
-            continue
-        raw = _deep_merge(raw, _load_yaml(extra))
+    # Step 1 — root config only; no rglob yet.
+    root_raw: dict[str, Any] = _load_yaml(config_path)
+    _logger.debug("config_loader root=%s app=%s", config_path, app_name or "(none)")
 
+    # Step 2 — preliminary resolver so include path tokens can be expanded.
+    prelim_resolver = _build_path_resolver(root_raw.get("paths", []))
+    resolver_strs: dict[str, str] = {
+        k: str(v) for k, v in prelim_resolver._paths.items()
+    }
+
+    # Step 3 — determine the ordered list of include folders.
+    include_folders = _resolve_include_folders(
+        root_raw, resolver_strs, app_name, config_path
+    )
+
+    # Steps 4–5 — walk each folder and merge files in declared order.
+    raw: dict[str, Any] = root_raw
+    for folder in include_folders:
+        folder_files = _yaml_files_in_folder(folder, config_path)
+        for yaml_file in folder_files:
+            raw = _deep_merge(raw, _load_yaml(yaml_file))
+        _logger.info("config_loader include=%s files=%d", folder, len(folder_files))
+
+    # Backward-compat: if paths list is still missing, search parent directories.
     if not isinstance(raw.get("paths"), list):
         parent_raw = _find_parent_install_raw(config_path)
         if parent_raw:
-            # Inject the parent's paths list directly so the app-level paths dict
-            # (if any) cannot shadow it during the merge.
             parent_paths = parent_raw.get("paths")
             parent_rest  = {k: v for k, v in parent_raw.items() if k != "paths"}
             raw = _deep_merge(parent_rest, raw)
             if isinstance(parent_paths, list):
                 raw["paths"] = parent_paths
 
+    # Step 6 — assemble and wrap.
     raw = _assemble_ctx_data(raw, config_dir)
-
     ctx = Namespace(raw)
     _inject_env_blocks(ctx)
 
@@ -281,10 +323,71 @@ def build_ctx_from_path(
         object.__setattr__(ctx, "paths", path_resolver)
         _apply_path_resolver(ctx, path_resolver)
 
+    object.__setattr__(ctx, "config_path", str(config_path))
+    if app_name:
+        object.__setattr__(ctx, "app_name", app_name)
     object.__setattr__(ctx, "log_level", "INFO")
     object.__setattr__(ctx, "log_depth", 0)
 
+    _logger.info(
+        "config_loader complete top_level_keys=%s",
+        [k for k in ctx.keys() if not k.startswith("_")],
+    )
     return ctx
+
+
+def _resolve_include_folders(
+    root_raw: dict[str, Any],
+    resolver_strs: dict[str, str],
+    app_name: str | None,
+    config_path: Path,
+) -> list[Path]:
+    """Return the ordered include folder list for the app.
+
+    Reads ``config_loading.apps.<app_name>.include`` from the root config.
+    Expands ``{token}`` placeholders using the preliminary path resolver.
+    Raises ``ConfigError`` for any declared folder that does not exist.
+    Falls back to the full config directory when no app-scoped block is found.
+    """
+    loading_cfg = root_raw.get("config_loading")
+    if not isinstance(loading_cfg, dict):
+        loading_cfg = {}
+
+    apps_cfg = loading_cfg.get("apps")
+    if not isinstance(apps_cfg, dict):
+        apps_cfg = {}
+
+    if app_name and app_name in apps_cfg:
+        app_cfg = apps_cfg.get(app_name)
+        include_list = app_cfg.get("include") or [] if isinstance(app_cfg, dict) else []
+        folders: list[Path] = []
+        for entry in include_list:
+            expanded = str(entry).format_map(_SafePathFormat(resolver_strs))
+            folder = Path(expanded).expanduser().resolve()
+            if not folder.exists():
+                raise ConfigError(
+                    f"Config include path does not exist for app "
+                    f"{app_name}: {folder}"
+                )
+            folders.append(folder)
+        return folders
+
+    # Default: rglob the config directory (backward-compatible behaviour).
+    default = loading_cfg.get("default_behavior", "full_folder")
+    if default == "full_folder":
+        return [config_path.parent]
+    return []
+
+
+def _yaml_files_in_folder(folder: Path, exclude: Path) -> list[Path]:
+    """Return sorted ``*.yaml`` files under ``folder``, skipping ``exclude``.
+
+    The root ``config.yaml`` is excluded so it is never merged twice.
+    """
+    return [
+        f for f in sorted(folder.rglob("*.yaml"))
+        if f.resolve() != exclude
+    ]
 
 
 def _find_parent_install_raw(config_path: Path) -> dict[str, Any] | None:
