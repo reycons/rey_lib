@@ -118,3 +118,78 @@ def test_read_jsonl_records_rejects_text_logs(tmp_path) -> None:
     assert result["records"] == []
     assert result["authoritative"] is False
     assert "JSONL" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# New-contract ctx shapes (no .env, log_path as Path from PathResolver)
+# ---------------------------------------------------------------------------
+
+def test_setup_logging_works_without_env_attribute(tmp_path) -> None:
+    """ctx built via build_ctx_from_path has no .env — must not raise."""
+    ctx = SimpleNamespace(
+        log_level="INFO",
+        log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
+        jsonl_ctx_fields=(),
+    )
+    setup_logging(ctx, operation="run")
+    logging.getLogger("sample").info("no-env ctx")
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    assert next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8")
+
+
+def test_setup_logging_defaults_to_info_without_env(tmp_path) -> None:
+    """When neither .env nor .log_level is set, INFO is the fallback."""
+    ctx = SimpleNamespace(
+        log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
+        jsonl_ctx_fields=(),
+    )
+    setup_logging(ctx, operation="run")
+    assert ctx.log_level == "INFO"
+
+
+def test_setup_logging_accepts_path_object_for_log_path(tmp_path) -> None:
+    """PathResolver sets log_path as a Path; setup_logging must handle it."""
+    from pathlib import Path
+
+    log_template = Path(tmp_path) / "app.{operation}.{timestamp}.log"
+    ctx = SimpleNamespace(
+        log_level="INFO",
+        log_path=log_template,
+        jsonl_ctx_fields=(),
+    )
+    setup_logging(ctx, operation="run")
+    logging.getLogger("path_test").info("path object ctx")
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    logs = list(tmp_path.glob("*.log"))
+    assert len(logs) == 1
+    assert "run" in logs[0].name
+
+
+def test_setup_logging_substitutes_operation_and_timestamp(tmp_path) -> None:
+    """{operation} and {timestamp} in the resolved log path are filled at runtime."""
+    ctx = SimpleNamespace(
+        log_level="INFO",
+        log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
+        jsonl_path=str(tmp_path / "app.{operation}.{timestamp}.jsonl"),
+        jsonl_ctx_fields=(),
+    )
+    setup_logging(ctx, operation="ingest")
+    logging.getLogger("sub").info("check placeholders")
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_files = list(tmp_path.glob("*.log"))
+    jsonl_files = list(tmp_path.glob("*.jsonl"))
+    assert len(log_files) == 1
+    assert "ingest" in log_files[0].name
+    assert "{operation}" not in log_files[0].name
+    assert "{timestamp}" not in log_files[0].name
+    assert len(jsonl_files) == 1
+    assert "ingest" in jsonl_files[0].name

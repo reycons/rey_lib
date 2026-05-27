@@ -17,7 +17,6 @@ StateError            Raised when a JSON state file cannot be read or written.
 FtpConnectionError    Raised when an FTP connection cannot be established.
 FtpDownloadError      Raised when a file download fails or is incomplete.
 handle_exception      Log and re-raise with chained traceback context.
-validate_env          Validate environment string ('dev' | 'prod').
 validate_path         Validate that a required path exists on disk.
 validate_required     Validate that a required string value is non-empty.
 """
@@ -37,7 +36,6 @@ __all__ = [
     "FtpConnectionError",
     "FtpDownloadError",
     "handle_exception",
-    "validate_env",
     "validate_path",
     "validate_required",
 ]
@@ -113,53 +111,20 @@ def handle_exception(
     new_exc_type : type[AppError]
         The exception type to raise. Defaults to AppError.
     ctx : Any | None
-        Optional context object. If present, ctx.env is prepended to the
-        log message for easier environment identification.
+        Optional context object. Reserved for future use.
 
     Raises
     ------
     AppError
         Always raises — this function never returns normally.
     """
-    env_tag = f"[{ctx.env}] " if ctx is not None else ""
-    logger.error("%s%s: %s", env_tag, msg, exc, exc_info=True)
+    logger.error("%s: %s", msg, exc, exc_info=True)
     raise new_exc_type(f"{msg}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
 # Input validation helpers
 # ---------------------------------------------------------------------------
-
-_VALID_ENVS = frozenset({"dev", "test", "prod"})
-
-
-def validate_env(env: str) -> str:
-    """
-    Validate that the environment string is one of the allowed values.
-
-    Parameters
-    ----------
-    env : str
-        The environment value to validate (e.g. from a CLI argument).
-
-    Returns
-    -------
-    str
-        The validated environment string, lowercased and stripped.
-
-    Raises
-    ------
-    ConfigError
-        If the value is not a recognised environment name.
-    """
-    normalised = env.strip().lower()
-    if normalised not in _VALID_ENVS:
-        raise ConfigError(
-            f"Invalid environment '{env}'. "
-            f"Must be one of: {', '.join(sorted(_VALID_ENVS))}"
-        )
-    return normalised
-
 
 def validate_path(path: object, label: str, must_exist: bool = True) -> None:
     """

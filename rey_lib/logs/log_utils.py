@@ -4,8 +4,8 @@ Logging configuration and helpers.
 All logging setup is centralised here. No module outside log_utils.py
 may call logging.basicConfig(), add handlers, or configure formatters directly.
 
-Log level is environment-aware: DEBUG in dev, INFO in prod. The active level
-is written to ctx.log_level after setup_logging() runs so all modules can
+Log level defaults to INFO unless ctx.log_level specifies otherwise. The active
+level is written to ctx.log_level after setup_logging() runs so all modules can
 read it from ctx.
 
 Log messages use ctx.log_depth to indent output, reflecting the call
@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,12 +54,6 @@ _LEVEL_MAP: dict[str, int] = {
     "INFO":    logging.INFO,
     "WARNING": logging.WARNING,
     "ERROR":   logging.ERROR,
-}
-
-# Environment → default log level.
-_ENV_LEVELS: dict[str, str] = {
-    "dev":  "DEBUG",
-    "prod": "INFO",
 }
 
 
@@ -166,17 +160,16 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     Parameters
     ----------
     ctx : Any
-        Application context Namespace. Must have .env. Optionally has
-        .log_path and/or .jsonl_path. ctx.log_level and ctx.log_file
-        are updated in-place after setup.
+        Application context Namespace. Optionally has .log_path and/or
+        .jsonl_path. ctx.log_level and ctx.log_file are updated in-place
+        after setup.
     operation : str
         Current operation name. Substituted into path templates.
         Defaults to 'app'.
     """
     global _current_depth
 
-    # Prefer an explicit log_level in ctx (set via config), fall back to env default.
-    level_name = getattr(ctx, "log_level", None) or _ENV_LEVELS.get(ctx.env, "INFO")
+    level_name = getattr(ctx, "log_level", None) or "INFO"
     level      = _LEVEL_MAP.get(level_name.upper(), logging.INFO)
 
     fmt     = "%(asctime)s  %(levelname)-8s  %(message)s"
@@ -217,7 +210,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
         jsonl_path = _resolve_jsonl_path(ctx, operation, timestamp, resolved_log)
         jsonl_handler = JsonlHandler(
             jsonl_path = jsonl_path,
-            context    = {"env": getattr(ctx, "env", "")},
+            context    = {},
             ctx        = ctx,
             ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
         )

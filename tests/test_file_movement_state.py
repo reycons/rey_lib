@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from rey_lib.config.config_utils import PathResolver
 from rey_lib.files.file_utils import (
     file_sha256,
     file_operation_log_path,
@@ -17,78 +20,33 @@ from rey_lib.files.file_utils import (
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
-    config_root = tmp_path / "test" / "installations" / "ccc" / "configs" / "v01"
-    config_root.mkdir(parents=True)
-    return SimpleNamespace(
-        config_root=config_root,
-        environment_root=tmp_path / "test",
-        installation="ccc",
-        state=SimpleNamespace(
-            file_operations_path="state/{config_root}/file_operations.jsonl"
-        ),
-    )
+    root   = tmp_path / "test"
+    state  = root / "state"
+    paths  = PathResolver({
+        "root":                 root.resolve(),
+        "state":                state.resolve(),
+        "file_operations_state": (state / "v01" / "file_operations.jsonl").resolve(),
+    })
+    return SimpleNamespace(paths=paths)
 
 
 def test_configured_log_path_resolves_under_state_file_operations(tmp_path: Path) -> None:
-    """File-operation state path must come from ctx.state.file_operations_path."""
+    """file_operation_log_path must return the path resolver's file_operations_state."""
     ctx = _ctx(tmp_path)
-    assert file_operation_log_path(ctx) == (
-        tmp_path
-        / "test"
-        / "installations"
-        / "ccc"
-        / "state"
-        / "v01"
-        / "file_operations.jsonl"
-    )
+    expected = (tmp_path / "test" / "state" / "v01" / "file_operations.jsonl").resolve()
+    assert file_operation_log_path(ctx) == expected
 
 
-def test_configured_log_path_is_relative_to_installation_root(tmp_path: Path) -> None:
+def test_file_movement_log_path_is_alias(tmp_path: Path) -> None:
+    """file_movement_log_path is a compatibility alias for file_operation_log_path."""
     ctx = _ctx(tmp_path)
-    ctx.state = SimpleNamespace(
-        file_operations_path="state/app/{config_root}/operations.jsonl"
-    )
-
-    assert file_operation_log_path(ctx) == (
-        tmp_path
-        / "test"
-        / "installations"
-        / "ccc"
-        / "state"
-        / "app"
-        / "v01"
-        / "operations.jsonl"
-    )
+    assert file_movement_log_path(ctx) == file_operation_log_path(ctx)
 
 
-def test_legacy_movement_path_still_resolves(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    ctx.state = SimpleNamespace(
-        file_movements_path="state/legacy/{config_root}/moves.jsonl"
-    )
-
-    assert file_movement_log_path(ctx) == (
-        tmp_path
-        / "test"
-        / "installations"
-        / "ccc"
-        / "state"
-        / "legacy"
-        / "v01"
-        / "moves.jsonl"
-    )
-
-
-def test_missing_state_path_raises(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    delattr(ctx, "state")
-
-    try:
-        file_movement_log_path(ctx)
-    except ValueError as exc:
-        assert "state.file_operations_path" in str(exc)
-    else:
-        raise AssertionError("Expected missing state path to raise.")
+def test_missing_paths_raises(tmp_path: Path) -> None:
+    ctx = SimpleNamespace()
+    with pytest.raises(ValueError, match="ctx.paths is required"):
+        file_operation_log_path(ctx)
 
 
 def test_move_file_writes_jsonl_after_successful_move(tmp_path: Path) -> None:

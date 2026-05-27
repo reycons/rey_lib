@@ -6,8 +6,8 @@ declarations that are otherwise duplicated across every Rey app.
 
 Public API
 ----------
-  preparse_config_args()    Pre-parse config/environment args and call load_dotenv.
-  add_config_args(parser)   Add shared config/env/pipeline args to a parser.
+  preparse_config_args()    Pre-parse --config-path/--config-dir and call load_dotenv.
+  add_config_args(parser)   Add shared config/pipeline args to a parser.
   apply_env_overrides(items) Write --set KEY=VALUE pairs into os.environ.
 """
 
@@ -26,15 +26,8 @@ __all__ = [
     "apply_env_overrides",
 ]
 
-_VALID_ENVIRONMENTS: tuple[str, ...] = (
-    "development",
-    "test",
-    "production",
-)
-
-
 def preparse_config_args() -> None:
-    """Pre-parse environment/config args from sys.argv and call load_dotenv.
+    """Pre-parse --config-path/--config-dir from sys.argv and call load_dotenv.
 
     Must be called at module level in each app entry point, before any
     imports that depend on environment variables being set.
@@ -50,8 +43,6 @@ def preparse_config_args() -> None:
 
     pre.add_argument("--config-path", dest="config_path", default=None)
     pre.add_argument("--config-dir",  dest="config_dir",  default=None)
-    pre.add_argument("--environment", dest="environment", default=None)
-    pre.add_argument("--installation", dest="installation", default=None)
 
     pre_args, _ = pre.parse_known_args()
 
@@ -82,10 +73,7 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
         "--config-path",
         dest="config_path",
         default=None,
-        help=(
-            "Path to the app config file or config root. "
-            "Supersedes --environment and --config-dir."
-        ),
+        help="Path to the app config.yaml or app.yaml file.",
     )
 
     parser.add_argument(
@@ -93,21 +81,6 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
         dest="config_dir",
         default=None,
         help="Path to the config directory (overrides APP_CONFIG_DIR).",
-    )
-
-    parser.add_argument(
-        "--environment",
-        required=False,
-        default=None,
-        choices=list(_VALID_ENVIRONMENTS),
-        help="Target runtime environment.",
-    )
-
-    parser.add_argument(
-        "--installation",
-        required=False,
-        default=None,
-        help="Installation name.",
     )
 
     parser.add_argument(

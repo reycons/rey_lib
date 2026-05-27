@@ -36,10 +36,12 @@ encrypt             Symmetrically encrypt a field value using Fernet (AES-128-CB
 
                     YAML example::
 
-                        field_transforms:
-                          account_number:
-                            type: encrypt
-                            key_env: TRADE_ENCRYPTION_KEY
+                        columns:
+                          - name: account_number
+                            source: Account Number
+                            transform:
+                              type: encrypt
+                              key_env: TRADE_ENCRYPTION_KEY
 
                     Generate a key once and store in .env::
 
@@ -68,9 +70,9 @@ hash                Compute a deterministic hash across a fixed set of output
 
 Constants and file_date injection
 ----------------------------------
-Application-specific values (e.g. source_file, batch_id) must be injected
-by the caller via the 'constants' section of the file_type_cfg — never
-hardcoded in this module. The file_date parameter provides a date value
+Application-specific values (e.g. source_file, batch_id) must be modeled
+as columns with ``transform.type: constant`` or ``transform.type: context`` —
+never hardcoded in this module. The file_date parameter provides a date value
 parsed from the filename; the target column is specified via
 'file_date_column' in file_type_cfg, keeping the injection config-driven.
 
@@ -271,7 +273,7 @@ def transform_row(
     ctx: Any = None,
 ) -> Optional[dict[str, Any]]:
     """
-    Apply column mapping and transforms to one raw CSV row.
+    Apply list-based column transforms to one raw CSV row.
 
     Parameters
     ----------
@@ -364,6 +366,24 @@ def _resolve_context_value(value_str: str, ctx: Any = None, row_num: int = 0) ->
     return value_str
 
 
+def _resolve_constant_value(value: Any, ctx: Any = None) -> Any:
+    """Resolve ``{ctx_field}`` tokens in constant transform values."""
+    if not isinstance(value, str) or ctx is None:
+        return value
+    return value.format_map(_CtxFormatMap(ctx))
+
+
+class _CtxFormatMap(dict):
+    """Format-map adapter that resolves token names against ctx attributes."""
+
+    def __init__(self, ctx: Any) -> None:
+        super().__init__()
+        self._ctx = ctx
+
+    def __missing__(self, key: str) -> str:
+        return str(getattr(self._ctx, key, ""))
+
+
 def _resolve_source_value(
     raw_row: Any,
     col_cfg: dict,
@@ -412,7 +432,7 @@ def _apply_transform_v2(
 
     try:
         if transform_type == "constant":
-            return transform_cfg.get("value")
+            return _resolve_constant_value(transform_cfg.get("value"), ctx=ctx)
 
         if transform_type == "context":
             return _resolve_context_value(

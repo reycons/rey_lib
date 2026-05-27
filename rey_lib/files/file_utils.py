@@ -656,27 +656,11 @@ def move_file(
 
 def file_operation_log_path(ctx: Any) -> Path:
     """Return the configured file-operation JSONL path for ``ctx``."""
-    config_root = getattr(ctx, "config_root", None)
-    config_root_path = (
-        Path(str(config_root)).expanduser().resolve()
-        if config_root
-        else None
-    )
-    installation_root = _installation_root(ctx, config_root_path)
-
-    state = getattr(ctx, "state", None)
-    configured = getattr(state, "file_operations_path", None) if state else None
-    configured = configured or (getattr(state, "file_movements_path", None) if state else None)
-    if configured:
-        return _resolve_file_operation_config(
-            str(configured),
-            installation_root,
-            config_root_path,
-            ctx,
-        )
-
+    paths = getattr(ctx, "paths", None)
+    if hasattr(paths, "resolve"):
+        return paths.resolve("file_operations_state")
     raise ValueError(
-        "state.file_operations_path is required to locate the file-operation state log."
+        "ctx.paths is required — build ctx with build_ctx_from_path."
     )
 
 
@@ -702,7 +686,7 @@ def log_file_operation(
     src = Path(source).expanduser()
     dest = Path(destination).expanduser()
     original = Path(original_source).expanduser() if original_source else src
-    environment_root = _environment_root(ctx)
+    environment_root = _display_root(ctx)
 
     record: dict[str, Any] = {
         "operation_id": str(uuid.uuid4()),
@@ -1070,52 +1054,15 @@ def _find_header_reader(fh: TextIO, source_column: str) -> csv.DictReader:
     raise ValueError(f"Column '{source_column}' not found in file.")
 
 
-def _environment_root(ctx: Any) -> Path | None:
-    value = getattr(ctx, "environment_root", None)
-    if value:
-        return Path(str(value)).expanduser().resolve()
-
-    config_root = getattr(ctx, "config_root", None)
-    if not config_root:
-        return None
-    return Path(str(config_root)).expanduser().resolve().parents[3]
-
-
-def _installation_root(ctx: Any, config_root_path: Path | None = None) -> Path:
-    """Return the installation root that owns the active config root."""
-    configured = getattr(ctx, "installation_root", None)
-    if configured:
-        return Path(str(configured)).expanduser().resolve()
-
-    if config_root_path is not None:
-        return config_root_path.parent.parent
-
-    raise ValueError("ctx.config_root is required to locate the installation root.")
-
-
-def _resolve_file_operation_config(
-    raw_path: str,
-    installation_root: Path,
-    config_root_path: Path | None,
-    ctx: Any,
-) -> Path:
-    """Resolve configured file-operation state path relative to the installation root."""
-    config_root_name = config_root_path.name if config_root_path is not None else ""
-    tokens = {
-        "config_root": config_root_name,
-        "config_root_name": config_root_name,
-        "installation": getattr(ctx, "installation", ""),
-    }
-    rendered = raw_path.format_map(_SafeFormatMap(tokens))
-    path = Path(rendered).expanduser()
-    return path if path.is_absolute() else installation_root / path
-
-
-class _SafeFormatMap(dict):
-    """Keep unknown config path tokens intact instead of raising KeyError."""
-
-    def __missing__(self, key: str) -> str:
-        return "{" + key + "}"
+def _display_root(ctx: Any) -> Path | None:
+    """Return the installation root path used to make file paths relative in records."""
+    paths = getattr(ctx, "paths", None)
+    if hasattr(paths, "resolve"):
+        try:
+            return paths.resolve("root")
+        except Exception:
+            pass
+    return None
 
 
 def _display_path(path: Path, environment_root: Path | None) -> str:

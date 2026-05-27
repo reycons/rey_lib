@@ -1,41 +1,30 @@
 """
 Generic configuration loader.
 
-Reads the main environment config file and all YAML config files under config/,
-deep-merges them into a single hierarchy, and returns a Namespace object
-that provides attribute-style access to every config value.
+Reads a config.yaml (or app.yaml) and all YAML files in the same directory,
+deep-merges them into a single hierarchy, resolves the paths: list into a
+PathResolver, and returns a Namespace with attribute-style access.
 
 Design principles
 -----------------
 - No application-specific knowledge — works for any project
-- project_root is passed explicitly — this module never assumes its own
-  location on disk, which would break when installed as a pip package
-- All YAML files under config/ are loaded and deep-merged automatically
-- Adding a new config file requires only dropping a new YAML file into
-  config/ — no code changes
+- One config.yaml per installation owns ALL physical paths via paths: list
+- Apps use app.yaml with {logicalname} references resolved by PathResolver
 - Path values are resolved automatically based on key name suffix
-- Secrets are injected from .env — never from YAML
-- Secret injection is the caller's responsibility via inject_secrets()
-
-Config file locations
----------------------
-  <project_root>/config/config.{env}.yaml     Main config — singleton values only
-  <project_root>/config/**/*.yaml             Additional config files — merged by hierarchy
+- Secrets are injected from environment variables via env: blocks in YAML
 
 Runtime state (not from YAML)
 ------------------------------
-  ctx.env          str   — 'dev' | 'prod'
   ctx.log_level    str   — written by log_utils.setup_logging()
   ctx.log_depth    int   — incremented/decremented by log_enter/log_exit
 
 Public API
 ----------
-  build_ctx(env, project_root)    Build and return a fully populated Namespace.
-  build_config_sources_yaml(...)  Return source-annotated YAML loaded by build_ctx().
-  inject_secrets(ctx, map)        Inject .env secrets into ctx at dot-separated paths.
-  save_config(data, env, ...)     Write a dict back to the main config file.
-  print_ctx(ctx)                  Log the full context at DEBUG level.
-  Namespace                       Attribute-access wrapper around a config dict.
+  build_ctx_from_path(config_path)  Build context from a config.yaml or app.yaml.
+  inject_secrets(ctx, map)          Inject env secrets into ctx at dot-separated paths.
+  print_ctx(ctx)                    Log the full context at DEBUG level.
+  Namespace                         Attribute-access wrapper around a config dict.
+  PathResolver                      Named-path resolver built from paths: list.
 """
 
 from __future__ import annotations
@@ -43,42 +32,32 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 from dotenv import load_dotenv
 
-from rey_lib.errors.error_utils import ConfigError, validate_env
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import get_logger
 
 _logger = get_logger(__name__)
 
 __all__ = [
-    "build_app_ctx",
-    "build_config_sources_yaml",
-    "build_config_sources_yaml_from_path",
-    "build_ctx",
     "build_ctx_from_path",
-    "config_path",
     "inject_secrets",
-    "save_config",
     "print_ctx",
     "validate_yaml_file",
     "validate_yaml_folder",
     "Namespace",
+    "PathResolver",
 ]
 
-# Config directory name and main config filename pattern — constant across all projects.
-_CONFIG_DIR_NAME   = "config"
-_CONFIG_FILE_NAMES = {
-    "dev": "config.dev.yaml",
-    "test": "config.test.yaml",
-    "prod": "config.prod.yaml",
-}
-_ENV_FILE_NAME     = ".env"
+# Config directory name — constant across all projects.
+_CONFIG_DIR_NAME = "config"
+_ENV_FILE_NAME   = ".env"
 
 # Keys whose string values are resolved to Path objects.
-_PATH_KEY_SUFFIXES = ("_path", "_dir", "_file")
+_PATH_KEY_SUFFIXES = ("_path", "_dir", "_file", "_root")
 _PATH_KEY_NAMES    = ("path",)
 
 # Keys whose string values are log path templates — placeholders must survive resolution.
@@ -145,74 +124,61 @@ class Namespace:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# PathResolver
 # ---------------------------------------------------------------------------
 
-def build_ctx(
-    env: str = "dev",
-    project_root: Path | None = None,
-    config_dir: Path | None = None,
-) -> Namespace:
+class PathResolver:
+    """Resolved named paths from the installation config ``paths:`` list.
+
+    Attached to ``ctx.paths`` after loading a ``config.yaml``.
+    Call ``ctx.paths.resolve("name")`` to get the physical ``Path``.
     """
-    Build and return a fully populated Namespace for the given environment.
 
-    Loads the main config file, deep-merges all additional YAML config files
-    found under config_dir, resolves paths, and adds runtime state attributes.
+    def __init__(self, paths: dict[str, Path]) -> None:
+        self._paths = dict(paths)
 
-    Secret injection is NOT performed here — call inject_secrets() separately
-    after build_ctx() with a project-specific secret map.
+    def resolve(self, name: str) -> Path:
+        """Return the resolved ``Path`` for the given logical name."""
+        if name not in self._paths:
+            raise ConfigError(f"Unknown path name: {name!r}")
+        return self._paths[name]
 
-    Parameters
-    ----------
-    env : str
-        Target environment. Must be 'dev' or 'prod'.
-    project_root : Path | None
-        Root directory of the calling project. .env is resolved relative
-        to this path. Defaults to Path.cwd() when None.
-    config_dir : Path | None
-        Directory containing config YAML files. When provided, overrides
-        the default <project_root>/config/ location. Use this to point to
-        a shared config directory outside the project folder.
-        Reads APP_CONFIG_DIR from environment if neither is provided.
+    def __repr__(self) -> str:
+        return f"PathResolver({list(self._paths)})"
 
-    Returns
-    -------
-    Namespace
-        Fully populated context object.
 
-    Raises
-    ------
-    ConfigError
-        If the environment is invalid or the main config file is missing.
+def _build_path_resolver(raw_paths: Any) -> PathResolver:
+    """Process a ``paths:`` list into a ``PathResolver``.
+
+    Each entry must have ``name`` and ``path`` keys.  Values may reference
+    earlier-resolved names with ``{name}`` placeholders.
     """
-    if project_root is None:
-        project_root = Path.cwd()
+    resolved_strs: dict[str, str] = {}
+    resolved_paths: dict[str, Path] = {}
 
-    project_root = Path(project_root).resolve()
-    env_file     = project_root / _ENV_FILE_NAME
+    entries: list[Any] = raw_paths if isinstance(raw_paths, list) else []
+    for entry in entries:
+        if isinstance(entry, Namespace):
+            name = str(getattr(entry, "name", "") or "")
+            template = str(getattr(entry, "path", "") or "")
+        elif isinstance(entry, dict):
+            name = str(entry.get("name", "") or "")
+            template = str(entry.get("path", "") or "")
+        else:
+            continue
+        if not name or not template:
+            continue
+        path_str = template.format_map(_SafePathFormat(resolved_strs))
+        path = Path(path_str).expanduser().resolve()
+        resolved_strs[name] = str(path)
+        resolved_paths[name] = path
 
-    # Config dir priority: explicit parameter > APP_CONFIG_DIR env var > default
-    if config_dir is None:
-        env_config_dir = os.getenv("APP_CONFIG_DIR")
-        config_dir = Path(env_config_dir) if env_config_dir else project_root / _CONFIG_DIR_NAME
+    return PathResolver(resolved_paths)
 
-    config_dir = Path(config_dir).resolve()
-    env        = validate_env(env)
-    _load_env_file(env_file)
 
-    raw = _read_config_yaml(env, config_dir)
-    raw = _assemble_ctx_data(raw, config_dir)
-
-    ctx = Namespace(raw)
-    _inject_env_blocks(ctx)
-    
-    # Runtime state — never from YAML.
-    object.__setattr__(ctx, "env",       env)
-    object.__setattr__(ctx, "log_level", "INFO")   # overwritten by log_utils
-    object.__setattr__(ctx, "log_depth", 0)         # managed by log_enter/log_exit
-
-    return ctx
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
     """
@@ -246,160 +212,98 @@ def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
             object.__setattr__(target, parts[-1], secret_value)
 
 
-def save_config(
-    data: dict[str, Any],
-    env: str = "dev",
-    project_root: Path | None = None,
-) -> None:
-    """
-    Write a plain dict back to the main config file for the given environment.
-
-    Parameters
-    ----------
-    data : dict
-        Full config structure to write.
-    env : str
-        Target environment.
-    project_root : Path | None
-        Project root. Defaults to Path.cwd().
-    """
-    if project_root is None:
-        project_root = Path.cwd()
-    config_dir  = Path(project_root) / _CONFIG_DIR_NAME
-    config_path = _config_path(env, config_dir)
-    with config_path.open("w", encoding="utf-8") as fh:
-        yaml.dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-
 def build_ctx_from_path(
     config_path: Path,
     project_root: Path | None = None,
 ) -> Namespace:
-    """Build context directly from a config file path.
+    """Build context from a ``config.yaml`` file.
 
-    Derives ``env`` and ``config_dir`` from ``config_path`` so the caller
-    does not need to pass ``--env`` separately.  Relative paths inside the
-    config file resolve relative to the config file's parent directory.
+    Loads the config, deep-merges all additional YAML files in the same
+    directory, resolves the ``paths:`` named-path list into ``ctx.paths``,
+    and returns a fully populated Namespace.
+
+    If the specified file does not contain a ``paths:`` list, parent directories
+    are searched for a ``config.yaml`` that does, and its ``paths:`` is merged in
+    so the PathResolver is always available.
 
     Parameters
     ----------
     config_path : Path
-        Path to a config file following the naming pattern
-        ``config.<env>.yaml`` (e.g. ``config.dev.yaml``).
+        Path to the ``config.yaml`` file (top-level install config or app-specific).
     project_root : Path | None
-        Root directory of the calling project. Defaults to ``Path.cwd()``.
+        Defaults to ``Path.cwd()``.
 
     Returns
     -------
     Namespace
-        Fully populated context object.
+        Fully populated context object with resolved ``ctx.paths``.
 
     Raises
     ------
     ConfigError
-        If the file does not exist or the filename does not match
-        ``config.<env>.yaml``.
+        If the file does not exist.
     """
     config_path = Path(config_path).expanduser().resolve()
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
 
-    env = _env_from_config_path(config_path)
-
-    return build_ctx(env=env, project_root=project_root, config_dir=config_path.parent)
-
-
-def build_config_sources_yaml(
-    env: str = "dev",
-    project_root: Path | None = None,
-    config_dir: Path | None = None,
-) -> str:
-    """Return source-annotated YAML files loaded for a config context.
-
-    This follows the same config-file selection as ``build_ctx()``: the
-    environment-specific main config first, then every non-main ``*.yaml``
-    file under ``config_dir`` in sorted order. The function intentionally
-    returns text, not a context object, so logs and UIs can show exactly which
-    YAML sources were available to the loader without reimplementing config
-    assembly in each app.
-    """
+    config_dir = config_path.parent
     if project_root is None:
         project_root = Path.cwd()
 
-    if config_dir is None:
-        env_config_dir = os.getenv("APP_CONFIG_DIR")
-        config_dir = (
-            Path(env_config_dir)
-            if env_config_dir
-            else Path(project_root) / _CONFIG_DIR_NAME
-        )
+    _load_env_file(config_dir / _ENV_FILE_NAME)
 
-    config_dir = Path(config_dir).expanduser().resolve()
-    env = validate_env(env)
-    sources = _read_config_yaml_sources(env, config_dir)
+    raw: dict[str, Any] = _load_yaml(config_path)
+    for extra in sorted(config_dir.rglob("*.yaml")):
+        if extra == config_path:
+            continue
+        raw = _deep_merge(raw, _load_yaml(extra))
 
-    docs: list[str] = []
-    for path, _data in sources:
-        docs.append(_source_yaml_document(config_dir, path))
+    if not isinstance(raw.get("paths"), list):
+        parent_raw = _find_parent_install_raw(config_path)
+        if parent_raw:
+            # Inject the parent's paths list directly so the app-level paths dict
+            # (if any) cannot shadow it during the merge.
+            parent_paths = parent_raw.get("paths")
+            parent_rest  = {k: v for k, v in parent_raw.items() if k != "paths"}
+            raw = _deep_merge(parent_rest, raw)
+            if isinstance(parent_paths, list):
+                raw["paths"] = parent_paths
 
-    return "\n".join(docs).rstrip() + "\n"
+    raw = _assemble_ctx_data(raw, config_dir)
 
+    ctx = Namespace(raw)
+    _inject_env_blocks(ctx)
 
-def build_config_sources_yaml_from_path(
-    config_path: Path,
-    project_root: Path | None = None,
-) -> str:
-    """Return source-annotated YAML files loaded for ``config_path``.
+    raw_paths = getattr(ctx, "paths", None)
+    if isinstance(raw_paths, list):
+        path_resolver = _build_path_resolver(raw_paths)
+        object.__setattr__(ctx, "paths", path_resolver)
+        _apply_path_resolver(ctx, path_resolver)
 
-    ``config_path`` follows the same ``config.<env>.yaml`` convention as
-    ``build_ctx_from_path()``.
-    """
-    config_path = Path(config_path).expanduser().resolve()
-    env = _env_from_config_path(config_path)
-    return build_config_sources_yaml(
-        env=env,
-        project_root=project_root,
-        config_dir=config_path.parent,
-    )
+    object.__setattr__(ctx, "log_level", "INFO")
+    object.__setattr__(ctx, "log_depth", 0)
 
-
-def config_path(env: str, config_dir: Path) -> Path:
-    """Return the main config file path for ``env`` under ``config_dir``."""
-    return _config_path(validate_env(env), Path(config_dir).expanduser().resolve())
-
-
-def build_app_ctx(
-    project_root: Path,
-    env: str,
-    log_level: Optional[str] = None,
-) -> Namespace:
-    """
-    Build application context from YAML config and .env.
-
-    Convenience wrapper around build_ctx() that optionally overrides the
-    log level after loading.  Suitable as the standard entry point for any
-    project's CLI startup.
-
-    Parameters
-    ----------
-    project_root : Path
-        Absolute path to the project root directory.
-    env : str
-        Runtime environment — ``'dev'`` or ``'prod'``.
-    log_level : str, optional
-        When provided, overrides the log level value from config with this
-        value (e.g. ``'DEBUG'``, ``'INFO'``).
-
-    Returns
-    -------
-    Namespace
-        Fully populated context object.
-    """
-    ctx = build_ctx(env=env, project_root=project_root)
-    if log_level is not None:
-        # Override whatever the config declared so the caller's --log-level flag wins.
-        object.__setattr__(ctx, "log_level", log_level.upper())
     return ctx
+
+
+def _find_parent_install_raw(config_path: Path) -> dict[str, Any] | None:
+    """Walk parent directories to find a ``config.yaml`` with a ``paths:`` list."""
+    current = config_path.parent.parent
+    while True:
+        candidate = current / "config.yaml"
+        if candidate.exists() and candidate != config_path:
+            try:
+                data = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and "paths" in data:
+                    return data
+            except Exception:
+                pass
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
 
 
 def print_ctx(ctx: Namespace) -> None:
@@ -633,81 +537,11 @@ def _load_env_file(env_file: Path) -> None:
         load_dotenv(dotenv_path=env_file, override=False)
 
 
-def _config_path(env: str, config_dir: Path) -> Path:
-    """Return the resolved Path to the main config file for the given environment."""
-    filename = _CONFIG_FILE_NAMES.get(env)
-    if not filename:
-        raise ConfigError(f"No config file defined for environment '{env}'.")
-    path = config_dir / filename
-    if not path.exists():
-        raise ConfigError(f"Config file not found: {path}")
-    return path
-
-
-def _read_config_yaml(env: str, config_dir: Path) -> dict[str, Any]:
-    """Read all YAML files for a context and return the merged raw dict."""
-    sources = _read_config_yaml_sources(env, config_dir)
-    result: dict[str, Any] = {}
-    for _path, data in sources:
-        result = _deep_merge(result, data)
-    return result
-
-
 def _assemble_ctx_data(raw: dict[str, Any], config_dir: Path) -> dict[str, Any]:
     """Apply the non-file transformations needed before Namespace wrapping."""
     raw = _resolve_env_references(raw)
     raw = _resolve_paths(raw, config_dir, parent_key="")
     return raw
-
-
-def _read_config_yaml_sources(env: str, config_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
-    """Read the exact YAML source files used by ``build_ctx()``."""
-    return [
-        (config_file, _load_yaml(config_file))
-        for config_file in _config_source_files(env, config_dir)
-    ]
-
-
-def _config_source_files(env: str, config_dir: Path) -> list[Path]:
-    """Return YAML files in the same order ``build_ctx()`` loads them."""
-    return [_config_path(env, config_dir), *_additional_config_files(config_dir)]
-
-
-def _additional_config_files(config_dir: Path) -> list[Path]:
-    """Return all non-main YAML files under ``config_dir`` in load order."""
-    main_filenames = set(_CONFIG_FILE_NAMES.values())
-    return [
-        config_file
-        for config_file in sorted(config_dir.rglob("*.yaml"))
-        if config_file.name not in main_filenames
-    ]
-
-
-def _source_yaml_document(config_dir: Path, path: Path) -> str:
-    """Return one source-annotated YAML document."""
-    relative = path.relative_to(config_dir).as_posix()
-    text = path.read_text(encoding="utf-8").rstrip()
-    return (
-        "---\n"
-        "# =============================================================================\n"
-        f"# SOURCE: {relative}\n"
-        "# =============================================================================\n"
-        f"{text}\n"
-    )
-
-
-def _env_from_config_path(config_path: Path) -> str:
-    """Derive and validate env from a ``config.<env>.yaml`` path."""
-    if not config_path.exists():
-        raise ConfigError(f"Config file not found: {config_path}")
-
-    stem = config_path.stem
-    parts = stem.split(".", 1)
-    if len(parts) != 2 or parts[0] != "config":
-        raise ConfigError(
-            f"Config filename must follow 'config.<env>.yaml', got: {config_path.name}"
-        )
-    return validate_env(parts[1])
 
 
 def _resolve_env_references(raw: dict[str, Any]) -> dict[str, Any]:
@@ -824,6 +658,9 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
                 if not (isinstance(item, dict) and item.get("name") in existing_names)
             ]
             result[key] = result[key] + new_items
+        elif key == "paths" and isinstance(result.get(key), list) and not isinstance(value, list):
+            # PathResolver list must never be replaced by an app-level paths dict.
+            pass
         else:
             result[key] = value
     return result
@@ -842,6 +679,8 @@ def _is_log_path_key(key: str) -> bool:
 
 
 def _resolve_path_value(value: str, base: Path) -> Path:
+    if "{" in value:
+        return Path(value)  # logical path template — substituted after PathResolver is built
     if value.startswith("~"):
         return Path(value).expanduser().resolve()
     p = Path(value)
@@ -849,6 +688,8 @@ def _resolve_path_value(value: str, base: Path) -> Path:
 
 
 def _resolve_log_path_value(value: str, base: Path) -> str:
+    if "{" in value:
+        return value  # logical path template — substituted after PathResolver is built
     if value.startswith("~"):
         return str(Path(value).expanduser())
     p = Path(value)
@@ -888,6 +729,44 @@ def _wrap_config_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_wrap_config_value(item) for item in value]
     return value
+
+
+class _SafePathFormat(dict):  # type: ignore[type-arg]
+    """dict subclass that returns the key in braces for missing keys."""
+
+    def __missing__(self, key: str) -> str:
+        return f"{{{key}}}"
+
+
+def _apply_path_resolver(obj: Any, resolver: PathResolver) -> None:
+    """Walk a Namespace tree and substitute {logicalname} references using *resolver*.
+
+    Only names present in the PathResolver are substituted; unknown placeholders
+    like {operation} and {timestamp} survive unchanged.
+    """
+    resolver_strs: dict[str, str] = {
+        name: str(resolver.resolve(name)) for name in resolver._paths
+    }
+    _walk_logical_refs(obj, resolver_strs)
+
+
+def _walk_logical_refs(obj: Any, resolver_strs: dict[str, str]) -> None:
+    """Recursive worker for :func:`_apply_path_resolver`."""
+    if isinstance(obj, Namespace):
+        for key in obj.keys():
+            value = object.__getattribute__(obj, key)
+            raw = str(value) if isinstance(value, Path) else value
+            if isinstance(raw, str) and "{" in raw:
+                substituted = raw.format_map(_SafePathFormat(resolver_strs))
+                if _is_path_key(key):
+                    object.__setattr__(obj, key, Path(substituted).expanduser())
+                else:
+                    object.__setattr__(obj, key, substituted)
+            elif isinstance(value, (Namespace, list)):
+                _walk_logical_refs(value, resolver_strs)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_logical_refs(item, resolver_strs)
 
 
 def _print_namespace(ns: Namespace, indent: int) -> None:

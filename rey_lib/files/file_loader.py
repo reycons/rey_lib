@@ -4,11 +4,11 @@ Generic file transform and loading pipeline for delimited file ingestion.
 Provides two independent pipeline stages driven entirely by YAML config:
 
 transform_files — reads raw files from inbox_path, validates headers,
-    applies column mapping and field transforms, writes clean output files
+    applies list-based column transforms, writes clean output files
     to processing_path, and moves source files per configured movements.
 
-load_files — reads transformed files from processing_path, injects runtime
-    constants, bulk inserts all rows into a SQL Server landing table, and
+load_files — reads transformed files from processing_path, bulk inserts all
+    rows into a SQL Server landing table, and
     moves files per configured movements on success or failure.
 
 On success  — commits and executes configured success movements.
@@ -129,8 +129,8 @@ def transform_files(
     On success — writes output file to processing_path, moves source file.
     On failure — moves source file to rejected_path, logs all errors.
 
-    batch_id is read from ctx.batch_id and injected into every output row
-    via constants automatically — no explicit parameter needed.
+    Runtime values such as batch_id should be modeled as columns with
+    inline ``transform.type: context`` or ``transform.type: constant``.
 
     File-level hook phases
     ----------------------
@@ -390,8 +390,8 @@ def load_files(
     conn : Any
         Open backend connection. Caller manages the connection lifecycle.
     data_source : Any
-        Namespace for one data_sources entry from ctx. Provides paths,
-        transforms list, and constants.
+        Namespace for one data_sources entry from ctx. Provides paths and
+        transforms list.
     load_cfg : Any
         Namespace for one loads entry. Provides source path key,
         pickup_pattern, version, load destination, and movements.
@@ -1850,8 +1850,8 @@ def _load_one_file(
     file_path : Path
         Full path of the file to load.
     transform_cfg : Any
-        Transform Namespace — provides header, columns, field_transforms,
-        constants, file_type, encoding.
+        Transform Namespace — provides header, list-based columns, file_type,
+        and encoding.
     load_cfg : Any
         Load Namespace — provides movements.
     paths : Any
@@ -1959,7 +1959,8 @@ def _build_column_defs(
     Parameters
     ----------
     transform_cfg : Any
-        Transform Namespace providing field_transforms.
+        Transform Namespace providing list-based columns with inline transform
+        entries.
     columns : list[str]
         Ordered list of output column names.
     rows : list[dict[str, Any]]
@@ -1970,9 +1971,7 @@ def _build_column_defs(
     list[tuple[str, str]]
         Ordered list of (column_name, sql_type) tuples.
     """
-    field_transforms = _namespace_to_dict(
-        getattr(transform_cfg, "field_transforms", None)
-    )
+    transform_map = _transform_map(transform_cfg)
 
     # Compute max observed length per column for varchar sizing.
     max_lengths: dict[str, int] = {}
@@ -1992,7 +1991,7 @@ def _build_column_defs(
 
     col_defs: list[tuple[str, str]] = []
     for col in columns:
-        transform      = field_transforms.get(col, {})
+        transform      = transform_map.get(col, {})
         transform_type = transform.get("type", "") if transform else ""
         cast_to        = transform.get("cast_to", "") if transform else ""
 
@@ -2061,6 +2060,21 @@ def _validate_load_header(
 	return False
 
 
+def _transform_map(transform_cfg: Any) -> dict[str, dict[str, Any]]:
+    """Return output column -> inline transform config for native columns."""
+    transform_map: dict[str, dict[str, Any]] = {}
+
+    for col_cfg in _namespace_to_plain(getattr(transform_cfg, "columns", None)) or []:
+        if not isinstance(col_cfg, dict):
+            continue
+        name = str(col_cfg.get("name", ""))
+        transform = col_cfg.get("transform") or {}
+        if name and isinstance(transform, dict) and transform:
+            transform_map[name] = transform
+
+    return transform_map
+
+
 def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
 	"""
 	Read the first non-blank line of a file and validate it against the
@@ -2109,7 +2123,7 @@ def _read_and_transform(
     ctx: Any = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[int, str, str]]]:
     """
-    Read all rows from a file and apply column mapping and transforms.
+    Read all rows from a file and apply list-based column transforms.
 
     Collects all row errors without stopping — returns both the clean
     rows and the full error list so the caller can decide what to do.
@@ -2608,20 +2622,24 @@ def _normalized_transform_config(transform_cfg: Any, ctx: Any = None) -> dict[st
     """
     Return the row-transform config in the internal list-based column shape.
 
-    Loader YAML is intentionally human-facing: ``columns`` may be a mapping
-    of output column to source column, with transform rules collected under
-    ``field_transforms``. The transformer uses one list of column definitions,
-    so this adapter keeps that conversion centralized in ``rey_lib``.
+    Loader YAML uses one native shape: ``columns`` must be a list where each
+    item defines the output name, source, and optional inline transform.
+    Legacy mapping-style ``columns``, ``field_transforms``, and ``constants``
+    are intentionally rejected so stale YAML is converted instead of silently
+    creating two competing config styles.
     """
     cfg_dict = _namespace_to_plain(transform_cfg)
-    cfg_dict["columns"] = _normalized_columns(
-        cfg_dict.get("columns"),
-        cfg_dict.get("field_transforms"),
-    )
-    cfg_dict.pop("field_transforms", None)
-
-    constants = _namespace_to_plain(cfg_dict.get("constants")) or {}
-    cfg_dict["columns"].extend(_constant_column_configs(constants, ctx=ctx))
+    if cfg_dict.get("field_transforms") is not None:
+        raise ConfigError(
+            "Legacy transform field_transforms is not supported. "
+            "Move each transform under columns[].transform."
+        )
+    if cfg_dict.get("constants") is not None:
+        raise ConfigError(
+            "Legacy transform constants is not supported. "
+            "Represent constants as columns with transform.type: constant."
+        )
+    cfg_dict["columns"] = _normalized_columns(cfg_dict.get("columns"))
     return cfg_dict
 
 
@@ -2645,89 +2663,27 @@ def _namespace_to_plain(value: Any) -> Any:
     return value
 
 
-def _normalized_columns(columns_cfg: Any, transforms_cfg: Any) -> list[dict[str, Any]]:
-    """Normalize supported column config shapes to transformer column defs."""
+def _normalized_columns(columns_cfg: Any) -> list[dict[str, Any]]:
+    """Validate and return native list-based column definitions."""
     columns = _namespace_to_plain(columns_cfg)
-    transforms = _namespace_to_plain(transforms_cfg) or {}
-    if not isinstance(transforms, dict):
-        transforms = {}
 
     if isinstance(columns, list):
-        return [
-            _normalized_column_config(col_cfg, transforms)
-            for col_cfg in columns
-            if isinstance(col_cfg, dict)
-        ]
+        normalized: list[dict[str, Any]] = []
+        for col_cfg in columns:
+            if not isinstance(col_cfg, dict):
+                raise ConfigError("Each transform column entry must be a mapping.")
+            if not str(col_cfg.get("name", "")).strip():
+                raise ConfigError("Each transform column entry requires name.")
+            normalized.append(dict(col_cfg))
+        return normalized
 
     if isinstance(columns, dict):
-        return [
-            _mapped_column_config(name, source, transforms.get(name, {}))
-            for name, source in columns.items()
-        ]
+        raise ConfigError(
+            "Legacy mapping-style transform columns is not supported. "
+            "Use a list of {name, source, transform} entries."
+        )
 
-    return []
-
-
-def _normalized_column_config(
-    col_cfg: dict[str, Any],
-    transforms: dict[str, Any],
-) -> dict[str, Any]:
-    """Normalize one already-list-shaped column config."""
-    normalized = dict(col_cfg)
-    name = str(normalized.get("name", ""))
-    if name and "transform" not in normalized and name in transforms:
-        normalized["transform"] = transforms[name]
-    return normalized
-
-
-def _mapped_column_config(
-    name: str,
-    source: Any,
-    transform_cfg: Any,
-) -> dict[str, Any]:
-    """Build one internal column config from output-name/source mapping."""
-    col_cfg = {
-        "name": str(name),
-        "source": source,
-    }
-    if transform_cfg:
-        col_cfg["transform"] = transform_cfg
-    return col_cfg
-
-
-def _constant_column_configs(constants: dict[str, Any], ctx: Any = None) -> list[dict[str, Any]]:
-    """Build internal column configs for configured constant output columns."""
-    return [
-        {
-            "name": str(name),
-            "transform": {
-                "type": "constant",
-                "value": _resolve_constant_value(value, ctx=ctx),
-            },
-        }
-        for name, value in constants.items()
-    ]
-
-
-def _resolve_constant_value(value: Any, ctx: Any = None) -> Any:
-    """Resolve runtime tokens in a constant config value."""
-    if not isinstance(value, str):
-        return value
-    if ctx is None:
-        return value
-    return value.format_map(_CtxFormatMap(ctx))
-
-
-class _CtxFormatMap(dict):
-    """Format-map adapter that resolves token names against ctx attributes."""
-
-    def __init__(self, ctx: Any) -> None:
-        super().__init__()
-        self._ctx = ctx
-
-    def __missing__(self, key: str) -> str:
-        return str(getattr(self._ctx, key, ""))
-
+    raise ConfigError("Transform columns must be a list of column definitions.")
 
 def _build_secrets(cfg_dict: dict[str, Any]) -> dict[str, str]:
     """
