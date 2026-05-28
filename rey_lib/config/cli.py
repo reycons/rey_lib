@@ -29,6 +29,7 @@ __all__ = [
     "add_config_args",
     "apply_env_overrides",
     "build_ctx_from_args",
+    "load_ctx_snapshot",
 ]
 
 def preparse_config_args() -> None:
@@ -136,6 +137,61 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
         help="Shared pipeline JSONL log file path.",
     )
 
+    parser.add_argument(
+        "--ctx-file",
+        dest="ctx_file",
+        default=None,
+        help="Path to a pipeline step ctx snapshot (JSON). Mutually exclusive with --config-path.",
+    )
+
+
+def load_ctx_snapshot(ctx_file: str) -> "Namespace":
+    """Load a pipeline step ctx snapshot from a JSON file.
+
+    Plain JSON deserializer — does not read YAML, call config-loading
+    machinery, discover config folders, or apply pipeline overrides.
+
+    Validates ctx_schema_version == "1.0" and reconstructs a PathResolver
+    from the serialized paths dict so apps can call ctx.paths.resolve().
+
+    Parameters
+    ----------
+    ctx_file : str
+        Path to the ctx snapshot JSON file written by the pipeline coordinator.
+
+    Returns
+    -------
+    Namespace
+        Context object equivalent to the one produced by build_ctx_from_path,
+        with ctx.paths as a PathResolver over pre-resolved path strings.
+
+    Raises
+    ------
+    RuntimeError
+        If the file is missing, malformed, or has an unsupported schema version.
+    """
+    import json
+
+    from rey_lib.config.config_utils import Namespace, PathResolver
+
+    path = Path(ctx_file).expanduser().resolve()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Cannot load ctx snapshot {ctx_file!r}: {exc}") from exc
+
+    version = data.get("ctx_schema_version")
+    if version != "1.0":
+        raise RuntimeError(f"Unsupported ctx snapshot version: {version!r}")
+
+    ctx_data: dict = data["ctx"]
+    ctx = Namespace(ctx_data)
+
+    paths_raw: dict = ctx_data.get("paths") or {}
+    path_resolver = PathResolver({k: Path(v) for k, v in paths_raw.items()})
+    object.__setattr__(ctx, "paths", path_resolver)
+
+    return ctx
 
 
 def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
@@ -165,10 +221,20 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
     """
     from rey_lib.config.config_utils import build_ctx_from_path
 
-    if not getattr(args, "config_path", None):
+    ctx_file = getattr(args, "ctx_file", None)
+    config_path = getattr(args, "config_path", None)
+
+    if ctx_file and config_path:
+        raise RuntimeError("--ctx-file and --config-path are mutually exclusive")
+
+    if ctx_file:
+        return load_ctx_snapshot(ctx_file)
+
+    if not config_path:
         raise SystemExit("--config-path is required.")
+
     return build_ctx_from_path(
-        Path(args.config_path).expanduser().resolve(),
+        Path(config_path).expanduser().resolve(),
         app_name=app_name,
     )
 
