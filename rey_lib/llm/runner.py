@@ -178,13 +178,14 @@ def run(
     )
 
     result = _execute_with_retry(
-        provider   = provider_cfg.provider,
-        messages   = messages,
-        model      = provider_cfg.model,
-        max_tokens = request.max_tokens,
-        schema     = schema,
-        policy     = policy,
-        raw_output = getattr(request, "raw_output", False),
+        provider    = provider_cfg.provider,
+        messages    = messages,
+        model       = provider_cfg.model,
+        max_tokens  = request.max_tokens,
+        temperature = request.temperature,
+        schema      = schema,
+        policy      = policy,
+        raw_output  = getattr(request, "raw_output", False),
     )
 
     # 4. Resolve the final stored status once.
@@ -424,7 +425,9 @@ def _resolve_provider_config(request: RunRequest) -> _ProviderConfig:
     except ConfigurationFailure:
         pass
 
-    provider = resolve_provider(request.provider, api_key=request.api_key)
+    provider = resolve_provider(
+        request.provider, api_key=request.api_key, options=request.provider_options
+    )
     return _ProviderConfig(name=request.provider, model=request.model, provider=provider)
 
 
@@ -470,13 +473,14 @@ def _check_capabilities(provider: BaseProvider, messages: list[Message]) -> None
 
 
 def _execute_with_retry(
-    provider:   BaseProvider,
-    messages:   list[Message],
-    model:      str,
-    max_tokens: int,
-    schema:     Optional[dict[str, Any]],
-    policy:     RetryPolicy,
-    raw_output: bool = False,
+    provider:    BaseProvider,
+    messages:    list[Message],
+    model:       str,
+    max_tokens:  int,
+    schema:      Optional[dict[str, Any]],
+    policy:      RetryPolicy,
+    raw_output:  bool  = False,
+    temperature: float = 0.0,
 ) -> _ExecuteResult:
     """Run the provider call up to policy.max_attempts times.
 
@@ -494,7 +498,7 @@ def _execute_with_retry(
 
     for attempt in range(policy.max_attempts):
         raw, tokens_in, tokens_out, exc = _single_provider_call(
-            provider, messages, model, max_tokens
+            provider, messages, model, max_tokens, temperature
         )
 
         if exc is not None:
@@ -610,14 +614,17 @@ def _execute_with_retry(
 
 
 def _single_provider_call(
-    provider:   BaseProvider,
-    messages:   list[Message],
-    model:      str,
-    max_tokens: int,
+    provider:    BaseProvider,
+    messages:    list[Message],
+    model:       str,
+    max_tokens:  int,
+    temperature: float = 0.0,
 ) -> tuple[str, int, int, Optional[ProviderFailure]]:
     """Make one provider call. Returns (raw, tokens_in, tokens_out, exc_or_None)."""
     try:
-        resp = provider.run(messages=messages, model=model, max_tokens=max_tokens, temperature=0.0)
+        resp = provider.run(
+            messages=messages, model=model, max_tokens=max_tokens, temperature=temperature
+        )
         return resp.content, resp.tokens_in, resp.tokens_out, None
     except ProviderFailure as exc:
         return str(exc), 0, 0, exc

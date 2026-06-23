@@ -20,7 +20,7 @@ resolve(name, api_key)
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from rey_lib.llm.exceptions import ConfigurationFailure
 from rey_lib.llm.providers.base import BaseProvider
@@ -76,9 +76,10 @@ def get(name: str) -> BaseProvider:
 
 def resolve(
     name:     str,
-    api_key:  str = "",
-    endpoint: str = "",
-    timeout:  int = 0,
+    api_key:  str                       = "",
+    endpoint: str                       = "",
+    timeout:  int                       = 0,
+    options:  Optional[dict[str, Any]]  = None,
 ) -> BaseProvider:
     """Return or construct a provider by logical name.
 
@@ -95,6 +96,9 @@ def resolve(
         Endpoint URL override.  Only used for 'ollama'; ignored otherwise.
     timeout : int
         HTTP timeout in seconds.  Only used for 'ollama'; 0 uses the default.
+    options : dict, optional
+        Provider options sourced from the LLM profile (endpoint,
+        timeout_seconds, capability flags).  Only used for 'ollama'.
 
     Returns
     -------
@@ -123,15 +127,17 @@ def resolve(
         return MockProvider()
 
     if normalised == "ollama":
-        from rey_lib.llm.providers.ollama import (  # noqa: PLC0415
-            DEFAULT_ENDPOINT,
-            DEFAULT_TIMEOUT,
-            OllamaProvider,
-        )
-        return OllamaProvider(
-            endpoint = endpoint or DEFAULT_ENDPOINT,
-            timeout  = timeout  or DEFAULT_TIMEOUT,
-        )
+        from rey_lib.llm.providers.ollama import OllamaProvider  # noqa: PLC0415
+
+        opts: dict[str, Any] = dict(options or {})
+        if endpoint and "endpoint" not in opts:
+            opts["endpoint"] = endpoint
+        if timeout and "timeout_seconds" not in opts:
+            opts["timeout_seconds"] = timeout
+
+        provider = OllamaProvider.from_options(opts)
+        provider.health_check()
+        return provider
 
     raise ConfigurationFailure(
         f"Unknown provider '{name}'. "

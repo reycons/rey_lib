@@ -93,6 +93,11 @@ class RunRequest:
     model:             str            = ""
     api_key:           str            = ""
 
+    # Provider-specific options sourced from the LLM profile (e.g. Ollama
+    # endpoint, timeout_seconds, and capability flags). Empty for providers
+    # that take no extra options.
+    provider_options:  dict[str, Any] = field(default_factory=dict)
+
     output_schema:     Optional[dict[str, Any]] = None
     schema_version:    str                      = ""
 
@@ -103,6 +108,7 @@ class RunRequest:
     classification:    str            = ""
     max_tokens:        int            = 4000
     max_rows:          int            = 200
+    temperature:       float          = 0.0
 
     # When True the runner stores the record as 'pending_approval' on success
     # instead of 'success'.  The pipeline halts at this stage until the record

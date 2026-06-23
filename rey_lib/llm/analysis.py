@@ -310,20 +310,24 @@ class Analyzer:
     def __init__(
         self,
         contract_path:    Path,
-        provider:         str                        = "",
-        model:            str                        = "",
-        api_key:          str                        = "",
-        log:              Optional[Path]             = None,
-        artifact_store:   Optional[ArtifactStore]   = None,
-        redaction_filter: Optional[RedactionFilter]  = None,
-        max_extract:      int                        = 10_000,
-        requires_approval: bool                      = False,
+        provider:         str                          = "",
+        model:            str                          = "",
+        api_key:          str                          = "",
+        temperature:      float                        = 0.0,
+        provider_options: Optional[dict[str, Any]]     = None,
+        log:              Optional[Path]               = None,
+        artifact_store:   Optional[ArtifactStore]     = None,
+        redaction_filter: Optional[RedactionFilter]    = None,
+        max_extract:      int                          = 10_000,
+        requires_approval: bool                        = False,
     ) -> None:
         """Load the contract and store provider configuration."""
         self._contract         = load_analysis_contract(contract_path)
         self._provider         = provider
         self._model            = model
         self._api_key          = api_key
+        self._temperature      = temperature
+        self._provider_options = provider_options or {}
         self._log              = Path(log) if log else None
         self._artifact_store   = artifact_store
         self._redaction_filter = redaction_filter
@@ -407,6 +411,8 @@ class Analyzer:
             provider          = self._provider,
             model             = self._model,
             api_key           = self._api_key,
+            temperature       = self._temperature,
+            provider_options  = self._provider_options,
             output_schema     = spec.output_schema,
             log               = self._log,
             requires_approval = self._requires_approval,
