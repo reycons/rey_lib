@@ -58,6 +58,13 @@ __all__ = [
     "converted_output_path",
     "get_reader",
     "write_file",
+    "delete_file",
+    "export_db_root",
+    "export_object_file_path",
+    "export_build_manifest_path",
+    "export_build_sql_path",
+    "export_relative_posix",
+    "cleanup_stale_files",
     "scan_column_lengths",
     "move_file",
     "file_operation_log_path",
@@ -584,6 +591,67 @@ def write_file(
             _logger.warning("Could not write file creation state for '%s': %s", outfile.name, exc)
 
     return outfile.resolve()
+
+
+def delete_file(path: Path | str) -> bool:
+    """Delete one file if it exists and return whether anything was removed."""
+    file_path = Path(path).expanduser()
+    if not file_path.exists():
+        return False
+    if not file_path.is_file():
+        raise ValueError(f"Path is not a file: {file_path}")
+    file_path.unlink()
+    return True
+
+
+def export_db_root(output_root: Path | str, provider: str, database: str) -> Path:
+    """Return export root folder for one provider/database pair."""
+    return Path(output_root).expanduser() / provider / database
+
+
+def export_object_file_path(
+    db_root: Path | str,
+    schema: str,
+    object_type: str,
+    file_name: str,
+) -> Path:
+    """Return full object SQL file path under export root."""
+    return Path(db_root) / schema / object_type / file_name
+
+
+def export_build_manifest_path(db_root: Path | str) -> Path:
+    """Return build manifest path under export root."""
+    return Path(db_root) / "build" / "build_manifest.json"
+
+
+def export_build_sql_path(db_root: Path | str) -> Path:
+    """Return build SQL path under export root."""
+    return Path(db_root) / "build" / "build_database.sql"
+
+
+def export_relative_posix(path: Path | str, root: Path | str) -> str:
+    """Return path relative to root in forward-slash format."""
+    return Path(path).relative_to(Path(root)).as_posix()
+
+
+def cleanup_stale_files(
+    root: Path | str,
+    keep_files: set[Path | str],
+) -> list[str]:
+    """Delete files under root that are not in keep_files and return removed relpaths."""
+    root_path = Path(root)
+    keep_resolved = {Path(path).resolve() for path in keep_files}
+    removed: list[str] = []
+
+    for existing in visible_files(root_path, "*", recursive=True):
+        if not existing.is_file():
+            continue
+        if existing.resolve() in keep_resolved:
+            continue
+        if delete_file(existing):
+            removed.append(existing.relative_to(root_path).as_posix())
+
+    return removed
 
 def move_file(
     src: Path,

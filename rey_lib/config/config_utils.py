@@ -381,10 +381,19 @@ def _resolve_include_folders(
 
 
 def _yaml_files_in_folder(folder: Path, exclude: Path) -> list[Path]:
-    """Return sorted ``*.yaml`` files under ``folder``, skipping ``exclude``.
+    """Return sorted YAML files for a folder or one YAML file path.
+
+    ``folder`` may be either:
+    - a directory, in which case all ``*.yaml`` files are returned recursively
+    - a single ``.yaml`` file, in which case only that file is returned
 
     The root ``config.yaml`` is excluded so it is never merged twice.
     """
+    if folder.is_file():
+        if folder.suffix.lower() == ".yaml" and folder.resolve() != exclude:
+            return [folder]
+        return []
+
     return [
         f for f in sorted(folder.rglob("*.yaml"))
         if f.resolve() != exclude

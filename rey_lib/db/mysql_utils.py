@@ -22,6 +22,9 @@ from rey_lib.logs import get_logger
 __all__ = [
 	"init_db",
 	"get_connection",
+	"get_current_database",
+	"list_database_objects",
+	"get_object_ddl",
 	"execute",
 	"fetch",
 	"fetch_dicts",
@@ -393,3 +396,269 @@ def _validate_identifier(name: str, label: str) -> None:
 			f"Invalid MySQL identifier for {label}: '{name}'. "
 			f"Only alphanumeric characters and underscores are permitted."
 		)
+
+
+def get_current_database(conn: mysql.connector.MySQLConnection) -> str:
+	"""Return the current MySQL database."""
+	cursor = conn.cursor()
+	try:
+		cursor.execute("SELECT DATABASE()")
+		row = cursor.fetchone()
+		return str(row[0]) if row and row[0] else ""
+	finally:
+		cursor.close()
+
+
+def list_database_objects(
+	conn: mysql.connector.MySQLConnection,
+	database: str | None = None,
+) -> list[dict[str, Any]]:
+	"""Return exportable MySQL objects and discoverable dependencies."""
+	db_name = database or get_current_database(conn)
+	cursor = conn.cursor(dictionary=True)
+	try:
+		cursor.execute(
+			"""
+			SELECT 'schema' AS object_type, schema_name AS schema_name, schema_name AS object_name
+			FROM information_schema.schemata
+			WHERE schema_name = %s
+			UNION ALL
+			SELECT 'table', table_schema, table_name
+			FROM information_schema.tables
+			WHERE table_schema = %s AND table_type = 'BASE TABLE'
+			UNION ALL
+			SELECT 'view', table_schema, table_name
+			FROM information_schema.views
+			WHERE table_schema = %s
+			UNION ALL
+			SELECT CASE routine_type WHEN 'PROCEDURE' THEN 'procedure' ELSE 'function' END,
+				routine_schema,
+				routine_name
+			FROM information_schema.routines
+			WHERE routine_schema = %s
+			UNION ALL
+			SELECT 'trigger', trigger_schema, trigger_name
+			FROM information_schema.triggers
+			WHERE trigger_schema = %s
+			UNION ALL
+			SELECT 'index', table_schema, index_name
+			FROM information_schema.statistics
+			WHERE table_schema = %s
+			GROUP BY table_schema, index_name
+			UNION ALL
+			SELECT 'constraint', constraint_schema, constraint_name
+			FROM information_schema.table_constraints
+			WHERE constraint_schema = %s
+			GROUP BY constraint_schema, constraint_name
+			ORDER BY object_type, schema_name, object_name
+			""",
+			[db_name, db_name, db_name, db_name, db_name, db_name, db_name],
+		)
+		rows = cursor.fetchall()
+	finally:
+		cursor.close()
+
+	deps = _mysql_dependencies(conn, db_name)
+	objects: list[dict[str, Any]] = []
+	for row in rows:
+		obj_type = str(row["object_type"])
+		schema_name = str(row["schema_name"])
+		obj_name = str(row["object_name"])
+		key = f"{obj_type}:{schema_name}.{obj_name}"
+		objects.append(
+			{
+				"database": db_name,
+				"object_type": obj_type,
+				"schema": schema_name,
+				"name": obj_name,
+				"dependencies": deps.get(key, []),
+			}
+		)
+	return objects
+
+
+def get_object_ddl(
+	conn: mysql.connector.MySQLConnection,
+	obj: dict[str, Any],
+) -> str:
+	"""Return native MySQL DDL for one object."""
+	object_type = str(obj.get("object_type", "")).lower().rstrip("s")
+	schema = str(obj.get("schema", ""))
+	name = str(obj.get("name", ""))
+	cursor = conn.cursor(dictionary=True)
+	try:
+		if object_type == "schema":
+			return f"CREATE SCHEMA IF NOT EXISTS `{schema}`;"
+
+		if object_type in ("table", "view"):
+			cursor.execute(f"SHOW CREATE TABLE `{schema}`.`{name}`")
+			row = cursor.fetchone() or {}
+			ddl = row.get("Create Table") or row.get("Create View") or ""
+			return str(ddl).rstrip() + ";"
+
+		if object_type in ("procedure", "function"):
+			cursor.execute(f"SHOW CREATE {object_type.upper()} `{schema}`.`{name}`")
+			row = cursor.fetchone() or {}
+			ddl = row.get("Create Procedure") or row.get("Create Function") or ""
+			return str(ddl).rstrip() + ";"
+
+		if object_type == "trigger":
+			cursor.execute(f"SHOW CREATE TRIGGER `{schema}`.`{name}`")
+			row = cursor.fetchone() or {}
+			ddl = row.get("SQL Original Statement") or row.get("Create Trigger") or ""
+			return str(ddl).rstrip() + ";"
+
+		if object_type == "index":
+			cursor.execute(
+				"""
+				SELECT table_name, non_unique,
+					GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ', ') AS columns,
+					index_type
+				FROM information_schema.statistics
+				WHERE table_schema = %s AND index_name = %s
+				GROUP BY table_name, non_unique, index_type
+				LIMIT 1
+				""",
+				[schema, name],
+			)
+			row = cursor.fetchone()
+			if not row:
+				raise DatabaseError(f"mysql_utils: index not found: {schema}.{name}")
+			table_name = row["table_name"]
+			non_unique = int(row["non_unique"])
+			cols = str(row["columns"])
+			prefix = "UNIQUE " if non_unique == 0 and name != "PRIMARY" else ""
+			if name == "PRIMARY":
+				return f"ALTER TABLE `{schema}`.`{table_name}` ADD PRIMARY KEY ({cols});"
+			return f"CREATE {prefix}INDEX `{name}` ON `{schema}`.`{table_name}` ({cols});"
+
+		if object_type == "constraint":
+			cursor.execute(
+				"""
+				SELECT tc.table_name, tc.constraint_type,
+					GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position SEPARATOR ', ') AS columns,
+					rc.referenced_table_name,
+					GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position SEPARATOR ', ') AS ref_columns
+				FROM information_schema.table_constraints tc
+				LEFT JOIN information_schema.key_column_usage kcu
+					ON tc.constraint_schema = kcu.constraint_schema
+					AND tc.constraint_name = kcu.constraint_name
+					AND tc.table_name = kcu.table_name
+				LEFT JOIN information_schema.referential_constraints rc
+					ON tc.constraint_schema = rc.constraint_schema
+					AND tc.constraint_name = rc.constraint_name
+				WHERE tc.constraint_schema = %s
+					AND tc.constraint_name = %s
+				GROUP BY tc.table_name, tc.constraint_type, rc.referenced_table_name
+				LIMIT 1
+				""",
+				[schema, name],
+			)
+			row = cursor.fetchone()
+			if not row:
+				raise DatabaseError(f"mysql_utils: constraint not found: {schema}.{name}")
+			table_name = row["table_name"]
+			constraint_type = str(row["constraint_type"]).upper()
+			cols = row.get("columns") or ""
+			if constraint_type == "PRIMARY KEY":
+				return f"ALTER TABLE `{schema}`.`{table_name}` ADD PRIMARY KEY ({cols});"
+			if constraint_type == "UNIQUE":
+				return f"ALTER TABLE `{schema}`.`{table_name}` ADD CONSTRAINT `{name}` UNIQUE ({cols});"
+			if constraint_type == "FOREIGN KEY":
+				ref_table = row.get("referenced_table_name")
+				ref_cols = row.get("ref_columns") or ""
+				return (
+					f"ALTER TABLE `{schema}`.`{table_name}` "
+					f"ADD CONSTRAINT `{name}` FOREIGN KEY ({cols}) "
+					f"REFERENCES `{schema}`.`{ref_table}` ({ref_cols});"
+				)
+			return f"-- Unsupported MySQL constraint type {constraint_type} for `{schema}`.`{name}`."
+
+		return f"-- Unsupported MySQL object type '{object_type}' for `{schema}`.`{name}`."
+	finally:
+		cursor.close()
+
+
+def _mysql_dependencies(
+	conn: mysql.connector.MySQLConnection,
+	database: str,
+) -> dict[str, list[dict[str, str]]]:
+	"""Return discoverable dependencies keyed by exporter object key."""
+	result: dict[str, list[dict[str, str]]] = {}
+	cursor = conn.cursor(dictionary=True)
+	try:
+		cursor.execute(
+			"""
+			SELECT view_schema, view_name, table_schema, table_name
+			FROM information_schema.view_table_usage
+			WHERE view_schema = %s
+			""",
+			[database],
+		)
+		for row in cursor.fetchall():
+			key = f"view:{row['view_schema']}.{row['view_name']}"
+			dep = {
+				"object_type": "table",
+				"schema": str(row["table_schema"]),
+				"name": str(row["table_name"]),
+			}
+			result.setdefault(key, []).append(dep)
+
+		cursor.execute(
+			"""
+			SELECT trigger_schema, trigger_name, event_object_schema, event_object_table
+			FROM information_schema.triggers
+			WHERE trigger_schema = %s
+			""",
+			[database],
+		)
+		for row in cursor.fetchall():
+			key = f"trigger:{row['trigger_schema']}.{row['trigger_name']}"
+			dep = {
+				"object_type": "table",
+				"schema": str(row["event_object_schema"]),
+				"name": str(row["event_object_table"]),
+			}
+			result.setdefault(key, []).append(dep)
+
+		cursor.execute(
+			"""
+			SELECT constraint_schema, constraint_name, table_name
+			FROM information_schema.table_constraints
+			WHERE constraint_schema = %s
+			""",
+			[database],
+		)
+		for row in cursor.fetchall():
+			key = f"constraint:{row['constraint_schema']}.{row['constraint_name']}"
+			dep = {
+				"object_type": "table",
+				"schema": str(row["constraint_schema"]),
+				"name": str(row["table_name"]),
+			}
+			result.setdefault(key, []).append(dep)
+
+		cursor.execute(
+			"""
+			SELECT table_schema, index_name, table_name
+			FROM information_schema.statistics
+			WHERE table_schema = %s
+			GROUP BY table_schema, index_name, table_name
+			""",
+			[database],
+		)
+		for row in cursor.fetchall():
+			key = f"index:{row['table_schema']}.{row['index_name']}"
+			dep = {
+				"object_type": "table",
+				"schema": str(row["table_schema"]),
+				"name": str(row["table_name"]),
+			}
+			result.setdefault(key, []).append(dep)
+	finally:
+		cursor.close()
+
+	for key, deps in result.items():
+		uniq = {(d["object_type"], d["schema"], d["name"]): d for d in deps}
+		result[key] = [uniq[k] for k in sorted(uniq)]
+	return result

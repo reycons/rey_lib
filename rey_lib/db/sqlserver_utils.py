@@ -63,6 +63,9 @@ from rey_lib.logs import get_logger
 __all__ = [
     "init_db",
     "get_connection",
+    "get_current_database",
+    "list_database_objects",
+    "get_object_ddl",
     "execute",
     "fetch",
     "bulk_insert",
@@ -1010,3 +1013,304 @@ def _validate_identifier(name: str, label: str) -> None:
             f"Only alphanumeric characters, underscores, dots, "
             f"and square brackets are permitted."
         )
+
+
+def get_current_database(conn: pyodbc.Connection) -> str:
+    """Return the active SQL Server database name."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT DB_NAME()")
+        row = cursor.fetchone()
+        return str(row[0]) if row and row[0] else ""
+    finally:
+        cursor.close()
+
+
+def list_database_objects(
+    conn: pyodbc.Connection,
+    database: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return exportable SQL Server objects with discoverable dependencies."""
+    del database
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            WITH objs AS (
+                SELECT 'schema' AS object_type, s.name AS schema_name, s.name AS object_name, NULL AS object_id
+                FROM sys.schemas s
+                WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+
+                UNION ALL
+
+                SELECT
+                    CASE o.type
+                        WHEN 'U' THEN 'table'
+                        WHEN 'V' THEN 'view'
+                        WHEN 'P' THEN 'procedure'
+                        WHEN 'FN' THEN 'function'
+                        WHEN 'TF' THEN 'function'
+                        WHEN 'IF' THEN 'function'
+                        WHEN 'TR' THEN 'trigger'
+                        WHEN 'SO' THEN 'sequence'
+                        WHEN 'PK' THEN 'constraint'
+                        WHEN 'UQ' THEN 'constraint'
+                        WHEN 'F' THEN 'constraint'
+                        WHEN 'C' THEN 'constraint'
+                        WHEN 'D' THEN 'constraint'
+                        ELSE NULL
+                    END AS object_type,
+                    s.name AS schema_name,
+                    o.name AS object_name,
+                    o.object_id
+                FROM sys.objects o
+                JOIN sys.schemas s ON s.schema_id = o.schema_id
+                WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+                    AND o.type IN ('U', 'V', 'P', 'FN', 'TF', 'IF', 'TR', 'SO', 'PK', 'UQ', 'F', 'C', 'D')
+
+                UNION ALL
+
+                SELECT 'index', s.name, i.name, i.object_id
+                FROM sys.indexes i
+                JOIN sys.tables t ON t.object_id = i.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE i.name IS NOT NULL
+                    AND i.type > 0
+                    AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+
+                UNION ALL
+
+                SELECT 'type', s.name, t.name, NULL
+                FROM sys.types t
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE t.is_user_defined = 1
+                    AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+            )
+            SELECT object_type, schema_name, object_name, object_id
+            FROM objs
+            WHERE object_type IS NOT NULL
+            ORDER BY object_type, schema_name, object_name
+            """
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    deps = _sqlserver_dependencies(conn)
+    db_name = get_current_database(conn)
+    objects: list[dict[str, Any]] = []
+    for row in rows:
+        object_type = str(row[0])
+        schema_name = str(row[1])
+        object_name = str(row[2])
+        object_id = int(row[3]) if row[3] is not None else None
+        key = f"{object_type}:{schema_name}.{object_name}"
+        objects.append(
+            {
+                "database": db_name,
+                "object_type": object_type,
+                "schema": schema_name,
+                "name": object_name,
+                "object_id": object_id,
+                "dependencies": deps.get(key, []),
+            }
+        )
+    return objects
+
+
+def get_object_ddl(conn: pyodbc.Connection, obj: dict[str, Any]) -> str:
+    """Return native SQL Server DDL for one export object."""
+    object_type = str(obj.get("object_type", "")).lower().rstrip("s")
+    schema = str(obj.get("schema", "dbo"))
+    name = str(obj.get("name", ""))
+    object_id = obj.get("object_id")
+
+    if object_type == "schema":
+        return (
+            f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC('CREATE SCHEMA [{schema}]');"
+        )
+
+    cursor = conn.cursor()
+    try:
+        if object_type in ("view", "procedure", "function", "trigger", "constraint") and object_id is not None:
+            cursor.execute("SELECT OBJECT_DEFINITION(?)", [object_id])
+            row = cursor.fetchone()
+            ddl = row[0] if row else None
+            if ddl:
+                return str(ddl).rstrip() + "\nGO"
+
+        if object_type == "table":
+            cursor.execute(
+                """
+                SELECT
+                    c.name,
+                    ty.name,
+                    c.max_length,
+                    c.precision,
+                    c.scale,
+                    c.is_nullable,
+                    dc.definition
+                FROM sys.columns c
+                JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+                LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+                JOIN sys.tables t ON t.object_id = c.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                WHERE s.name = ? AND t.name = ?
+                ORDER BY c.column_id
+                """,
+                [schema, name],
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                raise DatabaseError(f"sqlserver_utils: table not found: {schema}.{name}")
+            cols: list[str] = []
+            for row in rows:
+                col_name, type_name, max_len, precision, scale, is_nullable, default_def = row
+                type_sql = _sqlserver_column_type(type_name, max_len, precision, scale)
+                null_sql = "NULL" if bool(is_nullable) else "NOT NULL"
+                default_sql = f" DEFAULT {default_def}" if default_def else ""
+                cols.append(f"    [{col_name}] {type_sql}{default_sql} {null_sql}")
+            body = ",\n".join(cols)
+            return f"CREATE TABLE [{schema}].[{name}] (\n{body}\n);\nGO"
+
+        if object_type == "sequence":
+            cursor.execute(
+                """
+                SELECT start_value, increment, minimum_value, maximum_value, is_cycling
+                FROM sys.sequences seq
+                JOIN sys.schemas s ON s.schema_id = seq.schema_id
+                WHERE s.name = ? AND seq.name = ?
+                """,
+                [schema, name],
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise DatabaseError(f"sqlserver_utils: sequence not found: {schema}.{name}")
+            cycle_sql = "CYCLE" if bool(row[4]) else "NO CYCLE"
+            return (
+                f"CREATE SEQUENCE [{schema}].[{name}] "
+                f"START WITH {row[0]} INCREMENT BY {row[1]} "
+                f"MINVALUE {row[2]} MAXVALUE {row[3]} {cycle_sql};\nGO"
+            )
+
+        if object_type == "index":
+            cursor.execute(
+                """
+                SELECT t.name, i.is_unique,
+                    STRING_AGG(QUOTENAME(c.name), ', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
+                FROM sys.indexes i
+                JOIN sys.tables t ON t.object_id = i.object_id
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                WHERE s.name = ? AND i.name = ?
+                GROUP BY t.name, i.is_unique
+                """,
+                [schema, name],
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise DatabaseError(f"sqlserver_utils: index not found: {schema}.{name}")
+            unique_sql = "UNIQUE " if bool(row[1]) else ""
+            return (
+                f"CREATE {unique_sql}INDEX [{name}] ON [{schema}].[{row[0]}] ({row[2]});\nGO"
+            )
+
+        if object_type == "type":
+            cursor.execute(
+                """
+                SELECT base.name, t.max_length, t.precision, t.scale
+                FROM sys.types t
+                JOIN sys.schemas s ON s.schema_id = t.schema_id
+                JOIN sys.types base ON base.user_type_id = t.system_type_id
+                WHERE s.name = ? AND t.name = ?
+                """,
+                [schema, name],
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise DatabaseError(f"sqlserver_utils: type not found: {schema}.{name}")
+            type_sql = _sqlserver_column_type(row[0], row[1], row[2], row[3])
+            return f"CREATE TYPE [{schema}].[{name}] FROM {type_sql};\nGO"
+
+        return f"-- Unsupported SQL Server object type '{object_type}' for [{schema}].[{name}]"
+    finally:
+        cursor.close()
+
+
+def _sqlserver_dependencies(conn: pyodbc.Connection) -> dict[str, list[dict[str, str]]]:
+    """Return dependency map keyed by exporter object key."""
+    cursor = conn.cursor()
+    result: dict[str, list[dict[str, str]]] = {}
+    try:
+        cursor.execute(
+            """
+            SELECT
+                src_t.object_type,
+                src_s.name,
+                src_o.name,
+                ref_t.object_type,
+                ref_s.name,
+                ref_o.name
+            FROM sys.sql_expression_dependencies d
+            JOIN sys.objects src_o ON src_o.object_id = d.referencing_id
+            JOIN sys.schemas src_s ON src_s.schema_id = src_o.schema_id
+            JOIN sys.objects ref_o ON ref_o.object_id = d.referenced_id
+            JOIN sys.schemas ref_s ON ref_s.schema_id = ref_o.schema_id
+            CROSS APPLY (
+                SELECT CASE src_o.type
+                    WHEN 'U' THEN 'table'
+                    WHEN 'V' THEN 'view'
+                    WHEN 'P' THEN 'procedure'
+                    WHEN 'FN' THEN 'function'
+                    WHEN 'TF' THEN 'function'
+                    WHEN 'IF' THEN 'function'
+                    WHEN 'TR' THEN 'trigger'
+                    ELSE 'table' END AS object_type
+            ) src_t
+            CROSS APPLY (
+                SELECT CASE ref_o.type
+                    WHEN 'U' THEN 'table'
+                    WHEN 'V' THEN 'view'
+                    WHEN 'P' THEN 'procedure'
+                    WHEN 'FN' THEN 'function'
+                    WHEN 'TF' THEN 'function'
+                    WHEN 'IF' THEN 'function'
+                    WHEN 'TR' THEN 'trigger'
+                    ELSE 'table' END AS object_type
+            ) ref_t
+            WHERE src_s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+              AND ref_s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+            """
+        )
+        for row in cursor.fetchall():
+            src_key = f"{row[0]}:{row[1]}.{row[2]}"
+            dep = {
+                "object_type": str(row[3]),
+                "schema": str(row[4]),
+                "name": str(row[5]),
+            }
+            result.setdefault(src_key, []).append(dep)
+    finally:
+        cursor.close()
+
+    for key, deps in result.items():
+        uniq = {(d["object_type"], d["schema"], d["name"]): d for d in deps}
+        result[key] = [uniq[k] for k in sorted(uniq)]
+    return result
+
+
+def _sqlserver_column_type(type_name: str, max_len: int, precision: int, scale: int) -> str:
+    """Return SQL Server type declaration with parameters when applicable."""
+    t = str(type_name).lower()
+    if t in {"nvarchar", "varchar", "nchar", "char", "varbinary", "binary"}:
+        if max_len == -1:
+            return f"{type_name}(MAX)"
+        if t.startswith("n") and max_len and max_len > 0:
+            return f"{type_name}({int(max_len // 2)})"
+        return f"{type_name}({int(max_len)})"
+    if t in {"decimal", "numeric"}:
+        return f"{type_name}({int(precision)},{int(scale)})"
+    if t in {"datetime2", "time", "datetimeoffset"}:
+        return f"{type_name}({int(scale)})"
+    return str(type_name)

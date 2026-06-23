@@ -32,6 +32,9 @@ __all__ = [
     "DB_PATH",
     "init_db",
     "get_connection",
+    "get_current_database",
+    "list_database_objects",
+    "get_object_ddl",
     "execute",
     "fetch",
     "run_sql",
@@ -407,3 +410,138 @@ def _require_init() -> None:
         raise RuntimeError(
             "duckdb_utils.init_db() must be called before using the database."
         )
+
+
+def get_current_database(conn: duckdb.DuckDBPyConnection) -> str:
+    """Return current DuckDB catalog/database name."""
+    row = conn.execute("SELECT current_database()").fetchone()
+    return str(row[0]) if row and row[0] else "main"
+
+
+def list_database_objects(
+    conn: duckdb.DuckDBPyConnection,
+    database: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return exportable DuckDB objects with discoverable dependencies."""
+    db_name = database or get_current_database(conn)
+
+    rows = conn.execute(
+        """
+        WITH objects AS (
+            SELECT 'schema' AS object_type, schema_name AS schema_name, schema_name AS object_name
+            FROM information_schema.schemata
+            WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
+
+            UNION ALL
+
+            SELECT CASE table_type WHEN 'VIEW' THEN 'view' ELSE 'table' END,
+                   table_schema,
+                   table_name
+            FROM information_schema.tables
+            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+
+            UNION ALL
+
+            SELECT 'sequence', sequence_schema, sequence_name
+            FROM information_schema.sequences
+            WHERE sequence_schema NOT IN ('information_schema', 'pg_catalog')
+        )
+        SELECT object_type, schema_name, object_name
+        FROM objects
+        ORDER BY object_type, schema_name, object_name
+        """
+    ).fetchall()
+
+    deps = _duckdb_dependencies(conn)
+
+    result: list[dict[str, Any]] = []
+    for object_type, schema_name, object_name in rows:
+        key = f"{object_type}:{schema_name}.{object_name}"
+        result.append(
+            {
+                "database": db_name,
+                "object_type": str(object_type),
+                "schema": str(schema_name),
+                "name": str(object_name),
+                "dependencies": deps.get(key, []),
+            }
+        )
+    return result
+
+
+def get_object_ddl(conn: duckdb.DuckDBPyConnection, obj: dict[str, Any]) -> str:
+    """Return native DuckDB DDL for one object."""
+    object_type = str(obj.get("object_type", "")).lower().rstrip("s")
+    schema = str(obj.get("schema", "main"))
+    name = str(obj.get("name", ""))
+
+    if object_type == "schema":
+        return f'CREATE SCHEMA IF NOT EXISTS "{schema}";'
+
+    if object_type == "table":
+        row = conn.execute(f'SHOW CREATE TABLE "{schema}"."{name}"').fetchone()
+        ddl = row[1] if row and len(row) > 1 else (row[0] if row else "")
+        return str(ddl).rstrip() + ";"
+
+    if object_type == "view":
+        row = conn.execute(f'SHOW CREATE VIEW "{schema}"."{name}"').fetchone()
+        ddl = row[1] if row and len(row) > 1 else (row[0] if row else "")
+        return str(ddl).rstrip() + ";"
+
+    if object_type == "sequence":
+        row = conn.execute(
+            """
+            SELECT start_value, increment, min_value, max_value, cycle
+            FROM information_schema.sequences
+            WHERE sequence_schema = ? AND sequence_name = ?
+            """,
+            [schema, name],
+        ).fetchone()
+        if not row:
+            raise ValueError(f"duckdb_utils: sequence not found: {schema}.{name}")
+        cycle_sql = "CYCLE" if bool(row[4]) else "NO CYCLE"
+        return (
+            f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."{name}" '
+            f'START {row[0]} INCREMENT {row[1]} MINVALUE {row[2]} MAXVALUE {row[3]} {cycle_sql};'
+        )
+
+    return f"-- Unsupported DuckDB object type '{object_type}' for {schema}.{name}."
+
+
+def _duckdb_dependencies(conn: duckdb.DuckDBPyConnection) -> dict[str, list[dict[str, str]]]:
+    """Return discoverable DuckDB dependencies keyed by exporter key."""
+    result: dict[str, list[dict[str, str]]] = {}
+
+    # DuckDB exposes view dependencies in duckdb_dependencies() on recent versions.
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                object_schema,
+                object_name,
+                referenced_schema,
+                referenced_object_name,
+                referenced_object_type
+            FROM duckdb_dependencies()
+            WHERE object_schema NOT IN ('information_schema', 'pg_catalog')
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - older DuckDB versions may not expose this table function.
+        return result
+
+    for row in rows:
+        object_schema, object_name, ref_schema, ref_name, ref_type = row
+        src_type = "view"
+        ref_type_norm = str(ref_type or "table").lower().rstrip("s")
+        key = f"{src_type}:{object_schema}.{object_name}"
+        dep = {
+            "object_type": ref_type_norm,
+            "schema": str(ref_schema),
+            "name": str(ref_name),
+        }
+        result.setdefault(key, []).append(dep)
+
+    for key, deps in result.items():
+        uniq = {(d["object_type"], d["schema"], d["name"]): d for d in deps}
+        result[key] = [uniq[k] for k in sorted(uniq)]
+    return result
