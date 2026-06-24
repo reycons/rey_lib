@@ -190,6 +190,45 @@ class DBAdapter:
         """
         return _backend(self._provider_for_conn(conn)).fetch_dicts(conn, sql_name, params)
 
+    def run_sql(
+        self,
+        conn:     Any,
+        sql_text: str,
+        params:   Optional[list[Any]] = None,
+    ) -> Any:
+        """Execute ad hoc SQL text (e.g. a generated DDL file) and commit.
+
+        Delegates to the backend's ``run_sql`` implementation. Use for raw
+        SQL where a named query or stored procedure is not appropriate, such
+        as applying generated DDL files.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        sql_text : str
+            SQL statement(s) to execute.
+        params : Optional[list[Any]]
+            Positional query parameters, or ``None`` for parameterless SQL.
+
+        Returns
+        -------
+        Any
+            Backend-specific result (e.g. rows affected for DDL).
+
+        Raises
+        ------
+        NotImplementedError
+            If the connection's provider has no ad hoc SQL support.
+        """
+        backend = _backend(self._provider_for_conn(conn))
+        if not hasattr(backend, "run_sql"):
+            raise NotImplementedError(
+                f"DBAdapter: provider '{self._provider_for_conn(conn)}' "
+                "does not support run_sql."
+            )
+        return backend.run_sql(conn, sql_text, params)
+
     # ------------------------------------------------------------------
     # Stored procedures
     # ------------------------------------------------------------------

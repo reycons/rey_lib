@@ -30,6 +30,11 @@ encrypt = [
 control = [
     "psycopg2-binary>=2.9.0",
 ]
+sqlserver = [
+    # SQL Server backend (rey_lib/db/sqlserver_utils.py). Requires system ODBC
+    # libraries (unixODBC) and the Microsoft ODBC Driver 18 for SQL Server.
+    "pyodbc>=5.0.0",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-mock>=3.14.0",

@@ -223,6 +223,58 @@ def execute_procedure(
 
 
 # ---------------------------------------------------------------------------
+# Ad hoc SQL execution
+# ---------------------------------------------------------------------------
+
+
+def run_sql(
+    conn: Any,
+    sql_text: str,
+    params: Optional[list[Any]] = None,
+) -> int:
+    """
+    Execute an ad hoc SQL statement (or script) and commit.
+
+    Used for executing generated DDL files where a named query or stored
+    procedure is not appropriate. Execution still goes through the managed
+    connection obtained from get_connection(). The whole text is sent as a
+    single execute() call, so multi-statement DDL scripts run in one
+    transaction and are committed together.
+
+    Parameters
+    ----------
+    conn : Any
+        Open psycopg2 connection.
+    sql_text : str
+        SQL statement(s) to execute.
+    params : Optional[list[Any]]
+        Positional query parameters, or None for parameterless DDL.
+
+    Returns
+    -------
+    int
+        Number of rows affected by the last statement (cursor.rowcount), or
+        -1 when the backend does not report a row count.
+
+    Raises
+    ------
+    DatabaseError
+        If execution fails. The transaction is rolled back before raising.
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql_text, params if params else None)
+        rowcount = cursor.rowcount
+        conn.commit()
+        return rowcount
+    except Exception as exc:
+        conn.rollback()
+        raise DatabaseError(
+            f"postgres_utils: run_sql failed: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # Error classification
 # ---------------------------------------------------------------------------
 
