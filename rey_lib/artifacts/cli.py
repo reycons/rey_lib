@@ -112,5 +112,47 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def validate_yaml_main(argv: list[str] | None = None) -> int:
+    """Entry point for ``rey-validate-yaml`` — validate a generated YAML artifact.
+
+    Thin wrapper over :func:`main` that defaults ``--artifact-type`` to ``yaml``.
+    Reads the artifact via Rey file utilities, parses through config_utils, and
+    validates through rey_lib.artifacts. Status/errors go to the Rey logger; the
+    validated (unchanged) YAML is echoed to stdout on success.
+    """
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if not any(a == "--artifact-type" or a.startswith("--artifact-type=") for a in raw):
+        raw = ["--artifact-type", "yaml", *raw]
+    return main(raw)
+
+
+def validate_config_main(argv: list[str] | None = None) -> int:
+    """Entry point for ``rey-validate-config`` — validate effective config.
+
+    Builds the ctx from ``--config-path`` and validates the effective
+    artifact_processing routes (engines registered, config_path resolves).
+    Reports through the Rey logger; exit code 0 when valid, 1 otherwise.
+    """
+    parser = argparse.ArgumentParser(
+        prog="rey-validate-config",
+        description="Validate effective artifact_processing config from ctx.",
+    )
+    parser.add_argument("--config-path", required=True, dest="config_path")
+    parser.add_argument("--app", default="rey_console")
+    args = parser.parse_args(argv)
+
+    from rey_lib.artifacts.api import validate_artifact_processing  # noqa: PLC0415
+    from rey_lib.config.config_utils import build_ctx_from_path  # noqa: PLC0415
+
+    ctx = build_ctx_from_path(args.config_path, app_name=args.app)
+    errors = validate_artifact_processing(ctx)
+    if errors:
+        for error in errors:
+            _logger.error("%s", error)
+        return 1
+    _logger.info("artifact_processing config valid (config-path=%s)", args.config_path)
+    return 0
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

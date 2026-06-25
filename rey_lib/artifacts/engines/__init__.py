@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 from rey_lib.artifacts.engines.base import ArtifactEngine
+from rey_lib.artifacts.engines.rey_yaml_engine import ReyYamlValidateEngine
 from rey_lib.artifacts.engines.sqlfluff_engine import SqlFluffEngine
 
 __all__ = ["ArtifactEngine", "get_engine", "register_engine"]
@@ -46,3 +47,4 @@ def get_engine(name: str) -> Optional[ArtifactEngine]:
 
 # Built-in engines.
 register_engine(SqlFluffEngine())
+register_engine(ReyYamlValidateEngine())
