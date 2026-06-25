@@ -25,8 +25,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from rey_lib.config.config_utils import parse_yaml
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["Contract", "load"]
@@ -113,8 +112,8 @@ def load(path: Path) -> Contract:
     body             = raw[m.end():].strip()
 
     try:
-        fields: dict[str, Any] = yaml.safe_load(frontmatter_text) or {}
-    except yaml.YAMLError as exc:
+        fields: dict[str, Any] = parse_yaml(frontmatter_text) or {}
+    except ConfigError as exc:
         raise ConfigError(
             f"Contract '{path.name}' has invalid YAML frontmatter: {exc}"
         ) from exc

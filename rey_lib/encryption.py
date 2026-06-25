@@ -14,9 +14,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from rey_lib.config.config_utils import parse_yaml
 from rey_lib.errors.error_utils import ConfigError, validate_env
+from rey_lib.files.file_utils import read_text_file
 
 __all__ = [
     "generate_fernet_key",
@@ -121,8 +121,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
 
-    with path.open(encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
+    data = parse_yaml(read_text_file(path))
     return data if isinstance(data, dict) else {}
 
 

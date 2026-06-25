@@ -60,6 +60,9 @@ __all__ = [
     "print_ctx",
     "validate_yaml_file",
     "validate_yaml_folder",
+    "parse_yaml",
+    "parse_yaml_namespace",
+    "dump_yaml",
     "Namespace",
     "PathResolver",
 ]
@@ -747,6 +750,83 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     return data if isinstance(data, dict) else {}
+
+
+def parse_yaml(text: str) -> Any:
+    """Parse YAML text — the sanctioned YAML parser.
+
+    Application code must not import ``yaml`` directly. Read the file with
+    rey_lib.files (``read_text_file``) and parse the resulting text here.
+    Returns the parsed value (usually a dict) and ``{}`` for blank text;
+    callers that require a mapping should validate the result themselves.
+
+    Parameters
+    ----------
+    text : str
+        YAML document text (e.g. from ``read_text_file`` or markdown frontmatter).
+
+    Returns
+    -------
+    Any
+        The parsed value (``{}`` when the text is blank).
+
+    Raises
+    ------
+    ConfigError
+        When the text is not valid YAML.
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML text: {exc}") from exc
+    return {} if data is None else data
+
+
+def parse_yaml_namespace(text: str) -> "Namespace":
+    """Parse YAML text into an attribute-access :class:`Namespace` context.
+
+    Files are read with rey_lib.files; the context is built here. Non-mapping
+    documents yield an empty context.
+
+    Parameters
+    ----------
+    text : str
+        YAML document text.
+
+    Returns
+    -------
+    Namespace
+        Attribute-access view over the parsed mapping.
+    """
+    data = parse_yaml(text)
+    return Namespace(data if isinstance(data, dict) else {})
+
+
+def dump_yaml(data: Any, *, sort_keys: bool = False) -> str:
+    """Serialize a Python object to YAML text — the sanctioned YAML writer.
+
+    Application code must not import ``yaml`` directly. Serialize here, then
+    write the text with rey_lib.files. Uses block style and preserves key order
+    and unicode by default.
+
+    Parameters
+    ----------
+    data : Any
+        Object to serialize (typically a dict).
+    sort_keys : bool
+        Whether to sort mapping keys. Default False (preserve insertion order).
+
+    Returns
+    -------
+    str
+        YAML document text.
+    """
+    return yaml.dump(
+        data,
+        default_flow_style=False,
+        sort_keys=sort_keys,
+        allow_unicode=True,
+    )
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

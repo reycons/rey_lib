@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+from rey_lib.config.config_utils import parse_yaml
+from rey_lib.files.file_utils import read_text_file
 
 __all__ = ["ToolEntry", "ToolRegistry", "load_tool_registry"]
 
@@ -134,8 +135,7 @@ def load_tool_registry(config_path: Path) -> ToolRegistry:
     if not config_path.exists():
         return ToolRegistry([])
 
-    with config_path.open(encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
+    data = parse_yaml(read_text_file(config_path)) or {}
 
     if not isinstance(data, dict):
         return ToolRegistry([])

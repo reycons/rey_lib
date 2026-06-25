@@ -41,8 +41,8 @@ import argparse
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-import yaml
 
+from rey_lib.config.config_utils import dump_yaml
 from rey_lib.logs import get_logger
 
 _logger = get_logger(__name__)
@@ -169,8 +169,8 @@ def _ensure_yaml(
         result.existed.append(str(path))
         return
     try:
-        with path.open("w") as fh:
-            yaml.dump(content, fh, default_flow_style=False, sort_keys=False)
+        with path.open("w", encoding="utf-8") as fh:
+            fh.write(dump_yaml(content))
         result.created.append(str(path))
         _logger.debug("created file: %s", path)
     except OSError as exc:
