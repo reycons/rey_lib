@@ -35,12 +35,21 @@ sqlserver = [
     # libraries (unixODBC) and the Microsoft ODBC Driver 18 for SQL Server.
     "pyodbc>=5.0.0",
 ]
+artifacts = [
+    # Artifact post-processing (rey_lib/artifacts). SQLFluff is the first SQL
+    # formatting/linting engine adapter.
+    "sqlfluff>=4.0.0",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.4.4",
     "black>=24.4.2",
 ]
+
+[project.scripts]
+rey-format-sql = "rey_lib.artifacts.cli:main"
+rey-format-artifact = "rey_lib.artifacts.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -119,6 +119,18 @@ class RunRequest:
     # Use for contracts that output YAML, SQL, or other non-JSON formats.
     raw_output:        bool           = False
 
+    # When set (e.g. "sql"), the runner asks the model for a standard JSON
+    # artifact envelope, strips accidental fencing, extracts the `content`
+    # field, validates it for the artifact type, and returns only the clean
+    # content. Provider/model independent — applies to any configured provider.
+    artifact_type:     str            = ""
+
+    # Artifact-processing routing config (artifact_type -> {enabled, engine,
+    # config_path, fail_on_error}) from linting/artifact_processing.yaml. When
+    # present, the runner post-processes the extracted artifact (e.g. SQL
+    # formatting via rey_lib.artifacts) before returning the final content.
+    artifact_processing: dict[str, Any] = field(default_factory=dict)
+
     retry_policy:      RetryPolicy    = field(default_factory=lambda: DEFAULT_RETRY_POLICY)
 
 

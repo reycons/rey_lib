@@ -131,6 +131,7 @@ class AnalysisContractSpec:
     redaction:        list[dict[str, str]]     = field(default_factory=list)
     output_schema:    Optional[dict[str, Any]] = None
     output_format:    str                      = "json"
+    artifact_type:    str                      = ""
 
 
 @dataclass(frozen=True)
@@ -266,6 +267,7 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
         redaction        = list(fm.get("redaction") or []),
         output_schema    = fm.get("output_schema"),
         output_format    = str(fm.get("output_format", "json")).lower(),
+        artifact_type    = str(fm.get("artifact_type", "")).lower(),
     )
 
     return AnalysisContract(base=base, spec=spec)
@@ -320,6 +322,7 @@ class Analyzer:
         redaction_filter: Optional[RedactionFilter]    = None,
         max_extract:      int                          = 10_000,
         requires_approval: bool                        = False,
+        artifact_processing: Optional[dict[str, Any]]  = None,
     ) -> None:
         """Load the contract and store provider configuration."""
         self._contract         = load_analysis_contract(contract_path)
@@ -333,6 +336,7 @@ class Analyzer:
         self._redaction_filter = redaction_filter
         self._max_extract      = max_extract
         self._requires_approval = requires_approval
+        self._artifact_processing = artifact_processing or {}
 
         _logger.info(
             "analyzer: loaded contract '%s' v%s from %s",
@@ -417,6 +421,8 @@ class Analyzer:
             log               = self._log,
             requires_approval = self._requires_approval,
             raw_output        = spec.output_format == "raw",
+            artifact_type     = spec.artifact_type,
+            artifact_processing = self._artifact_processing,
         )
 
         response: RunResponse = run(

@@ -41,7 +41,9 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.llm import document_loader
 from rey_lib.llm.api import RunRequest, RunResponse
 from rey_lib.llm.artifacts import ArtifactStore
+from rey_lib.artifacts import ArtifactProcessingError, process_artifact
 from rey_lib.llm.contract import Contract, load as load_contract
+from rey_lib.llm.envelope import build_envelope_instruction, extract_artifact
 from rey_lib.llm.exceptions import (
     ConfigurationFailure,
     ParseFailure,
@@ -160,7 +162,8 @@ def run(
 
     _warn_token_budget(input_text, provider_cfg.model)
 
-    messages             = _build_messages(input_text, contract.body)
+    artifact_type        = getattr(request, "artifact_type", "") or ""
+    messages             = _build_messages(input_text, contract.body, artifact_type)
     rendered_prompt_hash = _hash_messages(messages)
 
     # 3. Capability check before touching the provider.
@@ -183,9 +186,11 @@ def run(
         model       = provider_cfg.model,
         max_tokens  = request.max_tokens,
         temperature = request.temperature,
-        schema      = schema,
-        policy      = policy,
-        raw_output  = getattr(request, "raw_output", False),
+        schema        = schema,
+        policy        = policy,
+        raw_output    = getattr(request, "raw_output", False),
+        artifact_type = artifact_type,
+        artifact_processing = getattr(request, "artifact_processing", None) or {},
     )
 
     # 4. Resolve the final stored status once.
@@ -234,7 +239,7 @@ def run(
         run_id          = record.run_id,
         status          = record.status,
         parsed_response = record.parsed_response,
-        raw_text        = result.raw if getattr(request, "raw_output", False) else None,
+        raw_text        = result.raw if (getattr(request, "raw_output", False) or artifact_type) else None,
         errors          = record.validation_errors,
         record          = record,
     )
@@ -447,13 +452,26 @@ def _load_schema(request: RunRequest) -> Optional[dict[str, Any]]:
     return _load_sidecar_schema(Path(request.contract_path))
 
 
-def _build_messages(input_text: str, system_prompt: str) -> list[Message]:
-    """Construct the message array sent to the provider."""
-    user_content = (
-        input_text
-        + "\n\nRespond with a single valid JSON object. "
-        "Return only the JSON — no explanation or markdown wrapper."
-    )
+def _build_messages(
+    input_text:    str,
+    system_prompt: str,
+    artifact_type: str = "",
+) -> list[Message]:
+    """Construct the message array sent to the provider.
+
+    When ``artifact_type`` is set the user message carries the standard JSON
+    artifact-envelope instruction (provider/model independent). Otherwise the
+    legacy generic-JSON instruction is used so existing ``output_format: json``
+    contracts behave unchanged.
+    """
+    if artifact_type:
+        user_content = input_text + build_envelope_instruction(artifact_type)
+    else:
+        user_content = (
+            input_text
+            + "\n\nRespond with a single valid JSON object. "
+            "Return only the JSON — no explanation or markdown wrapper."
+        )
     return [
         Message(role="system", content=system_prompt),
         Message(role="user",   content=user_content),
@@ -477,10 +495,12 @@ def _execute_with_retry(
     messages:    list[Message],
     model:       str,
     max_tokens:  int,
-    schema:      Optional[dict[str, Any]],
-    policy:      RetryPolicy,
-    raw_output:  bool  = False,
-    temperature: float = 0.0,
+    schema:        Optional[dict[str, Any]],
+    policy:        RetryPolicy,
+    raw_output:    bool  = False,
+    temperature:   float = 0.0,
+    artifact_type: str   = "",
+    artifact_processing: Optional[dict[str, Any]] = None,
 ) -> _ExecuteResult:
     """Run the provider call up to policy.max_attempts times.
 
@@ -547,6 +567,43 @@ def _execute_with_retry(
                     attempt + 1, policy.max_attempts, exc,
                 )
             continue
+
+        # Artifact-envelope mode: extract clean content from the JSON envelope.
+        # Extraction/validation failures are treated like parse failures so the
+        # retry policy applies; the original raw response is preserved on failure.
+        if artifact_type:
+            content, extract_exc = _attempt_extract_artifact(raw, artifact_type)
+            if extract_exc is not None:
+                last_errors = [str(extract_exc)]
+                if ParseFailure not in policy.retry_on:
+                    return _ExecuteResult(
+                        parsed=None, raw=raw, tokens_in=tokens_in,
+                        tokens_out=tokens_out, retry_count=attempt,
+                        validation_errors=last_errors, status=STATUS_FAILED,
+                    )
+                _logger.warning(
+                    "runner: attempt %d/%d artifact extraction failed: %s",
+                    attempt + 1, policy.max_attempts, extract_exc,
+                )
+                continue
+
+            # Artifact post-processing (e.g. SQL formatting) via the shared
+            # rey_lib.artifacts layer. A formatting failure is deterministic
+            # (re-running the same content will not help), so it is not retried.
+            processed, process_exc = _attempt_process_artifact(
+                content, artifact_type, artifact_processing or {}
+            )
+            if process_exc is not None:
+                return _ExecuteResult(
+                    parsed=None, raw=content, tokens_in=tokens_in,
+                    tokens_out=tokens_out, retry_count=attempt,
+                    validation_errors=[str(process_exc)], status=STATUS_FAILED,
+                )
+            return _ExecuteResult(
+                parsed=None, raw=processed, tokens_in=tokens_in,
+                tokens_out=tokens_out, retry_count=attempt,
+                validation_errors=[], status=STATUS_SUCCESS,
+            )
 
         if raw_output:
             return _ExecuteResult(
@@ -636,6 +693,37 @@ def _attempt_parse(raw: str) -> tuple[Optional[dict[str, Any]], Optional[ParseFa
         return json.loads(_strip_code_fences(raw)), None
     except (json.JSONDecodeError, ValueError) as exc:
         return None, ParseFailure(f"JSON parse error: {exc}")
+
+
+def _attempt_extract_artifact(
+    raw:           str,
+    artifact_type: str,
+) -> tuple[Optional[str], Optional[ParseFailure]]:
+    """Extract clean artifact content from a JSON envelope.
+
+    Returns ``(content, None)`` on success or ``(None, ParseFailure)`` when the
+    envelope cannot be parsed/extracted or the content fails validation.
+    """
+    try:
+        return extract_artifact(raw, artifact_type), None
+    except ParseFailure as exc:
+        return None, exc
+
+
+def _attempt_process_artifact(
+    content:             str,
+    artifact_type:       str,
+    artifact_processing: dict[str, Any],
+) -> tuple[Optional[str], Optional[ArtifactProcessingError]]:
+    """Post-process extracted content via rey_lib.artifacts.
+
+    Returns ``(processed, None)`` on success (or pass-through when processing is
+    disabled), or ``(None, ArtifactProcessingError)`` on a hard failure.
+    """
+    try:
+        return process_artifact(content, artifact_type, artifact_processing), None
+    except ArtifactProcessingError as exc:
+        return None, exc
 
 
 def _validate_schema(
