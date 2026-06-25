@@ -25,6 +25,9 @@ from pathlib import Path
 from rey_lib.artifacts.api import artifact_config_from_ctx, process_artifact
 from rey_lib.artifacts.errors import ArtifactProcessingError
 from rey_lib.files.file_utils import read_text_file, write_file
+from rey_lib.logs import get_logger
+
+_logger = get_logger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,10 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     ctx = build_ctx_from_path(args.config_path, app_name=args.app)
     config = artifact_config_from_ctx(ctx)
     if not config:
-        print(
-            "error: no artifact_processing config found in ctx "
-            f"(config-path={args.config_path}, app={args.app})",
-            file=sys.stderr,
+        _logger.error(
+            "no artifact_processing config found in ctx (config-path=%s, app=%s)",
+            args.config_path, args.app,
         )
         return 2
 
@@ -66,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = process_artifact(content, args.artifact_type, config)
     except ArtifactProcessingError as exc:
-        print(str(exc), file=sys.stderr)
+        _logger.error("%s", exc)
         return 1
 
     if args.in_place and args.file != "-":
