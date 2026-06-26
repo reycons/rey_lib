@@ -37,7 +37,7 @@ NOTES_FIELD = "notes"
 # fencing and no leftover JSON-envelope wrapper. Other types (markdown, text,
 # html) pass through unvalidated.
 _STRICT_ARTIFACT_TYPES = frozenset(
-    {"sql", "python", "shell", "yaml", "json", "xml", "csv"}
+    {"sql", "python", "shell", "yaml", "rey_loader_yaml", "json", "xml", "csv"}
 )
 
 
@@ -101,7 +101,11 @@ def extract_artifact(raw_response: str, artifact_type: str) -> str:
     text = _strip_outer_fence((raw_response or "").strip())
 
     try:
-        envelope = json.loads(text)
+        # strict=False allows literal control characters (e.g. unescaped
+        # newlines/tabs) inside string values. Models — especially smaller
+        # local ones — routinely emit multi-line artifact content with raw
+        # newlines in the content string; this normalises that uniformly.
+        envelope = json.loads(text, strict=False)
     except (json.JSONDecodeError, ValueError) as exc:
         raise ParseFailure(
             "LLM response extraction failed. Expected a JSON envelope with a "
