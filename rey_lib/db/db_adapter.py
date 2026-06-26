@@ -480,8 +480,15 @@ class DBAdapter:
         database: str | None = None,
         validate_only: bool = False,
         cleanup_stale: bool = True,
+        object_filter: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Export one database into deterministic object files and build artifacts."""
+        """Export one database into deterministic object files and build artifacts.
+
+        When ``object_filter`` is supplied (SGC Prerequisites P1) only the
+        selected objects are exported; the whole-database build artifacts and
+        stale-file cleanup are skipped so unselected objects are left untouched.
+        With ``object_filter=None`` behaviour is unchanged (full export).
+        """
         # Deferred import — see module-top note on the rey_lib.files cycle.
         from rey_lib.files import (
             cleanup_stale_files,
@@ -518,6 +525,15 @@ class DBAdapter:
             database or self._fallback_database_name(conn)
         )
 
+        # P1 object selection: filter the ordered set after validation/ordering
+        # so dependency checks run on the full database; only selected objects
+        # are written. Whole-database artifacts and cleanup are skipped below so
+        # unselected objects are never touched.
+        filtered = bool(object_filter)
+        if filtered:
+            from rey_lib.db.object_filter import apply_object_filter
+            ordered = apply_object_filter(ordered, object_filter)
+
         db_root = export_db_root(output_root, provider, resolved_database)
         desired_files: set[str] = set()
         ordered_ddls: list[tuple[dict[str, Any], str, str]] = []
@@ -545,7 +561,10 @@ class DBAdapter:
         build_manifest_path = export_build_manifest_path(db_root)
         build_sql_path = export_build_sql_path(db_root)
 
-        if not validate_only:
+        # Whole-database aggregates and stale cleanup are only written for a full
+        # export. A filtered (P1) export touches just the selected object files,
+        # leaving the manifest, build.sql, and unselected files unchanged.
+        if not validate_only and not filtered:
             write_file(build_manifest_path, build_manifest, "JSON")
             write_file(build_sql_path, self._build_database_sql(db_root, ordered_ddls), "TEXT")
             desired_files.add(str(build_manifest_path.resolve()))
@@ -563,7 +582,8 @@ class DBAdapter:
             "provider": provider,
             "database": resolved_database,
             "validate_only": validate_only,
-            "object_count": len(normalized),
+            "filtered": filtered,
+            "object_count": len(ordered),
             "build_manifest": build_manifest,
             "removed_stale_files": removed,
         }
