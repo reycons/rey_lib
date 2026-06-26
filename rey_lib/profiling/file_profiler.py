@@ -112,22 +112,26 @@ def profile_rows(
     type_source = type_rows or rows
 
     for col in columns:
-        values         = [str(row.get(col, "") or "") for row in rows]
+        # All profile FACTS are derived from the unredacted ``type_source`` so
+        # masking never distorts type, blank counts, or lengths (which drive
+        # DDL sizing). Only the displayed ``distinct_sample`` is taken from the
+        # redacted ``rows`` so sensitive values are never written to the JSON.
         type_values    = [str(row.get(col, "") or "") for row in type_source]
-        non_blank      = [v for v in values if v.strip()]
+        display_values = [str(row.get(col, "") or "") for row in rows]
         type_non_blank = [v for v in type_values if v.strip()]
-        blank_count = len(values) - len(non_blank)
-        lengths     = [len(v) for v in non_blank] if non_blank else [0]
+        display_blank  = [v for v in display_values if v.strip()]
+        blank_count = len(type_values) - len(type_non_blank)
+        lengths     = [len(v) for v in type_non_blank] if type_non_blank else [0]
 
         col_type = infer_col_type(type_non_blank)
-        distinct  = _distinct_sample(non_blank)
+        distinct  = _distinct_sample(display_blank)
         numeric_profile = _numeric_profile(type_non_blank, col_type)
 
         col_profile = {
             "name":          col,
             "redacted":      col in redacted_set,
             "type":          col_type,
-            "row_count":     len(values),
+            "row_count":     len(type_values),
             "blank_count":   blank_count,
             "min_length":    min(lengths),
             "max_length":    max(lengths),
