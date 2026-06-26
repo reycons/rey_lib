@@ -30,6 +30,7 @@ from fnmatch import fnmatch
 import hashlib
 import json
 import re
+import shutil
 import uuid
 from datetime import datetime
 from datetime import timezone
@@ -67,6 +68,7 @@ __all__ = [
     "cleanup_stale_files",
     "scan_column_lengths",
     "move_file",
+    "copy_file",
     "file_operation_log_path",
     "file_movement_log_path",
     "find_named_files",
@@ -719,6 +721,79 @@ def move_file(
             )
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Could not write file movement state for '%s': %s", src.name, exc)
+    return dest
+
+
+def copy_file(
+    src: Path,
+    dest_dir: Path,
+    dest_name: Optional[str] = None,
+    *,
+    state_ctx: Any = None,
+    app: str = "",
+    pipeline: str | None = None,
+    reason: str = "",
+    original_source: Path | str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    """
+    Copy a file byte-for-byte to a destination directory.
+
+    Creates the destination directory if it does not exist and overwrites any
+    existing file of the same name. The copy is byte-identical to the source —
+    content, delimiter, quoting, encoding, blank lines, line endings, and
+    whitespace are all preserved; no parsing or re-serialisation occurs.
+
+    Parameters mirror :func:`move_file`. When ``state_ctx`` is provided a
+    file-operation record is appended after the copy succeeds.
+
+    Parameters
+    ----------
+    src : Path
+        Full path of the file to copy.
+    dest_dir : Path
+        Destination directory. Created if it does not exist.
+    dest_name : Optional[str]
+        Destination filename. If None, keeps src.name.
+    state_ctx : Any
+        Optional context for the file-operation record.
+
+    Returns
+    -------
+    Path
+        Full path of the copied file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If src does not exist.
+    OSError
+        If the copy fails for any reason.
+    """
+    src      = Path(src)
+    dest_dir = Path(dest_dir)
+
+    if not src.exists():
+        raise FileNotFoundError(f"Source file not found: {src}")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (dest_name if dest_name else src.name)
+    shutil.copyfile(src, dest)
+    _logger.debug("Copied: %s → %s", src, dest)
+    if state_ctx is not None:
+        try:
+            log_file_operation(
+                state_ctx,
+                app=app,
+                pipeline=pipeline,
+                source=src,
+                destination=dest,
+                reason=reason,
+                original_source=original_source,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Could not write file copy state for '%s': %s", src.name, exc)
     return dest
 
 

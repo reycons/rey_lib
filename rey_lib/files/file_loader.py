@@ -50,6 +50,7 @@ from rey_lib.files.file_utils import (
     pattern_to_glob,
     get_reader,
     move_file,
+    copy_file,
     write_file,
     converted_output_path,
 )
@@ -357,12 +358,26 @@ def _reject_unmatched_file(
     transform_cfgs: list[Any],
     file_path: Path,
 ) -> None:
-    """Move a file to the failure destination after no header matched."""
+    """Move a file to the failure destination after no header matched.
+
+    The file is only moved when a destination is configured — failure
+    movements, or a ``rejected_path`` on the data source. When neither is
+    defined the original file is left in place (logged only) so a read-only
+    pickup folder is never swept.
+    """
     if transform_cfgs:
         failure = getattr(getattr(transform_cfgs[0], "movements", None), "failure", None)
         if failure:
             _execute_movements(failure, file_path, data_source.paths)
             return
+
+    rejected_path = getattr(data_source.paths, "rejected_path", None)
+    if not rejected_path:
+        _logger.info(
+            "No rejected_path configured — leaving unmatched file in place: %s",
+            file_path.name,
+        )
+        return
 
     rejected_dir = _resolve_path(data_source.paths, "rejected_path")
     move_file(file_path, rejected_dir)
@@ -1682,6 +1697,33 @@ def _transform_one_file(
 		_stamp_date_parts(ctx, "file_name_date", file_name_date)
 		object.__setattr__(ctx, "transform_version", getattr(transform_cfg, "version", ""))
 		object.__setattr__(ctx, "file_checksum", _hash_file(file_path))
+
+		# Prepare Files (no columns): identify and canonical-rename only. Copy the
+		# matched file byte-for-byte to its canonical name — never parse, transform,
+		# or re-serialise rows. Transforms WITH columns fall through to the normal
+		# row transformation below.
+		if not getattr(transform_cfg, "columns", None):
+			output_path = _build_output_path(
+				data_source.paths, transform_cfg, file_path, ctx=ctx
+			)
+			copy_file(
+				file_path,
+				output_path.parent,
+				dest_name=output_path.name,
+				state_ctx=ctx,
+				app=getattr(ctx, "app_name", "") if ctx is not None else "",
+				pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
+				reason="prepared",
+			)
+			object.__setattr__(ctx, "step_record_count", 0)
+			_logger.info(
+				"Prepared (byte copy): %s → %s", file_path.name, output_path.name
+			)
+			movements = getattr(transform_cfg, "movements", None)
+			if movements is not None and getattr(movements, "success", None):
+				_execute_movements(movements.success, file_path, data_source.paths, ctx=ctx)
+			log_exit(ctx, f"_transform_one_file prepared: {file_path.name}", _logger)
+			return True
 
 		rows, errors = _read_and_transform(
 			file_path,
