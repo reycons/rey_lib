@@ -28,7 +28,12 @@ from typing import Any
 from rey_lib.logs import get_logger
 from rey_lib.profiling import value_patterns as vp
 
-__all__ = ["enrich_csv_profile", "PROFILE_VERSION"]
+__all__ = [
+    "enrich_csv_profile",
+    "normalized_header",
+    "same_header_errors",
+    "PROFILE_VERSION",
+]
 
 _logger = get_logger(__name__)
 
@@ -41,6 +46,43 @@ _ALLOWED_TYPE_HINTS = frozenset(
 
 _DEFAULT_MAX_SAMPLE_VALUES = 10
 _STAGING_SCHEMA = "trade_analysis_staging"
+
+
+def normalized_header(header_fields: list[str]) -> list[str]:
+    """Return the normalised snake_case names for a header, preserving order."""
+    return [vp.normalize_name(name) for name in header_fields]
+
+
+def same_header_errors(file_headers: list[tuple[str, list[str]]]) -> list[str]:
+    """Return errors when files in a combined group do not share a header.
+
+    Compatibility (``same_header``) requires the same column count and the same
+    normalised column names in the same order across every file.
+
+    Parameters
+    ----------
+    file_headers : list[tuple[str, list[str]]]
+        ``(file_name, header_fields)`` for each file in the feed group.
+
+    Returns
+    -------
+    list[str]
+        Error messages; empty when all headers are compatible.
+    """
+    if len(file_headers) < 2:
+        return []
+
+    reference_name, reference_fields = file_headers[0]
+    reference = normalized_header(reference_fields)
+    errors: list[str] = []
+    for name, fields in file_headers[1:]:
+        candidate = normalized_header(fields)
+        if candidate != reference:
+            errors.append(
+                f"file '{name}' header does not match '{reference_name}' "
+                f"(normalized columns differ in name, order, or count)."
+            )
+    return errors
 
 
 def enrich_csv_profile(
@@ -56,6 +98,12 @@ def enrich_csv_profile(
     blank_line_count: int = 0,
     ragged_row_count: int = 0,
     max_sample_values: int = _DEFAULT_MAX_SAMPLE_VALUES,
+    feed: dict[str, Any] | None = None,
+    profile_scope: str = "single_file",
+    source_files: list[str] | None = None,
+    file_count: int = 1,
+    combined_row_count: int | None = None,
+    extra_warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a CSV-enriched copy of ``base_profile``.
 
@@ -121,10 +169,18 @@ def enrich_csv_profile(
         warnings.append(
             f"{ragged_row_count} sampled rows had a different column count than the header."
         )
+    if extra_warnings:
+        warnings.extend(extra_warnings)
 
     profile["profile_version"] = PROFILE_VERSION
+    profile["profile_scope"] = profile_scope
+    if feed is not None:
+        profile["feed"] = feed
+    profile["source_files"] = source_files or [source_file]
+    profile["file_count"] = file_count
     profile["columns"] = enriched_columns
-    profile["csv"] = {
+
+    csv_section = {
         "encoding": encoding,
         "delimiter": delimiter,
         "quote_char": quote_char,
@@ -134,14 +190,23 @@ def enrich_csv_profile(
         "blank_line_count": blank_line_count,
         "ragged_row_count": ragged_row_count,
     }
+    if combined_row_count is not None:
+        csv_section["combined_profiled_row_count"] = combined_row_count
+    profile["csv"] = csv_section
+
     profile["loader_hints"] = {
         "file_type": "CSV",
         "delimiter": delimiter,
         "encoding": encoding,
         "header": has_header,
     }
-    source_stem = PurePosixPath(source_file).stem
-    recommended_source = vp.normalize_name(source_stem)
+    # Combined profiles are named for the feed; single-file profiles keep the
+    # source stem as the recommended artifact name.
+    feed_name = (feed or {}).get("name") if feed else None
+    recommended_source = vp.normalize_name(
+        feed_name if (profile_scope == "combined_files" and feed_name)
+        else PurePosixPath(source_file).stem
+    )
     profile["llm_hints"] = {
         "recommended_source_name": recommended_source,
         "recommended_staging_table": f"{_STAGING_SCHEMA}.stg_{recommended_source}",

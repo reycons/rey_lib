@@ -21,7 +21,16 @@ __all__ = ["validate_csv_profile"]
 
 _logger = get_logger(__name__)
 
-_REQUIRED_TOP_LEVEL = ("source", "csv", "columns", "loader_hints", "llm_hints")
+_REQUIRED_TOP_LEVEL = (
+    "source",
+    "csv",
+    "columns",
+    "loader_hints",
+    "llm_hints",
+    "profile_scope",
+    "source_files",
+    "file_count",
+)
 _REQUIRED_COLUMN_FIELDS = (
     "ordinal",
     "raw_name",
