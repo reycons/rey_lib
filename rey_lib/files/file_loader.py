@@ -585,6 +585,15 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
     total = 0
 
     for data_source in ctx.data_sources:
+        # A data source with no transforms (e.g. an analysis-only source that
+        # shares the same config tree) has nothing to transform — skip it so
+        # the transform stage can coexist with non-loader data sources.
+        if not getattr(data_source, "transforms", None):
+            _logger.debug(
+                "transform: skipping '%s' — no transforms declared.",
+                getattr(data_source, "name", "?"),
+            )
+            continue
         object.__setattr__(ctx, "data_sources", data_source)
         bindings = getattr(data_source, "transform_hooks", None)
         hook_conns: dict[str, Any] = {}
