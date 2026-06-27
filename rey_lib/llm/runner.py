@@ -43,7 +43,12 @@ from rey_lib.llm.api import RunRequest, RunResponse
 from rey_lib.llm.artifacts import ArtifactStore
 from rey_lib.artifacts import ArtifactProcessingError, process_artifact
 from rey_lib.llm.contract import Contract, load as load_contract
-from rey_lib.llm.envelope import build_envelope_instruction, extract_artifact
+from rey_lib.llm.envelope import (
+    REJECTION_PREFIX,
+    build_envelope_instruction,
+    extract_artifact_envelope,
+    rejection_reason_from_notes,
+)
 from rey_lib.llm.exceptions import (
     ConfigurationFailure,
     ParseFailure,
@@ -572,7 +577,7 @@ def _execute_with_retry(
         # Extraction/validation failures are treated like parse failures so the
         # retry policy applies; the original raw response is preserved on failure.
         if artifact_type:
-            content, extract_exc = _attempt_extract_artifact(raw, artifact_type)
+            content, notes, extract_exc = _attempt_extract_artifact(raw, artifact_type)
             if extract_exc is not None:
                 last_errors = [str(extract_exc)]
                 if ParseFailure not in policy.retry_on:
@@ -586,6 +591,19 @@ def _execute_with_retry(
                     attempt + 1, policy.max_attempts, extract_exc,
                 )
                 continue
+
+            # Contract declined the object (e.g. it cannot be safely documented):
+            # the reason rides out-of-band in the envelope notes, the content is
+            # the unchanged input. Record it as failed (deterministic — no retry)
+            # so no raw output is written and the object is not applied.
+            rejection = rejection_reason_from_notes(notes)
+            if rejection is not None:
+                return _ExecuteResult(
+                    parsed=None, raw=content, tokens_in=tokens_in,
+                    tokens_out=tokens_out, retry_count=attempt,
+                    validation_errors=[f"{REJECTION_PREFIX}: {rejection}"],
+                    status=STATUS_FAILED,
+                )
 
             # Artifact post-processing (e.g. SQL formatting) via the shared
             # rey_lib.artifacts layer. A formatting failure is deterministic
@@ -698,16 +716,17 @@ def _attempt_parse(raw: str) -> tuple[Optional[dict[str, Any]], Optional[ParseFa
 def _attempt_extract_artifact(
     raw:           str,
     artifact_type: str,
-) -> tuple[Optional[str], Optional[ParseFailure]]:
-    """Extract clean artifact content from a JSON envelope.
+) -> tuple[Optional[str], list[Any], Optional[ParseFailure]]:
+    """Extract clean artifact content and envelope notes from a JSON envelope.
 
-    Returns ``(content, None)`` on success or ``(None, ParseFailure)`` when the
-    envelope cannot be parsed/extracted or the content fails validation.
+    Returns ``(content, notes, None)`` on success or ``(None, [], ParseFailure)``
+    when the envelope cannot be parsed/extracted or the content fails validation.
     """
     try:
-        return extract_artifact(raw, artifact_type), None
+        content, notes = extract_artifact_envelope(raw, artifact_type)
+        return content, notes, None
     except ParseFailure as exc:
-        return None, exc
+        return None, [], exc
 
 
 def _attempt_process_artifact(

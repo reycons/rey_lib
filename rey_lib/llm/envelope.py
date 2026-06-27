@@ -25,19 +25,27 @@ __all__ = [
     "ARTIFACT_TYPE_FIELD",
     "CONTENT_FIELD",
     "NOTES_FIELD",
+    "REJECTION_PREFIX",
     "build_envelope_instruction",
     "extract_artifact",
+    "extract_artifact_envelope",
+    "rejection_reason_from_notes",
 ]
 
 ARTIFACT_TYPE_FIELD = "artifact_type"
 CONTENT_FIELD = "content"
 NOTES_FIELD = "notes"
 
+# A contract may decline an object by returning the content unchanged and adding
+# a notes entry that starts with this prefix. The reason follows the prefix.
+REJECTION_PREFIX = "REJECTED"
+
 # Artifact types whose extracted content must be plain code/data — no Markdown
 # fencing and no leftover JSON-envelope wrapper. Other types (markdown, text,
 # html) pass through unvalidated.
 _STRICT_ARTIFACT_TYPES = frozenset(
-    {"sql", "python", "shell", "yaml", "rey_loader_yaml", "json", "xml", "csv"}
+    {"sql", "ddl_commented_sql", "python", "shell", "yaml", "rey_loader_yaml",
+     "json", "xml", "csv"}
 )
 
 
@@ -76,8 +84,8 @@ def build_envelope_instruction(artifact_type: str) -> str:
 def extract_artifact(raw_response: str, artifact_type: str) -> str:
     """Extract clean artifact content from a JSON-envelope response.
 
-    Strips an accidental outer Markdown fence, parses the JSON envelope,
-    extracts the ``content`` field, and validates it for the artifact type.
+    Thin wrapper over :func:`extract_artifact_envelope` returning the content
+    only — preserves the historical signature for existing callers.
 
     Parameters
     ----------
@@ -90,6 +98,39 @@ def extract_artifact(raw_response: str, artifact_type: str) -> str:
     -------
     str
         The clean artifact content, ready to write to the final file.
+
+    Raises
+    ------
+    ParseFailure
+        See :func:`extract_artifact_envelope`.
+    """
+    content, _notes = extract_artifact_envelope(raw_response, artifact_type)
+    return content
+
+
+def extract_artifact_envelope(
+    raw_response: str,
+    artifact_type: str,
+) -> tuple[str, list[Any]]:
+    """Extract ``(content, notes)`` from a JSON-envelope response.
+
+    Strips an accidental outer Markdown fence, parses the JSON envelope,
+    extracts and validates the ``content`` field, and returns the ``notes`` list
+    alongside it. ``notes`` lets a contract carry an out-of-band signal (e.g. a
+    rejection reason) without putting it inside the artifact content.
+
+    Parameters
+    ----------
+    raw_response : str
+        The model response text (possibly fenced).
+    artifact_type : str
+        The expected artifact type (e.g. ``"sql"``).
+
+    Returns
+    -------
+    tuple[str, list[Any]]
+        The clean artifact content and the envelope ``notes`` (empty when
+        absent).
 
     Raises
     ------
@@ -128,7 +169,35 @@ def extract_artifact(raw_response: str, artifact_type: str) -> str:
     content = content.strip()
 
     _validate_content(content, (artifact_type or "").lower())
-    return content
+
+    notes = envelope.get(NOTES_FIELD)
+    return content, (notes if isinstance(notes, list) else [])
+
+
+def rejection_reason_from_notes(notes: list[Any]) -> Optional[str]:
+    """Return a rejection reason when ``notes`` signals a declined object.
+
+    A contract may decline an object by returning the content unchanged and
+    adding a notes entry beginning with ``REJECTION_PREFIX`` (e.g.
+    ``"REJECTED: object cannot be safely documented"``). The text after the
+    prefix (and an optional ``:``) is returned as the reason; ``None`` when no
+    note signals rejection.
+
+    Parameters
+    ----------
+    notes : list[Any]
+        The envelope ``notes`` list.
+
+    Returns
+    -------
+    Optional[str]
+        The rejection reason, or None.
+    """
+    for note in notes or []:
+        if isinstance(note, str) and note.strip().upper().startswith(REJECTION_PREFIX):
+            reason = note.strip()[len(REJECTION_PREFIX):].lstrip(": ").strip()
+            return reason or "object declined by contract"
+    return None
 
 
 def _validate_content(content: str, artifact_type: str) -> None:
