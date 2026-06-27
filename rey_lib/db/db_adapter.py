@@ -584,6 +584,7 @@ class DBAdapter:
             "validate_only": validate_only,
             "filtered": filtered,
             "object_count": len(ordered),
+            "objects": [obj["key"] for obj in ordered],
             "build_manifest": build_manifest,
             "removed_stale_files": removed,
         }
