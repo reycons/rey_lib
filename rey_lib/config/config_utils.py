@@ -71,9 +71,20 @@ __all__ = [
 _CONFIG_DIR_NAME = "config"
 _ENV_FILE_NAME   = ".env"
 
-# Keys whose string values are resolved to Path objects.
-_PATH_KEY_SUFFIXES = ("_path", "_dir", "_file", "_root")
-_PATH_KEY_NAMES    = ("path",)
+# Keys whose string values are filesystem paths and are resolved to Path
+# objects. Explicit, reviewed membership only — path behaviour is never inferred
+# from how a key is spelled (no suffix/name/regex matching, no fallback). Add a
+# key here, under review, to opt it in. Notably absent: 'contract_file' (a
+# logical contract identifier, not a rey_lib path) and bare 'path' (the 'paths:'
+# block is resolved explicitly by _build_path_resolver).
+_PATH_KEYS = frozenset({
+    "app_path", "artifacts_path", "config_path", "contracts_root",
+    "converted_path", "env_file", "failed_path", "inbox_path", "jsonl_path",
+    "jsonl_root", "output_root", "pipeline_log_dir", "processing_path",
+    "raw_output_path", "readable_root", "records_path", "rejected_path",
+    "repo_root", "results_path", "script_path", "sql_path", "success_path",
+    "venv_path", "working_dir",
+})
 
 # Keys whose string values are log path templates — placeholders must survive resolution.
 _LOG_PATH_KEYS = ("log_path",)
@@ -864,7 +875,8 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 def _is_path_key(key: str) -> bool:
-    return key in _PATH_KEY_NAMES or any(key.endswith(s) for s in _PATH_KEY_SUFFIXES)
+    """Return True only for keys explicitly declared as filesystem paths."""
+    return key in _PATH_KEYS
 
 
 def _is_log_path_key(key: str) -> bool:
