@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -328,6 +329,7 @@ def build_ctx_from_path(
                 raw["paths"] = parent_paths
 
     # Step 6 — assemble and wrap.
+    raw = _apply_compatibility_aliases(raw)
     raw = _assemble_ctx_data(raw, config_dir)
     ctx = Namespace(raw)
     _inject_env_blocks(ctx)
@@ -431,6 +433,155 @@ def _find_parent_install_raw(config_path: Path) -> dict[str, Any] | None:
             break
         current = parent
     return None
+
+
+def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:
+    """Expose current and canonical config sections without removing either.
+
+    This is a structural bridge for the logical config reorganization. It keeps
+    legacy/current keys working while allowing future YAML to use canonical
+    names. Duplicate logical objects fail closed when definitions conflict.
+    """
+    result = deepcopy(raw)
+
+    _alias_named_collection(
+        result,
+        current_key="db_connections",
+        canonical_key="connections",
+    )
+    _alias_named_collection(
+        result,
+        current_key="llm_profiles",
+        canonical_key="llm",
+    )
+    _alias_nested_mapping(
+        result,
+        nested_parent="pipeline_coordinator",
+        nested_key="pipelines",
+        canonical_key="pipelines",
+    )
+
+    return result
+
+
+def _alias_named_collection(
+    raw: dict[str, Any],
+    *,
+    current_key: str,
+    canonical_key: str,
+) -> None:
+    current_exists = current_key in raw
+    canonical_exists = canonical_key in raw
+
+    if current_exists and canonical_exists:
+        merged = _merge_compatible_collection(
+            raw[current_key],
+            raw[canonical_key],
+            label=canonical_key,
+        )
+        raw[current_key] = deepcopy(merged)
+        raw[canonical_key] = deepcopy(merged)
+    elif current_exists:
+        raw[canonical_key] = deepcopy(raw[current_key])
+    elif canonical_exists:
+        raw[current_key] = deepcopy(raw[canonical_key])
+
+
+def _alias_nested_mapping(
+    raw: dict[str, Any],
+    *,
+    nested_parent: str,
+    nested_key: str,
+    canonical_key: str,
+) -> None:
+    parent = raw.get(nested_parent)
+    if parent is not None and not isinstance(parent, dict):
+        raise ConfigError(
+            f"Config section '{nested_parent}' must be a mapping to alias "
+            f"'{nested_parent}.{nested_key}'."
+        )
+
+    nested_exists = isinstance(parent, dict) and nested_key in parent
+    canonical_exists = canonical_key in raw
+
+    if nested_exists and canonical_exists:
+        merged = _merge_compatible_mapping(
+            parent[nested_key],
+            raw[canonical_key],
+            label=canonical_key,
+        )
+        parent[nested_key] = deepcopy(merged)
+        raw[canonical_key] = deepcopy(merged)
+    elif nested_exists:
+        raw[canonical_key] = deepcopy(parent[nested_key])
+    elif canonical_exists:
+        if parent is None:
+            parent = {}
+            raw[nested_parent] = parent
+        parent[nested_key] = deepcopy(raw[canonical_key])
+
+
+def _merge_compatible_collection(left: Any, right: Any, *, label: str) -> Any:
+    if isinstance(left, list) and isinstance(right, list):
+        return _merge_named_lists(left, right, label=label)
+    if isinstance(left, dict) and isinstance(right, dict):
+        return _merge_compatible_mapping(left, right, label=label)
+    if left == right:
+        return deepcopy(left)
+    raise ConfigError(
+        f"Conflicting compatibility aliases for '{label}': "
+        f"values must use the same shape or match exactly."
+    )
+
+
+def _merge_named_lists(left: list[Any], right: list[Any], *, label: str) -> list[Any]:
+    merged = deepcopy(left)
+    name_to_index: dict[str, int] = {
+        str(item["name"]): idx
+        for idx, item in enumerate(merged)
+        if isinstance(item, dict) and "name" in item
+    }
+
+    for item in right:
+        if not isinstance(item, dict) or "name" not in item:
+            if item not in merged:
+                merged.append(deepcopy(item))
+            continue
+
+        name = str(item["name"])
+        if name not in name_to_index:
+            name_to_index[name] = len(merged)
+            merged.append(deepcopy(item))
+            continue
+
+        existing = merged[name_to_index[name]]
+        if existing != item:
+            raise ConfigError(
+                f"Conflicting duplicate '{label}' entry named '{name}'."
+            )
+
+    return merged
+
+
+def _merge_compatible_mapping(left: Any, right: Any, *, label: str) -> Any:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        if left == right:
+            return deepcopy(left)
+        raise ConfigError(
+            f"Conflicting compatibility aliases for '{label}': "
+            "both values must be mappings."
+        )
+
+    merged = deepcopy(left)
+    for key, value in right.items():
+        if key not in merged:
+            merged[key] = deepcopy(value)
+            continue
+        if merged[key] != value:
+            raise ConfigError(
+                f"Conflicting duplicate '{label}' entry named '{key}'."
+            )
+    return merged
 
 
 def print_ctx(ctx: Namespace) -> None:
