@@ -220,6 +220,7 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
         If ``--config-path`` was not provided.
     """
     from rey_lib.config.config_utils import build_ctx_from_path
+    from rey_lib.errors.error_utils import ConfigError
 
     ctx_file = getattr(args, "ctx_file", None)
     config_path = getattr(args, "config_path", None)
@@ -228,15 +229,21 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
         raise RuntimeError("--ctx-file and --config-path are mutually exclusive")
 
     if ctx_file:
-        return load_ctx_snapshot(ctx_file)
+        try:
+            return load_ctx_snapshot(ctx_file)
+        except (RuntimeError, OSError) as exc:
+            raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
 
     if not config_path:
         raise SystemExit("--config-path is required.")
 
-    return build_ctx_from_path(
-        Path(config_path).expanduser().resolve(),
-        app_name=app_name,
-    )
+    try:
+        return build_ctx_from_path(
+            Path(config_path).expanduser().resolve(),
+            app_name=app_name,
+        )
+    except (ConfigError, OSError) as exc:
+        raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
 
 
 def apply_env_overrides(overrides: list[str]) -> None:

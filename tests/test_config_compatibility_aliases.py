@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from rey_lib.config.cli import build_ctx_from_args
 from rey_lib.config.config_utils import build_ctx_from_path
 from rey_lib.errors.error_utils import ConfigError
 
@@ -162,3 +164,27 @@ data_sources:
 
     assert len(ctx.data_sources) == 1
     assert ctx.data_sources[0].name == "trades"
+
+
+def test_cli_ctx_build_reports_duplicate_config_before_logging(tmp_path: Path) -> None:
+    config_dir = _root(tmp_path)
+    _write(config_dir / "sources" / "a.yaml", """\
+data_sources:
+  - name: trades
+    file_pattern: "*.csv"
+""")
+    _write(config_dir / "sources" / "b.yaml", """\
+data_sources:
+  - name: trades
+    file_pattern: "*.json"
+""")
+    args = SimpleNamespace(
+        config_path=str(config_dir / "config.yaml"),
+        ctx_file=None,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        build_ctx_from_args(args, app_name="rey_loader")
+
+    assert "FATAL: failed to load config" in str(exc_info.value)
+    assert "trades" in str(exc_info.value)
