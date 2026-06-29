@@ -1004,15 +1004,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         elif key in result and isinstance(result[key], list) and isinstance(value, list):
-            existing_names = {
-                item["name"] for item in result[key]
-                if isinstance(item, dict) and "name" in item
-            }
-            new_items = [
-                item for item in value
-                if not (isinstance(item, dict) and item.get("name") in existing_names)
-            ]
-            result[key] = result[key] + new_items
+            result[key] = _merge_named_lists(result[key], value, label=key)
         elif key == "paths" and isinstance(result.get(key), list) and not isinstance(value, list):
             # PathResolver list must never be replaced by an app-level paths dict.
             pass

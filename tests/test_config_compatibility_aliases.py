@@ -130,3 +130,35 @@ pipelines:
     with pytest.raises(ConfigError, match="file_onboarder"):
         build_ctx_from_path(config_dir / "config.yaml")
 
+
+def test_conflicting_duplicate_named_list_entries_fail_closed(tmp_path: Path) -> None:
+    config_dir = _root(tmp_path)
+    _write(config_dir / "sources" / "a.yaml", """\
+data_sources:
+  - name: trades
+    file_pattern: "*.csv"
+""")
+    _write(config_dir / "sources" / "b.yaml", """\
+data_sources:
+  - name: trades
+    file_pattern: "*.json"
+""")
+
+    with pytest.raises(ConfigError, match="trades"):
+        build_ctx_from_path(config_dir / "config.yaml")
+
+
+def test_identical_duplicate_named_list_entries_remain_compatible(tmp_path: Path) -> None:
+    config_dir = _root(tmp_path)
+    duplicate = """\
+data_sources:
+  - name: trades
+    file_pattern: "*.csv"
+"""
+    _write(config_dir / "sources" / "a.yaml", duplicate)
+    _write(config_dir / "sources" / "b.yaml", duplicate)
+
+    ctx = build_ctx_from_path(config_dir / "config.yaml")
+
+    assert len(ctx.data_sources) == 1
+    assert ctx.data_sources[0].name == "trades"
