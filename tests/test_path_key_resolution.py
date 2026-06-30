@@ -49,10 +49,18 @@ def test_no_suffix_fallback_for_arbitrary_path_suffix() -> None:
     assert out["thing_file"] == "f"
 
 
-def test_contract_file_not_resolved() -> None:
-    """'contract_file' is a logical identifier, not a path -> unchanged string."""
+def test_contract_file_is_resolved() -> None:
+    """'contract_file' is a declared path key and resolves like other file paths."""
     out = _resolve({"contract_file": "ddl_comment_enrichment.md"})
-    assert out["contract_file"] == "ddl_comment_enrichment.md"
+    assert isinstance(out["contract_file"], Path)
+    assert out["contract_file"] == (_BASE / "ddl_comment_enrichment.md").resolve()
+
+
+def test_contract_is_resolved() -> None:
+    """'contract' is a declared path key for analysis config contract files."""
+    out = _resolve({"contract": "contracts/analyze.md"})
+    assert isinstance(out["contract"], Path)
+    assert out["contract"] == (_BASE / "contracts/analyze.md").resolve()
 
 
 # ---- declared path keys ARE resolved --------------------------------------
@@ -80,5 +88,6 @@ def test_is_path_key_is_membership_only() -> None:
     assert not _is_path_key("output_path")
     assert not _is_path_key("log_dir")
     assert not _is_path_key("path")
-    assert not _is_path_key("contract_file")
+    assert _is_path_key("contract_file")
+    assert _is_path_key("contract")
     assert not _is_path_key("foo_path")

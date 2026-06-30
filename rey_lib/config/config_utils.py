@@ -75,16 +75,15 @@ _ENV_FILE_NAME   = ".env"
 # Keys whose string values are filesystem paths and are resolved to Path
 # objects. Explicit, reviewed membership only — path behaviour is never inferred
 # from how a key is spelled (no suffix/name/regex matching, no fallback). Add a
-# key here, under review, to opt it in. Notably absent: 'contract_file' (a
-# logical contract identifier, not a rey_lib path) and bare 'path' (the 'paths:'
-# block is resolved explicitly by _build_path_resolver).
+# key here, under review, to opt it in. Notably absent: bare 'path' (the
+# 'paths:' block is resolved explicitly by _build_path_resolver).
 _PATH_KEYS = frozenset({
     "app_path", "artifacts_path", "config_path", "contracts_root",
-    "converted_path", "env_file", "failed_path", "inbox_path", "jsonl_path",
-    "jsonl_root", "output_root", "pipeline_log_dir", "processing_path",
-    "raw_output_path", "readable_root", "records_path", "rejected_path",
-    "repo_root", "results_path", "script_path", "sql_path", "success_path",
-    "venv_path", "working_dir",
+    "contract", "contract_file", "converted_path", "env_file", "failed_path",
+    "inbox_path", "jsonl_path", "jsonl_root", "output_root",
+    "pipeline_log_dir", "processing_path", "raw_output_path", "readable_root",
+    "records_path", "rejected_path", "repo_root", "results_path",
+    "script_path", "sql_path", "success_path", "venv_path", "working_dir",
 })
 
 # Keys whose string values are log path templates — placeholders must survive resolution.
