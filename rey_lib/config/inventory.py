@@ -83,6 +83,8 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
     """Return normalized workflow rows from ctx.workflows."""
     rows: list[dict[str, Any]] = []
     workflows = _to_plain(getattr(ctx, "workflows", None))
+    root_app = _to_plain(getattr(ctx, "app", None))
+    root_app = root_app if isinstance(root_app, str) else ""
 
     if isinstance(workflows, dict):
         items = workflows.items()
@@ -94,7 +96,7 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
     for name, workflow in items:
         if not name or not isinstance(workflow, dict):
             continue
-        owner = str(workflow.get("app") or workflow.get("owner_app") or "")
+        owner = str(workflow.get("app") or workflow.get("owner_app") or root_app)
         rows.append(
             {
                 "name": str(name),

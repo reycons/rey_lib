@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rey_lib.config.config_utils import Namespace, PathResolver
+from rey_lib.config.config_utils import Namespace, PathResolver, build_ctx_from_path
 from rey_lib.config.inventory import build_installation_inventory
 from rey_lib.errors.error_utils import ConfigError
 
@@ -80,3 +80,76 @@ def test_installation_inventory_rejects_unknown_workflow_owner() -> None:
 
     with pytest.raises(ConfigError, match="known app name"):
         build_installation_inventory(ctx)
+
+
+def test_installation_inventory_uses_root_app_for_workflow_list() -> None:
+    """Canonical workflow list entries inherit owner from root app."""
+    ctx = _ctx()
+    ctx.app = "rey_loader"
+    ctx.workflows = [
+        {
+            "name": "load_only",
+            "steps": ["load"],
+        }
+    ]
+
+    inventory = build_installation_inventory(ctx)
+
+    assert inventory.workflows[0]["app"] == "rey_loader"
+    assert inventory.workflows[0]["name"] == "load_only"
+
+
+def test_config_utils_appends_workflow_list_entries(tmp_path) -> None:
+    """Multiple workflow files merge by appending named workflow entries."""
+    workflows_dir = tmp_path / "workflows" / "rey_loader"
+    workflows_dir.mkdir(parents=True)
+    config_path = tmp_path / "installation.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  - name: configs",
+                f"    path: {tmp_path}",
+                "config_loading:",
+                "  default_behavior: none",
+                "  apps:",
+                "    rey_loader:",
+                "      include:",
+                "        - '{configs}/workflows/rey_loader'",
+                "apps:",
+                "  - name: rey_loader",
+                "    enabled: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (workflows_dir / "a.yaml").write_text(
+        "\n".join(
+            [
+                "app: rey_loader",
+                "workflows:",
+                "  - name: workflow_a",
+                "    steps: []",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (workflows_dir / "b.yaml").write_text(
+        "\n".join(
+            [
+                "app: rey_loader",
+                "workflows:",
+                "  - name: workflow_b",
+                "    steps: []",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    ctx = build_ctx_from_path(config_path, app_name="rey_loader")
+    inventory = build_installation_inventory(ctx)
+
+    assert [workflow["name"] for workflow in inventory.workflows] == [
+        "workflow_a",
+        "workflow_b",
+    ]
