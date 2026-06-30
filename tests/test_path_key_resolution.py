@@ -49,18 +49,18 @@ def test_no_suffix_fallback_for_arbitrary_path_suffix() -> None:
     assert out["thing_file"] == "f"
 
 
-def test_contract_file_is_resolved() -> None:
-    """'contract_file' is a declared path key and resolves like other file paths."""
+def test_contract_file_remains_string() -> None:
+    """'contract_file' is not a path key; contract resolution owns it later."""
     out = _resolve({"contract_file": "ddl_comment_enrichment.md"})
-    assert isinstance(out["contract_file"], Path)
-    assert out["contract_file"] == (_BASE / "ddl_comment_enrichment.md").resolve()
+    assert out["contract_file"] == "ddl_comment_enrichment.md"
+    assert not isinstance(out["contract_file"], Path)
 
 
-def test_contract_is_resolved() -> None:
-    """'contract' is a declared path key for analysis config contract files."""
+def test_contract_remains_string() -> None:
+    """'contract' is not a path key; consumers resolve contract names explicitly."""
     out = _resolve({"contract": "contracts/analyze.md"})
-    assert isinstance(out["contract"], Path)
-    assert out["contract"] == (_BASE / "contracts/analyze.md").resolve()
+    assert out["contract"] == "contracts/analyze.md"
+    assert not isinstance(out["contract"], Path)
 
 
 # ---- declared path keys ARE resolved --------------------------------------
@@ -88,6 +88,6 @@ def test_is_path_key_is_membership_only() -> None:
     assert not _is_path_key("output_path")
     assert not _is_path_key("log_dir")
     assert not _is_path_key("path")
-    assert _is_path_key("contract_file")
-    assert _is_path_key("contract")
+    assert not _is_path_key("contract_file")
+    assert not _is_path_key("contract")
     assert not _is_path_key("foo_path")

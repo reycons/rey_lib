@@ -79,11 +79,11 @@ _ENV_FILE_NAME   = ".env"
 # 'paths:' block is resolved explicitly by _build_path_resolver).
 _PATH_KEYS = frozenset({
     "app_path", "artifacts_path", "config_path", "contracts_root",
-    "contract", "contract_file", "converted_path", "env_file", "failed_path",
-    "inbox_path", "jsonl_path", "jsonl_root", "output_root",
-    "pipeline_log_dir", "processing_path", "raw_output_path", "readable_root",
-    "records_path", "rejected_path", "repo_root", "results_path",
-    "script_path", "sql_path", "success_path", "venv_path", "working_dir",
+    "converted_path", "env_file", "failed_path", "inbox_path", "jsonl_path",
+    "jsonl_root", "output_root", "pipeline_log_dir", "processing_path",
+    "raw_output_path", "readable_root", "records_path", "rejected_path",
+    "repo_root", "results_path", "script_path", "sql_path", "success_path",
+    "venv_path", "working_dir",
 })
 
 # Keys whose string values are log path templates — placeholders must survive resolution.
