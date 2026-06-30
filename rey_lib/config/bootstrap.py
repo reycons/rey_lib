@@ -67,4 +67,4 @@ def build_ctx_for_app(
                 f"No config.yaml or app.yaml found in: {config_path}"
             )
 
-    return build_ctx_from_path(config_path)
+    return build_ctx_from_path(config_path, app_name=app_name, project_root=project_root)
