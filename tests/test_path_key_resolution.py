@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rey_lib.config.config_utils import _is_path_key, _resolve_paths
+from rey_lib.config.config_utils import (
+    Namespace,
+    PathResolver,
+    _apply_path_resolver,
+    _is_path_key,
+    _resolve_paths,
+)
 
 _BASE = Path("/base")
 
@@ -49,11 +55,25 @@ def test_no_suffix_fallback_for_arbitrary_path_suffix() -> None:
     assert out["thing_file"] == "f"
 
 
-def test_contract_file_remains_string() -> None:
-    """'contract_file' is not a path key; contract resolution owns it later."""
+def test_contract_file_is_resolved() -> None:
+    """'contract_file' is an explicit path key and resolves like other paths."""
     out = _resolve({"contract_file": "ddl_comment_enrichment.md"})
-    assert out["contract_file"] == "ddl_comment_enrichment.md"
-    assert not isinstance(out["contract_file"], Path)
+    assert isinstance(out["contract_file"], Path)
+    assert out["contract_file"] == (_BASE / "ddl_comment_enrichment.md").resolve()
+
+
+def test_contract_file_path_root_token_resolves() -> None:
+    """Path-root tokens in contract_file resolve to a concrete Path."""
+    ctx = Namespace({
+        "assist_sql": {"contract_file": "{llmcontracts}/db_admin/ddl_comment_enrichment.md"}
+    })
+    resolver = PathResolver({"llmcontracts": Path("/contracts")})
+
+    _apply_path_resolver(ctx, resolver)
+
+    assert ctx.assist_sql.contract_file == Path(
+        "/contracts/db_admin/ddl_comment_enrichment.md"
+    )
 
 
 def test_contract_remains_string() -> None:
@@ -88,6 +108,6 @@ def test_is_path_key_is_membership_only() -> None:
     assert not _is_path_key("output_path")
     assert not _is_path_key("log_dir")
     assert not _is_path_key("path")
-    assert not _is_path_key("contract_file")
+    assert _is_path_key("contract_file")
     assert not _is_path_key("contract")
     assert not _is_path_key("foo_path")
