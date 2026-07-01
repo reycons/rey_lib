@@ -243,6 +243,7 @@ def build_ctx_from_path(
     config_path: Path,
     app_name: str | None = None,
     project_root: Path | None = None,
+    full_installation: bool = False,
 ) -> Namespace:
     """Build context from an installation ``config.yaml`` using app-scoped includes.
 
@@ -254,7 +255,10 @@ def build_ctx_from_path(
     3. Resolve the ordered include folder list from
        ``config_loading.apps.<app_name>.include``.  Falls back to a full
        rglob of the config directory when ``app_name`` is not provided or
-       has no include block (``default_behavior: full_folder``).
+       has no include block (``default_behavior: full_folder``).  When
+       ``full_installation`` is set the app-scoped include list and
+       ``default_behavior`` are bypassed and the entire config directory is
+       merged, yielding the authoritative installation-wide context.
     4. Walk each include folder in declared order; within each folder load
        all ``*.yaml`` files sorted by path.
     5. Merge root config then each include folder's files deterministically.
@@ -267,10 +271,17 @@ def build_ctx_from_path(
         Path to the installation root ``config.yaml``.
     app_name : str | None
         The app's own identity string (e.g. ``"rey_console"``).  Used to
-        select the include list from ``config_loading.apps``.  When omitted
-        the full config folder is loaded for backward compatibility.
+        select the include list from ``config_loading.apps`` and recorded as
+        ``ctx.app_name``.  Preserved even when ``full_installation`` is set.
     project_root : Path | None
         Defaults to ``Path.cwd()``.
+    full_installation : bool
+        When ``True`` build an explicit installation-wide context: every
+        ``*.yaml`` under the config directory is deep-merged regardless of the
+        app-scoped include list or ``default_behavior``.  Used by
+        installation-wide consumers (console diagnostics, workflow inventory)
+        that must see every app's resolved configuration.  ``app_name`` still
+        records the requesting app's identity.  Defaults to ``False``.
 
     Returns
     -------
@@ -306,7 +317,7 @@ def build_ctx_from_path(
 
     # Step 3 — determine the ordered list of include folders.
     include_folders = _resolve_include_folders(
-        root_raw, resolver_strs, app_name, config_path
+        root_raw, resolver_strs, app_name, config_path, full_installation
     )
 
     # Steps 4–5 — walk each folder and merge files in declared order.
@@ -314,7 +325,7 @@ def build_ctx_from_path(
     for folder in include_folders:
         folder_files = _yaml_files_in_folder(folder, config_path)
         for yaml_file in folder_files:
-            raw = _deep_merge(raw, _load_yaml(yaml_file))
+            raw = _deep_merge(raw, _stamp_workflow_ownership(_load_yaml(yaml_file)))
             _logger.debug("config_loader   file=%s", yaml_file)
         _logger.info("config_loader include=%s files=%d", folder, len(folder_files))
 
@@ -358,6 +369,7 @@ def _resolve_include_folders(
     resolver_strs: dict[str, str],
     app_name: str | None,
     config_path: Path,
+    full_installation: bool = False,
 ) -> list[Path]:
     """Return the ordered include folder list for the app.
 
@@ -365,7 +377,13 @@ def _resolve_include_folders(
     Expands ``{token}`` placeholders using the preliminary path resolver.
     Raises ``ConfigError`` for any declared folder that does not exist.
     Falls back to the full config directory when no app-scoped block is found.
+    When ``full_installation`` is set the app-scoped block and
+    ``default_behavior`` are bypassed and the entire config directory is
+    returned, so every app's YAML is merged into one authoritative context.
     """
+    if full_installation:
+        return [config_path.parent]
+
     loading_cfg = root_raw.get("config_loading")
     if not isinstance(loading_cfg, dict):
         loading_cfg = {}
@@ -414,6 +432,47 @@ def _yaml_files_in_folder(folder: Path, exclude: Path) -> list[Path]:
         f for f in sorted(folder.rglob("*.yaml"))
         if f.resolve() != exclude
     ]
+
+
+def _stamp_workflow_ownership(file_raw: dict[str, Any]) -> dict[str, Any]:
+    """Stamp each workflow with its file-root ``app`` owner before merging.
+
+    Workflow YAML files declare the owning app once at the file root and list
+    their workflows without a per-item ``app``.  The deep-merge concatenates
+    ``workflows`` lists across files and collapses the scalar root ``app`` to a
+    single value, which would erase per-file ownership.  Copying the root
+    ``app`` onto every workflow item (list or mapping shape) before the merge
+    keeps ownership on each resolved workflow, so consumers can filter by
+    ``workflow.app`` without depending on which file merged last.
+
+    Parameters
+    ----------
+    file_raw : dict[str, Any]
+        Parsed contents of a single YAML file about to be merged.
+
+    Returns
+    -------
+    dict[str, Any]
+        The same mapping, with workflow items stamped in place when the file
+        declares a root ``app`` and a ``workflows`` block.
+    """
+    # Only workflow-owning files carry a root app and a workflows block.
+    app = file_raw.get("app")
+    workflows = file_raw.get("workflows")
+    if not isinstance(app, str) or not app:
+        return file_raw
+
+    if isinstance(workflows, list):
+        items = workflows
+    elif isinstance(workflows, dict):
+        items = list(workflows.values())
+    else:
+        return file_raw
+
+    for workflow in items:
+        if isinstance(workflow, dict) and not workflow.get("app"):
+            workflow["app"] = app
+    return file_raw
 
 
 def _find_parent_install_raw(config_path: Path) -> dict[str, Any] | None:
