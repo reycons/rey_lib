@@ -43,13 +43,18 @@ def build_installation_inventory(ctx: Any) -> InstallationInventory:
     """Build an immutable inventory from a context loaded by config_utils."""
     apps = _named_entries(getattr(ctx, "apps", None))
     app_names = {str(app.get("name")) for app in apps if app.get("name")}
+    source_config = str(getattr(ctx, "config_path", "") or "")
     workflows = _workflow_entries(ctx)
     pipelines = _pipeline_entries(ctx)
     contracts = _contract_entries(ctx)
     llm_profiles = _named_entries(
         getattr(ctx, "llm_profiles", None) or getattr(ctx, "llm_configs", None)
     )
+    llm_profile_names = {str(profile.get("name")) for profile in llm_profiles if profile.get("name")}
     connections = _connection_entries(ctx)
+    connection_names = {
+        str(connection.get("name")) for connection in connections if connection.get("name")
+    }
     tools = _named_entries(getattr(ctx, "tools", None))
     paths = _path_entries(ctx)
     logging = _to_plain(getattr(ctx, "logging", None))
@@ -57,7 +62,14 @@ def build_installation_inventory(ctx: Any) -> InstallationInventory:
     run_actions = _workflow_run_actions(ctx, apps, workflows)
     workflows_by_app = _workflows_by_app(workflows)
 
-    errors = _validate_inventory(app_names, workflows, contracts)
+    errors = _validate_inventory(
+        app_names,
+        workflows,
+        contracts,
+        llm_profile_names,
+        connection_names,
+        source_config,
+    )
     if errors:
         details = "; ".join(str(error) for error in errors)
         raise ConfigError(f"Installation inventory validation failed: {details}")
@@ -85,6 +97,7 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
     workflows = _to_plain(getattr(ctx, "workflows", None))
     root_app = _to_plain(getattr(ctx, "app", None))
     root_app = root_app if isinstance(root_app, str) else ""
+    source_config = str(getattr(ctx, "config_path", "") or "")
 
     if isinstance(workflows, dict):
         items = workflows.items()
@@ -104,6 +117,11 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
                 "kind": str(workflow.get("kind") or "workflow"),
                 "description": str(workflow.get("description") or ""),
                 "steps": workflow.get("steps") or [],
+                "llm_profile": workflow.get("llm_profile"),
+                "execution_profile": workflow.get("execution_profile"),
+                "connection": workflow.get("connection"),
+                "target_connection": workflow.get("target_connection"),
+                "source_config_file": source_config,
                 "source_section": "workflows",
             }
         )
@@ -142,6 +160,7 @@ def _workflow_run_actions(
     """Return normalized executable action metadata for workflows."""
     app_by_name = {str(app.get("name")): app for app in apps if app.get("name")}
     config_path = str(getattr(ctx, "config_path", ""))
+    source_config = str(getattr(ctx, "config_path", "") or "")
     rows: list[dict[str, Any]] = []
 
     for workflow in workflows:
@@ -154,6 +173,8 @@ def _workflow_run_actions(
                     "workflow": workflow["name"],
                     "executable": False,
                     "reason": "not executable: unknown owner app",
+                    "source_config_file": workflow.get("source_config_file") or source_config,
+                    "source_section": "workflows",
                 }
             )
             continue
@@ -169,12 +190,17 @@ def _workflow_run_actions(
                 "cli_command": command,
                 "command_preview": " ".join(command),
                 "copyable_command": " ".join(command),
+                "app_name": app_name,
+                "workflow_name": workflow["name"],
                 "entry_point": str(app_entry.get("entry_point") or "main.py"),
+                "app_path": str(app_entry.get("app_path") or ""),
+                "config_path": config_path,
                 "required_arguments": ["workflow"],
                 "optional_arguments": ["dry-run"] if dry_run else [],
                 "default_execution_flags": [],
                 "dry_run_capable": dry_run,
                 "confirmation_required": not dry_run,
+                "source_config_file": workflow.get("source_config_file") or source_config,
                 "source_section": "workflows",
                 "executable": True,
             }
@@ -241,27 +267,44 @@ def _workflows_by_app(workflows: list[dict[str, Any]]) -> dict[str, tuple[str, .
 def _contract_entries(ctx: Any) -> list[dict[str, Any]]:
     """Find explicit contract_file references already present on the ctx."""
     rows: list[dict[str, Any]] = []
-    _collect_contracts(_to_plain(getattr(ctx, "workflows", None)), "workflows", rows)
-    _collect_contracts(_to_plain(getattr(ctx, "analysis_configs", None)), "analysis_configs", rows)
-    _collect_contracts(_to_plain(getattr(ctx, "data_sources", None)), "data_sources", rows)
+    source_config = str(getattr(ctx, "config_path", "") or "")
+    _collect_contracts(_to_plain(getattr(ctx, "workflows", None)), "workflows", rows, source_config)
+    _collect_contracts(
+        _to_plain(getattr(ctx, "analysis_configs", None)),
+        "analysis_configs",
+        rows,
+        source_config,
+    )
+    _collect_contracts(
+        _to_plain(getattr(ctx, "data_sources", None)),
+        "data_sources",
+        rows,
+        source_config,
+    )
     return rows
 
 
-def _collect_contracts(value: Any, section: str, rows: list[dict[str, Any]]) -> None:
+def _collect_contracts(
+    value: Any,
+    section: str,
+    rows: list[dict[str, Any]],
+    source_config: str,
+) -> None:
     if isinstance(value, dict):
         if "contract_file" in value:
             rows.append(
                 {
+                    "config_file": source_config,
                     "section": section,
                     "field": "contract_file",
                     "contract_file": value["contract_file"],
                 }
             )
         for child in value.values():
-            _collect_contracts(child, section, rows)
+            _collect_contracts(child, section, rows, source_config)
     elif isinstance(value, list):
         for child in value:
-            _collect_contracts(child, section, rows)
+            _collect_contracts(child, section, rows, source_config)
 
 
 def _named_entries(value: Any) -> list[dict[str, Any]]:
@@ -297,6 +340,9 @@ def _validate_inventory(
     app_names: set[str],
     workflows: list[dict[str, Any]],
     contracts: list[dict[str, Any]],
+    llm_profile_names: set[str],
+    connection_names: set[str],
+    source_config: str,
 ) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     seen_workflows: dict[str, str] = {}
@@ -304,16 +350,84 @@ def _validate_inventory(
     for workflow in workflows:
         name = str(workflow.get("name") or "")
         app = str(workflow.get("app") or "")
+        workflow_source = str(workflow.get("source_config_file") or source_config)
         if not app:
-            errors.append(_error("workflows", name, "app", app, "workflow owner app is required"))
+            errors.append(
+                _error(workflow_source, "workflows", name, "app", app, "workflow owner app is required")
+            )
         elif app not in app_names:
-            errors.append(_error("workflows", name, "app", app, "known app name"))
+            errors.append(_error(workflow_source, "workflows", name, "app", app, "known app name"))
 
         previous = seen_workflows.get(name)
         if previous and previous != app:
-            errors.append(_error("workflows", name, "name", name, "unique workflow name or explicit app"))
+            errors.append(
+                _error(
+                    workflow_source,
+                    "workflows",
+                    name,
+                    "name",
+                    name,
+                    "unique workflow name or explicit app",
+                )
+            )
         else:
             seen_workflows[name] = app
+
+        _validate_named_reference(
+            errors,
+            workflow,
+            "llm_profile",
+            llm_profile_names,
+            "known LLM profile name",
+            workflow_source,
+        )
+        _validate_named_reference(
+            errors,
+            workflow,
+            "execution_profile",
+            llm_profile_names,
+            "known execution profile name",
+            workflow_source,
+        )
+        _validate_named_reference(
+            errors,
+            workflow,
+            "connection",
+            connection_names,
+            "known connection name",
+            workflow_source,
+        )
+        _validate_named_reference(
+            errors,
+            workflow,
+            "target_connection",
+            connection_names,
+            "known connection name",
+            workflow_source,
+        )
+        for ref in _collect_references(workflow.get("steps") or []):
+            if ref["field"] in {"llm_profile", "execution_profile"}:
+                _validate_reference_value(
+                    errors,
+                    workflow_source,
+                    "workflows.steps",
+                    name,
+                    ref["field"],
+                    ref["value"],
+                    llm_profile_names,
+                    "known execution profile name",
+                )
+            elif ref["field"] in {"connection", "target_connection", "source_connection"}:
+                _validate_reference_value(
+                    errors,
+                    workflow_source,
+                    "workflows.steps",
+                    name,
+                    ref["field"],
+                    ref["value"],
+                    connection_names,
+                    "known connection name",
+                )
 
     for contract in contracts:
         value = contract.get("contract_file")
@@ -326,6 +440,7 @@ def _validate_inventory(
         if not path.exists():
             errors.append(
                 _error(
+                    str(contract.get("config_file") or source_config),
                     str(contract.get("section") or "contracts"),
                     "contract_file",
                     "contract_file",
@@ -337,7 +452,67 @@ def _validate_inventory(
     return errors
 
 
+def _validate_named_reference(
+    errors: list[dict[str, Any]],
+    item: dict[str, Any],
+    field: str,
+    allowed_names: set[str],
+    expected: str,
+    source_config: str,
+) -> None:
+    _validate_reference_value(
+        errors,
+        source_config,
+        "workflows",
+        str(item.get("name") or ""),
+        field,
+        item.get(field),
+        allowed_names,
+        expected,
+    )
+
+
+def _validate_reference_value(
+    errors: list[dict[str, Any]],
+    config_file: str,
+    section: str,
+    item: str,
+    field: str,
+    value: Any,
+    allowed_names: set[str],
+    expected: str,
+) -> None:
+    if value in (None, ""):
+        return
+    if isinstance(value, Path):
+        value = str(value)
+    if not isinstance(value, str):
+        return
+    if value not in allowed_names:
+        errors.append(_error(config_file, section, item, field, value, expected))
+
+
+def _collect_references(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {
+                "llm_profile",
+                "execution_profile",
+                "connection",
+                "target_connection",
+                "source_connection",
+            }:
+                rows.append({"field": key, "value": item})
+            rows.extend(_collect_references(item))
+    elif isinstance(value, list):
+        for item in value:
+            rows.extend(_collect_references(item))
+    return rows
+
+
 def _error(
+    config_file: str,
     section: str,
     item: str,
     field: str,
@@ -345,7 +520,7 @@ def _error(
     expected: str,
 ) -> dict[str, Any]:
     return {
-        "config_file": "",
+        "config_file": config_file,
         "section": section,
         "item": item,
         "field": field,

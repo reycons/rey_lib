@@ -40,6 +40,12 @@ def _ctx() -> Namespace:
                     ]
                 }
             },
+            "llm_profiles": [
+                {"name": "local_precision"},
+            ],
+            "connections": [
+                {"name": "warehouse"},
+            ],
             "tools": [],
         }
     )
@@ -58,6 +64,7 @@ def test_build_installation_inventory_from_ctx() -> None:
         "rey_loader run-workflow --workflow load_only --config-path "
         "/tmp/install/installation.yaml"
     )
+    assert inventory.workflow_run_actions[0]["source_config_file"] == "/tmp/install/installation.yaml"
 
 
 def test_installation_inventory_is_read_only() -> None:
@@ -80,6 +87,66 @@ def test_installation_inventory_rejects_unknown_workflow_owner() -> None:
 
     with pytest.raises(ConfigError, match="known app name"):
         build_installation_inventory(ctx)
+
+
+def test_installation_inventory_rejects_unknown_execution_profile() -> None:
+    """Validation fails when a workflow references an unknown execution profile."""
+    ctx = _ctx()
+    ctx.workflows = {
+        "load_only": {
+            "app": "rey_loader",
+            "execution_profile": "missing_profile",
+            "steps": [],
+        }
+    }
+
+    with pytest.raises(ConfigError, match="known execution profile name"):
+        build_installation_inventory(ctx)
+
+
+def test_installation_inventory_rejects_unknown_connection() -> None:
+    """Validation fails when a workflow references an unknown connection."""
+    ctx = _ctx()
+    ctx.workflows = {
+        "load_only": {
+            "app": "rey_loader",
+            "target_connection": "missing_connection",
+            "steps": [],
+        }
+    }
+
+    with pytest.raises(ConfigError, match="known connection name"):
+        build_installation_inventory(ctx)
+
+
+def test_installation_inventory_rejects_missing_contract_file(tmp_path) -> None:
+    """Validation reports missing explicit contract_file references."""
+    ctx = _ctx()
+    missing_contract = tmp_path / "contracts" / "missing.md"
+    ctx.workflows = {
+        "load_only": {
+            "app": "rey_loader",
+            "steps": [{"name": "contracted", "contract_file": str(missing_contract)}],
+        }
+    }
+
+    with pytest.raises(ConfigError, match="existing contract file"):
+        build_installation_inventory(ctx)
+
+
+def test_installation_inventory_keeps_contract_alias_string() -> None:
+    """Only contract_file paths are validated; contract aliases remain strings."""
+    ctx = _ctx()
+    ctx.workflows = {
+        "load_only": {
+            "app": "rey_loader",
+            "steps": [{"name": "contracted", "contract": "plain_contract_name"}],
+        }
+    }
+
+    inventory = build_installation_inventory(ctx)
+
+    assert inventory.workflows[0]["steps"][0]["contract"] == "plain_contract_name"
 
 
 def test_installation_inventory_uses_root_app_for_workflow_list() -> None:
