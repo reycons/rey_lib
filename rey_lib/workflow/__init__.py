@@ -6,6 +6,12 @@ shared run context, result recording, error propagation) over a registry of
 callable steps. Domain apps own the step handlers, registry, and definitions.
 """
 
+from rey_lib.workflow.coordinator import (
+    ProcessHandler,
+    StepOutcome,
+    WorkflowRun,
+    run_workflow,
+)
 from rey_lib.workflow.engine import (
     RunContext,
     StepResult,
@@ -24,4 +30,8 @@ __all__ = [
     "WorkflowError",
     "build_steps",
     "run_steps",
+    "ProcessHandler",
+    "StepOutcome",
+    "WorkflowRun",
+    "run_workflow",
 ]
