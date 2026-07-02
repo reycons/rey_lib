@@ -46,7 +46,7 @@ from typing import Any, Optional
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
-from rey_lib.db.procedure_map import call_action, get_connection_config
+from rey_lib.db.procedure_map import execute_mapped_routine, get_connection_config
 
 __all__ = [
     "ensure_run_id",
@@ -876,10 +876,15 @@ def _call(
         return None
 
     try:
-        result = call_action(ctx, conn, map_name, action_name, variables)
-        if set_ctx is not None and result is not None:
-            setattr(ctx, set_ctx, result)
-        return result
+        result = execute_mapped_routine(
+            ctx=ctx, conn=conn, procedure_map=map_name,
+            routine_name=action_name, values=variables, run_ctx=ctx,
+        )
+        outputs = result.get("outputs") or {}
+        scalar = next(iter(outputs.values()), None)
+        if set_ctx is not None and scalar is not None:
+            setattr(ctx, set_ctx, scalar)
+        return scalar
 
     except (ConfigError, DatabaseError) as exc:
         _mark_unavailable(ctx, str(exc))

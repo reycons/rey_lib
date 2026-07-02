@@ -229,6 +229,33 @@ class DBAdapter:
             )
         return backend.run_sql(conn, sql_text, params)
 
+    def execute_sql(
+        self,
+        conn:         Any,
+        sql_text:     str,
+        named_params: dict[str, Any],
+        result_mode:  str,
+    ) -> Any:
+        """Execute parameter-bound SQL text and return a value per result_mode.
+
+        Named ``:param`` placeholders are bound safely (never interpolated).
+        ``result_mode`` is ``no_return`` (None), ``scalar_result`` (one value),
+        or ``dataset_result`` (list of column→value dict rows). Used by the
+        shared mapped-SQL / ad hoc SQL execution path.
+
+        Raises
+        ------
+        NotImplementedError
+            If the connection's provider has no named-SQL support.
+        """
+        backend = _backend(self._provider_for_conn(conn))
+        if not hasattr(backend, "execute_named_sql"):
+            raise NotImplementedError(
+                f"DBAdapter: provider '{self._provider_for_conn(conn)}' "
+                "does not support execute_named_sql."
+            )
+        return backend.execute_named_sql(conn, sql_text, named_params, result_mode)
+
     # ------------------------------------------------------------------
     # Stored procedures
     # ------------------------------------------------------------------

@@ -30,6 +30,7 @@ is_truncation_error(exc)
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
@@ -272,6 +273,81 @@ def run_sql(
         raise DatabaseError(
             f"postgres_utils: run_sql failed: {exc}"
         ) from exc
+
+
+# Named bind parameter ``:name`` (not a ``::type`` cast) -> psycopg ``%(name)s``.
+_NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
+
+
+def execute_named_sql(
+    conn: Any,
+    sql_text: str,
+    named_params: dict[str, Any],
+    result_mode: str,
+) -> Any:
+    """
+    Execute parameter-bound SQL text and return a value per ``result_mode``.
+
+    Named ``:param`` placeholders (never ``::type`` casts) are bound safely via
+    psycopg's ``%(name)s`` mechanism — values are always bound, never
+    interpolated into the SQL string.
+
+    Parameters
+    ----------
+    conn : Any
+        Open psycopg2 connection.
+    sql_text : str
+        SQL statement with ``:name`` bind placeholders.
+    named_params : dict[str, Any]
+        Bind name → value (jsonb values are serialised).
+    result_mode : str
+        ``no_return`` (commit, return None), ``scalar_result`` (return one
+        value), or ``dataset_result`` (return list[dict] rows).
+
+    Returns
+    -------
+    Any
+        None, a scalar, or a list of column→value dict rows.
+
+    Raises
+    ------
+    DatabaseError
+        On execution failure, an unsupported result_mode, or a scalar_result
+        that returns no row / more than one value.
+    """
+    serialised = _serialise_jsonb(named_params or {})
+    bound_sql = _NAMED_PARAM_RE.sub(lambda m: f"%({m.group(1)})s", sql_text)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(bound_sql, serialised)
+
+        if result_mode == "no_return":
+            conn.commit()
+            return None
+        if result_mode == "scalar_result":
+            row = cursor.fetchone()
+            conn.commit()
+            if row is None:
+                raise DatabaseError("execute_named_sql: scalar_result expected a "
+                                    "row but none was returned.")
+            if len(row) > 1:
+                raise DatabaseError("execute_named_sql: scalar_result expected one "
+                                    f"value but {len(row)} were returned.")
+            return row[0]
+        if result_mode == "dataset_result":
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            rows = [dict(zip(columns, record)) for record in cursor.fetchall()]
+            conn.commit()
+            return rows
+
+        raise DatabaseError(f"execute_named_sql: unsupported result_mode '{result_mode}'.")
+
+    except DatabaseError:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise DatabaseError(f"postgres_utils: execute_named_sql failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
