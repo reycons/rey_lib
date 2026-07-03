@@ -74,7 +74,9 @@ __all__ = [
     "load_files_to_callback",
     "run_transform",
     "run_load",
-    "run_app_hooks",
+    "transform_one",
+    "load_one",
+    "validate_one",
 ]
 
 _logger = get_logger(__name__)
@@ -177,12 +179,6 @@ def transform_files(
     )
     total = 0
 
-    # Hook connection cache local to this transform_files call — covers
-    # per-file pre/post_file_transform bindings. Closed in finally so a
-    # crash mid-loop still cleans up.
-    file_hook_conns: dict[str, Any] = {}
-    bindings = getattr(data_source, "transform_hooks", None)
-
     try:
         moved = _run_file_movements_pipeline(data_source)
         if moved:
@@ -216,74 +212,10 @@ def transform_files(
         )
 
         for file_path in pending:
-            # Stamp current-file attrs on ctx BEFORE pre_file_transform fires
-            # so bindings can resolve `source: ctx.current_file_name` etc.
-            # _setup_file_ctx will overwrite these inside the transform
-            # pipeline; values are identical so the second write is a no-op.
-            object.__setattr__(ctx, "current_file_path", str(file_path))
-            object.__setattr__(ctx, "current_file_name", file_path.name)
-
-            # Use a try/finally around the per-file body so that
-            # post_file_transform always fires, even if matching fails or
-            # the transform raises.
-            try:
-                _run_hook_bindings(
-                    ctx,
-                    data_source,
-                    bindings,
-                    "hooks.pre_file_transform",
-                    file_hook_conns,
-                    sql_dir,
-                )
-
-                matched_cfg, header_line = _match_transform(file_path, transforms)
-                if matched_cfg is not None:
-                    object.__setattr__(ctx, "transforms", matched_cfg)
-                if matched_cfg is None or header_line is None:
-                    _logger.error(
-                        "No header match across %d transform(s) — file rejected: %s",
-                        len(transforms),
-                        file_path.name,
-                    )
-                    _reject_unmatched_file(data_source, transforms, file_path)
-                    continue
-
-                _logger.debug(
-                    "Matched header for '%s' → %s %s",
-                    file_path.name,
-                    matched_cfg.name,
-                    matched_cfg.version,
-                )
-
-                success = _transform_one_file(
-                    ctx,
-                    data_source,
-                    matched_cfg,
-                    file_path,
-                    header_line=header_line,
-                )
-                if success:
-                    total += 1
-
-            finally:
-                _run_hook_bindings(
-                    ctx,
-                    data_source,
-                    bindings,
-                    "hooks.post_file_transform",
-                    file_hook_conns,
-                    sql_dir,
-                )
+            if transform_one(ctx, data_source, file_path):
+                total += 1
 
     finally:
-        # Commit and close every connection opened by file-level hooks.
-        for conn_name, conn in file_hook_conns.items():
-            try:
-                conn.commit()
-                conn.close()
-                _logger.debug("Closed file-hook connection '%s'", conn_name)
-            except Exception:  # noqa: BLE001 — close must never raise
-                pass
         log_exit(ctx, f"transform_files done: {total} file(s) transformed", _logger)
 
     return total
@@ -610,131 +542,82 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
             )
             continue
         object.__setattr__(ctx, "data_sources", data_source)
-        bindings = getattr(data_source, "transform_hooks", None)
-        hook_conns: dict[str, Any] = {}
-
-        try:
-            # Step 1: clear any previously injected row columns for this source.
-            object.__setattr__(ctx, "_injected_row_columns", {})
-
-            # Step 2: pre_transform bindings; collect row_column injections.
-            row_cols = _run_hook_bindings(
-                ctx,
-                data_source,
-                bindings,
-                "hooks.pre_transform",
-                hook_conns,
-                sql_dir,
-            )
-            if row_cols:
-                object.__setattr__(ctx, "_injected_row_columns", row_cols)
-                _logger.debug(
-                    "%s: injecting row columns from pre_transform: %s",
-                    data_source.name,
-                    list(row_cols.keys()),
-                )
-
-            # Step 3: transform files. sql_dir is threaded through so
-            # per-file hook bindings (hooks.pre_file_transform /
-            # hooks.post_file_transform) can resolve type: sql_file configs.
-            count = transform_files(
-                ctx,
-                data_source,
-                data_source.transforms,
-                sql_dir=sql_dir,
-            )
-            total += count
-            if count:
-                _logger.info("%s: %d file(s) transformed", data_source.name, count)
-
-            # Step 4: post_transform bindings.
-            _run_hook_bindings(
-                ctx,
-                data_source,
-                bindings,
-                "hooks.post_transform",
-                hook_conns,
-                sql_dir,
-            )
-
-        finally:
-            # Clear injected row columns so they don't bleed into the next source.
-            object.__setattr__(ctx, "_injected_row_columns", {})
-            for conn_name, conn in hook_conns.items():
-                try:
-                    conn.commit()
-                    conn.close()
-                    _logger.debug("Closed hook connection '%s'", conn_name)
-                except Exception:  # noqa: BLE001
-                    pass
+        count = transform_files(ctx, data_source, data_source.transforms, sql_dir=sql_dir)
+        total += count
+        if count:
+            _logger.info("%s: %d file(s) transformed", data_source.name, count)
 
     return total
 
 
-def run_app_hooks(
-    ctx: Any,
-    phase: str,
-    sql_dir: Optional[Path] = None,
-) -> None:
+# ---------------------------------------------------------------------------
+# Public per-file APIs (single file, no discovery, no hooks)
+#
+# These operate on exactly one already-resolved file using already-loaded
+# config. They never scan the inbox, glob, or call the batch runners, and they
+# execute no transform_hooks / load_hooks. Used by the rey_loader single-file
+# workflow (etl_operation / validate) against ``ctx.current_file``.
+# ---------------------------------------------------------------------------
+
+def validate_one(file_path: Path, transform_cfg: Any) -> bool:
+    """Validate one file's header against its transform config."""
+    return _validate_header(file_path, transform_cfg)
+
+
+def transform_one(ctx: Any, data_source: Any, file_path: Path) -> bool:
+    """Transform exactly one file. No discovery, no hooks.
+
+    Matches ``file_path`` against the data source's candidate transforms,
+    rejects it (per movement config) when no header matches, and otherwise runs
+    the existing single-file transform. Returns True on success.
     """
-    Run every app-level (run-scoped) hook binding declared on ``ctx.app_hooks``
-    whose ``hook`` field matches ``phase``.
-
-    Intended for lifecycle bookends — call once at the very start of a CLI
-    invocation with ``phase="hooks.pre_run"`` and once at the very end with
-    ``phase="hooks.post_run"``. The library does not interpret phase names,
-    so callers are free to define additional run-scoped phases (e.g.
-    ``hooks.pre_sync``) by declaring matching bindings in YAML.
-
-    Connections opened by bindings during this call are cached for the
-    duration of the call and closed (with commit) before returning. Hook
-    bindings declared on ``ctx.app_hooks`` follow the same shape as
-    ``transform_hooks`` and ``load_hooks``: each entry has ``name``,
-    ``sql_config``, and ``hook`` fields.
-
-    Parameters
-    ----------
-    ctx : Any
-        Application context. Reads ``ctx.app_hooks`` (absent is a no-op).
-    phase : str
-        Phase label to filter bindings by, e.g. ``"hooks.pre_run"``.
-    sql_dir : Optional[Path]
-        Base directory for ``type: sql_file`` sql_configs.
-
-    Notes
-    -----
-    App-level bindings are not expected to drive row injection — the run
-    has no current data source. If a binding declares ``row_column`` output
-    params they are logged at debug level but otherwise ignored.
-    """
-    bindings = getattr(ctx, "app_hooks", None)
-    if not bindings:
-        return
-
-    open_conns: dict[str, Any] = {}
-    try:
-        row_cols = _run_hook_bindings(
-            ctx,
-            None,            # no data source at run scope
-            bindings,
-            phase,
-            open_conns,
-            sql_dir,
+    transforms = _coerce_transform_cfgs(data_source.transforms)
+    matched_cfg, header_line = _match_transform(file_path, transforms)
+    if matched_cfg is None or header_line is None:
+        _logger.error(
+            "No header match across %d transform(s) — file rejected: %s",
+            len(transforms), file_path.name,
         )
-        if row_cols:
-            _logger.debug(
-                "app_hooks %s returned row_column values (ignored at run scope): %s",
-                phase,
-                list(row_cols.keys()),
-            )
+        _reject_unmatched_file(data_source, transforms, file_path)
+        return False
+    object.__setattr__(ctx, "transforms", matched_cfg)
+    return _transform_one_file(ctx, data_source, matched_cfg, file_path,
+                               header_line=header_line)
+
+
+def load_one(ctx: Any, data_source: Any, load_cfg: Any, file_path: Path) -> int:
+    """Load exactly one file into its destination table. No discovery, no hooks.
+
+    Resolves the load connection, destination schema/table, and matching
+    transform from config, then runs the existing single-file load. Returns the
+    number of rows loaded. Fails closed on a missing/unknown connection.
+    """
+    from rey_lib.config.ctx import find_by_name  # local import — avoids circular dep
+
+    conn_name = getattr(getattr(load_cfg, "load", None), "connection", None)
+    if not conn_name:
+        raise ConfigError(
+            f"load.connection is not set for load '{getattr(load_cfg, 'name', '?')}' "
+            f"in data source '{getattr(data_source, 'name', '?')}'."
+        )
+    db_cfg = find_by_name(getattr(getattr(ctx, "db", None), "connections", []), conn_name)
+    if db_cfg is None:
+        raise ConfigError(
+            f"Connection '{conn_name}' not found in ctx.db.connections."
+        )
+
+    transform_cfg = _find_transform(data_source.transforms, load_cfg.name, load_cfg.version)
+    schema, table = _parse_destination(load_cfg.load.destination_table)
+
+    conn = _db_adapter.get_connection(db_cfg)
+    try:
+        return _load_one_file(ctx, conn, file_path, transform_cfg, load_cfg,
+                              data_source.paths, schema, table)
     finally:
-        for conn_name, conn in open_conns.items():
-            try:
-                conn.commit()
-                conn.close()
-                _logger.debug("Closed app-hook connection '%s'", conn_name)
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — close must never raise
+            pass
 
 
 def run_load(
@@ -808,17 +691,6 @@ def run_load(
         try:
             for load_cfg in getattr(data_source, "loads", []):
                 object.__setattr__(ctx, "loads", load_cfg)
-                load_bindings = getattr(load_cfg, "load_hooks", None)
-
-                # pre_load bindings — fire before this load entry's data move.
-                _run_hook_bindings(
-                    ctx,
-                    data_source,
-                    load_bindings,
-                    "hooks.pre_load",
-                    open_conns,
-                    sql_dir,
-                )
 
                 conn_name = getattr(getattr(load_cfg, "load", None), "connection", None)
                 if not conn_name:
@@ -845,20 +717,6 @@ def run_load(
                 last_conn = conn
                 rows = load_files(ctx, conn, data_source, load_cfg)
                 total += rows
-
-                # Write row count to ctx so post_load hooks (e.g. end_batch_step)
-                # can stamp RecordCount on the BatchStep row.
-                object.__setattr__(ctx, "step_record_count", rows)
-
-                # post_load bindings — fire after this load entry completes.
-                _run_hook_bindings(
-                    ctx,
-                    data_source,
-                    load_bindings,
-                    "hooks.post_load",
-                    open_conns,
-                    sql_dir,
-                )
 
             # post_load_sql runs on the last connection used for this source
             # (backward-compat with existing post_load_sql YAML key).
