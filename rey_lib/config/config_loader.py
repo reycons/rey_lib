@@ -25,8 +25,6 @@ from rey_lib.logs import get_logger
 
 _logger = get_logger(__name__)
 
-_CONFIG_DIR_NAME = "config"
-
 _ENV_FILE_NAME   = ".env"
 
 # Matches ${VAR_NAME} and $VAR_NAME patterns in YAML string values.
