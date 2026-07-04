@@ -22,6 +22,7 @@ from rey_lib.config.provenance import (
     extract_dependencies,
     get_config_metadata,
     get_config_source_files,
+    get_config_source_map,
 )
 
 
@@ -128,6 +129,22 @@ def test_relevant_file_listing(install_root: Path) -> None:
     )
     assert meta is not None
     assert meta.layer == "workflow"
+
+
+def test_source_map_reports_files_and_sections(install_root: Path) -> None:
+    """get_config_source_map returns each file with the sections it contributed."""
+    ctx = build_ctx_from_path(install_root / "config.yaml")
+
+    wf = "postgres_version_lint_comment"
+    source_map = get_config_source_map(ctx, prefix=f"workflows.{wf}")
+    assert source_map, "expected at least one contributing file"
+
+    wf_file = next(f for f in source_map if f.endswith("rey_db_admin.yaml"))
+    info = source_map[wf_file]
+    assert info["layer"] == "workflow"
+    # The workflow file fed the workflow's name/description/steps sections.
+    assert "steps" in info["sections"]
+    assert "description" in info["sections"]
 
 
 def test_override_history_preserved(tmp_path: Path) -> None:

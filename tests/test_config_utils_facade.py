@@ -30,6 +30,7 @@ _PUBLIC_SURFACE = {
     "validate_yaml_folder": config_loader,
     "get_config_metadata": provenance,
     "get_config_source_files": provenance,
+    "get_config_source_map": provenance,
     "explain_config_value": provenance,
 }
 

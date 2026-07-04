@@ -40,6 +40,7 @@ from rey_lib.config.provenance import (
     explain_config_value,
     get_config_metadata,
     get_config_source_files,
+    get_config_source_map,
 )
 
 __all__ = [
@@ -55,5 +56,6 @@ __all__ = [
     "PathResolver",
     "get_config_metadata",
     "get_config_source_files",
+    "get_config_source_map",
     "explain_config_value",
 ]

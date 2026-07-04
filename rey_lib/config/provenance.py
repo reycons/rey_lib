@@ -29,6 +29,7 @@ __all__ = [
     "layer_for_source",
     "get_config_metadata",
     "get_config_source_files",
+    "get_config_source_map",
     "explain_config_value",
 ]
 
@@ -318,6 +319,42 @@ class ConfigMetadata:
                 files.append(entry.source_file)
         return files
 
+    def source_map(self, prefix: str = "") -> dict[str, dict[str, Any]]:
+        """Return per-source-file contribution info for a subtree.
+
+        For each distinct source file under ``prefix``, reports the layer and the
+        sorted list of subtree sections it contributed (the first path segment
+        after the prefix). Lets a consumer explain *what* each file provided
+        without reading the internal entry structure.
+
+        Parameters
+        ----------
+        prefix : str
+            Dotted-path prefix to filter by. Empty maps the whole tree.
+
+        Returns
+        -------
+        dict[str, dict[str, Any]]
+            ``{source_file: {"layer": str | None, "sections": list[str]}}``.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for path, entry in self._entries.items():
+            if prefix and path != prefix and not path.startswith(f"{prefix}."):
+                continue
+            if not entry.source_file:
+                continue
+            info = out.setdefault(entry.source_file, {"layer": entry.layer, "sections": []})
+            if prefix:
+                remainder = "" if path == prefix else path[len(prefix) + 1:]
+            else:
+                remainder = path
+            section = remainder.split(".", 1)[0] if remainder else (entry.source_section or "")
+            if section and section not in info["sections"]:
+                info["sections"].append(section)
+        for info in out.values():
+            info["sections"].sort()
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Public helper API (queried against a built ctx)
@@ -364,6 +401,30 @@ def get_config_source_files(ctx: Any, prefix: str = "") -> list[str]:
     """
     container = _container(ctx)
     return container.source_files(prefix) if container is not None else []
+
+
+def get_config_source_map(ctx: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+    """Return per-source-file contribution info for a config subtree on *ctx*.
+
+    Public wrapper over :meth:`ConfigMetadata.source_map` so consumers can explain
+    which files fed a subtree (and which sections) without touching the internal
+    metadata store.
+
+    Parameters
+    ----------
+    ctx : Any
+        A context built by ``build_ctx_from_path``.
+    prefix : str
+        Dotted-path prefix to filter by; empty maps the whole tree.
+
+    Returns
+    -------
+    dict[str, dict[str, Any]]
+        ``{source_file: {"layer": str | None, "sections": list[str]}}``; empty
+        when no metadata exists.
+    """
+    container = _container(ctx)
+    return container.source_map(prefix) if container is not None else {}
 
 
 def explain_config_value(ctx: Any, path: str) -> str:
