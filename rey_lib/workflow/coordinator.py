@@ -67,9 +67,16 @@ def run_workflow(
     *,
     apply: bool = True,
     only: Optional[str] = None,
+    step: Optional[str] = None,
+    from_step: Optional[str] = None,
+    to_step: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
 ) -> WorkflowRun:
     """Stack the workflow's step function calls per its YAML config.
+
+    Optionally run a single step or an ordered inclusive range instead of the
+    whole workflow. Selection resolves against the workflow's ordered step list
+    and is deterministic and fail-closed (SGC_Rey_Lib_Shared_Workflow_Step_Execution).
 
     Parameters
     ----------
@@ -83,11 +90,26 @@ def run_workflow(
         App-owned ``process name -> handler``. YAML may only call these names.
     apply : bool
         False for dry-run; a step whose effective config sets ``apply_only``
-        true is skipped.
+        true is skipped. Dry-run is expressed by ``apply=False`` — this SGC adds
+        no new dry-run semantics and applies the existing rules to the selected
+        step set only.
     only : str | None
-        When set, run only the step whose ``id`` matches (single-step).
+        Legacy single-step selector (by ``id``). Treated as ``step`` when set.
+    step : str | None
+        Run exactly the one step matching this identifier. Cannot be combined
+        with ``from_step``/``to_step``.
+    from_step : str | None
+        Run from the matching step through the end of the workflow.
+    to_step : str | None
+        Run from the start of the workflow through the matching step. Combined
+        with ``from_step`` this is the inclusive ordered range.
     metadata : dict | None
         Shared run metadata seeded into the run context.
+
+    Step identifiers resolve against each step's ``id``, ``label``, or
+    ``process``. An identifier matching no step, or more than one step, fails
+    closed with a clear error. Only the selected/executed steps appear in the
+    returned outcomes.
 
     Returns
     -------
@@ -97,32 +119,46 @@ def run_workflow(
     Raises
     ------
     WorkflowError
-        On a malformed workflow: a step missing ``id``/``process``, a step
-        calling a process not defined under ``processes``, or a process with no
-        registered handler in this app (fail closed — never guess).
+        On a malformed workflow (a step missing ``id``/``process``, an undefined
+        process, or an unregistered handler) or an invalid/unresolvable step
+        selection — always fail closed, never guess.
     """
     name = str(_get(workflow, "name", "") or "")
     tokens = _resolve_tokens(_get(workflow, "tokens"))
     processes = _to_mapping(_get(workflow, "processes"))
     steps = _as_list(_get(workflow, "steps"))
 
-    run_ctx = RunContext(apply=apply, metadata=dict(metadata or {}), data={"ctx": ctx})
-    run = WorkflowRun(name=name, status="success", context=run_ctx)
-
-    for index, step in enumerate(steps):
-        step_id = str(_get(step, "id", "") or "")
+    # Extract and structurally validate every step's identity up front so step
+    # selection can resolve deterministically against the ordered list.
+    step_views: list[tuple[str, str, str]] = []
+    for index, step_def in enumerate(steps):
+        step_id = str(_get(step_def, "id", "") or "")
         if not step_id:
             raise WorkflowError(
                 f"workflow '{name}': step {index} is missing required 'id'."
             )
-        label = str(_get(step, "label", "") or step_id)
-        process = str(_get(step, "process", "") or "")
+        label = str(_get(step_def, "label", "") or step_id)
+        process = str(_get(step_def, "process", "") or "")
         if not process:
             raise WorkflowError(
                 f"workflow '{name}': step '{step_id}' is missing required 'process'."
             )
-        if only is not None and step_id != only:
+        step_views.append((step_id, label, process))
+
+    # ``only`` is the legacy single-step-by-id parameter; treat it as ``step``.
+    if only is not None and step is None:
+        step = only
+    selected = _select_steps(
+        step_views, name, step=step, from_step=from_step, to_step=to_step
+    )
+
+    run_ctx = RunContext(apply=apply, metadata=dict(metadata or {}), data={"ctx": ctx})
+    run = WorkflowRun(name=name, status="success", context=run_ctx)
+
+    for index, step_def in enumerate(steps):
+        if index not in selected:
             continue
+        step_id, label, process = step_views[index]
         if process not in processes:
             raise WorkflowError(
                 f"workflow '{name}': step '{step_id}' calls undefined process "
@@ -137,7 +173,7 @@ def run_workflow(
 
         effective = _expand_config(
             _deep_merge(_to_mapping(processes.get(process)),
-                        _to_mapping(_get(step, "config"))),
+                        _to_mapping(_get(step_def, "config"))),
             tokens,
         )
 
@@ -167,6 +203,67 @@ def run_workflow(
             return run
 
     return run
+
+
+def _select_steps(
+    step_views: list[tuple[str, str, str]],
+    name: str,
+    *,
+    step: Optional[str],
+    from_step: Optional[str],
+    to_step: Optional[str],
+) -> set[int]:
+    """Resolve the set of step indices to execute (fail closed).
+
+    ``step`` selects one step; ``from_step`` runs to the end; ``to_step`` runs
+    from the start; ``from_step`` + ``to_step`` is the inclusive ordered range.
+    ``step`` cannot combine with a range, and a reversed range fails closed. With
+    no selector, every step runs.
+    """
+    total = len(step_views)
+    if step is not None and (from_step is not None or to_step is not None):
+        raise WorkflowError(
+            f"workflow '{name}': 'step' cannot be combined with 'from_step'/'to_step'."
+        )
+    if step is None and from_step is None and to_step is None:
+        return set(range(total))
+
+    if step is not None:
+        return {_resolve_step_index(step_views, name, step)}
+
+    start = _resolve_step_index(step_views, name, from_step) if from_step is not None else 0
+    end = _resolve_step_index(step_views, name, to_step) if to_step is not None else total - 1
+    if start > end:
+        raise WorkflowError(
+            f"workflow '{name}': from_step '{from_step}' resolves after to_step "
+            f"'{to_step}' (empty range)."
+        )
+    return set(range(start, end + 1))
+
+
+def _resolve_step_index(
+    step_views: list[tuple[str, str, str]], name: str, identifier: str
+) -> int:
+    """Return the one step index matching ``identifier`` by id, label, or process.
+
+    Fails closed: raises on no match, and on an ambiguous match (more than one
+    step). No fuzzy matching.
+    """
+    matches = [
+        index
+        for index, view in enumerate(step_views)
+        if identifier in view  # view == (id, label, process)
+    ]
+    if not matches:
+        raise WorkflowError(
+            f"workflow '{name}': no step matches identifier '{identifier}'."
+        )
+    if len(matches) > 1:
+        raise WorkflowError(
+            f"workflow '{name}': step identifier '{identifier}' is ambiguous "
+            f"(matches {len(matches)} steps)."
+        )
+    return matches[0]
 
 
 # ---------------------------------------------------------------------------
