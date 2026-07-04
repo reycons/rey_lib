@@ -50,6 +50,13 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from rey_lib.config.provenance import (
+    ConfigMetadata,
+    explain_config_value,
+    get_config_metadata,
+    get_config_source_files,
+    layer_for_source,
+)
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import get_logger
 
@@ -66,6 +73,9 @@ __all__ = [
     "dump_yaml",
     "Namespace",
     "PathResolver",
+    "get_config_metadata",
+    "get_config_source_files",
+    "explain_config_value",
 ]
 
 # Config directory name — constant across all projects.
@@ -320,12 +330,24 @@ def build_ctx_from_path(
         root_raw, resolver_strs, app_name, config_path, full_installation
     )
 
+    # Provenance metadata is recorded in the same merge order as the config
+    # values, so a later layer replacing a value carries the prior entry in its
+    # override history. Recording is additive and never alters ``raw``.
+    metadata = ConfigMetadata()
+    metadata.record_tree(root_raw, source_file=str(config_path), layer="installation")
+
     # Steps 4–5 — walk each folder and merge files in declared order.
     raw: dict[str, Any] = root_raw
     for folder in include_folders:
         folder_files = _yaml_files_in_folder(folder, config_path)
         for yaml_file in folder_files:
-            raw = _deep_merge(raw, _stamp_workflow_ownership(_load_yaml(yaml_file)))
+            file_raw = _stamp_workflow_ownership(_load_yaml(yaml_file))
+            raw = _deep_merge(raw, file_raw)
+            metadata.record_tree(
+                file_raw,
+                source_file=str(yaml_file),
+                layer=layer_for_source(yaml_file, config_dir),
+            )
             _logger.debug("config_loader   file=%s", yaml_file)
         _logger.info("config_loader include=%s files=%d", folder, len(folder_files))
 
@@ -351,11 +373,22 @@ def build_ctx_from_path(
         object.__setattr__(ctx, "paths", path_resolver)
         _apply_path_resolver(ctx, path_resolver)
 
+        # Record final resolved values for provenance (runtime values unchanged).
+        resolver_strs = {
+            name: str(resolved) for name, resolved in path_resolver._paths.items()
+        }
+        metadata.resolve_values(resolver_strs)
+        for name, resolved in path_resolver._paths.items():
+            metadata.set_resolved(f"paths.{name}", str(resolved))
+
     object.__setattr__(ctx, "config_path", str(config_path))
     if app_name:
         object.__setattr__(ctx, "app_name", app_name)
     object.__setattr__(ctx, "log_level", "INFO")
     object.__setattr__(ctx, "log_depth", 0)
+    # Provenance is stored separately under a private attribute so it never
+    # appears in ctx.keys() and never shadows a real config value.
+    object.__setattr__(ctx, "_config_metadata", metadata)
 
     _logger.info(
         "config_loader complete top_level_keys=%s",
