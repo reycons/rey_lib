@@ -117,6 +117,11 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
                 "kind": str(workflow.get("kind") or "workflow"),
                 "description": str(workflow.get("description") or ""),
                 "steps": workflow.get("steps") or [],
+                # Workflow-declared execution capabilities. Default false so a
+                # workflow is only step/range selectable when it opts in (unsafe
+                # partial execution never enabled by omission).
+                "step_selection_capable": bool(workflow.get("step_selection_capable")),
+                "range_selection_capable": bool(workflow.get("range_selection_capable")),
                 "llm_profile": workflow.get("llm_profile"),
                 "execution_profile": workflow.get("execution_profile"),
                 "connection": workflow.get("connection"),
@@ -199,6 +204,8 @@ def _workflow_run_actions(
                 "optional_arguments": ["dry-run"] if dry_run else [],
                 "default_execution_flags": [],
                 "dry_run_capable": dry_run,
+                "step_selection_capable": bool(workflow.get("step_selection_capable")),
+                "range_selection_capable": bool(workflow.get("range_selection_capable")),
                 "confirmation_required": not dry_run,
                 "source_config_file": workflow.get("source_config_file") or source_config,
                 "source_section": "workflows",

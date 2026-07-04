@@ -220,3 +220,27 @@ def test_config_utils_appends_workflow_list_entries(tmp_path) -> None:
         "workflow_a",
         "workflow_b",
     ]
+
+
+def test_workflow_capabilities_default_false() -> None:
+    """step/range selection capability defaults false when not declared."""
+    action = build_installation_inventory(_ctx()).workflow_run_actions[0]
+    assert action["step_selection_capable"] is False
+    assert action["range_selection_capable"] is False
+
+
+def test_workflow_capabilities_surface_when_declared() -> None:
+    """A workflow that opts in surfaces step/range selection capability."""
+    ctx = _ctx()
+    ctx.workflows = {
+        "load_only": {
+            "app": "rey_loader",
+            "kind": "internal",
+            "steps": ["load"],
+            "step_selection_capable": True,
+            "range_selection_capable": True,
+        }
+    }
+    action = build_installation_inventory(ctx).workflow_run_actions[0]
+    assert action["step_selection_capable"] is True
+    assert action["range_selection_capable"] is True
