@@ -225,8 +225,8 @@ def test_config_utils_appends_workflow_list_entries(tmp_path) -> None:
 def test_workflow_capabilities_default_false() -> None:
     """step/range default false when the workflow declares no execution block."""
     action = build_installation_inventory(_ctx()).workflow_run_actions[0]
-    assert action["step_selection_capable"] is False
-    assert action["range_selection_capable"] is False
+    assert action["execution"]["step"] is False
+    assert action["execution"]["range"] is False
 
 
 def test_workflow_capabilities_surface_from_execution_block() -> None:
@@ -241,5 +241,5 @@ def test_workflow_capabilities_surface_from_execution_block() -> None:
         }
     }
     action = build_installation_inventory(ctx).workflow_run_actions[0]
-    assert action["step_selection_capable"] is True
-    assert action["range_selection_capable"] is True
+    assert action["execution"]["step"] is True
+    assert action["execution"]["range"] is True
