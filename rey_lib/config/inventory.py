@@ -117,11 +117,11 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
                 "kind": str(workflow.get("kind") or "workflow"),
                 "description": str(workflow.get("description") or ""),
                 "steps": workflow.get("steps") or [],
-                # Workflow-declared execution capabilities. Default false so a
-                # workflow is only step/range selectable when it opts in (unsafe
-                # partial execution never enabled by omission).
-                "step_selection_capable": bool(workflow.get("step_selection_capable")),
-                "range_selection_capable": bool(workflow.get("range_selection_capable")),
+                # Workflow-declared execution contract (ADR-007): the nested
+                # execution:{full,dry_run,step,range} block. Defaults keep a
+                # workflow runnable but never step/range selectable unless it
+                # opts in (unsafe partial execution never enabled by omission).
+                "execution": _workflow_execution(workflow),
                 "llm_profile": workflow.get("llm_profile"),
                 "execution_profile": workflow.get("execution_profile"),
                 "connection": workflow.get("connection"),
@@ -185,7 +185,12 @@ def _workflow_run_actions(
             continue
 
         command = _workflow_command(app_entry, workflow["name"], config_path)
-        dry_run = _supports_dry_run(app_entry)
+        # Resolve the workflow's declared execution contract (ADR-007) against
+        # what the app CLI can actually honour. Full run and dry-run require both
+        # the workflow's declaration and app support; step/range are purely the
+        # workflow's contract (the shared coordinator supports them for all).
+        execution = _workflow_execution(workflow)
+        dry_run = _supports_dry_run(app_entry) and execution["dry_run"]
         rows.append(
             {
                 "app": app_name,
@@ -204,16 +209,33 @@ def _workflow_run_actions(
                 "optional_arguments": ["dry-run"] if dry_run else [],
                 "default_execution_flags": [],
                 "dry_run_capable": dry_run,
-                "step_selection_capable": bool(workflow.get("step_selection_capable")),
-                "range_selection_capable": bool(workflow.get("range_selection_capable")),
+                "step_selection_capable": execution["step"],
+                "range_selection_capable": execution["range"],
                 "confirmation_required": not dry_run,
                 "source_config_file": workflow.get("source_config_file") or source_config,
                 "source_section": "workflows",
-                "executable": True,
+                "executable": execution["full"],
             }
         )
 
     return rows
+
+
+def _workflow_execution(workflow: dict[str, Any]) -> dict[str, bool]:
+    """Return the normalized execution contract for a workflow (ADR-007).
+
+    Reads the declared ``execution: {full, dry_run, step, range}`` block. A
+    workflow defaults to full-run and dry-run enabled but step/range disabled, so
+    unsafe partial execution is never enabled by omission.
+    """
+    raw = workflow.get("execution")
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "full": bool(raw.get("full", True)),
+        "dry_run": bool(raw.get("dry_run", True)),
+        "step": bool(raw.get("step", False)),
+        "range": bool(raw.get("range", False)),
+    }
 
 
 def _workflow_command(
