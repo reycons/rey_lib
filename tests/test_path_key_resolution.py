@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rey_lib.config.config_utils import (
     Namespace,
     PathResolver,
@@ -17,6 +19,7 @@ from rey_lib.config.config_utils import (
     _is_path_key,
     _resolve_paths,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 _BASE = Path("/base")
 
@@ -74,6 +77,65 @@ def test_contract_file_path_root_token_resolves() -> None:
     assert ctx.assist_sql.contract_file == Path(
         "/contracts/db_admin/ddl_comment_enrichment.md"
     )
+
+
+def test_workflow_local_token_resolves_path_key_at_load() -> None:
+    """Workflow-local tokens expand into concrete path-bearing process values."""
+    ctx = Namespace({
+        "workflows": [
+            {
+                "name": "postgres_version_lint_comment",
+                "tokens": {"ddl_root": "{data}/rey_db_admin/database_ddl"},
+                "processes": {
+                    "export_database_ddl": {"output_root": "{ddl_root}"},
+                    "git_commit": {"repo_root": "{ddl_root}"},
+                    "commit_message": {"message_template": "Export {engine} DDL"},
+                },
+            }
+        ]
+    })
+    resolver = PathResolver({"data": Path("/rey/data")})
+
+    _apply_path_resolver(ctx, resolver)
+
+    workflow = ctx.workflows[0]
+    expected = Path("/rey/data/rey_db_admin/database_ddl")
+    assert workflow.tokens.ddl_root == str(expected)
+    assert workflow.processes.export_database_ddl.output_root == expected
+    assert workflow.processes.git_commit.repo_root == expected
+    assert workflow.processes.commit_message.message_template == "Export {engine} DDL"
+
+
+def test_workflow_local_token_unknown_reference_fails_at_load() -> None:
+    """Unknown placeholders inside workflow-local token definitions fail closed."""
+    ctx = Namespace({
+        "workflows": [
+            {
+                "name": "bad",
+                "tokens": {"ddl_root": "{missing}/ddl"},
+                "processes": {"export": {"output_root": "{ddl_root}"}},
+            }
+        ]
+    })
+
+    with pytest.raises(ConfigError, match="missing"):
+        _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+
+
+def test_workflow_local_token_global_name_collision_fails_at_load() -> None:
+    """Workflow-local token names may not silently shadow installation paths."""
+    ctx = Namespace({
+        "workflows": [
+            {
+                "name": "bad",
+                "tokens": {"data": "/other"},
+                "processes": {"export": {"output_root": "{data}/ddl"}},
+            }
+        ]
+    })
+
+    with pytest.raises(ConfigError, match="conflicts"):
+        _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
 
 
 def test_contract_remains_string() -> None:

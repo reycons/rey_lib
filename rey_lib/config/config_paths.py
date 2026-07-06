@@ -9,6 +9,7 @@ resolution, allowlists, and path normalisation are unchanged.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ _PATH_KEYS = frozenset({
 
 # Keys whose string values are log path templates — placeholders must survive resolution.
 _LOG_PATH_KEYS = ("log_path",)
+
+_TOKEN_PATTERN = re.compile(r"{([^{}]+)}")
+_RUNTIME_PATH_PLACEHOLDERS = frozenset({"operation", "timestamp", "run_id"})
 
 class PathResolver:
     """Resolved named paths from the installation config ``paths:`` list.
@@ -150,6 +154,9 @@ def _apply_path_resolver(obj: Any, resolver: PathResolver) -> None:
         name: str(resolver.resolve(name)) for name in resolver._paths
     }
     _walk_logical_refs(obj, resolver_strs)
+    _resolve_workflow_tokens(obj, resolver_strs)
+    _walk_logical_refs(obj, resolver_strs)
+    _validate_no_unresolved_path_tokens(obj)
 
 def _walk_logical_refs(obj: Any, resolver_strs: dict[str, str]) -> None:
     """Recursive worker for :func:`_apply_path_resolver`."""
@@ -168,3 +175,157 @@ def _walk_logical_refs(obj: Any, resolver_strs: dict[str, str]) -> None:
     elif isinstance(obj, list):
         for item in obj:
             _walk_logical_refs(item, resolver_strs)
+
+
+def _resolve_workflow_tokens(obj: Any, resolver_strs: dict[str, str]) -> None:
+    """Resolve each workflow's local ``tokens:`` block inside that workflow.
+
+    Workflow-local tokens are authoring conveniences. They should not leak into
+    process handlers, so they are expanded during config load after the global
+    PathResolver exists. Unknown placeholders in non-path text are still allowed
+    for runtime formatting, but unknown placeholders inside token definitions or
+    path-bearing values fail closed.
+    """
+    workflows = _child(obj, "workflows")
+    for workflow in _workflow_items(workflows):
+        tokens = _child(workflow, "tokens")
+        token_map = _resolve_local_tokens(tokens, resolver_strs)
+        if token_map:
+            _walk_workflow_refs(workflow, token_map)
+
+
+def _workflow_items(workflows: Any) -> list[Any]:
+    if workflows is None:
+        return []
+    if isinstance(workflows, Namespace):
+        return [item for _, item in workflows.items()]
+    if isinstance(workflows, dict):
+        return list(workflows.values())
+    if isinstance(workflows, list):
+        return list(workflows)
+    return []
+
+
+def _resolve_local_tokens(tokens: Any, resolver_strs: dict[str, str]) -> dict[str, str]:
+    raw = _mapping_items(tokens)
+    if not raw:
+        return {}
+
+    for key in raw:
+        if key in resolver_strs:
+            raise ConfigError(
+                f"Workflow token '{key}' conflicts with installation path token '{key}'."
+            )
+
+    resolved = {key: str(value) for key, value in raw.items()}
+    combined = dict(resolver_strs)
+    combined.update(resolved)
+
+    for _ in range(len(resolved) + 1):
+        changed = False
+        for key, value in list(resolved.items()):
+            expanded = _substitute_known_tokens(value, combined)
+            if expanded != value:
+                resolved[key] = expanded
+                combined[key] = expanded
+                changed = True
+        if not changed:
+            break
+
+    for key, value in resolved.items():
+        unresolved = _tokens_in(value) - set(combined)
+        if unresolved:
+            names = ", ".join(sorted(unresolved))
+            raise ConfigError(
+                f"Workflow token '{key}' references unknown token(s): {names}."
+            )
+
+    return resolved
+
+
+def _walk_workflow_refs(obj: Any, tokens: dict[str, str], parent_key: str = "") -> None:
+    if isinstance(obj, Namespace):
+        for key in obj.keys():
+            value = object.__getattribute__(obj, key)
+            resolved = _resolve_token_value(value, tokens, key)
+            if resolved is not value:
+                object.__setattr__(obj, key, resolved)
+            else:
+                _walk_workflow_refs(value, tokens, key)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_workflow_refs(item, tokens, parent_key)
+
+
+def _resolve_token_value(value: Any, tokens: dict[str, str], key: str) -> Any:
+    raw = str(value) if isinstance(value, Path) else value
+    if not isinstance(raw, str) or "{" not in raw:
+        return value
+
+    substituted = _substitute_known_tokens(raw, tokens)
+    if substituted == raw:
+        return value
+
+    if _is_path_key(key):
+        unresolved = _unresolved_path_tokens(substituted)
+        if unresolved:
+            names = ", ".join(sorted(unresolved))
+            raise ConfigError(
+                f"Path config key '{key}' contains unresolved token(s): {names}."
+            )
+        return Path(substituted).expanduser()
+
+    return substituted
+
+
+def _validate_no_unresolved_path_tokens(obj: Any, parent_key: str = "") -> None:
+    if isinstance(obj, Namespace):
+        for key in obj.keys():
+            value = object.__getattribute__(obj, key)
+            _validate_path_value(key, value)
+            _validate_no_unresolved_path_tokens(value, key)
+    elif isinstance(obj, list):
+        for item in obj:
+            _validate_no_unresolved_path_tokens(item, parent_key)
+
+
+def _validate_path_value(key: str, value: Any) -> None:
+    if not _is_path_key(key):
+        return
+    raw = str(value) if isinstance(value, Path) else value
+    if isinstance(raw, str) and "{" in raw:
+        unresolved = _unresolved_path_tokens(raw)
+        if not unresolved:
+            return
+        names = ", ".join(sorted(unresolved))
+        raise ConfigError(f"Path config key '{key}' contains unresolved token(s): {names}.")
+
+
+def _mapping_items(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, Namespace):
+        return {str(key): value for key, value in obj.items()}
+    if isinstance(obj, dict):
+        return {str(key): value for key, value in obj.items()}
+    return {}
+
+
+def _child(obj: Any, key: str) -> Any:
+    if isinstance(obj, Namespace):
+        return getattr(obj, key, None)
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return None
+
+
+def _substitute_known_tokens(text: str, tokens: dict[str, str]) -> str:
+    for key, value in tokens.items():
+        text = text.replace("{" + key + "}", str(value))
+    return text
+
+
+def _tokens_in(text: str) -> set[str]:
+    return set(_TOKEN_PATTERN.findall(text))
+
+
+def _unresolved_path_tokens(text: str) -> set[str]:
+    return _tokens_in(text) - _RUNTIME_PATH_PLACEHOLDERS
