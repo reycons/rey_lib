@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,43 @@ __all__ = [
     "log_exit",
     "format_jsonl_records",
     "read_jsonl_records",
+    "resolve_run_identity",
 ]
+
+
+def resolve_run_identity(ctx: Any) -> None:
+    """
+    Ensure the runtime context carries the standard run identity fields
+    (SGC_Rey_Run_ID_Standard), created once, before logging starts.
+
+    Sets three fields on ``ctx`` when absent and leaves existing values untouched so
+    the identity is stable for the whole execution:
+
+    - ``run_id``         : UUID string — the authoritative execution identity.
+    - ``run_timestamp``  : ``YYYYMMDD_HHMMSS`` — human-readable, filename-safe,
+      time-sortable; used for artifact filenames and operator display.
+    - ``run_started_at`` : ISO-8601 start time with timezone offset — the full
+      timestamp preserved separately from the filename-safe id.
+
+    The timestamp is taken from local system time made timezone-aware, so the offset
+    is recorded even when no runtime timezone is configured. Identity (``run_id``)
+    and display (``run_timestamp``) are intentionally separate.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context, mutated in place.
+
+    Returns
+    -------
+    None
+    """
+    if not getattr(ctx, "run_id", None):
+        ctx.run_id = str(uuid.uuid4())
+    if not getattr(ctx, "run_timestamp", None):
+        started = datetime.now().astimezone()
+        ctx.run_timestamp = started.strftime("%Y%m%d_%H%M%S")
+        ctx.run_started_at = started.isoformat()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -193,7 +230,12 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     console_handler.addFilter(_ProviderWarningFilter())
     root.addHandler(console_handler)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Establish the run identity before any handler so run_id exists before the
+    # first log record, and the log filename uses the stable run_timestamp
+    # (SGC_Rey_Run_ID_Standard). The run log is a run-created artifact and follows
+    # the same <name>.<run_timestamp>.<ext> convention as every other artifact.
+    resolve_run_identity(ctx)
+    timestamp = ctx.run_timestamp
     log_file  = None
 
     resolved_log: Path | None = None
@@ -208,9 +250,15 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
 
     if _log_bool(ctx, "jsonl_enabled", True):
         jsonl_path = _resolve_jsonl_path(ctx, operation, timestamp, resolved_log)
+        # Every run log record carries the run identity so records can be correlated
+        # to the run regardless of filename.
         jsonl_handler = JsonlHandler(
             jsonl_path = jsonl_path,
-            context    = {},
+            context    = {
+                "run_id":         ctx.run_id,
+                "run_timestamp":  ctx.run_timestamp,
+                "run_started_at": getattr(ctx, "run_started_at", ""),
+            },
             ctx        = ctx,
             ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
         )

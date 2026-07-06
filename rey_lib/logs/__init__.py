@@ -7,6 +7,7 @@ from rey_lib.logs.log_utils import (
     log_exit,
     log_file_metadata,
     read_jsonl_records,
+    resolve_run_identity,
     setup_logging,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "log_exit",
     "log_file_metadata",
     "read_jsonl_records",
+    "resolve_run_identity",
     "setup_logging",
 ]

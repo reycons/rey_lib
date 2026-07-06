@@ -40,16 +40,17 @@ ctx.control_available                       bool  (set False on failure)
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any, Optional
 
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
 from rey_lib.db.procedure_map import execute_mapped_routine, get_connection_config
+from rey_lib.logs import resolve_run_identity
 
 __all__ = [
     "ensure_run_id",
+    "ensure_run_timestamp",
     "get_provider",
     "start_batch",
     "end_batch",
@@ -79,9 +80,14 @@ _db = DBAdapter()
 
 def ensure_run_id(ctx: Any) -> str:
     """
-    Ensure ctx.run_id exists, generating a UUID v4 if absent.
+    Ensure ctx.run_id exists (UUID), generating the standard run identity if absent.
 
-    Must be called before any logging or control database interaction.
+    The run_id is the authoritative execution identity and is a UUID
+    (SGC_Rey_Run_ID_Standard). This delegates to the runner/logging layer's
+    resolve_run_identity, which also establishes ctx.run_timestamp and
+    ctx.run_started_at, so a single run identity is shared across logging and
+    control-database records. Must be called before any logging or control DB
+    interaction.
 
     Parameters
     ----------
@@ -93,12 +99,32 @@ def ensure_run_id(ctx: Any) -> str:
     str
         The run_id (existing or newly generated).
     """
-    run_id = getattr(ctx, "run_id", None)
-    if not run_id:
-        run_id = str(uuid.uuid4())
-        ctx.run_id = run_id
-        _logger.debug("control_utils: generated run_id %s", run_id)
-    return run_id
+    resolve_run_identity(ctx)
+    return ctx.run_id
+
+
+def ensure_run_timestamp(ctx: Any) -> str:
+    """
+    Ensure ctx.run_timestamp exists and return it (SGC_Rey_Run_ID_Standard).
+
+    The run_timestamp is the human-readable, filename-safe ``YYYYMMDD_HHMMSS`` used
+    for artifact filenames and operator display; it is separate from the UUID
+    run_id. Delegates to the runner/logging layer's resolve_run_identity so run_id,
+    run_timestamp, and run_started_at are established together and stay stable for
+    the execution.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+
+    Returns
+    -------
+    str
+        The run_timestamp (existing or newly generated).
+    """
+    resolve_run_identity(ctx)
+    return ctx.run_timestamp
 
 
 def get_provider(ctx: Any) -> Optional[str]:

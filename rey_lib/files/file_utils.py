@@ -57,6 +57,7 @@ __all__ = [
     "move_to_success",
     "pattern_to_glob",
     "converted_output_path",
+    "run_artifact_path",
     "get_reader",
     "write_file",
     "delete_file",
@@ -455,6 +456,54 @@ def converted_output_path(
     """
     filename = filename_pattern.format(**substitutions)
     return Path(base_dir) / filename
+
+
+def run_artifact_path(
+    base_dir: Path | str,
+    artifact_name: str,
+    run_timestamp: str,
+    extension: str,
+) -> Path:
+    """
+    Construct the path for a run-created artifact (SGC_Rey_Run_ID_Standard).
+
+    This is the single, centralized place run-artifact filenames are built. Every
+    run-created artifact embeds the run timestamp immediately before the extension,
+    following the universal pattern ``<artifact_name>.<run_timestamp>.<extension>``
+    (e.g. ``run_log.20260706_091845.jsonl``). The append-only run log is not an
+    exception to this rule.
+
+    Collision handling: a previous run is never silently overwritten. If a file with
+    the same run_timestamp already exists, a short filename-safe suffix is inserted
+    after the run_timestamp segment.
+
+    Parameters
+    ----------
+    base_dir : Path | str
+        Directory the artifact is written to (created by the caller).
+    artifact_name : str
+        Base artifact name, e.g. ``"run_log"`` or ``"rey_loader.run_log"``.
+    run_timestamp : str
+        Filename-safe run timestamp (``YYYYMMDD_HHMMSS``) from runtime context.
+    extension : str
+        File extension, with or without a leading dot (e.g. ``"jsonl"``, ``".md"``).
+
+    Returns
+    -------
+    Path
+        Absolute artifact path, with a short suffix appended to the run_timestamp
+        segment only when a same-timestamp file already exists.
+    """
+    directory = Path(base_dir)
+    ext = extension.lstrip(".")
+    candidate = directory / f"{artifact_name}.{run_timestamp}.{ext}"
+    if not candidate.exists():
+        return candidate.resolve()
+
+    # Collision: append a short, filename-safe suffix rather than overwrite.
+    suffix = uuid.uuid4().hex[:4]
+    collided = directory / f"{artifact_name}.{run_timestamp}_{suffix}.{ext}"
+    return collided.resolve()
 
 
 def get_reader(
