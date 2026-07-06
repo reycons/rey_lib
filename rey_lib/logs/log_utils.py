@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,9 @@ __all__ = [
     "log_enter",
     "log_exit",
     "format_jsonl_records",
+    "project_run_log",
     "read_jsonl_records",
+    "read_run_log_sections",
     "resolve_run_identity",
     "open_run_log",
     "log_run_record",
@@ -97,18 +100,40 @@ def resolve_run_identity(ctx: Any) -> None:
 # Record schema version stamped on every run-log record.
 _RUN_RECORD_SCHEMA_VERSION = 1
 
-# Execution records describe what happened while the run executed (the immutable
-# factual audit trail). Run-result records describe what is known/summarized about
-# the run (append-only accumulated knowledge). Both groups are reconstructed from
-# typed records in the same append-only file; the file is never rewritten.
+# The run log projects into three top-level groups
+# (SGC_Rey_Log_Writer_Run_View_Groups): execution (what happened), files (what files
+# were involved), and results (what is known after execution/review). File movement
+# (FILE_OPERATION) is execution history, not artifact inventory, so it stays in the
+# execution group. All groups are reconstructed from typed records in the same
+# append-only file; the file is never rewritten.
 EXECUTION_RECORD_TYPES = frozenset({
     "RUN_START", "STEP_START", "STEP_END", "INFO", "WARNING", "ERROR",
-    "ARTIFACT_REFERENCE", "RUN_COMPLETE",
+    "FILE_OPERATION", "RUN_COMPLETE",
 })
 RUN_RESULT_RECORD_TYPES = frozenset({
-    "RUN_SUMMARY", "EMAIL_SUMMARY", "ARTIFACT_MANIFEST",
+    "RUN_SUMMARY", "EMAIL_SUMMARY",
     "LLM_ANALYSIS_PACKAGE", "LLM_ANALYSIS_RESULT",
+    "MANUAL_REVIEW", "POST_MORTEM",
 })
+# Files-group record types and their subgroup. Only created/generated run-owned
+# files are artifacts; consumed inputs and run config/definition files are their
+# own subgroups.
+FILES_RECORD_SUBGROUP = {
+    "INPUT_FILE_REFERENCE": "input_files",
+    "CONFIG_FILE_REFERENCE": "config_files",
+    "CONFIG_FILE_MANIFEST": "config_files",
+    "ARTIFACT_REFERENCE": "artifacts",
+    "ARTIFACT_MANIFEST": "artifacts",
+}
+
+
+def _record_group(record_type: str) -> str:
+    """Map a record type to its top-level run-log group (execution/files/results)."""
+    if record_type in FILES_RECORD_SUBGROUP:
+        return "files"
+    if record_type in RUN_RESULT_RECORD_TYPES:
+        return "results"
+    return "execution"
 
 
 def open_run_log(ctx: Any) -> Path:
@@ -184,12 +209,15 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
         path = open_run_log(ctx)
         record: dict[str, Any] = {
             "record_type": record_type,
-            "record_group": "run_result" if record_type in RUN_RESULT_RECORD_TYPES else "execution",
+            "record_group": _record_group(record_type),
             "run_id": ctx.run_id,
             "run_timestamp": ctx.run_timestamp,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
         }
+        subgroup = FILES_RECORD_SUBGROUP.get(record_type)
+        if subgroup:
+            record["record_subgroup"] = subgroup
         app = (getattr(ctx, "owner_app_name", None) or getattr(ctx, "app_name", None)
                or getattr(ctx, "name", None))
         if app:
@@ -245,17 +273,79 @@ def log_run_summary(ctx: Any, summary: dict[str, Any]) -> None:
     log_run_record(ctx, "RUN_SUMMARY", summary=summary)
 
 
+def log_input_file_reference(ctx: Any, path: str, *, file_role: str = "",
+                             display_name: str = "", consumed_by_step: str = "",
+                             **fields: Any) -> None:
+    """Append an INPUT_FILE_REFERENCE record (files/input_files) for a consumed input.
+
+    Input files are files the run reads/consumes (source data, inbound files). They
+    are not artifacts unless the run also writes a new run-owned output copy.
+    """
+    log_run_record(
+        ctx, "INPUT_FILE_REFERENCE",
+        path=str(path), display_name=display_name or Path(str(path)).name,
+        file_role=file_role, source="runtime", consumed_by_step=consumed_by_step,
+        **fields,
+    )
+
+
+def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
+                              display_name: str = "", consumed_by_step: str = "",
+                              **fields: Any) -> None:
+    """Append a CONFIG_FILE_REFERENCE record (files/config_files) for a run config file.
+
+    Config files define or influence the run (workflow/pipeline/app YAML, contracts,
+    templates). They are recorded from resolved config/provenance so the console
+    reads them from the log rather than rescanning YAML or the filesystem.
+    """
+    log_run_record(
+        ctx, "CONFIG_FILE_REFERENCE",
+        path=str(path), display_name=display_name or Path(str(path)).name,
+        file_role=file_role, source="config_provenance",
+        consumed_by_step=consumed_by_step, **fields,
+    )
+
+
+def log_config_file_manifest(ctx: Any, files: list[dict[str, Any]]) -> None:
+    """Append the consolidated CONFIG_FILE_MANIFEST record (files/config_files)."""
+    log_run_record(ctx, "CONFIG_FILE_MANIFEST", files=files)
+
+
+def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
+                       target_path: str = "", status: str = "success",
+                       step_id: str = "", **fields: Any) -> None:
+    """Append a FILE_OPERATION execution record for a file movement/operation.
+
+    File movement (move/copy/rename/read/delete) is execution history, not artifact
+    inventory. These records carry enough detail (from/to/status) to support
+    rollback/recovery analysis derived from the append-only log rather than state
+    files.
+    """
+    log_run_record(
+        ctx, "FILE_OPERATION",
+        operation=operation, source_path=str(source_path),
+        target_path=str(target_path), status=status, step_id=step_id, **fields,
+    )
+
+
 def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
-                           event: str = "created", **fields: Any) -> None:
-    """Append an ARTIFACT_REFERENCE execution record for an artifact event."""
+                           event: str = "created", created_by_step: str = "",
+                           display_name: str = "", **fields: Any) -> None:
+    """Append an ARTIFACT_REFERENCE record (files/artifacts) for a created artifact.
+
+    Only created/generated/written/exported/reported files are artifacts. Moved,
+    copied, renamed, read, or deleted files are FILE_OPERATION execution records,
+    not artifacts.
+    """
     log_run_record(
         ctx, "ARTIFACT_REFERENCE",
-        artifact_path=str(path), role=role, event=event, **fields,
+        path=str(path), display_name=display_name or Path(str(path)).name,
+        artifact_role=role, event=event, created_by_step=created_by_step, **fields,
     )
 
 
 def log_artifact_manifest(ctx: Any, artifacts: list[dict[str, Any]]) -> None:
-    """Append the consolidated ARTIFACT_MANIFEST run-result record at completion."""
+    """Append the consolidated ARTIFACT_MANIFEST record (files/artifacts) at completion."""
     log_run_record(ctx, "ARTIFACT_MANIFEST", artifacts=artifacts)
 
 # ---------------------------------------------------------------------------
@@ -621,6 +711,332 @@ def read_jsonl_records(
         "rendered_text": format_jsonl_records(limited_records),
         **log_file_metadata(path),
     }
+
+
+_RUN_EXECUTION_TYPES = {
+    "RUN_START",
+    "STEP_START",
+    "STEP_END",
+    "INFO",
+    "WARNING",
+    "ERROR",
+    "RUN_COMPLETE",
+}
+_RUN_RESULT_TYPES = {
+    "RUN_SUMMARY",
+    "EMAIL_SUMMARY",
+    "LLM_ANALYSIS_PACKAGE",
+    "LLM_ANALYSIS_RESULT",
+}
+_ARTIFACT_CREATE_EVENTS = {
+    "created",
+    "generated",
+    "written",
+    "exported",
+    "reported",
+}
+_ARTIFACT_IGNORE_EVENTS = {
+    "moved",
+    "copied",
+    "renamed",
+    "read",
+    "touched",
+    "deleted",
+}
+
+
+def read_run_log_sections(path: Path | str) -> dict[str, Any]:
+    """Read an append-only run log and return section projections.
+
+    The returned payload contains metadata and structured record projections only.
+    File content preview belongs to file utilities, not log utilities.
+    """
+    log_path = Path(path).expanduser().resolve()
+    records: list[dict[str, Any]] = []
+    parse_errors: list[str] = []
+
+    try:
+        content = log_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {
+            "path": str(log_path),
+            "exists": log_path.exists(),
+            "records": [],
+            "sections": _empty_run_sections(),
+            "parse_errors": [str(exc)],
+            **log_file_metadata(log_path),
+        }
+
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            parse_errors.append(f"line {line_number}: {exc}")
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+
+    return {
+        "path": str(log_path),
+        "exists": True,
+        "records": records,
+        "sections": _run_log_sections(records),
+        "parse_errors": parse_errors,
+        **log_file_metadata(log_path),
+    }
+
+
+def project_run_log(path: Path | str) -> dict[str, Any]:
+    """Return a run-centered tree projection from one append-only run log."""
+    sections_payload = read_run_log_sections(path)
+    records = sections_payload["records"]
+    sections = sections_payload["sections"]
+    run = _run_log_identity(Path(sections_payload["path"]), records, sections)
+    return {
+        "run": run,
+        "log": {
+            "path": sections_payload["path"],
+            "name": Path(sections_payload["path"]).name,
+            "exists": sections_payload["exists"],
+            "authoritative": sections_payload["authoritative"],
+        },
+        "sections": sections,
+        "tree": _run_log_tree(run, sections),
+        "parse_errors": sections_payload["parse_errors"],
+    }
+
+
+def _empty_run_sections() -> dict[str, Any]:
+    """Return the empty three-group projection (SGC_Rey_Log_Writer_Run_View_Groups)."""
+    return {
+        "execution": {"records": [], "count": 0},
+        "files": {
+            "input_files": {"records": [], "files": [], "count": 0},
+            "config_files": {"records": [], "files": [], "count": 0},
+            "file_operations": {"records": [], "files": [], "count": 0},
+            "artifacts": {"records": [], "files": [], "count": 0},
+            "count": 0,
+        },
+        "results": {"records": [], "count": 0},
+    }
+
+
+def _run_log_sections(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Project typed run-log records into execution/files/results groups.
+
+    File movement (FILE_OPERATION) stays in execution and is additionally surfaced
+    as a file-centric ``files.file_operations`` view. Only created/generated files
+    become artifacts; moved/copied/read files never do.
+    """
+    sections = _empty_run_sections()
+    files = sections["files"]
+    for record in records:
+        record_type = str(record.get("record_type") or record.get("event_type") or "").upper()
+        record_group = str(record.get("record_group") or "").lower()
+
+        if record_type in _RUN_EXECUTION_TYPES or record_group == "execution":
+            sections["execution"]["records"].append(record)
+
+        if record_type in _RUN_RESULT_TYPES or record_group in ("results", "run_result"):
+            sections["results"]["records"].append(record)
+
+        if record_type == "INPUT_FILE_REFERENCE":
+            files["input_files"]["records"].append(record)
+            entry = _file_entry_from_record(record, "input")
+            if entry:
+                files["input_files"]["files"].append(entry)
+        elif record_type in ("CONFIG_FILE_MANIFEST", "RELEVANT_FILE_MANIFEST"):
+            files["config_files"]["records"].append(record)
+            files["config_files"]["files"].extend(_manifest_files(record))
+        elif record_type in ("CONFIG_FILE_REFERENCE", "RELEVANT_FILE"):
+            files["config_files"]["records"].append(record)
+            entry = _file_entry_from_record(record, "config")
+            if entry:
+                files["config_files"]["files"].append(entry)
+        elif record_type == "FILE_OPERATION":
+            files["file_operations"]["records"].append(record)
+            files["file_operations"]["files"].append(_file_operation_entry(record))
+        elif record_type == "ARTIFACT_MANIFEST":
+            files["artifacts"]["records"].append(record)
+            files["artifacts"]["files"].extend(_manifest_files(record))
+        elif record_type == "ARTIFACT_REFERENCE":
+            event = str(record.get("event") or "").lower()
+            if event in _ARTIFACT_IGNORE_EVENTS:
+                continue
+            if event and event not in _ARTIFACT_CREATE_EVENTS:
+                continue
+            files["artifacts"]["records"].append(record)
+            entry = _file_entry_from_record(record, "artifact")
+            if entry:
+                files["artifacts"]["files"].append(entry)
+
+    sections["execution"]["count"] = len(sections["execution"]["records"])
+    sections["results"]["count"] = len(sections["results"]["records"])
+    total_files = 0
+    for key in ("input_files", "config_files", "artifacts"):
+        subgroup = files[key]
+        subgroup["files"] = _dedupe_file_entries(subgroup["files"])
+        subgroup["count"] = len(subgroup["files"])
+        total_files += subgroup["count"]
+    # File operations are event-centric (one file may move several times), so they
+    # are counted per operation rather than deduped by path.
+    files["file_operations"]["count"] = len(files["file_operations"]["records"])
+    total_files += len(files["file_operations"]["files"])
+    files["count"] = total_files
+    return sections
+
+
+def _file_operation_entry(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a file-centric row for a FILE_OPERATION execution record."""
+    path = str(record.get("target_path") or record.get("source_path")
+               or record.get("path") or "")
+    return {
+        "path": path,
+        "display_name": Path(path).name if path else "",
+        "operation": str(record.get("operation") or ""),
+        "source_path": str(record.get("source_path") or ""),
+        "target_path": str(record.get("target_path") or ""),
+        "status": str(record.get("status") or ""),
+        "step_id": str(record.get("step_id") or ""),
+        "actions": ["view", "copy_path", "open_external"],
+    }
+
+
+def _manifest_files(record: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = record.get("files") or record.get("artifacts") or []
+    files = raw.values() if isinstance(raw, dict) else raw
+    result: list[dict[str, Any]] = []
+    for item in files:
+        if isinstance(item, str):
+            result.append({"path": item, "display_name": Path(item).name})
+        elif isinstance(item, dict):
+            path = str(item.get("path") or item.get("artifact_path") or "")
+            if not path:
+                continue
+            result.append({
+                "path": path,
+                "display_name": str(item.get("display_name") or item.get("name") or Path(path).name),
+                "file_role": str(item.get("file_role") or item.get("role") or ""),
+                "status": str(item.get("status") or ""),
+                "actions": item.get("actions") or ["view", "copy_path", "open_external"],
+            })
+    return result
+
+
+def _file_entry_from_record(record: dict[str, Any], default_role: str) -> dict[str, Any] | None:
+    path = str(record.get("path") or record.get("file_path") or record.get("artifact_path") or "")
+    if not path:
+        return None
+    return {
+        "path": path,
+        "display_name": str(record.get("display_name") or record.get("name") or Path(path).name),
+        "file_role": str(record.get("file_role") or record.get("role") or default_role),
+        "step_name": str(record.get("step_name") or ""),
+        "status": str(record.get("status") or ""),
+        "actions": ["view", "copy_path", "open_external"],
+    }
+
+
+def _dedupe_file_entries(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for file in files:
+        path = str(file.get("path") or "")
+        if path:
+            rows[path] = file
+    return sorted(rows.values(), key=lambda row: str(row.get("display_name") or row.get("path") or "").lower())
+
+
+def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[str, Any]) -> dict[str, Any]:
+    first = records[0] if records else {}
+    complete = next(
+        (
+            record for record in reversed(records)
+            if str(record.get("record_type") or "").upper() == "RUN_COMPLETE"
+        ),
+        {},
+    )
+    return {
+        "run_id": str(first.get("run_id") or ""),
+        "run_timestamp": str(first.get("run_timestamp") or _timestamp_from_run_log_name(path)),
+        "run_started_at": str(first.get("run_started_at") or first.get("timestamp") or ""),
+        "run_completed_at": str(complete.get("timestamp") or ""),
+        "status": str(complete.get("status") or ""),
+        "app": str(first.get("app") or ""),
+        "workflow": str(first.get("workflow") or first.get("workflow_name") or ""),
+        "pipeline": str(first.get("pipeline") or first.get("pipeline_name") or ""),
+        "log_path": str(path),
+        "log_display_name": path.name,
+        "execution_count": sections["execution"]["count"],
+        "input_file_count": sections["files"]["input_files"]["count"],
+        "config_file_count": sections["files"]["config_files"]["count"],
+        "file_operation_count": sections["files"]["file_operations"]["count"],
+        "artifact_count": sections["files"]["artifacts"]["count"],
+        "file_count": sections["files"]["count"],
+        "result_count": sections["results"]["count"],
+    }
+
+
+def _run_log_tree(run: dict[str, Any], sections: dict[str, Any]) -> dict[str, Any]:
+    run_key = run.get("run_id") or run.get("run_timestamp") or run.get("log_display_name")
+    files = sections["files"]
+    return {
+        "id": f"run:{run_key}",
+        "label": str(run.get("run_timestamp") or run.get("log_display_name") or "Run"),
+        "kind": "run",
+        "status": str(run.get("status") or ""),
+        "children": [
+            {"id": f"run:{run_key}:execution", "label": "Execution", "kind": "execution", "count": sections["execution"]["count"], "children": []},
+            {
+                "id": f"run:{run_key}:files",
+                "label": "Files",
+                "kind": "files",
+                "count": files["count"],
+                "children": [
+                    {
+                        "id": f"run:{run_key}:input-files",
+                        "label": "Input Files",
+                        "kind": "input_files",
+                        "count": files["input_files"]["count"],
+                        "children": [_file_tree_node(file, "input_file") for file in files["input_files"]["files"]],
+                    },
+                    {
+                        "id": f"run:{run_key}:config-files",
+                        "label": "Config Files",
+                        "kind": "config_files",
+                        "count": files["config_files"]["count"],
+                        "children": [_file_tree_node(file, "config_file") for file in files["config_files"]["files"]],
+                    },
+                    {
+                        "id": f"run:{run_key}:artifacts",
+                        "label": "Artifacts",
+                        "kind": "artifacts",
+                        "count": files["artifacts"]["count"],
+                        "children": [_file_tree_node(file, "artifact") for file in files["artifacts"]["files"]],
+                    },
+                ],
+            },
+            {"id": f"run:{run_key}:results", "label": "Results", "kind": "results", "count": sections["results"]["count"], "children": []},
+        ],
+    }
+
+
+def _file_tree_node(file: dict[str, Any], kind: str) -> dict[str, Any]:
+    path = str(file.get("path") or "")
+    return {
+        "id": f"{kind}:{path}",
+        "label": str(file.get("display_name") or Path(path).name),
+        "kind": kind,
+        "path": path,
+        "status": str(file.get("status") or ""),
+        "children": [],
+    }
+
+
+def _timestamp_from_run_log_name(path: Path) -> str:
+    match = re.search(r"run_log\.(\d{8}_\d{6})", path.name)
+    return match.group(1) if match else ""
 
 
 def format_jsonl_records(records: list[dict[str, Any]]) -> str:
