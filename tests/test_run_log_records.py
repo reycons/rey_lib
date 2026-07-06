@@ -88,3 +88,37 @@ def test_record_append_is_fail_safe(tmp_path: Path) -> None:
     log_run_start(ctx, weird=object())
     records = _read(Path(ctx.run_log_path))
     assert records[0]["record_type"] == "RUN_START"
+
+
+def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
+    """run_workflow emits RUN_START, per-step STEP_START/STEP_END, RUN_COMPLETE, RUN_SUMMARY."""
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    workflow = {
+        "name": "wf",
+        "processes": {"p1": {}, "p2": {}},
+        "steps": [
+            {"id": "s1", "label": "One", "process": "p1"},
+            {"id": "s2", "label": "Two", "process": "p2"},
+        ],
+    }
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
+        return None
+
+    result = run_workflow(ctx, workflow, {"p1": handler, "p2": handler})
+    assert result.status == "success"
+
+    records = _read(Path(ctx.run_log_path))
+    types = [r["record_type"] for r in records]
+    assert types[0] == "RUN_START"
+    assert types.count("STEP_START") == 2
+    assert types.count("STEP_END") == 2
+    assert types[-2] == "RUN_COMPLETE"
+    assert types[-1] == "RUN_SUMMARY"
+    assert all(r["run_id"] == ctx.run_id for r in records)
+    summary = [r for r in records if r["record_type"] == "RUN_SUMMARY"][0]["summary"]
+    assert summary["steps_total"] == 2
+    assert summary["steps_ok"] == 2
+    assert summary["status"] == "success"

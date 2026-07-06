@@ -25,7 +25,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import (
+    get_logger,
+    log_run_complete,
+    log_run_start,
+    log_run_summary,
+    log_step_end,
+    log_step_start,
+)
 from rey_lib.workflow.engine import RunContext, WorkflowError
 
 __all__ = ["StepOutcome", "WorkflowRun", "run_workflow", "ProcessHandler"]
@@ -155,6 +162,14 @@ def run_workflow(
     run_ctx = RunContext(apply=apply, metadata=dict(metadata or {}), data={"ctx": ctx})
     run = WorkflowRun(name=name, status="success", context=run_ctx)
 
+    # Append-only run logging (SGC_Rey_Workflow_Pipeline_Automatic_Control_Batch_Logging):
+    # emit a RUN_START, per-step STEP_START/STEP_END, and a RUN_COMPLETE + deterministic
+    # RUN_SUMMARY through the log_utils authority. Record emission is fail-safe and
+    # never alters workflow behavior. run_id is established by the logging layer; all
+    # records share it and RUN_START carries the workflow name.
+    log_run_start(ctx, workflow=name, apply=apply)
+
+    sequence = 0
     for index, step_def in enumerate(steps):
         if index not in selected:
             continue
@@ -177,7 +192,12 @@ def run_workflow(
             tokens,
         )
 
+        sequence += 1
+        step_name = label or step_id
+        log_step_start(ctx, step_name, sequence, step_type=process)
+
         if not apply and bool(effective.get("apply_only")):
+            log_step_end(ctx, step_name, "skipped", message="dry-run")
             run.outcomes.append(
                 StepOutcome(step_id, label, process, "skipped", "dry-run")
             )
@@ -187,22 +207,43 @@ def run_workflow(
         try:
             result = handler(ctx, effective, run_ctx)
         except Exception as exc:  # noqa: BLE001 — fail closed: record and stop
+            log_step_end(ctx, step_name, "failed", message=str(exc))
             run.outcomes.append(
                 StepOutcome(step_id, label, process, "failed", error=str(exc))
             )
             run.status = "failed"
             _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
+            log_run_complete(ctx, "failed", message=str(exc))
+            log_run_summary(ctx, _deterministic_summary(name, run))
             return run
 
         status = str(getattr(result, "status", "ok")) if result is not None else "ok"
         detail = str(getattr(result, "detail", "")) if result is not None else ""
         artifacts = list(getattr(result, "artifacts", []) or []) if result is not None else []
+        log_step_end(ctx, step_name, status, message=detail)
         run.outcomes.append(StepOutcome(step_id, label, process, status, detail, artifacts))
         if status == "failed":
             run.status = "failed"
+            log_run_complete(ctx, "failed")
+            log_run_summary(ctx, _deterministic_summary(name, run))
             return run
 
+    log_run_complete(ctx, "success")
+    log_run_summary(ctx, _deterministic_summary(name, run))
     return run
+
+
+def _deterministic_summary(name: str, run: "WorkflowRun") -> dict[str, Any]:
+    """Build a deterministic run summary from the recorded step outcomes (no LLM)."""
+    outcomes = run.outcomes
+    return {
+        "workflow": name,
+        "status": run.status,
+        "steps_total": len(outcomes),
+        "steps_ok": sum(1 for outcome in outcomes if outcome.status == "ok"),
+        "steps_skipped": sum(1 for outcome in outcomes if outcome.status == "skipped"),
+        "steps_failed": sum(1 for outcome in outcomes if outcome.status == "failed"),
+    }
 
 
 def _select_steps(
