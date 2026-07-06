@@ -49,6 +49,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from rey_lib.files.file_utils import append_jsonl
+
 __all__ = [
     # Status constants
     "STATUS_PENDING",
@@ -490,11 +492,8 @@ def load_latest_record(
 # ---------------------------------------------------------------------------
 
 def _append_jsonl(data: dict[str, Any], path: Path) -> None:
-    """Append one JSON object as a line to a JSONL file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(data, default=str) + "\n")
+    """Append one JSON object as a line to a JSONL file via the central file authority."""
+    append_jsonl(path, data)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.errors.error_utils import StateError
+from rey_lib.files.file_utils import write_file
 from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
 
 __all__ = [
@@ -155,10 +156,8 @@ def save_state(ctx: Any, conn: Any, state: dict[str, str]) -> None:
     """
     log_enter(ctx, "save_state", log)
     state_file: Path = get_state_file_path(ctx, conn)
-    state_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with state_file.open("w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
+        write_file(state_file, state, "JSON", sort_keys=True)
         log.info("Saved state: %d entry/entries to '%s'", len(state), state_file)
     except OSError as exc:
         raise StateError(f"Cannot write state file '{state_file}'.") from exc
@@ -465,12 +464,10 @@ def abandon_to_failed_file(
     }
 
     # Append to the persistent failed file.
-    failed_file.parent.mkdir(parents=True, exist_ok=True)
     existing = load_failed_files(failed_file)
     existing.append(entry)
     try:
-        with failed_file.open("w", encoding="utf-8") as f:
-            json.dump(existing, f, indent=2, sort_keys=True)
+        write_file(failed_file, existing, "JSON", sort_keys=True)
     except OSError as exc:
         raise StateError(f"Cannot write failed file '{failed_file}'.") from exc
 

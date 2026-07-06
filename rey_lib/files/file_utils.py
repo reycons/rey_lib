@@ -60,6 +60,7 @@ __all__ = [
     "run_artifact_path",
     "get_reader",
     "write_file",
+    "append_jsonl",
     "delete_file",
     "export_db_root",
     "export_object_file_path",
@@ -570,6 +571,7 @@ def write_file(
     content: Any,
     file_type: str = "CSV",
     *,
+    sort_keys: bool = False,
     state_ctx: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
@@ -587,6 +589,9 @@ def write_file(
         any JSON-serialisable value for JSON.
     file_type : str
         Output format — 'CSV', 'XLSX', 'TEXT', or 'JSON'. Case-insensitive.
+    sort_keys : bool
+        For JSON output, sort object keys for deterministic files (e.g. state
+        files). Ignored for other formats.
     state_ctx : Any
         Optional context with ``config_root``. When provided, a creation
         record is appended to the file-operation state log after the file is written.
@@ -622,7 +627,10 @@ def write_file(
         outfile.write_text(str(content), encoding="utf-8")
     elif fmt == "JSON":
         outfile.parent.mkdir(parents=True, exist_ok=True)
-        outfile.write_text(json.dumps(content, default=str, indent=2), encoding="utf-8")
+        outfile.write_text(
+            json.dumps(content, default=str, indent=2, sort_keys=sort_keys),
+            encoding="utf-8",
+        )
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
 
@@ -642,6 +650,33 @@ def write_file(
             _logger.warning("Could not write file creation state for '%s': %s", outfile.name, exc)
 
     return outfile.resolve()
+
+
+def append_jsonl(path: Path | str, record: dict[str, Any]) -> Path:
+    """
+    Append one record as a JSON line to a JSONL file.
+
+    The single, centralized place JSONL/run-log records are appended
+    (SGC_Rey_System_File_Creation_Standard), so no subsystem opens JSONL files
+    directly. Parent directories are created as needed.
+
+    Parameters
+    ----------
+    path : Path | str
+        Destination JSONL file.
+    record : dict[str, Any]
+        One record, serialised as a single JSON line.
+
+    Returns
+    -------
+    Path
+        The JSONL file path.
+    """
+    outfile = Path(path)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    with outfile.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, default=str) + "\n")
+    return outfile
 
 
 def delete_file(path: Path | str) -> bool:
