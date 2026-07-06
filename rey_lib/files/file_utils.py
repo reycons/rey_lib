@@ -572,6 +572,7 @@ def write_file(
     file_type: str = "CSV",
     *,
     sort_keys: bool = False,
+    csv_minimal_quoting: bool = False,
     state_ctx: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
@@ -592,6 +593,10 @@ def write_file(
     sort_keys : bool
         For JSON output, sort object keys for deterministic files (e.g. state
         files). Ignored for other formats.
+    csv_minimal_quoting : bool
+        For CSV output, use standard QUOTE_MINIMAL quoting (safely quotes fields
+        that contain the delimiter or quotes) instead of the default verbatim
+        QUOTE_NONE. Ignored for other formats.
     state_ctx : Any
         Optional context with ``config_root``. When provided, a creation
         record is appended to the file-operation state log after the file is written.
@@ -619,7 +624,7 @@ def write_file(
         if not content:
             raise ValueError("write_file called with empty rows list.")
         if fmt == "CSV":
-            _csv_writer(outfile, content)
+            _csv_writer(outfile, content, minimal_quoting=csv_minimal_quoting)
         else:
             _xlsx_writer(outfile, content)
     elif fmt == "TEXT":
@@ -1302,25 +1307,28 @@ def _display_path(path: Path, environment_root: Path | None) -> str:
     return str(resolved)
 
 
-def _csv_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
+def _csv_writer(
+    outfile: Path,
+    rows: list[dict[str, Any]],
+    minimal_quoting: bool = False,
+) -> None:
     """Write rows to a CSV file using the key order of the first row.
 
-    Uses QUOTE_NONE so values are written exactly as-is — no extra quoting
-    or escaping is applied by the CSV writer. Values that already contain
-    quote characters (e.g. constants configured with quote: '"') are written
-    verbatim.
+    By default uses QUOTE_NONE so values are written exactly as-is — no extra
+    quoting or escaping is applied (values that already contain quote characters,
+    e.g. constants configured with quote: '"', are written verbatim). When
+    ``minimal_quoting`` is True, standard QUOTE_MINIMAL is used instead, so
+    free-text fields containing the delimiter or quotes are safely quoted.
     """
     outfile = Path(outfile)
     outfile.parent.mkdir(parents=True, exist_ok=True)
 
+    writer_kwargs: dict[str, Any] = {"fieldnames": list(rows[0].keys())}
+    if not minimal_quoting:
+        writer_kwargs.update(quoting=csv.QUOTE_NONE, quotechar="\x00", escapechar="\\")
+
     with outfile.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(
-            fh,
-            fieldnames=list(rows[0].keys()),
-            quoting=csv.QUOTE_NONE,
-            quotechar="\x00",
-            escapechar="\\",
-        )
+        writer = csv.DictWriter(fh, **writer_kwargs)
         writer.writeheader()
         writer.writerows(rows)
 
