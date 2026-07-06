@@ -679,6 +679,55 @@ def append_jsonl(path: Path | str, record: dict[str, Any]) -> Path:
     return primitive_file_io.append_jsonl(path, record)
 
 
+def _path_within(path: Path, root: Path) -> bool:
+    """Return whether ``path`` is ``root`` or lives beneath it."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def file_reference_metadata(
+    raw_path: Path | str,
+    *,
+    approved_roots: Iterable[Path | str],
+) -> dict[str, Any]:
+    """Return safe on-disk metadata for one referenced file, without reading content.
+
+    Validates the path under approved Rey roots and returns name/path/exists/size/
+    modified/actions — the file-side metadata for a run-log file reference
+    (SGC_Rey_Run_Backend_Helper_API). Unlike ``preview_file_for_display``, a
+    still-approved path that no longer exists is reported as ``exists=False`` rather
+    than raising. Content preview belongs to that helper; run-log interpretation
+    belongs to log_utils.
+    """
+    path = Path(raw_path).expanduser().resolve()
+    roots = [Path(root).expanduser().resolve() for root in approved_roots if root]
+    if not roots:
+        raise ValueError("No approved roots configured for file metadata.")
+    if not any(_path_within(path, root) for root in roots):
+        raise ValueError(f"Path is outside approved roots: {path}")
+    if not path.exists():
+        return {
+            "name": path.name,
+            "path": str(path),
+            "exists": False,
+            "size_bytes": 0,
+            "modified_at": "",
+            "actions": ["copy_path"],
+        }
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "path": str(path),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "actions": ["view", "copy_path", "open_external", "download"],
+    }
+
+
 def delete_file(path: Path | str) -> bool:
     """Delete one file if it exists and return whether anything was removed."""
     file_path = Path(path).expanduser()

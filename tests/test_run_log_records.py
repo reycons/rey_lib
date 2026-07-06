@@ -129,6 +129,76 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert summary["status"] == "success"
 
 
+def test_discover_runs_lists_newest_first_without_raw_data(tmp_path: Path) -> None:
+    """discover_runs returns per-run summaries, newest first, with no raw records."""
+    from rey_lib.logs import discover_runs
+
+    for ts, status in [("20260706_090000", "success"), ("20260706_100000", "failed")]:
+        (tmp_path / f"run_log.{ts}.jsonl").write_text(
+            "\n".join(json.dumps(record) for record in [
+                {"record_type": "RUN_START", "run_id": f"r-{ts}", "run_timestamp": ts,
+                 "timestamp": "2026-07-06T00:00:00+00:00", "app": "rey_loader"},
+                {"record_type": "WARNING", "run_id": f"r-{ts}", "run_timestamp": ts},
+                {"record_type": "RUN_COMPLETE", "run_id": f"r-{ts}", "run_timestamp": ts,
+                 "timestamp": "2026-07-06T00:05:00+00:00", "status": status},
+            ]),
+            encoding="utf-8",
+        )
+
+    runs = discover_runs(tmp_path)
+
+    assert [r["run_timestamp"] for r in runs] == ["20260706_100000", "20260706_090000"]
+    newest = runs[0]
+    assert newest["status"] == "failed"
+    assert newest["warning_count"] == 1
+    assert newest["error_count"] == 0
+    assert newest["run_log_path"].endswith("run_log.20260706_100000.jsonl")
+    # A discovery summary carries no raw log data.
+    assert "records" not in newest
+    assert "sections" not in newest
+
+
+def test_discover_runs_missing_or_empty_dir_yields_nothing(tmp_path: Path) -> None:
+    """Missing or empty directories yield no runs rather than raising."""
+    from rey_lib.logs import discover_runs
+
+    assert discover_runs(tmp_path / "missing") == []
+    assert discover_runs(tmp_path) == []
+
+
+def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
+    """get_run_section returns one section; get_run_file_reference resolves a run file."""
+    from rey_lib.logs import get_run_file_reference, get_run_section
+
+    ctx = _ctx(tmp_path)
+    report = tmp_path / "report.json"
+    log_run_start(ctx)
+    log_config_file_reference(ctx, str(tmp_path / "workflow.yaml"),
+                              file_role="workflow_definition")
+    log_artifact_reference(ctx, str(report), role="report", event="written")
+    log_file_operation(ctx, "move", source_path=str(tmp_path / "a.csv"),
+                       target_path=str(tmp_path / "b.csv"))
+    log_run_complete(ctx, "success")
+    path = ctx.run_log_path
+
+    artifacts = get_run_section(path, "artifacts")
+    assert artifacts["section"] == "artifacts"
+    assert [Path(f["path"]).name for f in artifacts["files"]] == ["report.json"]
+
+    config = get_run_section(path, "config_files")
+    assert [Path(f["path"]).name for f in config["files"]] == ["workflow.yaml"]
+
+    # A referenced artifact resolves to its log entry; an unknown path does not.
+    ref = get_run_file_reference(path, str(report))
+    assert ref is not None
+    assert ref["section"] == "artifacts"
+    assert ref["file_role"] == "report"
+    assert get_run_file_reference(path, str(tmp_path / "nope.txt")) is None
+
+    with pytest.raises(ValueError):
+        get_run_section(path, "bogus")
+
+
 def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     """At completion the coordinator appends an ARTIFACT_MANIFEST of created artifacts only."""
     from rey_lib.logs import log_file_operation

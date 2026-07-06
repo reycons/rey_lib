@@ -3,6 +3,9 @@ from rey_lib.logs.log_utils import (
     add_jsonl_handler,
     format_jsonl_records,
     get_logger,
+    discover_runs,
+    get_run_file_reference,
+    get_run_section,
     log_enter,
     log_exit,
     log_file_metadata,
@@ -10,6 +13,7 @@ from rey_lib.logs.log_utils import (
     read_jsonl_records,
     read_run_log_sections,
     resolve_run_identity,
+    run_summary,
     setup_logging,
 )
 from rey_lib.logs.log_utils import (
@@ -41,6 +45,10 @@ __all__ = [
     "log_exit",
     "log_file_metadata",
     "project_run_log",
+    "discover_runs",
+    "run_summary",
+    "get_run_section",
+    "get_run_file_reference",
     "read_jsonl_records",
     "read_run_log_sections",
     "resolve_run_identity",

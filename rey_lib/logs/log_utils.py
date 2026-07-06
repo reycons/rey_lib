@@ -837,6 +837,109 @@ def project_run_log(path: Path | str) -> dict[str, Any]:
     }
 
 
+# Run sections addressable through the backend run API. The four files subgroups
+# live under the "files" group; execution and results are top-level groups.
+_RUN_SECTION_NAMES = (
+    "execution",
+    "input_files",
+    "config_files",
+    "file_operations",
+    "artifacts",
+    "results",
+)
+_RUN_FILE_SUBGROUPS = ("input_files", "config_files", "file_operations", "artifacts")
+
+
+def run_summary(path: Path | str) -> dict[str, Any]:
+    """Return one run's discovery summary — identity and counts, no raw records.
+
+    This is the per-run row for run discovery (SGC_Rey_Run_Backend_Helper_API): the
+    run identity, started/completed timestamps, status, warning/error counts, and
+    the run-log path. It never returns raw log data.
+    """
+    payload = read_run_log_sections(path)
+    identity = _run_log_identity(Path(payload["path"]), payload["records"], payload["sections"])
+    return {
+        "run_id": identity["run_id"],
+        "run_timestamp": identity["run_timestamp"],
+        "started_at": identity["run_started_at"],
+        "completed_at": identity["run_completed_at"],
+        "status": identity["status"],
+        "warning_count": identity["warning_count"],
+        "error_count": identity["error_count"],
+        "app": identity["app"],
+        "workflow": identity["workflow"],
+        "pipeline": identity["pipeline"],
+        "run_log_path": identity["log_path"],
+    }
+
+
+def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Discover recent runs under a log directory, newest first.
+
+    Scans ``run_log.<run_timestamp>.jsonl`` files in *log_dir* and returns one
+    lightweight summary per run (see :func:`run_summary`) — never raw log records.
+    This is the run-discovery authority for the console backend
+    (SGC_Rey_Run_Backend_Helper_API); the console must not scan directories itself.
+
+    Parameters
+    ----------
+    log_dir : Path | str
+        Directory holding a workflow/pipeline's run logs.
+    limit : int
+        Maximum number of runs to return (most recent first). 0 means no limit.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Run summaries sorted by run_timestamp descending.
+    """
+    directory = Path(log_dir).expanduser()
+    if not directory.is_dir():
+        return []
+    summaries = [run_summary(path) for path in directory.glob("run_log.*.jsonl")]
+    summaries.sort(key=lambda run: str(run.get("run_timestamp") or ""), reverse=True)
+    return summaries[:limit] if limit else summaries
+
+
+def get_run_section(path: Path | str, section: str) -> dict[str, Any]:
+    """Return the records/files for one projected run section.
+
+    ``section`` is one of execution, input_files, config_files, file_operations,
+    artifacts, or results (SGC_Rey_Run_Backend_Helper_API). The projection comes
+    from the append-only run log; no directory scan or filename inference occurs.
+
+    Raises
+    ------
+    ValueError
+        If ``section`` is not a known run section.
+    """
+    key = str(section or "").strip().lower()
+    if key not in _RUN_SECTION_NAMES:
+        raise ValueError(f"Unknown run section: {section!r}")
+    sections = read_run_log_sections(path)["sections"]
+    payload = sections["files"][key] if key in _RUN_FILE_SUBGROUPS else sections[key]
+    return {"section": key, **payload}
+
+
+def get_run_file_reference(path: Path | str, file_path: Path | str) -> dict[str, Any] | None:
+    """Return the run-log reference entry for one file, or None if the run never used it.
+
+    Looks the file up among the run's projected input/config/artifact/file-operation
+    entries — the run log is the source of truth for which files belong to a run
+    (SGC_Rey_Run_Backend_Helper_API). This returns the log-derived reference metadata
+    (role, display name, owning section, actions); reading/previewing the file's
+    contents is file_utils' responsibility, not this layer's.
+    """
+    targets = {str(file_path), str(Path(file_path).expanduser())}
+    files = read_run_log_sections(path)["sections"]["files"]
+    for key in _RUN_FILE_SUBGROUPS:
+        for entry in files[key]["files"]:
+            if str(entry.get("path")) in targets:
+                return {"section": key, **entry}
+    return None
+
+
 def _empty_run_sections() -> dict[str, Any]:
     """Return the empty three-group projection (SGC_Rey_Log_Writer_Run_View_Groups)."""
     return {
@@ -987,12 +1090,22 @@ def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[
         ),
         {},
     )
+    warning_count = sum(
+        1 for record in records
+        if str(record.get("record_type") or "").upper() == "WARNING"
+    )
+    error_count = sum(
+        1 for record in records
+        if str(record.get("record_type") or "").upper() == "ERROR"
+    )
     return {
         "run_id": str(first.get("run_id") or ""),
         "run_timestamp": str(first.get("run_timestamp") or _timestamp_from_run_log_name(path)),
         "run_started_at": str(first.get("run_started_at") or first.get("timestamp") or ""),
         "run_completed_at": str(complete.get("timestamp") or ""),
         "status": str(complete.get("status") or ""),
+        "warning_count": warning_count,
+        "error_count": error_count,
         "app": str(first.get("app") or ""),
         "workflow": str(first.get("workflow") or first.get("workflow_name") or ""),
         "pipeline": str(first.get("pipeline") or first.get("pipeline_name") or ""),
