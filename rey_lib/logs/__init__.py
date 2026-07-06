@@ -10,6 +10,19 @@ from rey_lib.logs.log_utils import (
     resolve_run_identity,
     setup_logging,
 )
+from rey_lib.logs.log_utils import (
+    EXECUTION_RECORD_TYPES,
+    RUN_RESULT_RECORD_TYPES,
+    log_artifact_manifest,
+    log_artifact_reference,
+    log_run_complete,
+    log_run_record,
+    log_run_start,
+    log_run_summary,
+    log_step_end,
+    log_step_start,
+    open_run_log,
+)
 
 __all__ = [
     "JsonlHandler",
@@ -22,4 +35,15 @@ __all__ = [
     "read_jsonl_records",
     "resolve_run_identity",
     "setup_logging",
+    "open_run_log",
+    "log_run_record",
+    "log_run_start",
+    "log_step_start",
+    "log_step_end",
+    "log_run_complete",
+    "log_run_summary",
+    "log_artifact_reference",
+    "log_artifact_manifest",
+    "EXECUTION_RECORD_TYPES",
+    "RUN_RESULT_RECORD_TYPES",
 ]

@@ -41,6 +41,17 @@ __all__ = [
     "format_jsonl_records",
     "read_jsonl_records",
     "resolve_run_identity",
+    "open_run_log",
+    "log_run_record",
+    "log_run_start",
+    "log_step_start",
+    "log_step_end",
+    "log_run_complete",
+    "log_run_summary",
+    "log_artifact_reference",
+    "log_artifact_manifest",
+    "EXECUTION_RECORD_TYPES",
+    "RUN_RESULT_RECORD_TYPES",
 ]
 
 
@@ -77,6 +88,175 @@ def resolve_run_identity(ctx: Any) -> None:
         started = datetime.now().astimezone()
         ctx.run_timestamp = started.strftime("%Y%m%d_%H%M%S")
         ctx.run_started_at = started.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Append-only typed run log (SGC_Rey_Workflow_Pipeline_Automatic_Control_Batch_Logging)
+# ---------------------------------------------------------------------------
+
+# Record schema version stamped on every run-log record.
+_RUN_RECORD_SCHEMA_VERSION = 1
+
+# Execution records describe what happened while the run executed (the immutable
+# factual audit trail). Run-result records describe what is known/summarized about
+# the run (append-only accumulated knowledge). Both groups are reconstructed from
+# typed records in the same append-only file; the file is never rewritten.
+EXECUTION_RECORD_TYPES = frozenset({
+    "RUN_START", "STEP_START", "STEP_END", "INFO", "WARNING", "ERROR",
+    "ARTIFACT_REFERENCE", "RUN_COMPLETE",
+})
+RUN_RESULT_RECORD_TYPES = frozenset({
+    "RUN_SUMMARY", "EMAIL_SUMMARY", "ARTIFACT_MANIFEST",
+    "LLM_ANALYSIS_PACKAGE", "LLM_ANALYSIS_RESULT",
+})
+
+
+def open_run_log(ctx: Any) -> Path:
+    """
+    Establish and return the append-only run-log path for this execution.
+
+    The run log is a run-created artifact named ``run_log.<run_timestamp>.jsonl``
+    (SGC_Rey_Run_ID_Standard) beside the configured log directory. The path is
+    resolved once and cached on ``ctx.run_log_path``; run identity is established
+    first so ``run_id``/``run_timestamp`` exist before the first record. The logging
+    layer names and writes its own run log (it cannot depend on files/file_utils).
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context. Must have ``log_file`` set (by setup_logging) so the
+        run-log directory is known; execution should not proceed without a durable
+        log path.
+
+    Returns
+    -------
+    Path
+        The append-only run-log path.
+
+    Raises
+    ------
+    ValueError
+        If no durable log directory is available (fail closed).
+    """
+    existing = getattr(ctx, "run_log_path", None)
+    if existing:
+        return Path(existing)
+
+    resolve_run_identity(ctx)
+    log_file = getattr(ctx, "log_file", None)
+    if not log_file:
+        raise ValueError(
+            "Cannot open run log: no durable log path (ctx.log_file). Configure "
+            "logging before starting a run."
+        )
+    path = Path(log_file).parent / f"run_log.{ctx.run_timestamp}.jsonl"
+    ctx.run_log_path = str(path)
+    return path
+
+
+def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: Any) -> None:
+    """
+    Append one typed record to the append-only run log.
+
+    Every record carries ``run_id`` (SGC_Rey_Run_ID_Standard) plus the record type,
+    its logical group (execution vs run-result), a UTC timestamp, the owning app,
+    and the workflow/pipeline name when known. This is the single, centralized entry
+    point for run-log records — runners and the logging layer emit through here
+    rather than writing the run log directly. Append failures are recorded to the
+    standard logger and never mask execution.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context.
+    record_type : str
+        A record type (e.g. ``"RUN_START"``, ``"STEP_END"``, ``"RUN_SUMMARY"``).
+    message : str
+        Optional human-readable message.
+    **fields : Any
+        Additional typed fields merged into the record.
+
+    Returns
+    -------
+    None
+    """
+    try:
+        path = open_run_log(ctx)
+        record: dict[str, Any] = {
+            "record_type": record_type,
+            "record_group": "run_result" if record_type in RUN_RESULT_RECORD_TYPES else "execution",
+            "run_id": ctx.run_id,
+            "run_timestamp": ctx.run_timestamp,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
+        }
+        app = (getattr(ctx, "owner_app_name", None) or getattr(ctx, "app_name", None)
+               or getattr(ctx, "name", None))
+        if app:
+            record["app"] = str(app)
+        for key in ("workflow_name", "pipeline_name"):
+            value = getattr(ctx, key, None)
+            if value:
+                record[key] = str(value)
+        if message:
+            record["message"] = message
+        record.update(fields)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+    except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
+        logging.getLogger(__name__).warning(
+            "run log: could not append %s record: %s", record_type, exc
+        )
+
+
+def log_run_start(ctx: Any, **fields: Any) -> None:
+    """Append a RUN_START execution record marking the start of the run."""
+    log_run_record(ctx, "RUN_START", **fields)
+
+
+def log_step_start(ctx: Any, step_name: str, step_sequence: int,
+                   step_type: str = "", **fields: Any) -> None:
+    """Append a STEP_START execution record for one step."""
+    log_run_record(
+        ctx, "STEP_START",
+        step_name=step_name, step_sequence=step_sequence, step_type=step_type,
+        **fields,
+    )
+
+
+def log_step_end(ctx: Any, step_name: str, status: str, *,
+                 message: str = "", **fields: Any) -> None:
+    """Append a STEP_END execution record with the step status (success/failure/skipped)."""
+    log_run_record(
+        ctx, "STEP_END",
+        step_name=step_name, status=status, message=message, **fields,
+    )
+
+
+def log_run_complete(ctx: Any, status: str, *, message: str = "", **fields: Any) -> None:
+    """Append a RUN_COMPLETE execution record with the final run status."""
+    log_run_record(ctx, "RUN_COMPLETE", status=status, message=message, **fields)
+
+
+def log_run_summary(ctx: Any, summary: dict[str, Any]) -> None:
+    """Append a deterministic RUN_SUMMARY run-result record (no LLM required)."""
+    log_run_record(ctx, "RUN_SUMMARY", summary=summary)
+
+
+def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
+                           event: str = "created", **fields: Any) -> None:
+    """Append an ARTIFACT_REFERENCE execution record for an artifact event."""
+    log_run_record(
+        ctx, "ARTIFACT_REFERENCE",
+        artifact_path=str(path), role=role, event=event, **fields,
+    )
+
+
+def log_artifact_manifest(ctx: Any, artifacts: list[dict[str, Any]]) -> None:
+    """Append the consolidated ARTIFACT_MANIFEST run-result record at completion."""
+    log_run_record(ctx, "ARTIFACT_MANIFEST", artifacts=artifacts)
 
 # ---------------------------------------------------------------------------
 # Constants
