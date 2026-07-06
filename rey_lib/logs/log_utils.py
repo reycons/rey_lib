@@ -353,6 +353,30 @@ def log_artifact_manifest(ctx: Any, artifacts: list[dict[str, Any]]) -> None:
     """Append the consolidated ARTIFACT_MANIFEST record (files/artifacts) at completion."""
     log_run_record(ctx, "ARTIFACT_MANIFEST", artifacts=artifacts)
 
+
+def log_artifact_manifest_from_run_log(ctx: Any) -> None:
+    """Append a consolidated ARTIFACT_MANIFEST built from this run's own records.
+
+    Collects the artifacts already recorded on the append-only run log for this run
+    and appends a single consolidated ARTIFACT_MANIFEST (files/artifacts). It reads
+    only the run log — it never rescans directories or infers artifacts from
+    filenames — and includes only files/artifacts entries, i.e. created/generated
+    outputs. Moved, read, and copied files are FILE_OPERATION execution records and
+    are never included (SGC_Rey_Run_Artifact_Naming_Convention). Meant to run at run
+    completion, after RUN_COMPLETE/RUN_SUMMARY. Emission is fail-safe.
+    """
+    try:
+        path = getattr(ctx, "run_log_path", None)
+        if not path:
+            return
+        artifacts = read_run_log_sections(path)["sections"]["files"]["artifacts"]["files"]
+        if artifacts:
+            log_artifact_manifest(ctx, artifacts)
+    except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
+        logging.getLogger(__name__).warning(
+            "run log: could not append ARTIFACT_MANIFEST: %s", exc
+        )
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -937,7 +961,8 @@ def _file_entry_from_record(record: dict[str, Any], default_role: str) -> dict[s
     return {
         "path": path,
         "display_name": str(record.get("display_name") or record.get("name") or Path(path).name),
-        "file_role": str(record.get("file_role") or record.get("role") or default_role),
+        "file_role": str(record.get("file_role") or record.get("role")
+                         or record.get("artifact_role") or default_role),
         "step_name": str(record.get("step_name") or ""),
         "status": str(record.get("status") or ""),
         "actions": ["view", "copy_path", "open_external"],

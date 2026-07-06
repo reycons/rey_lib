@@ -129,6 +129,39 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert summary["status"] == "success"
 
 
+def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
+    """At completion the coordinator appends an ARTIFACT_MANIFEST of created artifacts only."""
+    from rey_lib.logs import log_file_operation
+    from rey_lib.workflow import run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    report = tmp_path / "report.json"
+
+    def handler(_ctx: object, _config: dict, _run: object) -> None:
+        # A created artifact and an unrelated file move within the same step.
+        log_artifact_reference(ctx, str(report), role="report", event="written")
+        log_file_operation(ctx, "move", source_path=str(tmp_path / "in.csv"),
+                           target_path=str(tmp_path / "done.csv"))
+        return None
+
+    result = run_workflow(ctx, {
+        "name": "wf", "processes": {"p1": {}},
+        "steps": [{"id": "s1", "label": "One", "process": "p1"}],
+    }, {"p1": handler})
+    assert result.status == "success"
+
+    records = _read(Path(ctx.run_log_path))
+    # The manifest is appended once, at completion, after RUN_SUMMARY.
+    assert records[-1]["record_type"] == "ARTIFACT_MANIFEST"
+    manifest = records[-1]
+    assert manifest["record_group"] == "files"
+    assert manifest["record_subgroup"] == "artifacts"
+    # Built from the run's own ARTIFACT_REFERENCE records; the moved file is excluded.
+    names = [Path(item["path"]).name for item in manifest["artifacts"]]
+    assert names == ["report.json"]
+    assert manifest["artifacts"][0]["file_role"] == "report"
+
+
 def test_run_log_sections_project_execution_files_and_results(tmp_path: Path) -> None:
     """Run logs are projected into execution/files/results without exposing file content."""
     log_path = tmp_path / "run_log.20260706_091845.jsonl"

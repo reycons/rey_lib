@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.logs import (
     get_logger,
+    log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
     log_run_summary,
@@ -215,6 +216,7 @@ def run_workflow(
             _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
             log_run_complete(ctx, "failed", message=str(exc))
             log_run_summary(ctx, _deterministic_summary(name, run))
+            log_artifact_manifest_from_run_log(ctx)
             return run
 
         status = str(getattr(result, "status", "ok")) if result is not None else "ok"
@@ -226,10 +228,12 @@ def run_workflow(
             run.status = "failed"
             log_run_complete(ctx, "failed")
             log_run_summary(ctx, _deterministic_summary(name, run))
+            log_artifact_manifest_from_run_log(ctx)
             return run
 
     log_run_complete(ctx, "success")
     log_run_summary(ctx, _deterministic_summary(name, run))
+    log_artifact_manifest_from_run_log(ctx)
     return run
 
 
