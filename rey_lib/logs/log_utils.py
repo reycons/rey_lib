@@ -230,9 +230,14 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
             record["message"] = message
         record.update(fields)
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, default=str) + "\n")
+        # Route the durable append through the primitive I/O layer so the run-log
+        # writer shares one low-level append with file_utils without either
+        # foundational module importing the other (SGC_Rey_Lib_Primitive_File_IO_Layer).
+        # Imported lazily because the rey_lib.files package eagerly loads file_utils,
+        # which imports this logging layer — a module-level import would form a cycle.
+        from rey_lib.files import primitive_file_io
+
+        primitive_file_io.append_jsonl(path, record)
     except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
         logging.getLogger(__name__).warning(
             "run log: could not append %s record: %s", record_type, exc

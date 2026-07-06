@@ -38,6 +38,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
+from rey_lib.files import primitive_file_io
 from rey_lib.logs import get_logger
 
 __all__ = [
@@ -628,13 +629,11 @@ def write_file(
         else:
             _xlsx_writer(outfile, content)
     elif fmt == "TEXT":
-        outfile.parent.mkdir(parents=True, exist_ok=True)
-        outfile.write_text(str(content), encoding="utf-8")
+        primitive_file_io.write_text(outfile, str(content))
     elif fmt == "JSON":
-        outfile.parent.mkdir(parents=True, exist_ok=True)
-        outfile.write_text(
+        primitive_file_io.write_text(
+            outfile,
             json.dumps(content, default=str, indent=2, sort_keys=sort_keys),
-            encoding="utf-8",
         )
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
@@ -677,11 +676,7 @@ def append_jsonl(path: Path | str, record: dict[str, Any]) -> Path:
     Path
         The JSONL file path.
     """
-    outfile = Path(path)
-    outfile.parent.mkdir(parents=True, exist_ok=True)
-    with outfile.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, default=str) + "\n")
-    return outfile
+    return primitive_file_io.append_jsonl(path, record)
 
 
 def delete_file(path: Path | str) -> bool:
