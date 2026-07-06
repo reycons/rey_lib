@@ -17,6 +17,8 @@ def test_httpx_429_records_are_promoted_to_warning(tmp_path) -> None:
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_path=str(tmp_path / "app.{operation}.{timestamp}.jsonl"),
         jsonl_ctx_fields=(),
+        # Opt in to the legacy readable log so the text handler is exercised too.
+        readable_enabled=True,
     )
     setup_logging(ctx, operation="run")
 
@@ -39,8 +41,8 @@ def test_httpx_429_records_are_promoted_to_warning(tmp_path) -> None:
     assert "429 Too Many Requests" in record["message"]
 
 
-def test_setup_logging_writes_jsonl_by_default_when_only_text_log_configured(tmp_path) -> None:
-    """JSONL is the authoritative default even when YAML only names log_path."""
+def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(tmp_path) -> None:
+    """JSONL is written beside the configured log_path; no readable log is produced."""
     ctx = SimpleNamespace(
         env="test",
         log_level="INFO",
@@ -55,10 +57,10 @@ def test_setup_logging_writes_jsonl_by_default_when_only_text_log_configured(tmp
     for handler in logging.getLogger().handlers:
         handler.flush()
 
-    text_log = next(tmp_path.glob("*.log"))
     jsonl_log = next(tmp_path.glob("*.jsonl"))
 
-    assert text_log.read_text(encoding="utf-8")
+    # New runs produce only the JSONL run log, written beside the configured path.
+    assert list(tmp_path.glob("*.log")) == []
     assert json.loads(jsonl_log.read_text(encoding="utf-8"))["message"] == "hello"
     assert ctx.log_file == str(jsonl_log.resolve())
 
@@ -69,7 +71,8 @@ def test_setup_logging_can_disable_jsonl_with_yaml_flag(tmp_path) -> None:
         env="test",
         log_level="INFO",
         log_path=str(tmp_path / "sample.{operation}.{timestamp}.log"),
-        logging=SimpleNamespace(jsonl_enabled=False),
+        # Readable-only legacy case: JSONL off, so opt back into the text handler.
+        logging=SimpleNamespace(jsonl_enabled=False, readable_enabled=True),
     )
 
     setup_logging(ctx, operation="run")
@@ -166,9 +169,12 @@ def test_setup_logging_accepts_path_object_for_log_path(tmp_path) -> None:
     for handler in logging.getLogger().handlers:
         handler.flush()
 
-    logs = list(tmp_path.glob("*.log"))
+    # A Path log_path is accepted and used to place the JSONL run log; no readable
+    # log is produced for new runs.
+    logs = list(tmp_path.glob("*.jsonl"))
     assert len(logs) == 1
     assert "run" in logs[0].name
+    assert list(tmp_path.glob("*.log")) == []
 
 
 def test_setup_logging_substitutes_operation_and_timestamp(tmp_path) -> None:
@@ -185,11 +191,10 @@ def test_setup_logging_substitutes_operation_and_timestamp(tmp_path) -> None:
     for handler in logging.getLogger().handlers:
         handler.flush()
 
-    log_files = list(tmp_path.glob("*.log"))
     jsonl_files = list(tmp_path.glob("*.jsonl"))
-    assert len(log_files) == 1
-    assert "ingest" in log_files[0].name
-    assert "{operation}" not in log_files[0].name
-    assert "{timestamp}" not in log_files[0].name
+    # No readable execution log for new runs; substitution is verified on the JSONL.
+    assert list(tmp_path.glob("*.log")) == []
     assert len(jsonl_files) == 1
     assert "ingest" in jsonl_files[0].name
+    assert "{operation}" not in jsonl_files[0].name
+    assert "{timestamp}" not in jsonl_files[0].name

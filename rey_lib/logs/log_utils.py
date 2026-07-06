@@ -478,10 +478,13 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     Initialise logging for the application.
 
     Sets up handlers based on what is configured in ctx:
-      - Console (stderr): always active, respects log level.
-      - Human-readable file: when ctx.log_path is present.
+      - Console (stderr): always active, respects log level (live transport).
       - JSONL: active by default unless disabled in ctx.logging.jsonl_enabled
-        or ctx.jsonl_enabled.
+        or ctx.jsonl_enabled. This is the single durable execution log.
+      - Human-readable file: opt-in legacy only (readable_enabled=true). New runs
+        do not produce a separate human-readable execution log
+        (SGC_Rey_Log_Utils_JSONL_Only_Human_View_Cleanup); readable views are
+        rendered on demand from the JSONL run log via the render_* helpers.
 
     Both path templates support two placeholders:
       {operation}  — the current operation name (e.g. 'scan', 'import')
@@ -537,15 +540,21 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     timestamp = ctx.run_timestamp
     log_file  = None
 
+    # The append-only JSONL run log is the single durable execution log
+    # (SGC_Rey_Log_Utils_JSONL_Only_Human_View_Cleanup). A separate human-readable
+    # execution log is no longer produced for new runs; it is opt-in legacy only via
+    # readable_enabled=true. When log_path is configured it is still resolved so the
+    # JSONL log is written beside it, but the text handler is added only when opted in.
     resolved_log: Path | None = None
-    if getattr(ctx, "log_path", None) and _log_bool(ctx, "readable_enabled", True):
+    if getattr(ctx, "log_path", None):
         resolved_log = _resolve_log_path(ctx.log_path, ctx, operation, timestamp)
-        file_handler = _TextFileHandler(resolved_log)
-        file_handler.setLevel(level)
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(_ProviderWarningFilter())
-        root.addHandler(file_handler)
-        log_file = str(resolved_log)
+        if _log_bool(ctx, "readable_enabled", False):
+            file_handler = _TextFileHandler(resolved_log)
+            file_handler.setLevel(level)
+            file_handler.setFormatter(formatter)
+            file_handler.addFilter(_ProviderWarningFilter())
+            root.addHandler(file_handler)
+            log_file = str(resolved_log)
 
     if _log_bool(ctx, "jsonl_enabled", True):
         jsonl_path = _resolve_jsonl_path(ctx, operation, timestamp, resolved_log)
@@ -1180,6 +1189,127 @@ def _file_tree_node(file: dict[str, Any], kind: str) -> dict[str, Any]:
 def _timestamp_from_run_log_name(path: Path) -> str:
     match = re.search(r"run_log\.(\d{8}_\d{6})", path.name)
     return match.group(1) if match else ""
+
+
+# ---------------------------------------------------------------------------
+# Human-readable views (SGC_Rey_Log_Utils_JSONL_Only_Human_View_Cleanup)
+#
+# Human-readable execution output is a projection of the append-only JSONL run
+# log, rendered on demand — never a second durable execution log. Each render_*
+# helper accepts a run-log path or an already-read list of records and returns
+# safe plain text for console/CLI/email/report use.
+# ---------------------------------------------------------------------------
+
+def _run_records_for_view(source: Any) -> list[dict[str, Any]]:
+    """Normalise a path or a record list into a list of run-log records."""
+    if isinstance(source, (str, Path)):
+        return read_run_log_sections(source)["records"]
+    return [record for record in source if isinstance(record, dict)]
+
+
+def _run_header_lines(records: list[dict[str, Any]]) -> list[str]:
+    """Return human-readable run-identity header lines."""
+    identity = _run_log_identity(Path(""), records, _run_log_sections(records))
+    lines = [
+        f"Run {identity['run_timestamp'] or identity['run_id'] or '(unknown)'}",
+        f"  status:    {identity['status'] or 'in-progress'}",
+        f"  run_id:    {identity['run_id']}",
+        f"  started:   {identity['run_started_at']}",
+        f"  completed: {identity['run_completed_at']}",
+    ]
+    for label, key in (("app", "app"), ("workflow", "workflow"), ("pipeline", "pipeline")):
+        if identity[key]:
+            lines.append(f"  {label}:{' ' * (9 - len(label))}{identity[key]}")
+    if identity["warning_count"] or identity["error_count"]:
+        lines.append(
+            f"  warnings:  {identity['warning_count']}   errors: {identity['error_count']}"
+        )
+    return lines
+
+
+def _render_file_block(label: str, subgroup: str, entries: list[dict[str, Any]]) -> str:
+    """Render one files subgroup (input/config/artifacts/file-operations) as text."""
+    if not entries:
+        return f"{label} (0)\n  (none)"
+    lines = [f"{label} ({len(entries)})"]
+    for entry in entries:
+        if subgroup == "file_operations":
+            lines.append(
+                f"  {entry.get('operation', '')}: {entry.get('source_path', '')}"
+                f" -> {entry.get('target_path', '')} [{entry.get('status', '')}]"
+            )
+        else:
+            role = str(entry.get("file_role") or "")
+            suffix = f"  · {role}" if role else ""
+            lines.append(f"  {entry.get('display_name') or entry.get('path')}{suffix}")
+    return "\n".join(lines)
+
+
+def render_execution_view(source: Any) -> str:
+    """Render the execution audit trail from a JSONL run log (or records)."""
+    sections = _run_log_sections(_run_records_for_view(source))
+    return format_jsonl_records(sections["execution"]["records"]) or "(no execution records)"
+
+
+def render_files_view(source: Any) -> str:
+    """Render the Files group (input/config/file-operations/artifacts) as text."""
+    files = _run_log_sections(_run_records_for_view(source))["files"]
+    blocks = [
+        _render_file_block("Input Files", "input_files", files["input_files"]["files"]),
+        _render_file_block("Config Files", "config_files", files["config_files"]["files"]),
+        _render_file_block("File Operations", "file_operations", files["file_operations"]["files"]),
+        _render_file_block("Artifacts", "artifacts", files["artifacts"]["files"]),
+    ]
+    return "\n\n".join(blocks)
+
+
+def render_results_view(source: Any) -> str:
+    """Render the results records (summaries, analyses) from the run log."""
+    sections = _run_log_sections(_run_records_for_view(source))
+    return format_jsonl_records(sections["results"]["records"]) or "(no results)"
+
+
+def render_summary_view(source: Any) -> str:
+    """Render the run header plus the deterministic RUN_SUMMARY, if present."""
+    records = _run_records_for_view(source)
+    lines = list(_run_header_lines(records))
+    summary = next(
+        (record.get("summary") for record in reversed(records)
+         if str(record.get("record_type") or "").upper() == "RUN_SUMMARY"
+         and isinstance(record.get("summary"), dict)),
+        None,
+    )
+    if summary:
+        lines.append("Summary")
+        lines.extend(f"  {key}: {value}" for key, value in summary.items())
+    return "\n".join(lines)
+
+
+def render_error_warning_view(source: Any) -> str:
+    """Render only the WARNING/ERROR records from the run log."""
+    records = _run_records_for_view(source)
+    flagged = [
+        record for record in records
+        if str(record.get("record_type") or "").upper() in ("WARNING", "ERROR")
+    ]
+    return format_jsonl_records(flagged) if flagged else "(no warnings or errors)"
+
+
+def render_run_view(source: Any) -> str:
+    """Render the full human-readable run view (header + execution/files/results)."""
+    records = _run_records_for_view(source)
+    return "\n".join([
+        *_run_header_lines(records),
+        "",
+        "== Execution ==",
+        render_execution_view(records),
+        "",
+        "== Files ==",
+        render_files_view(records),
+        "",
+        "== Results ==",
+        render_results_view(records),
+    ])
 
 
 def format_jsonl_records(records: list[dict[str, Any]]) -> str:
