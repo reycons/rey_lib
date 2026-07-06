@@ -240,9 +240,10 @@ class TestLocalArtifactStore:
         """write() returns a file:// URI pointing to the written file."""
         store = LocalArtifactStore(tmp_path / "artifacts")
         uri = store.write(
-            run_id   = "run-abc",
-            stage_id = "extract",
-            data     = {"key": "value"},
+            run_id        = "run-abc",
+            run_timestamp = "20260706_091845",
+            stage_id      = "extract",
+            data          = {"key": "value"},
         )
         assert uri.startswith("file://")
 
@@ -250,38 +251,48 @@ class TestLocalArtifactStore:
         """The artifact file contains the JSON-serialised data."""
         store = LocalArtifactStore(tmp_path / "artifacts")
         data  = {"items": [1, 2, 3]}
-        uri   = store.write(run_id="run-abc", stage_id="extract", data=data)
+        uri   = store.write(
+            run_id="run-abc", run_timestamp="20260706_091845",
+            stage_id="extract", data=data,
+        )
 
         path = Path(uri.replace("file://", ""))
         loaded = json.loads(path.read_text(encoding="utf-8"))
         assert loaded == data
 
-    def test_file_named_with_stage_and_run_id(self, tmp_path: Path) -> None:
-        """Artifact filename is <stage_id>.<run_id>.json."""
+    def test_file_named_with_stage_and_run_timestamp(self, tmp_path: Path) -> None:
+        """Artifact filename is <stage_id>.<run_timestamp>.json — never the UUID."""
         store = LocalArtifactStore(tmp_path / "artifacts")
-        store.write(run_id="run-xyz", stage_id="classify", data={})
+        store.write(
+            run_id="run-xyz-uuid", run_timestamp="20260706_214500",
+            stage_id="classify", data={},
+        )
 
         files = list((tmp_path / "artifacts").iterdir())
-        assert any("classify" in f.name and "run-xyz" in f.name for f in files)
+        assert any(f.name == "classify.20260706_214500.json" for f in files)
+        # The UUID run_id must not appear in the operator-facing filename.
+        assert not any("run-xyz-uuid" in f.name for f in files)
 
-    def test_idempotent_on_second_write(self, tmp_path: Path) -> None:
-        """Writing the same run_id + stage_id twice does not raise."""
+    def test_collision_does_not_overwrite_previous_run(self, tmp_path: Path) -> None:
+        """A same-timestamp write keeps the earlier file rather than overwriting."""
         store = LocalArtifactStore(tmp_path / "artifacts")
-        store.write(run_id="r1", stage_id="s1", data={"v": 1})
-        store.write(run_id="r1", stage_id="s1", data={"v": 2})
+        store.write(run_id="r1", run_timestamp="20260706_091845", stage_id="s1", data={"v": 1})
+        store.write(run_id="r2", run_timestamp="20260706_091845", stage_id="s1", data={"v": 2})
+        files = list((tmp_path / "artifacts").iterdir())
+        assert len(files) == 2
 
     def test_base_dir_created_on_first_write(self, tmp_path: Path) -> None:
         """base_dir is created if it does not exist."""
         base = tmp_path / "deep" / "nested" / "artifacts"
         assert not base.exists()
         store = LocalArtifactStore(base)
-        store.write(run_id="r1", stage_id="s1", data={})
+        store.write(run_id="r1", run_timestamp="20260706_091845", stage_id="s1", data={})
         assert base.exists()
 
     def test_slash_in_stage_id_sanitised(self, tmp_path: Path) -> None:
         """Slashes in stage_id are replaced so the filename is valid."""
         store = LocalArtifactStore(tmp_path / "artifacts")
-        store.write(run_id="r1", stage_id="a/b/c", data={})
+        store.write(run_id="r1", run_timestamp="20260706_091845", stage_id="a/b/c", data={})
         files = list((tmp_path / "artifacts").iterdir())
         assert not any("/" in f.name for f in files)
 

@@ -174,9 +174,10 @@ def run(
     # 3. Capability check before touching the provider.
     _check_capabilities(provider_cfg.provider, messages)
 
-    policy     = request.retry_policy or DEFAULT_RETRY_POLICY
-    started_at = datetime.now(timezone.utc).isoformat()
-    t0         = time.monotonic()
+    policy      = request.retry_policy or DEFAULT_RETRY_POLICY
+    started_dt  = datetime.now(timezone.utc)
+    started_at  = started_dt.isoformat()
+    t0          = time.monotonic()
 
     _logger.info(
         "runner.run: pipeline=%s stage=%s contract=%s v%s provider=%s model=%s",
@@ -206,15 +207,20 @@ def run(
     if result.status == STATUS_SUCCESS and request.requires_approval:
         final_status = STATUS_PENDING_APPROVAL
 
-    # 5. Generate the run_id now so the artifact URI embeds the real ID.
-    run_id = str(uuid.uuid4())
+    # 5. Establish this analysis run's identity: run_id is the authoritative UUID
+    # (kept on the ExecutionRecord); run_timestamp is the filename-safe token that
+    # names the artifact, like every other Rey run artifact
+    # (SGC_Rey_LLM_Artifact_Naming_Uses_Run_Timestamp).
+    run_id        = str(uuid.uuid4())
+    run_timestamp = started_dt.astimezone().strftime("%Y%m%d_%H%M%S")
 
     artifact_uris: list[str] = []
     if artifact_store is not None and result.parsed is not None:
         uri = artifact_store.write(
-            run_id   = run_id,
-            stage_id = request.stage_id,
-            data     = result.parsed,
+            run_id        = run_id,
+            run_timestamp = run_timestamp,
+            stage_id      = request.stage_id,
+            data          = result.parsed,
         )
         artifact_uris.append(uri)
 
