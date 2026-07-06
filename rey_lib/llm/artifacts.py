@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.files.file_utils import run_artifact_path, write_file
+from rey_lib.logs import log_artifact_reference
 
 __all__ = ["ArtifactStore", "LocalArtifactStore"]
 
@@ -78,11 +79,22 @@ class LocalArtifactStore(ArtifactStore):
     ----------
     base_dir : Path
         Directory where artifact files are written. Created on first write.
+    run_ctx : Any
+        Optional run context (with run identity and a durable log path). When
+        provided, each written stage-result JSON is recorded as a files/artifacts
+        ``ARTIFACT_REFERENCE`` on the append-only run log
+        (SGC_Rey_Log_Writer_Run_View_Groups). These are operator-inspectable
+        produced outputs, not transient cache/lock/temp/provider-internal files.
+    artifact_role : str
+        Role stamped on the emitted artifact record. Defaults to ``"llm_result"``.
     """
 
-    def __init__(self, base_dir: Path) -> None:
-        """Initialise with the target directory."""
+    def __init__(self, base_dir: Path, *, run_ctx: Any = None,
+                 artifact_role: str = "llm_result") -> None:
+        """Initialise with the target directory and optional run-log sink."""
         self._base_dir = Path(base_dir)
+        self._run_ctx = run_ctx
+        self._artifact_role = artifact_role
 
     def write(
         self,
@@ -116,4 +128,13 @@ class LocalArtifactStore(ArtifactStore):
         safe_stage = stage_id.replace("/", "_").replace("\\", "_")
         path = run_artifact_path(self._base_dir, safe_stage, run_timestamp, "json")
         write_file(path, data, "JSON")
+
+        # The stage-result JSON is a produced, operator-inspectable output, so record
+        # it as a files/artifacts entry on the run log when a run context is present.
+        # Emission is fail-safe and never blocks artifact storage.
+        if self._run_ctx is not None:
+            log_artifact_reference(
+                self._run_ctx, str(path), role=self._artifact_role,
+                event="written", created_by_step=stage_id,
+            )
         return path.resolve().as_uri()

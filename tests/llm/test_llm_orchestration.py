@@ -18,6 +18,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
@@ -295,6 +296,39 @@ class TestLocalArtifactStore:
         store.write(run_id="r1", run_timestamp="20260706_091845", stage_id="a/b/c", data={})
         files = list((tmp_path / "artifacts").iterdir())
         assert not any("/" in f.name for f in files)
+
+    def test_write_emits_artifact_reference_with_run_ctx(self, tmp_path: Path) -> None:
+        """With a run context, a written stage result emits a files/artifacts record."""
+        ctx = SimpleNamespace(
+            log_file=str(tmp_path / "rey_analyzer.jsonl"),
+            owner_app_name="rey_analyzer",
+            run_id="run-pipe-1",
+            run_timestamp="20260706_130000",
+        )
+        store = LocalArtifactStore(tmp_path / "artifacts", run_ctx=ctx)
+        uri = store.write(
+            run_id="llm-uuid", run_timestamp="20260706_091845",
+            stage_id="extract", data={"key": "value"},
+        )
+
+        records = [
+            json.loads(line)
+            for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+        ]
+        artifact = next(r for r in records if r["record_type"] == "ARTIFACT_REFERENCE")
+        assert artifact["record_group"] == "files"
+        assert artifact["record_subgroup"] == "artifacts"
+        assert artifact["artifact_role"] == "llm_result"
+        assert artifact["created_by_step"] == "extract"
+        # The record is stamped with the run identity, and its path is the produced file.
+        assert artifact["run_id"] == "run-pipe-1"
+        assert artifact["path"] == uri.replace("file://", "")
+
+    def test_write_without_run_ctx_emits_no_run_log(self, tmp_path: Path) -> None:
+        """Without a run context, the store writes the file but opens no run log."""
+        store = LocalArtifactStore(tmp_path / "artifacts")
+        store.write(run_id="r1", run_timestamp="20260706_091845", stage_id="s1", data={})
+        assert not any(p.name.startswith("run_log.") for p in (tmp_path / "artifacts").iterdir())
 
 
 # ---------------------------------------------------------------------------
