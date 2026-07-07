@@ -23,6 +23,7 @@ _PUBLIC_SURFACE = {
     "build_ctx_from_path": config_context,
     "inject_secrets": config_context,
     "print_ctx": config_context,
+    "record_config_file_references": config_context,
     "parse_yaml": config_loader,
     "parse_yaml_namespace": config_loader,
     "dump_yaml": config_loader,
@@ -31,6 +32,7 @@ _PUBLIC_SURFACE = {
     "get_config_metadata": provenance,
     "get_config_source_files": provenance,
     "get_config_source_map": provenance,
+    "get_config_file_references": provenance,
     "explain_config_value": provenance,
 }
 

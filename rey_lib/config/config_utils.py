@@ -21,6 +21,7 @@ from rey_lib.config.config_context import (
     build_ctx_from_path,
     inject_secrets,
     print_ctx,
+    record_config_file_references,
 )
 from rey_lib.config.config_loader import (
     dump_yaml,
@@ -38,6 +39,7 @@ from rey_lib.config.config_paths import (
 )
 from rey_lib.config.provenance import (
     explain_config_value,
+    get_config_file_references,
     get_config_metadata,
     get_config_source_files,
     get_config_source_map,
@@ -47,6 +49,7 @@ __all__ = [
     "build_ctx_from_path",
     "inject_secrets",
     "print_ctx",
+    "record_config_file_references",
     "validate_yaml_file",
     "validate_yaml_folder",
     "parse_yaml",
@@ -57,5 +60,6 @@ __all__ = [
     "get_config_metadata",
     "get_config_source_files",
     "get_config_source_map",
+    "get_config_file_references",
     "explain_config_value",
 ]

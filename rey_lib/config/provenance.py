@@ -30,6 +30,7 @@ __all__ = [
     "get_config_metadata",
     "get_config_source_files",
     "get_config_source_map",
+    "get_config_file_references",
     "explain_config_value",
 ]
 
@@ -355,6 +356,51 @@ class ConfigMetadata:
             info["sections"].sort()
         return out
 
+    def file_references(self) -> list[dict[str, Any]]:
+        """Return one provenance summary per contributing config source file.
+
+        Each contributing file is reported once, in first-seen merge order
+        (``load_order``), with its precedence ``layer``, the config sections it
+        supplied (``variables_contributed``), and the dotted paths where its
+        value replaced an earlier layer (``overrides``). This is the authoritative
+        list of files that fed the effective context, derived from recorded
+        provenance rather than from file reads or filename inference.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Ordered per-file summaries with keys ``path``, ``configuration_layer``,
+            ``variables_contributed``, ``overrides`` and ``load_order``.
+        """
+        order: list[str] = []
+        info: dict[str, dict[str, Any]] = {}
+        for path, entry in self._entries.items():
+            source = entry.source_file
+            if not source:
+                continue
+            if source not in info:
+                order.append(source)
+                info[source] = {
+                    "path": source,
+                    "configuration_layer": entry.layer,
+                    "variables_contributed": [],
+                    "overrides": [],
+                }
+            summary = info[source]
+            section = entry.source_section or path.split(".", 1)[0]
+            if section and section not in summary["variables_contributed"]:
+                summary["variables_contributed"].append(section)
+            if entry.overrides and path not in summary["overrides"]:
+                summary["overrides"].append(path)
+        references: list[dict[str, Any]] = []
+        for load_order, source in enumerate(order):
+            summary = info[source]
+            summary["variables_contributed"].sort()
+            summary["overrides"].sort()
+            summary["load_order"] = load_order
+            references.append(summary)
+        return references
+
 
 # ---------------------------------------------------------------------------
 # Public helper API (queried against a built ctx)
@@ -425,6 +471,29 @@ def get_config_source_map(ctx: Any, prefix: str = "") -> dict[str, dict[str, Any
     """
     container = _container(ctx)
     return container.source_map(prefix) if container is not None else {}
+
+
+def get_config_file_references(ctx: Any) -> list[dict[str, Any]]:
+    """Return the contributing config source files recorded on *ctx*.
+
+    Each entry summarises one file that fed the effective context: its precedence
+    layer, the sections it supplied, the dotted paths it overrode, and its load
+    order. The list is authoritative provenance — a consumer emits configuration
+    records from it rather than inferring config files from file reads.
+
+    Parameters
+    ----------
+    ctx : Any
+        A context built by ``build_ctx_from_path``.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Ordered per-file provenance summaries, or an empty list when no metadata
+        exists.
+    """
+    container = _container(ctx)
+    return container.file_references() if container is not None else []
 
 
 def explain_config_value(ctx: Any, path: str) -> str:

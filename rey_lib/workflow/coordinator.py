@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
+from rey_lib.config.config_utils import record_config_file_references
 from rey_lib.logs import (
     bind_run,
     clear_run,
@@ -174,6 +175,9 @@ def run_workflow(
     # Bind the current run so file_utils records file operations to this run log
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
     bind_run(ctx)
+    # Record the config files that fed the effective ctx from provenance
+    # (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
+    record_config_file_references(ctx)
 
     sequence = 0
     for index, step_def in enumerate(steps):

@@ -32,11 +32,24 @@ from rey_lib.config.config_paths import (
     _build_path_resolver,
     _resolve_paths,
 )
-from rey_lib.config.provenance import ConfigMetadata, layer_for_source
+from rey_lib.config.provenance import (
+    ConfigMetadata,
+    get_config_file_references,
+    layer_for_source,
+)
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import get_logger, log_config_file_reference
 
 _logger = get_logger(__name__)
+
+# Config precedence layers map to human-facing configuration roles. Roles come
+# from recorded provenance (the layer a file contributed at), never from the
+# file name or extension (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
+_LAYER_ROLE = {
+    "installation": "Installation",
+    "workflow": "Workflow",
+    "runtime": "Runtime",
+}
 
 def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
     """
@@ -387,6 +400,50 @@ def _alias_nested_mapping(
             parent = {}
             raw[nested_parent] = parent
         parent[nested_key] = deepcopy(raw[canonical_key])
+
+def _role_for_layer(layer: str) -> str:
+    """Return the configuration role for a provenance layer, defaulting cleanly."""
+    return _LAYER_ROLE.get(layer.lower(), "Configuration")
+
+
+def record_config_file_references(ctx: Namespace) -> None:
+    """Emit one CONFIG_FILE_REFERENCE per config file that fed the effective ctx.
+
+    Configuration files are recorded because they contributed to the effective
+    execution context — from recorded provenance, not because they were read and
+    not by filename inference
+    (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording). Each contributing file
+    is emitted once, in load order, carrying its role/layer, the sections it
+    supplied, and the paths it overrode. Called at run start, once the run log
+    exists; a no-op when ``ctx`` carries no provenance metadata.
+
+    Parameters
+    ----------
+    ctx : Namespace
+        A context built by ``build_ctx_from_path`` with a live run log.
+
+    Returns
+    -------
+    None
+    """
+    referenced_by = str(
+        getattr(ctx, "workflow_name", "")
+        or getattr(ctx, "pipeline_name", "")
+        or getattr(ctx, "app_name", "")
+    )
+    for reference in get_config_file_references(ctx):
+        layer = str(reference.get("configuration_layer") or "")
+        log_config_file_reference(
+            ctx,
+            reference["path"],
+            file_role=_role_for_layer(layer),
+            configuration_layer=layer,
+            load_order=reference.get("load_order"),
+            variables_contributed=list(reference.get("variables_contributed") or []),
+            overrides=list(reference.get("overrides") or []),
+            referenced_by=referenced_by,
+        )
+
 
 def print_ctx(ctx: Namespace) -> None:
     """Log the full context hierarchy at DEBUG level for diagnostic use."""
