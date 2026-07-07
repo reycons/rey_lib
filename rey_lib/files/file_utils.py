@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
 from rey_lib.files import primitive_file_io
-from rey_lib.logs import get_logger
+from rey_lib.logs import get_logger, record_file_operation
 
 __all__ = [
     "bounded_text_preview",
@@ -225,12 +225,16 @@ def read_text_file(
     errors: str = "strict",
 ) -> str:
     """Read a text file through the shared file utility boundary."""
-    return Path(path).read_text(encoding=encoding, errors=errors)
+    text = Path(path).read_text(encoding=encoding, errors=errors)
+    record_file_operation("read", source_path=str(path))
+    return text
 
 
 def read_bytes_file(path: Path | str) -> bytes:
     """Read raw file bytes through the shared file utility boundary."""
-    return Path(path).read_bytes()
+    data = Path(path).read_bytes()
+    record_file_operation("read", source_path=str(path))
+    return data
 
 
 def open_text_file(
@@ -1036,6 +1040,9 @@ def write_file(
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Could not write file creation state for '%s': %s", outfile.name, exc)
 
+    # Record the write against the bound run, if any
+    # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording). No-op when unbound.
+    record_file_operation("write", target_path=str(outfile))
     return outfile.resolve()
 
 
@@ -1059,7 +1066,9 @@ def append_jsonl(path: Path | str, record: dict[str, Any]) -> Path:
     Path
         The JSONL file path.
     """
-    return primitive_file_io.append_jsonl(path, record)
+    result = primitive_file_io.append_jsonl(path, record)
+    record_file_operation("write", target_path=str(result))
+    return result
 
 
 def _path_within(path: Path, root: Path) -> bool:
@@ -1119,6 +1128,7 @@ def delete_file(path: Path | str) -> bool:
     if not file_path.is_file():
         raise ValueError(f"Path is not a file: {file_path}")
     file_path.unlink()
+    record_file_operation("delete", source_path=str(file_path))
     return True
 
 
@@ -1222,6 +1232,7 @@ def move_file(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (dest_name if dest_name else src.name)
     src.replace(dest)
+    record_file_operation("move", source_path=str(src), target_path=str(dest))
     _logger.debug("Moved: %s → %s", src, dest)
     if state_ctx is not None:
         try:

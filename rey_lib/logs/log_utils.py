@@ -28,6 +28,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from rey_lib.logs.jsonl_handler import JsonlHandler
@@ -331,6 +332,72 @@ def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
         operation=operation, source_path=str(source_path),
         target_path=str(target_path), status=status, step_id=step_id, **fields,
     )
+
+
+# ---------------------------------------------------------------------------
+# Ambient current run (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording).
+#
+# One current run per process, owned here. Runners bind the run at start and
+# clear it at end; file_utils records file operations against it without any ctx
+# threading. When no run is bound, recording is a no-op. Process-scoped for P1;
+# concurrent/nested runs are out of scope.
+# ---------------------------------------------------------------------------
+
+_CURRENT_RUN: Any = None
+
+
+def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
+             run_timestamp: str = "") -> None:
+    """Bind the current run so file_utils records file operations against it.
+
+    Reads run_log_path / run_id / run_timestamp from ``ctx`` when given, else from
+    the keyword arguments. Binding without a durable run_log_path is a no-op.
+    """
+    global _CURRENT_RUN
+    if ctx is not None:
+        run_log_path = str(getattr(ctx, "run_log_path", "") or run_log_path)
+        run_id = str(getattr(ctx, "run_id", "") or run_id)
+        run_timestamp = str(getattr(ctx, "run_timestamp", "") or run_timestamp)
+    if not run_log_path:
+        return
+    _CURRENT_RUN = SimpleNamespace(
+        run_id=run_id, run_timestamp=run_timestamp, run_log_path=str(run_log_path),
+    )
+
+
+def clear_run() -> None:
+    """Clear the current run (recording becomes a no-op until the next bind)."""
+    global _CURRENT_RUN
+    _CURRENT_RUN = None
+
+
+def current_run() -> dict[str, str] | None:
+    """Return the bound run's {run_log_path, run_id}, or None if unbound."""
+    if _CURRENT_RUN is None:
+        return None
+    return {"run_log_path": _CURRENT_RUN.run_log_path, "run_id": _CURRENT_RUN.run_id}
+
+
+def record_file_operation(operation: str, *, source_path: str = "",
+                          target_path: str = "", status: str = "success",
+                          **fields: Any) -> None:
+    """Append a FILE_OPERATION to the bound run log, or no-op if no run is bound.
+
+    Called by file_utils after a file operation; emission is fail-safe and never
+    raises into the caller (a logging failure must not break a file operation).
+    """
+    run = _CURRENT_RUN
+    if run is None:
+        return
+    try:
+        log_file_operation(
+            run, operation, source_path=source_path, target_path=target_path,
+            status=status, **fields,
+        )
+    except Exception as exc:  # noqa: BLE001 — recording must never break a file op.
+        logging.getLogger(__name__).warning(
+            "run log: could not record file operation '%s': %s", operation, exc
+        )
 
 
 def log_artifact_reference(ctx: Any, path: str, *, role: str = "",

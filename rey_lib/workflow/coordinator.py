@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.logs import (
+    bind_run,
+    clear_run,
     get_logger,
     log_artifact_manifest_from_run_log,
     log_run_complete,
@@ -169,6 +171,9 @@ def run_workflow(
     # never alters workflow behavior. run_id is established by the logging layer; all
     # records share it and RUN_START carries the workflow name.
     log_run_start(ctx, workflow=name, apply=apply)
+    # Bind the current run so file_utils records file operations to this run log
+    # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
+    bind_run(ctx)
 
     sequence = 0
     for index, step_def in enumerate(steps):
@@ -217,6 +222,7 @@ def run_workflow(
             log_run_complete(ctx, "failed", message=str(exc))
             log_run_summary(ctx, _deterministic_summary(name, run))
             log_artifact_manifest_from_run_log(ctx)
+            clear_run()
             return run
 
         status = str(getattr(result, "status", "ok")) if result is not None else "ok"
@@ -229,11 +235,13 @@ def run_workflow(
             log_run_complete(ctx, "failed")
             log_run_summary(ctx, _deterministic_summary(name, run))
             log_artifact_manifest_from_run_log(ctx)
+            clear_run()
             return run
 
     log_run_complete(ctx, "success")
     log_run_summary(ctx, _deterministic_summary(name, run))
     log_artifact_manifest_from_run_log(ctx)
+    clear_run()
     return run
 
 
