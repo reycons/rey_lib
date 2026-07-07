@@ -117,6 +117,7 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
                 "kind": str(workflow.get("kind") or "workflow"),
                 "description": str(workflow.get("description") or ""),
                 "steps": workflow.get("steps") or [],
+                "relevant_files": workflow.get("relevant_files") or {},
                 # Workflow-declared execution contract (ADR-007): the nested
                 # execution:{full,dry_run,step,range} block. Defaults keep a
                 # workflow runnable but never step/range selectable unless it

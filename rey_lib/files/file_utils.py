@@ -52,11 +52,13 @@ __all__ = [
     "file_sha256",
     "matched_tree_files",
     "matches_file_pattern",
+    "list_relevant_files",
     "move_to_failed",
     "move_to_processing",
     "move_to_stage",
     "move_to_success",
     "pattern_to_glob",
+    "preview_file_for_display",
     "converted_output_path",
     "run_artifact_path",
     "get_reader",
@@ -328,6 +330,60 @@ def bounded_text_preview(
     }
 
 
+def preview_file_for_display(
+    raw_path: Path | str,
+    *,
+    approved_roots: Iterable[Path | str],
+    max_bytes: int = 262_144,
+    encoding: str = "utf-8",
+) -> dict[str, Any]:
+    """Validate and preview one selected file for console display.
+
+    This helper returns safe metadata and bounded text content only when the file
+    is under an approved Rey root and is not secret-like or binary. It performs no
+    run-log interpretation.
+    """
+    path = _resolve_under_approved_roots(raw_path, approved_roots)
+    blocked = _blocked_display_file(path)
+    stat = path.stat()
+    base = {
+        "name": path.name,
+        "path": str(path),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "actions": ["view", "copy_path", "open_external", "download"],
+    }
+    if blocked:
+        return {
+            **base,
+            "supported": False,
+            "content": "",
+            "truncated": False,
+            "reason": blocked,
+        }
+
+    data = path.read_bytes()
+    if b"\x00" in data[:4096]:
+        return {
+            **base,
+            "supported": False,
+            "content": "",
+            "truncated": False,
+            "reason": "Binary file preview is not supported.",
+        }
+
+    truncated = len(data) > max_bytes
+    content = data[:max_bytes].decode(encoding, errors="replace")
+    return {
+        **base,
+        "supported": True,
+        "content": content,
+        "truncated": truncated,
+        "reason": "",
+    }
+
+
 def pattern_to_glob(file_pattern: str) -> str:
     """
     Convert a configured file pattern with tokens to a filesystem glob.
@@ -365,6 +421,112 @@ def discover_inbox_files(source_cfg: Any) -> list[Path]:
     inbox.mkdir(parents=True, exist_ok=True)
     pattern = getattr(source_cfg, "file_pattern", "*")
     return input_files(inbox, pattern)
+
+
+_RELEVANT_SECRET_PATTERNS = (
+    ".env",
+    "*.env",
+    "*.pem",
+    "*.key",
+    "*secret*",
+    "*credential*",
+    "*credentials*",
+)
+
+_RELEVANT_FILE_ROLES = {
+    "workflow_definition",
+    "pipeline_definition",
+    "app_config",
+    "process_config",
+    "contract",
+    "template",
+    "sql",
+    "mapping",
+    "profile",
+    "reference",
+    "unknown",
+}
+
+
+def list_relevant_files(
+    *,
+    ctx: Any,
+    app_name: str | None = None,
+    workflow_name: str | None = None,
+    pipeline_name: str | None = None,
+    step_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return metadata for static files relevant to a selected Rey object.
+
+    YAML/metadata declares sources, include/exclude filters, and optional role
+    patterns. This helper resolves those declarations under approved Rey roots
+    and returns metadata only; it does not read file contents and does not cover
+    logs, state files, produced files, or run artifacts.
+    """
+    spec = _relevant_file_spec(metadata)
+    sources = _coerce_str_list(spec.get("sources") or spec.get("source"))
+    if not sources:
+        return []
+
+    includes = _coerce_str_list(spec.get("include")) or ["*"]
+    excludes = _coerce_str_list(spec.get("exclude")) + list(_RELEVANT_SECRET_PATTERNS)
+    roles = {
+        str(role): _coerce_str_list(patterns)
+        for role, patterns in _mapping_items(spec.get("roles"))
+    }
+    allowed_roots = _approved_relevant_roots(ctx)
+    rows: dict[str, dict[str, Any]] = {}
+
+    for source_decl in sources:
+        source = _resolve_relevant_source(source_decl, ctx)
+        _require_under_relevant_root(source, allowed_roots)
+        if not source.exists():
+            continue
+
+        candidates = [source] if source.is_file() else visible_files(source)
+        for path in candidates:
+            if not path.is_file():
+                continue
+            resolved = path.expanduser().resolve()
+            _require_under_relevant_root(resolved, allowed_roots)
+            relative_path = _safe_relative_path(resolved, source)
+            if _matches_any(resolved, relative_path, excludes):
+                continue
+            matched = _matched_pattern(resolved, relative_path, includes)
+            if not matched:
+                continue
+
+            role, role_pattern = _relevant_file_role(resolved, relative_path, roles)
+            stat = resolved.stat()
+            rows[str(resolved)] = {
+                "file_id": _relevant_file_id(resolved),
+                "display_name": resolved.name,
+                "path": str(resolved),
+                "relative_path": relative_path,
+                "file_role": role,
+                "source_decl": source_decl,
+                "matched_filter": role_pattern or matched,
+                "app_name": app_name or "",
+                "workflow_name": workflow_name or "",
+                "pipeline_name": pipeline_name or "",
+                "step_id": step_id or "",
+                "exists": True,
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat(),
+                "actions": ["view", "copy_path", "open_external"],
+            }
+
+    return sorted(
+        rows.values(),
+        key=lambda row: (
+            row["file_role"],
+            row["relative_path"].lower(),
+            row["path"].lower(),
+        ),
+    )
 
 
 def move_to_processing(
@@ -431,6 +593,227 @@ def _coerce_glob_patterns(pattern: str | Iterable[str]) -> list[str]:
         if item and item.strip()
     }
     return sorted(glob_patterns or {"*"})
+
+
+def _resolve_under_approved_roots(
+    raw_path: Path | str,
+    approved_roots: Iterable[Path | str],
+) -> Path:
+    """Resolve a file and require it to live under one approved root."""
+    path = Path(raw_path).expanduser().resolve()
+    roots = [Path(root).expanduser().resolve() for root in approved_roots if root]
+    if not roots:
+        raise ValueError("No approved roots configured for file preview.")
+    for root in roots:
+        try:
+            path.relative_to(root)
+            break
+        except ValueError:
+            continue
+    else:
+        raise ValueError(f"Path is outside approved roots: {path}")
+
+    if not path.exists():
+        raise FileNotFoundError(f"Path does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"Path is not a file: {path}")
+    return path
+
+
+def _blocked_display_file(path: Path) -> str:
+    """Return a block reason for secret-like files, or empty when allowed."""
+    lowered = path.name.lower()
+    for pattern in _RELEVANT_SECRET_PATTERNS:
+        if fnmatch(lowered, pattern.lower()):
+            return "Sensitive file preview is blocked."
+    return ""
+
+
+def _relevant_file_spec(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the relevant_files mapping from metadata, if present."""
+    if not isinstance(metadata, dict):
+        return {}
+    nested = metadata.get("relevant_files")
+    if isinstance(nested, dict):
+        return nested
+    if any(key in metadata for key in ("sources", "source", "include", "exclude", "roles")):
+        return metadata
+    return {}
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Normalize YAML scalar/list values to non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, dict)):
+        values = [str(item) for item in value]
+    else:
+        values = [str(value)]
+    return [item.strip() for item in values if item and item.strip()]
+
+
+def _mapping_items(value: Any) -> list[tuple[str, Any]]:
+    """Return mapping items for plain dicts and Namespace-like objects."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return list(value.items())
+    if hasattr(value, "__dict__"):
+        return list(vars(value).items())
+    return []
+
+
+def _resolve_relevant_source(source_decl: str, ctx: Any) -> Path:
+    """Resolve one relevant-file source declaration against ctx path tokens."""
+    rendered = str(source_decl)
+    tokens = {
+        "config": _ctx_path_value(ctx, "configs"),
+        "configs": _ctx_path_value(ctx, "configs"),
+        "root": _ctx_path_value(ctx, "root"),
+        "data": _ctx_path_value(ctx, "data"),
+        "logs": _ctx_path_value(ctx, "logs"),
+        "contracts": _ctx_path_value(ctx, "contracts")
+        or _ctx_path_value(ctx, "llmcontracts"),
+    }
+    for name, value in _ctx_path_map(ctx).items():
+        tokens.setdefault(name, value)
+    for name, value in tokens.items():
+        if value:
+            rendered = rendered.replace("{" + name + "}", str(value))
+    return Path(rendered).expanduser().resolve()
+
+
+def _ctx_path_value(ctx: Any, name: str) -> Path | None:
+    """Resolve a named path from ctx.paths or direct ctx attributes."""
+    paths = getattr(ctx, "paths", None)
+    if paths is not None and hasattr(paths, "resolve"):
+        try:
+            value = paths.resolve(name)
+            if value:
+                return Path(value).expanduser().resolve()
+        except Exception:
+            pass
+    if paths is not None and hasattr(paths, name):
+        try:
+            value = getattr(paths, name)
+            if value:
+                return Path(value).expanduser().resolve()
+        except Exception:
+            pass
+    if hasattr(ctx, name):
+        value = getattr(ctx, name)
+        if value:
+            return Path(value).expanduser().resolve()
+    return None
+
+
+def _ctx_path_map(ctx: Any) -> dict[str, Path]:
+    """Return resolvable ctx path names for token substitution."""
+    paths = getattr(ctx, "paths", None)
+    if paths is None:
+        return {}
+
+    raw = getattr(paths, "_paths", None)
+    if isinstance(raw, dict):
+        return {
+            str(name): Path(value).expanduser().resolve()
+            for name, value in raw.items()
+            if value
+        }
+
+    result: dict[str, Path] = {}
+    for name in dir(paths):
+        if name.startswith("_") or name == "resolve":
+            continue
+        try:
+            value = getattr(paths, name)
+        except Exception:
+            continue
+        if isinstance(value, (str, Path)):
+            result[name] = Path(value).expanduser().resolve()
+    return result
+
+
+def _approved_relevant_roots(ctx: Any) -> list[Path]:
+    """Return roots under which relevant-file discovery is allowed."""
+    roots: list[Path] = []
+    for path in _ctx_path_map(ctx).values():
+        _append_unique_root(roots, path)
+    for name in ("root", "configs", "data", "contracts", "llmcontracts"):
+        path = _ctx_path_value(ctx, name)
+        if path:
+            _append_unique_root(roots, path)
+    installations_path = getattr(ctx, "installations_path", None)
+    if installations_path:
+        root = Path(installations_path).expanduser().resolve()
+        _append_unique_root(roots, root)
+        _append_unique_root(roots, root.parent)
+    return roots
+
+
+def _append_unique_root(roots: list[Path], path: Path) -> None:
+    """Append a resolved root path once."""
+    resolved = path.expanduser().resolve()
+    if resolved not in roots:
+        roots.append(resolved)
+
+
+def _require_under_relevant_root(path: Path, allowed_roots: list[Path]) -> None:
+    """Fail closed when a relevant-file path is outside approved roots."""
+    if not allowed_roots:
+        raise ValueError("No approved roots configured for relevant-file discovery.")
+    resolved = path.expanduser().resolve()
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root)
+            return
+        except ValueError:
+            continue
+    raise ValueError(f"Relevant file source is outside approved roots: {resolved}")
+
+
+def _safe_relative_path(path: Path, source: Path) -> str:
+    """Return a deterministic relative path for matching/display."""
+    base = source if source.is_dir() else source.parent
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _matched_pattern(path: Path, relative_path: str, patterns: list[str]) -> str:
+    """Return the first matching glob pattern, or an empty string."""
+    for pattern in patterns:
+        glob_pattern = pattern_to_glob(pattern)
+        if fnmatch(path.name, glob_pattern) or fnmatch(relative_path, glob_pattern):
+            return pattern
+    return ""
+
+
+def _matches_any(path: Path, relative_path: str, patterns: list[str]) -> bool:
+    """Return true when a file matches any pattern."""
+    return bool(_matched_pattern(path, relative_path, patterns))
+
+
+def _relevant_file_role(
+    path: Path,
+    relative_path: str,
+    roles: dict[str, list[str]],
+) -> tuple[str, str]:
+    """Assign a relevant-file role from configured role patterns."""
+    for role, patterns in sorted(roles.items()):
+        matched = _matched_pattern(path, relative_path, patterns)
+        if matched:
+            normalized = role if role in _RELEVANT_FILE_ROLES else "unknown"
+            return normalized, matched
+    return "unknown", ""
+
+
+def _relevant_file_id(path: Path) -> str:
+    """Return a stable non-content identifier for one relevant file path."""
+    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
 def converted_output_path(
