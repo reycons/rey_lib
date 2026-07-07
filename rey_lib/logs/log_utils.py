@@ -343,7 +343,10 @@ def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
 # concurrent/nested runs are out of scope.
 # ---------------------------------------------------------------------------
 
-_CURRENT_RUN: Any = None
+# Single-slot holder for the process-scoped current run. A mutable module-level
+# container (rather than a rebound module global) keeps the binding writable from
+# bind_run/clear_run without the ``global`` keyword.
+_CURRENT_RUN: dict[str, Any] = {"run": None}
 
 
 def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
@@ -353,29 +356,28 @@ def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
     Reads run_log_path / run_id / run_timestamp from ``ctx`` when given, else from
     the keyword arguments. Binding without a durable run_log_path is a no-op.
     """
-    global _CURRENT_RUN
     if ctx is not None:
         run_log_path = str(getattr(ctx, "run_log_path", "") or run_log_path)
         run_id = str(getattr(ctx, "run_id", "") or run_id)
         run_timestamp = str(getattr(ctx, "run_timestamp", "") or run_timestamp)
     if not run_log_path:
         return
-    _CURRENT_RUN = SimpleNamespace(
+    _CURRENT_RUN["run"] = SimpleNamespace(
         run_id=run_id, run_timestamp=run_timestamp, run_log_path=str(run_log_path),
     )
 
 
 def clear_run() -> None:
     """Clear the current run (recording becomes a no-op until the next bind)."""
-    global _CURRENT_RUN
-    _CURRENT_RUN = None
+    _CURRENT_RUN["run"] = None
 
 
 def current_run() -> dict[str, str] | None:
     """Return the bound run's {run_log_path, run_id}, or None if unbound."""
-    if _CURRENT_RUN is None:
+    run = _CURRENT_RUN["run"]
+    if run is None:
         return None
-    return {"run_log_path": _CURRENT_RUN.run_log_path, "run_id": _CURRENT_RUN.run_id}
+    return {"run_log_path": run.run_log_path, "run_id": run.run_id}
 
 
 def record_file_operation(operation: str, *, source_path: str = "",
@@ -386,7 +388,7 @@ def record_file_operation(operation: str, *, source_path: str = "",
     Called by file_utils after a file operation; emission is fail-safe and never
     raises into the caller (a logging failure must not break a file operation).
     """
-    run = _CURRENT_RUN
+    run = _CURRENT_RUN["run"]
     if run is None:
         return
     try:
