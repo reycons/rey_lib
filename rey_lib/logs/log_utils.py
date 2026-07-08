@@ -95,6 +95,20 @@ def resolve_run_identity(ctx: Any) -> None:
         ctx.run_started_at = started.isoformat()
 
 
+def _execution_name(ctx: Any) -> str:
+    """Return the execution-owned name for the durable run log filename."""
+    for key in ("pipeline_name", "workflow_name", "owner_app_name", "app_name", "name"):
+        value = str(getattr(ctx, key, "") or "").strip()
+        if value:
+            return value
+    return "app"
+
+
+def _execution_log_filename(ctx: Any) -> str:
+    """Return the standardized execution log filename for one run."""
+    return f"{_execution_name(ctx)}.{ctx.run_timestamp}.jsonl"
+
+
 # ---------------------------------------------------------------------------
 # Append-only typed run log (SGC_Rey_Workflow_Pipeline_Automatic_Control_Batch_Logging)
 # ---------------------------------------------------------------------------
@@ -142,18 +156,19 @@ def open_run_log(ctx: Any) -> Path:
     """
     Establish and return the append-only run-log path for this execution.
 
-    The run log is a run-created artifact named ``run_log.<run_timestamp>.jsonl``
-    (SGC_Rey_Run_ID_Standard) beside the configured log directory. The path is
-    resolved once and cached on ``ctx.run_log_path``; run identity is established
-    first so ``run_id``/``run_timestamp`` exist before the first record. The logging
-    layer names and writes its own run log (it cannot depend on files/file_utils).
+    The run log is a run-created artifact named
+    ``{execution_name}.<run_timestamp>.jsonl`` beside the configured log directory.
+    The path is resolved once and cached on ``ctx.run_log_path``; run identity is
+    established first so ``run_id``/``run_timestamp`` exist before the first
+    record. The logging layer names and writes its own run log (it cannot depend
+    on files/file_utils).
 
     Parameters
     ----------
     ctx : Any
-        Application context. Must have ``log_file`` set (by setup_logging) so the
-        run-log directory is known; execution should not proceed without a durable
-        log path.
+        Application context. Must have either ``run_log_dir`` set explicitly or
+        ``log_file`` set (by setup_logging) so the run-log directory is known;
+        execution should not proceed without a durable log path.
 
     Returns
     -------
@@ -170,13 +185,18 @@ def open_run_log(ctx: Any) -> Path:
         return Path(existing)
 
     resolve_run_identity(ctx)
+    run_log_dir = getattr(ctx, "run_log_dir", None)
     log_file = getattr(ctx, "log_file", None)
-    if not log_file:
+    if run_log_dir:
+        directory = Path(run_log_dir)
+    elif log_file:
+        directory = Path(log_file).parent
+    else:
         raise ValueError(
-            "Cannot open run log: no durable log path (ctx.log_file). Configure "
-            "logging before starting a run."
+            "Cannot open run log: no durable log path (ctx.run_log_dir or "
+            "ctx.log_file). Configure logging before starting a run."
         )
-    path = Path(log_file).parent / f"run_log.{ctx.run_timestamp}.jsonl"
+    path = directory / _execution_log_filename(ctx)
     ctx.run_log_path = str(path)
     return path
 
@@ -1323,9 +1343,9 @@ def run_summary(path: Path | str) -> dict[str, Any]:
 def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any]]:
     """Discover recent runs under a log directory, newest first.
 
-    Scans ``run_log.<run_timestamp>.jsonl`` files in *log_dir* and returns one
-    lightweight summary per run (see :func:`run_summary`) — never raw log records.
-    This is the run-discovery authority for the console backend
+    Scans JSONL files in *log_dir*, keeps only typed execution logs, and returns
+    one lightweight summary per run (see :func:`run_summary`) — never raw log
+    records. This is the run-discovery authority for the console backend
     (SGC_Rey_Run_Backend_Helper_API); the console must not scan directories itself.
 
     Parameters
@@ -1343,7 +1363,25 @@ def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any
     directory = Path(log_dir).expanduser()
     if not directory.is_dir():
         return []
-    summaries = [run_summary(path) for path in directory.glob("run_log.*.jsonl")]
+    summaries: list[dict[str, Any]] = []
+    for path in directory.glob("*.jsonl"):
+        payload = read_run_log_sections(path)
+        if not _is_typed_run_log(payload["records"]):
+            continue
+        identity = _run_log_identity(Path(payload["path"]), payload["records"], payload["sections"])
+        summaries.append({
+            "run_id": identity["run_id"],
+            "run_timestamp": identity["run_timestamp"],
+            "started_at": identity["run_started_at"],
+            "completed_at": identity["run_completed_at"],
+            "status": identity["status"],
+            "warning_count": identity["warning_count"],
+            "error_count": identity["error_count"],
+            "app": identity["app"],
+            "workflow": identity["workflow"],
+            "pipeline": identity["pipeline"],
+            "run_log_path": identity["log_path"],
+        })
     summaries.sort(key=lambda run: str(run.get("run_timestamp") or ""), reverse=True)
     return summaries[:limit] if limit else summaries
 
@@ -1567,6 +1605,25 @@ def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[
     }
 
 
+def _is_typed_run_log(records: list[dict[str, Any]]) -> bool:
+    """Return True when parsed records match the shared run-log schema."""
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_type = str(record.get("record_type") or "").upper()
+        if not record_type:
+            continue
+        if not (record.get("run_id") or record.get("run_timestamp")):
+            continue
+        if (
+            record_type in EXECUTION_RECORD_TYPES
+            or record_type in RUN_RESULT_RECORD_TYPES
+            or record_type in FILES_RECORD_SUBGROUP
+        ):
+            return True
+    return False
+
+
 def _run_log_tree(run: dict[str, Any], sections: dict[str, Any]) -> dict[str, Any]:
     run_key = run.get("run_id") or run.get("run_timestamp") or run.get("log_display_name")
     files = sections["files"]
@@ -1624,7 +1681,7 @@ def _file_tree_node(file: dict[str, Any], kind: str) -> dict[str, Any]:
 
 
 def _timestamp_from_run_log_name(path: Path) -> str:
-    match = re.search(r"run_log\.(\d{8}_\d{6})", path.name)
+    match = re.search(r"\.(\d{8}_\d{6})\.jsonl$", path.name)
     return match.group(1) if match else ""
 
 

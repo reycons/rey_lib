@@ -46,10 +46,10 @@ def _read(path: Path) -> list[dict]:
 
 
 def test_run_log_named_with_run_timestamp(tmp_path: Path) -> None:
-    """The run log is run_log.<run_timestamp>.jsonl in the log directory."""
+    """The run log is {execution_name}.<run_timestamp>.jsonl in the log directory."""
     ctx = _ctx(tmp_path)
     path = open_run_log(ctx)
-    assert path.name == f"run_log.{ctx.run_timestamp}.jsonl"
+    assert path.name == f"transform_load.{ctx.run_timestamp}.jsonl"
     assert path.parent == tmp_path
 
 
@@ -134,7 +134,7 @@ def test_discover_runs_lists_newest_first_without_raw_data(tmp_path: Path) -> No
     from rey_lib.logs import discover_runs
 
     for ts, status in [("20260706_090000", "success"), ("20260706_100000", "failed")]:
-        (tmp_path / f"run_log.{ts}.jsonl").write_text(
+        (tmp_path / f"daily.{ts}.jsonl").write_text(
             "\n".join(json.dumps(record) for record in [
                 {"record_type": "RUN_START", "run_id": f"r-{ts}", "run_timestamp": ts,
                  "timestamp": "2026-07-06T00:00:00+00:00", "app": "rey_loader"},
@@ -152,7 +152,7 @@ def test_discover_runs_lists_newest_first_without_raw_data(tmp_path: Path) -> No
     assert newest["status"] == "failed"
     assert newest["warning_count"] == 1
     assert newest["error_count"] == 0
-    assert newest["run_log_path"].endswith("run_log.20260706_100000.jsonl")
+    assert newest["run_log_path"].endswith("daily.20260706_100000.jsonl")
     # A discovery summary carries no raw log data.
     assert "records" not in newest
     assert "sections" not in newest
@@ -234,7 +234,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
 
 def test_run_log_sections_project_execution_files_and_results(tmp_path: Path) -> None:
     """Run logs are projected into execution/files/results without exposing file content."""
-    log_path = tmp_path / "run_log.20260706_091845.jsonl"
+    log_path = tmp_path / "postgres_version_lint_comment.20260706_091845.jsonl"
     records = [
         {
             "record_type": "RUN_START",
@@ -291,7 +291,7 @@ def test_run_log_sections_project_execution_files_and_results(tmp_path: Path) ->
 
 def test_run_log_projection_ignores_moved_or_read_artifact_references(tmp_path: Path) -> None:
     """Only created/generated/written/exported/reported references become artifact files."""
-    log_path = tmp_path / "run_log.20260706_091845.jsonl"
+    log_path = tmp_path / "transform_load.20260706_091845.jsonl"
     records = [
         {"record_type": "RUN_START", "run_id": "run-1", "run_timestamp": "20260706_091845"},
         {"record_type": "ARTIFACT_REFERENCE", "event": "read", "artifact_path": str(tmp_path / "input.csv")},

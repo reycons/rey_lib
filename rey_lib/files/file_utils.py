@@ -859,7 +859,7 @@ def run_artifact_path(
     This is the single, centralized place run-artifact filenames are built. Every
     run-created artifact embeds the run timestamp immediately before the extension,
     following the universal pattern ``<artifact_name>.<run_timestamp>.<extension>``
-    (e.g. ``run_log.20260706_091845.jsonl``). The append-only run log is not an
+    (e.g. ``postgres_version_lint_comment.20260706_091845.jsonl``). The append-only run log is not an
     exception to this rule.
 
     Collision handling: a previous run is never silently overwritten. If a file with
@@ -871,7 +871,7 @@ def run_artifact_path(
     base_dir : Path | str
         Directory the artifact is written to (created by the caller).
     artifact_name : str
-        Base artifact name, e.g. ``"run_log"`` or ``"rey_loader.run_log"``.
+        Base artifact name, e.g. ``"postgres_version_lint_comment"`` or ``"llm_package"``.
     run_timestamp : str
         Filename-safe run timestamp (``YYYYMMDD_HHMMSS``) from runtime context.
     extension : str

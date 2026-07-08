@@ -171,6 +171,7 @@ def run_workflow(
     # RUN_SUMMARY through the log_utils authority. Record emission is fail-safe and
     # never alters workflow behavior. run_id is established by the logging layer; all
     # records share it and RUN_START carries the workflow name.
+    ctx.workflow_name = name
     log_run_start(ctx, workflow=name, apply=apply)
     # Bind the current run so file_utils records file operations to this run log
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
