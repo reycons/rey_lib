@@ -1306,6 +1306,7 @@ def copy_file(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (dest_name if dest_name else src.name)
     shutil.copyfile(src, dest)
+    record_file_operation("copy", source_path=str(src), target_path=str(dest))
     _logger.debug("Copied: %s → %s", src, dest)
     if state_ctx is not None:
         try:

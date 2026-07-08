@@ -56,6 +56,22 @@ def test_movement_events_update_current_path() -> None:
     assert artifact["current_path"] == "/done/a.csv"   # final location via lineage
 
 
+def test_destination_path_updates_current_path() -> None:
+    """Lineage can use destination_path when target_path is not present."""
+    records = [
+        _artifact("/inbox/a.csv", producer="loader"),
+        {
+            "record_type": "FILE_OPERATION",
+            "operation": "archive",
+            "source_path": "/inbox/a.csv",
+            "destination_path": "/archive/a.csv",
+            "status": "success",
+        },
+    ]
+    artifact = normalize_artifacts(records)[0]
+    assert artifact["current_path"] == "/archive/a.csv"
+
+
 def test_related_records_match_by_path_and_correlation_id() -> None:
     """Related records are grounded by path and correlation id, with source lines."""
     records = [
@@ -153,3 +169,25 @@ def test_log_artifact_reference_tags_producer_fields(tmp_path: Path) -> None:
     artifact = normalize_artifacts([record])[0]
     assert artifact["producer"] == "redactor"
     assert artifact["artifact_type"] == "redacted_file"
+
+
+def test_log_artifact_reference_records_direct_file_metadata(tmp_path: Path) -> None:
+    """The shared artifact helper records direct metadata for the referenced file."""
+    from types import SimpleNamespace
+
+    artifact_path = tmp_path / "report.json"
+    artifact_path.write_text('{"ok": true}\n', encoding="utf-8")
+    run_log = tmp_path / "run_log.20260708_000000.jsonl"
+    ctx = SimpleNamespace(run_log_path=str(run_log), run_id="r1",
+                          run_timestamp="20260708_000000")
+
+    log_artifact_reference(ctx, str(artifact_path), role="report", event="generated")
+
+    record = next(json.loads(line) for line in run_log.read_text().splitlines()
+                  if '"ARTIFACT_REFERENCE"' in line)
+    assert record["exists"] is True
+    assert record["size_bytes"] == artifact_path.stat().st_size
+    assert record["modified_at"]
+    artifact = normalize_artifacts([record])[0]
+    assert artifact["exists"] is True
+    assert artifact["size_bytes"] == artifact_path.stat().st_size

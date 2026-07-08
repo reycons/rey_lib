@@ -64,6 +64,7 @@ __all__ = [
     "log_validation_result",
     "log_artifact_reference",
     "log_artifact_manifest",
+    "validate_run_log_completeness",
     "bind_run",
     "clear_run",
     "current_run",
@@ -678,11 +679,17 @@ def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
     rollback/recovery analysis derived from the append-only log rather than state
     files.
     """
+    destination_path = str(fields.pop("destination_path", "") or target_path)
+    current_path = str(fields.pop("current_path", "") or target_path or source_path)
+    file_metadata = _file_evidence_metadata(current_path)
     payload: dict[str, Any] = {
         "operation": operation,
         "source_path": str(source_path),
         "target_path": str(target_path),
+        "destination_path": destination_path,
+        "current_path": current_path,
         "status": status,
+        **file_metadata,
         **fields,
     }
     if step_id:
@@ -821,6 +828,124 @@ def record_file_operation(operation: str, *, source_path: str = "",
         )
 
 
+def validate_run_log_completeness(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return shared run-log completeness findings without mutating records.
+
+    This validator is intentionally evidence-based. It reports sparse or
+    contradictory lifecycle records so consumers can reject or flag incomplete
+    runs without inventing missing facts.
+    """
+    issues: list[dict[str, Any]] = []
+    record_types = {
+        str(record.get("record_type") or "").upper()
+        for record in records
+    }
+
+    if "RUN_START" not in record_types:
+        issues.append({
+            "code": "missing_run_start",
+            "severity": "error",
+            "message": "Run log has no RUN_START record.",
+        })
+    if "RUN_COMPLETE" not in record_types:
+        issues.append({
+            "code": "missing_run_complete",
+            "severity": "error",
+            "message": "Run log has no RUN_COMPLETE record.",
+        })
+
+    error_ids = {
+        str(record.get("error_id") or "")
+        for record in records
+        if str(record.get("record_type") or "").upper() == "ERROR"
+    }
+    failure_ids = {
+        str(record.get("failure_record_id") or "")
+        for record in records
+        if str(record.get("record_type") or "").upper() == "STEP_FAILURE"
+    }
+
+    active_step: dict[str, Any] | None = None
+    for index, record in enumerate(records, start=1):
+        record_type = str(record.get("record_type") or "").upper()
+        if record_type == "STEP_START":
+            active_step = record
+        if record_type == "RUN_COMPLETE" and str(record.get("status") or "").lower() == "failed":
+            evidence_id = str(record.get("failure_record_id") or "")
+            has_failure_fields = all(
+                record.get(key)
+                for key in ("failed_step_id", "failed_step_name", "failure_message")
+            )
+            has_referenced_evidence = bool(
+                evidence_id and (evidence_id in error_ids or evidence_id in failure_ids)
+            )
+            if not has_failure_fields or not has_referenced_evidence:
+                issues.append({
+                    "code": "failed_run_missing_failure_evidence",
+                    "severity": "error",
+                    "line": index,
+                    "message": "RUN_COMPLETE status=failed lacks structured failure evidence.",
+                })
+        if record_type == "FILE_OPERATION" and _is_step_scoped_file_operation(record, active_step):
+            if not record.get("step_id"):
+                issues.append({
+                    "code": "step_file_operation_missing_step_id",
+                    "severity": "error",
+                    "line": index,
+                    "message": "Step-scoped FILE_OPERATION has a blank step_id.",
+                })
+            if not record.get("step_name"):
+                issues.append({
+                    "code": "step_file_operation_missing_step_name",
+                    "severity": "warning",
+                    "line": index,
+                    "message": "Step-scoped FILE_OPERATION has a blank step_name.",
+                })
+        if record_type in ("STEP_END", "STEP_FAILURE"):
+            active_step = None
+
+    return {
+        "valid": not any(issue["severity"] == "error" for issue in issues),
+        "issue_count": len(issues),
+        "issues": issues,
+    }
+
+
+def _is_step_scoped_file_operation(
+    record: dict[str, Any],
+    active_step: dict[str, Any] | None = None,
+) -> bool:
+    """Return whether a file operation appears to have happened inside a step."""
+    if active_step is not None:
+        return True
+    return any(
+        record.get(key)
+        for key in ("step_id", "step_name", "step_sequence", "correlation_id")
+    )
+
+
+def _file_evidence_metadata(path: str) -> dict[str, Any]:
+    """Return direct metadata for a referenced path without reading content."""
+    if not path:
+        return {}
+    try:
+        file_path = Path(path).expanduser()
+        if not file_path.exists():
+            return {"exists": False}
+        if not file_path.is_file():
+            return {"exists": True}
+        stat = file_path.stat()
+        return {
+            "exists": True,
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(
+                stat.st_mtime, timezone.utc
+            ).isoformat(),
+        }
+    except OSError:
+        return {}
+
+
 def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
                            event: str = "created", created_by_step: str = "",
                            display_name: str = "", producer: str = "",
@@ -851,11 +976,12 @@ def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
         extra["viewer_type"] = viewer_type
     if safe_to_preview is not None:
         extra["safe_to_preview"] = bool(safe_to_preview)
+    file_metadata = _file_evidence_metadata(str(path))
     log_run_record(
         ctx, "ARTIFACT_REFERENCE",
         path=str(path), display_name=display_name or Path(str(path)).name,
         artifact_role=role, event=event, created_by_step=created_by_step,
-        **extra, **fields,
+        **file_metadata, **extra, **fields,
     )
 
 
@@ -1424,7 +1550,10 @@ _ARTIFACT_IGNORE_EVENTS = {
 # ---------------------------------------------------------------------------
 
 # FILE_OPERATION operations that relocate a file (source -> target lineage).
-_MOVE_OPERATIONS = {"move", "moved", "copy", "copied", "rename", "renamed"}
+_MOVE_OPERATIONS = {
+    "move", "moved", "copy", "copied", "rename", "renamed",
+    "archive", "archived", "redact", "redacted",
+}
 
 # App name -> stable producer name, used only when a record carries no explicit
 # ``producer``. Unknown apps fall back to "unknown".
@@ -1473,7 +1602,8 @@ def _artifact_lineage(records: list[dict[str, Any]]) -> dict[str, str]:
         if str(record.get("operation") or "").lower() not in _MOVE_OPERATIONS:
             continue
         source = str(record.get("source_path") or "")
-        target = str(record.get("target_path") or "")
+        target = str(record.get("target_path") or record.get("destination_path")
+                     or record.get("current_path") or "")
         if source and target:
             moves[source] = target
     return moves
@@ -1533,7 +1663,10 @@ def _artifact_source_records(records: list[dict[str, Any]]):
 
 def _merge_artifact(into: dict[str, Any], other: dict[str, Any]) -> None:
     """Merge a duplicate artifact for the same file into an existing entry."""
-    for field in ("source_path", "artifact_type", "producer", "metadata", "id"):
+    for field in (
+        "source_path", "artifact_type", "producer", "metadata", "id",
+        "exists", "size_bytes", "modified_at", "hash", "sha256",
+    ):
         if not into.get(field) and other.get(field):
             into[field] = other[field]
     if other.get("safe_to_preview") is False:
@@ -1616,6 +1749,9 @@ def normalize_artifacts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "related_source_lines": lines,
             "metadata": _redact_secret_metadata(record.get("metadata") or {}),
         }
+        for field in ("exists", "size_bytes", "modified_at", "hash", "sha256"):
+            if field in record:
+                artifact[field] = record[field]
         key = current or path
         if key in by_key:
             _merge_artifact(by_key[key], artifact)
@@ -1922,8 +2058,13 @@ def _file_operation_entry(record: dict[str, Any]) -> dict[str, Any]:
         "operation": str(record.get("operation") or ""),
         "source_path": str(record.get("source_path") or ""),
         "target_path": str(record.get("target_path") or ""),
+        "destination_path": str(record.get("destination_path") or ""),
+        "current_path": str(record.get("current_path") or ""),
         "status": str(record.get("status") or ""),
         "step_id": str(record.get("step_id") or ""),
+        "exists": record.get("exists"),
+        "size_bytes": record.get("size_bytes"),
+        "modified_at": str(record.get("modified_at") or ""),
         "actions": ["view", "copy_path", "open_external"],
     }
 
@@ -1948,7 +2089,8 @@ def _manifest_files(record: dict[str, Any]) -> list[dict[str, Any]]:
             }
             for key in (
                 "config_name", "config_type", "source", "exists", "hash",
-                "config_hash", "safe_to_preview",
+                "config_hash", "safe_to_preview", "size_bytes", "modified_at",
+                "sha256",
             ):
                 if key in item:
                     entry[key] = item[key]
@@ -1971,7 +2113,8 @@ def _file_entry_from_record(record: dict[str, Any], default_role: str) -> dict[s
     }
     for key in (
         "config_name", "config_type", "source", "exists", "hash",
-        "config_hash", "safe_to_preview",
+        "config_hash", "safe_to_preview", "size_bytes", "modified_at",
+        "sha256",
     ):
         if key in record:
             entry[key] = record[key]

@@ -693,6 +693,8 @@ def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
     ops = sections["files"]["file_operations"]
     assert ops["count"] == 1
     assert ops["files"][0]["operation"] == "move"
+    assert ops["files"][0]["destination_path"].endswith("processing/file.csv")
+    assert ops["files"][0]["current_path"].endswith("processing/file.csv")
     # The move is execution history, not an artifact.
     assert [f["display_name"] for f in sections["files"]["artifacts"]["files"]] == ["report.json"]
     # FILE_OPERATION also remains in the execution audit trail.

@@ -62,6 +62,7 @@ from rey_lib.logs.log_utils import (
     log_step_start,
     log_validation_result,
     open_run_log,
+    validate_run_log_completeness,
 )
 
 __all__ = [
@@ -108,6 +109,7 @@ __all__ = [
     "log_config_file_reference",
     "log_config_file_manifest",
     "log_file_operation",
+    "validate_run_log_completeness",
     "bind_run",
     "clear_run",
     "current_run",

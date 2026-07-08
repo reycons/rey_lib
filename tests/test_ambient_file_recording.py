@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from rey_lib.files.file_utils import (
+    copy_file,
     delete_file,
     move_file,
     read_bytes_file,
@@ -68,6 +69,20 @@ def test_move_records_file_operation(bound_run: Path, tmp_path: Path) -> None:
     op = next(o for o in _ops(bound_run) if o["operation"] == "move")
     assert op["source_path"].endswith("in.csv")
     assert op["target_path"].endswith("done/in.csv")
+    assert op["destination_path"].endswith("done/in.csv")
+    assert op["current_path"].endswith("done/in.csv")
+
+
+def test_copy_records_file_operation_lineage(bound_run: Path, tmp_path: Path) -> None:
+    """copy_file records a FILE_OPERATION (copy) with source and target lineage."""
+    src = tmp_path / "source.csv"
+    src.write_text("x\n", encoding="utf-8")
+    copy_file(src, tmp_path / "copied", "target.csv")
+    op = next(o for o in _ops(bound_run) if o["operation"] == "copy")
+    assert op["source_path"].endswith("source.csv")
+    assert op["target_path"].endswith("copied/target.csv")
+    assert op["destination_path"].endswith("copied/target.csv")
+    assert op["current_path"].endswith("copied/target.csv")
 
 
 def test_file_operation_inherits_bound_step_context(bound_run: Path, tmp_path: Path) -> None:
