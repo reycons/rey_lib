@@ -420,6 +420,90 @@ def test_discover_runs_missing_or_empty_dir_yields_nothing(tmp_path: Path) -> No
     assert discover_runs(tmp_path) == []
 
 
+def _write_run_log(
+    path: Path, run_timestamp: str, metadata: dict[str, str] | None = None,
+) -> Path:
+    """Write a minimal typed run log (RUN_START + RUN_COMPLETE) and return its path."""
+    run_id = f"r-{run_timestamp}"
+    start = {
+        "record_type": "RUN_START", "run_id": run_id, "run_timestamp": run_timestamp,
+        "timestamp": "2026-07-07T00:00:00+00:00", **(metadata or {}),
+    }
+    complete = {
+        "record_type": "RUN_COMPLETE", "run_id": run_id, "run_timestamp": run_timestamp,
+        "timestamp": "2026-07-07T00:05:00+00:00", "status": "success",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(record) for record in (start, complete)),
+                    encoding="utf-8")
+    return path
+
+
+def test_discover_runs_finds_jsonl_and_log_by_extension(tmp_path: Path) -> None:
+    """Discovery finds *.jsonl and *.log run logs by extension, not by filename prefix."""
+    from rey_lib.logs import discover_runs
+
+    _write_run_log(tmp_path / "trade_analyzer.20260707_090000.jsonl", "20260707_090000")
+    _write_run_log(tmp_path / "redact_trade_inbox.20260707_100000.log", "20260707_100000")
+
+    names = {Path(run["run_log_path"]).name for run in discover_runs(tmp_path)}
+    assert names == {
+        "trade_analyzer.20260707_090000.jsonl",
+        "redact_trade_inbox.20260707_100000.log",
+    }
+
+
+def test_discover_runs_includes_legacy_run_log_prefixed_files(tmp_path: Path) -> None:
+    """Legacy run_log* files are discovered as ordinary *.jsonl/*.log files."""
+    from rey_lib.logs import discover_runs
+
+    _write_run_log(tmp_path / "run_log.20260707_120000.jsonl", "20260707_120000")
+
+    runs = discover_runs(tmp_path)
+    assert [Path(run["run_log_path"]).name for run in runs] == ["run_log.20260707_120000.jsonl"]
+
+
+def test_discover_runs_searches_recursively(tmp_path: Path) -> None:
+    """Discovery finds run logs nested beneath the scope's log folder."""
+    from rey_lib.logs import discover_runs
+
+    _write_run_log(tmp_path / "top.20260707_080000.jsonl", "20260707_080000")
+    _write_run_log(tmp_path / "nested" / "deep.20260707_130000.jsonl", "20260707_130000")
+
+    timestamps = {run["run_timestamp"] for run in discover_runs(tmp_path)}
+    assert timestamps == {"20260707_080000", "20260707_130000"}
+
+
+def test_discover_runs_skips_unparseable_and_untyped_logs(tmp_path: Path) -> None:
+    """Files that cannot prove they are typed run logs never appear in discovery."""
+    from rey_lib.logs import discover_runs
+
+    _write_run_log(tmp_path / "valid.20260707_140000.jsonl", "20260707_140000")
+    (tmp_path / "plain.20260707_150000.log").write_text("not json at all\n", encoding="utf-8")
+    (tmp_path / "untyped.20260707_160000.jsonl").write_text(
+        json.dumps({"note": "no record_type or run identity"}) + "\n", encoding="utf-8",
+    )
+
+    timestamps = [run["run_timestamp"] for run in discover_runs(tmp_path)]
+    assert timestamps == ["20260707_140000"]
+
+
+def test_discover_runs_derives_ownership_from_records_not_filename(tmp_path: Path) -> None:
+    """Ownership/identity come from parsed log metadata, never the filename or path."""
+    from rey_lib.logs import discover_runs
+
+    _write_run_log(
+        tmp_path / "misleading_name.20260707_170000.log", "20260707_170000",
+        metadata={"app": "pipeline_coordinator", "pipeline": "trade_analyzer_generate_apply_ddl"},
+    )
+
+    run = discover_runs(tmp_path)[0]
+    assert run["app"] == "pipeline_coordinator"
+    assert run["pipeline"] == "trade_analyzer_generate_apply_ddl"
+    assert run["workflow"] == ""
+    assert run["run_id"] == "r-20260707_170000"
+
+
 def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
     """get_run_section returns one section; get_run_file_reference resolves a run file."""
     from rey_lib.logs import get_run_file_reference, get_run_section

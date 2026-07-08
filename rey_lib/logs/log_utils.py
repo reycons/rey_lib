@@ -1716,17 +1716,24 @@ def run_summary(path: Path | str) -> dict[str, Any]:
 
 
 def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any]]:
-    """Discover recent runs under a log directory, newest first.
+    """Discover recent runs under a log directory tree, newest first.
 
-    Scans JSONL files in *log_dir*, keeps only typed execution logs, and returns
-    one lightweight summary per run (see :func:`run_summary`) — never raw log
-    records. This is the run-discovery authority for the console backend
-    (SGC_Rey_Run_Backend_Helper_API); the console must not scan directories itself.
+    Discovers run logs by file extension — ``*.jsonl`` and ``*.log`` — searched
+    recursively beneath *log_dir*, so runs nested under a scope's log folder are
+    found regardless of filename (there is no ``run_log*`` prefix convention:
+    legacy ``run_log*`` files are discovered as ordinary ``*.jsonl``/``*.log``
+    files). Only typed execution logs are kept, and every run's identity and
+    ownership are derived exclusively from the parsed log records — never from the
+    filename or directory name. Returns one lightweight summary per run
+    (see :func:`run_summary`) — never raw log records. This is the run-discovery
+    authority for the console backend (SGC_Rey_Console_Run_History_Log_Discovery_
+    Correction, SGC_Rey_Run_Backend_Helper_API); the console must not scan
+    directories itself.
 
     Parameters
     ----------
     log_dir : Path | str
-        Directory holding a workflow/pipeline's run logs.
+        Root of a workflow/pipeline/app's run-log folder (searched recursively).
     limit : int
         Maximum number of runs to return (most recent first). 0 means no limit.
 
@@ -1739,7 +1746,10 @@ def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any
     if not directory.is_dir():
         return []
     summaries: list[dict[str, Any]] = []
-    for path in directory.glob("*.jsonl"):
+    run_log_paths = sorted(
+        set(directory.rglob("*.jsonl")) | set(directory.rglob("*.log"))
+    )
+    for path in run_log_paths:
         payload = read_run_log_sections(path)
         if not _is_typed_run_log(payload["records"]):
             continue
