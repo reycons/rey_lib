@@ -41,7 +41,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
+from rey_lib.logs.log_utils import get_logger, log_artifact_reference, log_enter, log_exit
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
@@ -1577,6 +1577,11 @@ def _transform_one_file(
 			_logger.info(
 				"Prepared (byte copy): %s → %s", file_path.name, output_path.name
 			)
+			log_artifact_reference(
+				ctx, str(output_path), role="prepared",
+				artifact_type="prepared_file", source_path=str(file_path),
+				viewer_type="file", safe_to_preview=True,
+			)
 			movements = getattr(transform_cfg, "movements", None)
 			if movements is not None and getattr(movements, "success", None):
 				_execute_movements(movements.success, file_path, data_source.paths, ctx=ctx)
@@ -1642,6 +1647,11 @@ def _transform_one_file(
 		_logger.info(
 			"Transformed: %s → %s  rows=%d",
 			file_path.name, output_path.name, len(rows),
+		)
+		log_artifact_reference(
+			ctx, str(output_path), role="transformed",
+			artifact_type="transformed_file", source_path=str(file_path),
+			viewer_type="file", safe_to_preview=True,
 		)
 
 		_execute_movements(
