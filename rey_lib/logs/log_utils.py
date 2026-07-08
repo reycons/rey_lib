@@ -625,6 +625,9 @@ def log_input_file_reference(ctx: Any, path: str, *, file_role: str = "",
 
 def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
                               display_name: str = "", consumed_by_step: str = "",
+                              config_name: str = "", config_type: str = "",
+                              exists: bool | None = None,
+                              safe_to_preview: bool | None = None,
                               **fields: Any) -> None:
     """Append a CONFIG_FILE_REFERENCE record (files/config_files) for a run config file.
 
@@ -632,11 +635,31 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
     templates). They are recorded from resolved config/provenance so the console
     reads them from the log rather than rescanning YAML or the filesystem.
     """
+    config_path = Path(str(path))
+    role = file_role or str(fields.get("config_role") or "")
+    cfg_type = config_type or str(fields.get("configuration_layer") or role or "config")
+    cfg_name = config_name or display_name or config_path.name
+    payload = {
+        "path": str(path),
+        "display_name": display_name or cfg_name,
+        "file_role": role,
+        "config_name": cfg_name,
+        "config_type": cfg_type,
+        "source": fields.pop("source", "config_provenance"),
+        "consumed_by_step": consumed_by_step,
+        **fields,
+    }
+    if exists is None:
+        exists = config_path.exists()
+    payload["exists"] = bool(exists)
+    if safe_to_preview is None:
+        safe_to_preview = True
+    payload["safe_to_preview"] = bool(safe_to_preview)
+    if "config_hash" in payload and "hash" not in payload:
+        payload["hash"] = payload["config_hash"]
     log_run_record(
         ctx, "CONFIG_FILE_REFERENCE",
-        path=str(path), display_name=display_name or Path(str(path)).name,
-        file_role=file_role, source="config_provenance",
-        consumed_by_step=consumed_by_step, **fields,
+        **payload,
     )
 
 
@@ -1916,13 +1939,20 @@ def _manifest_files(record: dict[str, Any]) -> list[dict[str, Any]]:
             path = str(item.get("path") or item.get("artifact_path") or "")
             if not path:
                 continue
-            result.append({
+            entry = {
                 "path": path,
                 "display_name": str(item.get("display_name") or item.get("name") or Path(path).name),
                 "file_role": str(item.get("file_role") or item.get("role") or ""),
                 "status": str(item.get("status") or ""),
                 "actions": item.get("actions") or ["view", "copy_path", "open_external"],
-            })
+            }
+            for key in (
+                "config_name", "config_type", "source", "exists", "hash",
+                "config_hash", "safe_to_preview",
+            ):
+                if key in item:
+                    entry[key] = item[key]
+            result.append(entry)
     return result
 
 
@@ -1930,7 +1960,7 @@ def _file_entry_from_record(record: dict[str, Any], default_role: str) -> dict[s
     path = str(record.get("path") or record.get("file_path") or record.get("artifact_path") or "")
     if not path:
         return None
-    return {
+    entry = {
         "path": path,
         "display_name": str(record.get("display_name") or record.get("name") or Path(path).name),
         "file_role": str(record.get("file_role") or record.get("role")
@@ -1939,6 +1969,13 @@ def _file_entry_from_record(record: dict[str, Any], default_role: str) -> dict[s
         "status": str(record.get("status") or ""),
         "actions": ["view", "copy_path", "open_external"],
     }
+    for key in (
+        "config_name", "config_type", "source", "exists", "hash",
+        "config_hash", "safe_to_preview",
+    ):
+        if key in record:
+            entry[key] = record[key]
+    return entry
 
 
 def _dedupe_file_entries(files: list[dict[str, Any]]) -> list[dict[str, Any]]:

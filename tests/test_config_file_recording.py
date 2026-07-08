@@ -65,6 +65,16 @@ def test_effective_context_emits_config_records(tmp_path: Path) -> None:
     refs = _config_refs(Path(ctx.run_log_path))
     paths = {record["path"] for record in refs}
     assert paths == {"/cfg/config.yaml", "/cfg/workflows/wf.yaml"}
+    by_path = {record["path"]: record for record in refs}
+    install = by_path["/cfg/config.yaml"]
+    workflow = by_path["/cfg/workflows/wf.yaml"]
+    assert install["config_name"] == "config.yaml"
+    assert install["config_type"] == "installation"
+    assert install["source"] == "config_provenance"
+    assert install["exists"] is False
+    assert install["safe_to_preview"] is True
+    assert workflow["config_name"] == "wf.yaml"
+    assert workflow["config_type"] == "workflow"
 
 
 def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
@@ -120,6 +130,9 @@ def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
     assert config_files["count"] == 2
     roles = {entry["file_role"] for entry in config_files["files"]}
     assert roles == {"Installation", "Workflow"}
+    assert {entry["config_type"] for entry in config_files["files"]} == {
+        "installation", "workflow",
+    }
 
 
 def test_no_metadata_records_nothing(tmp_path: Path) -> None:

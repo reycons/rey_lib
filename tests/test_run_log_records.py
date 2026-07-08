@@ -678,6 +678,10 @@ def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
     assert by_type["INPUT_FILE_REFERENCE"]["record_group"] == "files"
     assert by_type["INPUT_FILE_REFERENCE"]["record_subgroup"] == "input_files"
     assert by_type["CONFIG_FILE_REFERENCE"]["record_subgroup"] == "config_files"
+    assert by_type["CONFIG_FILE_REFERENCE"]["config_name"] == "workflow.yaml"
+    assert by_type["CONFIG_FILE_REFERENCE"]["config_type"] == "workflow_definition"
+    assert by_type["CONFIG_FILE_REFERENCE"]["exists"] is False
+    assert by_type["CONFIG_FILE_REFERENCE"]["safe_to_preview"] is True
     assert by_type["ARTIFACT_REFERENCE"]["record_subgroup"] == "artifacts"
     assert by_type["RUN_SUMMARY"]["record_group"] == "results"
 
@@ -694,3 +698,31 @@ def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
     # FILE_OPERATION also remains in the execution audit trail.
     exec_types = [r["record_type"] for r in sections["execution"]["records"]]
     assert "FILE_OPERATION" in exec_types
+
+
+def test_config_reference_normalized_fields(tmp_path: Path) -> None:
+    """CONFIG_FILE_REFERENCE exposes CONFIG_REFERENCE semantics for consumers."""
+    ctx = _ctx(tmp_path)
+    config_path = tmp_path / "workflow.yaml"
+    config_path.write_text("name: wf\n", encoding="utf-8")
+
+    log_config_file_reference(
+        ctx,
+        str(config_path),
+        config_name="workflow.yaml",
+        config_type="workflow",
+        exists=True,
+        safe_to_preview=False,
+        config_hash="abc123",
+    )
+
+    record = _read(Path(ctx.run_log_path))[0]
+    assert record["record_type"] == "CONFIG_FILE_REFERENCE"
+    assert record["record_subgroup"] == "config_files"
+    assert record["config_name"] == "workflow.yaml"
+    assert record["config_type"] == "workflow"
+    assert record["source"] == "config_provenance"
+    assert record["exists"] is True
+    assert record["safe_to_preview"] is False
+    assert record["config_hash"] == "abc123"
+    assert record["hash"] == "abc123"

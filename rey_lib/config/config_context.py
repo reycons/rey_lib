@@ -433,10 +433,14 @@ def record_config_file_references(ctx: Namespace) -> None:
     )
     for reference in get_config_file_references(ctx):
         layer = str(reference.get("configuration_layer") or "")
+        role = _role_for_layer(layer)
+        path = str(reference["path"])
         log_config_file_reference(
             ctx,
-            reference["path"],
-            file_role=_role_for_layer(layer),
+            path,
+            file_role=role,
+            config_name=Path(path).name,
+            config_type=layer or role,
             configuration_layer=layer,
             load_order=reference.get("load_order"),
             variables_contributed=list(reference.get("variables_contributed") or []),
