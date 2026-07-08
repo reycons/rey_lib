@@ -16,18 +16,31 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.logs import (
+    bind_correlation,
+    bind_step,
+    clear_correlation,
+    clear_step,
+    log_app_execution,
     log_artifact_reference,
     log_config_file_reference,
+    log_error,
     log_file_operation,
+    log_input_discovered,
     log_input_file_reference,
+    log_row_count,
     log_run_complete,
     log_run_start,
     log_run_summary,
+    log_sql_execution,
     log_step_end,
+    log_step_failure,
     log_step_start,
+    log_validation_result,
     open_run_log,
     project_run_log,
     read_run_log_sections,
+    sanitize_command_arguments,
+    sanitize_log_value,
 )
 
 
@@ -93,6 +106,115 @@ def test_record_append_is_fail_safe(tmp_path: Path) -> None:
     log_run_start(ctx, weird=object())
     records = _read(Path(ctx.run_log_path))
     assert records[0]["record_type"] == "RUN_START"
+
+
+def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> None:
+    """All typed helpers flow through the shared enrichment path."""
+    ctx = _ctx(tmp_path)
+    bind_step(step_id="prepare", step_name="Prepare", step_sequence=2,
+              app="rey_loader", workflow_name="transform_load")
+    bind_correlation("corr-1")
+    try:
+        log_input_discovered(
+            ctx, input_name="trades", path=str(tmp_path / "trades.csv"),
+            pattern="*.csv", source_config="source.trades", exists=True,
+            safe_to_preview=True,
+        )
+    finally:
+        clear_correlation()
+        clear_step()
+
+    record = _read(Path(ctx.run_log_path))[0]
+    assert record["record_type"] == "INPUT_DISCOVERED"
+    assert record["record_group"] == "files"
+    assert record["record_subgroup"] == "input_files"
+    assert record["step_id"] == "prepare"
+    assert record["step_name"] == "Prepare"
+    assert record["step_sequence"] == 2
+    assert record["correlation_id"] == "corr-1"
+    assert record["app"] == "rey_loader"
+
+
+def test_write_side_sanitizer_masks_secret_like_keys(tmp_path: Path) -> None:
+    """Secret-like helper fields are sanitized before JSONL persistence."""
+    ctx = _ctx(tmp_path)
+    log_app_execution(
+        ctx,
+        app="rey_loader",
+        entrypoint="python -m rey_loader",
+        arguments_redacted=["--config-path", "safe.yaml"],
+        working_directory=str(tmp_path),
+        status="started",
+        metadata={"api_key": "abc", "nested": {"password": "pw"}, "safe": "ok"},
+    )
+
+    record = _read(Path(ctx.run_log_path))[0]
+    assert record["metadata"]["api_key"] == "[REDACTED]"
+    assert record["metadata"]["nested"]["password"] == "[REDACTED]"
+    assert record["metadata"]["safe"] == "ok"
+    assert sanitize_log_value({"token": "x", "safe": "y"}) == {
+        "token": "[REDACTED]",
+        "safe": "y",
+    }
+
+
+def test_command_argument_sanitizer_redacts_secret_like_flags() -> None:
+    """Shared command sanitization redacts flag values without app-local logic."""
+    assert sanitize_command_arguments([
+        "run", "--password", "pw", "--api-key=abc", "--config-path", "safe.yaml",
+    ]) == [
+        "run", "--password", "[REDACTED]", "--api-key=[REDACTED]",
+        "--config-path", "safe.yaml",
+    ]
+
+
+def test_failed_run_complete_requires_failure_evidence(tmp_path: Path) -> None:
+    """A failed RUN_COMPLETE without evidence is a programming error."""
+    ctx = _ctx(tmp_path)
+    with pytest.raises(ValueError, match="requires structured failure evidence"):
+        log_run_complete(ctx, "failed")
+
+
+def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) -> None:
+    """The coordinator can create failure evidence, then reference it at completion."""
+    ctx = _ctx(tmp_path)
+    failure_id = log_step_failure(
+        ctx,
+        failed_step_id="load",
+        failed_step_name="Load",
+        message="loader failed",
+        error_type="RuntimeError",
+        sanitized_exception="RuntimeError: loader failed",
+        exit_code=1,
+    )
+    log_run_complete(
+        ctx,
+        "failed",
+        failure_record_id=failure_id,
+        failed_step_id="load",
+        failed_step_name="Load",
+        failure_message="loader failed",
+    )
+
+    records = _read(Path(ctx.run_log_path))
+    assert records[0]["record_type"] == "STEP_FAILURE"
+    assert records[0]["failure_record_id"] == failure_id
+    assert records[1]["record_type"] == "RUN_COMPLETE"
+    assert records[1]["failure_record_id"] == failure_id
+
+
+def test_new_event_helpers_emit_approved_record_types(tmp_path: Path) -> None:
+    """Phase 2 helpers emit narrow event semantics through log_run_record."""
+    ctx = _ctx(tmp_path)
+    log_error(ctx, message="bad", error_type="RuntimeError")
+    log_sql_execution(ctx, connection_name="local", database="db",
+                      sql_path=str(tmp_path / "apply.sql"), operation="apply",
+                      status="success", duration_ms=12)
+    log_row_count(ctx, count_name="loaded", count=10, subject="trades")
+    log_validation_result(ctx, validation_name="headers", status="success")
+
+    types = [record["record_type"] for record in _read(Path(ctx.run_log_path))]
+    assert types == ["ERROR", "SQL_EXECUTION", "ROW_COUNT", "VALIDATION_RESULT"]
 
 
 def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:

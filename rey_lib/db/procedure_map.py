@@ -48,11 +48,13 @@ procedure_no_return``, and ``return_variable`` normalize into the new shape:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 from rey_lib.config.ctx import find_by_name
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError
+from rey_lib.logs import log_sql_execution
 
 __all__ = [
     "get_procedure_map",
@@ -61,6 +63,8 @@ __all__ = [
     "resolve_sql_binding",
     "execute_mapped_routine",
     "execute_operation",
+    "execute_sql_text",
+    "execute_procedure_call",
     "call_action",
 ]
 
@@ -332,7 +336,7 @@ def execute_operation(
     if target == "mapped_sql":
         binding = resolve_sql_binding(get_procedure_map(ctx, operation_map),
                                       operation_map, str(_get(config, "binding")))
-        return _execute_sql(conn, operation_map, binding["name"], binding["sql"],
+        return _execute_sql(ctx, conn, operation_map, binding["name"], binding["sql"],
                             binding["result_mode"], binding["inputs"],
                             binding["output"], values, run_ctx)
 
@@ -341,7 +345,7 @@ def execute_operation(
     if not sql_text:
         raise ConfigError("procedure_map: adhoc_sql operation is missing 'sql_text'.")
     result_mode = _validate_result_mode(_get(config, "result_mode"), "adhoc_sql", operation_map)
-    return _execute_sql(conn, operation_map, "adhoc_sql", str(sql_text), result_mode,
+    return _execute_sql(ctx, conn, operation_map, "adhoc_sql", str(sql_text), result_mode,
                         _get(config, "input") if _get(config, "input") is not None
                         else _get(config, "inputs"),
                         _get(config, "output"), values, run_ctx)
@@ -373,17 +377,48 @@ def execute_mapped_routine(
         procedure_map, routine_name, binding["routine"], list(named_params), result_mode,
     )
 
+    t0 = time.monotonic()
     outputs: dict[str, Any] = {}
-    if result_mode == "scalar_result":
-        scalar = _db.execute_function(conn, binding["routine"], named_params)
-        outputs = _apply_output(scalar, binding["output"], values, run_ctx)
-    elif result_mode == "no_return":
-        _db.execute_procedure(conn, binding["routine"], named_params)
-    else:  # dataset_result
-        raise ConfigError(
-            f"procedure_map: routine '{routine_name}' in map '{procedure_map}' "
-            "requests 'dataset_result'; use a mapped_sql binding for datasets."
+    try:
+        if result_mode == "scalar_result":
+            scalar = _db.execute_function(conn, binding["routine"], named_params)
+            outputs = _apply_output(scalar, binding["output"], values, run_ctx)
+        elif result_mode == "no_return":
+            _db.execute_procedure(conn, binding["routine"], named_params)
+        else:  # dataset_result
+            raise ConfigError(
+                f"procedure_map: routine '{routine_name}' in map '{procedure_map}' "
+                "requests 'dataset_result'; use a mapped_sql binding for datasets."
+            )
+    except Exception as exc:
+        log_sql_execution(
+            ctx,
+            sql_label=routine_name,
+            operation="routine",
+            status="failed",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            error_message=str(exc),
+            safe_to_preview=False,
+            procedure_map=procedure_map,
+            routine=str(binding["routine"]),
+            routine_type=str(binding.get("routine_type") or ""),
+            result_mode=result_mode,
         )
+        raise
+
+    log_sql_execution(
+        ctx,
+        sql_label=routine_name,
+        operation="routine",
+        status="success",
+        duration_ms=int((time.monotonic() - t0) * 1000),
+        safe_to_preview=False,
+        procedure_map=procedure_map,
+        routine=str(binding["routine"]),
+        routine_type=str(binding.get("routine_type") or ""),
+        result_mode=result_mode,
+        object_count=len(outputs) if outputs else None,
+    )
 
     return {
         "procedure_map": procedure_map,
@@ -396,7 +431,100 @@ def execute_mapped_routine(
     }
 
 
+def execute_sql_text(
+    ctx: Any,
+    conn: Any,
+    sql_text: str,
+    *,
+    sql_label: str,
+    operation: str,
+    sql_path: str = "",
+    safe_to_preview: bool = False,
+    **context: Any,
+) -> Any:
+    """Execute raw SQL text and emit authoritative SQL_EXECUTION evidence."""
+    t0 = time.monotonic()
+    try:
+        result = conn.execute(sql_text)
+    except Exception as exc:
+        log_sql_execution(
+            ctx,
+            sql_path=sql_path,
+            sql_label=sql_label,
+            operation=operation,
+            status="failed",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            error_message=str(exc),
+            safe_to_preview=safe_to_preview,
+            **context,
+        )
+        raise
+
+    log_sql_execution(
+        ctx,
+        sql_path=sql_path,
+        sql_label=sql_label,
+        operation=operation,
+        status="success",
+        duration_ms=int((time.monotonic() - t0) * 1000),
+        safe_to_preview=safe_to_preview,
+        **context,
+    )
+    return result
+
+
+def execute_procedure_call(
+    ctx: Any,
+    conn: Any,
+    proc_name: str,
+    named_inputs: list[tuple[str, Any]],
+    output_specs: list[tuple[str, str]],
+    *,
+    sql_label: str,
+    operation: str,
+    safe_to_preview: bool = False,
+    **context: Any,
+) -> dict[str, Any]:
+    """Execute a procedure call and emit authoritative SQL_EXECUTION evidence."""
+    t0 = time.monotonic()
+    try:
+        if output_specs:
+            output_values = _db.call_proc_with_output(
+                conn, proc_name, named_inputs, output_specs
+            )
+        else:
+            _db.call_proc(conn, proc_name, [v for _n, v in named_inputs])
+            output_values = {}
+    except Exception as exc:
+        log_sql_execution(
+            ctx,
+            sql_label=sql_label,
+            operation=operation,
+            status="failed",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            error_message=str(exc),
+            safe_to_preview=safe_to_preview,
+            routine=str(proc_name),
+            **context,
+        )
+        raise
+
+    log_sql_execution(
+        ctx,
+        sql_label=sql_label,
+        operation=operation,
+        status="success",
+        duration_ms=int((time.monotonic() - t0) * 1000),
+        safe_to_preview=safe_to_preview,
+        routine=str(proc_name),
+        object_count=len(output_values) if output_values else None,
+        **context,
+    )
+    return output_values
+
+
 def _execute_sql(
+    ctx: Any,
     conn: Any,
     map_name: str,
     name: str,
@@ -416,19 +544,47 @@ def _execute_sql(
             "'scalar_result' but has no 'output.variable'."
         )
 
-    data = _db.execute_sql(conn, sql_text, named_params, result_mode)
-
+    t0 = time.monotonic()
     outputs: dict[str, Any] = {}
     rows: Optional[list[dict[str, Any]]] = None
-    if result_mode == "scalar_result":
-        outputs = _apply_output(data, output, values, run_ctx)
-    elif result_mode == "dataset_result":
-        rows = data
+    execution_target = "adhoc_sql" if name == "adhoc_sql" else "mapped_sql"
+    try:
+        data = _db.execute_sql(conn, sql_text, named_params, result_mode)
+        if result_mode == "scalar_result":
+            outputs = _apply_output(data, output, values, run_ctx)
+        elif result_mode == "dataset_result":
+            rows = data
+    except Exception as exc:
+        log_sql_execution(
+            ctx,
+            sql_label=name,
+            operation=execution_target,
+            status="failed",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            error_message=str(exc),
+            safe_to_preview=False,
+            procedure_map=map_name,
+            result_mode=result_mode,
+        )
+        raise
+
+    log_sql_execution(
+        ctx,
+        sql_label=name,
+        operation=execution_target,
+        status="success",
+        duration_ms=int((time.monotonic() - t0) * 1000),
+        safe_to_preview=False,
+        procedure_map=map_name,
+        result_mode=result_mode,
+        row_count=len(rows) if rows is not None else None,
+        object_count=len(outputs) if outputs else None,
+    )
 
     return {
         "procedure_map": map_name,
         "routine_name": name,
-        "execution_target": "adhoc_sql" if name == "adhoc_sql" else "mapped_sql",
+        "execution_target": execution_target,
         "result_mode": result_mode,
         "outputs": outputs,
         "rows": rows,

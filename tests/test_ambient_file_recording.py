@@ -20,7 +20,16 @@ from rey_lib.files.file_utils import (
     read_text_file,
     write_file,
 )
-from rey_lib.logs import bind_run, clear_run, current_run, record_file_operation
+from rey_lib.logs import (
+    bind_correlation,
+    bind_run,
+    bind_step,
+    clear_correlation,
+    clear_run,
+    clear_step,
+    current_run,
+    record_file_operation,
+)
 
 
 def _ops(run_log: Path) -> list[dict]:
@@ -59,6 +68,23 @@ def test_move_records_file_operation(bound_run: Path, tmp_path: Path) -> None:
     op = next(o for o in _ops(bound_run) if o["operation"] == "move")
     assert op["source_path"].endswith("in.csv")
     assert op["target_path"].endswith("done/in.csv")
+
+
+def test_file_operation_inherits_bound_step_context(bound_run: Path, tmp_path: Path) -> None:
+    """Ambient FILE_OPERATION records inherit the separately bound step context."""
+    bind_step(step_id="export_before", step_name="Export before", step_sequence=1)
+    bind_correlation("corr-file-1")
+    try:
+        write_file(tmp_path / "ctx.json", {"ok": True}, "JSON")
+    finally:
+        clear_correlation()
+        clear_step()
+
+    op = next(o for o in _ops(bound_run) if o["operation"] == "write")
+    assert op["step_id"] == "export_before"
+    assert op["step_name"] == "Export before"
+    assert op["step_sequence"] == 1
+    assert op["correlation_id"] == "corr-file-1"
 
 
 def test_read_records_file_operation(bound_run: Path, tmp_path: Path) -> None:

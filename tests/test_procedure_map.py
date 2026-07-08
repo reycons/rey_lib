@@ -10,6 +10,7 @@ the named-SQL adapter primitive.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,11 +21,27 @@ from rey_lib.db.postgres_utils import execute_named_sql
 from rey_lib.db.procedure_map import (
     execute_mapped_routine,
     execute_operation,
+    execute_procedure_call,
+    execute_sql_text,
     get_procedure_map,
     resolve_routine_binding,
     resolve_sql_binding,
 )
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
+
+
+def _log_ctx(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        log_file=str(tmp_path / "procedure_map.run.jsonl"),
+        owner_app_name="test_app",
+    )
+
+
+def _run_records(ctx: SimpleNamespace) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+    ]
 
 
 def _rb(name="start_batch", routine="control.f_start_batch", call_type=None,
@@ -200,6 +217,28 @@ def test_routine_scalar_executes_and_loads_output():
     assert result["result_mode"] == "scalar_result"
 
 
+def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
+    ctx = _log_ctx(tmp_path)
+    conn = object()
+    m = _map(_rb(name="start_batch", call_type="function_with_return",
+                 output={"variable": "batch_id", "load_to_ctx": "batch_id"},
+                 inp={"p_run_id": "run_id"}))
+    run_ctx = SimpleNamespace()
+    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
+         patch("rey_lib.db.procedure_map._db") as db:
+        db.execute_function.return_value = 123
+        execute_mapped_routine(ctx, conn, "control", "start_batch",
+                               {"run_id": "R1"}, run_ctx=run_ctx)
+
+    record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
+    assert record["operation"] == "routine"
+    assert record["sql_label"] == "start_batch"
+    assert record["routine"] == "control.f_start_batch"
+    assert record["status"] == "success"
+    assert record["object_count"] == 1
+    assert "p_run_id" not in json.dumps(record)
+
+
 def test_routine_no_return_executes_procedure():
     conn = object()
     m = _map(_rb(name="end_batch", routine="control.p_end_batch",
@@ -303,6 +342,100 @@ def test_operation_adhoc_dataset_returns_rows():
                                     "result_mode": "dataset_result",
                                     "sql_text": "SELECT id FROM t"}, {})
     assert result["rows"] == [{"id": 1}, {"id": 2}]
+
+
+def test_mapped_sql_logs_dataset_row_count_without_raw_sql(tmp_path: Path):
+    ctx = _log_ctx(tmp_path)
+    conn = object()
+    m = {"name": "control", "sql_bindings": [
+        _sb(name="find_batch", sql="SELECT secret_value FROM t WHERE id = :batch_id",
+            result_mode="dataset_result", inp={"batch_id": "batch_id"})]}
+    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
+         patch("rey_lib.db.procedure_map._db") as db:
+        db.execute_sql.return_value = [{"id": 1}, {"id": 2}]
+        execute_operation(ctx, conn, "control",
+                          {"execution_target": "mapped_sql", "binding": "find_batch"},
+                          {"batch_id": 5})
+
+    record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
+    assert record["operation"] == "mapped_sql"
+    assert record["sql_label"] == "find_batch"
+    assert record["row_count"] == 2
+    text = json.dumps(record)
+    assert "secret_value" not in text
+    assert "batch_id" not in text
+
+
+def test_sql_failure_logs_sanitized_failure_evidence(tmp_path: Path):
+    ctx = _log_ctx(tmp_path)
+    conn = object()
+    config = {"execution_target": "adhoc_sql", "result_mode": "no_return",
+              "sql_text": "DELETE FROM t WHERE api_key = :api_key",
+              "input": {"api_key": "api_key"}}
+    with patch("rey_lib.db.procedure_map._db") as db:
+        db.execute_sql.side_effect = RuntimeError("connection failed")
+        with pytest.raises(RuntimeError, match="connection failed"):
+            execute_operation(ctx, conn, "control", config, {"api_key": "SECRET"})
+
+    record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
+    assert record["operation"] == "adhoc_sql"
+    assert record["status"] == "failed"
+    assert record["error_message"] == "connection failed"
+    text = json.dumps(record)
+    assert "DELETE FROM" not in text
+    assert "SECRET" not in text
+
+
+def test_execute_sql_text_logs_one_authoritative_record(tmp_path: Path):
+    ctx = _log_ctx(tmp_path)
+
+    class Conn:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def execute(self, _sql: str) -> None:
+            self.calls += 1
+
+    conn = Conn()
+    execute_sql_text(
+        ctx,
+        conn,
+        "select secret_value from source",
+        sql_label="hook_file",
+        operation="hook_sql_file",
+        sql_path="/tmp/hook.sql",
+        safe_to_preview=True,
+    )
+
+    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    assert conn.calls == 1
+    assert len(records) == 1
+    assert records[0]["operation"] == "hook_sql_file"
+    assert records[0]["sql_label"] == "hook_file"
+    assert "secret_value" not in json.dumps(records[0])
+
+
+def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
+    ctx = _log_ctx(tmp_path)
+    conn = object()
+    with patch("rey_lib.db.procedure_map._db") as db:
+        db.call_proc_with_output.return_value = {"out_id": 7}
+        result = execute_procedure_call(
+            ctx,
+            conn,
+            "control.finish_batch",
+            [("batch_id", 5)],
+            [("out_id", "INT")],
+            sql_label="finish_batch",
+            operation="hook_procedure",
+        )
+
+    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    assert result == {"out_id": 7}
+    assert len(records) == 1
+    assert records[0]["operation"] == "hook_procedure"
+    assert records[0]["routine"] == "control.finish_batch"
+    assert records[0]["object_count"] == 1
 
 
 def test_operation_missing_execution_target_fails_closed():

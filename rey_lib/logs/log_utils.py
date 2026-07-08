@@ -47,14 +47,33 @@ __all__ = [
     "read_run_log_sections",
     "resolve_run_identity",
     "open_run_log",
+    "sanitize_log_value",
+    "sanitize_command_arguments",
     "log_run_record",
     "log_run_start",
     "log_step_start",
     "log_step_end",
     "log_run_complete",
     "log_run_summary",
+    "log_step_failure",
+    "log_error",
+    "log_app_execution",
+    "log_input_discovered",
+    "log_sql_execution",
+    "log_row_count",
+    "log_validation_result",
     "log_artifact_reference",
     "log_artifact_manifest",
+    "bind_run",
+    "clear_run",
+    "current_run",
+    "bind_step",
+    "clear_step",
+    "current_step",
+    "bind_correlation",
+    "clear_correlation",
+    "current_correlation",
+    "record_file_operation",
     "EXECUTION_RECORD_TYPES",
     "RUN_RESULT_RECORD_TYPES",
 ]
@@ -124,7 +143,8 @@ _RUN_RECORD_SCHEMA_VERSION = 1
 # append-only file; the file is never rewritten.
 EXECUTION_RECORD_TYPES = frozenset({
     "RUN_START", "STEP_START", "STEP_END", "INFO", "WARNING", "ERROR",
-    "FILE_OPERATION", "RUN_COMPLETE",
+    "FILE_OPERATION", "RUN_COMPLETE", "STEP_FAILURE", "APP_EXECUTION",
+    "SQL_EXECUTION", "ROW_COUNT", "VALIDATION_RESULT",
 })
 RUN_RESULT_RECORD_TYPES = frozenset({
     "RUN_SUMMARY", "EMAIL_SUMMARY",
@@ -136,6 +156,7 @@ RUN_RESULT_RECORD_TYPES = frozenset({
 # own subgroups.
 FILES_RECORD_SUBGROUP = {
     "INPUT_FILE_REFERENCE": "input_files",
+    "INPUT_DISCOVERED": "input_files",
     "CONFIG_FILE_REFERENCE": "config_files",
     "CONFIG_FILE_MANIFEST": "config_files",
     "ARTIFACT_REFERENCE": "artifacts",
@@ -201,6 +222,159 @@ def open_run_log(ctx: Any) -> Path:
     return path
 
 
+_SECRET_WRITE_KEY_RE = re.compile(
+    r"(secret|password|passwd|token|api[_-]?key|access[_-]?key|"
+    r"credential|connection[_-]?string|private[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_log_value(value: Any) -> Any:
+    """Return a write-safe copy of a log value with secret-like keys masked."""
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            sanitized[key_text] = (
+                "[REDACTED]" if _SECRET_WRITE_KEY_RE.search(key_text)
+                else sanitize_log_value(item)
+            )
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        return [sanitize_log_value(item) for item in value]
+    return value
+
+
+def sanitize_command_arguments(arguments: list[Any] | tuple[Any, ...]) -> list[str]:
+    """Return command arguments with values after secret-like flags redacted."""
+    sanitized: list[str] = []
+    redact_next = False
+    for arg in arguments:
+        text = str(arg)
+        key = text.lstrip("-").split("=", 1)[0]
+        if redact_next:
+            sanitized.append("[REDACTED]")
+            redact_next = False
+            continue
+        if _SECRET_WRITE_KEY_RE.search(key):
+            if "=" in text:
+                prefix = text.split("=", 1)[0]
+                sanitized.append(f"{prefix}=[REDACTED]")
+            else:
+                sanitized.append(text)
+                redact_next = True
+            continue
+        sanitized.append(text)
+    return sanitized
+
+
+def _base_record(ctx: Any, record_type: str, message: str) -> dict[str, Any]:
+    """Build the shared typed-record envelope before event fields are merged."""
+    record: dict[str, Any] = {
+        "record_type": record_type,
+        "record_group": _record_group(record_type),
+        "run_id": ctx.run_id,
+        "run_timestamp": ctx.run_timestamp,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
+    }
+    subgroup = FILES_RECORD_SUBGROUP.get(record_type)
+    if subgroup:
+        record["record_subgroup"] = subgroup
+    app = (getattr(ctx, "owner_app_name", None) or getattr(ctx, "app_name", None)
+           or getattr(ctx, "name", None))
+    if app:
+        record["app"] = str(app)
+    for key in ("workflow_name", "pipeline_name"):
+        value = getattr(ctx, key, None)
+        if value:
+            record[key] = str(value)
+    if message:
+        record["message"] = message
+    return record
+
+
+def _context_fields() -> dict[str, Any]:
+    """Return active step/correlation context for typed run-log records."""
+    merged: dict[str, Any] = {}
+    step = current_step()
+    if step:
+        merged.update(step)
+    correlation = current_correlation()
+    if correlation:
+        merged.update(correlation)
+    return merged
+
+
+def _enrich_run_record(
+    ctx: Any,
+    record_type: str,
+    *,
+    message: str = "",
+    fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge context, sanitize values, and validate one typed run-log record."""
+    record = _base_record(ctx, record_type, message)
+    record.update(_context_fields())
+    record.update(fields or {})
+    record = sanitize_log_value(record)
+    _validate_run_record(record)
+    return record
+
+
+def _validate_run_record(record: dict[str, Any]) -> None:
+    """Validate typed record invariants enforced by the shared logging layer."""
+    if str(record.get("record_type") or "").upper() == "RUN_COMPLETE":
+        status = str(record.get("status") or "").lower()
+        if status == "failed":
+            missing = [
+                key for key in (
+                    "failure_record_id",
+                    "failed_step_id",
+                    "failed_step_name",
+                    "failure_message",
+                )
+                if not record.get(key)
+            ]
+            if missing:
+                raise ValueError(
+                    "RUN_COMPLETE status='failed' requires structured failure "
+                    f"evidence fields: {', '.join(missing)}."
+                )
+
+
+def _validate_run_record_fields(record_type: str, fields: dict[str, Any]) -> None:
+    """Validate invariants that must raise before fail-safe append handling."""
+    if str(record_type or "").upper() != "RUN_COMPLETE":
+        return
+    status = str(fields.get("status") or "").lower()
+    if status != "failed":
+        return
+    missing = [
+        key for key in (
+            "failure_record_id",
+            "failed_step_id",
+            "failed_step_name",
+            "failure_message",
+        )
+        if not fields.get(key)
+    ]
+    if missing:
+        raise ValueError(
+            "RUN_COMPLETE status='failed' requires structured failure "
+            f"evidence fields: {', '.join(missing)}."
+        )
+
+
+def _has_durable_run_path(ctx: Any) -> bool:
+    """Return True when ctx appears able to write an append-only run log."""
+    return bool(
+        getattr(ctx, "run_log_path", None)
+        or getattr(ctx, "run_log_dir", None)
+        or getattr(ctx, "log_file", None)
+    )
+
+
 def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: Any) -> None:
     """
     Append one typed record to the append-only run log.
@@ -227,30 +401,11 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
     -------
     None
     """
+    if _has_durable_run_path(ctx):
+        _validate_run_record_fields(record_type, fields)
     try:
         path = open_run_log(ctx)
-        record: dict[str, Any] = {
-            "record_type": record_type,
-            "record_group": _record_group(record_type),
-            "run_id": ctx.run_id,
-            "run_timestamp": ctx.run_timestamp,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
-        }
-        subgroup = FILES_RECORD_SUBGROUP.get(record_type)
-        if subgroup:
-            record["record_subgroup"] = subgroup
-        app = (getattr(ctx, "owner_app_name", None) or getattr(ctx, "app_name", None)
-               or getattr(ctx, "name", None))
-        if app:
-            record["app"] = str(app)
-        for key in ("workflow_name", "pipeline_name"):
-            value = getattr(ctx, key, None)
-            if value:
-                record[key] = str(value)
-        if message:
-            record["message"] = message
-        record.update(fields)
+        record = _enrich_run_record(ctx, record_type, message=message, fields=fields)
 
         # Route the durable append through the primitive I/O layer so the run-log
         # writer shares one low-level append with file_utils without either
@@ -272,11 +427,12 @@ def log_run_start(ctx: Any, **fields: Any) -> None:
 
 
 def log_step_start(ctx: Any, step_name: str, step_sequence: int,
-                   step_type: str = "", **fields: Any) -> None:
+                   step_type: str = "", step_id: str = "", **fields: Any) -> None:
     """Append a STEP_START execution record for one step."""
     log_run_record(
         ctx, "STEP_START",
         step_name=step_name, step_sequence=step_sequence, step_type=step_type,
+        step_id=step_id or fields.pop("step_id", ""),
         **fields,
     )
 
@@ -298,6 +454,146 @@ def log_run_complete(ctx: Any, status: str, *, message: str = "", **fields: Any)
 def log_run_summary(ctx: Any, summary: dict[str, Any]) -> None:
     """Append a deterministic RUN_SUMMARY run-result record (no LLM required)."""
     log_run_record(ctx, "RUN_SUMMARY", summary=summary)
+
+
+def log_step_failure(
+    ctx: Any,
+    *,
+    failed_step_id: str,
+    failed_step_name: str,
+    message: str,
+    error_type: str = "",
+    sanitized_exception: str = "",
+    exit_code: int | None = None,
+    related_path: str = "",
+    related_artifact_id: str = "",
+    traceback_summary: str = "",
+    **fields: Any,
+) -> str:
+    """Append STEP_FAILURE evidence and return its failure record id."""
+    failure_record_id = str(fields.pop("failure_record_id", "") or uuid.uuid4())
+    payload: dict[str, Any] = {
+        "failure_record_id": failure_record_id,
+        "status": "failed",
+        "failed_step_id": failed_step_id,
+        "failed_step_name": failed_step_name,
+        "message": message,
+        "error_type": error_type,
+        "sanitized_exception": sanitized_exception,
+        "related_path": related_path,
+        "related_artifact_id": related_artifact_id,
+        "traceback_summary": traceback_summary,
+        **fields,
+    }
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    log_run_record(ctx, "STEP_FAILURE", **payload)
+    return failure_record_id
+
+
+def log_error(ctx: Any, *, message: str, error_type: str = "",
+              sanitized_exception: str = "", **fields: Any) -> None:
+    """Append a structured ERROR record."""
+    log_run_record(
+        ctx, "ERROR", message=message, error_type=error_type,
+        sanitized_exception=sanitized_exception, **fields,
+    )
+
+
+def log_app_execution(
+    ctx: Any,
+    *,
+    app: str,
+    entrypoint: str = "",
+    arguments_redacted: list[Any] | None = None,
+    working_directory: str = "",
+    status: str,
+    exit_code: int | None = None,
+    duration_ms: int | None = None,
+    stdout_summary: str = "",
+    stderr_summary: str = "",
+    **fields: Any,
+) -> None:
+    """Append APP_EXECUTION evidence for one app or external process invocation."""
+    payload: dict[str, Any] = {
+        "app": app,
+        "entrypoint": entrypoint,
+        "arguments_redacted": list(arguments_redacted or []),
+        "working_directory": working_directory,
+        "status": status,
+        "stdout_summary": stdout_summary,
+        "stderr_summary": stderr_summary,
+        **fields,
+    }
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    if duration_ms is not None:
+        payload["duration_ms"] = duration_ms
+    log_run_record(ctx, "APP_EXECUTION", **payload)
+
+
+def log_input_discovered(ctx: Any, *, input_name: str = "", path: str = "",
+                         pattern: str = "", source_config: str = "",
+                         exists: bool | None = None,
+                         safe_to_preview: bool | None = None,
+                         **fields: Any) -> None:
+    """Append INPUT_DISCOVERED evidence for input file discovery."""
+    payload: dict[str, Any] = {
+        "input_name": input_name,
+        "path": str(path),
+        "pattern": pattern,
+        "source_config": source_config,
+        **fields,
+    }
+    if exists is not None:
+        payload["exists"] = bool(exists)
+    if safe_to_preview is not None:
+        payload["safe_to_preview"] = bool(safe_to_preview)
+    log_run_record(ctx, "INPUT_DISCOVERED", **payload)
+
+
+def log_sql_execution(ctx: Any, *, connection_name: str = "", database: str = "",
+                      schema: str = "", sql_path: str = "", sql_label: str = "",
+                      operation: str = "", status: str = "",
+                      duration_ms: int | None = None,
+                      error_message: str = "",
+                      safe_to_preview: bool | None = None,
+                      **fields: Any) -> None:
+    """Append SQL_EXECUTION evidence for generated or executed SQL work."""
+    payload: dict[str, Any] = {
+        "connection_name": connection_name,
+        "database": database,
+        "schema": schema,
+        "sql_path": sql_path,
+        "sql_label": sql_label,
+        "operation": operation,
+        "status": status,
+        "error_message": error_message,
+        **fields,
+    }
+    if duration_ms is not None:
+        payload["duration_ms"] = duration_ms
+    if safe_to_preview is not None:
+        payload["safe_to_preview"] = bool(safe_to_preview)
+    log_run_record(ctx, "SQL_EXECUTION", **payload)
+
+
+def log_row_count(ctx: Any, *, count_name: str, count: int,
+                  subject: str = "", **fields: Any) -> None:
+    """Append a ROW_COUNT record for run evidence."""
+    log_run_record(
+        ctx, "ROW_COUNT", count_name=count_name, count=count,
+        subject=subject, **fields,
+    )
+
+
+def log_validation_result(ctx: Any, *, validation_name: str, status: str,
+                          message: str = "", **fields: Any) -> None:
+    """Append a VALIDATION_RESULT record for run evidence."""
+    log_run_record(
+        ctx, "VALIDATION_RESULT", validation_name=validation_name,
+        status=status, message=message, **fields,
+    )
 
 
 def log_input_file_reference(ctx: Any, path: str, *, file_role: str = "",
@@ -348,11 +644,16 @@ def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
     rollback/recovery analysis derived from the append-only log rather than state
     files.
     """
-    log_run_record(
-        ctx, "FILE_OPERATION",
-        operation=operation, source_path=str(source_path),
-        target_path=str(target_path), status=status, step_id=step_id, **fields,
-    )
+    payload: dict[str, Any] = {
+        "operation": operation,
+        "source_path": str(source_path),
+        "target_path": str(target_path),
+        "status": status,
+        **fields,
+    }
+    if step_id:
+        payload["step_id"] = step_id
+    log_run_record(ctx, "FILE_OPERATION", **payload)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +669,8 @@ def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
 # container (rather than a rebound module global) keeps the binding writable from
 # bind_run/clear_run without the ``global`` keyword.
 _CURRENT_RUN: dict[str, Any] = {"run": None}
+_CURRENT_STEP: dict[str, Any] = {"step": None}
+_CURRENT_CORRELATION: dict[str, Any] = {"correlation": None}
 
 
 def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
@@ -399,6 +702,67 @@ def current_run() -> dict[str, str] | None:
     if run is None:
         return None
     return {"run_log_path": run.run_log_path, "run_id": run.run_id}
+
+
+def bind_step(
+    *,
+    step_id: str,
+    step_name: str = "",
+    step_sequence: int | None = None,
+    app: str = "",
+    pipeline_name: str = "",
+    workflow_name: str = "",
+) -> None:
+    """Bind the current step context independently from the current run."""
+    if not step_id:
+        return
+    step: dict[str, Any] = {"step_id": str(step_id)}
+    if step_name:
+        step["step_name"] = str(step_name)
+    if step_sequence is not None:
+        step["step_sequence"] = step_sequence
+    if app:
+        step["app"] = str(app)
+    if pipeline_name:
+        step["pipeline_name"] = str(pipeline_name)
+    if workflow_name:
+        step["workflow_name"] = str(workflow_name)
+    _CURRENT_STEP["step"] = SimpleNamespace(**step)
+
+
+def clear_step() -> None:
+    """Clear the current step context."""
+    _CURRENT_STEP["step"] = None
+
+
+def current_step() -> dict[str, Any] | None:
+    """Return the active step context, or None if no step is bound."""
+    step = _CURRENT_STEP["step"]
+    if step is None:
+        return None
+    return dict(vars(step))
+
+
+def bind_correlation(correlation_id: str = "") -> None:
+    """Bind the current correlation id independently from run and step context."""
+    if not correlation_id:
+        return
+    _CURRENT_CORRELATION["correlation"] = SimpleNamespace(
+        correlation_id=str(correlation_id)
+    )
+
+
+def clear_correlation() -> None:
+    """Clear the current correlation context."""
+    _CURRENT_CORRELATION["correlation"] = None
+
+
+def current_correlation() -> dict[str, str] | None:
+    """Return the active correlation context, or None if no correlation is bound."""
+    correlation = _CURRENT_CORRELATION["correlation"]
+    if correlation is None:
+        return None
+    return {"correlation_id": correlation.correlation_id}
 
 
 def record_file_operation(operation: str, *, source_path: str = "",

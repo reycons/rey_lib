@@ -41,7 +41,17 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from rey_lib.logs.log_utils import get_logger, log_artifact_reference, log_enter, log_exit
+from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
+from rey_lib.logs.log_utils import (
+    get_logger,
+    log_artifact_reference,
+    log_enter,
+    log_exit,
+    log_input_discovered,
+    log_row_count,
+    log_step_failure,
+    log_validation_result,
+)
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.files.file_utils import (
@@ -199,7 +209,19 @@ def transform_files(
         pending_map: dict[str, Path] = {}
         for glob_pattern in glob_patterns:
             for file_path in input_files(inbox_dir, glob_pattern):
-                pending_map[str(file_path)] = file_path
+                key = str(file_path)
+                if key not in pending_map:
+                    pending_map[key] = file_path
+                    log_input_discovered(
+                        ctx,
+                        input_name=file_path.name,
+                        path=str(file_path),
+                        pattern=glob_pattern,
+                        source_config=f"{data_source.name}.transforms",
+                        exists=True,
+                        safe_to_preview=True,
+                        size_bytes=file_path.stat().st_size if file_path.exists() else None,
+                    )
         pending = sorted(pending_map.values())
 
         max_files = getattr(data_source, "max_files_per_run", None)
@@ -355,6 +377,17 @@ def load_files(
         source_dir    = _resolve_path(data_source.paths, load_cfg.source, ctx=ctx)
         pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version, ctx=ctx)
         pending       = input_files(source_dir, pattern)
+        for file_path in pending:
+            log_input_discovered(
+                ctx,
+                input_name=file_path.name,
+                path=str(file_path),
+                pattern=pattern,
+                source_config=f"{data_source.name}.{load_cfg.name}",
+                exists=True,
+                safe_to_preview=True,
+                size_bytes=file_path.stat().st_size if file_path.exists() else None,
+            )
         max_files     = getattr(data_source, "max_files_per_run", None)
         if max_files is not None:
             pending   = pending[:int(max_files)]
@@ -578,6 +611,14 @@ def transform_one(ctx: Any, data_source: Any, file_path: Path) -> bool:
             "No header match across %d transform(s) — file rejected: %s",
             len(transforms), file_path.name,
         )
+        log_validation_result(
+            ctx,
+            validation_name="transform_header",
+            status="failed",
+            message=f"No header match across {len(transforms)} transform(s)",
+            path=str(file_path),
+            data_source=getattr(data_source, "name", ""),
+        )
         _reject_unmatched_file(data_source, transforms, file_path)
         return False
     object.__setattr__(ctx, "transforms", matched_cfg)
@@ -721,7 +762,7 @@ def run_load(
             # post_load_sql runs on the last connection used for this source
             # (backward-compat with existing post_load_sql YAML key).
             if last_conn is not None:
-                _execute_post_load_sql(last_conn, data_source, sql_dir)
+                _execute_post_load_sql(ctx, last_conn, data_source, sql_dir)
 
         finally:
             # Always close every connection opened for this data source.
@@ -735,7 +776,7 @@ def run_load(
     return total
 
 
-def _execute_post_load_sql(conn: Any, data_source: Any, sql_dir: Optional[Path]) -> None:
+def _execute_post_load_sql(ctx: Any, conn: Any, data_source: Any, sql_dir: Optional[Path]) -> None:
     """Execute each SQL file listed in data_source.post_load_sql.
 
     Skips silently when ``post_load_sql`` is absent, empty, or ``sql_dir``
@@ -764,7 +805,16 @@ def _execute_post_load_sql(conn: Any, data_source: Any, sql_dir: Optional[Path])
                 f"(data_source='{data_source.name}')"
             )
         sql_text = sql_path.read_text(encoding="utf-8")
-        conn.execute(sql_text)
+        execute_sql_text(
+            ctx,
+            conn,
+            sql_text,
+            sql_path=str(sql_path),
+            sql_label=sql_filename,
+            operation="post_load_sql",
+            safe_to_preview=True,
+            data_source=getattr(data_source, "name", ""),
+        )
         _logger.info("post_load_sql executed: %s", sql_filename)
 
 
@@ -1045,7 +1095,7 @@ def _execute_one_hook(
     row_columns: dict[str, Any] = {}
 
     if hook_type == "sql_file":
-        _execute_one_hook_sql_file(conn, sql_cfg, sql_dir)
+        _execute_one_hook_sql_file(ctx, conn, sql_cfg, sql_dir)
 
     else:
         # Default: type == "procedure"
@@ -1055,6 +1105,7 @@ def _execute_one_hook(
 
 
 def _execute_one_hook_sql_file(
+    ctx: Any,
     conn: Any,
     sql_cfg: Any,
     sql_dir: Optional[Path],
@@ -1092,7 +1143,15 @@ def _execute_one_hook_sql_file(
             f"sql_config '{sql_cfg.name}': file not found: {sql_path}"
         )
     sql_text = sql_path.read_text(encoding="utf-8")
-    conn.execute(sql_text)
+    execute_sql_text(
+        ctx,
+        conn,
+        sql_text,
+        sql_path=str(sql_path),
+        sql_label=str(sql_cfg.name),
+        operation="hook_sql_file",
+        safe_to_preview=True,
+    )
     _logger.info("Hook sql_file executed: %s (config='%s')", file_name, sql_cfg.name)
 
 
@@ -1165,13 +1224,16 @@ def _execute_one_hook_procedure(
         inputs_repr,
     )
 
-    if output_specs:
-        output_values = _db_adapter.call_proc_with_output(
-            conn, proc_name, named_inputs, output_specs
-        )
-    else:
-        _db_adapter.call_proc(conn, proc_name, [v for _n, v in named_inputs])
-        output_values = {}
+    output_values = execute_procedure_call(
+        ctx,
+        conn,
+        proc_name,
+        named_inputs,
+        output_specs,
+        sql_label=str(sql_cfg.name),
+        operation="hook_procedure",
+        safe_to_preview=False,
+    )
 
 
     if output_values:
@@ -1533,143 +1595,190 @@ def _transform_one_file(
 	file_path: Path,
 	header_line: Optional[str] = None,
 ) -> bool:
-	log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
+    log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
 
-	try:
-		if header_line is None and not _validate_header(file_path, transform_cfg):
-			_logger.error("Header mismatch — file rejected: %s", file_path.name)
-			_execute_movements(
-				transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
-			)
-			log_exit(
-				ctx,
-				f"_transform_one_file rejected (header): {file_path.name}",
-				_logger,
-			)
-			return False
+    try:
+        if header_line is None and not _validate_header(file_path, transform_cfg):
+            _logger.error("Header mismatch — file rejected: %s", file_path.name)
+            log_validation_result(
+                ctx,
+                validation_name="transform_header",
+                status="failed",
+                message="Header mismatch",
+                path=str(file_path),
+                transform_name=getattr(transform_cfg, "name", ""),
+                transform_version=getattr(transform_cfg, "version", ""),
+            )
+            _execute_movements(
+                transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+            )
+            log_exit(
+                ctx,
+                f"_transform_one_file rejected (header): {file_path.name}",
+                _logger,
+            )
+            return False
 
-		_setup_file_ctx(ctx, file_path, data_source.paths)
+        _setup_file_ctx(ctx, file_path, data_source.paths)
 
-		file_name_date = parse_date_from_filename(file_path.name, _namespace_to_dict(transform_cfg))
-		object.__setattr__(ctx, "file_name_date", file_name_date)
-		_stamp_date_parts(ctx, "file_name_date", file_name_date)
-		object.__setattr__(ctx, "transform_version", getattr(transform_cfg, "version", ""))
-		object.__setattr__(ctx, "file_checksum", _hash_file(file_path))
+        file_name_date = parse_date_from_filename(file_path.name, _namespace_to_dict(transform_cfg))
+        object.__setattr__(ctx, "file_name_date", file_name_date)
+        _stamp_date_parts(ctx, "file_name_date", file_name_date)
+        object.__setattr__(ctx, "transform_version", getattr(transform_cfg, "version", ""))
+        object.__setattr__(ctx, "file_checksum", _hash_file(file_path))
 
-		# Prepare Files (no columns): identify and canonical-rename only. Copy the
-		# matched file byte-for-byte to its canonical name — never parse, transform,
-		# or re-serialise rows. Transforms WITH columns fall through to the normal
-		# row transformation below.
-		if not getattr(transform_cfg, "columns", None):
-			output_path = _build_output_path(
-				data_source.paths, transform_cfg, file_path, ctx=ctx
-			)
-			copy_file(
-				file_path,
-				output_path.parent,
-				dest_name=output_path.name,
-				state_ctx=ctx,
-				app=getattr(ctx, "app_name", "") if ctx is not None else "",
-				pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
-				reason="prepared",
-			)
-			object.__setattr__(ctx, "step_record_count", 0)
-			_logger.info(
-				"Prepared (byte copy): %s → %s", file_path.name, output_path.name
-			)
-			log_artifact_reference(
-				ctx, str(output_path), role="prepared",
-				artifact_type="prepared_file", source_path=str(file_path),
-				viewer_type="file", safe_to_preview=True,
-			)
-			movements = getattr(transform_cfg, "movements", None)
-			if movements is not None and getattr(movements, "success", None):
-				_execute_movements(movements.success, file_path, data_source.paths, ctx=ctx)
-			log_exit(ctx, f"_transform_one_file prepared: {file_path.name}", _logger)
-			return True
+        # Prepare Files (no columns): identify and canonical-rename only. Copy the
+        # matched file byte-for-byte to its canonical name — never parse, transform,
+        # or re-serialise rows. Transforms WITH columns fall through to the normal
+        # row transformation below.
+        if not getattr(transform_cfg, "columns", None):
+            output_path = _build_output_path(
+                data_source.paths, transform_cfg, file_path, ctx=ctx
+            )
+            copy_file(
+                file_path,
+                output_path.parent,
+                dest_name=output_path.name,
+                state_ctx=ctx,
+                app=getattr(ctx, "app_name", "") if ctx is not None else "",
+                pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
+                reason="prepared",
+            )
+            object.__setattr__(ctx, "step_record_count", 0)
+            log_row_count(
+                ctx,
+                count_name="transformed_rows",
+                count=0,
+                subject=file_path.name,
+                path=str(output_path),
+            )
+            _logger.info(
+                "Prepared (byte copy): %s → %s", file_path.name, output_path.name
+            )
+            log_artifact_reference(
+                ctx, str(output_path), role="prepared",
+                artifact_type="prepared_file", source_path=str(file_path),
+                viewer_type="file", safe_to_preview=True,
+            )
+            movements = getattr(transform_cfg, "movements", None)
+            if movements is not None and getattr(movements, "success", None):
+                _execute_movements(movements.success, file_path, data_source.paths, ctx=ctx)
+            log_exit(ctx, f"_transform_one_file prepared: {file_path.name}", _logger)
+            return True
 
-		rows, errors = _read_and_transform(
-			file_path,
-			transform_cfg,
-			header_line=header_line,
-			ctx=ctx,
-		)
+        rows, errors = _read_and_transform(
+            file_path,
+            transform_cfg,
+            header_line=header_line,
+            ctx=ctx,
+        )
 
-		if errors:
-			for row_num, col, raw_value, err in errors:
-				_logger.error(
-					"Transform error — file=%s row=%d col=%s value=%r: %s",
-					file_path.name,
-					row_num,
-					col,
-					raw_value,
-					err,
-				)
+        if errors:
+            log_validation_result(
+                ctx,
+                validation_name="transform_rows",
+                status="failed",
+                message=f"{len(errors)} transform error(s)",
+                path=str(file_path),
+                error_count=len(errors),
+            )
+            for row_num, col, raw_value, err in errors:
+                _logger.error(
+                    "Transform error — file=%s row=%d col=%s value=%r: %s",
+                    file_path.name,
+                    row_num,
+                    col,
+                    raw_value,
+                    err,
+                )
 
-			_write_rejections(ctx, file_path, errors)
-			_execute_movements(
-				transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
-			)
-			log_exit(
-				ctx,
-				f"_transform_one_file rejected (errors): {file_path.name}",
-				_logger,
-			)
-			return False
+            _write_rejections(ctx, file_path, errors)
+            _execute_movements(
+                transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+            )
+            log_exit(
+                ctx,
+                f"_transform_one_file rejected (errors): {file_path.name}",
+                _logger,
+            )
+            return False
 
-		if not rows:
-			_logger.warning("No rows produced from file: %s", file_path.name)
-			_execute_movements(
-				transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
-			)
-			log_exit(
-				ctx,
-				f"_transform_one_file rejected (empty): {file_path.name}",
-				_logger,
-			)
-			return False
+        if not rows:
+            _logger.warning("No rows produced from file: %s", file_path.name)
+            log_validation_result(
+                ctx,
+                validation_name="transform_rows",
+                status="failed",
+                message="No rows produced",
+                path=str(file_path),
+            )
+            _execute_movements(
+                transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+            )
+            log_exit(
+                ctx,
+                f"_transform_one_file rejected (empty): {file_path.name}",
+                _logger,
+            )
+            return False
 
-		output_path = _build_output_path(data_source.paths, transform_cfg, file_path, ctx=ctx)
-		write_file(
-			output_path,
-			rows,
-			file_type="CSV",
-			state_ctx=ctx,
-			app=getattr(ctx, "app_name", "") if ctx is not None else "",
-			pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
-			reason="transformed",
-		)
+        output_path = _build_output_path(data_source.paths, transform_cfg, file_path, ctx=ctx)
+        write_file(
+            output_path,
+            rows,
+            file_type="CSV",
+            state_ctx=ctx,
+            app=getattr(ctx, "app_name", "") if ctx is not None else "",
+            pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
+            reason="transformed",
+        )
 
-		# Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
-		# can stamp RecordCount on the BatchStep row.
-		object.__setattr__(ctx, "step_record_count", len(rows))
+        # Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
+        # can stamp RecordCount on the BatchStep row.
+        object.__setattr__(ctx, "step_record_count", len(rows))
+        log_row_count(
+            ctx,
+            count_name="transformed_rows",
+            count=len(rows),
+            subject=file_path.name,
+            path=str(output_path),
+        )
 
-		_logger.info(
-			"Transformed: %s → %s  rows=%d",
-			file_path.name, output_path.name, len(rows),
-		)
-		log_artifact_reference(
-			ctx, str(output_path), role="transformed",
-			artifact_type="transformed_file", source_path=str(file_path),
-			viewer_type="file", safe_to_preview=True,
-		)
+        _logger.info(
+            "Transformed: %s → %s  rows=%d",
+            file_path.name, output_path.name, len(rows),
+        )
+        log_artifact_reference(
+            ctx, str(output_path), role="transformed",
+            artifact_type="transformed_file", source_path=str(file_path),
+            viewer_type="file", safe_to_preview=True,
+        )
 
-		_execute_movements(
-			transform_cfg.movements.success, file_path, data_source.paths, ctx=ctx
-		)
-		log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
-		return True
+        _execute_movements(
+            transform_cfg.movements.success, file_path, data_source.paths, ctx=ctx
+        )
+        log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
+        return True
 
-	except _NON_FATAL_PIPELINE_ERRORS as exc:
-		_logger.error(
-			"Unexpected error transforming '%s': %s",
-			file_path.name, exc, exc_info=True,
-		)
-		_execute_movements(
-			transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
-		)
-		log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
-		return False
+    except _NON_FATAL_PIPELINE_ERRORS as exc:
+        _logger.error(
+            "Unexpected error transforming '%s': %s",
+            file_path.name, exc, exc_info=True,
+        )
+        log_step_failure(
+            ctx,
+            failed_step_id=getattr(transform_cfg, "name", "transform"),
+            failed_step_name=getattr(transform_cfg, "name", "transform"),
+            message=str(exc),
+            error_type=type(exc).__name__,
+            sanitized_exception=str(exc),
+            related_path=str(file_path),
+        )
+        _execute_movements(
+            transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+        )
+        log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
+        return False
     
 def _build_output_path(
     paths: Any,
@@ -1794,6 +1903,15 @@ def _load_one_file(
 
         if not _validate_load_header(file_path, expected_columns, encoding):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
+            log_validation_result(
+                ctx,
+                validation_name="load_header",
+                status="failed",
+                message="Header mismatch",
+                path=str(file_path),
+                schema=schema,
+                table=table,
+            )
             _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
@@ -1808,6 +1926,15 @@ def _load_one_file(
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
+            log_validation_result(
+                ctx,
+                validation_name="load_rows",
+                status="failed",
+                message="No rows produced",
+                path=str(file_path),
+                schema=schema,
+                table=table,
+            )
             _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
             log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
             return 0
@@ -1843,6 +1970,15 @@ def _load_one_file(
             "Loaded: %s → %s.%s  rows=%d",
             file_path.name, schema, table, len(rows),
         )
+        log_row_count(
+            ctx,
+            count_name="loaded_rows",
+            count=len(rows),
+            subject=file_path.name,
+            path=str(file_path),
+            schema=schema,
+            table=table,
+        )
 
         _execute_movements(load_cfg.movements.success, file_path, paths, ctx=ctx)
         log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
@@ -1853,6 +1989,15 @@ def _load_one_file(
         _logger.error(
             "Database error loading '%s' — rolled back: %s",
             file_path.name, exc,
+        )
+        log_step_failure(
+            ctx,
+            failed_step_id=getattr(load_cfg, "name", "load"),
+            failed_step_name=getattr(load_cfg, "name", "load"),
+            message=str(exc),
+            error_type=type(exc).__name__,
+            sanitized_exception=str(exc),
+            related_path=str(file_path),
         )
         _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
         log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
