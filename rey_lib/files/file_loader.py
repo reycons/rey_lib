@@ -46,6 +46,7 @@ from rey_lib.logs.log_utils import (
     get_logger,
     log_artifact_reference,
     log_enter,
+    log_error,
     log_exit,
     log_input_discovered,
     log_row_count,
@@ -53,7 +54,11 @@ from rey_lib.logs.log_utils import (
     log_validation_result,
 )
 from rey_lib.db.db_adapter import DBAdapter
-from rey_lib.errors.error_utils import DatabaseError, ConfigError
+from rey_lib.errors.error_utils import (
+    ConfigError,
+    DatabaseError,
+    build_safe_error_payload,
+)
 from rey_lib.files.file_utils import (
     apply_file_movements,
     input_files,
@@ -271,6 +276,36 @@ def _coerce_transform_cfgs(transform_cfg: Any) -> list[Any]:
     if isinstance(transform_cfg, (list, tuple)):
         return list(transform_cfg)
     return [transform_cfg]
+
+
+def _log_loader_step_failure(
+    ctx: Any,
+    exc: BaseException,
+    *,
+    failed_step_id: str,
+    failed_step_name: str,
+    related_path: str = "",
+) -> str:
+    """Log canonical ERROR evidence and STEP_FAILURE reference for loader work."""
+    error_payload = build_safe_error_payload(
+        exc,
+        message=str(exc),
+        failed_step_id=failed_step_id,
+        failed_step_name=failed_step_name,
+        related_path=related_path,
+    )
+    error_record = log_error(ctx, **error_payload)
+    error_id = str(error_record.get("error_id") or "")
+    error_message = str(error_record.get("error_message") or str(exc))
+    return log_step_failure(
+        ctx,
+        failed_step_id=failed_step_id,
+        failed_step_name=failed_step_name,
+        message=error_message,
+        failure_record_id=error_id,
+        error_id=error_id,
+        related_path=related_path,
+    )
 
 
 def _match_transform(
@@ -1765,13 +1800,11 @@ def _transform_one_file(
             "Unexpected error transforming '%s': %s",
             file_path.name, exc, exc_info=True,
         )
-        log_step_failure(
+        _log_loader_step_failure(
             ctx,
+            exc,
             failed_step_id=getattr(transform_cfg, "name", "transform"),
             failed_step_name=getattr(transform_cfg, "name", "transform"),
-            message=str(exc),
-            error_type=type(exc).__name__,
-            sanitized_exception=str(exc),
             related_path=str(file_path),
         )
         _execute_movements(
@@ -1990,13 +2023,11 @@ def _load_one_file(
             "Database error loading '%s' — rolled back: %s",
             file_path.name, exc,
         )
-        log_step_failure(
+        _log_loader_step_failure(
             ctx,
+            exc,
             failed_step_id=getattr(load_cfg, "name", "load"),
             failed_step_name=getattr(load_cfg, "name", "load"),
-            message=str(exc),
-            error_type=type(exc).__name__,
-            sanitized_exception=str(exc),
             related_path=str(file_path),
         )
         _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
