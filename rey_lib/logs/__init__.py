@@ -64,6 +64,7 @@ from rey_lib.logs.log_utils import (
     open_run_log,
     validate_run_log_completeness,
 )
+from rey_lib.run_lifecycle import run_app_operation
 
 __all__ = [
     "JsonlHandler",
@@ -100,6 +101,7 @@ __all__ = [
     "log_error",
     "log_run_complete",
     "log_run_summary",
+    "run_app_operation",
     "log_app_execution",
     "log_input_discovered",
     "log_sql_execution",

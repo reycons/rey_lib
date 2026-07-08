@@ -36,12 +36,14 @@ from rey_lib.logs import (
     log_step_failure,
     log_step_start,
     log_validation_result,
+    run_app_operation,
     open_run_log,
     project_run_log,
     read_run_log_sections,
     sanitize_command_arguments,
     sanitize_log_value,
 )
+from rey_lib.run_lifecycle import run_app_operation as lifecycle_run_app_operation
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -91,6 +93,54 @@ def test_append_only_accumulates(tmp_path: Path) -> None:
     log_artifact_reference(ctx, str(tmp_path / "out.csv"), role="output")
     log_run_complete(ctx, "success")
     assert len(_read(Path(ctx.run_log_path))) == 3
+
+
+def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
+    """The shared app-run helper owns public command lifecycle records."""
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+
+    assert lifecycle_run_app_operation is run_app_operation
+    result = run_app_operation(ctx, "transform", lambda: 7)
+
+    assert result == 7
+    records = _read(Path(ctx.run_log_path))
+    assert [record["record_type"] for record in records] == [
+        "RUN_START",
+        "RUN_COMPLETE",
+        "RUN_SUMMARY",
+    ]
+    assert records[0]["operation"] == "transform"
+    assert records[1]["status"] == "success"
+    assert records[2]["summary"] == {
+        "operation": "transform",
+        "status": "success",
+    }
+
+
+def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) -> None:
+    """Failures produce canonical ERROR evidence and preserve exception behavior."""
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+
+    def fail() -> None:
+        raise ValueError("password=hunter2 failed")
+
+    with pytest.raises(ValueError):
+        run_app_operation(ctx, "load", fail)
+
+    records = _read(Path(ctx.run_log_path))
+    by_type = {record["record_type"]: record for record in records}
+    assert [record["record_type"] for record in records] == [
+        "RUN_START",
+        "ERROR",
+        "RUN_COMPLETE",
+        "RUN_SUMMARY",
+    ]
+    assert by_type["ERROR"]["error_id"]
+    assert by_type["ERROR"]["failed_step_id"] == "load"
+    assert "hunter2" not in by_type["ERROR"]["error_message"]
+    assert by_type["RUN_COMPLETE"]["status"] == "failed"
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
+    assert by_type["RUN_SUMMARY"]["summary"]["status"] == "failed"
 
 
 def test_open_run_log_fails_closed_without_log_path() -> None:
