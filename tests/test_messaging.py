@@ -182,6 +182,37 @@ def test_execute_message_set_uses_log_and_recipient_group(tmp_path: Path) -> Non
     assert result["message_name"] == "test_email_summary"
 
 
+def test_execute_message_set_logs_archive_as_messaging_artifact(tmp_path: Path) -> None:
+    """The message archive is recorded as a messaging-producer artifact."""
+    from rey_lib.logs import group_artifacts_by_producer, normalize_artifacts
+
+    log_file = tmp_path / "pipeline.jsonl"
+    log_file.write_text(json.dumps({"level": "INFO", "message": "done"}), encoding="utf-8")
+
+    ctx = _ctx(tmp_path)
+    run_log = tmp_path / "run_log.20260708_000000.jsonl"
+    object.__setattr__(ctx, "run_log_path", str(run_log))
+    object.__setattr__(ctx, "run_id", "rm1")
+    object.__setattr__(ctx, "run_timestamp", "20260708_000000")
+
+    execute_message_set(
+        ctx, message_set_name="test_run_complete",
+        context_file=log_file, context_type="jsonl_log",
+    )
+
+    records = [json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
+               if line.strip()]
+    artifact = next(r for r in records if r["record_type"] == "ARTIFACT_REFERENCE")
+    assert artifact["producer"] == "messaging"
+    assert artifact["artifact_type"] == "message_archive"
+    assert artifact["path"] == str(tmp_path / "messages" / "archive.jsonl")
+    assert artifact["source_path"] == str(log_file)
+    assert artifact["safe_to_preview"] is True
+
+    groups = group_artifacts_by_producer(normalize_artifacts(records))
+    assert "messaging" in groups
+
+
 def test_external_audience_requires_approval_before_send(tmp_path: Path) -> None:
     """Approval policy blocks delivery until a deterministic approval is recorded."""
     ctx = _ctx(tmp_path)

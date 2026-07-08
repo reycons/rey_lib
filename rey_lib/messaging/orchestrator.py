@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.logs import get_logger, read_jsonl_records
+from rey_lib.logs import get_logger, log_artifact_reference, read_jsonl_records
 from rey_lib.messaging.body_builder import build_body
 from rey_lib.messaging.config import (
     delivery_dry_run,
+    message_archive_path,
     resolve_message_definition,
     resolve_message_set,
     resolve_template_definition,
@@ -105,6 +106,18 @@ def execute_message_set(
             dry_run=resolved_dry_run,
         )
         results.append(result)
+
+    # Record the message archive as a grounded messaging artifact so the console
+    # groups it under the messaging producer
+    # (SGC_Rey_Console_Run_Artifact_Evidence_And_File_Inspector). Emission is
+    # fail-safe and never affects delivery.
+    archive = message_archive_path(ctx)
+    if archive and Path(archive).exists():
+        log_artifact_reference(
+            ctx, str(archive), role="message_archive", event="written",
+            producer="messaging", artifact_type="message_archive",
+            source_path=str(path), viewer_type="file", safe_to_preview=True,
+        )
 
     return results
 
