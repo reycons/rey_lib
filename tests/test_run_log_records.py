@@ -100,9 +100,9 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
 
     assert lifecycle_run_app_operation is run_app_operation
-    result = run_app_operation(ctx, "transform", lambda: 7)
+    result = run_app_operation(ctx, "transform", lambda: 0)
 
-    assert result == 7
+    assert result == 0
     records = _read(Path(ctx.run_log_path))
     assert [record["record_type"] for record in records] == [
         "RUN_START",
@@ -141,6 +141,29 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
     assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
     assert by_type["RUN_SUMMARY"]["summary"]["status"] == "failed"
+
+
+def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
+    """A nonzero integer return is failed evidence but still returned unchanged."""
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_redactor")
+
+    result = run_app_operation(ctx, "redact", lambda: 1)
+
+    assert result == 1
+    records = _read(Path(ctx.run_log_path))
+    by_type = {record["record_type"]: record for record in records}
+    assert [record["record_type"] for record in records] == [
+        "RUN_START",
+        "STEP_FAILURE",
+        "RUN_COMPLETE",
+        "RUN_SUMMARY",
+    ]
+    assert by_type["STEP_FAILURE"]["failure_record_id"]
+    assert by_type["RUN_COMPLETE"]["status"] == "failed"
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == (
+        by_type["STEP_FAILURE"]["failure_record_id"]
+    )
+    assert by_type["RUN_SUMMARY"]["summary"]["result"] == 1
 
 
 def test_open_run_log_fails_closed_without_log_path() -> None:

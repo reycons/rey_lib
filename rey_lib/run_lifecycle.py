@@ -23,6 +23,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
         log_run_complete,
         log_run_start,
         log_run_summary,
+        log_step_failure,
     )
 
     log_run_start(ctx, operation=operation)
@@ -56,6 +57,35 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
         })
         raise
     else:
+        if _is_failed_result(result):
+            failure_message = (
+                f"app operation '{operation}' returned nonzero result {result}."
+            )
+            failure_id = log_step_failure(
+                ctx,
+                failed_step_id=operation,
+                failed_step_name=operation,
+                message=failure_message,
+                error_type="AppOperationFailed",
+                error_message=failure_message,
+                sanitized_exception=failure_message,
+            )
+            log_run_complete(
+                ctx,
+                "failed",
+                message=failure_message,
+                failure_record_id=failure_id,
+                failed_step_id=operation,
+                failed_step_name=operation,
+                failure_message=failure_message,
+            )
+            log_run_summary(ctx, {
+                "operation": operation,
+                "status": "failed",
+                "failure_record_id": failure_id,
+                "result": result,
+            })
+            return result
         log_run_complete(ctx, "success")
         log_run_summary(ctx, {
             "operation": operation,
@@ -64,3 +94,8 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
         return result
     finally:
         clear_run()
+
+
+def _is_failed_result(result: Any) -> bool:
+    """Return whether a callable result represents a failed app exit code."""
+    return isinstance(result, int) and not isinstance(result, bool) and result != 0
