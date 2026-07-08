@@ -405,17 +405,39 @@ def record_file_operation(operation: str, *, source_path: str = "",
 
 def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
                            event: str = "created", created_by_step: str = "",
-                           display_name: str = "", **fields: Any) -> None:
+                           display_name: str = "", producer: str = "",
+                           artifact_type: str = "", source_path: str = "",
+                           viewer_type: str = "", safe_to_preview: bool | None = None,
+                           **fields: Any) -> None:
     """Append an ARTIFACT_REFERENCE record (files/artifacts) for a created artifact.
 
     Only created/generated/written/exported/reported files are artifacts. Moved,
     copied, renamed, read, or deleted files are FILE_OPERATION execution records,
     not artifacts.
+
+    Producers (redactor/loader/analyzer/…) should tag the artifact with a stable
+    ``producer``, an ``artifact_type``, the originating ``source_path`` where one
+    exists, and ``safe_to_preview`` so the console can group and safely preview
+    artifacts from grounded evidence
+    (SGC_Rey_Console_Run_Artifact_Evidence_And_File_Inspector). These fields are
+    optional and only emitted when supplied, keeping older callers unchanged.
     """
+    extra: dict[str, Any] = {}
+    if producer:
+        extra["producer"] = producer
+    if artifact_type:
+        extra["artifact_type"] = artifact_type
+    if source_path:
+        extra["source_path"] = str(source_path)
+    if viewer_type:
+        extra["viewer_type"] = viewer_type
+    if safe_to_preview is not None:
+        extra["safe_to_preview"] = bool(safe_to_preview)
     log_run_record(
         ctx, "ARTIFACT_REFERENCE",
         path=str(path), display_name=display_name or Path(str(path)).name,
-        artifact_role=role, event=event, created_by_step=created_by_step, **fields,
+        artifact_role=role, event=event, created_by_step=created_by_step,
+        **extra, **fields,
     )
 
 
@@ -971,6 +993,231 @@ _ARTIFACT_IGNORE_EVENTS = {
     "touched",
     "deleted",
 }
+
+
+# ---------------------------------------------------------------------------
+# Artifact evidence normalization
+# (SGC_Rey_Console_Run_Artifact_Evidence_And_File_Inspector, Phase 1).
+#
+# Normalize grounded run-log evidence into producer-tagged artifacts with file
+# movement lineage and related-record links, so the console can group artifacts
+# by producer and open each with its log context — from evidence only, never a
+# filesystem crawl.
+# ---------------------------------------------------------------------------
+
+# FILE_OPERATION operations that relocate a file (source -> target lineage).
+_MOVE_OPERATIONS = {"move", "moved", "copy", "copied", "rename", "renamed"}
+
+# App name -> stable producer name, used only when a record carries no explicit
+# ``producer``. Unknown apps fall back to "unknown".
+_APP_TO_PRODUCER = {
+    "file_redactor": "redactor",
+    "rey_loader": "loader",
+    "rey_analyzer": "analyzer",
+    "rey_messaging": "messaging",
+    "rey_console": "console",
+    "pipeline_coordinator": "pipeline_coordinator",
+}
+
+# Grounded identifier fields used to link a record to an artifact.
+_LINK_FIELDS = (
+    "path", "source_path", "target_path", "destination_path",
+    "current_path", "artifact_id", "correlation_id",
+)
+
+# Metadata keys whose values are masked in the outward (UI-facing) package.
+_SECRET_KEY_RE = re.compile(
+    r"(secret|password|passwd|token|api[_-]?key|access[_-]?key|"
+    r"credential|connection[_-]?string|private[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def _redact_secret_metadata(value: Any) -> Any:
+    """Return metadata with secret-like values masked (recurses dicts/lists)."""
+    if isinstance(value, dict):
+        return {
+            key: ("***redacted***" if _SECRET_KEY_RE.search(str(key))
+                  else _redact_secret_metadata(val))
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secret_metadata(item) for item in value]
+    return value
+
+
+def _artifact_lineage(records: list[dict[str, Any]]) -> dict[str, str]:
+    """Return a source_path -> target_path map from FILE_OPERATION move events."""
+    moves: dict[str, str] = {}
+    for record in records:
+        if str(record.get("record_type") or "").upper() != "FILE_OPERATION":
+            continue
+        if str(record.get("operation") or "").lower() not in _MOVE_OPERATIONS:
+            continue
+        source = str(record.get("source_path") or "")
+        target = str(record.get("target_path") or "")
+        if source and target:
+            moves[source] = target
+    return moves
+
+
+def _resolve_current_path(path: str, moves: dict[str, str]) -> str:
+    """Follow the movement chain from ``path`` to its final known location."""
+    current = path
+    seen: set[str] = set()
+    while current in moves and current not in seen:
+        seen.add(current)
+        current = moves[current]
+    return current
+
+
+def _related_records(
+    records: list[dict[str, Any]], keys: set[str],
+) -> tuple[list[str], list[int]]:
+    """Return (record ids, 1-based source lines) of records grounded to ``keys``."""
+    ids: list[str] = []
+    lines: list[int] = []
+    for line, record in enumerate(records, start=1):
+        values = {str(record.get(field) or "") for field in _LINK_FIELDS}
+        values.discard("")
+        if not values & keys:
+            continue
+        lines.append(line)
+        record_id = (record.get("record_id") or record.get("artifact_id")
+                     or record.get("correlation_id"))
+        if record_id:
+            ids.append(str(record_id))
+    return ids, lines
+
+
+def _producer_for(record: dict[str, Any]) -> str:
+    """Return the artifact's producer from its explicit tag, else its app, else unknown."""
+    producer = str(record.get("producer") or "").strip()
+    if producer:
+        return producer
+    return _APP_TO_PRODUCER.get(str(record.get("app") or "").strip(), "unknown")
+
+
+def _artifact_source_records(records: list[dict[str, Any]]):
+    """Yield the records that create artifacts (references + manifest entries)."""
+    for record in records:
+        record_type = str(record.get("record_type") or "").upper()
+        if record_type == "ARTIFACT_REFERENCE":
+            event = str(record.get("event") or "").lower()
+            if event and event not in _ARTIFACT_CREATE_EVENTS:
+                continue
+            yield record
+        elif record_type in ("ARTIFACT_MANIFEST", "RELEVANT_FILE_MANIFEST"):
+            for entry in _manifest_files(record):
+                yield {**entry, "record_type": "ARTIFACT_MANIFEST",
+                       "producer": record.get("producer"), "app": record.get("app")}
+
+
+def _merge_artifact(into: dict[str, Any], other: dict[str, Any]) -> None:
+    """Merge a duplicate artifact for the same file into an existing entry."""
+    for field in ("source_path", "artifact_type", "producer", "metadata", "id"):
+        if not into.get(field) and other.get(field):
+            into[field] = other[field]
+    if other.get("safe_to_preview") is False:
+        into["safe_to_preview"] = False
+    for field in ("related_log_record_ids", "related_source_lines"):
+        merged = list(dict.fromkeys(into[field] + other[field]))
+        into[field] = merged
+
+
+def _apply_redacted_preference(artifacts: list[dict[str, Any]]) -> None:
+    """Prefer redacted outputs over the originals they were produced from."""
+    by_path: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        by_path.setdefault(artifact["path"], artifact)
+        by_path.setdefault(artifact["current_path"], artifact)
+    for artifact in artifacts:
+        is_redacted = (artifact.get("artifact_type") == "redacted_file"
+                       or artifact.get("producer") == "redactor")
+        source = artifact.get("source_path") or ""
+        if not is_redacted or not source:
+            continue
+        original = by_path.get(source)
+        if original is not None and original is not artifact:
+            original["preferred"] = False
+            original["redacted_by"] = artifact["path"]
+
+
+def normalize_artifacts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize run-log records into grounded, producer-tagged artifacts.
+
+    Reads artifact-creating records (ARTIFACT_REFERENCE / manifest entries) and
+    FILE_OPERATION movement events; returns one entry per artifact with its
+    producer, type, movement-resolved ``current_path``, related log record
+    ids/source lines, and secret-redacted metadata. Duplicate evidence for the
+    same file is merged, and redacted outputs are preferred over their originals.
+    The input is the parsed run-log record list (as returned by
+    ``read_run_log_sections(...)["records"]``); no files are read.
+
+    Parameters
+    ----------
+    records : list[dict[str, Any]]
+        Parsed, ordered run-log records.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Normalized artifact entries, in first-seen order.
+    """
+    records = list(records or [])
+    moves = _artifact_lineage(records)
+    by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    for record in _artifact_source_records(records):
+        path = str(record.get("path") or "")
+        if not path:
+            continue
+        current = _resolve_current_path(path, moves)
+        keys = {path, current}
+        for field in ("source_path", "artifact_id", "correlation_id"):
+            value = str(record.get(field) or "")
+            if value:
+                keys.add(value)
+        ids, lines = _related_records(records, keys)
+        artifact = {
+            "id": str(record.get("artifact_id") or path),
+            "label": str(record.get("display_name") or record.get("name")
+                         or Path(path).name),
+            "producer": _producer_for(record),
+            "artifact_type": str(record.get("artifact_type")
+                                 or record.get("artifact_role")
+                                 or record.get("file_role") or ""),
+            "path": path,
+            "source_path": str(record.get("source_path") or ""),
+            "current_path": current,
+            "viewer_type": str(record.get("viewer_type") or "file"),
+            "safe_to_preview": bool(record.get("safe_to_preview", True)),
+            "preferred": True,
+            "related_log_record_ids": ids,
+            "related_source_lines": lines,
+            "metadata": _redact_secret_metadata(record.get("metadata") or {}),
+        }
+        key = current or path
+        if key in by_key:
+            _merge_artifact(by_key[key], artifact)
+        else:
+            by_key[key] = artifact
+            order.append(key)
+
+    artifacts = [by_key[key] for key in order]
+    _apply_redacted_preference(artifacts)
+    return artifacts
+
+
+def group_artifacts_by_producer(
+    artifacts: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group normalized artifacts by their observed producer, in first-seen order."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for artifact in artifacts:
+        groups.setdefault(artifact.get("producer") or "unknown", []).append(artifact)
+    return groups
 
 
 def read_run_log_sections(path: Path | str) -> dict[str, Any]:
