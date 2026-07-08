@@ -1,6 +1,7 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
 from rey_lib.logs.log_utils import (
     add_jsonl_handler,
+    build_jsonl_event_table,
     format_jsonl_records,
     get_logger,
     discover_runs,
@@ -49,6 +50,7 @@ from rey_lib.logs.log_utils import (
 __all__ = [
     "JsonlHandler",
     "add_jsonl_handler",
+    "build_jsonl_event_table",
     "format_jsonl_records",
     "get_logger",
     "log_enter",

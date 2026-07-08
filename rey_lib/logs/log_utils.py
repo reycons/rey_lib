@@ -41,6 +41,7 @@ __all__ = [
     "log_enter",
     "log_exit",
     "format_jsonl_records",
+    "build_jsonl_event_table",
     "project_run_log",
     "read_jsonl_records",
     "read_run_log_sections",
@@ -818,6 +819,126 @@ def read_jsonl_records(
         "rendered_text": format_jsonl_records(limited_records),
         **log_file_metadata(path),
     }
+
+
+_JSONL_EVENT_COLUMNS = [
+    {"id": "timestamp", "label": "Time", "type": "datetime", "filter": True},
+    {"id": "level", "label": "Level", "type": "text", "filter": True},
+    {"id": "event", "label": "Event", "type": "text", "filter": True},
+    {"id": "step", "label": "Step", "type": "text", "filter": True},
+    {"id": "status", "label": "Status", "type": "text", "filter": True},
+    {"id": "message", "label": "Message", "type": "text", "filter": True},
+    {"id": "source_line", "label": "Source Line", "type": "number", "filter": True},
+]
+_SECRET_KEY_RE = re.compile(r"(password|passwd|secret|token|api[_-]?key|credential)", re.IGNORECASE)
+
+
+def build_jsonl_event_table(
+    *,
+    raw_text: str | None = None,
+    records: list[dict[str, Any]] | None = None,
+    include_raw: bool = False,
+) -> dict[str, Any]:
+    """Return a UI-safe normalized table package for JSONL execution records.
+
+    This helper owns durable JSONL log/event normalization. It parses one JSON
+    object per line when raw text is supplied, preserves source line/index, keeps
+    malformed-line errors local to the package, and redacts secret-like values
+    before rows are returned to the console.
+    """
+    parsed_records: list[tuple[int, dict[str, Any]]] = []
+    parse_errors: list[dict[str, Any]] = []
+
+    if records is not None:
+      for index, record in enumerate(records):
+          if isinstance(record, dict):
+              parsed_records.append((index, record))
+    elif raw_text:
+        for line_number, line in enumerate(str(raw_text).splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                parse_errors.append({
+                    "line": line_number,
+                    "message": str(exc),
+                })
+                continue
+            if isinstance(record, dict):
+                parsed_records.append((line_number, record))
+            else:
+                parse_errors.append({
+                    "line": line_number,
+                    "message": "JSONL line is not an object.",
+                })
+
+    rows: list[dict[str, Any]] = []
+    error_count = 0
+    warning_count = 0
+    safe_records: list[dict[str, Any]] = []
+    for row_index, (source_line, record) in enumerate(parsed_records):
+        safe_record = _redact_jsonl_value(record)
+        safe_records.append(safe_record)
+        level = _first_text(safe_record, "level", "levelname", "severity")
+        event = _first_text(safe_record, "record_type", "event_type", "event", "type")
+        status = _first_text(safe_record, "status")
+        if str(level).upper() == "ERROR" or str(event).upper() == "ERROR" or str(status).lower() == "error":
+            error_count += 1
+        if str(level).upper() in {"WARNING", "WARN"} or str(event).upper() in {"WARNING", "WARN"}:
+            warning_count += 1
+        rows.append({
+            "id": str(safe_record.get("id") or safe_record.get("record_id") or f"jsonl:{source_line}:{row_index}"),
+            "timestamp": _first_text(safe_record, "timestamp", "time", "created_at"),
+            "level": level,
+            "event": event,
+            "step": _first_text(safe_record, "step_name", "step", "process", "process_name"),
+            "status": status,
+            "message": _first_text(safe_record, "message", "msg", "detail", "error"),
+            "source_line": source_line,
+            "raw_index": source_line,
+        })
+
+    result: dict[str, Any] = {
+        "columns": list(_JSONL_EVENT_COLUMNS),
+        "rows": rows,
+        "summary": {
+            "record_count": len(rows),
+            "error_count": error_count,
+            "warning_count": warning_count,
+        },
+        "parse_errors": parse_errors,
+    }
+    if include_raw:
+        result["raw_text"] = (
+            str(raw_text) if raw_text is not None
+            else "\n".join(json.dumps(record, ensure_ascii=False) for record in safe_records)
+        )
+    return result
+
+
+def _redact_jsonl_value(value: Any) -> Any:
+    """Return a copy of value with secret-like keys masked."""
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            redacted[key_text] = "[REDACTED]" if _SECRET_KEY_RE.search(key_text) else _redact_jsonl_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_jsonl_value(item) for item in value]
+    return value
+
+
+def _first_text(record: dict[str, Any], *keys: str) -> str:
+    """Return the first present record value as text, or empty string."""
+    for key in keys:
+        value = record.get(key)
+        if value is not None:
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            return str(value)
+    return ""
 
 
 _RUN_EXECUTION_TYPES = {
