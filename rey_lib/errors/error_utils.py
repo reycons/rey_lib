@@ -24,6 +24,9 @@ validate_required     Validate that a required string value is non-empty.
 from __future__ import annotations
 
 import logging
+import re
+import traceback
+import uuid
 from typing import Any
 
 from rey_lib.logs import get_logger
@@ -36,11 +39,105 @@ __all__ = [
     "FtpConnectionError",
     "FtpDownloadError",
     "handle_exception",
+    "build_error_record_payload",
+    "build_safe_error_payload",
     "validate_path",
     "validate_required",
 ]
 
 _logger = get_logger(__name__)
+
+_SECRET_ERROR_RE = re.compile(
+    r"(?i)"
+    r"("
+    r"(password|passwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"credential|connection[_-]?string|private[_-]?key)"
+    r"\s*[:=]\s*"
+    r")"
+    r"([^,\s;]+)"
+)
+
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+
+
+def _redact_error_text(value: Any) -> str:
+    """Return exception/log text with common secret shapes masked."""
+    text = "" if value is None else str(value)
+    text = _SECRET_ERROR_RE.sub(r"\1[REDACTED]", text)
+    text = _BEARER_RE.sub(r"\1[REDACTED]", text)
+    return text
+
+
+def _sanitize_error_value(value: Any) -> Any:
+    """Return an error payload value with secret-like text and keys redacted."""
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _SECRET_ERROR_RE.search(f"{key_text}="):
+                sanitized[key_text] = "[REDACTED]"
+            else:
+                sanitized[key_text] = _sanitize_error_value(item)
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_error_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_error_text(value)
+    return value
+
+
+def _traceback_summary(lines: list[str], *, max_lines: int = 8) -> str:
+    """Return a compact traceback summary from sanitized traceback lines."""
+    if not lines:
+        return ""
+    selected = lines[-max_lines:]
+    return "".join(selected).strip()
+
+
+def build_error_record_payload(
+    *,
+    message: str,
+    error_type: str = "",
+    error_id: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    """Build the canonical sanitized ERROR payload; log_utils writes it."""
+    safe_message = _redact_error_text(message)
+    return {
+        "error_id": str(error_id or uuid.uuid4()),
+        "status": "failed",
+        "error_type": _redact_error_text(error_type),
+        "message": safe_message,
+        "error_message": safe_message,
+        **_sanitize_error_value(fields),
+    }
+
+
+def build_safe_error_payload(
+    exc: BaseException,
+    *,
+    message: str = "",
+    include_traceback: bool = True,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Build sanitized structured error fields for run-log evidence.
+
+    error_utils owns exception interpretation, traceback shaping, and
+    exception-text redaction. log_utils owns the event envelope.
+    """
+    error_message = _redact_error_text(exc)
+    payload: dict[str, Any] = {
+        "error_type": type(exc).__name__,
+        "message": _redact_error_text(message or error_message),
+        "error_message": error_message,
+        "sanitized_exception": error_message,
+    }
+    if include_traceback:
+        lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        sanitized_lines = [_redact_error_text(line) for line in lines]
+        payload["sanitized_traceback"] = "".join(sanitized_lines).strip()
+        payload["traceback_summary"] = _traceback_summary(sanitized_lines)
+    return build_error_record_payload(**payload, **fields)
 
 # ---------------------------------------------------------------------------
 # Generic exception hierarchy

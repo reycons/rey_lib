@@ -463,7 +463,9 @@ def log_step_failure(
     failed_step_name: str,
     message: str,
     error_type: str = "",
+    error_message: str = "",
     sanitized_exception: str = "",
+    sanitized_traceback: str = "",
     exit_code: int | None = None,
     related_path: str = "",
     related_artifact_id: str = "",
@@ -479,7 +481,9 @@ def log_step_failure(
         "failed_step_name": failed_step_name,
         "message": message,
         "error_type": error_type,
+        "error_message": error_message,
         "sanitized_exception": sanitized_exception,
+        "sanitized_traceback": sanitized_traceback,
         "related_path": related_path,
         "related_artifact_id": related_artifact_id,
         "traceback_summary": traceback_summary,
@@ -492,12 +496,19 @@ def log_step_failure(
 
 
 def log_error(ctx: Any, *, message: str, error_type: str = "",
-              sanitized_exception: str = "", **fields: Any) -> None:
-    """Append a structured ERROR record."""
-    log_run_record(
-        ctx, "ERROR", message=message, error_type=error_type,
-        sanitized_exception=sanitized_exception, **fields,
+              sanitized_exception: str = "", **fields: Any) -> dict[str, Any]:
+    """Append a structured ERROR record from an error_utils canonical payload."""
+    from rey_lib.errors.error_utils import build_error_record_payload
+
+    if sanitized_exception:
+        fields["sanitized_exception"] = sanitized_exception
+    payload = build_error_record_payload(
+        message=message, error_type=error_type, **fields
     )
+    record_fields = dict(payload)
+    record_message = str(record_fields.pop("message", "") or message)
+    log_run_record(ctx, "ERROR", message=record_message, **record_fields)
+    return payload
 
 
 def log_app_execution(

@@ -251,6 +251,138 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert summary["status"] == "success"
 
 
+def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> None:
+    """Workflow coordinator binds step context for handler execution and clears it."""
+    from rey_lib.logs import current_step
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    workflow = {
+        "name": "wf",
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "label": "One", "process": "p1"}],
+    }
+    seen_steps: list[dict] = []
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
+        seen_steps.append(current_step() or {})
+
+    result = run_workflow(ctx, workflow, {"p1": handler})
+
+    assert result.status == "success"
+    assert seen_steps == [{
+        "step_id": "s1",
+        "step_name": "One",
+        "step_sequence": 1,
+        "workflow_name": "wf",
+    }]
+    assert current_step() is None
+
+
+def test_workflow_failure_emits_canonical_error_and_referenced_completion(
+    tmp_path: Path,
+) -> None:
+    """Exception failures produce canonical ERROR evidence referenced by lifecycle records."""
+    from rey_lib.logs import current_step
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    workflow = {
+        "name": "wf",
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "label": "One", "process": "p1"}],
+    }
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
+        raise RuntimeError("load failed password=hunter2 token=abc123")
+
+    result = run_workflow(ctx, workflow, {"p1": handler})
+
+    assert result.status == "failed"
+    records = _read(Path(ctx.run_log_path))
+    error = next(r for r in records if r["record_type"] == "ERROR")
+    failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
+    complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
+    assert error["error_id"]
+    assert error["error_type"] == "RuntimeError"
+    assert error["error_message"]
+    assert error["sanitized_exception"]
+    assert error["sanitized_traceback"]
+    assert error["traceback_summary"]
+    assert error["failed_step_id"] == "s1"
+    assert error["failed_step_name"] == "One"
+    assert error["failed_step_sequence"] == 1
+    assert "hunter2" not in json.dumps(error)
+    assert "abc123" not in json.dumps(error)
+    assert failure["failed_step_id"] == "s1"
+    assert failure["failed_step_name"] == "One"
+    assert failure["failed_step_sequence"] == 1
+    assert failure["error_id"] == error["error_id"]
+    assert failure["failure_record_id"] == error["error_id"]
+    assert "hunter2" not in json.dumps(failure)
+    assert "abc123" not in json.dumps(failure)
+    assert complete["status"] == "failed"
+    assert complete["failure_record_id"] == error["error_id"]
+    assert complete["failed_step_id"] == "s1"
+    assert complete["failed_step_name"] == "One"
+    assert "hunter2" not in json.dumps(complete)
+    assert "abc123" not in json.dumps(complete)
+    assert current_step() is None
+
+
+def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> None:
+    """FILE_OPERATION inherits workflow step context without changing file utilities."""
+    from rey_lib.files.file_utils import write_file
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    workflow = {
+        "name": "wf",
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "label": "One", "process": "p1"}],
+    }
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
+        write_file(tmp_path / "ctx.json", {"ok": True}, "JSON")
+
+    result = run_workflow(ctx, workflow, {"p1": handler})
+
+    assert result.status == "success"
+    records = _read(Path(ctx.run_log_path))
+    op = next(r for r in records if r["record_type"] == "FILE_OPERATION")
+    assert op["operation"] == "write"
+    assert op["step_id"] == "s1"
+    assert op["step_name"] == "One"
+    assert op["step_sequence"] == 1
+
+
+def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -> None:
+    """A handler result with status=failed also produces STEP_FAILURE evidence."""
+    from rey_lib.logs import current_step
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    workflow = {
+        "name": "wf",
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "label": "One", "process": "p1"}],
+    }
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> SimpleNamespace:
+        return SimpleNamespace(status="failed", detail="validation failed")
+
+    result = run_workflow(ctx, workflow, {"p1": handler})
+
+    assert result.status == "failed"
+    records = _read(Path(ctx.run_log_path))
+    failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
+    complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
+    assert failure["error_type"] == "WorkflowStepFailed"
+    assert failure["failed_step_id"] == "s1"
+    assert complete["failure_record_id"] == failure["failure_record_id"]
+    assert current_step() is None
+
+
 def test_discover_runs_lists_newest_first_without_raw_data(tmp_path: Path) -> None:
     """discover_runs returns per-run summaries, newest first, with no raw records."""
     from rey_lib.logs import discover_runs

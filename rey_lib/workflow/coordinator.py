@@ -26,14 +26,19 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.config.config_utils import record_config_file_references
+from rey_lib.errors.error_utils import build_safe_error_payload
 from rey_lib.logs import (
+    bind_step,
     bind_run,
+    clear_step,
     clear_run,
     get_logger,
     log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
     log_run_summary,
+    log_error,
+    log_step_failure,
     log_step_end,
     log_step_start,
 )
@@ -210,43 +215,100 @@ def run_workflow(
 
         sequence += 1
         step_name = label or step_id
-        log_step_start(ctx, step_name, sequence, step_type=process)
-
-        if not apply and bool(effective.get("apply_only")):
-            log_step_end(ctx, step_name, "skipped", message="dry-run")
-            run.outcomes.append(
-                StepOutcome(step_id, label, process, "skipped", "dry-run")
-            )
-            _logger.info("workflow '%s' step '%s' skipped (dry-run).", name, step_id)
-            continue
-
+        bind_step(
+            step_id=step_id,
+            step_name=step_name,
+            step_sequence=sequence,
+            workflow_name=name,
+        )
         try:
-            result = handler(ctx, effective, run_ctx)
-        except Exception as exc:  # noqa: BLE001 — fail closed: record and stop
-            log_step_end(ctx, step_name, "failed", message=str(exc))
-            run.outcomes.append(
-                StepOutcome(step_id, label, process, "failed", error=str(exc))
+            log_step_start(
+                ctx, step_name, sequence, step_type=process, step_id=step_id
             )
-            run.status = "failed"
-            _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
-            log_run_complete(ctx, "failed", message=str(exc))
-            log_run_summary(ctx, _deterministic_summary(name, run))
-            log_artifact_manifest_from_run_log(ctx)
-            clear_run()
-            return run
 
-        status = str(getattr(result, "status", "ok")) if result is not None else "ok"
-        detail = str(getattr(result, "detail", "")) if result is not None else ""
-        artifacts = list(getattr(result, "artifacts", []) or []) if result is not None else []
-        log_step_end(ctx, step_name, status, message=detail)
-        run.outcomes.append(StepOutcome(step_id, label, process, status, detail, artifacts))
-        if status == "failed":
-            run.status = "failed"
-            log_run_complete(ctx, "failed")
-            log_run_summary(ctx, _deterministic_summary(name, run))
-            log_artifact_manifest_from_run_log(ctx)
-            clear_run()
-            return run
+            if not apply and bool(effective.get("apply_only")):
+                log_step_end(ctx, step_name, "skipped", message="dry-run")
+                run.outcomes.append(
+                    StepOutcome(step_id, label, process, "skipped", "dry-run")
+                )
+                _logger.info("workflow '%s' step '%s' skipped (dry-run).", name, step_id)
+                continue
+
+            try:
+                result = handler(ctx, effective, run_ctx)
+            except Exception as exc:  # noqa: BLE001 — fail closed: record and stop
+                error_payload = build_safe_error_payload(
+                    exc,
+                    message=f"workflow '{name}' step '{step_id}' failed",
+                    failed_step_id=step_id,
+                    failed_step_name=step_name,
+                    failed_step_sequence=sequence,
+                )
+                error_record = log_error(ctx, **error_payload)
+                failure_message = str(error_record.get("error_message") or "")
+                failure_id = str(error_record.get("error_id") or "")
+                failure_id = log_step_failure(
+                    ctx,
+                    failed_step_id=step_id,
+                    failed_step_name=step_name,
+                    message=failure_message,
+                    failure_record_id=failure_id,
+                    error_id=failure_id,
+                    failed_step_sequence=sequence,
+                )
+                log_step_end(ctx, step_name, "failed", message=failure_message)
+                run.outcomes.append(
+                    StepOutcome(step_id, label, process, "failed", error=failure_message)
+                )
+                run.status = "failed"
+                _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
+                log_run_complete(
+                    ctx,
+                    "failed",
+                    message=failure_message,
+                    failure_record_id=failure_id,
+                    failed_step_id=step_id,
+                    failed_step_name=step_name,
+                    failure_message=failure_message,
+                )
+                log_run_summary(ctx, _deterministic_summary(name, run))
+                log_artifact_manifest_from_run_log(ctx)
+                clear_run()
+                return run
+
+            status = str(getattr(result, "status", "ok")) if result is not None else "ok"
+            detail = str(getattr(result, "detail", "")) if result is not None else ""
+            artifacts = list(getattr(result, "artifacts", []) or []) if result is not None else []
+            log_step_end(ctx, step_name, status, message=detail)
+            run.outcomes.append(StepOutcome(step_id, label, process, status, detail, artifacts))
+            if status == "failed":
+                run.status = "failed"
+                failure_message = detail or f"workflow step '{step_id}' failed."
+                failure_id = log_step_failure(
+                    ctx,
+                    failed_step_id=step_id,
+                    failed_step_name=step_name,
+                    message=failure_message,
+                    error_type="WorkflowStepFailed",
+                    error_message=failure_message,
+                    sanitized_exception=failure_message,
+                    failed_step_sequence=sequence,
+                )
+                log_run_complete(
+                    ctx,
+                    "failed",
+                    message=failure_message,
+                    failure_record_id=failure_id,
+                    failed_step_id=step_id,
+                    failed_step_name=step_name,
+                    failure_message=failure_message,
+                )
+                log_run_summary(ctx, _deterministic_summary(name, run))
+                log_artifact_manifest_from_run_log(ctx)
+                clear_run()
+                return run
+        finally:
+            clear_step()
 
     log_run_complete(ctx, "success")
     log_run_summary(ctx, _deterministic_summary(name, run))
