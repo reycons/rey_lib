@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,36 @@ paths:
     path: {tmp_path}
 """)
     return config_dir
+
+
+def test_ctx_file_args_apply_child_app_log_context(tmp_path: Path) -> None:
+    """Pipeline child ctx snapshots inherit CLI app identity and log path."""
+    ctx_file = tmp_path / "ctx.json"
+    log_file = tmp_path / "pipeline.jsonl"
+    ctx_file.write_text(
+        json.dumps({
+            "ctx_schema_version": "1.0",
+            "ctx": {
+                "app_name": "pipeline_coordinator",
+                "paths": {"state": str(tmp_path / "state")},
+            },
+        }),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        ctx_file=str(ctx_file),
+        config_path=None,
+        log_file=str(log_file),
+        pipeline_name="daily",
+    )
+
+    ctx = build_ctx_from_args(args, app_name="rey_loader")
+
+    assert ctx.app_name == "rey_loader"
+    assert ctx.pipeline_name == "daily"
+    assert ctx.log_file == str(log_file.resolve())
+    assert ctx.jsonl_path == str(log_file.resolve())
+    assert ctx.run_log_path == str(log_file.resolve())
 
 
 def test_db_connections_alias_to_connections(tmp_path: Path) -> None:

@@ -40,6 +40,7 @@ __all__ = [
     "FtpDownloadError",
     "handle_exception",
     "build_error_record_payload",
+    "build_process_failure_payload",
     "build_safe_error_payload",
     "validate_path",
     "validate_required",
@@ -94,6 +95,14 @@ def _traceback_summary(lines: list[str], *, max_lines: int = 8) -> str:
     return "".join(selected).strip()
 
 
+def _diagnostic_summary(value: Any, *, max_chars: int = 4000) -> str:
+    """Return a bounded, sanitized diagnostic text summary."""
+    text = _redact_error_text(value).strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars].rstrip()}...[truncated]"
+
+
 def build_error_record_payload(
     *,
     message: str,
@@ -111,6 +120,53 @@ def build_error_record_payload(
         "error_message": safe_message,
         **_sanitize_error_value(fields),
     }
+
+
+def build_process_failure_payload(
+    *,
+    message: str = "",
+    error_type: str = "AppExecutionError",
+    exit_code: int | None = None,
+    stdout: Any = "",
+    stderr: Any = "",
+    stdout_summary: str = "",
+    stderr_summary: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    """Build canonical sanitized ERROR payload fields for a failed process.
+
+    This helper owns subprocess diagnostic interpretation: stdout/stderr are
+    sanitized and bounded before being written to run logs.
+    """
+    safe_stdout = _diagnostic_summary(stdout_summary if stdout_summary else stdout)
+    safe_stderr = _diagnostic_summary(stderr_summary if stderr_summary else stderr)
+    detail = safe_stderr or safe_stdout
+    if not message:
+        message = (
+            f"Application exited with code {exit_code}"
+            if exit_code is not None else "Application execution failed"
+        )
+    if detail and message.startswith("Application exited with code"):
+        message = f"{message}: {detail}"
+    elif not detail and message.startswith("Application exited with code"):
+        message = (
+            f"{message} and did not emit stderr, stdout failure detail, "
+            "exception detail, or canonical child ERROR evidence."
+        )
+
+    payload_fields = dict(fields)
+    if exit_code is not None:
+        payload_fields["exit_code"] = exit_code
+    if safe_stdout:
+        payload_fields["stdout_summary"] = safe_stdout
+    if safe_stderr:
+        payload_fields["stderr_summary"] = safe_stderr
+
+    return build_error_record_payload(
+        message=message,
+        error_type=error_type,
+        **payload_fields,
+    )
 
 
 def build_safe_error_payload(

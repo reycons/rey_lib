@@ -43,6 +43,7 @@ from rey_lib.logs import (
     sanitize_command_arguments,
     sanitize_log_value,
 )
+from rey_lib.errors.error_utils import build_process_failure_payload
 from rey_lib.run_lifecycle import run_app_operation as lifecycle_run_app_operation
 
 
@@ -115,6 +116,34 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
         "operation": "transform",
         "status": "success",
     }
+
+
+def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
+    """Process failure evidence includes bounded sanitized stderr details."""
+    payload = build_process_failure_payload(
+        message="Application exited with code 1",
+        exit_code=1,
+        stderr="database failed password=hunter2",
+        failed_step_id="load",
+    )
+
+    assert payload["exit_code"] == 1
+    assert payload["failed_step_id"] == "load"
+    assert payload["stderr_summary"] == "database failed password=[REDACTED]"
+    assert "hunter2" not in json.dumps(payload)
+    assert payload["message"].startswith("Application exited with code 1: database failed")
+
+
+def test_process_failure_payload_reports_missing_diagnostics() -> None:
+    """Process failure evidence explicitly says when no output was available."""
+    payload = build_process_failure_payload(
+        message="Application exited with code 1",
+        exit_code=1,
+    )
+
+    assert "did not emit stderr" in payload["message"]
+    assert "stdout_summary" not in payload
+    assert "stderr_summary" not in payload
 
 
 def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) -> None:

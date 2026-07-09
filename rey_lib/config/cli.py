@@ -230,9 +230,20 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
 
     if ctx_file:
         try:
-            return load_ctx_snapshot(ctx_file)
+            ctx = load_ctx_snapshot(ctx_file)
         except (RuntimeError, OSError) as exc:
             raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
+        object.__setattr__(ctx, "app_name", app_name)
+        log_file = getattr(args, "log_file", None)
+        if log_file:
+            resolved_log_file = str(Path(log_file).expanduser().resolve())
+            object.__setattr__(ctx, "log_file", resolved_log_file)
+            object.__setattr__(ctx, "jsonl_path", resolved_log_file)
+            object.__setattr__(ctx, "run_log_path", resolved_log_file)
+        pipeline_name = getattr(args, "pipeline_name", None)
+        if pipeline_name:
+            object.__setattr__(ctx, "pipeline_name", pipeline_name)
+        return ctx
 
     if not config_path:
         raise SystemExit("--config-path is required.")

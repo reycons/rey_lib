@@ -572,6 +572,11 @@ def log_sql_execution(ctx: Any, *, connection_name: str = "", database: str = ""
                       safe_to_preview: bool | None = None,
                       **fields: Any) -> None:
     """Append SQL_EXECUTION evidence for generated or executed SQL work."""
+    if error_message:
+        from rey_lib.errors.error_utils import build_error_record_payload
+        error_message = str(
+            build_error_record_payload(message=error_message).get("error_message") or ""
+        )
     payload: dict[str, Any] = {
         "connection_name": connection_name,
         "database": database,
