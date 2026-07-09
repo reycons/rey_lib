@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.logs import get_logger, log_artifact_reference, read_jsonl_records
+from rey_lib.logs import (
+    get_logger,
+    log_artifact_reference,
+    log_input_discovered,
+    log_input_file_reference,
+    log_row_count,
+    log_validation_result,
+    read_jsonl_records,
+)
 from rey_lib.messaging.body_builder import build_body
 from rey_lib.messaging.config import (
     delivery_dry_run,
@@ -75,6 +83,22 @@ def execute_message_set(
     path = Path(context_file).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Context file not found: {path}")
+    log_input_discovered(
+        ctx,
+        input_name="messaging_context",
+        path=str(path),
+        source_config=message_set_name,
+        exists=True,
+        safe_to_preview=True,
+        context_type=context_type,
+    )
+    log_input_file_reference(
+        ctx,
+        str(path),
+        file_role="messaging_context",
+        display_name=path.name,
+        context_type=context_type,
+    )
 
     _logger.info(
         "messaging execute_message_set=%s context_type=%s dry_run=%s",
@@ -90,7 +114,22 @@ def execute_message_set(
     )
 
     raw_text, records = _load_context_file(path, context_type)
+    if context_type == "jsonl_log":
+        log_row_count(
+            ctx,
+            count_name="messaging_context_records",
+            count=len(records),
+            subject=message_set_name,
+            context_type=context_type,
+            source_path=str(path),
+        )
     message_names = resolve_message_set(ctx, message_set_name)
+    log_row_count(
+        ctx,
+        count_name="messages_selected",
+        count=len(message_names),
+        subject=message_set_name,
+    )
 
     results: list[dict[str, Any]] = []
     for message_name in message_names:
@@ -106,6 +145,22 @@ def execute_message_set(
             dry_run=resolved_dry_run,
         )
         results.append(result)
+    sent = sum(1 for result in results if result.get("status") == "sent")
+    skipped = sum(1 for result in results if result.get("status") == "skipped")
+    failed = len(results) - sent - skipped
+    log_row_count(ctx, count_name="messages_sent", count=sent, subject=message_set_name)
+    log_row_count(ctx, count_name="messages_skipped", count=skipped, subject=message_set_name)
+    log_row_count(ctx, count_name="messages_failed", count=failed, subject=message_set_name)
+    log_validation_result(
+        ctx,
+        validation_name="message_set_execution",
+        status="success" if failed == 0 else "failed",
+        message=f"message_set={message_set_name} sent={sent} skipped={skipped} failed={failed}",
+        message_set=message_set_name,
+        sent=sent,
+        skipped=skipped,
+        failed=failed,
+    )
 
     # Record the message archive as a grounded messaging artifact so the console
     # groups it under the messaging producer

@@ -154,15 +154,15 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Pat
     by_type = {record["record_type"]: record for record in records}
     assert [record["record_type"] for record in records] == [
         "RUN_START",
+        "ERROR",
         "STEP_FAILURE",
         "RUN_COMPLETE",
         "RUN_SUMMARY",
     ]
-    assert by_type["STEP_FAILURE"]["failure_record_id"]
+    assert by_type["ERROR"]["error_type"] == "AppOperationFailed"
+    assert by_type["STEP_FAILURE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
-    assert by_type["RUN_COMPLETE"]["failure_record_id"] == (
-        by_type["STEP_FAILURE"]["failure_record_id"]
-    )
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
     assert by_type["RUN_SUMMARY"]["summary"]["result"] == 1
 
 

@@ -15,7 +15,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
     caller's existing exit-code behavior remains unchanged.
     """
     from rey_lib.config.config_utils import record_config_file_references
-    from rey_lib.errors.error_utils import build_safe_error_payload
+    from rey_lib.errors.error_utils import build_error_record_payload, build_safe_error_payload
     from rey_lib.logs.log_utils import (
         bind_run,
         clear_run,
@@ -61,20 +61,30 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             failure_message = (
                 f"app operation '{operation}' returned nonzero result {result}."
             )
+            error_record = log_error(
+                ctx,
+                **build_error_record_payload(
+                    message=failure_message,
+                    error_type="AppOperationFailed",
+                    failed_step_id=operation,
+                    failed_step_name=operation,
+                    result=result,
+                ),
+            )
+            failure_record_id = str(error_record.get("error_id") or "")
             failure_id = log_step_failure(
                 ctx,
                 failed_step_id=operation,
                 failed_step_name=operation,
                 message=failure_message,
-                error_type="AppOperationFailed",
-                error_message=failure_message,
-                sanitized_exception=failure_message,
+                failure_record_id=failure_record_id,
+                error_id=failure_record_id,
             )
             log_run_complete(
                 ctx,
                 "failed",
                 message=failure_message,
-                failure_record_id=failure_id,
+                failure_record_id=failure_record_id or failure_id,
                 failed_step_id=operation,
                 failed_step_name=operation,
                 failure_message=failure_message,
@@ -82,7 +92,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             log_run_summary(ctx, {
                 "operation": operation,
                 "status": "failed",
-                "failure_record_id": failure_id,
+                "failure_record_id": failure_record_id or failure_id,
                 "result": result,
             })
             return result

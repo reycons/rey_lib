@@ -202,7 +202,25 @@ def test_execute_message_set_logs_archive_as_messaging_artifact(tmp_path: Path) 
 
     records = [json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
                if line.strip()]
+    input_discovered = next(r for r in records if r["record_type"] == "INPUT_DISCOVERED")
+    input_reference = next(r for r in records if r["record_type"] == "INPUT_FILE_REFERENCE")
+    counts = {
+        r["count_name"]: r["count"]
+        for r in records
+        if r["record_type"] == "ROW_COUNT"
+    }
+    validation = next(r for r in records if r["record_type"] == "VALIDATION_RESULT")
     artifact = next(r for r in records if r["record_type"] == "ARTIFACT_REFERENCE")
+    assert input_discovered["path"] == str(log_file)
+    assert input_discovered["context_type"] == "jsonl_log"
+    assert input_reference["file_role"] == "messaging_context"
+    assert counts["messaging_context_records"] == 1
+    assert counts["messages_selected"] == 1
+    assert counts["messages_sent"] == 1
+    assert counts["messages_skipped"] == 0
+    assert counts["messages_failed"] == 0
+    assert validation["validation_name"] == "message_set_execution"
+    assert validation["status"] == "success"
     assert artifact["producer"] == "messaging"
     assert artifact["artifact_type"] == "message_archive"
     assert artifact["path"] == str(tmp_path / "messages" / "archive.jsonl")
