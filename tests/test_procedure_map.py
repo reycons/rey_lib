@@ -386,33 +386,107 @@ def test_sql_failure_logs_sanitized_failure_evidence(tmp_path: Path):
     assert "SECRET" not in text
 
 
-def test_execute_sql_text_logs_one_authoritative_record(tmp_path: Path):
+def test_execute_sql_text_delegates_to_adapter_run_sql(tmp_path: Path):
+    # execute_sql_text is provider-neutral: it must route ad hoc SQL through the
+    # DBAdapter (which owns provider dispatch), never call conn.execute() itself.
+    ctx = _log_ctx(tmp_path)
+    conn = object()  # no .execute() — a raw connection API access would AttributeError
+    with patch("rey_lib.db.procedure_map._db") as db:
+        db.run_sql.return_value = 1
+        execute_sql_text(
+            ctx,
+            conn,
+            "select secret_value from source",
+            sql_label="hook_file",
+            operation="hook_sql_file",
+            sql_path="/tmp/hook.sql",
+            safe_to_preview=True,
+        )
+
+    db.run_sql.assert_called_once_with(conn, "select secret_value from source")
+    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    assert len(records) == 1
+    assert records[0]["operation"] == "hook_sql_file"
+    assert records[0]["sql_label"] == "hook_file"
+    assert records[0]["status"] == "success"
+    assert "secret_value" not in json.dumps(records[0])
+
+
+def test_execute_sql_text_runs_through_postgres_cursor(tmp_path: Path):
+    # End-to-end through the real DBAdapter + postgres_utils: a psycopg2-shaped
+    # connection exposes cursor()/commit()/rollback() and NO .execute(). This
+    # proves the old 'connection object has no attribute execute' failure is gone.
     ctx = _log_ctx(tmp_path)
 
-    class Conn:
+    class FakeCursor:
         def __init__(self) -> None:
-            self.calls = 0
+            self.executed: list[str] = []
+            self.rowcount = 3
 
-        def execute(self, _sql: str) -> None:
-            self.calls += 1
+        def execute(self, sql: str, _params=None) -> None:
+            self.executed.append(sql)
 
-    conn = Conn()
+    class FakePgConn:
+        provider = "postgres"
+
+        def __init__(self) -> None:
+            self.cur = FakeCursor()
+            self.commits = 0
+
+        def cursor(self) -> FakeCursor:
+            return self.cur
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:  # pragma: no cover — success path
+            raise AssertionError("rollback must not run on success")
+
+    conn = FakePgConn()
+    assert not hasattr(conn, "execute")  # guard: no DuckDB-style connection API
     execute_sql_text(
         ctx,
         conn,
         "select secret_value from source",
         sql_label="hook_file",
-        operation="hook_sql_file",
+        operation="post_load_sql",
         sql_path="/tmp/hook.sql",
         safe_to_preview=True,
     )
 
+    assert conn.cur.executed == ["select secret_value from source"]
+    assert conn.commits == 1
     records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
-    assert conn.calls == 1
     assert len(records) == 1
-    assert records[0]["operation"] == "hook_sql_file"
-    assert records[0]["sql_label"] == "hook_file"
+    assert records[0]["status"] == "success"
     assert "secret_value" not in json.dumps(records[0])
+
+
+def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Path):
+    # A provider failure must propagate and leave exactly one failed, sanitized
+    # SQL_EXECUTION record — no second commit/rollback added by the shared layer.
+    ctx = _log_ctx(tmp_path)
+    conn = object()
+    with patch("rey_lib.db.procedure_map._db") as db:
+        db.run_sql.side_effect = DatabaseError("postgres_utils: run_sql failed: boom")
+        with pytest.raises(DatabaseError, match="run_sql failed"):
+            execute_sql_text(
+                ctx,
+                conn,
+                "delete from source where api_key = 'SECRET'",
+                sql_label="hook_file",
+                operation="hook_sql_file",
+                sql_path="/tmp/hook.sql",
+                safe_to_preview=False,
+            )
+
+    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    assert len(records) == 1
+    assert records[0]["status"] == "failed"
+    assert "run_sql failed" in records[0]["error_message"]
+    text = json.dumps(records[0])
+    assert "SECRET" not in text
+    assert "delete from source" not in text
 
 
 def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):

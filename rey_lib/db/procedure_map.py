@@ -445,7 +445,7 @@ def execute_sql_text(
     """Execute raw SQL text and emit authoritative SQL_EXECUTION evidence."""
     t0 = time.monotonic()
     try:
-        result = conn.execute(sql_text)
+        result = _db.run_sql(conn, sql_text)
     except Exception as exc:
         log_sql_execution(
             ctx,
