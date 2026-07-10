@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -677,6 +678,9 @@ def _run_log_sections(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
     sections = _empty_run_sections()
     files = sections["files"]
+    # One canonical movement map for the whole run, reused for file-operation lineage
+    # (never a second lineage algorithm).
+    moves = _artifact_lineage(records)
     for record in records:
         record_type = str(record.get("record_type") or record.get("event_type") or "").upper()
         record_group = str(record.get("record_group") or "").lower()
@@ -702,7 +706,9 @@ def _run_log_sections(records: list[dict[str, Any]]) -> dict[str, Any]:
                 files["config_files"]["files"].append(entry)
         elif record_type == "FILE_OPERATION":
             files["file_operations"]["records"].append(record)
-            files["file_operations"]["files"].append(_file_operation_entry(record))
+            files["file_operations"]["files"].append(
+                _file_operation_entry(record, records, moves)
+            )
         elif record_type == "ARTIFACT_MANIFEST":
             files["artifacts"]["records"].append(record)
             files["artifacts"]["files"].extend(_manifest_files(record))
@@ -725,33 +731,136 @@ def _run_log_sections(records: list[dict[str, Any]]) -> dict[str, Any]:
         subgroup["files"] = _dedupe_file_entries(subgroup["files"])
         subgroup["count"] = len(subgroup["files"])
         total_files += subgroup["count"]
-    # File operations are event-centric (one file may move several times), so they
-    # are counted per operation rather than deduped by path.
-    files["file_operations"]["count"] = len(files["file_operations"]["records"])
+    # File operations are deduped by stable evidence identity (repeated evidence for
+    # the same operation collapses; genuinely distinct operations are preserved).
+    files["file_operations"]["files"] = _dedupe_file_operations(
+        files["file_operations"]["files"]
+    )
+    files["file_operations"]["count"] = len(files["file_operations"]["files"])
     total_files += len(files["file_operations"]["files"])
     files["count"] = total_files
     return sections
 
 
-def _file_operation_entry(record: dict[str, Any]) -> dict[str, Any]:
-    """Return a file-centric row for a FILE_OPERATION execution record."""
-    path = str(record.get("target_path") or record.get("source_path")
-               or record.get("path") or "")
+def _file_operation_id(record: dict[str, Any]) -> str:
+    """Return a deterministic, stable id for a projected file operation.
+
+    Derived from the operation's own typed evidence — run identity, step, operation
+    type, and the RAW source/target/destination paths (never the lineage-resolved
+    current path, so distinct moves in a chain stay distinct). The same source
+    evidence always yields the same id; genuinely distinct operations differ. Never
+    uses object identity, randomness, filenames, or position.
+    """
+    parts = [
+        str(record.get("run_id") or ""),
+        str(record.get("run_timestamp") or ""),
+        str(record.get("step_name") or record.get("step_id") or ""),
+        str(record.get("step_sequence") or ""),
+        str(record.get("operation") or ""),
+        str(record.get("source_path") or ""),
+        str(record.get("target_path") or ""),
+        str(record.get("destination_path") or ""),
+    ]
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
+    ts = str(record.get("run_timestamp") or "")
+    step = str(record.get("step_name") or record.get("step_id") or "step")
+    seq = str(record.get("step_sequence") or "0")
+    return f"fileop-{ts}-{step}-{seq}-{digest}"
+
+
+def _file_operation_capabilities(current_path: str) -> dict[str, bool]:
+    """Return capability flags for a file operation from its resolved physical path."""
+    has_path = bool(current_path)
+    return {"can_open": has_path, "can_copy_path": has_path}
+
+
+# Action id -> capability flag that must be true to offer it.
+_FILE_OP_ACTION_SPECS: tuple[tuple[str, str], ...] = (
+    ("view", "can_open"),
+    ("open_external", "can_open"),
+    ("copy_path", "can_copy_path"),
+)
+
+
+def _file_operation_entry(
+    record: dict[str, Any],
+    records: list[dict[str, Any]],
+    moves: dict[str, str],
+) -> dict[str, Any]:
+    """Return an enriched, file-centric row for a FILE_OPERATION execution record.
+
+    Adds, from typed evidence only (SGC_Rey_Lib_File_Operation_Evidence_Backend_Projection):
+    a stable operation id, the lineage-resolved current path across chained moves,
+    related log record ids / source lines, viewer/open/copy capability flags (with
+    capability-gated actions), and execution ownership metadata. Missing optional
+    fields render as empty/None — never fabricated from filenames or paths.
+    """
+    source_path = str(record.get("source_path") or "")
+    target_path = str(record.get("target_path") or "")
+    destination_path = str(record.get("destination_path") or "")
+    raw_path = target_path or source_path or str(record.get("path") or "")
+    # Best current path: start from where this operation put the file (current ->
+    # destination -> target -> source) then follow the movement chain to its end.
+    endpoint = (str(record.get("current_path") or "") or destination_path
+                or target_path or source_path)
+    current_path = _resolve_current_path(endpoint, moves) if endpoint else ""
+
+    keys = {source_path, target_path, destination_path, raw_path, endpoint, current_path}
+    # Also ground related records by this operation's own correlation/artifact ids,
+    # so correlated non-path records (e.g. STEP_END) are linked as evidence.
+    for field in ("correlation_id", "artifact_id"):
+        keys.add(str(record.get(field) or ""))
+    keys.discard("")
+    related_ids, related_lines = _related_records(records, keys)
+
+    capabilities = _file_operation_capabilities(current_path)
+    display_source = current_path or raw_path
     return {
-        "path": path,
-        "display_name": Path(path).name if path else "",
+        "id": _file_operation_id(record),
+        "path": raw_path,
+        "display_name": Path(display_source).name if display_source else "",
         "operation": str(record.get("operation") or ""),
-        "source_path": str(record.get("source_path") or ""),
-        "target_path": str(record.get("target_path") or ""),
-        "destination_path": str(record.get("destination_path") or ""),
-        "current_path": str(record.get("current_path") or ""),
+        "source_path": source_path,
+        "target_path": target_path,
+        "destination_path": destination_path,
+        "current_path": current_path,
         "status": str(record.get("status") or ""),
+        "viewer_type": str(record.get("viewer_type") or "file"),
+        "producing_app": str(record.get("producer") or record.get("app") or ""),
+        "pipeline_name": str(record.get("pipeline_name") or ""),
+        "run_id": str(record.get("run_id") or ""),
+        "run_timestamp": str(record.get("run_timestamp") or ""),
         "step_id": str(record.get("step_id") or ""),
+        "step_name": str(record.get("step_name") or ""),
+        "step_sequence": record.get("step_sequence"),
+        "related_log_record_ids": related_ids,
+        "related_source_lines": related_lines,
         "exists": record.get("exists"),
         "size_bytes": record.get("size_bytes"),
         "modified_at": str(record.get("modified_at") or ""),
-        "actions": ["view", "copy_path", "open_external"],
+        "capabilities": capabilities,
+        "actions": [
+            action for action, flag in _FILE_OP_ACTION_SPECS if capabilities.get(flag)
+        ],
     }
+
+
+def _dedupe_file_operations(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse repeated evidence for the same operation by stable id, keeping order.
+
+    Deduplicates on the deterministic operation id (stable evidence identity), so
+    duplicate rows for the same operation collapse while genuinely distinct
+    operations — different type or source/target — are preserved.
+    """
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for entry in entries:
+        entry_id = str(entry.get("id") or "")
+        if entry_id in seen:
+            continue
+        seen.add(entry_id)
+        deduped.append(entry)
+    return deduped
 
 
 def _manifest_files(record: dict[str, Any]) -> list[dict[str, Any]]:
