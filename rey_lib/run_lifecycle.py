@@ -2,9 +2,76 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-__all__ = ["run_app_operation"]
+__all__ = ["run_app_operation", "pipeline_run_dir", "pipeline_run_ctx_path"]
+
+
+def pipeline_run_dir(
+    state_dir: Path,
+    run_id: str,
+    pipeline_name: str,
+) -> Path:
+    """Return the canonical directory for a single pipeline run.
+
+    All of a run's per-step artifacts live directly under this directory, kept
+    under ``<state_dir>/pipeline_runs`` and namespaced by run id and pipeline name
+    to preserve run isolation.
+
+    Parameters
+    ----------
+    state_dir : Path
+        The resolved application state directory.
+    run_id : str
+        The pipeline run identifier.
+    pipeline_name : str
+        The pipeline name.
+
+    Returns
+    -------
+    Path
+        The run directory (not created by this function).
+    """
+    # Compose the run-scoped directory; callers create it as needed.
+    return state_dir / "pipeline_runs" / run_id / pipeline_name
+
+
+def pipeline_run_ctx_path(
+    state_dir: Path,
+    run_id: str,
+    pipeline_name: str,
+    step_id: str,
+) -> Path:
+    """Return the flat step-context snapshot path for a pipeline step.
+
+    A step that persists only its execution context stores it as a single
+    ``<step_id>.ctx.json`` file directly under the pipeline run directory, so no
+    per-step directory is created for the context alone. The filename itself
+    identifies the step; this helper is the single source of truth for the path.
+
+    Parameters
+    ----------
+    state_dir : Path
+        The resolved application state directory.
+    run_id : str
+        The pipeline run identifier.
+    pipeline_name : str
+        The pipeline name.
+    step_id : str
+        The step identifier (its name), used verbatim as the filename stem.
+
+    Returns
+    -------
+    Path
+        The ``<step_id>.ctx.json`` path under the pipeline run directory.
+    """
+    # The filename carries the step identity — no per-step directory is created.
+    return pipeline_run_dir(
+        state_dir=state_dir,
+        run_id=run_id,
+        pipeline_name=pipeline_name,
+    ) / f"{step_id}.ctx.json"
 
 
 def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
