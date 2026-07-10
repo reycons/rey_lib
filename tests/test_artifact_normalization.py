@@ -146,6 +146,38 @@ def test_safe_to_preview_defaults_true_and_honors_explicit_false() -> None:
     assert flags["/a/blob.bin"] is False
 
 
+def test_producing_step_is_recovered_from_created_by_step() -> None:
+    """producing_step is surfaced from the typed created_by_step evidence field."""
+    records = [_artifact("/a/staging.sql", producer="analyzer",
+                         created_by_step="generate_trade_staging_tables")]
+    artifact = normalize_artifacts(records)[0]
+    assert artifact["producing_step"] == "generate_trade_staging_tables"
+
+
+def test_producing_step_falls_back_to_step_name() -> None:
+    """When created_by_step is absent, step_name on the record is the fallback."""
+    records = [_artifact("/a/out.csv", producer="loader", step_name="prepare_trade_files")]
+    assert normalize_artifacts(records)[0]["producing_step"] == "prepare_trade_files"
+
+
+def test_producing_step_absent_renders_empty_not_inferred() -> None:
+    """With no step evidence, producing_step is empty — never inferred from the path."""
+    records = [_artifact("/a/prepare_trade_files.ctx.json", producer="loader")]
+    assert normalize_artifacts(records)[0]["producing_step"] == ""
+
+
+def test_producing_step_is_preserved_across_artifact_merge() -> None:
+    """A step-tagged record's producing_step survives dedupe/merge with a bare record."""
+    records = [
+        _artifact("/a/report.json", producer="analyzer"),
+        _artifact("/a/report.json", producer="analyzer",
+                  created_by_step="generate_trade_final_tables"),
+    ]
+    artifacts = normalize_artifacts(records)
+    assert len(artifacts) == 1
+    assert artifacts[0]["producing_step"] == "generate_trade_final_tables"
+
+
 def test_log_artifact_reference_tags_producer_fields(tmp_path: Path) -> None:
     """The emitter records producer/type/source_path/safe_to_preview when supplied."""
     from types import SimpleNamespace

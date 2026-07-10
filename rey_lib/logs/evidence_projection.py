@@ -344,7 +344,7 @@ def _artifact_source_records(records: list[dict[str, Any]]):
 def _merge_artifact(into: dict[str, Any], other: dict[str, Any]) -> None:
     """Merge a duplicate artifact for the same file into an existing entry."""
     for field in (
-        "source_path", "artifact_type", "producer", "metadata", "id",
+        "source_path", "artifact_type", "producer", "producing_step", "metadata", "id",
         "exists", "size_bytes", "modified_at", "hash", "sha256",
     ):
         if not into.get(field) and other.get(field):
@@ -416,6 +416,11 @@ def normalize_artifacts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "label": str(record.get("display_name") or record.get("name")
                          or Path(path).name),
             "producer": _producer_for(record),
+            # Producing step is typed evidence: ARTIFACT_REFERENCE records carry
+            # created_by_step (step_name as a fallback where present). It is recovered
+            # from the record here — never inferred from filenames, paths, or grouping.
+            "producing_step": str(record.get("created_by_step")
+                                  or record.get("step_name") or ""),
             "artifact_type": str(record.get("artifact_type")
                                  or record.get("artifact_role")
                                  or record.get("file_role") or ""),
