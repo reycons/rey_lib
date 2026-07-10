@@ -24,6 +24,7 @@ from rey_lib.logs import (
     log_artifact_reference,
     log_config_file_reference,
     log_error,
+    log_execution_plan,
     log_file_operation,
     log_input_discovered,
     log_input_file_reference,
@@ -67,6 +68,26 @@ def test_run_log_named_with_run_timestamp(tmp_path: Path) -> None:
     path = open_run_log(ctx)
     assert path.name == f"transform_load.{ctx.run_timestamp}.jsonl"
     assert path.parent == tmp_path
+
+
+def test_log_execution_plan_writes_execution_grouped_record(tmp_path: Path) -> None:
+    """log_execution_plan emits one EXECUTION_PLAN record grouped as execution."""
+    ctx = _ctx(tmp_path)
+    log_run_start(ctx)
+    steps = [
+        {"sequence": 1, "step_id": "a", "step_name": "a", "app": "tool"},
+        {"sequence": 2, "step_id": "b", "step_name": "b", "app": "tool"},
+    ]
+    log_execution_plan(ctx, total_steps=2, steps=steps)
+
+    records = _read(Path(ctx.run_log_path))
+    plans = [r for r in records if r["record_type"] == "EXECUTION_PLAN"]
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan["record_group"] == "execution"
+    assert plan["total_steps"] == 2
+    assert [s["step_name"] for s in plan["steps"]] == ["a", "b"]
+    assert plan["run_id"] == ctx.run_id
 
 
 def test_records_carry_run_id_and_group(tmp_path: Path) -> None:

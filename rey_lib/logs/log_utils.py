@@ -34,6 +34,7 @@ from rey_lib.logs.evidence_projection import (
 from rey_lib.logs.execution_records import (
     log_app_execution,
     log_error,
+    log_execution_plan,
     log_run_complete,
     log_run_start,
     log_run_summary,
@@ -110,6 +111,7 @@ __all__ = [
     "sanitize_command_arguments",
     "log_run_record",
     "log_run_start",
+    "log_execution_plan",
     "log_step_start",
     "log_step_end",
     "log_step_failure",

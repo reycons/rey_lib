@@ -13,6 +13,21 @@ def log_run_start(ctx: Any, **fields: Any) -> None:
     log_run_record(ctx, "RUN_START", **fields)
 
 
+def log_execution_plan(ctx: Any, *, total_steps: int,
+                       steps: list[dict[str, Any]], **fields: Any) -> None:
+    """Append one EXECUTION_PLAN execution record describing the ordered plan.
+
+    Emitted once per run, after RUN_START and before the first STEP_START, so the
+    run log is the durable source of truth for step count, order, and identity
+    (SGC_Pipeline_Coordinator_Execution_Plan_Record). ``run_id``, ``run_timestamp``,
+    and ``pipeline_name`` are enriched by the shared logging layer.
+    """
+    log_run_record(
+        ctx, "EXECUTION_PLAN",
+        total_steps=total_steps, steps=list(steps), **fields,
+    )
+
+
 def log_step_start(ctx: Any, step_name: str, step_sequence: int,
                    step_type: str = "", step_id: str = "", **fields: Any) -> None:
     """Append a STEP_START execution record for one step."""
