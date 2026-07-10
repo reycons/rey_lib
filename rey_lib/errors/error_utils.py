@@ -42,6 +42,7 @@ __all__ = [
     "build_error_record_payload",
     "build_process_failure_payload",
     "build_safe_error_payload",
+    "redact_text",
     "validate_path",
     "validate_required",
 ]
@@ -67,6 +68,30 @@ def _redact_error_text(value: Any) -> str:
     text = _SECRET_ERROR_RE.sub(r"\1[REDACTED]", text)
     text = _BEARER_RE.sub(r"\1[REDACTED]", text)
     return text
+
+
+def redact_text(value: Any) -> str:
+    """Return text with common secret shapes masked (public secret-masking helper).
+
+    Applies the same masking used for error/evidence diagnostic summaries so callers
+    that stream live process output can sanitize each line with the identical rules,
+    keeping redaction behavior single-sourced. Masks ``key: value`` / ``key=value``
+    secret patterns (password/token/api-key/credential/connection-string/private-key)
+    and bearer tokens.
+
+    Parameters
+    ----------
+    value : Any
+        The text (or value coerced to text) to sanitize.
+
+    Returns
+    -------
+    str
+        The text with secret-shaped substrings replaced by ``[REDACTED]``.
+    """
+    # Delegate to the shared internal masker so there is one source of truth for the
+    # secret patterns.
+    return _redact_error_text(value)
 
 
 def _sanitize_error_value(value: Any) -> Any:
