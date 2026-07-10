@@ -9,6 +9,22 @@ from types import SimpleNamespace
 from rey_lib.logs.log_utils import log_file_metadata, read_jsonl_records, setup_logging
 
 
+def test_log_utils_public_api_includes_package_facade_exports() -> None:
+    """log_utils.__all__ covers the supported rey_lib.logs facade surface."""
+    import rey_lib.logs as logs
+    import rey_lib.logs.log_utils as log_utils
+
+    non_log_utils_exports = {"JsonlHandler", "run_app_operation"}
+    missing = [
+        name for name in logs.__all__
+        if name not in non_log_utils_exports and name not in log_utils.__all__
+    ]
+    assert missing == []
+
+    for name in log_utils.__all__:
+        assert hasattr(log_utils, name), name
+
+
 def test_httpx_429_records_are_promoted_to_warning(tmp_path) -> None:
     """OpenAI/HTTPX 429 messages are warning-level in text and JSONL logs."""
     ctx = SimpleNamespace(
