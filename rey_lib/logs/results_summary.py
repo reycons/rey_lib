@@ -245,44 +245,206 @@ def _warnings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Assemble failure diagnostics incl. the complete assembled error output.
+# Explicit marker appended by error_utils._diagnostic_summary when it bounds text.
+_TRUNCATION_MARKER = "...[truncated]"
 
-    The error output is assembled verbatim from the error-bearing records in log
-    order — never sanitized or truncated by this builder. If an upstream record was
-    already flagged truncated, that is reported honestly.
+# Error-bearing fields mapped to (stream, in-stream precedence). Lower precedence
+# number wins when two fields of one stream carry proven-identical evidence. The
+# tuple order is also the extraction order within a single record.
+_ERROR_FIELDS: tuple[tuple[str, str, int], ...] = (
+    ("stderr_summary", "stderr", 0),
+    ("stdout_summary", "stdout", 0),
+    ("full_error_output", "structured_error", 0),
+    ("sanitized_exception", "structured_error", 1),
+    ("error_message", "structured_error", 2),
+    ("message", "structured_error", 3),
+    ("sanitized_traceback", "traceback", 0),
+    ("traceback_summary", "traceback", 1),
+)
+
+# Stream section order for the assembled string; index is the cross-stream rank
+# (stderr_summary > stdout_summary > structured error > traceback).
+_STREAM_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("stderr", "STDERR"),
+    ("stdout", "STDOUT"),
+    ("structured_error", "STRUCTURED ERROR"),
+    ("traceback", "TRACEBACK"),
+)
+_STREAM_RANK = {stream: index for index, (stream, _label) in enumerate(_STREAM_SECTIONS)}
+
+
+def _logical_failure_id(record: dict[str, Any], rtype: str,
+                        known_error_ids: frozenset[str]) -> str:
+    """Return the logical failure identity for an error-bearing record.
+
+    Correlation is evidence-only: a STEP_FAILURE joins an ERROR when its
+    ``failure_record_id`` matches that ERROR's ``error_id``; otherwise it falls back
+    to a shared ``failed_step_id`` group. No fuzzy correlation (timestamps, message or
+    traceback similarity) is ever attempted
+    (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
+    """
+    if rtype == _ERROR:
+        return str(record.get("error_id") or record.get("record_id") or "")
+    if rtype == _STEP_FAILURE:
+        failure_id = str(record.get("failure_record_id") or "")
+        if failure_id and failure_id in known_error_ids:
+            return failure_id
+        step_id = str(record.get("failed_step_id") or "")
+        if step_id:
+            return f"step:{step_id}"
+        return str(record.get("record_id") or failure_id or "")
+    step_id = str(record.get("failed_step_id") or record.get("step_id") or "")
+    return f"step:{step_id}" if step_id else ""
+
+
+def _collect_error_blocks(records: list[dict[str, Any]],
+                          known_error_ids: frozenset[str]) -> list[dict[str, Any]]:
+    """Extract labelled error-evidence blocks from records in original log order.
+
+    Each block records its stream, logical failure, and whether its own upstream
+    evidence was already truncated. Truncation is asserted only from explicit signals:
+    the ``output_truncated``/``truncated`` flags, the ``...[truncated]`` marker, or a
+    ``traceback_summary`` standing in for an absent ``sanitized_traceback``.
+    """
+    blocks: list[dict[str, Any]] = []
+    for record in records:
+        rtype = _rtype(record)
+        if rtype not in (_ERROR, _STEP_FAILURE, _APP_EXECUTION):
+            continue
+        record_id = str(record.get("record_id") or record.get("error_id")
+                        or record.get("failure_record_id") or "")
+        logical_id = _logical_failure_id(record, rtype, known_error_ids)
+        flag_truncated = bool(record.get("output_truncated") or record.get("truncated"))
+        has_full_traceback = bool(record.get("sanitized_traceback"))
+        for field, stream, priority in _ERROR_FIELDS:
+            value = record.get(field)
+            if not value:
+                continue
+            text = str(value)
+            truncated = False
+            if stream in ("stderr", "stdout") and flag_truncated:
+                truncated = True
+            if text.rstrip().endswith(_TRUNCATION_MARKER):
+                truncated = True
+            if field == "traceback_summary" and not has_full_traceback:
+                truncated = True
+            blocks.append({
+                "record_id": record_id,
+                "record_type": rtype,
+                "logical_failure_id": logical_id,
+                "stream": stream,
+                "priority": priority,
+                "truncated": truncated,
+                "text": text,
+                "order": len(blocks),
+            })
+    return blocks
+
+
+def _dedupe_error_blocks(
+    blocks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Suppress proven-duplicate blocks, returning (kept-in-log-order, removed count).
+
+    A block is removed only when it is an exact match or a strict contiguous substring
+    of a retained block; partial overlaps, reordered text, and fuzzy similarity are
+    never treated as duplicates. Processing longest-first (ties by stream precedence,
+    then in-stream precedence, then log order) makes every subset see its superset
+    already retained and lets the higher-precedence stream win exact matches.
+    """
+    ranked = sorted(
+        blocks,
+        key=lambda b: (-len(b["text"]), _STREAM_RANK[b["stream"]], b["priority"],
+                       b["order"]),
+    )
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for block in ranked:
+        if any(block["text"] in other["text"] for other in kept):
+            removed += 1
+            continue
+        kept.append(block)
+    kept.sort(key=lambda b: b["order"])
+    return kept, removed
+
+
+def _assemble_error_output(kept: list[dict[str, Any]]) -> str:
+    """Join retained blocks into one labelled, deterministic string.
+
+    Streams appear in a fixed section order with explicit headers so a downstream
+    reader can distinguish stderr, stdout, structured errors, and tracebacks without
+    consulting the source records. Blocks within a section stay in log order.
+    """
+    sections: list[str] = []
+    for stream, label in _STREAM_SECTIONS:
+        texts = [b["text"] for b in kept if b["stream"] == stream]
+        if not texts:
+            continue
+        sections.append(f"===== {label} =====\n\n" + "\n\n".join(texts))
+    return "\n\n".join(sections)
+
+
+def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Assemble failure diagnostics with deduplicated, provenance-tracked evidence.
+
+    Error text is gathered from every error-bearing record, correlated into logical
+    failures, deduplicated (exact/subset only), and assembled into one labelled string
+    plus per-block ``error_blocks`` metadata. Nothing is sanitized, reordered, or
+    truncated by this builder; upstream truncation is reported honestly and an
+    ``error_statistics`` inventory exposes how the package was assembled
+    (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
     """
     complete = next((r for r in reversed(records) if _rtype(r) == _RUN_COMPLETE), {})
+    known_error_ids = frozenset(
+        str(r.get("error_id") or r.get("record_id") or "")
+        for r in records if _rtype(r) == _ERROR
+    ) - {""}
     failure_ids = [str(r.get("failure_record_id") or r.get("record_id") or "")
                    for r in records if _rtype(r) == _STEP_FAILURE]
     error_ids = [str(r.get("error_id") or r.get("record_id") or "")
                  for r in records if _rtype(r) == _ERROR]
 
-    parts: list[str] = []
-    truncated = False
+    raw_blocks = _collect_error_blocks(records, known_error_ids)
+    kept, removed = _dedupe_error_blocks(raw_blocks)
+
+    logical_ids = {
+        _logical_failure_id(r, _rtype(r), known_error_ids)
+        for r in records if _rtype(r) in (_ERROR, _STEP_FAILURE)
+    } - {""}
     truncated_source_ids: list[str] = []
-    for record in records:
-        if _rtype(record) not in (_ERROR, _APP_EXECUTION, _STEP_FAILURE):
-            continue
-        for field in ("full_error_output", "stderr_summary", "stdout_summary",
-                      "sanitized_traceback", "traceback_summary", "error_message", "message"):
-            value = record.get(field)
-            if value:
-                parts.append(str(value))
-        if record.get("output_truncated") or record.get("truncated"):
-            truncated = True
-            rid = str(record.get("record_id") or record.get("error_id") or "")
-            if rid:
-                truncated_source_ids.append(rid)
+    for block in kept:
+        rid = block["record_id"]
+        if block["truncated"] and rid and rid not in truncated_source_ids:
+            truncated_source_ids.append(rid)
+
+    error_blocks = [
+        {"record_id": b["record_id"], "record_type": b["record_type"],
+         "logical_failure_id": b["logical_failure_id"], "stream": b["stream"],
+         "truncated": b["truncated"], "text": b["text"]}
+        for b in kept
+    ]
+    statistics = {
+        "logical_failures": len(logical_ids),
+        "error_records": sum(1 for r in records if _rtype(r) == _ERROR),
+        "step_failure_records": sum(1 for r in records if _rtype(r) == _STEP_FAILURE),
+        "app_execution_records": sum(1 for r in records if _rtype(r) == _APP_EXECUTION),
+        "duplicate_blocks_removed": removed,
+        "stderr_blocks": sum(1 for b in kept if b["stream"] == "stderr"),
+        "stdout_blocks": sum(1 for b in kept if b["stream"] == "stdout"),
+        "structured_blocks": sum(1 for b in kept if b["stream"] == "structured_error"),
+        "traceback_blocks": sum(1 for b in kept if b["stream"] == "traceback"),
+    }
 
     diagnostics: dict[str, Any] = {
         "failed_step_id": str(complete.get("failed_step_id") or ""),
         "failed_step_name": str(complete.get("failed_step_name") or ""),
         "failure_record_ids": [i for i in failure_ids if i],
         "error_record_ids": [i for i in error_ids if i],
-        "error_output_source": "application_subprocess",
-        "error_output_truncated": truncated,
-        "full_error_output": "\n".join(parts),
+        "error_output_source": "application_subprocess" if kept else "none_recorded",
+        "error_output_truncated": bool(truncated_source_ids),
+        "error_blocks": error_blocks,
+        "error_statistics": statistics,
+        "full_error_output": _assemble_error_output(kept),
     }
     if truncated_source_ids:
         diagnostics["truncated_source_record_ids"] = truncated_source_ids

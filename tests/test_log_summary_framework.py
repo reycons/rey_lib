@@ -144,7 +144,12 @@ def test_results_summary_preserves_full_error_output_verbatim(tmp_path: Path) ->
     finalize_run_log(_ctx(log))
     doc = _doc(log)
     # Verbatim: every line preserved, not sanitized (this increment adds no redaction).
-    assert doc["diagnostics"]["full_error_output"] == big
+    # The assembled string is now labelled by stream, so the payload is contained
+    # within it, while the block carries the untouched byte-for-byte text.
+    assert big in doc["diagnostics"]["full_error_output"]
+    block = doc["diagnostics"]["error_blocks"][0]
+    assert block["text"] == big
+    assert block["truncated"] is False
     assert doc["diagnostics"]["error_output_truncated"] is False
 
 
@@ -162,6 +167,121 @@ def test_results_summary_marks_upstream_truncation_honestly(tmp_path: Path) -> N
     d = _doc(log)["diagnostics"]
     assert d["error_output_truncated"] is True
     assert d["truncated_source_record_ids"] == ["e1"]
+
+
+def test_results_summary_dedupes_repeated_subprocess_transcript(tmp_path: Path) -> None:
+    """The same stderr copied across records is retained once; provenance stays honest."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    transcript = "Traceback (most recent call last):\n  File a.py\nRuntimeError: boom"
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "STEP_START", "record_group": "execution", "run_id": "r1",
+         "step_id": "b", "step_name": "b", "step_sequence": 1},
+        {"record_type": "APP_EXECUTION", "record_group": "execution", "run_id": "r1",
+         "record_id": "a1", "failed_step_id": "b", "stderr_summary": transcript},
+        {"record_type": "ERROR", "record_group": "execution", "run_id": "r1",
+         "error_id": "e1", "sanitized_exception": transcript,
+         "error_message": "step b aborted"},
+        {"record_type": "STEP_FAILURE", "record_group": "execution", "run_id": "r1",
+         "record_id": "s1", "failed_step_id": "b", "failure_record_id": "e1",
+         "sanitized_exception": transcript},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "failed_step_id": "b", "failed_step_name": "b",
+         "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    d = _doc(log)["diagnostics"]
+    # The transcript appears three times; only the highest-precedence (stderr) survives.
+    transcript_blocks = [b for b in d["error_blocks"] if b["text"] == transcript]
+    assert len(transcript_blocks) == 1
+    assert transcript_blocks[0]["stream"] == "stderr"
+    assert d["full_error_output"].count(transcript) == 1
+    assert d["error_statistics"]["duplicate_blocks_removed"] == 2
+    # STEP_FAILURE correlates to ERROR e1 via failure_record_id -> one logical failure.
+    assert d["error_statistics"]["logical_failures"] == 1
+    # A message that is not contained in the transcript is preserved as its own block.
+    assert any(b["text"] == "step b aborted" for b in d["error_blocks"])
+
+
+def test_results_summary_keeps_streams_labelled_and_distinct(tmp_path: Path) -> None:
+    """stdout, stderr, structured errors, and tracebacks stay separated and labelled."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "APP_EXECUTION", "record_group": "execution", "run_id": "r1",
+         "record_id": "a1", "stdout_summary": "wrote 3 rows", "stderr_summary": "disk warn"},
+        {"record_type": "ERROR", "record_group": "execution", "run_id": "r1",
+         "error_id": "e1", "error_message": "load failed",
+         "sanitized_traceback": "Traceback:\n  ValueError: bad"},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    d = _doc(log)["diagnostics"]
+    out = d["full_error_output"]
+    # Deterministic section order: stderr, stdout, structured error, traceback.
+    assert out.index("===== STDERR =====") < out.index("===== STDOUT =====")
+    assert out.index("===== STDOUT =====") < out.index("===== STRUCTURED ERROR =====")
+    assert out.index("===== STRUCTURED ERROR =====") < out.index("===== TRACEBACK =====")
+    stats = d["error_statistics"]
+    assert (stats["stderr_blocks"], stats["stdout_blocks"]) == (1, 1)
+    assert (stats["structured_blocks"], stats["traceback_blocks"]) == (1, 1)
+    assert stats["duplicate_blocks_removed"] == 0
+
+
+def test_results_summary_truncation_marker_detected_without_flag(tmp_path: Path) -> None:
+    """The ...[truncated] marker alone marks the output truncated (no explicit flag)."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "ERROR", "record_group": "execution", "run_id": "r1",
+         "record_id": "e1", "stderr_summary": "line1\nline2...[truncated]"},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    d = _doc(log)["diagnostics"]
+    assert d["error_output_truncated"] is True
+    assert d["truncated_source_record_ids"] == ["e1"]
+    assert d["error_blocks"][0]["truncated"] is True
+
+
+def test_results_summary_no_error_text_reports_none_recorded(tmp_path: Path) -> None:
+    """A failed run with no error text is honest: empty output, none_recorded source."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "STEP_FAILURE", "record_group": "execution", "run_id": "r1",
+         "failed_step_id": "b", "failure_record_id": "f1"},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "failed_step_id": "b", "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    d = _doc(log)["diagnostics"]
+    assert d["full_error_output"] == ""
+    assert d["error_blocks"] == []
+    assert d["error_output_source"] == "none_recorded"
+    assert d["error_statistics"]["logical_failures"] == 1
+
+
+def test_results_summary_conflicting_evidence_is_preserved(tmp_path: Path) -> None:
+    """Two genuinely different stderr captures are both kept (no merge, no pick)."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "APP_EXECUTION", "record_group": "execution", "run_id": "r1",
+         "record_id": "a1", "stderr_summary": "connection refused"},
+        {"record_type": "APP_EXECUTION", "record_group": "execution", "run_id": "r1",
+         "record_id": "a2", "stderr_summary": "permission denied"},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    d = _doc(log)["diagnostics"]
+    texts = [b["text"] for b in d["error_blocks"]]
+    assert "connection refused" in texts
+    assert "permission denied" in texts
+    assert d["error_statistics"]["duplicate_blocks_removed"] == 0
 
 
 def test_results_summary_step_results_enriched_by_execution_details(tmp_path: Path) -> None:
