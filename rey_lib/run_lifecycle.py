@@ -86,10 +86,10 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
     from rey_lib.logs.log_utils import (
         bind_run,
         clear_run,
+        finalize_run_log,
         log_error,
         log_run_complete,
         log_run_start,
-        log_run_summary,
         log_step_failure,
     )
 
@@ -117,11 +117,6 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             failed_step_name=operation,
             failure_message=failure_message,
         )
-        log_run_summary(ctx, {
-            "operation": operation,
-            "status": "failed",
-            "failure_record_id": failure_id,
-        })
         raise
     else:
         if _is_failed_result(result):
@@ -156,20 +151,14 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
                 failed_step_name=operation,
                 failure_message=failure_message,
             )
-            log_run_summary(ctx, {
-                "operation": operation,
-                "status": "failed",
-                "failure_record_id": failure_record_id or failure_id,
-                "result": result,
-            })
             return result
         log_run_complete(ctx, "success")
-        log_run_summary(ctx, {
-            "operation": operation,
-            "status": "success",
-        })
         return result
     finally:
+        # After the terminal RUN_COMPLETE is durably written, the shared framework
+        # appends the canonical RUN_SUMMARY (apps contribute no execution_details).
+        # Runs before clear_run so the run-bound append target is still active.
+        finalize_run_log(ctx)
         clear_run()
 
 

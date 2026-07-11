@@ -33,10 +33,10 @@ from rey_lib.logs import (
     clear_step,
     clear_run,
     get_logger,
+    finalize_run_log,
     log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
-    log_run_summary,
     log_error,
     log_step_failure,
     log_step_end,
@@ -271,7 +271,9 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                log_run_summary(ctx, _deterministic_summary(name, run))
+                finalize_run_log(ctx, execution_details=_workflow_execution_details(
+                    run, apply=apply, only=only, step=step, from_step=from_step,
+                    to_step=to_step))
                 log_artifact_manifest_from_run_log(ctx)
                 clear_run()
                 return run
@@ -303,7 +305,9 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                log_run_summary(ctx, _deterministic_summary(name, run))
+                finalize_run_log(ctx, execution_details=_workflow_execution_details(
+                    run, apply=apply, only=only, step=step, from_step=from_step,
+                    to_step=to_step))
                 log_artifact_manifest_from_run_log(ctx)
                 clear_run()
                 return run
@@ -311,22 +315,53 @@ def run_workflow(
             clear_step()
 
     log_run_complete(ctx, "success")
-    log_run_summary(ctx, _deterministic_summary(name, run))
+    finalize_run_log(ctx, execution_details=_workflow_execution_details(
+        run, apply=apply, only=only, step=step, from_step=from_step,
+        to_step=to_step))
     log_artifact_manifest_from_run_log(ctx)
     clear_run()
     return run
 
 
-def _deterministic_summary(name: str, run: "WorkflowRun") -> dict[str, Any]:
-    """Build a deterministic run summary from the recorded step outcomes (no LLM)."""
-    outcomes = run.outcomes
+def _workflow_execution_details(
+    run: "WorkflowRun",
+    *,
+    apply: bool,
+    only: Optional[str],
+    step: Optional[str],
+    from_step: Optional[str],
+    to_step: Optional[str],
+) -> dict[str, Any]:
+    """Build workflow execution_details (domain facts only) for the shared summary.
+
+    Contributes only workflow-specific facts — execution mode, step selection, and
+    per-step outcomes — namespaced under ``workflow``. Common fields (status, counts,
+    timestamps) are derived by rey_lib.logs from the completed log, not repeated here
+    (SGC_Rey_Lib_Log_Summary_Framework_And_Run_Summary).
+    """
+    steps: list[dict[str, Any]] = []
+    for outcome in run.outcomes:
+        entry: dict[str, Any] = {
+            "id": outcome.id,
+            "label": outcome.label,
+            "process": outcome.process,
+            "status": outcome.status,
+        }
+        if outcome.detail:
+            entry["detail"] = outcome.detail
+        steps.append(entry)
     return {
-        "workflow": name,
-        "status": run.status,
-        "steps_total": len(outcomes),
-        "steps_ok": sum(1 for outcome in outcomes if outcome.status == "ok"),
-        "steps_skipped": sum(1 for outcome in outcomes if outcome.status == "skipped"),
-        "steps_failed": sum(1 for outcome in outcomes if outcome.status == "failed"),
+        "kind": "workflow",
+        "workflow": {
+            "mode": "apply" if apply else "dry_run",
+            "selection": {
+                "only": only,
+                "step": step,
+                "from_step": from_step,
+                "to_step": to_step,
+            },
+            "steps": steps,
+        },
     }
 
 

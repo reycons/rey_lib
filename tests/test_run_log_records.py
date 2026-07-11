@@ -133,10 +133,14 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     ]
     assert records[0]["operation"] == "transform"
     assert records[1]["status"] == "success"
-    assert records[2]["summary"] == {
-        "operation": "transform",
-        "status": "success",
-    }
+    # The canonical RUN_SUMMARY is built by the shared framework: common fields from
+    # the completed log plus execution_details (an app contributes none).
+    summary = records[2]["summary"]
+    assert summary["execution_kind"] == "app"
+    assert summary["status"] == "success"
+    assert summary["terminal_outcome"] == {"status": "success"}
+    assert summary["execution_details"] == {"kind": "app"}
+    assert summary["run_id"] == ctx.run_id
 
 
 def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
@@ -213,7 +217,13 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Pat
     assert by_type["STEP_FAILURE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
     assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
-    assert by_type["RUN_SUMMARY"]["summary"]["result"] == 1
+    # Canonical RUN_SUMMARY: failed terminal outcome linked to the ERROR; app has no
+    # execution_details.
+    failed_summary = by_type["RUN_SUMMARY"]["summary"]
+    assert failed_summary["status"] == "failed"
+    assert failed_summary["execution_kind"] == "app"
+    assert failed_summary["terminal_outcome"]["failure_record_id"] == by_type["ERROR"]["error_id"]
+    assert failed_summary["execution_details"] == {"kind": "app"}
 
 
 def test_open_run_log_fails_closed_without_log_path() -> None:
@@ -369,9 +379,19 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert types[-1] == "RUN_SUMMARY"
     assert all(r["run_id"] == ctx.run_id for r in records)
     summary = [r for r in records if r["record_type"] == "RUN_SUMMARY"][0]["summary"]
-    assert summary["steps_total"] == 2
-    assert summary["steps_ok"] == 2
+    # Common fields are derived by the framework from the completed log ...
+    assert summary["execution_kind"] == "workflow"
     assert summary["status"] == "success"
+    assert summary["steps_total"] == 2
+    assert summary["steps_succeeded"] == 2
+    # ... and workflow-specific facts arrive as namespaced execution_details.
+    details = summary["execution_details"]
+    assert details["kind"] == "workflow"
+    assert details["workflow"]["mode"] == "apply"
+    assert [s["status"] for s in details["workflow"]["steps"]] == ["ok", "ok"]
+    assert details["workflow"]["selection"] == {
+        "only": None, "step": None, "from_step": None, "to_step": None,
+    }
 
 
 def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> None:

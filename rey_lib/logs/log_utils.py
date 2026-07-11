@@ -31,6 +31,7 @@ from rey_lib.logs.evidence_projection import (
     render_summary_view,
     run_summary,
 )
+from rey_lib.logs.summary import finalize_run_log
 from rey_lib.logs.execution_records import (
     log_app_execution,
     log_error,
@@ -112,6 +113,7 @@ __all__ = [
     "log_run_record",
     "log_run_start",
     "log_execution_plan",
+    "finalize_run_log",
     "log_step_start",
     "log_step_end",
     "log_step_failure",
