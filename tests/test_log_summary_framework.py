@@ -176,3 +176,153 @@ def test_results_summary_step_results_enriched_by_execution_details(tmp_path: Pa
     step = _doc(log)["step_results"][0]
     assert step["app"] == "rey_loader" and step["exit_code"] == 0
     assert step["step_sequence"] == 1 and step["duration_ms"] == 1200
+
+
+# --- Increment 3: item / artifact / warning correlation ----------------------
+
+def _analyzer_run(tmp_path: Path) -> Path:
+    """A pipeline log with an analyzer step: v01 fails (no output), v02 succeeds."""
+    v01, v02 = "/in/fidelity_v01.profile.json", "/in/fidelity_v02.profile.json"
+    out02 = "/out/fidelity_v02.rey_loader.yaml"
+    log = tmp_path / "trade.20260711_094744.jsonl"
+    _write_log(log, [
+        {"record_type": "RUN_START", "record_group": "execution", "run_id": "r1",
+         "run_timestamp": "20260711_094744", "run_started_at": "2026-07-11T09:47:44+00:00",
+         "pipeline": "trade_analyzer_generate_apply_ddl", "app": "pipeline_coordinator"},
+        {"record_type": "STEP_START", "record_group": "execution", "run_id": "r1",
+         "step_id": "generate_staging_load_config", "step_name": "generate_staging_load_config",
+         "step_sequence": 6},
+        {"record_type": "INPUT_FILE_REFERENCE", "record_group": "files", "run_id": "r1",
+         "record_subgroup": "input_files", "path": v01, "display_name": "fidelity_v01.profile.json",
+         "file_role": "analysis_input", "source_name": "fidelity", "analysis_name": "loader"},
+        {"record_type": "INPUT_FILE_REFERENCE", "record_group": "files", "run_id": "r1",
+         "record_subgroup": "input_files", "path": v02, "display_name": "fidelity_v02.profile.json",
+         "file_role": "analysis_input", "source_name": "fidelity", "analysis_name": "loader"},
+        {"record_type": "WARNING", "record_group": "execution", "run_id": "r1",
+         "message": "LLM response extraction failed", "source_file": v01},
+        {"record_type": "WARNING", "record_group": "execution", "run_id": "r1",
+         "message": "generic warning with no file key"},
+        {"record_type": "VALIDATION_RESULT", "record_group": "execution", "run_id": "r1",
+         "validation_name": "analysis_result", "status": "failed", "input_file": v01},
+        {"record_type": "ARTIFACT_REFERENCE", "record_group": "files", "run_id": "r1",
+         "record_subgroup": "artifacts", "event": "written", "path": "/out/v02.result.json",
+         "artifact_type": "analysis_result", "producer": "analyzer", "source_path": v02,
+         "producing_step": "generate_staging_load_config"},
+        {"record_type": "ARTIFACT_REFERENCE", "record_group": "files", "run_id": "r1",
+         "record_subgroup": "artifacts", "event": "written", "path": "/out/v02.context.json",
+         "artifact_type": "analysis_context", "producer": "analyzer", "source_path": v02},
+        {"record_type": "ARTIFACT_REFERENCE", "record_group": "files", "run_id": "r1",
+         "record_subgroup": "artifacts", "event": "written", "path": out02,
+         "artifact_type": "llm_result", "role": "raw_output", "producer": "llm", "source_path": v02,
+         "producing_step": "generate_staging_load_config"},
+        {"record_type": "VALIDATION_RESULT", "record_group": "execution", "run_id": "r1",
+         "validation_name": "analysis_result", "status": "success", "input_file": v02},
+        {"record_type": "STEP_FAILURE", "record_group": "execution", "run_id": "r1",
+         "failed_step_id": "generate_staging_load_config", "failure_record_id": "f1"},
+        {"record_type": "STEP_END", "record_group": "execution", "run_id": "r1",
+         "step_name": "generate_staging_load_config", "status": "failed", "duration_ms": 111024},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "failed_step_id": "generate_staging_load_config",
+         "timestamp": "2026-07-11T09:49:00+00:00"},
+    ])
+    return log
+
+
+def test_results_summary_item_results_and_partial_success(tmp_path: Path) -> None:
+    """item_results are keyed by input; failed step keeps a successful sibling item."""
+    log = _analyzer_run(tmp_path)
+    finalize_run_log(_ctx(log))
+    doc = _doc(log)
+    items = {i["input_path"]: i for i in doc["item_results"]}
+    assert set(items) == {"/in/fidelity_v01.profile.json", "/in/fidelity_v02.profile.json"}
+    assert items["/in/fidelity_v01.profile.json"]["status"] == "failed"
+    assert items["/in/fidelity_v02.profile.json"]["status"] == "success"
+    # A failed step containing a successful item is a partial failure.
+    assert doc["execution"]["partial_success"] is True
+
+
+def test_results_summary_links_result_context_output_by_source_path(tmp_path: Path) -> None:
+    """Result/context/output artifacts link to their item by exact source_path."""
+    log = _analyzer_run(tmp_path)
+    finalize_run_log(_ctx(log))
+    v02 = next(i for i in _doc(log)["item_results"] if i["input_path"].endswith("v02.profile.json"))
+    assert v02["result_path"] == "/out/v02.result.json"
+    assert v02["context_path"] == "/out/v02.context.json"
+    assert v02["output_path"] == "/out/fidelity_v02.rey_loader.yaml"
+    assert v02["output_created"] is True
+    assert v02["producing_step"] == "generate_staging_load_config"
+    assert v02["lineage_resolved"] is True
+
+
+def test_results_summary_expected_but_missing_output_is_honest(tmp_path: Path) -> None:
+    """A failed item with no output is output_created:false and expected_output_known:false."""
+    log = _analyzer_run(tmp_path)
+    finalize_run_log(_ctx(log))
+    doc = _doc(log)
+    v01 = next(i for i in doc["item_results"] if i["input_path"].endswith("v01.profile.json"))
+    assert v01["output_created"] is False
+    assert "expected_output" not in v01  # name not in evidence -> not fabricated
+    missing = doc["artifacts"]["failed_or_missing"]
+    assert any(m["source_path"] == "/in/fidelity_v01.profile.json"
+               and m["expected_output_known"] is False and m["status"] == "missing"
+               for m in missing)
+
+
+def test_results_summary_artifact_grouping_and_lineage(tmp_path: Path) -> None:
+    """Artifacts group into inputs/created with source_path lineage and producing app/step."""
+    log = _analyzer_run(tmp_path)
+    finalize_run_log(_ctx(log))
+    art = _doc(log)["artifacts"]
+    assert {a["path"] for a in art["inputs"]} == {
+        "/in/fidelity_v01.profile.json", "/in/fidelity_v02.profile.json"}
+    created = {a["path"]: a for a in art["created"]}
+    assert "/out/v02.result.json" in created
+    result = created["/out/v02.result.json"]
+    assert result["source_path"] == "/in/fidelity_v02.profile.json"
+    assert result["producing_app"] == "analyzer"
+    assert result["lineage_resolved"] is True
+    assert result["status"]  # never blank
+
+
+def test_results_summary_warning_attribution(tmp_path: Path) -> None:
+    """A warning with a file key attaches to its item; a keyless one stays unattributed."""
+    log = _analyzer_run(tmp_path)
+    finalize_run_log(_ctx(log))
+    doc = _doc(log)
+    v01 = next(i for i in doc["item_results"] if i["input_path"].endswith("v01.profile.json"))
+    assert any(w["attributed"] is True for w in v01["warnings"])
+    # The keyless warning stays at run level, explicitly unattributed.
+    assert any(w["attributed"] is False for w in doc["warnings"])
+
+
+def test_results_summary_analysis_id_absent_without_structured_field(tmp_path: Path) -> None:
+    """analysis_id is not fabricated when no record carries it."""
+    log = _analyzer_run(tmp_path)
+    finalize_run_log(_ctx(log))
+    for item in _doc(log)["item_results"]:
+        assert item["analysis_id_known"] is False
+        assert "analysis_id" not in item
+
+
+def test_results_summary_ambiguous_basename_marks_lineage_unresolved(tmp_path: Path) -> None:
+    """Two inputs sharing a basename can't be resolved by basename -> lineage unresolved."""
+    a, b = "/in/a/data.json", "/in/b/data.json"
+    log = tmp_path / "trade.20260711_094744.jsonl"
+    _write_log(log, [
+        {"record_type": "RUN_START", "record_group": "execution", "run_id": "r1",
+         "run_timestamp": "20260711_094744", "pipeline": "p", "app": "pipeline_coordinator"},
+        {"record_type": "INPUT_FILE_REFERENCE", "record_group": "files", "run_id": "r1",
+         "path": a, "file_role": "analysis_input"},
+        {"record_type": "INPUT_FILE_REFERENCE", "record_group": "files", "run_id": "r1",
+         "path": b, "file_role": "analysis_input"},
+        # Validation references only the basename -> ambiguous, cannot attribute.
+        {"record_type": "VALIDATION_RESULT", "record_group": "execution", "run_id": "r1",
+         "validation_name": "analysis_result", "status": "success", "input_file": "data.json"},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "success", "timestamp": "2026-07-11T09:49:00+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    items = _doc(log)["item_results"]
+    # Both inputs present; neither got the ambiguous status; both lineage unresolved.
+    assert {i["input_path"] for i in items} == {a, b}
+    assert all(i["status"] == "unknown" and i["lineage_resolved"] is False for i in items)
