@@ -126,21 +126,16 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
 
     assert result == 0
     records = _read(Path(ctx.run_log_path))
-    assert [record["record_type"] for record in records] == [
-        "RUN_START",
-        "RUN_COMPLETE",
-        "RUN_SUMMARY",
-    ]
+    # The execution JSONL stays the authoritative event log — no summary record.
+    assert [record["record_type"] for record in records] == ["RUN_START", "RUN_COMPLETE"]
     assert records[0]["operation"] == "transform"
     assert records[1]["status"] == "success"
-    # The canonical RUN_SUMMARY is built by the shared framework: common fields from
-    # the completed log plus execution_details (an app contributes none).
-    summary = records[2]["summary"]
-    assert summary["execution_kind"] == "app"
-    assert summary["status"] == "success"
-    assert summary["terminal_outcome"] == {"status": "success"}
-    assert summary["execution_details"] == {"kind": "app"}
-    assert summary["run_id"] == ctx.run_id
+    # The canonical results are a deterministic .results.json projection beside the log.
+    log = Path(ctx.run_log_path)
+    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
+    assert doc["record_type"] == "RESULTS_SUMMARY"
+    assert doc["status"] == "success" and doc["run"]["execution_kind"] == "app"
+    assert doc["run_id"] == ctx.run_id
 
 
 def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
@@ -187,14 +182,15 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
         "RUN_START",
         "ERROR",
         "RUN_COMPLETE",
-        "RUN_SUMMARY",
     ]
     assert by_type["ERROR"]["error_id"]
     assert by_type["ERROR"]["failed_step_id"] == "load"
     assert "hunter2" not in by_type["ERROR"]["error_message"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
     assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
-    assert by_type["RUN_SUMMARY"]["summary"]["status"] == "failed"
+    log = Path(ctx.run_log_path)
+    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
+    assert doc["status"] == "failed" and doc["diagnostics"]["failure_record_ids"] == []
 
 
 def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
@@ -211,19 +207,17 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Pat
         "ERROR",
         "STEP_FAILURE",
         "RUN_COMPLETE",
-        "RUN_SUMMARY",
     ]
     assert by_type["ERROR"]["error_type"] == "AppOperationFailed"
     assert by_type["STEP_FAILURE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
     assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
-    # Canonical RUN_SUMMARY: failed terminal outcome linked to the ERROR; app has no
-    # execution_details.
-    failed_summary = by_type["RUN_SUMMARY"]["summary"]
-    assert failed_summary["status"] == "failed"
-    assert failed_summary["execution_kind"] == "app"
-    assert failed_summary["terminal_outcome"]["failure_record_id"] == by_type["ERROR"]["error_id"]
-    assert failed_summary["execution_details"] == {"kind": "app"}
+    # Canonical RESULTS_SUMMARY projection: failed outcome, failure linked in diagnostics.
+    log = Path(ctx.run_log_path)
+    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
+    assert doc["status"] == "failed"
+    assert doc["run"]["execution_kind"] == "app"
+    assert doc["diagnostics"]["failure_record_ids"] == [by_type["STEP_FAILURE"]["failure_record_id"]]
 
 
 def test_open_run_log_fails_closed_without_log_path() -> None:
@@ -375,23 +369,18 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert types[0] == "RUN_START"
     assert types.count("STEP_START") == 2
     assert types.count("STEP_END") == 2
-    assert types[-2] == "RUN_COMPLETE"
-    assert types[-1] == "RUN_SUMMARY"
+    assert types[-1] == "RUN_COMPLETE"   # terminal record; no summary record in the JSONL
+    assert "RUN_SUMMARY" not in types and "RESULTS_SUMMARY" not in types
     assert all(r["run_id"] == ctx.run_id for r in records)
-    summary = [r for r in records if r["record_type"] == "RUN_SUMMARY"][0]["summary"]
-    # Common fields are derived by the framework from the completed log ...
-    assert summary["execution_kind"] == "workflow"
-    assert summary["status"] == "success"
-    assert summary["steps_total"] == 2
-    assert summary["steps_succeeded"] == 2
-    # ... and workflow-specific facts arrive as namespaced execution_details.
-    details = summary["execution_details"]
-    assert details["kind"] == "workflow"
-    assert details["workflow"]["mode"] == "apply"
-    assert [s["status"] for s in details["workflow"]["steps"]] == ["ok", "ok"]
-    assert details["workflow"]["selection"] == {
-        "only": None, "step": None, "from_step": None, "to_step": None,
-    }
+    # The results projection is written beside the log.
+    log = Path(ctx.run_log_path)
+    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
+    assert doc["record_type"] == "RESULTS_SUMMARY"
+    assert doc["run"]["execution_kind"] == "workflow"
+    assert doc["status"] == "success"
+    assert doc["run"]["steps_total"] == 2 and doc["run"]["steps_succeeded"] == 2
+    # Workflow step domain facts (process) enrich the step_results.
+    assert [s["operation"] for s in doc["step_results"]] == ["p1", "p2"]
 
 
 def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> None:

@@ -1,5 +1,8 @@
-"""Tests for the shared post-execution log-summary framework and run_summary builder
-(SGC_Rey_Lib_Log_Summary_Framework_And_Run_Summary)."""
+"""Tests for the run-results finalization framework and RESULTS_SUMMARY builder.
+
+Increment 2: schema boundary, .results.json file output, migration from RUN_SUMMARY,
+idempotency/determinism, and successful/failed-run behavior
+(SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction)."""
 
 from __future__ import annotations
 
@@ -8,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rey_lib.logs import finalize_run_log
-from rey_lib.logs import summary as summary_mod
 
 
 def _write_log(path: Path, records: list[dict]) -> None:
@@ -16,188 +18,161 @@ def _write_log(path: Path, records: list[dict]) -> None:
 
 
 def _ctx(path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        run_log_path=str(path),
-        run_id="r1",
-        run_timestamp="20260711_120000",
-        owner_app_name="demo_app",
-    )
+    return SimpleNamespace(run_log_path=str(path), run_id="r1",
+                           run_timestamp="20260711_120000", owner_app_name="demo_app")
+
+
+def _results_path(log: Path) -> Path:
+    return log.parent / (log.stem + ".results.json")
 
 
 def _completed_records(status: str = "success") -> list[dict]:
     return [
         {"record_type": "RUN_START", "record_group": "execution", "run_id": "r1",
          "run_timestamp": "20260711_120000", "run_started_at": "2026-07-11T12:00:00+00:00",
-         "app": "demo_app"},
+         "pipeline": "daily", "app": "pipeline_coordinator"},
         {"record_type": "STEP_START", "record_group": "execution", "run_id": "r1",
-         "step_name": "one"},
+         "step_id": "one", "step_name": "one", "step_sequence": 1},
         {"record_type": "STEP_END", "record_group": "execution", "run_id": "r1",
-         "step_name": "one", "status": "success"},
+         "step_name": "one", "status": "success", "duration_ms": 1200},
         {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
          "status": status, "timestamp": "2026-07-11T12:00:03+00:00"},
     ]
 
 
-def _summaries(path: Path) -> list[dict]:
-    return [json.loads(line)["summary"]
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and json.loads(line).get("record_type") == "RUN_SUMMARY"]
+def _doc(log: Path) -> dict:
+    return json.loads(_results_path(log).read_text(encoding="utf-8"))
 
 
-def test_log_summary_framework_invokes_registered_builders(tmp_path: Path) -> None:
-    """The framework dispatches builders and generates RUN_SUMMARY (TEST-001)."""
-    log = tmp_path / "run.jsonl"
+def test_results_summary_success_run(tmp_path: Path) -> None:
+    """A successful run writes a RESULTS_SUMMARY .results.json with full accounting."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
     _write_log(log, _completed_records())
     result = finalize_run_log(_ctx(log))
-    assert result["builders_invoked"] == ["RUN_SUMMARY"]
-    assert result["sections_generated"] == ["RUN_SUMMARY"]
-    assert result["log_changed"] is True and result["records_appended"] == 1
+    assert result["results_written"] is True
+    assert result["results_path"] == str(_results_path(log))
+    doc = _doc(log)
+    assert doc["record_type"] == "RESULTS_SUMMARY" and doc["record_schema_version"] == 1
+    assert doc["status"] == "success" and doc["execution"]["outcome"] == "success"
+    assert doc["run"]["steps_total"] == 1 and doc["run"]["steps_succeeded"] == 1
+    assert doc["run"]["duration_ms"] == 3000
+    assert [s["step_id"] for s in doc["step_results"]] == ["one"]
+    # A successful run needs no failure fields populated.
+    assert doc["execution"]["failed_step_ids"] == []
+    assert doc["diagnostics"]["full_error_output"] == ""
 
 
-def test_log_summary_framework_requires_terminal_run(tmp_path: Path) -> None:
-    """An incomplete log (no RUN_COMPLETE) is not finalized (TEST-002)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records()[:-1])  # drop RUN_COMPLETE
+def test_results_summary_is_a_projection_not_a_jsonl_record(tmp_path: Path) -> None:
+    """RESULTS_SUMMARY is a separate .results.json file, not appended to the JSONL."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    original = log.read_text if log.exists() else None
+    _write_log(log, _completed_records())
+    before_types = [json.loads(l)["record_type"] for l in log.read_text().splitlines() if l.strip()]
+    finalize_run_log(_ctx(log))
+    after_types = [json.loads(l)["record_type"] for l in log.read_text().splitlines() if l.strip()]
+    # The execution JSONL is unchanged; no RESULTS_SUMMARY / RUN_SUMMARY record added.
+    assert after_types == before_types
+    assert "RESULTS_SUMMARY" not in after_types and "RUN_SUMMARY" not in after_types
+    assert _results_path(log).exists()
+
+
+def test_results_summary_requires_terminal_run(tmp_path: Path) -> None:
+    """An incomplete log (no RUN_COMPLETE) is not finalized."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    _write_log(log, _completed_records()[:-1])
     result = finalize_run_log(_ctx(log))
-    assert result["log_changed"] is False
-    assert result["sections_skipped"] == [{"section": "*", "reason": "no_terminal_record"}]
-    assert not _summaries(log)
+    assert result["results_written"] is False
+    assert result["skipped"] == ["no_terminal_record"]
+    assert not _results_path(log).exists()
 
 
-def test_log_summary_framework_appends_to_same_jsonl_log(tmp_path: Path) -> None:
-    """The RUN_SUMMARY is appended to the same durable log (TEST-003)."""
-    log = tmp_path / "run.jsonl"
+def test_results_summary_is_deterministic(tmp_path: Path) -> None:
+    """Identical JSONL input produces identical content except the summary timestamp."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
     _write_log(log, _completed_records())
     finalize_run_log(_ctx(log))
-    types = [json.loads(l)["record_type"] for l in log.read_text().splitlines() if l.strip()]
-    assert types[-1] == "RUN_SUMMARY" and types[0] == "RUN_START"
-
-
-def test_run_summary_derives_deterministic_authoritative_facts(tmp_path: Path) -> None:
-    """Common fields come only from structured evidence (TEST-004/005)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records())
+    first = _doc(log)
     finalize_run_log(_ctx(log))
-    s = _summaries(log)[0]
-    assert s["execution_kind"] == "app"
-    assert s["status"] == "success"
-    assert s["steps_total"] == 1 and s["steps_succeeded"] == 1
-    assert s["elapsed_ms"] == 3000
-    assert s["terminal_outcome"] == {"status": "success"}
-    assert s["execution_details"] == {"kind": "app"}
+    second = _doc(log)
+    first.pop("timestamp"), second.pop("timestamp")
+    assert first == second
 
 
-def test_log_summary_framework_is_idempotent(tmp_path: Path) -> None:
-    """Repeated finalization does not duplicate RUN_SUMMARY (TEST-006)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records())
-    finalize_run_log(_ctx(log))
-    second = finalize_run_log(_ctx(log))
-    assert second["sections_already_present"] == ["RUN_SUMMARY"]
-    assert second["log_changed"] is False
-    assert len(_summaries(log)) == 1
-
-
-def test_run_summary_handles_missing_optional_evidence(tmp_path: Path) -> None:
-    """Absent steps/timestamps yield zeros/None, never invented values (TEST-007)."""
-    log = tmp_path / "run.jsonl"
+def test_results_summary_failed_run(tmp_path: Path) -> None:
+    """A failed run records outcome, failed step, and full error output."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
     _write_log(log, [
-        {"record_type": "RUN_START", "record_group": "execution", "run_id": "r1",
-         "run_timestamp": "20260711_120000"},
+        _completed_records()[0],
+        {"record_type": "STEP_START", "record_group": "execution", "run_id": "r1",
+         "step_id": "a", "step_name": "a", "step_sequence": 1},
+        {"record_type": "STEP_END", "record_group": "execution", "run_id": "r1",
+         "step_name": "a", "status": "success", "duration_ms": 100},
+        {"record_type": "STEP_START", "record_group": "execution", "run_id": "r1",
+         "step_id": "b", "step_name": "b", "step_sequence": 2},
+        {"record_type": "ERROR", "record_group": "execution", "run_id": "r1",
+         "error_id": "e1", "error_message": "boom", "stderr_summary": "Traceback: boom line 1"},
+        {"record_type": "STEP_FAILURE", "record_group": "execution", "run_id": "r1",
+         "failed_step_id": "b", "failure_record_id": "f1"},
+        {"record_type": "STEP_END", "record_group": "execution", "run_id": "r1",
+         "step_name": "b", "status": "failed", "duration_ms": 200},
         {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
-         "status": "success"},
+         "status": "failed", "failed_step_id": "b", "failed_step_name": "b",
+         "timestamp": "2026-07-11T12:00:03+00:00"},
     ])
     finalize_run_log(_ctx(log))
-    s = _summaries(log)[0]
-    assert s["steps_total"] == 0 and s["failed_step_ids"] == []
-    assert s["elapsed_ms"] is None
+    doc = _doc(log)
+    assert doc["status"] == "failed"
+    assert doc["execution"]["outcome"] == "partial_failure"
+    assert doc["execution"]["partial_success"] is True
+    assert doc["execution"]["failed_step_ids"] == ["b"]
+    assert doc["diagnostics"]["failed_step_id"] == "b"
+    assert doc["diagnostics"]["failure_record_ids"] == ["f1"]
+    assert "Traceback: boom line 1" in doc["diagnostics"]["full_error_output"]
 
 
-def test_run_summary_sanitizes_sensitive_values(tmp_path: Path) -> None:
-    """Secret-keyed execution_details values are redacted in the record (TEST-008)."""
-    log = tmp_path / "run.jsonl"
+def test_results_summary_preserves_full_error_output_verbatim(tmp_path: Path) -> None:
+    """Large multi-line error output is preserved byte-for-byte (no sanitize/truncate)."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    big = "\n".join(f"2026-07-11 09:49:{i:02d} ERROR line {i} password=hunter2" for i in range(60))
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "ERROR", "record_group": "execution", "run_id": "r1",
+         "error_id": "e1", "full_error_output": big},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    doc = _doc(log)
+    # Verbatim: every line preserved, not sanitized (this increment adds no redaction).
+    assert doc["diagnostics"]["full_error_output"] == big
+    assert doc["diagnostics"]["error_output_truncated"] is False
+
+
+def test_results_summary_marks_upstream_truncation_honestly(tmp_path: Path) -> None:
+    """When a source record was already truncated, the summary reports it, not completeness."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
+    _write_log(log, [
+        _completed_records()[0],
+        {"record_type": "ERROR", "record_group": "execution", "run_id": "r1",
+         "record_id": "e1", "stderr_summary": "...cut", "output_truncated": True},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "r1",
+         "status": "failed", "timestamp": "2026-07-11T12:00:03+00:00"},
+    ])
+    finalize_run_log(_ctx(log))
+    d = _doc(log)["diagnostics"]
+    assert d["error_output_truncated"] is True
+    assert d["truncated_source_record_ids"] == ["e1"]
+
+
+def test_results_summary_step_results_enriched_by_execution_details(tmp_path: Path) -> None:
+    """execution_details enriches step_results with app/exit_code without fabrication."""
+    log = tmp_path / "daily.20260711_120000.jsonl"
     _write_log(log, _completed_records())
-    details = {"kind": "workflow", "workflow": {"password": "hunter2", "steps": []}}
+    details = {"kind": "pipeline", "pipeline": {"mode": "full", "aborted": False,
+               "invoked_apps": ["rey_loader"],
+               "steps": [{"name": "one", "app": "rey_loader", "status": "success",
+                          "exit_code": 0, "finalizer": False}]}}
     finalize_run_log(_ctx(log), execution_details=details)
-    raw = log.read_text(encoding="utf-8")
-    assert "hunter2" not in raw
-    s = _summaries(log)[0]
-    assert s["execution_details"]["workflow"]["password"] == "[REDACTED]"
-
-
-def test_summary_append_failure_preserves_original_log(tmp_path: Path, monkeypatch) -> None:
-    """A builder failure preserves the log and is reported (TEST-009)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records())
-    before = log.read_text(encoding="utf-8")
-
-    def _boom(ctx, summary):
-        raise RuntimeError("append failed")
-
-    monkeypatch.setattr(summary_mod, "log_run_summary", _boom)
-    result = finalize_run_log(_ctx(log))
-    assert result["failures"] and result["failures"][0]["section"] == "RUN_SUMMARY"
-    assert result["log_changed"] is False
-    assert log.read_text(encoding="utf-8") == before  # unchanged, still valid
-
-
-def test_additional_summary_builder_requires_no_lifecycle_change(tmp_path: Path, monkeypatch) -> None:
-    """A newly registered builder is invoked without any terminal-path change (TEST-010)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records())
-    invoked: list[str] = []
-
-    def _extra(ctx, *, sections, identity, records, execution_details):
-        invoked.append("EMAIL_SUMMARY")
-
-    monkeypatch.setattr(
-        summary_mod, "_SUMMARY_BUILDERS",
-        list(summary_mod._SUMMARY_BUILDERS) + [("EMAIL_SUMMARY", _extra)],
-    )
-    result = finalize_run_log(_ctx(log))
-    assert "EMAIL_SUMMARY" in result["builders_invoked"]
-    assert invoked == ["EMAIL_SUMMARY"]
-
-
-def test_workflow_execution_details_matches_locked_contract(tmp_path: Path) -> None:
-    """Workflow execution_details is namespaced with mode/selection/ordered steps (TEST-014)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records())
-    details = {
-        "kind": "workflow",
-        "workflow": {
-            "mode": "dry_run",
-            "selection": {"only": None, "step": "b", "from_step": None, "to_step": None},
-            "steps": [
-                {"id": "a", "label": "A", "process": "p1", "status": "ok"},
-                {"id": "b", "label": "B", "process": "p2", "status": "failed", "detail": "x"},
-            ],
-        },
-    }
-    finalize_run_log(_ctx(log), execution_details=details)
-    ed = _summaries(log)[0]["execution_details"]
-    assert ed["kind"] == "workflow"
-    assert ed["workflow"]["mode"] == "dry_run"
-    assert [s["id"] for s in ed["workflow"]["steps"]] == ["a", "b"]
-    assert ed["workflow"]["selection"]["step"] == "b"
-
-
-def test_execution_details_ordering_size_and_app_kind(tmp_path: Path) -> None:
-    """Oversized step lists truncate+flag; a plain app emits kind=app (TEST-016)."""
-    log = tmp_path / "run.jsonl"
-    _write_log(log, _completed_records())
-    big = {"kind": "pipeline", "pipeline": {
-        "mode": "full", "aborted": False, "invoked_apps": ["x"],
-        "steps": [{"name": f"s{i}", "app": "x", "status": "success", "finalizer": False}
-                  for i in range(summary_mod._MAX_EMBEDDED_STEPS + 5)],
-    }}
-    finalize_run_log(_ctx(log), execution_details=big)
-    ed = _summaries(log)[0]["execution_details"]
-    assert "steps" not in ed["pipeline"]
-    assert ed["pipeline"]["steps_truncated"] is True
-
-    # A plain app (no execution_details) records kind=app with no domain object.
-    log2 = tmp_path / "run2.jsonl"
-    _write_log(log2, _completed_records())
-    finalize_run_log(_ctx(log2))
-    assert _summaries(log2)[0]["execution_details"] == {"kind": "app"}
+    step = _doc(log)["step_results"][0]
+    assert step["app"] == "rey_loader" and step["exit_code"] == 0
+    assert step["step_sequence"] == 1 and step["duration_ms"] == 1200
