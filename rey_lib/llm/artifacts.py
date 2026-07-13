@@ -136,5 +136,6 @@ class LocalArtifactStore(ArtifactStore):
             log_artifact_reference(
                 self._run_ctx, str(path), role=self._artifact_role,
                 event="written", created_by_step=stage_id,
+                artifact_group="analysis_results", producing_step=stage_id,
             )
         return path.resolve().as_uri()

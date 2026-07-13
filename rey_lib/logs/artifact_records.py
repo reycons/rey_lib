@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from rey_lib.logs.file_records import _file_evidence_metadata
+from rey_lib.logs.file_records import _file_declaration_metadata
 from rey_lib.logs.record_enrichment import log_run_record
 
 
@@ -14,6 +14,9 @@ def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
                            event: str = "created", created_by_step: str = "",
                            display_name: str = "", producer: str = "",
                            artifact_type: str = "", source_path: str = "",
+                           artifact_group: str = "", producing_app: str = "",
+                           producing_step: str = "", status: str = "",
+                           actions: Iterable[str] | None = None,
                            viewer_type: str = "", safe_to_preview: bool | None = None,
                            **fields: Any) -> None:
     """Append an ARTIFACT_REFERENCE record (files/artifacts) for a created artifact.
@@ -22,12 +25,10 @@ def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
     copied, renamed, read, or deleted files are FILE_OPERATION execution records,
     not artifacts.
 
-    Producers (redactor/loader/analyzer/…) should tag the artifact with a stable
-    ``producer``, an ``artifact_type``, the originating ``source_path`` where one
-    exists, and ``safe_to_preview`` so the console can group and safely preview
-    artifacts from grounded evidence
-    (SGC_Rey_Console_Run_Artifact_Evidence_And_File_Inspector). These fields are
-    optional and only emitted when supplied, keeping older callers unchanged.
+    Producers declare ``artifact_group`` as the broader Files-tree category and
+    may provide ``producing_app``, ``producing_step``, source lineage, and viewer
+    metadata. The shared projection passes those declarations through; it never
+    classifies an artifact from its path, role, or filename.
     """
     extra: dict[str, Any] = {}
     if producer:
@@ -38,14 +39,18 @@ def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
         extra["source_path"] = str(source_path)
     if viewer_type:
         extra["viewer_type"] = viewer_type
-    if safe_to_preview is not None:
-        extra["safe_to_preview"] = bool(safe_to_preview)
-    file_metadata = _file_evidence_metadata(str(path))
+    declaration = _file_declaration_metadata(
+        ctx, path, artifact_group=artifact_group,
+        producing_app=producing_app or producer,
+        producing_step=producing_step or created_by_step,
+        status=status, actions=actions, viewer_type=viewer_type,
+        safe_to_preview=safe_to_preview,
+    )
     log_run_record(
         ctx, "ARTIFACT_REFERENCE",
         path=str(path), display_name=display_name or Path(str(path)).name,
         artifact_role=role, event=event, created_by_step=created_by_step,
-        **file_metadata, **extra, **fields,
+        **declaration, **extra, **fields,
     )
 
 
@@ -57,23 +62,34 @@ def log_artifact_manifest(ctx: Any, artifacts: list[dict[str, Any]]) -> None:
 def log_artifact_manifest_from_run_log(ctx: Any) -> None:
     """Append a consolidated ARTIFACT_MANIFEST built from this run's own records.
 
-    Collects the artifacts already recorded on the append-only run log for this run
-    and appends a single consolidated ARTIFACT_MANIFEST (files/artifacts). It reads
-    only the run log — it never rescans directories or infers artifacts from
-    filenames — and includes only files/artifacts entries, i.e. created/generated
-    outputs. Moved, read, and copied files are FILE_OPERATION execution records and
-    are never included (SGC_Rey_Run_Artifact_Naming_Convention). Meant to run at run
-    completion, after RUN_COMPLETE/RUN_SUMMARY. Emission is fail-safe.
+    Collects explicit input, config, and created-artifact declarations already
+    recorded on this run's append-only log, then appends the single canonical
+    ARTIFACT_MANIFEST. It never rescans directories, classifies from filenames, or
+    promotes FILE_OPERATION execution evidence. Meant to run after RUN_COMPLETE;
+    repeated finalization is idempotent and emission is fail-safe.
     """
     try:
         path = getattr(ctx, "run_log_path", None)
         if not path:
             return
-        from rey_lib.logs.evidence_projection import read_run_log_sections
+        from rey_lib.logs.evidence_projection import (
+            build_artifact_manifest_entries,
+            read_run_log_sections,
+        )
 
-        artifacts = read_run_log_sections(path)["sections"]["files"]["artifacts"]["files"]
-        if artifacts:
-            log_artifact_manifest(ctx, artifacts)
+        payload = read_run_log_sections(path)
+        records = payload["records"]
+        if not any(str(record.get("record_type") or "").upper() == "RUN_COMPLETE"
+                   for record in records):
+            return
+        if any(str(record.get("record_type") or "").upper() == "ARTIFACT_MANIFEST"
+               for record in records):
+            return
+        artifacts = build_artifact_manifest_entries(records)
+        # A completed run owns exactly one manifest, including when its inventory is
+        # empty. This makes finalization idempotent and keeps cardinality independent
+        # of whether the run happened to produce files.
+        log_artifact_manifest(ctx, artifacts)
     except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
         logging.getLogger(__name__).warning(
             "run log: could not append ARTIFACT_MANIFEST: %s", exc

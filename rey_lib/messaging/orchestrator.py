@@ -170,6 +170,7 @@ def execute_message_set(
     if archive and Path(archive).exists():
         log_artifact_reference(
             ctx, str(archive), role="message_archive", event="written",
+            artifact_group="output_files", producing_app="rey_messaging",
             producer="messaging", artifact_type="message_archive",
             source_path=str(path), viewer_type="file", safe_to_preview=True,
         )

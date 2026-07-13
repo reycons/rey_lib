@@ -450,6 +450,149 @@ def normalize_artifacts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return artifacts
 
 
+def build_artifact_manifest_entries(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the canonical operator-visible file inventory from declarations.
+
+    Only explicit durable-file declarations participate. In particular,
+    ``FILE_OPERATION`` is execution evidence and is never promoted into the
+    manifest. Group ownership and viewer behavior pass through from producers;
+    this projection does not derive either from paths, filenames, roles, or record
+    types. Repeated declarations merge by canonical path while preserving the
+    first declaration's position.
+    """
+    by_path: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for declaration in _manifest_declaration_records(records):
+        path = str(declaration.get("path") or declaration.get("artifact_path") or "")
+        artifact_group = str(declaration.get("artifact_group") or "").strip()
+        if not path or not artifact_group:
+            continue
+        canonical = _canonical_artifact_path(path)
+        entry = _manifest_entry(declaration, canonical, artifact_group)
+        if canonical in by_path:
+            _merge_manifest_entry(by_path[canonical], entry)
+        else:
+            by_path[canonical] = entry
+            order.append(canonical)
+    return [by_path[path] for path in order]
+
+
+def _manifest_declaration_records(records: list[dict[str, Any]]):
+    """Yield explicit inventory declarations, never file-operation evidence."""
+    for record in records or []:
+        record_type = str(record.get("record_type") or "").upper()
+        if record_type == "ARTIFACT_REFERENCE":
+            event = str(record.get("event") or "").lower()
+            if event and event not in _ARTIFACT_CREATE_EVENTS:
+                continue
+            yield record
+        elif record_type in ("INPUT_FILE_REFERENCE", "CONFIG_FILE_REFERENCE"):
+            yield record
+        elif record_type in ("CONFIG_FILE_MANIFEST", "RELEVANT_FILE_MANIFEST"):
+            parent_fields = {
+                "producing_app": record.get("producing_app") or record.get("app"),
+                "producing_step": record.get("producing_step"),
+            }
+            for item in _manifest_files(record):
+                yield {**parent_fields, **item}
+
+
+def _canonical_artifact_path(path: str) -> str:
+    """Return the stable canonical-path deduplication key."""
+    try:
+        return str(Path(path).expanduser().resolve())
+    except OSError:
+        return str(Path(path).expanduser().absolute())
+
+
+def _manifest_entry(
+    declaration: dict[str, Any], canonical_path: str, artifact_group: str,
+) -> dict[str, Any]:
+    """Project one producer declaration to the required manifest schema."""
+    actions = declaration.get("actions") or []
+    if isinstance(actions, str):
+        actions = [actions]
+    entry: dict[str, Any] = {
+        "path": canonical_path,
+        "display_name": str(
+            declaration.get("display_name") or declaration.get("name")
+            or Path(canonical_path).name
+        ),
+        "artifact_group": artifact_group,
+        "file_role": str(
+            declaration.get("file_role") or declaration.get("artifact_role")
+            or declaration.get("role") or ""
+        ),
+        # Legacy aliases are compatibility-only; current producers emit the
+        # authoritative producing_* fields directly.
+        "producing_app": str(
+            declaration.get("producing_app") or declaration.get("producer")
+            or declaration.get("app") or "unknown"
+        ),
+        "producing_step": str(
+            declaration.get("producing_step") or declaration.get("created_by_step")
+            or declaration.get("consumed_by_step") or ""
+        ),
+        "status": str(declaration.get("status") or "unknown"),
+        "actions": list(dict.fromkeys(str(action) for action in actions if action)),
+        "exists": bool(declaration.get("exists", False)),
+        "safe_to_preview": bool(declaration.get("safe_to_preview", False)),
+        "size_bytes": int(declaration.get("size_bytes") or 0),
+        "modified_at": str(declaration.get("modified_at") or ""),
+    }
+    optional_sources = {
+        "source_path": ("source_path",),
+        "operation": ("operation",),
+        "mime_type": ("mime_type",),
+        "extension": ("extension",),
+        "preferred_viewer": ("preferred_viewer", "viewer_type"),
+        "checksum": ("checksum", "sha256", "hash"),
+        "lineage_resolved": ("lineage_resolved",),
+        "temporary": ("temporary",),
+        "retention": ("retention",),
+        "metadata": ("metadata",),
+    }
+    for output_field, source_fields in optional_sources.items():
+        value = next(
+            (declaration.get(field) for field in source_fields if declaration.get(field) is not None),
+            None,
+        )
+        if value not in (None, "", {}):
+            entry[output_field] = (
+                _redact_secret_metadata(value) if output_field == "metadata" else value
+            )
+    return entry
+
+
+def _merge_manifest_entry(into: dict[str, Any], other: dict[str, Any]) -> None:
+    """Merge a repeated canonical-path declaration deterministically."""
+    # First declaration owns ordering and classification. Later declarations enrich
+    # missing identity/lineage fields but never silently reclassify the artifact.
+    for field in (
+        "display_name", "file_role", "producing_app", "producing_step",
+        "source_path", "operation", "mime_type", "extension",
+        "preferred_viewer", "checksum", "lineage_resolved", "temporary",
+        "retention", "metadata",
+    ):
+        if (not into.get(field) or into.get(field) == "unknown") and other.get(field):
+            into[field] = other[field]
+
+    # State/capability metadata is allowed to become more current on a later explicit
+    # declaration. A false safe_to_preview remains restrictive across all evidence.
+    for field in ("status", "actions", "size_bytes", "modified_at"):
+        if other.get(field) not in (None, "", []):
+            into[field] = other[field]
+    # False is meaningful current state, so presence rather than truthiness decides
+    # whether a later explicit declaration updates it.
+    if "exists" in other:
+        into["exists"] = bool(other["exists"])
+    into["safe_to_preview"] = bool(
+        into.get("safe_to_preview", False) and other.get("safe_to_preview", False)
+    )
+
+
 def group_artifacts_by_producer(
     artifacts: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -884,7 +1027,10 @@ def _manifest_files(record: dict[str, Any]) -> list[dict[str, Any]]:
             for key in (
                 "config_name", "config_type", "source", "exists", "hash",
                 "config_hash", "safe_to_preview", "size_bytes", "modified_at",
-                "sha256",
+                "sha256", "artifact_group", "producing_app", "producing_step",
+                "preferred_viewer", "viewer_type", "source_path", "operation",
+                "mime_type", "extension", "checksum", "lineage_resolved",
+                "temporary", "retention", "metadata",
             ):
                 if key in item:
                     entry[key] = item[key]

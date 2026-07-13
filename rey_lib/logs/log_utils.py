@@ -12,6 +12,7 @@ from rey_lib.logs.artifact_records import (
     log_artifact_reference,
 )
 from rey_lib.logs.evidence_projection import (
+    build_artifact_manifest_entries,
     build_jsonl_event_table,
     discover_runs,
     format_jsonl_records,
@@ -93,6 +94,7 @@ __all__ = [
     "log_row_values",
     "format_jsonl_records",
     "build_jsonl_event_table",
+    "build_artifact_manifest_entries",
     "project_run_log",
     "discover_runs",
     "run_summary",

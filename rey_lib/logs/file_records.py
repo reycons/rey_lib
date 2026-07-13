@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from rey_lib.logs.record_enrichment import _CURRENT_RUN, log_run_record
 
@@ -32,23 +32,34 @@ def log_input_discovered(ctx: Any, *, input_name: str = "", path: str = "",
 
 def log_input_file_reference(ctx: Any, path: str, *, file_role: str = "",
                              display_name: str = "", consumed_by_step: str = "",
+                             producing_app: str = "", status: str = "",
+                             actions: Iterable[str] | None = None,
+                             safe_to_preview: bool | None = None,
                              **fields: Any) -> None:
     """Append an INPUT_FILE_REFERENCE record (files/input_files) for a consumed input.
 
-    Input files are files the run reads/consumes (source data, inbound files). They
-    are not artifacts unless the run also writes a new run-owned output copy.
+    Input files are files the run reads/consumes (source data, inbound files). A
+    reference declares an operator-visible input in the run-level file inventory;
+    it does not claim that the run created the input.
     """
+    declaration = _file_declaration_metadata(
+        ctx, path, artifact_group="input_files",
+        producing_app=producing_app, producing_step=consumed_by_step,
+        status=status, actions=actions, safe_to_preview=safe_to_preview,
+    )
     log_run_record(
         ctx, "INPUT_FILE_REFERENCE",
         path=str(path), display_name=display_name or Path(str(path)).name,
         file_role=file_role, source="runtime", consumed_by_step=consumed_by_step,
-        **fields,
+        **declaration, **fields,
     )
 
 
 def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
                               display_name: str = "", consumed_by_step: str = "",
                               config_name: str = "", config_type: str = "",
+                              producing_app: str = "", status: str = "",
+                              actions: Iterable[str] | None = None,
                               exists: bool | None = None,
                               safe_to_preview: bool | None = None,
                               **fields: Any) -> None:
@@ -62,6 +73,12 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
     role = file_role or str(fields.get("config_role") or "")
     cfg_type = config_type or str(fields.get("configuration_layer") or role or "config")
     cfg_name = config_name or display_name or config_path.name
+    declaration = _file_declaration_metadata(
+        ctx, path, artifact_group="config_files",
+        producing_app=producing_app, producing_step=consumed_by_step,
+        status=status, actions=actions, exists=exists,
+        safe_to_preview=safe_to_preview,
+    )
     payload = {
         "path": str(path),
         "display_name": display_name or cfg_name,
@@ -70,6 +87,7 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
         "config_type": cfg_type,
         "source": fields.pop("source", "config_provenance"),
         "consumed_by_step": consumed_by_step,
+        **declaration,
         **fields,
     }
     if exists is None:
@@ -88,7 +106,26 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
 
 def log_config_file_manifest(ctx: Any, files: list[dict[str, Any]]) -> None:
     """Append the consolidated CONFIG_FILE_MANIFEST record (files/config_files)."""
-    log_run_record(ctx, "CONFIG_FILE_MANIFEST", files=files)
+    declared: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("artifact_path") or "")
+        if not path:
+            continue
+        declared.append({
+            **item,
+            **_file_declaration_metadata(
+                ctx, path, artifact_group="config_files",
+                producing_app=str(item.get("producing_app") or ""),
+                producing_step=str(item.get("producing_step") or ""),
+                status=str(item.get("status") or ""),
+                actions=item.get("actions"),
+                exists=item.get("exists"),
+                safe_to_preview=item.get("safe_to_preview"),
+            ),
+        })
+    log_run_record(ctx, "CONFIG_FILE_MANIFEST", files=declared)
 
 
 def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
@@ -161,3 +198,63 @@ def _file_evidence_metadata(path: str) -> dict[str, Any]:
         }
     except OSError:
         return {}
+
+
+def _file_declaration_metadata(
+    ctx: Any,
+    path: str,
+    *,
+    artifact_group: str,
+    producing_app: str = "",
+    producing_step: str = "",
+    status: str = "",
+    actions: Iterable[str] | None = None,
+    viewer_type: str = "",
+    exists: bool | None = None,
+    safe_to_preview: bool | None = None,
+) -> dict[str, Any]:
+    """Return complete, producer-grounded manifest metadata for one file.
+
+    ``artifact_group`` is supplied by the semantic declaration API or its caller;
+    this helper never derives ownership from a filename, path, role, or record type.
+    File state is captured once at declaration time so downstream consumers need not
+    inspect the filesystem or reconstruct viewer capabilities.
+    """
+    evidence = _file_evidence_metadata(str(path))
+    resolved_exists = bool(evidence.get("exists", False)) if exists is None else bool(exists)
+    safe = True if safe_to_preview is None else bool(safe_to_preview)
+    app = str(
+        producing_app
+        or getattr(ctx, "owner_app_name", "")
+        or getattr(ctx, "app_name", "")
+        or getattr(ctx, "name", "")
+        or "unknown"
+    )
+    step = str(
+        producing_step
+        or getattr(ctx, "pipeline_step_name", "")
+        or getattr(ctx, "step_name", "")
+        or ""
+    )
+    if actions is None:
+        resolved_actions = ["copy_path"] if path else []
+        if resolved_exists:
+            resolved_actions.append("open_external")
+        if resolved_exists and safe:
+            resolved_actions.insert(0, "view")
+    else:
+        resolved_actions = list(dict.fromkeys(str(action) for action in actions if action))
+    metadata: dict[str, Any] = {
+        "artifact_group": str(artifact_group),
+        "producing_app": app,
+        "producing_step": step,
+        "status": str(status or ("available" if exists else "missing")),
+        "actions": resolved_actions,
+        "exists": resolved_exists,
+        "safe_to_preview": safe,
+        "size_bytes": int(evidence.get("size_bytes") or 0),
+        "modified_at": str(evidence.get("modified_at") or ""),
+    }
+    if viewer_type:
+        metadata["preferred_viewer"] = str(viewer_type)
+    return metadata

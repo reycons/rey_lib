@@ -1692,6 +1692,7 @@ def _transform_one_file(
             )
             log_artifact_reference(
                 ctx, str(output_path), role="prepared",
+                artifact_group="output_files",
                 artifact_type="prepared_file", source_path=str(file_path),
                 viewer_type="file", safe_to_preview=True,
             )
@@ -1785,6 +1786,7 @@ def _transform_one_file(
         )
         log_artifact_reference(
             ctx, str(output_path), role="transformed",
+            artifact_group="output_files",
             artifact_type="transformed_file", source_path=str(file_path),
             viewer_type="file", safe_to_preview=True,
         )

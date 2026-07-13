@@ -130,12 +130,9 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     assert [record["record_type"] for record in records] == ["RUN_START", "RUN_COMPLETE"]
     assert records[0]["operation"] == "transform"
     assert records[1]["status"] == "success"
-    # The canonical results are a deterministic .results.json projection beside the log.
-    log = Path(ctx.run_log_path)
-    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
-    assert doc["record_type"] == "RESULTS_SUMMARY"
-    assert doc["status"] == "success" and doc["run"]["execution_kind"] == "app"
-    assert doc["run_id"] == ctx.run_id
+    # Generic app-operation lifecycle is not the run owner; the top-level app or
+    # coordinator performs summary/manifest finalization exactly once.
+    assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
 def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
@@ -188,9 +185,7 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
     assert "hunter2" not in by_type["ERROR"]["error_message"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
     assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
-    log = Path(ctx.run_log_path)
-    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
-    assert doc["status"] == "failed" and doc["diagnostics"]["failure_record_ids"] == []
+    assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
 def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
@@ -212,12 +207,7 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Pat
     assert by_type["STEP_FAILURE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
     assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
-    # Canonical RESULTS_SUMMARY projection: failed outcome, failure linked in diagnostics.
-    log = Path(ctx.run_log_path)
-    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
-    assert doc["status"] == "failed"
-    assert doc["run"]["execution_kind"] == "app"
-    assert doc["diagnostics"]["failure_record_ids"] == [by_type["STEP_FAILURE"]["failure_record_id"]]
+    assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
 def test_open_run_log_fails_closed_without_log_path() -> None:
@@ -369,12 +359,13 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert types[0] == "RUN_START"
     assert types.count("STEP_START") == 2
     assert types.count("STEP_END") == 2
-    assert types[-1] == "RUN_COMPLETE"   # terminal record; no summary record in the JSONL
-    assert "RUN_SUMMARY" not in types and "RESULTS_SUMMARY" not in types
+    assert types[-1] == "ARTIFACT_MANIFEST"
+    assert types.count("ARTIFACT_MANIFEST") == 1
+    assert "RUN_SUMMARY" not in types
+    assert types.count("RESULTS_SUMMARY") == 1
     assert all(r["run_id"] == ctx.run_id for r in records)
-    # The results projection is written beside the log.
-    log = Path(ctx.run_log_path)
-    doc = json.loads((log.parent / (log.stem + ".results.json")).read_text(encoding="utf-8"))
+    # The canonical results projection is an explicit record before the manifest.
+    doc = next(record for record in records if record["record_type"] == "RESULTS_SUMMARY")
     assert doc["record_type"] == "RESULTS_SUMMARY"
     assert doc["run"]["execution_kind"] == "workflow"
     assert doc["status"] == "success"
@@ -670,7 +661,7 @@ def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
 
 
 def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
-    """At completion the coordinator appends an ARTIFACT_MANIFEST of created artifacts only."""
+    """A real workflow fixture emits one complete declaration-driven manifest."""
     from rey_lib.logs import log_file_operation
     from rey_lib.workflow import run_workflow
 
@@ -679,7 +670,11 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
 
     def handler(_ctx: object, _config: dict, _run: object) -> None:
         # A created artifact and an unrelated file move within the same step.
-        log_artifact_reference(ctx, str(report), role="report", event="written")
+        log_artifact_reference(
+            ctx, str(report), role="report", event="written",
+            artifact_group="output_files", producing_app="test_workflow",
+            producing_step="s1",
+        )
         log_file_operation(ctx, "move", source_path=str(tmp_path / "in.csv"),
                            target_path=str(tmp_path / "done.csv"))
         return None
@@ -691,7 +686,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     assert result.status == "success"
 
     records = _read(Path(ctx.run_log_path))
-    # The manifest is appended once, at completion, after RUN_SUMMARY.
+    # The manifest is appended once at completion, after the results summary.
     assert records[-1]["record_type"] == "ARTIFACT_MANIFEST"
     manifest = records[-1]
     assert manifest["record_group"] == "files"
@@ -699,7 +694,16 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     # Built from the run's own ARTIFACT_REFERENCE records; the moved file is excluded.
     names = [Path(item["path"]).name for item in manifest["artifacts"]]
     assert names == ["report.json"]
-    assert manifest["artifacts"][0]["file_role"] == "report"
+    artifact = manifest["artifacts"][0]
+    assert artifact["file_role"] == "report"
+    assert artifact["artifact_group"] == "output_files"
+    assert artifact["producing_app"] == "test_workflow"
+    assert artifact["producing_step"] == "s1"
+    assert {
+        "path", "display_name", "artifact_group", "file_role",
+        "producing_app", "producing_step", "status", "actions", "exists",
+        "safe_to_preview", "size_bytes", "modified_at",
+    } <= set(artifact)
 
 
 def test_run_log_sections_project_execution_files_and_results(tmp_path: Path) -> None:
