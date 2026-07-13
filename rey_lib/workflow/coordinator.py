@@ -33,7 +33,7 @@ from rey_lib.logs import (
     clear_step,
     clear_run,
     get_logger,
-    finalize_run_log,
+    create_results_summary,
     log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
@@ -271,7 +271,7 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                finalize_run_log(ctx, execution_details=_workflow_execution_details(
+                create_results_summary(ctx, execution_details=_workflow_execution_details(
                     run, apply=apply, only=only, step=step, from_step=from_step,
                     to_step=to_step))
                 log_artifact_manifest_from_run_log(ctx)
@@ -305,7 +305,7 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                finalize_run_log(ctx, execution_details=_workflow_execution_details(
+                create_results_summary(ctx, execution_details=_workflow_execution_details(
                     run, apply=apply, only=only, step=step, from_step=from_step,
                     to_step=to_step))
                 log_artifact_manifest_from_run_log(ctx)
@@ -315,7 +315,7 @@ def run_workflow(
             clear_step()
 
     log_run_complete(ctx, "success")
-    finalize_run_log(ctx, execution_details=_workflow_execution_details(
+    create_results_summary(ctx, execution_details=_workflow_execution_details(
         run, apply=apply, only=only, step=step, from_step=from_step,
         to_step=to_step))
     log_artifact_manifest_from_run_log(ctx)

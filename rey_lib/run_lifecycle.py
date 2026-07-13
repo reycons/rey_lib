@@ -86,7 +86,6 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
     from rey_lib.logs.log_utils import (
         bind_run,
         clear_run,
-        finalize_run_log,
         log_error,
         log_run_complete,
         log_run_start,
@@ -155,10 +154,11 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
         log_run_complete(ctx, "success")
         return result
     finally:
-        # After the terminal RUN_COMPLETE is durably written, the shared framework
-        # appends the canonical RUN_SUMMARY (apps contribute no execution_details).
-        # Runs before clear_run so the run-bound append target is still active.
-        finalize_run_log(ctx)
+        # RESULTS_SUMMARY creation is NOT done here: a generic app operation may be a
+        # nested pipeline sub-app sharing the owner's log, so finalizing here would
+        # create an early, incorrect summary. The top-level run-owning application calls
+        # create_results_summary explicitly after its final RUN_COMPLETE
+        # (SGC_Rey_Lib_Explicit_Results_Summary_Creation).
         clear_run()
 
 
