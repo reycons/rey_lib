@@ -136,21 +136,31 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
 
 
 def _pipeline_entries(ctx: Any) -> list[dict[str, Any]]:
-    """Return normalized pipeline rows from ctx.pipelines."""
+    """Return normalized pipeline rows from ctx.pipelines.
+
+    Consumes the canonical list schema (``pipelines: [{name: ...}]``); a legacy keyed
+    mapping is normalized here (map key -> entry name), mirroring the coordinator's
+    pipeline-collection boundary.
+    """
     rows: list[dict[str, Any]] = []
     pipelines = _to_plain(getattr(ctx, "pipelines", None))
-    if not isinstance(pipelines, dict):
+    if not isinstance(pipelines, (list, dict)):
         pc = getattr(ctx, "pipeline_coordinator", None)
         pipelines = _to_plain(getattr(pc, "pipelines", None) if pc else None)
-    if not isinstance(pipelines, dict):
+
+    if isinstance(pipelines, dict):
+        entries: list[tuple[Any, Any]] = list(pipelines.items())
+    elif isinstance(pipelines, list):
+        entries = [(None, entry) for entry in pipelines]
+    else:
         return rows
 
-    for name, pipeline in pipelines.items():
+    for key, pipeline in entries:
         if not isinstance(pipeline, dict):
             continue
         rows.append(
             {
-                "name": str(pipeline.get("name") or name),
+                "name": str(pipeline.get("name") or key or ""),
                 "steps": pipeline.get("steps") or [],
                 "source_section": "pipelines",
             }

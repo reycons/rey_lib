@@ -67,6 +67,27 @@ def test_build_installation_inventory_from_ctx() -> None:
     assert inventory.workflow_run_actions[0]["source_config_file"] == "/tmp/install/installation.yaml"
 
 
+def test_inventory_reads_list_schema_pipelines() -> None:
+    """Pipelines authored as a list (``pipelines: - name:``) are discovered.
+
+    Regression: the list migration left inventory._pipeline_entries expecting a keyed
+    map, which returned no pipelines and emptied the console pipeline list so the
+    runner had nothing to start.
+    """
+    ctx = _ctx()
+    ctx.pipelines = [
+        {"name": "trade_analyzer_generate_apply_ddl",
+         "steps": [{"name": "prepare", "app": "rey_loader"}]},
+        {"name": "file_onboarder", "steps": []},
+    ]
+
+    inventory = build_installation_inventory(ctx)
+
+    assert [p["name"] for p in inventory.pipelines] == [
+        "trade_analyzer_generate_apply_ddl", "file_onboarder",
+    ]
+
+
 def test_installation_inventory_is_read_only() -> None:
     """Inventory mappings cannot be mutated after build."""
     inventory = build_installation_inventory(_ctx())
