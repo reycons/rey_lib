@@ -40,7 +40,7 @@ def preview_pipeline_reset_from_run(run_log: Path | str) -> dict[str, Any]:
     """Return an evidence-based reset plan without changing the filesystem."""
     source_log, records = _source_records(run_log)
     run_identity = _run_identity(records)
-    inputs, not_restorable = _recoverable_inputs(records)
+    inputs, not_restorable = _restore_candidates(records)
     moves: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = list(not_restorable)
 
@@ -186,100 +186,98 @@ def _run_identity(records: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
-def _recoverable_inputs(
+def _restore_candidates(
     records: list[dict[str, Any]],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Project inputs using declarations only; never reconstruct file movement."""
-    references: dict[str, dict[str, Any]] = {}
-    manifests: dict[str, dict[str, Any]] = {}
-    for record in records:
-        record_type = str(record.get("record_type") or "").upper()
-        if record_type == "INPUT_FILE_REFERENCE":
-            path = _canonical(record.get("restore_destination_path") or record.get("path"))
-            if path:
-                references[path] = record
-        elif record_type == "ARTIFACT_MANIFEST":
-            for item in record.get("artifacts", []):
-                if not isinstance(item, dict):
-                    continue
-                path = _canonical(item.get("restore_destination_path") or item.get("path"))
-                if path:
-                    manifests[path] = item
+    """Select restore candidates from this run's move FILE_OPERATION records,
+    constrained by the single PIPELINE_RESTORE_POLICY.
+
+    INPUT_FILE_REFERENCE and ARTIFACT_MANIFEST remain valid provenance/display
+    records but are not authoritative for restore planning. A file is a candidate
+    only when its latest tracked location (reconstructed from this run's move
+    records) lies beneath a restore rule's ``from`` folder; it is then restored to
+    that rule's ``to`` folder under the same basename. Files whose latest location
+    matches no rule are reported, not restored.
+    """
+    rules = _restore_rules(records)
+    latest_locations = _movement_chains(records)
 
     recoverable: list[dict[str, str]] = []
     not_restorable: list[dict[str, str]] = []
-    # INPUT_FILE_REFERENCE and manifest input declarations are co-equal sources.
-    # A reference must not disappear merely because an older or partial manifest
-    # omitted its input_files projection.
-    candidate_paths = set(references)
-    candidate_paths.update(
-        path for path, item in manifests.items()
-        if str(item.get("artifact_group") or "") == "input_files"
-    )
-    for candidate_path in sorted(candidate_paths):
-        reference = references.get(candidate_path)
-        manifest = manifests.get(candidate_path)
-        declarations = [item for item in (manifest, reference) if item is not None]
-        artifact_groups = {
-            str(item.get("artifact_group") or "") for item in declarations
-            if str(item.get("artifact_group") or "")
-        }
-        if not artifact_groups:
+    for origin in sorted(latest_locations):
+        location = latest_locations[origin]
+        name = Path(location).name
+        rule = _match_restore_rule(location, rules)
+        if rule is None:
             not_restorable.append({
-                "file": Path(candidate_path).name,
-                "reason": "not restorable: artifact_group is missing",
-            })
-            continue
-        if "input_files" not in artifact_groups:
-            continue
-        if any(item.get("recoverable") is False for item in declarations):
-            not_restorable.append({
-                "file": Path(candidate_path).name,
-                "reason": "not restorable: recoverable is false",
-            })
-            continue
-        manifest = manifest or {}
-        reference = reference or {}
-        manifest_restore = _restore_metadata(manifest)
-        reference_restore = _restore_metadata(reference)
-        source = _canonical(
-            manifest.get("restore_source_path")
-            or reference.get("restore_source_path")
-            or manifest_restore.get("source_path")
-            or reference_restore.get("source_path")
-        )
-        destination = _canonical(
-            manifest.get("restore_destination_path")
-            or reference.get("restore_destination_path")
-            or manifest_restore.get("destination_path")
-            or reference_restore.get("destination_path")
-            # INPUT_FILE_REFERENCE.path is itself an explicit declaration of the
-            # original consumed input location; it is not derived from a name or
-            # directory convention.
-            or reference.get("path")
-        )
-        if not source:
-            not_restorable.append({
-                "file": Path(candidate_path).name,
-                "reason": "not restorable: explicit restore source is missing",
-            })
-            continue
-        if not destination:
-            not_restorable.append({
-                "file": Path(candidate_path).name,
-                "reason": "not restorable: explicit original location is missing",
+                "file": name,
+                "reason": "not restorable: no matching restore rule",
             })
             continue
         recoverable.append({
-            "source_path": source,
-            "destination_path": destination,
+            "source_path": location,
+            "destination_path": str(Path(rule["to"]) / name),
         })
     return recoverable, not_restorable
 
 
-def _restore_metadata(record: dict[str, Any]) -> dict[str, Any]:
-    value = record.get("restore_metadata") or record.get("restore") or {}
-    return value if isinstance(value, dict) else {}
+def _restore_rules(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Return resolved from/to rules from the single PIPELINE_RESTORE_POLICY record."""
+    for record in records:
+        if str(record.get("record_type") or "").upper() == "PIPELINE_RESTORE_POLICY":
+            rules: list[dict[str, str]] = []
+            for rule in record.get("restore_rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                source = _canonical(rule.get("from"))
+                target = _canonical(rule.get("to"))
+                if source and target:
+                    rules.append({"from": source, "to": target})
+            return rules
+    return []
+
+
+def _movement_chains(records: list[dict[str, Any]]) -> dict[str, str]:
+    """Reconstruct each tracked file's latest absolute location from this run's move
+    FILE_OPERATION records, in chronological (append) order.
+
+    Consumes the production file_utils move schema unchanged (``operation``/``action``,
+    ``source_abs``, ``destination_abs``, ``original_source_abs``). Moves are linked by
+    location continuity, so a multi-hop chain resolves to one latest location per
+    origin file.
+    """
+    latest: dict[str, str] = {}
+    location_origin: dict[str, str] = {}
+    for record in records:
+        if str(record.get("record_type") or "").upper() != "FILE_OPERATION":
+            continue
+        operation = str(record.get("operation") or record.get("action") or "").lower()
+        if operation != "move":
+            continue
+        source = _canonical(record.get("source_abs"))
+        destination = _canonical(record.get("destination_abs"))
+        if not source or not destination:
+            continue
+        origin = (location_origin.pop(source, None)
+                  or _canonical(record.get("original_source_abs"))
+                  or source)
+        latest[origin] = destination
+        location_origin[destination] = origin
+    return latest
+
+
+def _match_restore_rule(
+    location: str, rules: list[dict[str, str]]
+) -> dict[str, str] | None:
+    """Return the first rule whose ``from`` folder contains ``location`` (recursive)."""
+    target = Path(location)
+    for rule in rules:
+        try:
+            target.relative_to(Path(rule["from"]))
+        except ValueError:
+            continue
+        return rule
+    return None
 
 
 def _canonical(value: Any) -> str:
