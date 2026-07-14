@@ -17,6 +17,7 @@ from rey_lib.files.file_utils import (
     iter_file_movements,
     move_file,
 )
+from rey_lib.logs import read_run_log_sections
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -27,7 +28,12 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         "state":                state.resolve(),
         "file_operations_state": (state / "v01" / "file_operations.jsonl").resolve(),
     })
-    return SimpleNamespace(paths=paths)
+    return SimpleNamespace(
+        paths=paths,
+        run_log_dir=root / "logs",
+        app_name="file_redactor",
+        pipeline_name="daily",
+    )
 
 
 def test_configured_log_path_resolves_under_state_file_operations(tmp_path: Path) -> None:
@@ -49,7 +55,7 @@ def test_missing_paths_raises(tmp_path: Path) -> None:
         file_operation_log_path(ctx)
 
 
-def test_move_file_writes_jsonl_after_successful_move(tmp_path: Path) -> None:
+def test_move_file_writes_run_log_not_state_file(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     src = tmp_path / "test" / "data" / "pipelines" / "daily" / "inbox" / "client_a" / "feed.csv"
     dest_dir = tmp_path / "test" / "data" / "pipelines" / "daily" / "processed" / "client_a"
@@ -65,7 +71,8 @@ def test_move_file_writes_jsonl_after_successful_move(tmp_path: Path) -> None:
         reason="processed",
     )
 
-    record = list(iter_file_operations(ctx))[0]
+    record = read_run_log_sections(ctx.run_log_path)["records"][0]
+    assert record["record_type"] == "FILE_OPERATION"
     assert record["app"] == "file_redactor"
     assert record["operation_id"]
     assert record["operation"] == "move"
@@ -77,10 +84,12 @@ def test_move_file_writes_jsonl_after_successful_move(tmp_path: Path) -> None:
     assert record["file_fingerprint"]["size_bytes"] == 4
     assert record["file_fingerprint"]["sha256"] == file_sha256(dest_dir / "feed.csv")
 
-    assert list(iter_file_movements(ctx)) == [record]
+    assert list(iter_file_operations(ctx)) == []
+    assert list(iter_file_movements(ctx)) == []
+    assert not file_operation_log_path(ctx).exists()
 
 
-def test_find_original_relative_path_uses_latest_nested_inbox_path(tmp_path: Path) -> None:
+def test_move_does_not_feed_legacy_state_reader(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     src = tmp_path / "test" / "data" / "pipelines" / "daily" / "inbox" / "client_a" / "feed.csv"
     dest_dir = tmp_path / "test" / "data" / "pipelines" / "daily" / "processed"
@@ -89,4 +98,4 @@ def test_find_original_relative_path_uses_latest_nested_inbox_path(tmp_path: Pat
 
     move_file(src, dest_dir, state_ctx=ctx, app="file_redactor", pipeline="daily")
 
-    assert find_original_relative_path(ctx, pipeline="daily", file_name="feed.csv") == Path("client_a/feed.csv")
+    assert find_original_relative_path(ctx, pipeline="daily", file_name="feed.csv") is None

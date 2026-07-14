@@ -71,6 +71,23 @@ def test_manifest_contains_complete_producer_declared_inventory(tmp_path: Path) 
     assert manifest[-1]["actions"] == ["view", "copy_path", "open_external"]
 
 
+def test_manifest_preserves_explicit_restore_metadata(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    original = tmp_path / "inbox" / "feed.csv"
+    recoverable = tmp_path / "processed" / "feed.csv"
+    log_input_file_reference(
+        ctx,
+        str(original),
+        restore_source_path=str(recoverable),
+        restore_destination_path=str(original),
+    )
+
+    entry = build_artifact_manifest_entries(_records(ctx))[0]
+
+    assert entry["restore_source_path"] == str(recoverable)
+    assert entry["restore_destination_path"] == str(original)
+
+
 def test_all_supported_inventory_categories_are_explicit_declarations(
     tmp_path: Path,
 ) -> None:

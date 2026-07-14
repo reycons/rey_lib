@@ -41,6 +41,11 @@ from rey_lib.files.transformer import (
     TransformError,
 )
 from rey_lib.files.file_loader import load_files
+from rey_lib.files.pipeline_reset import (
+    latest_pipeline_run,
+    preview_pipeline_reset_from_run,
+    reset_pipeline_from_run,
+)
 
 __all__ = [
     "discover_inbox_files",
@@ -82,4 +87,7 @@ __all__ = [
     "parse_date_from_filename",
     "TransformError",
     "load_files",
+    "latest_pipeline_run",
+    "preview_pipeline_reset_from_run",
+    "reset_pipeline_from_run",
 ]

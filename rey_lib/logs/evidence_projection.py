@@ -553,6 +553,9 @@ def _manifest_entry(
         "temporary": ("temporary",),
         "retention": ("retention",),
         "metadata": ("metadata",),
+        "restore_source_path": ("restore_source_path",),
+        "restore_destination_path": ("restore_destination_path",),
+        "restore_metadata": ("restore_metadata", "restore"),
     }
     for output_field, source_fields in optional_sources.items():
         value = next(
@@ -574,7 +577,8 @@ def _merge_manifest_entry(into: dict[str, Any], other: dict[str, Any]) -> None:
         "display_name", "file_role", "producing_app", "producing_step",
         "source_path", "operation", "mime_type", "extension",
         "preferred_viewer", "checksum", "lineage_resolved", "temporary",
-        "retention", "metadata",
+        "retention", "metadata", "restore_source_path",
+        "restore_destination_path", "restore_metadata",
     ):
         if (not into.get(field) or into.get(field) == "unknown") and other.get(field):
             into[field] = other[field]

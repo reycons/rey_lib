@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
 from rey_lib.files import primitive_file_io
-from rey_lib.logs import get_logger, record_file_operation
+from rey_lib.logs import get_logger, log_run_record, record_file_operation
 
 __all__ = [
     "bounded_text_preview",
@@ -1038,11 +1038,11 @@ def write_file(
                 original_source=outfile,
             )
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("Could not write file creation state for '%s': %s", outfile.name, exc)
+            _logger.warning("Could not write file creation record for '%s': %s", outfile.name, exc)
 
-    # Record the write against the bound run, if any
-    # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording). No-op when unbound.
-    record_file_operation("write", target_path=str(outfile))
+    # Record against the ambient run only when no explicit run context handled it.
+    if state_ctx is None:
+        record_file_operation("write", target_path=str(outfile))
     return outfile.resolve()
 
 
@@ -1232,7 +1232,6 @@ def move_file(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (dest_name if dest_name else src.name)
     src.replace(dest)
-    record_file_operation("move", source_path=str(src), target_path=str(dest))
     _logger.debug("Moved: %s → %s", src, dest)
     if state_ctx is not None:
         try:
@@ -1247,7 +1246,9 @@ def move_file(
                 metadata=metadata,
             )
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("Could not write file movement state for '%s': %s", src.name, exc)
+            _logger.warning("Could not write file movement record for '%s': %s", src.name, exc)
+    else:
+        record_file_operation("move", source_path=str(src), target_path=str(dest))
     return dest
 
 
@@ -1306,7 +1307,6 @@ def copy_file(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (dest_name if dest_name else src.name)
     shutil.copyfile(src, dest)
-    record_file_operation("copy", source_path=str(src), target_path=str(dest))
     _logger.debug("Copied: %s → %s", src, dest)
     if state_ctx is not None:
         try:
@@ -1321,7 +1321,9 @@ def copy_file(
                 metadata=metadata,
             )
         except Exception as exc:  # noqa: BLE001
-            _logger.warning("Could not write file copy state for '%s': %s", src.name, exc)
+            _logger.warning("Could not write file copy record for '%s': %s", src.name, exc)
+    else:
+        record_file_operation("copy", source_path=str(src), target_path=str(dest))
     return dest
 
 
@@ -1380,10 +1382,7 @@ def log_file_operation(
     if metadata:
         record["metadata"] = metadata
 
-    path = file_operation_log_path(ctx)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    log_run_record(ctx, "FILE_OPERATION", **record)
     return record
 
 
