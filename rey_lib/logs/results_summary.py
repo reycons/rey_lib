@@ -51,6 +51,12 @@ _OUTPUT_ARTIFACT_TYPES = frozenset({"llm_result", "raw_output", "loader_config"}
 _RESULT_ARTIFACT_TYPE = "analysis_result"
 _CONTEXT_RESULT_TYPE = "analysis_context"
 
+_IMPORTANT_CREATED_ROLES = frozenset({
+    "llm_result",
+    "loader_config",
+    "raw_output",
+})
+
 
 def build_results_summary(
     sections: dict[str, Any],
@@ -212,22 +218,46 @@ def _execution_detail_steps(
     return indexed
 
 
-def _validations(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project VALIDATION_RESULT records, in log order."""
-    out: list[dict[str, Any]] = []
+def _validations(records: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {
+        "success": 0,
+        "failed": 0,
+        "warning": 0,
+    }
+    failed: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
     for record in records:
         if _rtype(record) != _VALIDATION_RESULT:
             continue
+
+        status = str(record.get("status") or "").lower()
+        if status in counts:
+            counts[status] += 1
+
         entry = {
             "validation_name": str(record.get("validation_name") or ""),
-            "status": str(record.get("status") or ""),
+            "status": status,
         }
-        source = record.get("source_file") or record.get("current_file") or record.get("path")
+
+        source = (
+            record.get("source_file")
+            or record.get("current_file")
+            or record.get("path")
+        )
         if source:
             entry["source_file"] = str(source)
-        out.append(entry)
-    return out
 
+        if status == "failed":
+            failed.append(entry)
+        elif status == "warning":
+            warnings.append(entry)
+
+    return {
+        "counts": counts,
+        "failed": failed,
+        "warnings": warnings,
+    }
 
 def _warnings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Project WARNING records (retry/extraction history), in log order."""
@@ -384,6 +414,13 @@ def _assemble_error_output(kept: list[dict[str, Any]]) -> str:
     return "\n\n".join(sections)
 
 
+def _concise_error_text(text: str, limit: int = 500) -> str:
+    value = str(text).strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + _TRUNCATION_MARKER
+
+
 def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Assemble failure diagnostics with deduplicated, provenance-tracked evidence.
 
@@ -420,7 +457,7 @@ def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
     error_blocks = [
         {"record_id": b["record_id"], "record_type": b["record_type"],
          "logical_failure_id": b["logical_failure_id"], "stream": b["stream"],
-         "truncated": b["truncated"], "text": b["text"]}
+         "truncated": b["truncated"], "message": _concise_error_text(b["text"])}
         for b in kept
     ]
     statistics = {
@@ -653,17 +690,17 @@ def _attach_item_warnings(
 def _artifact_groups(
     records: list[dict[str, Any]],
     items: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Group run artifacts into inputs / created / failed_or_missing / diagnostics /
-    execution_context, each with lineage. Deterministically ordered."""
+) -> dict[str, Any]:
     from rey_lib.logs.evidence_projection import normalize_artifacts
 
     created: list[dict[str, Any]] = []
     execution_context: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+
     for artifact in normalize_artifacts(records):
         entry = _artifact_entry(artifact)
         atype = str(artifact.get("artifact_type") or "").lower()
+
         if atype in _CONTEXT_ARTIFACT_TYPES:
             execution_context.append(entry)
         elif atype in _DIAGNOSTIC_ARTIFACT_TYPES:
@@ -671,10 +708,36 @@ def _artifact_groups(
         else:
             created.append(entry)
 
+    # Deduplicate each completed projection once.
+    inputs = _dedupe_artifacts(_input_artifacts(records))
+    created = _dedupe_artifacts(created)
+    failed_or_missing = _dedupe_artifacts(_missing_outputs(items))
+    diagnostics = _dedupe_artifacts(diagnostics)
+    execution_context = _dedupe_artifacts(execution_context)
+
+    created_by_role: dict[str, int] = {}
+    for entry in created:
+        role = str(entry.get("role") or "unknown")
+        created_by_role[role] = created_by_role.get(role, 0) + 1
+
+    important_created = [
+        entry
+        for entry in created
+        if str(entry.get("role") or "") in _IMPORTANT_CREATED_ROLES
+    ]
+
     return {
-        "inputs": _sort_artifacts(_input_artifacts(records)),
-        "created": _sort_artifacts(created),
-        "failed_or_missing": _sort_artifacts(_missing_outputs(items)),
+        "counts": {
+            "inputs": len(inputs),
+            "created": len(created),
+            "failed_or_missing": len(failed_or_missing),
+            "diagnostics": len(diagnostics),
+            "execution_context": len(execution_context),
+        },
+        "created_by_role": dict(sorted(created_by_role.items())),
+        "important_created": _sort_artifacts(important_created),
+        "inputs": _sort_artifacts(inputs),
+        "failed_or_missing": _sort_artifacts(failed_or_missing),
         "diagnostics": _sort_artifacts(diagnostics),
         "execution_context": _sort_artifacts(execution_context),
     }
@@ -696,24 +759,49 @@ def _artifact_entry(artifact: dict[str, Any]) -> dict[str, Any]:
 
 
 def _input_artifacts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    entries: dict[tuple[str, str], dict[str, Any]] = {}
+
     for record in records:
         if _rtype(record) != _INPUT_FILE_REFERENCE:
             continue
+
         path = str(record.get("path") or "")
         if not path:
             continue
-        out.append({
-            "path": path,
-            "role": str(record.get("file_role") or "") or "input",
-            "status": str(record.get("status") or "") or "referenced",
-            "source_path": None,
-            "producing_app": "",
-            "producing_step": None,
-            "lineage_resolved": True,
-        })
-    return out
 
+        role = str(record.get("file_role") or "") or "input"
+        key = (path, role)
+
+        entries.setdefault(
+            key,
+            {
+                "path": path,
+                "role": role,
+                "status": str(record.get("status") or "") or "referenced",
+                "source_path": None,
+                "producing_app": "",
+                "producing_step": None,
+                "lineage_resolved": True,
+            },
+        )
+
+    return list(entries.values())
+
+def _dedupe_artifacts(
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+    for entry in entries:
+        key = (
+            entry.get("path"),
+            entry.get("role"),
+            entry.get("source_path"),
+            entry.get("producing_step"),
+        )
+        unique.setdefault(key, entry)
+
+    return list(unique.values())
 
 def _missing_outputs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Represent failed items whose expected output was never created — no invention."""
