@@ -97,6 +97,7 @@ def run_configured_log_analysis(
 
     from rey_lib.config.config_utils import build_ctx_from_path
     from rey_lib.config.ctx import find_in_ctx
+    from rey_lib.errors.error_utils import build_safe_error_payload
     from rey_lib.files import write_file
     from rey_lib.llm.envelope import build_envelope_instruction, extract_artifact_envelope
     from rey_lib.llm.exceptions import ConfigurationFailure, ParseFailure, ProviderFailure
@@ -155,6 +156,19 @@ def run_configured_log_analysis(
         result["action"] = "existing"
         return result
 
+    # Stamp run identity so every write (success or nonfatal failure) targets this log.
+    identity = _run_log_identity(path, records, run["sections"])
+    ctx.run_log_path = str(path)
+    ctx.run_id = identity["run_id"]
+    ctx.run_timestamp = identity["run_timestamp"]
+    if identity["app"]:
+        ctx.owner_app_name = identity["app"]
+    if identity["pipeline"]:
+        ctx.pipeline_name = identity["pipeline"]
+    if identity["workflow"]:
+        ctx.workflow_name = identity["workflow"]
+
+    record_group = str(output.record_group)
     artifact_type = str(getattr(analysis, "artifact_type", ""))
     try:
         profile = find_in_ctx(ctx, "llm_profiles", str(analysis.llm_execution_profile))
@@ -168,32 +182,27 @@ def run_configured_log_analysis(
             provider=profile.provider,
             api_key=getattr(profile, "api_key", ""),
         )
-        content, _notes = extract_artifact_envelope(raw, artifact_type)
+        content, _ = extract_artifact_envelope(raw, artifact_type)
         parsed_result = json.loads(content)
     except (ProviderFailure, ParseFailure, ConfigurationFailure, json.JSONDecodeError) as exc:
         if getattr(analysis, "fail_on_error", False):
             raise
+        # Nonfatal: still write a canonical failure record so the analysis outcome is
+        # never silent. The error is shaped by error_utils so the full sanitized scope
+        # (type, message, exception, traceback) is captured — not just str(exc).
+        log_run_record(
+            ctx, record_type, record_group=record_group,
+            analysis_name=analysis_name, **build_safe_error_payload(exc),
+        )
         result["failures"].append(str(exc))
+        result["action"] = "failed"
         return result
-
-    identity = _run_log_identity(path, records, run["sections"])
-    ctx.run_log_path = str(path)
-    ctx.run_id = identity["run_id"]
-    ctx.run_timestamp = identity["run_timestamp"]
-    if identity["app"]:
-        ctx.owner_app_name = identity["app"]
-    if identity["pipeline"]:
-        ctx.pipeline_name = identity["pipeline"]
-    if identity["workflow"]:
-        ctx.workflow_name = identity["workflow"]
 
     if destination == "file":
         write_file(Path(str(output.path)), parsed_result, file_type=str(output.format))
         result["action"] = "written_file"
     else:
-        log_run_record(
-            ctx, record_type, record_group=str(output.record_group), **parsed_result
-        )
+        log_run_record(ctx, record_type, record_group=record_group, **parsed_result)
         result["action"] = "written_stdout"
 
     result["result"] = parsed_result

@@ -182,15 +182,16 @@ def test_summary_failure_prevents_package_creation(
     assert called is False
 
 
-def test_finalizer_appends_summary_then_package(tmp_path: Path) -> None:
+def test_finalizer_appends_summary_then_package_then_analysis(tmp_path: Path) -> None:
     log_path, _contract_path = _unfinalized_run(tmp_path)
 
     finalize_run_log(log_path)
 
-    assert [record["record_type"] for record in _records(log_path)[-2:]] == [
-        "RESULTS_SUMMARY",
-        "LLM_PACKAGE",
-    ]
+    types = [record["record_type"] for record in _records(log_path)]
+    # Order is summary -> package -> analysis. This config has no llm profile, so the
+    # analysis writes a canonical failure record rather than failing silently.
+    assert types[-3:] == ["RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION"]
+    assert _records(log_path)[-1]["status"] == "failed"
 
 
 def test_package_failure_preserves_summary_and_completed_log(tmp_path: Path) -> None:
@@ -487,14 +488,25 @@ def test_missing_llm_package_fails_explicitly(tmp_path, monkeypatch) -> None:
         run_configured_log_analysis(log_path)
 
 
-def test_nonfatal_llm_failure_preserves_existing_records(tmp_path, monkeypatch) -> None:
+def test_nonfatal_llm_failure_writes_failure_record(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
-    before = log_path.read_bytes()
+    before = _records(log_path)
     _patch_direct_ask(monkeypatch, raises=ProviderFailure("boom"))
     out = run_configured_log_analysis(log_path)
     assert out["result"] is None
     assert out["failures"]
-    assert log_path.read_bytes() == before
+    after = _records(log_path)
+    # Prior records are preserved; one canonical failure record is appended, with the
+    # full error scope shaped by error_utils (type, message, exception, traceback).
+    assert after[:len(before)] == before
+    failure = after[-1]
+    assert failure["record_type"] == "LLM_INTERPRETATION"
+    assert failure["record_group"] == "results"
+    assert failure["status"] == "failed"
+    assert failure["error_type"] == "ProviderFailure"
+    assert failure["error_message"]
+    assert failure["sanitized_traceback"]
+    assert failure["analysis_name"] == "log_interpreter"
 
 
 def test_fail_on_error_true_propagates(tmp_path, monkeypatch) -> None:
