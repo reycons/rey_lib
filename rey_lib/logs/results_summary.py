@@ -172,8 +172,8 @@ def _step_results(
             "step_id": key,
             "step_name": str(start.get("step_name") or key),
             "step_sequence": start.get("step_sequence"),
-            "app": detail.get("app", ""),
-            "operation": detail.get("operation", ""),
+            "app": detail.get("app") or str(start.get("app") or ""),
+            "operation": detail.get("operation") or str(start.get("step_type") or ""),
             "status": str(end.get("status") or detail.get("status") or ""),
             "duration_ms": end.get("duration_ms"),
         }

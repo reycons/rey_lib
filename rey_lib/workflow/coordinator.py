@@ -33,7 +33,7 @@ from rey_lib.logs import (
     clear_step,
     clear_run,
     get_logger,
-    create_results_summary,
+    finalize_run_log,
     log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
@@ -271,9 +271,8 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                create_results_summary(ctx, execution_details=_workflow_execution_details(
-                    run, apply=apply, only=only, step=step, from_step=from_step,
-                    to_step=to_step))
+                if getattr(ctx, "run_log_path", None):
+                    finalize_run_log(ctx.run_log_path)
                 log_artifact_manifest_from_run_log(ctx)
                 clear_run()
                 return run
@@ -305,9 +304,8 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                create_results_summary(ctx, execution_details=_workflow_execution_details(
-                    run, apply=apply, only=only, step=step, from_step=from_step,
-                    to_step=to_step))
+                if getattr(ctx, "run_log_path", None):
+                    finalize_run_log(ctx.run_log_path)
                 log_artifact_manifest_from_run_log(ctx)
                 clear_run()
                 return run
@@ -315,9 +313,8 @@ def run_workflow(
             clear_step()
 
     log_run_complete(ctx, "success")
-    create_results_summary(ctx, execution_details=_workflow_execution_details(
-        run, apply=apply, only=only, step=step, from_step=from_step,
-        to_step=to_step))
+    if getattr(ctx, "run_log_path", None):
+        finalize_run_log(ctx.run_log_path)
     log_artifact_manifest_from_run_log(ctx)
     clear_run()
     return run
