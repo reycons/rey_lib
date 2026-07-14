@@ -864,3 +864,12 @@ def test_config_reference_normalized_fields(tmp_path: Path) -> None:
     assert record["safe_to_preview"] is False
     assert record["config_hash"] == "abc123"
     assert record["hash"] == "abc123"
+
+
+def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> None:
+    """A nested app operation never writes a PIPELINE_RESTORE_POLICY (pipeline-owner only)."""
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    run_app_operation(ctx, "transform", lambda: 0)
+    records = _read(Path(ctx.run_log_path))
+    assert records  # lifecycle records were written
+    assert not any(r["record_type"] == "PIPELINE_RESTORE_POLICY" for r in records)
