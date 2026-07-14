@@ -319,11 +319,10 @@ def _stamp_workflow_ownership(file_raw: dict[str, Any]) -> dict[str, Any]:
     return file_raw
 
 def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:
-    """Expose current and canonical config sections without removing either.
+    """Apply the remaining supported compatibility aliases.
 
-    This is a structural bridge for the logical config reorganization. It keeps
-    legacy/current keys working while allowing future YAML to use canonical
-    names. Duplicate logical objects fail closed when definitions conflict.
+    Database and LLM aliases remain structural bridges. Pipelines have one
+    canonical top-level list and reject the retired nested representation.
     """
     result = deepcopy(raw)
 
@@ -337,12 +336,18 @@ def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:
         current_key="llm_profiles",
         canonical_key="llm",
     )
-    _alias_nested_mapping(
-        result,
-        nested_parent="pipeline_coordinator",
-        nested_key="pipelines",
-        canonical_key="pipelines",
-    )
+    pipeline_coordinator = result.get("pipeline_coordinator")
+    if (
+        isinstance(pipeline_coordinator, dict)
+        and "pipelines" in pipeline_coordinator
+    ):
+        raise ConfigError(
+            "Config section 'pipeline_coordinator.pipelines' is retired; "
+            "declare the canonical top-level 'pipelines' list instead."
+        )
+    pipelines = result.get("pipelines")
+    if pipelines is not None and not isinstance(pipelines, list):
+        raise ConfigError("Config section 'pipelines' must be a canonical list.")
 
     return result
 
@@ -367,39 +372,6 @@ def _alias_named_collection(
         raw[canonical_key] = deepcopy(raw[current_key])
     elif canonical_exists:
         raw[current_key] = deepcopy(raw[canonical_key])
-
-def _alias_nested_mapping(
-    raw: dict[str, Any],
-    *,
-    nested_parent: str,
-    nested_key: str,
-    canonical_key: str,
-) -> None:
-    parent = raw.get(nested_parent)
-    if parent is not None and not isinstance(parent, dict):
-        raise ConfigError(
-            f"Config section '{nested_parent}' must be a mapping to alias "
-            f"'{nested_parent}.{nested_key}'."
-        )
-
-    nested_exists = isinstance(parent, dict) and nested_key in parent
-    canonical_exists = canonical_key in raw
-
-    if nested_exists and canonical_exists:
-        merged = _merge_compatible_mapping(
-            parent[nested_key],
-            raw[canonical_key],
-            label=canonical_key,
-        )
-        parent[nested_key] = deepcopy(merged)
-        raw[canonical_key] = deepcopy(merged)
-    elif nested_exists:
-        raw[canonical_key] = deepcopy(parent[nested_key])
-    elif canonical_exists:
-        if parent is None:
-            parent = {}
-            raw[nested_parent] = parent
-        parent[nested_key] = deepcopy(raw[canonical_key])
 
 def _role_for_layer(layer: str) -> str:
     """Return the configuration role for a provenance layer, defaulting cleanly."""

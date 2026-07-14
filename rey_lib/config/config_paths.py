@@ -35,7 +35,9 @@ _PATH_KEYS = frozenset({
 _LOG_PATH_KEYS = ("log_path",)
 
 _TOKEN_PATTERN = re.compile(r"{([^{}]+)}")
-_RUNTIME_PATH_PLACEHOLDERS = frozenset({"operation", "timestamp", "run_id"})
+_RUNTIME_PATH_PLACEHOLDERS = frozenset(
+    {"operation", "timestamp", "run_id", "source_subfolder"}
+)
 
 class PathResolver:
     """Resolved named paths from the installation config ``paths:`` list.
@@ -154,7 +156,8 @@ def _apply_path_resolver(obj: Any, resolver: PathResolver) -> None:
         name: str(resolver.resolve(name)) for name in resolver._paths
     }
     _walk_logical_refs(obj, resolver_strs)
-    _resolve_workflow_tokens(obj, resolver_strs)
+    _resolve_scoped_tokens(obj, "workflows", resolver_strs)
+    _resolve_scoped_tokens(obj, "pipelines", resolver_strs)
     _walk_logical_refs(obj, resolver_strs)
     _validate_no_unresolved_path_tokens(obj)
 
@@ -177,73 +180,88 @@ def _walk_logical_refs(obj: Any, resolver_strs: dict[str, str]) -> None:
             _walk_logical_refs(item, resolver_strs)
 
 
-def _resolve_workflow_tokens(obj: Any, resolver_strs: dict[str, str]) -> None:
-    """Resolve each workflow's local ``tokens:`` block inside that workflow.
+def _resolve_scoped_tokens(
+    obj: Any, section: str, global_tokens: dict[str, str]
+) -> None:
+    """Resolve entry-local tokens within each item in ``section``.
 
-    Workflow-local tokens are authoring conveniences. They should not leak into
-    process handlers, so they are expanded during config load after the global
-    PathResolver exists. Unknown placeholders in non-path text are still allowed
-    for runtime formatting, but unknown placeholders inside token definitions or
-    path-bearing values fail closed.
+    Workflows and pipelines share this implementation. Each entry receives only
+    the global tokens plus its own resolved local tokens, so scopes never leak
+    between entries.
     """
-    workflows = _child(obj, "workflows")
-    for workflow in _workflow_items(workflows):
-        tokens = _child(workflow, "tokens")
-        token_map = _resolve_local_tokens(tokens, resolver_strs)
+    entries = _child(obj, section)
+    for entry in _scoped_items(entries):
+        tokens = _child(entry, "tokens")
+        token_map = _resolve_local_tokens(tokens, global_tokens, section)
         if token_map:
-            _walk_workflow_refs(workflow, token_map)
+            combined = dict(global_tokens)
+            combined.update(token_map)
+            _walk_scoped_refs(entry, combined)
 
 
-def _workflow_items(workflows: Any) -> list[Any]:
-    if workflows is None:
+def _scoped_items(entries: Any) -> list[Any]:
+    if entries is None:
         return []
-    if isinstance(workflows, Namespace):
-        return [item for _, item in workflows.items()]
-    if isinstance(workflows, dict):
-        return list(workflows.values())
-    if isinstance(workflows, list):
-        return list(workflows)
+    if isinstance(entries, Namespace):
+        return [item for _, item in entries.items()]
+    if isinstance(entries, dict):
+        return list(entries.values())
+    if isinstance(entries, list):
+        return list(entries)
     return []
 
 
-def _resolve_local_tokens(tokens: Any, resolver_strs: dict[str, str]) -> dict[str, str]:
+def _resolve_local_tokens(
+    tokens: Any, global_tokens: dict[str, str], section: str
+) -> dict[str, str]:
     raw = _mapping_items(tokens)
     if not raw:
         return {}
 
     for key in raw:
-        if key in resolver_strs:
+        if key in global_tokens:
             raise ConfigError(
-                f"Workflow token '{key}' conflicts with installation path token '{key}'."
+                f"Scoped token '{key}' in {section} conflicts with installation path token '{key}'."
             )
 
-    resolved = {key: str(value) for key, value in raw.items()}
-    combined = dict(resolver_strs)
-    combined.update(resolved)
+    authored = {key: str(value) for key, value in raw.items()}
+    resolved: dict[str, str] = {}
+    resolving: list[str] = []
 
-    for _ in range(len(resolved) + 1):
-        changed = False
-        for key, value in list(resolved.items()):
-            expanded = _substitute_known_tokens(value, combined)
-            if expanded != value:
-                resolved[key] = expanded
-                combined[key] = expanded
-                changed = True
-        if not changed:
-            break
-
-    for key, value in resolved.items():
-        unresolved = _tokens_in(value) - set(combined)
-        if unresolved:
-            names = ", ".join(sorted(unresolved))
+    def resolve(key: str) -> str:
+        if key in resolved:
+            return resolved[key]
+        if key in resolving:
+            cycle = " -> ".join([*resolving[resolving.index(key):], key])
             raise ConfigError(
-                f"Workflow token '{key}' references unknown token(s): {names}."
+                f"Circular scoped token reference in {section}: {cycle}."
             )
+
+        resolving.append(key)
+        value = authored[key]
+        for dependency in sorted(_tokens_in(value)):
+            if dependency in authored:
+                replacement = resolve(dependency)
+            elif dependency in global_tokens:
+                replacement = str(global_tokens[dependency])
+            elif dependency in _RUNTIME_PATH_PLACEHOLDERS:
+                continue
+            else:
+                raise ConfigError(
+                    f"Scoped token '{key}' in {section} references unknown token(s): {dependency}."
+                )
+            value = value.replace("{" + dependency + "}", replacement)
+        resolving.pop()
+        resolved[key] = value
+        return value
+
+    for key in authored:
+        resolve(key)
 
     return resolved
 
 
-def _walk_workflow_refs(obj: Any, tokens: dict[str, str], parent_key: str = "") -> None:
+def _walk_scoped_refs(obj: Any, tokens: dict[str, str], parent_key: str = "") -> None:
     if isinstance(obj, Namespace):
         for key in obj.keys():
             value = object.__getattribute__(obj, key)
@@ -251,10 +269,21 @@ def _walk_workflow_refs(obj: Any, tokens: dict[str, str], parent_key: str = "") 
             if resolved is not value:
                 object.__setattr__(obj, key, resolved)
             else:
-                _walk_workflow_refs(value, tokens, key)
+                _walk_scoped_refs(value, tokens, key)
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            resolved = _resolve_token_value(value, tokens, str(key))
+            if resolved is not value:
+                obj[key] = resolved
+            else:
+                _walk_scoped_refs(value, tokens, str(key))
     elif isinstance(obj, list):
-        for item in obj:
-            _walk_workflow_refs(item, tokens, parent_key)
+        for index, item in enumerate(obj):
+            resolved = _resolve_token_value(item, tokens, parent_key)
+            if resolved is not item:
+                obj[index] = resolved
+            else:
+                _walk_scoped_refs(item, tokens, parent_key)
 
 
 def _resolve_token_value(value: Any, tokens: dict[str, str], key: str) -> Any:

@@ -33,13 +33,14 @@ def _ctx() -> Namespace:
                     "steps": ["load"],
                 }
             },
-            "pipelines": {
-                "daily": {
+            "pipelines": [
+                {
+                    "name": "daily",
                     "steps": [
                         {"name": "load", "app": "rey_loader"},
                     ]
                 }
-            },
+            ],
             "llm_profiles": [
                 {"name": "local_precision"},
             ],
@@ -86,6 +87,33 @@ def test_inventory_reads_list_schema_pipelines() -> None:
     assert [p["name"] for p in inventory.pipelines] == [
         "trade_analyzer_generate_apply_ddl", "file_onboarder",
     ]
+
+
+def test_pipeline_inventory_preserves_resolved_config_source_path(tmp_path) -> None:
+    """A pipeline entry carries its config-utils provenance directory."""
+    installation = tmp_path / "installations" / "local"
+    pipeline_path = installation / "pipelines" / "trade_analyzer_generate_apply_ddl"
+    pipeline_path.mkdir(parents=True)
+    config_path = installation / "installation.yaml"
+    config_path.write_text("installation:\n  name: local\n", encoding="utf-8")
+    (pipeline_path / "pipeline.yaml").write_text(
+        "pipelines:\n"
+        "  - name: trade_analyzer_generate_apply_ddl\n"
+        "    steps: []\n",
+        encoding="utf-8",
+    )
+
+    ctx = build_ctx_from_path(
+        config_path,
+        app_name="rey_console",
+        full_installation=True,
+    )
+    inventory = build_installation_inventory(ctx)
+
+    assert inventory.pipelines[0]["path"] == str(pipeline_path.resolve())
+    assert inventory.pipelines[0]["source_config_file"] == str(
+        (pipeline_path / "pipeline.yaml").resolve()
+    )
 
 
 def test_installation_inventory_is_read_only() -> None:

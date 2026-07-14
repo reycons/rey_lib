@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from rey_lib.config.config_utils import Namespace
+from rey_lib.config.provenance import get_config_metadata
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
@@ -138,29 +139,31 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
 def _pipeline_entries(ctx: Any) -> list[dict[str, Any]]:
     """Return normalized pipeline rows from ctx.pipelines.
 
-    Consumes the canonical list schema (``pipelines: [{name: ...}]``); a legacy keyed
-    mapping is normalized here (map key -> entry name), mirroring the coordinator's
-    pipeline-collection boundary.
+    Consumes only the canonical list schema (``pipelines: [{name: ...}]``).
     """
     rows: list[dict[str, Any]] = []
     pipelines = _to_plain(getattr(ctx, "pipelines", None))
-    if not isinstance(pipelines, (list, dict)):
-        pc = getattr(ctx, "pipeline_coordinator", None)
-        pipelines = _to_plain(getattr(pc, "pipelines", None) if pc else None)
-
-    if isinstance(pipelines, dict):
-        entries: list[tuple[Any, Any]] = list(pipelines.items())
-    elif isinstance(pipelines, list):
-        entries = [(None, entry) for entry in pipelines]
-    else:
+    if pipelines is None:
         return rows
+    if not isinstance(pipelines, list):
+        raise ConfigError("Canonical pipeline inventory 'ctx.pipelines' must be a list.")
 
-    for key, pipeline in entries:
+    for pipeline in pipelines:
         if not isinstance(pipeline, dict):
             continue
+        name = str(pipeline.get("name") or "")
+        source = get_config_metadata(ctx, f"pipelines.{name}.name")
+        source_config_file = str(source.source_file or "") if source else ""
+        pipeline_path = (
+            str(Path(source_config_file).expanduser().resolve().parent)
+            if source_config_file
+            else ""
+        )
         rows.append(
             {
-                "name": str(pipeline.get("name") or key or ""),
+                "name": name,
+                "path": pipeline_path,
+                "source_config_file": source_config_file,
                 "steps": pipeline.get("steps") or [],
                 "source_section": "pipelines",
             }

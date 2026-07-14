@@ -20,6 +20,7 @@ from rey_lib.config.config_utils import (
     _resolve_paths,
 )
 from rey_lib.errors.error_utils import ConfigError
+from rey_lib.logs.execution_records import log_pipeline_restore_policy
 
 _BASE = Path("/base")
 
@@ -136,6 +137,125 @@ def test_workflow_local_token_global_name_collision_fails_at_load() -> None:
 
     with pytest.raises(ConfigError, match="conflicts"):
         _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+
+
+def test_pipeline_local_tokens_resolve_across_owned_entry() -> None:
+    """Pipeline tokens resolve restore mappings, args, overrides, and nested lists."""
+    ctx = Namespace({
+        "pipelines": [
+            {
+                "name": "trade",
+                "tokens": {
+                    "trade_root": "{data}/trade",
+                    "trade_inbox": "{trade_root}/inbox",
+                    "trade_processed": "{trade_root}/processed",
+                },
+                "restore_mappings": [
+                    {"from": "{trade_processed}", "to": "{trade_inbox}"}
+                ],
+                "steps": [
+                    {
+                        "name": "prepare",
+                        "args": ["--inbox", "{trade_inbox}"],
+                        "ctx_overrides": {
+                            "processed": "{trade_processed}",
+                            "nested": [{"source": "{trade_inbox}"}],
+                        },
+                    }
+                ],
+            }
+        ]
+    })
+
+    _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+
+    pipeline = ctx.pipelines[0]
+    assert pipeline.tokens.trade_root == "/rey/data/trade"
+    assert pipeline.tokens.trade_inbox == "/rey/data/trade/inbox"
+    assert getattr(pipeline.restore_mappings[0], "from") == "/rey/data/trade/processed"
+    assert pipeline.restore_mappings[0].to == "/rey/data/trade/inbox"
+    assert pipeline.steps[0].args == ["--inbox", "/rey/data/trade/inbox"]
+    assert pipeline.steps[0].ctx_overrides.processed == "/rey/data/trade/processed"
+    assert pipeline.steps[0].ctx_overrides.nested[0].source == "/rey/data/trade/inbox"
+
+
+def test_pipeline_scoped_tokens_are_isolated() -> None:
+    """A pipeline cannot consume another pipeline's local token scope."""
+    ctx = Namespace({
+        "pipelines": [
+            {"name": "first", "tokens": {"owned": "{data}/first"}, "value": "{owned}"},
+            {"name": "second", "tokens": {"other": "{data}/second"}, "value": "{owned}"},
+        ]
+    })
+
+    _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+
+    assert ctx.pipelines[0].value == "/rey/data/first"
+    assert ctx.pipelines[1].value == "{owned}"
+
+
+def test_circular_pipeline_scoped_tokens_fail_explicitly() -> None:
+    """Circular local dependencies fail instead of surviving configuration load."""
+    ctx = Namespace({
+        "pipelines": [
+            {"name": "bad", "tokens": {"one": "{two}", "two": "{one}"}}
+        ]
+    })
+
+    with pytest.raises(ConfigError, match="Circular scoped token reference"):
+        _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+
+
+def test_approved_late_bound_pipeline_token_may_survive() -> None:
+    """The established source_subfolder runtime placeholder remains late-bound."""
+    ctx = Namespace({
+        "pipelines": [
+            {
+                "name": "parameterized",
+                "tokens": {"processed": "{data}/processed/{source_subfolder}"},
+                "value": "{processed}",
+            }
+        ]
+    })
+
+    _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+
+    assert ctx.pipelines[0].value == "/rey/data/processed/{source_subfolder}"
+
+
+def test_pipeline_restore_policy_receives_resolved_paths(monkeypatch) -> None:
+    """The log helper receives resolved mappings and performs no token resolution."""
+    ctx = Namespace({
+        "pipelines": [
+            {
+                "name": "trade",
+                "tokens": {
+                    "inbox": "{data}/trade/inbox",
+                    "processed": "{data}/trade/processed",
+                },
+                "restore_mappings": [{"from": "{processed}", "to": "{inbox}"}],
+            }
+        ]
+    })
+    _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
+    captured: dict[str, object] = {}
+
+    def capture(_ctx, record_type, **fields):
+        captured.update({"record_type": record_type, **fields})
+
+    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
+    resolved_mappings = [
+        {key: getattr(mapping, key) for key in mapping.keys()}
+        for mapping in ctx.pipelines[0].restore_mappings
+    ]
+    log_pipeline_restore_policy(ctx, resolved_mappings)
+
+    assert captured == {
+        "record_type": "PIPELINE_RESTORE_POLICY",
+        "restore_rules": [
+            {"from": "/rey/data/trade/processed", "to": "/rey/data/trade/inbox"}
+        ],
+    }
 
 
 def test_contract_remains_string() -> None:

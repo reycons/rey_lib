@@ -119,7 +119,7 @@ llm_profiles:
     assert ctx.llm[0].name == "local"
 
 
-def test_pipeline_coordinator_pipelines_alias_to_top_level(tmp_path: Path) -> None:
+def test_pipeline_coordinator_pipeline_collection_is_rejected(tmp_path: Path) -> None:
     config_dir = _root(tmp_path)
     _write(config_dir / "pipelines" / "legacy.yaml", """\
 pipeline_coordinator:
@@ -128,24 +128,35 @@ pipeline_coordinator:
       enabled: true
 """)
 
-    ctx = build_ctx_from_path(config_dir / "config.yaml")
-
-    assert ctx.pipeline_coordinator.pipelines.file_onboarder.enabled is True
-    assert ctx.pipelines.file_onboarder.enabled is True
+    with pytest.raises(ConfigError, match="pipeline_coordinator.pipelines.*retired"):
+        build_ctx_from_path(config_dir / "config.yaml")
 
 
-def test_top_level_pipelines_alias_to_pipeline_coordinator(tmp_path: Path) -> None:
+def test_top_level_pipelines_remain_the_only_pipeline_collection(tmp_path: Path) -> None:
     config_dir = _root(tmp_path)
     _write(config_dir / "pipelines" / "logical.yaml", """\
 pipelines:
-  file_onboarder:
+  - name: file_onboarder
     enabled: true
 """)
 
     ctx = build_ctx_from_path(config_dir / "config.yaml")
 
-    assert ctx.pipelines.file_onboarder.enabled is True
-    assert ctx.pipeline_coordinator.pipelines.file_onboarder.enabled is True
+    assert ctx.pipelines[0].name == "file_onboarder"
+    assert ctx.pipelines[0].enabled is True
+    assert not hasattr(ctx, "pipeline_coordinator")
+
+
+def test_top_level_pipeline_mapping_is_rejected(tmp_path: Path) -> None:
+    config_dir = _root(tmp_path)
+    _write(config_dir / "pipelines" / "legacy.yaml", """\
+pipelines:
+  file_onboarder:
+    enabled: true
+""")
+
+    with pytest.raises(ConfigError, match="pipelines.*canonical list"):
+        build_ctx_from_path(config_dir / "config.yaml")
 
 
 def test_conflicting_duplicate_pipelines_fail_closed(tmp_path: Path) -> None:
@@ -160,7 +171,7 @@ pipelines:
     enabled: false
 """)
 
-    with pytest.raises(ConfigError, match="file_onboarder"):
+    with pytest.raises(ConfigError, match="pipeline_coordinator.pipelines.*retired"):
         build_ctx_from_path(config_dir / "config.yaml")
 
 
