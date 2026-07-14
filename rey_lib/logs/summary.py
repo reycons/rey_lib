@@ -35,17 +35,22 @@ _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
 
 def finalize_run_log(log_path: str | Path) -> dict[str, Any]:
-    """Run the canonical post-run log processing sequence."""
-    from rey_lib.logs.llm_package import create_llm_package
+    """Run the canonical post-run log processing sequence.
+
+    Order: RESULTS_SUMMARY, then LLM_PACKAGE, then the configured log analysis. The
+    analysis honors its own ``fail_on_error`` setting (nonfatal-returns otherwise).
+    """
+    from rey_lib.logs.llm_package import create_llm_package, run_configured_log_analysis
 
     result = create_results_summary(log_path=log_path)
     if result.get("summary") is None:
-        return {**result, "package": None}
+        return {**result, "package": None, "analysis": None}
     try:
         package = create_llm_package(log_path)
     except Exception as exc:  # noqa: BLE001 — post-run processing must preserve the run
-        return {**result, "package": None, "package_failures": [str(exc)]}
-    return {**result, "package": package, "package_failures": []}
+        return {**result, "package": None, "package_failures": [str(exc)], "analysis": None}
+    analysis = run_configured_log_analysis(log_path)
+    return {**result, "package": package, "package_failures": [], "analysis": analysis}
 
 
 def create_results_summary(

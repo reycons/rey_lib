@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from rey_lib.logs import create_llm_package, create_results_summary, finalize_run_log
+from rey_lib.llm.exceptions import ProviderFailure
+from rey_lib.logs import (
+    create_llm_package,
+    create_results_summary,
+    finalize_run_log,
+    run_configured_log_analysis,
+)
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -116,7 +122,7 @@ def _prepared_run(tmp_path: Path) -> tuple[Path, Path, dict]:
     return log_path, contract_path, result["summary"]
 
 
-def test_finalizer_calls_summary_then_package_with_same_log_path(
+def test_finalize_run_log_order_is_summary_package_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -133,12 +139,21 @@ def test_finalizer_calls_summary_then_package_with_same_log_path(
         calls.append(("package", path))
         return {"instructions": {}, "results": {}}
 
+    def fake_analysis(path: Path) -> dict:
+        calls.append(("analysis", path))
+        return {"result": None, "action": None}
+
     monkeypatch.setattr(summary, "create_results_summary", fake_summary)
     monkeypatch.setattr(llm_package, "create_llm_package", fake_package)
+    monkeypatch.setattr(llm_package, "run_configured_log_analysis", fake_analysis)
 
     finalize_run_log(log_path)
 
-    assert calls == [("summary", log_path), ("package", log_path)]
+    assert calls == [
+        ("summary", log_path),
+        ("package", log_path),
+        ("analysis", log_path),
+    ]
 
 
 def test_summary_failure_prevents_package_creation(
@@ -306,3 +321,192 @@ def test_repeated_creation_with_unchanged_inputs_is_idempotent(tmp_path: Path) -
         if record["record_type"] == "LLM_PACKAGE"
     ]
     assert len(packages) == 1
+
+
+# ---------------------------------------------------------------------------
+# run_configured_log_analysis (SGC_Rey_Lib_Run_Configured_Log_Analysis)
+# ---------------------------------------------------------------------------
+
+def _analysis_config(
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    fail_on_error: bool = False,
+    destination: str = "stdout",
+    output_path: Path | None = None,
+) -> Path:
+    installation = tmp_path / "installation"
+    shared = installation / "shared"
+    shared.mkdir(parents=True)
+    config_path = installation / "installation.yaml"
+    config_path.write_text("installation:\n  name: demo\n", encoding="utf-8")
+    output = (
+        f"      destination: {destination}\n"
+        "      format: JSON\n"
+        "      record_type: LLM_INTERPRETATION\n"
+        "      record_group: results\n"
+    )
+    if output_path is not None:
+        output += f'      path: "{output_path}"\n'
+    (shared / "log_analysis.yaml").write_text(
+        "log_analysis:\n"
+        "  log_interpreter:\n"
+        f"    enabled: {'true' if enabled else 'false'}\n"
+        "    engine: llm\n"
+        "    artifact_type: json\n"
+        "    llm_execution_profile: local_precision\n"
+        f"    fail_on_error: {'true' if fail_on_error else 'false'}\n"
+        "    output:\n" + output,
+        encoding="utf-8",
+    )
+    (shared / "llm_profiles.yaml").write_text(
+        "llm_profiles:\n"
+        "  - name: local_precision\n"
+        "    provider: mock\n"
+        "    model: mock-model\n"
+        '    api_key: ""\n',
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _package_log(tmp_path: Path, config_path: Path, *, with_package: bool = True) -> Path:
+    log_path = tmp_path / "demo.20260714_120000.jsonl"
+    records = [
+        {"record_type": "RUN_START", "record_group": "execution", "run_id": "run-1",
+         "run_timestamp": "20260714_120000", "app": "demo", "pipeline_name": "demo_pipeline"},
+        {"record_type": "CONFIG_FILE_REFERENCE", "record_group": "files", "run_id": "run-1",
+         "run_timestamp": "20260714_120000", "path": str(config_path),
+         "configuration_layer": "installation", "config_type": "installation", "load_order": 0},
+        {"record_type": "RUN_COMPLETE", "record_group": "execution", "run_id": "run-1",
+         "run_timestamp": "20260714_120000", "status": "success"},
+    ]
+    if with_package:
+        records.append({
+            "record_type": "LLM_PACKAGE", "record_group": "results", "run_id": "run-1",
+            "run_timestamp": "20260714_120000",
+            "instructions": {"name": "rey_log_interpreter"}, "results": {"status": "success"},
+        })
+    _write_jsonl(log_path, records)
+    return log_path
+
+
+def _envelope(content: dict) -> str:
+    return json.dumps({"artifact_type": "json", "content": content, "notes": []})
+
+
+def _patch_direct_ask(monkeypatch, *, response=None, capture=None, raises=None) -> None:
+    def fake(prompt, *, model, provider, api_key, **_kwargs):
+        if capture is not None:
+            capture.update({"prompt": prompt, "model": model, "provider": provider})
+        if raises is not None:
+            raise raises
+        return response
+    monkeypatch.setattr("rey_lib.llm.llm_utils.direct_ask", fake)
+
+
+def test_configured_analysis_reads_existing_llm_package(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
+    captured: dict = {}
+    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
+    run_configured_log_analysis(log_path)
+    assert '"instructions"' in captured["prompt"]
+    assert '"results"' in captured["prompt"]
+
+
+def test_configured_analysis_uses_resolved_log_analysis_entry(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
+    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
+    assert run_configured_log_analysis(log_path, analysis_name="log_interpreter")["action"] == "written_stdout"
+    with pytest.raises(ValueError, match="log_analysis configuration not found"):
+        run_configured_log_analysis(log_path, analysis_name="missing")
+
+
+def test_configured_analysis_uses_execution_profile(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
+    captured: dict = {}
+    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
+    run_configured_log_analysis(log_path)
+    assert captured["provider"] == "mock"
+    assert captured["model"] == "mock-model"
+
+
+def test_configured_analysis_calls_existing_llm_executor(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
+    called = {"n": 0}
+
+    def fake(prompt, **_kwargs):
+        called["n"] += 1
+        return _envelope({"ok": True})
+
+    monkeypatch.setattr("rey_lib.llm.llm_utils.direct_ask", fake)
+    run_configured_log_analysis(log_path)
+    assert called["n"] == 1
+
+
+def test_stdout_result_uses_configured_record_type_and_group(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path, destination="stdout"))
+    _patch_direct_ask(monkeypatch, response=_envelope({"verdict": "ok", "reasons": ["r"]}))
+    run_configured_log_analysis(log_path)
+    record = _records(log_path)[-1]
+    assert record["record_type"] == "LLM_INTERPRETATION"
+    assert record["record_group"] == "results"
+    assert record["verdict"] == "ok"
+    assert record["reasons"] == ["r"]
+
+
+def test_file_result_uses_existing_writer_and_configured_path(tmp_path, monkeypatch) -> None:
+    out_file = tmp_path / "interpretation.json"
+    log_path = _package_log(
+        tmp_path, _analysis_config(tmp_path, destination="file", output_path=out_file)
+    )
+    _patch_direct_ask(monkeypatch, response=_envelope({"verdict": "ok"}))
+    run_configured_log_analysis(log_path)
+    assert out_file.is_file()
+    assert json.loads(out_file.read_text(encoding="utf-8")) == {"verdict": "ok"}
+    assert not any(r["record_type"] == "LLM_INTERPRETATION" for r in _records(log_path))
+
+
+def test_disabled_analysis_is_skipped(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path, enabled=False))
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "rey_lib.llm.llm_utils.direct_ask",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1),
+    )
+    out = run_configured_log_analysis(log_path)
+    assert out["skipped"] == ["disabled"]
+    assert called["n"] == 0
+    assert not any(r["record_type"] == "LLM_INTERPRETATION" for r in _records(log_path))
+
+
+def test_missing_llm_package_fails_explicitly(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path), with_package=False)
+    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
+    with pytest.raises(ValueError, match="LLM_PACKAGE"):
+        run_configured_log_analysis(log_path)
+
+
+def test_nonfatal_llm_failure_preserves_existing_records(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
+    before = log_path.read_bytes()
+    _patch_direct_ask(monkeypatch, raises=ProviderFailure("boom"))
+    out = run_configured_log_analysis(log_path)
+    assert out["result"] is None
+    assert out["failures"]
+    assert log_path.read_bytes() == before
+
+
+def test_fail_on_error_true_propagates(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=True))
+    _patch_direct_ask(monkeypatch, raises=ProviderFailure("boom"))
+    with pytest.raises(ProviderFailure):
+        run_configured_log_analysis(log_path)
+
+
+def test_repeated_finalization_does_not_duplicate_result(tmp_path, monkeypatch) -> None:
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
+    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
+    run_configured_log_analysis(log_path)
+    run_configured_log_analysis(log_path)
+    assert sum(1 for r in _records(log_path) if r["record_type"] == "LLM_INTERPRETATION") == 1
