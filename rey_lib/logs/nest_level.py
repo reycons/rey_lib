@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs import record_parenting
 
 __all__ = [
     "get_nest_level",
@@ -85,6 +86,9 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
             f"Known bases: {sorted(_SEMANTIC_BASES)}."
         )
     level = _SEMANTIC_BASES[semantic_level]
+    # Phase 2 consumes the base change: clear deeper levels and restore parent
+    # context (SGC_Rey_Log_Record_Parenting_Phase_2). No caller-facing change.
+    record_parenting.on_level_set(ctx, level)
     _store(ctx, level)
     return level
 
@@ -102,7 +106,10 @@ def next_nest_level(ctx: Any) -> int:
     int
         The new level.
     """
-    level = get_nest_level(ctx) + 1
+    current = get_nest_level(ctx)
+    # Phase 2: the last written record parents the new deeper level.
+    record_parenting.on_level_next(ctx, current)
+    level = current + 1
     _store(ctx, level)
     return level
 
@@ -131,6 +138,8 @@ def previous_nest_level(ctx: Any) -> int:
             current, _MIN_LEVEL,
         )
         level = _MIN_LEVEL
+    # Phase 2: return to an existing higher parent context.
+    record_parenting.on_level_previous(ctx, level)
     _store(ctx, level)
     return level
 
