@@ -22,12 +22,29 @@ def _ctx() -> Namespace:
     return Namespace({})
 
 
-# TEST-001
+# TEST-001 — corrected semantic level constants.
 def test_semantic_base_mapping() -> None:
-    """pipeline/workflow/app resolve to fixed 1/2/3."""
+    """pipeline/pipeline_step/app/workflow/workflow_step resolve to fixed 1/2/3/4/5."""
     assert set_nest_level(_ctx(), "pipeline") == 1
-    assert set_nest_level(_ctx(), "workflow") == 2
+    assert set_nest_level(_ctx(), "pipeline_step") == 2
     assert set_nest_level(_ctx(), "app") == 3
+    assert set_nest_level(_ctx(), "workflow") == 4
+    assert set_nest_level(_ctx(), "workflow_step") == 5
+
+
+# TEST-005 (hierarchy SGC) — pipeline step and workflow step are distinct levels.
+def test_pipeline_and_workflow_step_are_distinct() -> None:
+    assert set_nest_level(_ctx(), "pipeline_step") != set_nest_level(_ctx(), "workflow_step")
+
+
+# TEST-002 (hierarchy SGC) — the full chain produces strictly increasing levels.
+def test_full_hierarchy_transitions_increase() -> None:
+    ctx = _ctx()
+    assert set_nest_level(ctx, "pipeline") == 1
+    assert set_nest_level(ctx, "pipeline_step") == 2
+    assert set_nest_level(ctx, "app") == 3
+    assert set_nest_level(ctx, "workflow") == 4
+    assert set_nest_level(ctx, "workflow_step") == 5
 
 
 # TEST-002
@@ -49,7 +66,7 @@ def test_semantic_base_reset_discards_deeper_nesting() -> None:
     next_nest_level(ctx)                  # 5 — and never left (abnormal exit)
     # The next semantic base reset is self-correcting.
     assert set_nest_level(ctx, "app") == 3
-    assert set_nest_level(ctx, "workflow") == 2
+    assert set_nest_level(ctx, "workflow") == 4
     assert set_nest_level(ctx, "pipeline") == 1
 
 
@@ -81,12 +98,13 @@ def test_direct_app_execution_establishes_app_base_then_nests() -> None:
     assert get_nest_level(ctx) == 3
 
 
-# TEST-006 — representative workflow execution.
-def test_workflow_then_app_then_nested() -> None:
+# TEST-006 — representative workflow execution: an app owns the workflow, which
+# owns its steps (corrected hierarchy: app 3 -> workflow 4 -> workflow_step 5).
+def test_app_then_workflow_then_step() -> None:
     ctx = _ctx()
-    set_nest_level(ctx, "workflow")      # 2
-    set_nest_level(ctx, "app")           # 3 — app establishes its own fixed base
-    assert next_nest_level(ctx) == 4     # app-owned nested section
+    set_nest_level(ctx, "app")               # 3
+    assert set_nest_level(ctx, "workflow") == 4       # workflow runs inside the app
+    assert set_nest_level(ctx, "workflow_step") == 5  # a step inside the workflow
 
 
 # TEST-007 — representative pipeline execution.

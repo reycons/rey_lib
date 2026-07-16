@@ -95,23 +95,27 @@ def test_direct_app_parents_to_synthetic_root() -> None:
     assert _write(ctx, 3)["parent_record_id"] == 0
 
 
-# TEST-007 / AC-011
-def test_direct_workflow_then_app() -> None:
+# TEST-007 / AC-011 — an app owns a workflow (4) which owns its steps (5); each
+# level parents to the record above it (corrected hierarchy).
+def test_app_workflow_step_parent_chain() -> None:
     ctx = _ctx()
-    set_nest_level(ctx, "workflow")   # 2, parent 0
-    wf = _write(ctx, 2)
-    next_nest_level(ctx)              # 3, parent wf
-    assert _write(ctx, 3)["parent_record_id"] == wf["record_id"]
+    set_nest_level(ctx, "app")        # 3, parent 0
+    app = _write(ctx, 3)
+    set_nest_level(ctx, "workflow")   # 4, descent -> parent = app
+    wf = _write(ctx, 4)
+    next_nest_level(ctx)              # 5, parent wf
+    assert wf["parent_record_id"] == app["record_id"]
+    assert _write(ctx, 5)["parent_record_id"] == wf["record_id"]
 
 
-# TEST-008 / AC-012 — pipeline with skipped workflow level.
-def test_pipeline_directly_parents_app_when_workflow_absent() -> None:
+# TEST-008 / AC-012 — app parents to the nearest written ancestor when the
+# intervening pipeline-step level (2) has no record of its own.
+def test_pipeline_directly_parents_app_when_step_record_absent() -> None:
     ctx = _ctx()
     set_nest_level(ctx, "pipeline")  # 1, parent 0
     pipe = _write(ctx, 1)
-    next_nest_level(ctx)             # 2, parent pipe
-    # App establishes its fixed base at 3, skipping the (absent) workflow level 2.
-    set_nest_level(ctx, "app")       # 3 — largest active level < 3 is 1 (pipeline)
+    next_nest_level(ctx)             # enter level 2 (pipeline step); no record written
+    set_nest_level(ctx, "app")       # 3 — descent parents to the last record (pipeline)
     assert _write(ctx, 3)["parent_record_id"] == pipe["record_id"]
 
 

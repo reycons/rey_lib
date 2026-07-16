@@ -1,17 +1,22 @@
 """
 Shared semantic nest-level utility (SGC_Rey_Log_Nest_Level_Phase_1).
 
-Execution code declares *semantic* boundaries — pipeline, workflow, app, and
-relative nested sections — while this utility owns the numeric nest state. Callers
-never compute base levels, mutate the underlying field directly, or manage record
-IDs, parent IDs, or any tree mechanics. A later phase consumes this state to build
-explicit parent-child log relationships without callers changing again.
+Execution code declares *semantic* boundaries — pipeline, pipeline step, app,
+workflow, workflow step, and relative nested sections — while this utility owns the
+numeric nest state. Callers never compute base levels, mutate the underlying field
+directly, or manage record IDs, parent IDs, or any tree mechanics. A later phase
+consumes this state to build explicit parent-child log relationships without callers
+changing again.
 
-Fixed semantic bases (independent of how execution was invoked):
+Fixed semantic bases (independent of how execution was invoked). Pipelines
+orchestrate apps; workflows execute inside an app, so workflow sits below app
+(SGC_Rey_Log_Nest_Level_Hierarchy_Correction):
 
-    pipeline = 1
-    workflow = 2
-    app      = 3
+    pipeline      = 1
+    pipeline_step = 2
+    app           = 3
+    workflow      = 4
+    workflow_step = 5
 
 ``set_nest_level`` is not plain numeric assignment. Setting a semantic base also
 resets any deeper active nesting: a new base discards whatever deeper level a
@@ -43,11 +48,15 @@ _logger = get_logger(__name__)
 # field. Named to avoid collision with configuration/run attributes.
 _NEST_FIELD = "_rey_nest_level"
 
-# Fixed semantic base levels. These do not vary with invocation path.
+# Fixed semantic base levels. These do not vary with invocation path. Ordering
+# reflects the real execution hierarchy: pipeline -> pipeline step -> app ->
+# workflow -> workflow step (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
 _SEMANTIC_BASES: dict[str, int] = {
     "pipeline": 1,
-    "workflow": 2,
+    "pipeline_step": 2,
     "app": 3,
+    "workflow": 4,
+    "workflow_step": 5,
 }
 
 # Level 0 means "no semantic base established". The level never goes below it.
@@ -55,13 +64,15 @@ _MIN_LEVEL = 0
 
 
 def set_nest_level(ctx: Any, semantic_level: str) -> int:
-    """Establish a fixed semantic base level, resetting any deeper nesting.
+    """Establish a fixed semantic base level.
 
-    Resolves ``semantic_level`` ("pipeline", "workflow", or "app") to its fixed
-    numeric level and sets the current level to it. Because the base is assigned
-    outright, any deeper level left by an earlier nested section is discarded and
-    execution returns to this base — so a new app / workflow / pipeline start is
-    self-correcting even if a prior nested section exited abnormally.
+    Resolves ``semantic_level`` (one of "pipeline", "pipeline_step", "app",
+    "workflow", "workflow_step") to its fixed numeric level and sets the current
+    level to it. A set to a level deeper than the current one is a semantic descent
+    that nests under the most recent record; a set to the same or a shallower level
+    discards any deeper nesting and returns to that base — so a new boundary is
+    self-correcting even if a prior nested section exited abnormally
+    (parent resolution: SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
 
     Parameters
     ----------
@@ -86,9 +97,14 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
             f"Known bases: {sorted(_SEMANTIC_BASES)}."
         )
     level = _SEMANTIC_BASES[semantic_level]
-    # Phase 2 consumes the base change: clear deeper levels and restore parent
-    # context (SGC_Rey_Log_Record_Parenting_Phase_2). No caller-facing change.
-    record_parenting.on_level_set(ctx, level)
+    # Phase 2 consumes the base change. A set to a deeper level is a semantic descent
+    # that parents the deeper level to the last written record; a set to the same or a
+    # shallower level clears deeper levels and restores the lower parent
+    # (SGC_Rey_Log_Parent_Resolver_Semantic_Descent). The prior level is read here and
+    # passed in so the resolver needs no back-dependency on this utility. No
+    # caller-facing change.
+    prior_level = get_nest_level(ctx)
+    record_parenting.on_level_set(ctx, level, prior_level)
     _store(ctx, level)
     return level
 

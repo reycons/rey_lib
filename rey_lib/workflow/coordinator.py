@@ -183,7 +183,8 @@ def run_workflow(
         # Some tests intentionally pass bare object() as ctx; proceed without
         # mutating ctx when it cannot accept dynamic attributes.
         pass
-    # Workflow semantic base (SGC_Rey_Log_Nest_Level_Phase_1) -> level 2.
+    # Workflow semantic base -> level 4: a workflow executes inside an app, so it
+    # sits below the app base (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
     set_nest_level(ctx, "workflow")
     log_run_start(ctx, workflow=name, apply=apply)
     # Bind the current run so file_utils records file operations to this run log
@@ -225,6 +226,10 @@ def run_workflow(
             workflow_name=name,
         )
         try:
+            # Workflow-step semantic boundary -> level 5, one per sequential in-process
+            # step dispatch (SGC_Rey_Log_Nest_Level_Hierarchy_Correction). The descent
+            # from workflow (4) parents each step under the workflow record.
+            set_nest_level(ctx, "workflow_step")
             log_step_start(
                 ctx, step_name, sequence, step_type=process, step_id=step_id
             )

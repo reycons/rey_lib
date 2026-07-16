@@ -90,13 +90,28 @@ def _clear_deeper_than(levels: dict[int, int], level: int) -> dict[int, int]:
 
 # -- nest-level transition consumers ------------------------------------------
 
-def on_level_set(ctx: Any, new_level: int) -> None:
-    """Consume a semantic base set/change: clear deeper levels, restore parent.
+def on_level_set(ctx: Any, new_level: int, prior_level: int) -> None:
+    """Consume a semantic base set: descent creates a parent link, else reset/return.
 
-    All stored levels deeper than ``new_level`` are removed, and the current
-    parent is resolved from the largest active level strictly below it (synthetic
-    root when none). Ordinary base changes never record a new parent themselves.
+    A set to a level deeper than ``prior_level`` is a semantic descent: the most
+    recently written record (``last_record_id``) becomes the parent for records
+    written at the new deeper level, mirroring a ``next_nest_level`` descent so that
+    base boundaries (pipeline -> pipeline_step, workflow -> workflow_step) nest under
+    their orchestrator record rather than the synthetic root
+    (SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
+
+    A set to the same or a shallower level is a reset/return: all stored levels deeper
+    than ``new_level`` are removed and the parent is restored from the largest active
+    level strictly below it (synthetic root when none).
     """
+    if new_level > prior_level:
+        last = _last_record_id(ctx)
+        levels = dict(_level_parents(ctx))
+        levels[prior_level] = last
+        levels = _clear_deeper_than(levels, new_level)
+        _store(ctx, _LEVELS_FIELD, levels)
+        _store(ctx, _PARENT_FIELD, last)
+        return
     levels = _clear_deeper_than(_level_parents(ctx), new_level)
     _store(ctx, _LEVELS_FIELD, levels)
     _store(ctx, _PARENT_FIELD, _largest_parent_below(levels, new_level))
