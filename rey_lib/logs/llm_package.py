@@ -115,10 +115,16 @@ def _build_analysis_package(
     instructions: Any,
     source: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return the canonical package shape pairing a contract with its source record.
+    """Return the log-analysis LLM_PACKAGE, pairing a contract with a source record.
 
-    One shape serves every analysis stage, whether the package is appended to a
-    run log or executed directly from memory.
+    This is the legacy provider wire package for the log-analysis path, not the
+    canonical LLM package (rey_lib/llm/package.py). The same object is written as
+    the durable LLM_PACKAGE record and serialized as the provider prompt, and every
+    configured contract reads this shape, so its structure and fields are an
+    established wire contract preserved unchanged
+    (SGC_Rey_Lib_Canonical_LLM_Package_And_Contract_Evidence, reconciliation c).
+    The canonical package is adopted separately in paths whose fields exist without
+    reconstruction (rey_analyzer).
     """
     return {
         "analysis_name": analysis_name,

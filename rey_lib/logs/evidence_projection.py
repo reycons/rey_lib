@@ -217,6 +217,11 @@ _RUN_RESULT_TYPES = {
     "EMAIL_SUMMARY",
     "LLM_ANALYSIS_PACKAGE",
     "LLM_ANALYSIS_RESULT",
+    # Per-analysis LLM evidence, recognized by type so it is projected into the
+    # results section and correlatable to its analysis even when a caller does not
+    # set record_group (SGC_Rey_Lib_Canonical_LLM_Package_And_Contract_Evidence).
+    "LLM_CONTRACT",
+    "LLM_CONTEXT",
 }
 
 
