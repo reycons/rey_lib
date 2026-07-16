@@ -1,4 +1,10 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.nest_level import (
+    get_nest_level,
+    next_nest_level,
+    previous_nest_level,
+    set_nest_level,
+)
 from rey_lib.logs.log_utils import (
     add_jsonl_handler,
     build_artifact_manifest_entries,
@@ -146,4 +152,8 @@ __all__ = [
     "EXECUTION_RECORD_TYPES",
     "RUN_RESULT_RECORD_TYPES",
     "FILES_RECORD_SUBGROUP",
+    "get_nest_level",
+    "next_nest_level",
+    "previous_nest_level",
+    "set_nest_level",
 ]

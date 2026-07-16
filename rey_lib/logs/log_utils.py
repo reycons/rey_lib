@@ -33,6 +33,12 @@ from rey_lib.logs.evidence_projection import (
     run_summary,
 )
 from rey_lib.logs.summary import create_results_summary, finalize_run_log
+from rey_lib.logs.nest_level import (
+    get_nest_level,
+    next_nest_level,
+    previous_nest_level,
+    set_nest_level,
+)
 from rey_lib.logs.llm_package import (
     create_llm_package,
     run_configured_log_analysis,
@@ -161,4 +167,8 @@ __all__ = [
     "EXECUTION_RECORD_TYPES",
     "RUN_RESULT_RECORD_TYPES",
     "FILES_RECORD_SUBGROUP",
+    "get_nest_level",
+    "next_nest_level",
+    "previous_nest_level",
+    "set_nest_level",
 ]

@@ -37,6 +37,7 @@ from rey_lib.logs import (
     log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
+    set_nest_level,
     log_error,
     log_step_failure,
     log_step_end,
@@ -182,6 +183,8 @@ def run_workflow(
         # Some tests intentionally pass bare object() as ctx; proceed without
         # mutating ctx when it cannot accept dynamic attributes.
         pass
+    # Workflow semantic base (SGC_Rey_Log_Nest_Level_Phase_1) -> level 2.
+    set_nest_level(ctx, "workflow")
     log_run_start(ctx, workflow=name, apply=apply)
     # Bind the current run so file_utils records file operations to this run log
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.

@@ -90,8 +90,12 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
         log_run_complete,
         log_run_start,
         log_step_failure,
+        set_nest_level,
     )
 
+    # App semantic base (SGC_Rey_Log_Nest_Level_Phase_1). The shared app boundary,
+    # so every app establishes level 3 here regardless of how it was invoked.
+    set_nest_level(ctx, "app")
     log_run_start(ctx, operation=operation)
     bind_run(ctx)
     record_config_file_references(ctx)
