@@ -211,7 +211,7 @@ def run_configured_record_analysis(
         The already-parsed record to analyse, exactly as selected by the caller.
     analysis_name : str
         The configured ``log_analysis`` entry to run (for example
-        ``email_results``).
+        ``log_interpreter``).
     source_record_type : str
         Optional declared type of the supplied record, recorded in the package
         for the contract's benefit. Defaults to the record's own

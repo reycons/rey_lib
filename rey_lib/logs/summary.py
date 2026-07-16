@@ -38,20 +38,19 @@ def finalize_run_log(log_path: str | Path) -> dict[str, Any]:
     """Run the canonical post-run log processing sequence.
 
     Order: RESULTS_SUMMARY, then the log_interpreter stage
-    (RESULTS_SUMMARY -> LLM_PACKAGE -> LLM_INTERPRETATION), then the email_results
-    stage (LLM_INTERPRETATION -> LLM_EMAIL_PACKAGE -> LLM_EMAIL_RESULT). Each analysis
-    honors its own ``fail_on_error`` setting. An email stage runs only when its required
-    upstream record is present, and a failure in an email stage is captured — never
-    raised — so completed run evidence is preserved.
-    """
-    from rey_lib.logs.evidence_projection import read_run_log_sections
-    from rey_lib.logs.llm_package import create_llm_package, run_configured_log_analysis
+    (RESULTS_SUMMARY -> LLM_PACKAGE -> LLM_INTERPRETATION). The analysis honors its
+    own ``fail_on_error`` setting.
 
-    empty_email = {"email_package": None, "email_analysis": None, "email_failures": []}
+    One LLM call produces one authoritative result record. LLM_INTERPRETATION
+    carries the structured interpretation together with the rendered subject, html,
+    and text, because the configured contract renders them in the same response —
+    so no second email-generation stage exists to duplicate that work.
+    """
+    from rey_lib.logs.llm_package import create_llm_package, run_configured_log_analysis
 
     result = create_results_summary(log_path=log_path)
     if result.get("summary") is None:
-        return {**result, "package": None, "analysis": None, **empty_email}
+        return {**result, "package": None, "analysis": None}
     try:
         package = create_llm_package(
             log_path,
@@ -61,39 +60,12 @@ def finalize_run_log(log_path: str | Path) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001 — post-run processing must preserve the run
         return {**result, "package": None, "package_failures": [str(exc)],
-                "analysis": None, **empty_email}
+                "analysis": None}
     analysis = run_configured_log_analysis(
         log_path, analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
     )
 
-    email: dict[str, Any] = dict(empty_email)
-    records = read_run_log_sections(log_path)["records"]
-    if _has_record_type(records, "LLM_INTERPRETATION"):
-        try:
-            email["email_package"] = create_llm_package(
-                log_path,
-                analysis_name="email_results",
-                source_record_type="LLM_INTERPRETATION",
-                package_record_type="LLM_EMAIL_PACKAGE",
-            )
-        except Exception as exc:  # noqa: BLE001 — email failure must not drop evidence
-            email["email_failures"] = [str(exc)]
-        if email["email_package"] is not None:
-            records = read_run_log_sections(log_path)["records"]
-            if _has_record_type(records, "LLM_EMAIL_PACKAGE"):
-                try:
-                    email["email_analysis"] = run_configured_log_analysis(
-                        log_path,
-                        analysis_name="email_results",
-                        package_record_type="LLM_EMAIL_PACKAGE",
-                    )
-                except Exception as exc:  # noqa: BLE001 — finalization must not abort
-                    # run_configured_log_analysis owns canonical failure recording; this
-                    # only prevents an unexpected raise from aborting finalization or
-                    # dropping the completed run and its earlier result records.
-                    email["email_failures"] = email["email_failures"] + [str(exc)]
-    return {**result, "package": package, "package_failures": [],
-            "analysis": analysis, **email}
+    return {**result, "package": package, "package_failures": [], "analysis": analysis}
 
 
 def create_results_summary(

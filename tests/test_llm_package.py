@@ -33,10 +33,7 @@ def _records(path: Path) -> list[dict]:
 
 
 def _result_types(path: Path) -> list[str]:
-    stages = {
-        "RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION",
-        "LLM_EMAIL_PACKAGE", "LLM_EMAIL_RESULT",
-    }
+    stages = {"RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION"}
     return [r["record_type"] for r in _records(path) if r["record_type"] in stages]
 
 
@@ -207,11 +204,19 @@ def _patch_direct_ask(monkeypatch, *, response=None, capture=None, raises=None) 
 
 
 def _stage_direct_ask(monkeypatch) -> None:
-    """direct_ask that returns the interpretation or email envelope per stage."""
-    def fake(prompt, **_kwargs):
-        if '"analysis_name": "email_results"' in prompt:
-            return _envelope({"subject": "Run report", "html": "<p>ok</p>", "text": "ok"})
-        return _envelope({"verdict": "ok"})
+    """direct_ask returning the interpreter's single-pass result.
+
+    The configured contract renders the subject, html, and text in the same
+    response as the structured interpretation, so one call returns both and no
+    second stage is needed to produce the presentation fields.
+    """
+    def fake(_prompt, **_kwargs):
+        return _envelope({
+            "verdict": "ok",
+            "subject": "Run report",
+            "html": "<p>ok</p>",
+            "text": "ok",
+        })
     monkeypatch.setattr("rey_lib.llm.llm_utils.direct_ask", fake)
 
 
@@ -219,8 +224,16 @@ def _stage_direct_ask(monkeypatch) -> None:
 # finalize_run_log lifecycle
 # ---------------------------------------------------------------------------
 
-def test_finalize_runs_both_stages_in_required_order(tmp_path, monkeypatch) -> None:
-    log_path, _contract_path, _summary = _prepared_run(tmp_path)
+def test_finalize_runs_one_llm_stage_producing_one_result_record(
+    tmp_path, monkeypatch,
+) -> None:
+    """Finalization is a single LLM stage; the interpretation is the final record.
+
+    The configured contract renders the subject, html, and text in the same
+    response as the structured interpretation, so no second email-generation stage
+    exists to duplicate that work.
+    """
+    log_path, _contract_path = _unfinalized_run(tmp_path)
     _stage_direct_ask(monkeypatch)
 
     finalize_run_log(log_path)
@@ -229,14 +242,32 @@ def test_finalize_runs_both_stages_in_required_order(tmp_path, monkeypatch) -> N
         "RESULTS_SUMMARY",
         "LLM_PACKAGE",
         "LLM_INTERPRETATION",
-        "LLM_EMAIL_PACKAGE",
-        "LLM_EMAIL_RESULT",
     ]
-    email_result = _records(log_path)[-1]
-    assert email_result["record_type"] == "LLM_EMAIL_RESULT"
-    assert email_result["subject"] == "Run report"
-    assert email_result["html"] == "<p>ok</p>"
-    assert email_result["text"] == "ok"
+    interpretation = _records(log_path)[-1]
+    assert interpretation["record_type"] == "LLM_INTERPRETATION"
+    # One authoritative record carries the structured interpretation and the
+    # rendered presentation together, at the top level.
+    assert interpretation["verdict"] == "ok"
+    assert interpretation["subject"] == "Run report"
+    assert interpretation["html"] == "<p>ok</p>"
+    assert interpretation["text"] == "ok"
+
+
+def test_finalize_produces_no_email_stage_records(tmp_path, monkeypatch) -> None:
+    """The duplicate email stage is gone: it leaves no records behind."""
+    log_path, _contract_path = _unfinalized_run(tmp_path)
+    _stage_direct_ask(monkeypatch)
+
+    result = finalize_run_log(log_path)
+
+    types = [record["record_type"] for record in _records(log_path)]
+    assert "LLM_EMAIL_PACKAGE" not in types
+    assert "LLM_EMAIL_RESULT" not in types
+    # The removed stage leaves no vestigial keys on the result either.
+    assert "email_package" not in result
+    assert "email_analysis" not in result
+    assert "email_failures" not in result
+
 
 
 def test_summary_failure_prevents_package_creation(
@@ -275,30 +306,9 @@ def test_email_package_not_created_when_interpretation_absent(
     finalize_run_log(log_path)
 
     types = [r["record_type"] for r in _records(log_path)]
-    # Interpreter disabled -> no LLM_INTERPRETATION -> email stage never starts.
+    # Interpreter disabled -> no interpretation, and no result record at all.
     assert "LLM_INTERPRETATION" not in types
-    assert "LLM_EMAIL_PACKAGE" not in types
-    assert "LLM_EMAIL_RESULT" not in types
 
-
-def test_email_execution_not_attempted_when_email_package_absent(
-    tmp_path, monkeypatch,
-) -> None:
-    log_path, _contract_path = _unfinalized_run(tmp_path, email_contract=False)
-    create_results_summary(log_path=log_path)
-    _stage_direct_ask(monkeypatch)
-
-    result = finalize_run_log(log_path)
-
-    types = [r["record_type"] for r in _records(log_path)]
-    # Missing email contract -> email package creation fails and is captured; no result.
-    assert result["email_failures"]
-    assert "LLM_EMAIL_PACKAGE" not in types
-    assert "LLM_EMAIL_RESULT" not in types
-    # Completed run and earlier results survive the later-stage failure.
-    assert "RUN_COMPLETE" in types
-    assert "RESULTS_SUMMARY" in types
-    assert "LLM_INTERPRETATION" in types
 
 
 def test_package_failure_preserves_summary_and_completed_log(tmp_path: Path) -> None:
@@ -323,10 +333,7 @@ def test_repeated_finalization_does_not_duplicate_records(tmp_path, monkeypatch)
     finalize_run_log(log_path)
 
     types = [record["record_type"] for record in _records(log_path)]
-    for stage in (
-        "RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION",
-        "LLM_EMAIL_PACKAGE", "LLM_EMAIL_RESULT",
-    ):
+    for stage in ("RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION"):
         assert types.count(stage) == 1
 
 
