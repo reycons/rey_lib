@@ -19,13 +19,16 @@ orchestrate apps; workflows execute inside an app, so workflow sits below app
     workflow_step = 5
 
 ``set_nest_level`` is not plain numeric assignment. Setting a semantic base also
-resets any deeper active nesting: a new base discards whatever deeper level a
-prior nested section left behind, returning execution to that base. In Phase 1
-this is purely the numeric level; physical parent resolution belongs to a later
-phase.
+resets or descends the active nesting: a deeper base nests under the most recent
+record, while a same/shallower base discards deeper nesting and returns to that
+base (parent resolution: SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
 
-Phase 1 maintains this state only in memory on ctx. It writes nothing to the
-JSONL run log and changes no record shape.
+The authoritative nest and parent state is the per-run companion file owned by
+``run_state`` (SGC_Rey_Log_Hierarchy_Shared_Run_State_Correction), derived from the
+run log path so every process writing the same run log shares one state. Each
+function here reads that state, applies its transition, and persists it — no
+authoritative nest state is kept on ctx. When no durable run log resolves (a bare
+test context) ``run_state`` uses an in-memory store, which is then the sole store.
 """
 
 from __future__ import annotations
@@ -33,7 +36,8 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.logs.logging_setup import get_logger
-from rey_lib.logs import record_parenting
+from rey_lib.logs import record_parenting, run_state
+from rey_lib.logs.run_state import CURRENT_NEST_LEVEL
 
 __all__ = [
     "get_nest_level",
@@ -43,10 +47,6 @@ __all__ = [
 ]
 
 _logger = get_logger(__name__)
-
-# The utility owns this ctx field; callers use the functions below, never the
-# field. Named to avoid collision with configuration/run attributes.
-_NEST_FIELD = "_rey_nest_level"
 
 # Fixed semantic base levels. These do not vary with invocation path. Ordering
 # reflects the real execution hierarchy: pipeline -> pipeline step -> app ->
@@ -97,15 +97,15 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
             f"Known bases: {sorted(_SEMANTIC_BASES)}."
         )
     level = _SEMANTIC_BASES[semantic_level]
-    # Phase 2 consumes the base change. A set to a deeper level is a semantic descent
-    # that parents the deeper level to the last written record; a set to the same or a
-    # shallower level clears deeper levels and restores the lower parent
-    # (SGC_Rey_Log_Parent_Resolver_Semantic_Descent). The prior level is read here and
-    # passed in so the resolver needs no back-dependency on this utility. No
-    # caller-facing change.
-    prior_level = get_nest_level(ctx)
-    record_parenting.on_level_set(ctx, level, prior_level)
-    _store(ctx, level)
+    # Read-modify-write the shared run state. A set to a deeper level is a semantic
+    # descent that parents the deeper level to the last written record; a set to the
+    # same or a shallower level clears deeper levels and restores the lower parent
+    # (SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
+    state, path = run_state.load(ctx)
+    prior_level = int(state[CURRENT_NEST_LEVEL])
+    record_parenting.on_level_set(state, level, prior_level)
+    state[CURRENT_NEST_LEVEL] = level
+    run_state.save(ctx, state, path)
     return level
 
 
@@ -122,11 +122,13 @@ def next_nest_level(ctx: Any) -> int:
     int
         The new level.
     """
-    current = get_nest_level(ctx)
-    # Phase 2: the last written record parents the new deeper level.
-    record_parenting.on_level_next(ctx, current)
+    state, path = run_state.load(ctx)
+    current = int(state[CURRENT_NEST_LEVEL])
+    # The last written record parents the new deeper level.
+    record_parenting.on_level_next(state, current)
     level = current + 1
-    _store(ctx, level)
+    state[CURRENT_NEST_LEVEL] = level
+    run_state.save(ctx, state, path)
     return level
 
 
@@ -146,7 +148,8 @@ def previous_nest_level(ctx: Any) -> int:
     int
         The new level.
     """
-    current = get_nest_level(ctx)
+    state, path = run_state.load(ctx)
+    current = int(state[CURRENT_NEST_LEVEL])
     level = current - 1
     if level < _MIN_LEVEL:
         _logger.warning(
@@ -154,9 +157,10 @@ def previous_nest_level(ctx: Any) -> int:
             current, _MIN_LEVEL,
         )
         level = _MIN_LEVEL
-    # Phase 2: return to an existing higher parent context.
-    record_parenting.on_level_previous(ctx, level)
-    _store(ctx, level)
+    # Return to an existing higher parent context.
+    record_parenting.on_level_previous(state, level)
+    state[CURRENT_NEST_LEVEL] = level
+    run_state.save(ctx, state, path)
     return level
 
 
@@ -173,22 +177,8 @@ def get_nest_level(ctx: Any) -> int:
     int
         The current level.
     """
+    state, _ = run_state.load(ctx)
     try:
-        return int(getattr(ctx, _NEST_FIELD, _MIN_LEVEL) or _MIN_LEVEL)
-    except (TypeError, ValueError):
+        return int(state[CURRENT_NEST_LEVEL])
+    except (TypeError, ValueError, KeyError):
         return _MIN_LEVEL
-
-
-def _store(ctx: Any, level: int) -> None:
-    """Store the numeric level on ctx using the framework's mutation pattern.
-
-    ctx is a frozen-style namespace; run identity and paths are set the same way,
-    so nest state carries on ctx without a separate ownership mechanism. Some tests
-    intentionally pass a bare object() that cannot accept attributes; nest state is
-    best-effort in-memory and changes no output, so such a ctx is skipped rather
-    than raised on (mirroring the workflow coordinator's own guard).
-    """
-    try:
-        object.__setattr__(ctx, _NEST_FIELD, int(level))
-    except (AttributeError, TypeError):
-        pass

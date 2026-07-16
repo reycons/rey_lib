@@ -327,15 +327,28 @@ def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
 
     Reads run_log_path / run_id / run_timestamp from ``ctx`` when given, else from
     the keyword arguments. Binding without a durable run_log_path is a no-op.
+
+    The execution-identity fields ``_base_record`` reads (app identity, workflow_name,
+    pipeline_name) are captured onto the bound run so ambient FILE_OPERATION records
+    written through it receive the same standard enrichment as any other log write,
+    rather than lacking ``app`` and context. Empty values are left off by
+    ``_base_record`` exactly as an absent attribute would be.
     """
+    identity: dict[str, str] = {
+        key: "" for key in
+        ("owner_app_name", "app_name", "name", "workflow_name", "pipeline_name")
+    }
     if ctx is not None:
         run_log_path = str(getattr(ctx, "run_log_path", "") or run_log_path)
         run_id = str(getattr(ctx, "run_id", "") or run_id)
         run_timestamp = str(getattr(ctx, "run_timestamp", "") or run_timestamp)
+        for key in identity:
+            identity[key] = str(getattr(ctx, key, "") or "")
     if not run_log_path:
         return
     _CURRENT_RUN["run"] = SimpleNamespace(
         run_id=run_id, run_timestamp=run_timestamp, run_log_path=str(run_log_path),
+        **identity,
     )
 
 
