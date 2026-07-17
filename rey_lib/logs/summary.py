@@ -6,10 +6,9 @@ that same log. It is called explicitly by the top-level application that owns th
 (a standalone app, or pipeline_coordinator / the workflow coordinator) after its final
 RUN_COMPLETE — never automatically in generic app-operation finalization, so nested
 pipeline sub-apps that share the owner's log do not create an early, incorrect summary.
-rey_console calls the same utility on demand for a selected run log.
 
 The execution layer contributes only execution-specific facts (``execution_details``);
-this module owns building, the durable append, and idempotency
+this module owns building and the one-time durable append
 (SGC_Rey_Lib_Log_Summary_Framework_And_Run_Summary,
  SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction,
  SGC_Rey_Lib_Write_Results_Summary_To_Run_Log,
@@ -18,9 +17,9 @@ this module owns building, the durable append, and idempotency
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from rey_lib.logs.results_summary import build_results_summary
@@ -73,38 +72,30 @@ def create_results_summary(
     *,
     log_path: str | Path | None = None,
     execution_details: dict[str, Any] | None = None,
-    replace_existing: bool = False,
 ) -> dict[str, Any]:
-    """Create (or recreate) the canonical RESULTS_SUMMARY for a completed run log.
+    """Create the canonical RESULTS_SUMMARY for a completed run log.
 
     The explicit finalization utility. The top-level run-owning application calls it
-    after its final RUN_COMPLETE; rey_console calls it on demand for a selected log.
-    It reads the JSONL run log, excludes any prior RESULTS_SUMMARY from the source
-    evidence, builds the deterministic summary with ``build_results_summary``, and
-    appends exactly one RESULTS_SUMMARY as the final record — preserving every other
-    record and its order. Diagnostic error output is preserved verbatim (never
-    sanitized or truncated here).
+    after its final RUN_COMPLETE.
+    It reads the JSONL run log, builds the deterministic summary with
+    ``build_results_summary``, and appends the immutable RESULTS_SUMMARY through the
+    standard hierarchy-stamped writer. Diagnostic error output is preserved verbatim
+    (never sanitized or truncated here).
 
     Parameters
     ----------
     ctx : Any
         The run context (exposes ``run_log_path``); used when ``log_path`` is omitted.
     log_path : str | Path | None
-        An explicit run-log path (e.g. from rey_console for a selected run).
+        An explicit completed run-log path.
     execution_details : dict[str, Any] | None
         Execution-specific facts from the execution layer (namespaced by ``kind``);
         used to enrich step_results. ``None`` for plain apps.
-    replace_existing : bool
-        When False (default), an existing terminal RESULTS_SUMMARY is returned
-        unchanged (no duplicate). When True, existing RESULTS_SUMMARY records are
-        removed (every other record left unchanged and in order) and one freshly
-        built RESULTS_SUMMARY is appended as the final record.
-
     Returns
     -------
     dict[str, Any]
         ``summary`` (the RESULTS_SUMMARY object or None), ``action``
-        (``"created"`` / ``"existing"`` / ``"replaced"`` / None), ``log_path``,
+        (``"created"`` / None), ``log_path``,
         ``skipped``, ``failures``.
     """
     from rey_lib.logs.evidence_projection import (
@@ -112,8 +103,6 @@ def create_results_summary(
         _run_log_sections,
         read_run_log_sections,
     )
-    from rey_lib.files import primitive_file_io
-
     result: dict[str, Any] = {
         "summary": None,
         "action": None,
@@ -141,17 +130,8 @@ def create_results_summary(
         result["skipped"].append("no_terminal_record")
         return result
 
-    existing = [r for r in records if _is_record_type(r, _RESULTS_SUMMARY)]
-    if existing and not replace_existing:
-        # Default idempotency: an existing terminal summary is reused, never duplicated.
-        result["summary"] = existing[-1]
-        result["action"] = "existing"
-        return result
-
     try:
-        # Build from evidence with any prior RESULTS_SUMMARY excluded, so a stale
-        # summary never feeds the newly built one.
-        source_records = [r for r in records if not _is_record_type(r, _RESULTS_SUMMARY)]
+        source_records = records
         sections = _run_log_sections(source_records)
         identity = _run_log_identity(Path(payload["path"]), source_records, sections)
         summary = build_results_summary(
@@ -160,33 +140,43 @@ def create_results_summary(
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
-        if existing:
-            # replace_existing: rewrite the log without prior RESULTS_SUMMARY records
-            # (every other record unchanged and in order), then the new summary last.
-            _rewrite_run_log(payload["path"], source_records + [summary])
-            result["action"] = "replaced"
-        else:
-            # Append the completed RESULTS_SUMMARY as the final JSONL record. The builder
-            # returns a complete, self-describing record, appended verbatim through the
-            # same primitive the run-log writer uses — no separate results file.
-            primitive_file_io.append_jsonl(payload["path"], summary)
-            result["action"] = "created"
+        from rey_lib.logs.record_enrichment import log_run_record
+        from rey_lib.logs.run_state import companion_path
+
+        state_path = companion_path(str(payload["path"]))
+        if not state_path.is_file():
+            result["failures"].append(
+                f"Authoritative hierarchy state not found: {state_path}"
+            )
+            return result
+
+        # Limit the writer context to fields already present in the canonical Summary.
+        # Optional app/workflow enrichment would otherwise alter the builder payload.
+        # The shared hierarchy writer resolves state solely from run_log_path.
+        write_ctx = SimpleNamespace(
+            run_log_path=str(payload["path"]),
+            run_id=str(summary["run_id"]),
+            run_timestamp=str(summary["run_timestamp"]),
+        )
+        records_before = read_run_log_sections(payload["path"])["records"]
+        summary_fields = dict(summary)
+        summary_fields.pop("record_type", None)
+        log_run_record(write_ctx, _RESULTS_SUMMARY, **summary_fields)
+        records_after = read_run_log_sections(payload["path"])["records"]
+        appended = records_after[len(records_before):]
+        if len(appended) != 1 or not _is_record_type(appended[0], _RESULTS_SUMMARY):
+            result["failures"].append(
+                "Standard run-log writer did not append RESULTS_SUMMARY"
+            )
+            return result
+        summary = appended[0]
+        result["action"] = "created"
     except Exception as exc:  # noqa: BLE001 — preserve the log; report; never raise
         result["failures"].append(str(exc))
         return result
 
     result["summary"] = summary
     return result
-
-
-def _rewrite_run_log(path: str, records: list[dict[str, Any]]) -> None:
-    """Atomically rewrite the run log as ``records`` (one JSON object per line)."""
-    from rey_lib.files import primitive_file_io
-
-    text = "".join(
-        json.dumps(record, ensure_ascii=False, default=str) + "\n" for record in records
-    )
-    primitive_file_io.atomic_write_text(path, text)
 
 
 def _is_record_type(record: dict[str, Any], record_type: str) -> bool:

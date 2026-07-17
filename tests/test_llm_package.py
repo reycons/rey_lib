@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,9 @@ from rey_lib.logs import (
     finalize_run_log,
     run_configured_log_analysis,
     run_configured_record_analysis,
+    set_nest_level,
 )
+from rey_lib.logs.record_enrichment import log_run_record
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -22,6 +25,25 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
+
+
+def _write_completed_run(path: Path, records: list[dict]) -> None:
+    """Emit a completed fixture through the hierarchy-stamped run-log writer."""
+    first = records[0]
+    ctx = SimpleNamespace(
+        run_log_path=str(path), run_id=first["run_id"],
+        run_timestamp=first["run_timestamp"], owner_app_name=first.get("app", ""),
+        pipeline_name=first.get("pipeline_name", ""),
+    )
+    set_nest_level(ctx, "pipeline")
+    for source in records:
+        fields = dict(source)
+        record_type = fields.pop("record_type")
+        for envelope_field in (
+            "record_group", "run_id", "run_timestamp", "app", "pipeline_name",
+        ):
+            fields.pop(envelope_field, None)
+        log_run_record(ctx, record_type, **fields)
 
 
 def _records(path: Path) -> list[dict]:
@@ -178,7 +200,7 @@ def _completed_records(config_path: Path) -> list[dict]:
 def _unfinalized_run(tmp_path: Path, **config_kwargs) -> tuple[Path, Path]:
     config_path, contract_path = _configuration(tmp_path, **config_kwargs)
     log_path = tmp_path / "demo.20260714_120000.jsonl"
-    _write_jsonl(log_path, _completed_records(config_path))
+    _write_completed_run(log_path, _completed_records(config_path))
     return log_path, contract_path
 
 
@@ -300,7 +322,6 @@ def test_email_package_not_created_when_interpretation_absent(
     tmp_path, monkeypatch,
 ) -> None:
     log_path, _contract_path = _unfinalized_run(tmp_path, interpreter_enabled=False)
-    create_results_summary(log_path=log_path)
     _stage_direct_ask(monkeypatch)
 
     finalize_run_log(log_path)
@@ -323,18 +344,6 @@ def test_package_failure_preserves_summary_and_completed_log(tmp_path: Path) -> 
     assert record_types[-1] == "RESULTS_SUMMARY"
     assert "RUN_COMPLETE" in record_types
     assert "LLM_PACKAGE" not in record_types
-
-
-def test_repeated_finalization_does_not_duplicate_records(tmp_path, monkeypatch) -> None:
-    log_path, _contract_path, _summary = _prepared_run(tmp_path)
-    _stage_direct_ask(monkeypatch)
-
-    finalize_run_log(log_path)
-    finalize_run_log(log_path)
-
-    types = [record["record_type"] for record in _records(log_path)]
-    for stage in ("RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION"):
-        assert types.count(stage) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +453,7 @@ def test_package_requires_load_order_zero_installation_reference(tmp_path: Path)
     log_path = tmp_path / "demo.20260714_120000.jsonl"
     records = _completed_records(config_path)
     records[1]["load_order"] = 1
-    _write_jsonl(log_path, records)
+    _write_completed_run(log_path, records)
     create_results_summary(log_path=log_path)
 
     with pytest.raises(ValueError, match="load-order-zero installation"):
