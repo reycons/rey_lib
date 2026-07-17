@@ -180,6 +180,34 @@ def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
     assert _identity(pipeline) == (1, _ROOT, 1)
 
 
+def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: Path) -> None:
+    """Next enters once; sibling replaces peer anchors without changing level."""
+    ctx = _ctx(tmp_path)
+    set_nest_level(ctx, "app")
+    log_run_record(ctx, "RUN_START", app="demo")
+
+    assert set_nest_level(ctx, "next") == 4
+    assert set_nest_level(ctx, "sibling") == 4
+    log_run_record(ctx, "INPUT_FILE_REFERENCE", display_name="v01.json")
+    next_nest_level(ctx)
+    log_run_record(ctx, "LLM_CONTRACT", contract_path="v01.md")
+    assert previous_nest_level(ctx) == 4
+
+    assert set_nest_level(ctx, "sibling") == 4
+    log_run_record(ctx, "INPUT_FILE_REFERENCE", display_name="v02.json")
+    next_nest_level(ctx)
+    log_run_record(ctx, "LLM_CONTRACT", contract_path="v02.md")
+
+    app, first_input, first_child, second_input, second_child = _records(tmp_path)
+    assert _identity(app) == (1, _ROOT, 3)
+    assert _identity(first_input) == (2, 1, 4)
+    assert _identity(first_child) == (3, 2, 5)
+    assert _identity(second_input) == (4, 1, 4)
+    assert _identity(second_child) == (5, 4, 5)
+    assert second_input["parent_record_id"] != first_input["record_id"]
+    assert [record["record_id"] for record in _records(tmp_path)] == [1, 2, 3, 4, 5]
+
+
 def test_set_then_write_orders_the_scope_spine(tmp_path: Path) -> None:
     """Each base's first record anchors the next base's records."""
     ctx = _ctx(tmp_path)

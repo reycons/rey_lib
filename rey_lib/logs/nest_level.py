@@ -76,7 +76,9 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
 
     Resolves ``semantic_level`` (one of "pipeline", "pipeline_step", "app",
     "workflow", "workflow_step") to its fixed numeric level and sets the current
-    level to it. A set to a level deeper than the current one is a semantic descent
+    level to it. ``"next"`` keeps that semantic base and enters its existing
+    minimum child level. ``"sibling"`` keeps the current level and reopens it as
+    a fresh peer scope. A set to a level deeper than the current one is a semantic descent
     that nests under the most recent record; a set to the same or a shallower level
     discards any deeper nesting and returns to that base — so a new boundary is
     self-correcting even if a prior nested section exited abnormally
@@ -87,7 +89,8 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
     ctx : Any
         The execution context carrying nest state.
     semantic_level : str
-        A known semantic base name.
+        A known semantic base name, ``"next"`` to enter its child floor, or
+        ``"sibling"`` to start a peer scope at the current level.
 
     Returns
     -------
@@ -99,10 +102,25 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
     ValueError
         If ``semantic_level`` is not a known semantic base.
     """
+    if semantic_level == "next":
+        state, path = run_state.load(ctx)
+        level = max(int(state[MINIMUM_NEST_LEVEL]), _MIN_LEVEL)
+        record_parenting.on_level_next(state, level)
+        state[CURRENT_NEST_LEVEL] = level
+        run_state.save(ctx, state, path)
+        return level
+    if semantic_level == "sibling":
+        state, path = run_state.load(ctx)
+        level = max(int(state[CURRENT_NEST_LEVEL]), _MIN_LEVEL)
+        record_parenting.on_level_next(state, level)
+        state[CURRENT_NEST_LEVEL] = level
+        run_state.save(ctx, state, path)
+        return level
     if semantic_level not in _SEMANTIC_BASES:
         raise ValueError(
             f"Unknown semantic nest level: {semantic_level!r}. "
-            f"Known bases: {sorted(_SEMANTIC_BASES)}."
+            f"Known bases: {sorted(_SEMANTIC_BASES)}; relative operations: "
+            "'next', 'sibling'."
         )
     level = _SEMANTIC_BASES[semantic_level]
     # Read-modify-write the shared run state. A set always starts a new named scope at
