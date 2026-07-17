@@ -16,12 +16,14 @@ that context — there is never a file plus a second authoritative ctx copy.
 
 Companion file naming (deterministic, owned here): ``<run_log_path>.hstate.json``.
 
-State shape (``level_parents`` keys are integers in memory, serialized as strings):
+State shape (``level_anchors`` keys are integers in memory, serialized as strings):
 
-    last_record_id            last committed logical record id (starts 0)
+    last_record_id            global record sequence only; never determines parentage
     current_nest_level        active semantic/relative nest level (starts 0)
+    parent_level              semantic base scope; established only by set_nest_level
+    minimum_nest_level        relative nesting floor; always parent_level + 1
     current_parent_record_id  parent id stamped at the active level (starts 0)
-    level_parents             {level: record_id} restore points; seeded {0: 0}
+    level_anchors             {level: first record committed at that level}; seeded {0: 0}
 
 Persistence goes through the shared low-level primitive file layer already used by
 the run-log writer; this module adds no parallel I/O layer. Concurrency is out of
@@ -37,8 +39,10 @@ from typing import Any
 __all__ = [
     "LAST_RECORD_ID",
     "CURRENT_NEST_LEVEL",
+    "PARENT_LEVEL",
+    "MINIMUM_NEST_LEVEL",
     "CURRENT_PARENT_RECORD_ID",
-    "LEVEL_PARENTS",
+    "LEVEL_ANCHORS",
     "companion_path",
     "initial_state",
     "load",
@@ -57,8 +61,10 @@ _MEM_FIELD = "_rey_run_state"
 
 LAST_RECORD_ID = "last_record_id"
 CURRENT_NEST_LEVEL = "current_nest_level"
+PARENT_LEVEL = "parent_level"
+MINIMUM_NEST_LEVEL = "minimum_nest_level"
 CURRENT_PARENT_RECORD_ID = "current_parent_record_id"
-LEVEL_PARENTS = "level_parents"
+LEVEL_ANCHORS = "level_anchors"
 
 
 def initial_state() -> dict[str, Any]:
@@ -66,8 +72,10 @@ def initial_state() -> dict[str, Any]:
     return {
         LAST_RECORD_ID: 0,
         CURRENT_NEST_LEVEL: 0,
+        PARENT_LEVEL: 0,
+        MINIMUM_NEST_LEVEL: 1,
         CURRENT_PARENT_RECORD_ID: _SYNTHETIC_ROOT,
-        LEVEL_PARENTS: {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT},
+        LEVEL_ANCHORS: {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT},
     }
 
 
@@ -148,30 +156,37 @@ def _write(path: Path, state: dict[str, Any]) -> None:
 
 
 def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
-    """Coerce a loaded state dict to the in-memory shape (int level_parents keys)."""
-    levels_raw = raw.get(LEVEL_PARENTS) or {}
+    """Coerce a loaded state dict to the in-memory shape (int level_anchors keys)."""
+    anchors_raw = raw.get(LEVEL_ANCHORS) or {}
     try:
-        levels = {int(k): int(v) for k, v in levels_raw.items()}
+        anchors = {int(k): int(v) for k, v in anchors_raw.items()}
     except (TypeError, ValueError):
-        levels = {}
-    if not levels:
-        levels = {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT}
+        anchors = {}
+    if not anchors:
+        anchors = {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT}
+    parent_level = _as_int(raw.get(PARENT_LEVEL), 0)
     return {
         LAST_RECORD_ID: _as_int(raw.get(LAST_RECORD_ID), 0),
         CURRENT_NEST_LEVEL: _as_int(raw.get(CURRENT_NEST_LEVEL), 0),
+        PARENT_LEVEL: parent_level,
+        # The floor is derived, so a state file predating it still normalizes correctly.
+        MINIMUM_NEST_LEVEL: _as_int(raw.get(MINIMUM_NEST_LEVEL), parent_level + 1),
         CURRENT_PARENT_RECORD_ID: _as_int(raw.get(CURRENT_PARENT_RECORD_ID), _SYNTHETIC_ROOT),
-        LEVEL_PARENTS: levels,
+        LEVEL_ANCHORS: anchors,
     }
 
 
 def _serializable(state: dict[str, Any]) -> dict[str, Any]:
-    """Render state for JSON: level_parents keys become strings."""
-    levels = state.get(LEVEL_PARENTS) or {}
+    """Render state for JSON: level_anchors keys become strings."""
+    anchors = state.get(LEVEL_ANCHORS) or {}
+    parent_level = _as_int(state.get(PARENT_LEVEL), 0)
     return {
         LAST_RECORD_ID: _as_int(state.get(LAST_RECORD_ID), 0),
         CURRENT_NEST_LEVEL: _as_int(state.get(CURRENT_NEST_LEVEL), 0),
+        PARENT_LEVEL: parent_level,
+        MINIMUM_NEST_LEVEL: _as_int(state.get(MINIMUM_NEST_LEVEL), parent_level + 1),
         CURRENT_PARENT_RECORD_ID: _as_int(state.get(CURRENT_PARENT_RECORD_ID), _SYNTHETIC_ROOT),
-        LEVEL_PARENTS: {str(int(k)): int(v) for k, v in levels.items()},
+        LEVEL_ANCHORS: {str(int(k)): int(v) for k, v in anchors.items()},
     }
 
 

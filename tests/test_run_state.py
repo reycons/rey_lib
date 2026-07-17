@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 from rey_lib.config.config_utils import Namespace
-from rey_lib.logs import next_nest_level, set_nest_level
+from rey_lib.logs import set_nest_level
 from rey_lib.logs import record_parenting as rp
 from rey_lib.logs import run_state
 
@@ -25,10 +25,11 @@ def _ctx(run_log_path: Path) -> Namespace:
 
 
 def _write(ctx, nest_level, *, fail=False) -> dict:
+    """Stamp a record; commit only on a successful append (fail=False)."""
     record: dict = {}
     record_id = rp.stamp_record(ctx, record, nest_level)
     if not fail:
-        rp.commit_record(ctx, record_id)
+        rp.commit_record(ctx, record_id, nest_level)
     return record
 
 
@@ -117,27 +118,6 @@ def test_no_authoritative_state_on_ctx_when_file_backed(tmp_path: Path) -> None:
     assert getattr(ctx, "_rey_last_record_id", None) is None
     assert getattr(ctx, "_rey_level_parents", None) is None
     assert getattr(ctx, "_rey_run_state", None) is None  # file-backed, not in-memory
-
-
-# TEST-009 — semantic descent behavior holds with file-backed state.
-def test_semantic_descent_with_file_backed_state(tmp_path: Path) -> None:
-    log = tmp_path / "pipe.ts.jsonl"
-    ctx = _ctx(log)
-    set_nest_level(ctx, "pipeline")
-    a = _write(ctx, 1)
-    set_nest_level(ctx, "pipeline_step")
-    b = _write(ctx, 2)
-    set_nest_level(ctx, "app")
-    c = _write(ctx, 3)
-    assert a["parent_record_id"] == 0
-    assert b["parent_record_id"] == a["record_id"]
-    assert c["parent_record_id"] == b["record_id"]
-    # A shallower set is a reset, restoring the largest active lower parent.
-    set_nest_level(ctx, "pipeline_step")
-    back = _write(ctx, 2)
-    assert back["parent_record_id"] == a["record_id"]
-    next_nest_level(ctx)                    # relative nesting still works file-backed
-    assert _write(ctx, 3)["parent_record_id"] == back["record_id"]
 
 
 # Successful-append rule survives the process boundary: a failed append does not

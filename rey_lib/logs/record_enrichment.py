@@ -295,7 +295,8 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
         from rey_lib.logs import record_parenting
         from rey_lib.logs.nest_level import get_nest_level
 
-        record_id = record_parenting.stamp_record(ctx, record, get_nest_level(ctx))
+        nest_level = get_nest_level(ctx)
+        record_id = record_parenting.stamp_record(ctx, record, nest_level)
 
         # Route the durable append through the primitive I/O layer so the run-log
         # writer shares one low-level append with file_utils without either
@@ -305,7 +306,7 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
         from rey_lib.files import primitive_file_io
 
         primitive_file_io.append_jsonl(path, record)
-        record_parenting.commit_record(ctx, record_id)
+        record_parenting.commit_record(ctx, record_id, nest_level)
     except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
         logging.getLogger(__name__).warning(
             "run log: could not append %s record: %s", record_type, exc

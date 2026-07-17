@@ -18,10 +18,18 @@ orchestrate apps; workflows execute inside an app, so workflow sits below app
     workflow      = 4
     workflow_step = 5
 
-``set_nest_level`` is not plain numeric assignment. Setting a semantic base also
-resets or descends the active nesting: a deeper base nests under the most recent
-record, while a same/shallower base discards deeper nesting and returns to that
-base (parent resolution: SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
+``set_nest_level`` is not plain numeric assignment. It starts a new named semantic
+scope at its fixed level: the anchor at that level and below is discarded, so the
+first record written afterwards anchors the new scope, and the relative nesting floor
+is rebased to ``parent_level + 1``. A set to the same level is therefore a sibling
+scope, not a continuation, and a set is the only way to leave a relative context.
+
+Relative nesting lives beneath the established base: ``next_nest_level`` enters or
+descends unnamed child levels starting at ``minimum_nest_level``, and
+``previous_nest_level`` returns upward but never past that floor. Parentage follows
+each level's stable anchor — the first record committed there — so ordinary records
+written at a level never re-parent the next deeper scope
+(parent resolution: SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
 
 The authoritative nest and parent state is the per-run companion file owned by
 ``run_state`` (SGC_Rey_Log_Hierarchy_Shared_Run_State_Correction), derived from the
@@ -37,7 +45,7 @@ from typing import Any
 
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.logs import record_parenting, run_state
-from rey_lib.logs.run_state import CURRENT_NEST_LEVEL
+from rey_lib.logs.run_state import CURRENT_NEST_LEVEL, MINIMUM_NEST_LEVEL
 
 __all__ = [
     "get_nest_level",
@@ -97,20 +105,21 @@ def set_nest_level(ctx: Any, semantic_level: str) -> int:
             f"Known bases: {sorted(_SEMANTIC_BASES)}."
         )
     level = _SEMANTIC_BASES[semantic_level]
-    # Read-modify-write the shared run state. A set to a deeper level is a semantic
-    # descent that parents the deeper level to the last written record; a set to the
-    # same or a shallower level clears deeper levels and restores the lower parent
-    # (SGC_Rey_Log_Parent_Resolver_Semantic_Descent).
+    # Read-modify-write the shared run state. A set always starts a new named scope at
+    # this level: it clears the anchor there and below, so the first record written
+    # afterwards anchors the scope, and it rebases the relative nesting floor.
     state, path = run_state.load(ctx)
-    prior_level = int(state[CURRENT_NEST_LEVEL])
-    record_parenting.on_level_set(state, level, prior_level)
+    record_parenting.on_level_set(state, level)
     state[CURRENT_NEST_LEVEL] = level
     run_state.save(ctx, state, path)
     return level
 
 
 def next_nest_level(ctx: Any) -> int:
-    """Enter a nested semantic section: increase the current level by exactly one.
+    """Enter or descend the relative child hierarchy beneath the established base.
+
+    The first descent from the base lands on ``minimum_nest_level`` (base + 1);
+    further calls descend one level each. This establishes no new semantic base.
 
     Parameters
     ----------
@@ -124,19 +133,22 @@ def next_nest_level(ctx: Any) -> int:
     """
     state, path = run_state.load(ctx)
     current = int(state[CURRENT_NEST_LEVEL])
-    # The last written record parents the new deeper level.
-    record_parenting.on_level_next(state, current)
-    level = current + 1
+    # Relative nesting starts at the floor, so a descent from the base cannot land
+    # on the base itself.
+    level = max(current + 1, int(state[MINIMUM_NEST_LEVEL]))
+    record_parenting.on_level_next(state, level)
     state[CURRENT_NEST_LEVEL] = level
     run_state.save(ctx, state, path)
     return level
 
 
 def previous_nest_level(ctx: Any) -> int:
-    """Leave a nested semantic section: decrease the current level by exactly one.
+    """Return upward within the relative child hierarchy owned by the current base.
 
-    Never produces a negative level; a decrement at or below the floor is clamped
-    and reported rather than corrupting state.
+    A return never moves above ``minimum_nest_level``: relative nesting cannot escape
+    into or below its own base, and only ``set_nest_level`` establishes a new base.
+    A return also never moves deeper, so calling it while sitting on the base — where
+    the floor is one level below the current position — leaves the level unchanged.
 
     Parameters
     ----------
@@ -150,13 +162,13 @@ def previous_nest_level(ctx: Any) -> int:
     """
     state, path = run_state.load(ctx)
     current = int(state[CURRENT_NEST_LEVEL])
-    level = current - 1
-    if level < _MIN_LEVEL:
+    floor = max(int(state[MINIMUM_NEST_LEVEL]), _MIN_LEVEL)
+    level = min(current, max(current - 1, floor))
+    if level == current and current >= floor:
         _logger.warning(
-            "previous_nest_level below floor (current=%d); clamping to %d.",
-            current, _MIN_LEVEL,
+            "previous_nest_level at the relative floor (current=%d); holding at %d.",
+            current, floor,
         )
-        level = _MIN_LEVEL
     # Return to an existing higher parent context.
     record_parenting.on_level_previous(state, level)
     state[CURRENT_NEST_LEVEL] = level

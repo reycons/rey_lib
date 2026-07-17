@@ -87,15 +87,14 @@ def test_get_defaults_to_zero_without_a_base() -> None:
     assert get_nest_level(_ctx()) == 0
 
 
-# TEST-005 — representative direct app execution.
+# TEST-005 — representative direct app execution. The relative floor is proven by
+# test_nesting_contract; this covers only the base and its nested section.
 def test_direct_app_execution_establishes_app_base_then_nests() -> None:
     ctx = _ctx()
     set_nest_level(ctx, "app")           # app runs directly -> base 3
     assert get_nest_level(ctx) == 3
     next_nest_level(ctx)                  # analysis-owned section
     assert get_nest_level(ctx) == 4
-    previous_nest_level(ctx)             # back to app level
-    assert get_nest_level(ctx) == 3
 
 
 # TEST-006 — representative workflow execution: an app owns the workflow, which
