@@ -77,6 +77,21 @@ class WorkflowRun:
     context: Optional[RunContext] = None  # final run context (metadata + data)
 
 
+def _finalize_run(ctx: Any) -> None:
+    """Finalize the run log unless a parent pipeline owns finalization.
+
+    A pipeline step's ctx carries pipeline run identity in ``ctx.runtime`` (stamped
+    by pipeline_coordinator); when present, the pipeline owns the single run-level
+    finalization, so this embedded workflow must not finalize the shared pipeline
+    run. A standalone workflow run has no pipeline identity and finalizes as before.
+    """
+    if _get(getattr(ctx, "runtime", None), "pipeline_run_id"):
+        return
+    if getattr(ctx, "run_log_path", None):
+        finalize_run_log(ctx.run_log_path)
+    log_artifact_manifest_from_run_log(ctx)
+
+
 def run_workflow(
     ctx: Any,
     workflow: Any,
@@ -279,9 +294,7 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                if getattr(ctx, "run_log_path", None):
-                    finalize_run_log(ctx.run_log_path)
-                log_artifact_manifest_from_run_log(ctx)
+                _finalize_run(ctx)
                 clear_run()
                 return run
 
@@ -312,18 +325,14 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                if getattr(ctx, "run_log_path", None):
-                    finalize_run_log(ctx.run_log_path)
-                log_artifact_manifest_from_run_log(ctx)
+                _finalize_run(ctx)
                 clear_run()
                 return run
         finally:
             clear_step()
 
     log_run_complete(ctx, "success")
-    if getattr(ctx, "run_log_path", None):
-        finalize_run_log(ctx.run_log_path)
-    log_artifact_manifest_from_run_log(ctx)
+    _finalize_run(ctx)
     clear_run()
     return run
 
