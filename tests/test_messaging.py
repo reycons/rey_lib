@@ -104,6 +104,42 @@ def test_email_dry_run_lifecycle_writes_archive(tmp_path: Path) -> None:
     assert any(record["kind"] == "message" and record["message_id"] == message.message_id for record in records)
 
 
+def test_email_markdown_uses_shared_semantic_html_rendering(tmp_path: Path) -> None:
+    """Messaging delegates Markdown conversion before email delivery."""
+    message = create_message(
+        _ctx(tmp_path),
+        message_type="etl_failure_summary",
+        audience="internal",
+        channel="email",
+        recipients=["ops@example.com"],
+        subject="Failure",
+        markdown="## Errors\n\n- **Load** failed at `step_1`.",
+        dry_run=True,
+    )
+
+    assert "<h2>Errors</h2>" in message.content.body_html
+    assert "<ul>" in message.content.body_html
+    assert "<strong>Load</strong>" in message.content.body_html
+    assert "<code>step_1</code>" in message.content.body_html
+
+
+def test_email_existing_html_remains_authoritative(tmp_path: Path) -> None:
+    """An existing HTML result is not replaced by Markdown conversion."""
+    message = create_message(
+        _ctx(tmp_path),
+        message_type="etl_failure_summary",
+        audience="internal",
+        channel="email",
+        recipients=["ops@example.com"],
+        subject="Failure",
+        markdown="# Replacement",
+        html="<p>Existing HTML</p>",
+        dry_run=True,
+    )
+
+    assert message.content.body_html == "<p>Existing HTML</p>"
+
+
 def test_email_recipient_group_resolves_channel_shape(tmp_path: Path) -> None:
     """Recipient groups use the channel-shaped YAML structure."""
     message = create_message(

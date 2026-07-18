@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from rey_lib.formatting import markdown_to_html
 from rey_lib.messaging.models import Message
-from rey_lib.messaging.rendering.html import markdown_to_html, text_to_html
+from rey_lib.messaging.rendering.html import text_to_html
 from rey_lib.messaging.rendering.markdown import markdown_to_text
 
 __all__ = ["render_message"]
