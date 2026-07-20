@@ -177,11 +177,16 @@ def _execute_analysis_package(
         raise ConfigurationFailure(
             f"llm_execution_profile not found: {analysis.llm_execution_profile}"
         )
+    _eval = getattr(ctx, "llm_evaluation", None)
+    _payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
+    _run_log = getattr(_eval, "run_log_path", None) if _eval else None
     raw = direct_ask(
         prompt,
         model=profile.model,
         provider=profile.provider,
         api_key=getattr(profile, "api_key", ""),
+        eval_payload_log_path=Path(_payload_log) if _payload_log else None,
+        eval_run_log_path=Path(_run_log) if _run_log else None,
     )
     content, _ = extract_artifact_envelope(raw, artifact_type)
     return json.loads(content)

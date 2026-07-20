@@ -33,6 +33,9 @@ def direct_ask(
     system_prompt: Optional[str] = None,
     temperature:   float         = 0.0,
     output_format: str           = "",
+    eval_payload_log_path: Optional[Path] = None,
+    eval_run_log_path:     Optional[Path] = None,
+    payload_id:            Optional[str]  = None,
 ) -> str:
     """Run a fully-formed prompt through runner.run and return the response text.
 
@@ -97,6 +100,9 @@ def direct_ask(
             temperature   = temperature,
             raw_output    = True,
             contract_text = contract_text,
+            eval_payload_log_path = eval_payload_log_path,
+            eval_run_log_path     = eval_run_log_path,
+            payload_id            = payload_id,
         )
     )
     return response.raw_text or ""
