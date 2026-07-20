@@ -1363,6 +1363,17 @@ def _derived_jsonl_path(path: Path, jsonl_stems: set[str]) -> str:
     return f"{stem}.jsonl" if stem in jsonl_stems else ""
 
 
+def _split_filter_values(raw: str | None) -> set[str]:
+    """Split a comma-separated filter value into a set of non-empty tokens.
+
+    Supports multi-select record-type/record-group filters passed as a single
+    comma-separated request parameter; a single value yields a one-element set.
+    """
+    if not raw:
+        return set()
+    return {token.strip() for token in str(raw).split(",") if token.strip()}
+
+
 def _record_matches(record: dict[str, Any], filters: dict[str, str]) -> bool:
     """Return true when a JSONL record matches all requested filters."""
     if filters.get("errors_only") == "true":
@@ -1373,6 +1384,11 @@ def _record_matches(record: dict[str, Any], filters: dict[str, str]) -> bool:
     for key in ("level", "app", "pipeline_run_id", "pipeline_step_name", "batch_id", "file_name"):
         expected = filters.get(key)
         if expected and str(record.get(key, "")) != expected:
+            return False
+
+    for key in ("record_type", "record_group"):
+        selected = _split_filter_values(filters.get(key))
+        if selected and str(record.get(key, "")) not in selected:
             return False
 
     return True
