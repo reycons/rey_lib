@@ -101,27 +101,44 @@ def load(path: Path) -> Contract:
     raw          = path.read_text(encoding="utf-8")
     content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    m = _FRONTMATTER_RE.match(raw)
-    if not m:
-        raise ConfigError(
-            f"Contract '{path.name}' has no frontmatter block. "
-            "Add a '---' delimited block with name, version, and effective_date."
-        )
-
-    frontmatter_text = m.group(1)
-    body             = raw[m.end():].strip()
-
-    try:
-        fields: dict[str, Any] = parse_yaml(frontmatter_text) or {}
-    except ConfigError as exc:
-        raise ConfigError(
-            f"Contract '{path.name}' has invalid YAML frontmatter: {exc}"
-        ) from exc
+    suffix = path.suffix.lower()
+    if suffix in (".yaml", ".yml"):
+        # Native YAML contract: the whole document is the contract. Parse it as
+        # one mapping and keep the complete raw text as the instruction body.
+        try:
+            parsed = parse_yaml(raw)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"Contract '{path.name}' has invalid YAML: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ConfigError(
+                f"Contract '{path.name}' YAML root must be a mapping."
+            )
+        fields: dict[str, Any] = parsed
+        body                   = raw
+        field_source           = "document root"
+    else:
+        # Markdown contract: existing frontmatter-plus-body format, unchanged.
+        m = _FRONTMATTER_RE.match(raw)
+        if not m:
+            raise ConfigError(
+                f"Contract '{path.name}' has no frontmatter block. "
+                "Add a '---' delimited block with name, version, and effective_date."
+            )
+        try:
+            fields = parse_yaml(m.group(1)) or {}
+        except ConfigError as exc:
+            raise ConfigError(
+                f"Contract '{path.name}' has invalid YAML frontmatter: {exc}"
+            ) from exc
+        body         = raw[m.end():].strip()
+        field_source = "frontmatter"
 
     for required in ("name", "version", "effective_date"):
         if required not in fields:
             raise ConfigError(
-                f"Contract '{path.name}' frontmatter is missing required field '{required}'."
+                f"Contract '{path.name}' {field_source} is missing required field '{required}'."
             )
 
     raw_date = fields["effective_date"]
