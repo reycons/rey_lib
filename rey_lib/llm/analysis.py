@@ -323,6 +323,9 @@ class Analyzer:
         max_extract:      int                          = 10_000,
         requires_approval: bool                        = False,
         artifact_processing: Optional[dict[str, Any]]  = None,
+        eval_payload_log_path: Optional[Path]          = None,
+        eval_run_log_path:     Optional[Path]          = None,
+        payload_id:            Optional[str]           = None,
     ) -> None:
         """Load the contract and store provider configuration."""
         self._contract         = load_analysis_contract(contract_path)
@@ -337,6 +340,12 @@ class Analyzer:
         self._max_extract      = max_extract
         self._requires_approval = requires_approval
         self._artifact_processing = artifact_processing or {}
+        # Resolved llm_evaluation.payload_log_path / run_log_path, supplied by the
+        # ctx-holding caller exactly as the run-log ``log`` path already is
+        # (SGC_Rey_LLM_Evaluation_Append_Only_Log). Evaluation logging is additive.
+        self._eval_payload_log_path = Path(eval_payload_log_path) if eval_payload_log_path else None
+        self._eval_run_log_path     = Path(eval_run_log_path) if eval_run_log_path else None
+        self._payload_id            = payload_id
 
         _logger.info(
             "analyzer: loaded contract '%s' v%s from %s",
@@ -423,6 +432,9 @@ class Analyzer:
             raw_output        = spec.output_format == "raw",
             artifact_type     = spec.artifact_type,
             artifact_processing = self._artifact_processing,
+            eval_payload_log_path = self._eval_payload_log_path,
+            eval_run_log_path     = self._eval_run_log_path,
+            payload_id            = self._payload_id,
         )
 
         response: RunResponse = run(

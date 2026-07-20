@@ -1,9 +1,11 @@
 """
-Low-level LLM dispatch utilities.
+Convenience LLM dispatch utilities.
 
-Provides direct provider calls for callers that do not need the full
-RunRequest / RunResponse / ExecutionRecord machinery.  All SDK access
-is delegated to the provider abstraction layer.
+direct_ask() is a convenience API over rey_lib.llm.runner.run for callers that
+already have a fully formed prompt/package and do not need a persistent contract
+file. It wraps the prompt as an in-memory contract and delegates to runner.run —
+the single LLM execution owner — so it still gets provider execution, retries,
+normal logging, and evaluation logging.
 
 For ctx-based dispatch (reading provider config from a rey_lib Namespace
 application context), use rey_lib.llm.adapters.ask_with_ctx instead.
@@ -11,15 +13,13 @@ application context), use rey_lib.llm.adapters.ask_with_ctx instead.
 Public API
 ----------
 direct_ask(prompt, model, provider, api_key, ...)
-    Call an LLM directly with explicit credentials and return the response text.
+    Run a fully-formed prompt through runner.run and return the response text.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
-
-from rey_lib.llm.providers.base import Message
-from rey_lib.llm.providers.registry import resolve as resolve_provider
 
 __all__ = ["direct_ask"]
 
@@ -32,13 +32,15 @@ def direct_ask(
     max_tokens:    int           = 4000,
     system_prompt: Optional[str] = None,
     temperature:   float         = 0.0,
+    output_format: str           = "",
 ) -> str:
-    """Call an LLM directly without the full orchestration stack.
+    """Run a fully-formed prompt through runner.run and return the response text.
 
-    Intended for standalone tools that supply credentials explicitly and do
-    not need execution records, retries, or schema validation.  All SDK
-    access is delegated to the provider abstraction layer — no SDK is
-    imported here.
+    A convenience API for callers that already have a complete prompt/package
+    and do not need a persistent contract file. Credentials are supplied
+    explicitly. The prompt is wrapped as an in-memory contract and executed
+    through the normal runner, so it gains provider execution, retries, normal
+    logging, and evaluation logging without duplicating any of that here.
 
     Parameters
     ----------
@@ -57,29 +59,44 @@ def direct_ask(
         Optional system-level instruction.
     temperature : float
         Sampling temperature.  Defaults to 0.0 for deterministic output.
+    output_format : str
+        Optional expected output mode (e.g. "markdown"). Carried into the inline
+        contract so the runner does not force a JSON-object response. Empty means
+        the prompt is sent exactly as supplied.
 
     Returns
     -------
     str
         LLM response text.
 
-    Raises
-    ------
-    ConfigurationFailure
-        If the provider name is not recognised.
-    ProviderFailure
-        If the provider API call fails.
+    Notes
+    -----
+    Execution is delegated to runner.run() — the single LLM execution owner —
+    so retries, normal logging, payload_id, llm_run_id, and evaluation logging
+    all apply. Because a full prompt and credentials are supplied, no contract
+    file is loaded and no JSON-object instruction is appended.
     """
-    messages: list[Message] = []
-    if system_prompt:
-        messages.append(Message(role="system", content=system_prompt))
-    messages.append(Message(role="user", content=prompt))
+    # Local imports avoid an import cycle (runner imports the llm package).
+    from rey_lib.llm.api import RunRequest
+    from rey_lib.llm.runner import run as _run
 
-    llm_provider = resolve_provider(provider, api_key=api_key)
-    response     = llm_provider.run(
-        messages    = messages,
-        model       = model,
-        max_tokens  = max_tokens,
-        temperature = temperature,
+    contract_text = system_prompt if system_prompt else prompt
+    if output_format:
+        contract_text = f"{contract_text}\n\nProduce the response as {output_format}."
+
+    response = _run(
+        RunRequest(
+            pipeline_id   = "direct_ask",
+            stage_id      = "direct_ask",
+            contract_path = Path("<direct_ask>"),
+            input_data    = prompt,
+            provider      = provider,
+            model         = model,
+            api_key       = api_key,
+            max_tokens    = max_tokens,
+            temperature   = temperature,
+            raw_output    = True,
+            contract_text = contract_text,
+        )
     )
-    return response.content
+    return response.raw_text or ""

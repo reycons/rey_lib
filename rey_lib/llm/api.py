@@ -133,6 +133,21 @@ class RunRequest:
 
     retry_policy:      RetryPolicy    = field(default_factory=lambda: DEFAULT_RETRY_POLICY)
 
+    # Append-only LLM evaluation logs (SGC_Rey_LLM_Evaluation_Append_Only_Log).
+    # Callers pass the already-resolved llm_evaluation.payload_log_path and
+    # run_log_path from ctx; evaluation logging is additive and only active when
+    # a path is set. payload_id is the stable reusable-payload identity: when
+    # supplied the payload is reused (no new payload record), otherwise the runner
+    # generates one for the newly captured payload.
+    eval_payload_log_path: Optional[Path] = None
+    eval_run_log_path:     Optional[Path] = None
+    payload_id:            Optional[str]  = None
+
+    # In-memory contract text for the deprecated direct_ask() compatibility
+    # adapter. When set, the runner uses this as the contract instead of loading
+    # contract_path — no file is read and nothing is persisted or registered.
+    contract_text:         Optional[str]  = None
+
 
 @dataclass(frozen=True)
 class RunResponse:

@@ -64,6 +64,7 @@ from rey_lib.llm.records import (
     STATUS_PENDING_APPROVAL,
     STATUS_SUCCESS,
     ExecutionRecord,
+    _append_jsonl,
     load_all_records,
     store_record,
 )
@@ -152,7 +153,11 @@ def run(
     if idempotency_response is not None:
         return idempotency_response
 
-    contract     = _load_contract(request.contract_path)
+    contract     = (
+        _inline_contract(request.contract_text)
+        if request.contract_text
+        else _load_contract(request.contract_path)
+    )
     provider_cfg = _resolve_provider_config(request)
 
     raw_text, input_hash = _prepare_input(request)
@@ -168,7 +173,7 @@ def run(
     _warn_token_budget(input_text, provider_cfg.model)
 
     artifact_type        = getattr(request, "artifact_type", "") or ""
-    messages             = _build_messages(input_text, contract.body, artifact_type)
+    messages             = _build_messages(input_text, contract.body, artifact_type, request.raw_output)
     rendered_prompt_hash = _hash_messages(messages)
 
     # 3. Capability check before touching the provider.
@@ -178,6 +183,23 @@ def run(
     started_dt  = datetime.now(timezone.utc)
     started_at  = started_dt.isoformat()
     t0          = time.monotonic()
+
+    # Append-only LLM evaluation logging (SGC_Rey_LLM_Evaluation_Append_Only_Log).
+    # Additive: only active when the caller supplies a resolved path. A supplied
+    # payload_id means a reused saved payload, so its payload record is not
+    # re-appended; otherwise a new payload_id is generated and the payload is
+    # written once before the provider call. This never affects normal logging.
+    eval_payload_id = request.payload_id or str(uuid.uuid4())
+    if request.eval_payload_log_path and not request.payload_id:
+        _append_jsonl(
+            {
+                "record_type": "LLM_EVALUATION_PAYLOAD",
+                "payload_id":  eval_payload_id,
+                "created_at":  started_at,
+                "payload":     input_text,
+            },
+            request.eval_payload_log_path,
+        )
 
     _logger.info(
         "runner.run: pipeline=%s stage=%s contract=%s v%s provider=%s model=%s",
@@ -245,6 +267,29 @@ def run(
     if request.log:
         store_record(record, request.log)
         _logger.info("runner.run: record stored → %s", request.log)
+
+    # Append-only LLM evaluation run record (additive). llm_run_id reuses the
+    # execution run_id and links to the payload_id; result and available
+    # model/contract provenance are recorded. Normal logging above is untouched.
+    if request.eval_run_log_path:
+        _append_jsonl(
+            {
+                "record_type":      "LLM_EVALUATION_RUN",
+                "llm_run_id":       run_id,
+                "payload_id":       eval_payload_id,
+                "started_at":       started_at,
+                "completed_at":     datetime.now(timezone.utc).isoformat(),
+                "status":           final_status,
+                "model":            provider_cfg.model,
+                "provider":         provider_cfg.provider,
+                "execution_profile": provider_cfg.name,
+                "contract":         contract.name,
+                "contract_version": contract.version,
+                "result":           record.parsed_response,
+                "error":            record.validation_errors,
+            },
+            request.eval_run_log_path,
+        )
 
     return RunResponse(
         run_id          = record.run_id,
@@ -414,6 +459,24 @@ def _load_contract(contract_path: Path) -> Contract:
         ) from exc
 
 
+def _inline_contract(text: str) -> Contract:
+    """Build an in-memory contract for the deprecated direct_ask() adapter.
+
+    The supplied text is the instruction set for this one call. No file is read
+    and nothing is persisted or registered — the contract lives only for this
+    request, so direct_ask() can pass raw prompts through the normal runner.
+    """
+    return Contract(
+        name            = "direct_ask",
+        version         = "0",
+        effective_date  = datetime.now(timezone.utc).date(),
+        body            = text,
+        hash            = "",
+        path            = Path("<direct_ask>"),
+        raw_frontmatter = {},
+    )
+
+
 def _resolve_provider_config(request: RunRequest) -> _ProviderConfig:
     """Construct the provider instance from the fully-populated RunRequest.
 
@@ -467,6 +530,7 @@ def _build_messages(
     input_text:    str,
     system_prompt: str,
     artifact_type: str = "",
+    raw_output:    bool = False,
 ) -> list[Message]:
     """Construct the message array sent to the provider.
 
@@ -477,6 +541,10 @@ def _build_messages(
     """
     if artifact_type:
         user_content = input_text + build_envelope_instruction(artifact_type)
+    elif raw_output:
+        # Raw output requested (e.g. direct_ask markdown/plain text): send the
+        # prompt as supplied without forcing a JSON-object response.
+        user_content = input_text
     else:
         user_content = (
             input_text
