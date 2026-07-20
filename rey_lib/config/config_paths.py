@@ -48,6 +48,7 @@ class PathResolver:
 
     def __init__(self, paths: dict[str, Path]) -> None:
         self._paths = dict(paths)
+        self._runtime_tokens: dict[str, str] = {}
 
     def resolve(self, name: str) -> Path:
         """Return the resolved ``Path`` for the given logical name."""
@@ -58,13 +59,17 @@ class PathResolver:
     def __repr__(self) -> str:
         return f"PathResolver({list(self._paths)})"
 
-def _build_path_resolver(raw_paths: Any) -> PathResolver:
+def _build_path_resolver(
+    raw_paths: Any,
+    tokens: dict[str, str] | None = None,
+) -> PathResolver:
     """Process a ``paths:`` list into a ``PathResolver``.
 
     Each entry must have ``name`` and ``path`` keys.  Values may reference
     earlier-resolved names with ``{name}`` placeholders.
     """
-    resolved_strs: dict[str, str] = {}
+    runtime_tokens = dict(tokens or {})
+    resolved_strs: dict[str, str] = dict(runtime_tokens)
     resolved_paths: dict[str, Path] = {}
 
     entries: list[Any] = raw_paths if isinstance(raw_paths, list) else []
@@ -84,7 +89,9 @@ def _build_path_resolver(raw_paths: Any) -> PathResolver:
         resolved_strs[name] = str(path)
         resolved_paths[name] = path
 
-    return PathResolver(resolved_paths)
+    resolver = PathResolver(resolved_paths)
+    resolver._runtime_tokens = runtime_tokens
+    return resolver
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +159,10 @@ def _apply_path_resolver(obj: Any, resolver: PathResolver) -> None:
     Only names present in the PathResolver are substituted; unknown placeholders
     like {operation} and {timestamp} survive unchanged.
     """
-    resolver_strs: dict[str, str] = {
+    resolver_strs: dict[str, str] = dict(resolver._runtime_tokens)
+    resolver_strs.update({
         name: str(resolver.resolve(name)) for name in resolver._paths
-    }
+    })
     _walk_logical_refs(obj, resolver_strs)
     _resolve_scoped_tokens(obj, "workflows", resolver_strs)
     _resolve_scoped_tokens(obj, "pipelines", resolver_strs)

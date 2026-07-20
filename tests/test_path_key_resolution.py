@@ -19,6 +19,7 @@ from rey_lib.config.config_utils import (
     _is_path_key,
     _resolve_paths,
 )
+from rey_lib.config.config_paths import _build_path_resolver
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs.execution_records import log_pipeline_restore_policy
 
@@ -28,6 +29,41 @@ _BASE = Path("/base")
 def _resolve(data: dict) -> dict:
     """Run the load-time path resolver against a flat config dict."""
     return _resolve_paths(data, _BASE, parent_key="")
+
+
+def test_configured_date_tokens_resolve_from_supplied_startup_values() -> None:
+    """The existing resolver applies every exact date-token spelling."""
+    runtime_tokens = {
+        "date": "20260720",
+        "yyyy": "2026",
+        "mm": "07",
+        "dd": "20",
+        "yyymm": "202607",
+        "yyymmdd": "20260720",
+    }
+    resolver = _build_path_resolver([
+        {"name": "logs", "path": "/resolved/logs"},
+        {
+            "name": "dated",
+            "path": (
+                "{logs}/{date}/{yyyy}/{mm}/{dd}/{yyymm}/"
+                "llm_evaluation_payloads.{yyymmdd}.jsonl"
+            ),
+        },
+    ], runtime_tokens)
+
+    assert resolver.resolve("dated") == Path(
+        "/resolved/logs/20260720/2026/07/20/202607/"
+        "llm_evaluation_payloads.20260720.jsonl"
+    )
+
+    ctx = Namespace({
+        "payload_log_path": "{logs}/llm_evaluation/payloads.{yyymmdd}.jsonl",
+    })
+    _apply_path_resolver(ctx, resolver)
+    assert ctx.payload_log_path == (
+        "/resolved/logs/llm_evaluation/payloads.20260720.jsonl"
+    )
 
 
 # ---- undeclared path-like keys are NOT resolved (no suffix inference) ------

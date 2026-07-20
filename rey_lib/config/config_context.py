@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -146,6 +147,17 @@ def build_ctx_from_path(
     if project_root is None:
         project_root = Path.cwd()
 
+    started = datetime.now().astimezone()
+    date = started.strftime("%Y%m%d")
+    runtime_path_tokens = {
+        "date": date,
+        "yyyy": date[:4],
+        "mm": date[4:6],
+        "dd": date[6:8],
+        "yyymm": date[:6],
+        "yyymmdd": date,
+    }
+
     _load_env_file(config_dir / _ENV_FILE_NAME)
 
     # Step 1 — root config only; no rglob yet.
@@ -153,10 +165,13 @@ def build_ctx_from_path(
     _logger.info("config_loader root=%s app=%s", config_path, app_name or "(none)")
 
     # Step 2 — preliminary resolver so include path tokens can be expanded.
-    prelim_resolver = _build_path_resolver(root_raw.get("paths", []))
-    resolver_strs: dict[str, str] = {
+    prelim_resolver = _build_path_resolver(
+        root_raw.get("paths", []), runtime_path_tokens
+    )
+    resolver_strs: dict[str, str] = dict(runtime_path_tokens)
+    resolver_strs.update({
         k: str(v) for k, v in prelim_resolver._paths.items()
-    }
+    })
 
     # Step 3 — determine the ordered list of include folders.
     include_folders = _resolve_include_folders(
@@ -202,14 +217,15 @@ def build_ctx_from_path(
 
     raw_paths = getattr(ctx, "paths", None)
     if isinstance(raw_paths, list):
-        path_resolver = _build_path_resolver(raw_paths)
+        path_resolver = _build_path_resolver(raw_paths, runtime_path_tokens)
         object.__setattr__(ctx, "paths", path_resolver)
         _apply_path_resolver(ctx, path_resolver)
 
         # Record final resolved values for provenance (runtime values unchanged).
-        resolver_strs = {
+        resolver_strs = dict(runtime_path_tokens)
+        resolver_strs.update({
             name: str(resolved) for name, resolved in path_resolver._paths.items()
-        }
+        })
         metadata.resolve_values(resolver_strs)
         for name, resolved in path_resolver._paths.items():
             metadata.set_resolved(f"paths.{name}", str(resolved))

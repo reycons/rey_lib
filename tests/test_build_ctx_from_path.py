@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,9 @@ paths:
 
   - name: redactor_output
     path: "{{data}}/redactor/output/{{source_name}}"
+
+  - name: dated_output
+    path: "{{logs}}/{{date}}/{{yyyy}}/{{mm}}/{{dd}}/{{yyymm}}/{{yyymmdd}}.jsonl"
 """)
 
     return configs
@@ -101,6 +105,36 @@ class TestPathResolverBuilt:
         ctx = build_ctx_from_path(install_root / "config.yaml")
         expected = (tmp_path / "data" / "analyzer" / "records").resolve()
         assert ctx.paths.resolve("analyzer_records") == expected
+
+    def test_date_tokens_use_one_startup_datetime(
+        self, install_root: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both resolver passes and final ctx substitution share one clock read."""
+        import rey_lib.config.config_context as config_context
+
+        class FixedDatetime:
+            calls = 0
+
+            @classmethod
+            def now(cls):
+                cls.calls += 1
+                return datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(config_context, "datetime", FixedDatetime)
+        _write(install_root / "console" / "app.yaml", """\
+name: console
+payload_log_path: "{logs}/llm_evaluation/payloads.{yyymmdd}.jsonl"
+""")
+
+        ctx = build_ctx_from_path(install_root / "config.yaml")
+
+        assert FixedDatetime.calls == 1
+        assert ctx.paths.resolve("dated_output") == (
+            tmp_path / "logs/20260720/2026/07/20/202607/20260720.jsonl"
+        ).resolve()
+        assert ctx.payload_log_path == str(
+            (tmp_path / "logs/llm_evaluation/payloads.20260720.jsonl").resolve()
+        )
 
 
 # ---------------------------------------------------------------------------
