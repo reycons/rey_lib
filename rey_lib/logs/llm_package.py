@@ -65,7 +65,7 @@ def create_llm_package(
         )
 
     package = _build_analysis_package(
-        analysis_name, source_record_type, instructions, source_record
+        ctx, analysis_name, source_record_type, instructions, source_record
     )
     if any(
         str(record.get("record_type") or "").upper() == package_record_type.upper()
@@ -109,7 +109,73 @@ def _analysis_instructions(analysis: Any) -> Any:
     return parse_yaml(read_text_file(contract_path))
 
 
+def _resolve_reference_path(ctx: Any, raw_path: str) -> Path:
+    """Resolve a contract-declared reference path through the existing resolver.
+
+    Reuses ctx.paths (the installation PathResolver): each ``{name}`` token is
+    replaced with its resolved path. No new resolver or path system is created.
+    """
+    import re
+
+    resolver = getattr(ctx, "paths", None)
+
+    def _sub(match: "re.Match[str]") -> str:
+        if resolver is not None:
+            try:
+                return str(resolver.resolve(match.group(1)))
+            except Exception:
+                return match.group(0)
+        return match.group(0)
+
+    return Path(re.sub(r"\{([^}]+)\}", _sub, str(raw_path))).expanduser()
+
+
+def _load_contract_references(ctx: Any, instructions: Any) -> list[dict[str, Any]] | None:
+    """Load the reference documents a contract declares, if any.
+
+    Reuses the existing path-token resolver (ctx.paths) and the approved text
+    loader (rey_lib.files.read_text_file). Returns None when the contract declares
+    no references, so existing behavior is unchanged. A required reference that
+    cannot be resolved or loaded raises before the LLM request; a non-required one
+    is omitted with a warning.
+    """
+    from rey_lib.files import read_text_file
+    from rey_lib.logs.log_utils import get_logger
+
+    declared = instructions.get("references") if isinstance(instructions, dict) else None
+    if not declared:
+        return None
+
+    loaded: list[dict[str, Any]] = []
+    for ref in declared:
+        if not isinstance(ref, dict):
+            continue
+        name = str(ref.get("name") or "")
+        role = str(ref.get("role") or "")
+        raw_path = str(ref.get("path") or "")
+        required = bool(ref.get("required", True))
+        try:
+            content = read_text_file(_resolve_reference_path(ctx, raw_path))
+        except Exception as exc:
+            if required:
+                raise ValueError(
+                    f"Required contract reference '{name}' could not be loaded "
+                    f"from '{raw_path}': {exc}"
+                ) from exc
+            get_logger(__name__).warning(
+                "Skipping optional contract reference '%s' (%s): %s", name, raw_path, exc
+            )
+            continue
+        entry: dict[str, Any] = {"name": name}
+        if role:
+            entry["role"] = role
+        entry["content"] = content
+        loaded.append(entry)
+    return loaded
+
+
 def _build_analysis_package(
+    ctx: Any,
     analysis_name: str,
     source_record_type: str,
     instructions: Any,
@@ -126,12 +192,16 @@ def _build_analysis_package(
     The canonical package is adopted separately in paths whose fields exist without
     reconstruction (rey_analyzer).
     """
-    return {
+    package: dict[str, Any] = {
         "analysis_name": analysis_name,
         "source_record_type": source_record_type,
         "instructions": instructions,
-        "source": source,
     }
+    references = _load_contract_references(ctx, instructions)
+    if references:
+        package["references"] = references
+    package["source"] = source
+    return package
 
 
 def _execute_analysis_package(
@@ -265,6 +335,7 @@ def run_configured_record_analysis(
         return result
 
     package = _build_analysis_package(
+        ctx,
         analysis_name,
         source_record_type or str(record.get("record_type") or ""),
         _analysis_instructions(analysis),
