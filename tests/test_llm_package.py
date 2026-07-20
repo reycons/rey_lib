@@ -218,7 +218,12 @@ def _envelope(content: dict) -> str:
 def _patch_direct_ask(monkeypatch, *, response=None, capture=None, raises=None) -> None:
     def fake(prompt, *, model, provider, api_key, **_kwargs):
         if capture is not None:
-            capture.update({"prompt": prompt, "model": model, "provider": provider})
+            capture.update({
+                "prompt": prompt,
+                "model": model,
+                "provider": provider,
+                **_kwargs,
+            })
         if raises is not None:
             raise raises
         return response
@@ -799,6 +804,29 @@ def test_record_analysis_runs_the_configured_analysis_over_a_supplied_record(
     assert package["source_record_type"] == "LLM_INTERPRETATION"
     assert package["instructions"]["name"] == "email_results"
     assert capture["provider"] == "mock" and capture["model"] == "mock-model"
+
+
+def test_record_analysis_preserves_existing_payload_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A selected evaluation payload keeps its identity for the new execution."""
+    capture: dict = {}
+    _patch_direct_ask(
+        monkeypatch,
+        response=_envelope({"subject": "Run report", "html": "<p>ok</p>"}),
+        capture=capture,
+    )
+    record = {
+        "record_type": "LLM_EVALUATION_PAYLOAD",
+        "payload_id": "existing-payload-id",
+        "payload": "exact payload",
+    }
+
+    run_configured_record_analysis(_record_ctx(tmp_path), record, "email_results")
+
+    package, _ = json.JSONDecoder().raw_decode(capture["prompt"])
+    assert capture["payload_id"] == "existing-payload-id"
+    assert package["source"] == record
 
 
 def test_record_analysis_writes_nothing_and_reads_no_log(tmp_path: Path, monkeypatch) -> None:

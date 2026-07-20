@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 
@@ -538,6 +539,191 @@ class TestRunnerApprovalSemantics:
         assert response.record is not None
         assert len(response.record.artifact_uris) == 1
         assert response.record.artifact_uris[0].startswith("file://")
+
+
+class TestRunnerEvaluationPersistence:
+    """The evaluation run record retains the exact contract and returned result."""
+
+    def test_payload_log_stores_package_source_without_changing_provider_input(
+        self, tmp_path: Path
+    ) -> None:
+        contract = _write_contract(tmp_path)
+        payload_log = tmp_path / "payloads.jsonl"
+        provider = _make_mock_provider("# Exact result")
+        source = {"record_type": "RESULTS_SUMMARY", "status": "failed"}
+        package = {
+            "analysis_name": "log_interpreter",
+            "source_record_type": "RESULTS_SUMMARY",
+            "instructions": {"contract": {"name": "log_interpreter"}},
+            "source": source,
+        }
+        runner_input = json.dumps(package) + "\n\nEXISTING ENVELOPE INSTRUCTIONS"
+        request = RunRequest(
+            pipeline_id="test-pipe",
+            stage_id="stage1",
+            contract_path=contract,
+            input_data=runner_input,
+            raw_output=True,
+            eval_payload_log_path=payload_log,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(
+                name="mock", model="mock-model", provider=provider
+            ),
+        ):
+            run(request)
+
+        payload_record = json.loads(payload_log.read_text(encoding="utf-8"))
+        messages = provider.run.call_args.kwargs["messages"]
+        assert payload_record["payload"] == source
+        assert payload_record["payload"] != package
+        assert messages[1].content == runner_input
+
+    def test_structured_success_stores_contract_body_and_parsed_result(
+        self, tmp_path: Path
+    ) -> None:
+        contract_body = "Use this exact contract body."
+        contract = _write_contract(tmp_path, body=contract_body)
+        payload_log = tmp_path / "payloads.jsonl"
+        run_log = tmp_path / "runs.jsonl"
+        provider = _make_mock_provider('{"result": "exact"}')
+        request = RunRequest(
+            pipeline_id="test-pipe",
+            stage_id="stage1",
+            contract_path=contract,
+            input_data="test input",
+            output_schema={
+                "type": "object",
+                "properties": {"result": {"type": "string"}},
+            },
+            eval_payload_log_path=payload_log,
+            eval_run_log_path=run_log,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(
+                name="mock", model="mock-model", provider=provider
+            ),
+        ):
+            response = run(request)
+
+        payload_record = json.loads(payload_log.read_text(encoding="utf-8"))
+        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        assert run_record["contract"] == contract_body
+        assert run_record["result"] == response.parsed_response == {"result": "exact"}
+        assert run_record["payload_id"] == payload_record["payload_id"]
+        assert str(UUID(run_record["payload_id"])) == run_record["payload_id"]
+        assert run_record["llm_run_id"] == response.run_id
+        assert payload_record == {
+            "record_type": "LLM_EVALUATION_PAYLOAD",
+            "payload_id": run_record["payload_id"],
+            "created_at": payload_record["created_at"],
+            "payload": "test input",
+        }
+
+    def test_raw_success_stores_inline_contract_and_returned_text(
+        self, tmp_path: Path
+    ) -> None:
+        contract_text = "Return Markdown exactly."
+        run_log = tmp_path / "runs.jsonl"
+        provider = _make_mock_provider("# Exact result")
+        request = RunRequest(
+            pipeline_id="direct_ask",
+            stage_id="direct_ask",
+            contract_path=Path("<direct_ask>"),
+            contract_text=contract_text,
+            input_data="test input",
+            raw_output=True,
+            eval_run_log_path=run_log,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(
+                name="mock", model="mock-model", provider=provider
+            ),
+        ):
+            response = run(request)
+
+        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        assert run_record["contract"] == contract_text
+        assert run_record["result"] == response.raw_text == "# Exact result"
+
+    def test_reused_payload_keeps_id_across_runs_with_new_run_ids(
+        self, tmp_path: Path
+    ) -> None:
+        contract = _write_contract(tmp_path)
+        payload_log = tmp_path / "payloads.jsonl"
+        run_log = tmp_path / "runs.jsonl"
+        provider = _make_mock_provider('{"result": "exact"}')
+        request = RunRequest(
+            pipeline_id="test-pipe",
+            stage_id="stage1",
+            contract_path=contract,
+            input_data="existing payload",
+            payload_id="existing-payload-id",
+            eval_payload_log_path=payload_log,
+            eval_run_log_path=run_log,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(
+                name="mock", model="mock-model", provider=provider
+            ),
+        ):
+            first = run(request)
+            second = run(request)
+
+        run_records = [
+            json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
+        ]
+        assert not payload_log.exists()
+        assert [record["payload_id"] for record in run_records] == [
+            "existing-payload-id",
+            "existing-payload-id",
+        ]
+        assert [record["llm_run_id"] for record in run_records] == [
+            first.run_id,
+            second.run_id,
+        ]
+        assert first.run_id != second.run_id
+
+    def test_failure_stores_contract_and_error_without_result(
+        self, tmp_path: Path
+    ) -> None:
+        contract_body = "Use this contract even on failure."
+        contract = _write_contract(tmp_path, body=contract_body)
+        run_log = tmp_path / "runs.jsonl"
+        provider = _make_mock_provider()
+        provider.run.side_effect = TimeoutFailure("provider timed out")
+        request = RunRequest(
+            pipeline_id="test-pipe",
+            stage_id="stage1",
+            contract_path=contract,
+            input_data="test input",
+            retry_policy=RetryPolicy(max_attempts=1),
+            eval_run_log_path=run_log,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(
+                name="mock", model="mock-model", provider=provider
+            ),
+        ):
+            response = run(request)
+
+        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        assert response.status == STATUS_FAILED
+        assert run_record["status"] == STATUS_FAILED
+        assert run_record["contract"] == contract_body
+        assert run_record["result"] is None
+        assert run_record["error"] == response.errors == ["provider timed out"]
+        assert run_record["llm_run_id"] == response.run_id
 
 
 class TestRunnerRedaction:

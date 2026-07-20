@@ -139,6 +139,7 @@ def _execute_analysis_package(
     analysis: Any,
     package: dict[str, Any],
     max_input_characters: int = 0,
+    payload_id: str | None = None,
 ) -> Any:
     """Send one package to its configured profile and return the parsed artifact.
 
@@ -187,6 +188,7 @@ def _execute_analysis_package(
         api_key=getattr(profile, "api_key", ""),
         eval_payload_log_path=Path(_payload_log) if _payload_log else None,
         eval_run_log_path=Path(_run_log) if _run_log else None,
+        payload_id=payload_id,
     )
     content, _ = extract_artifact_envelope(raw, artifact_type)
     return json.loads(content)
@@ -268,7 +270,13 @@ def run_configured_record_analysis(
         _analysis_instructions(analysis),
         record,
     )
-    result["result"] = _execute_analysis_package(ctx, analysis, package, max_input_characters)
+    result["result"] = _execute_analysis_package(
+        ctx,
+        analysis,
+        package,
+        max_input_characters,
+        payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
+    )
     result["action"] = "analysed"
     return result
 

@@ -191,12 +191,24 @@ def run(
     # written once before the provider call. This never affects normal logging.
     eval_payload_id = request.payload_id or str(uuid.uuid4())
     if request.eval_payload_log_path and not request.payload_id:
+        eval_payload: Any = input_text
+        try:
+            package, _ = json.JSONDecoder().raw_decode(input_text.lstrip())
+            if (
+                isinstance(package, dict)
+                and "analysis_name" in package
+                and "instructions" in package
+                and "source" in package
+            ):
+                eval_payload = package["source"]
+        except (json.JSONDecodeError, TypeError):
+            pass
         _append_jsonl(
             {
                 "record_type": "LLM_EVALUATION_PAYLOAD",
                 "payload_id":  eval_payload_id,
                 "created_at":  started_at,
-                "payload":     input_text,
+                "payload":     eval_payload,
             },
             request.eval_payload_log_path,
         )
@@ -283,9 +295,13 @@ def run(
                 "model":            provider_cfg.model,
                 "provider":         provider_cfg.provider,
                 "execution_profile": provider_cfg.name,
-                "contract":         contract.name,
+                "contract":         contract.body,
                 "contract_version": contract.version,
-                "result":           record.parsed_response,
+                "result":           (
+                    record.parsed_response
+                    if record.parsed_response is not None
+                    else result.raw if result.status == STATUS_SUCCESS else None
+                ),
                 "error":            record.validation_errors,
             },
             request.eval_run_log_path,
