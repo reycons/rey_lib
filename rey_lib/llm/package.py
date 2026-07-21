@@ -185,6 +185,7 @@ def build_package(
     contract: LlmPackageContract | Mapping[str, Any],
     inputs: Sequence[LlmPackageInput | Mapping[str, Any]],
     execution_context: Mapping[str, Any] | None = None,
+    references: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble one canonical LLM package.
 
@@ -211,9 +212,12 @@ def build_package(
         The canonical package with analysis, contract, inputs, and
         execution_context top-level sections.
     """
-    return {
+    package: dict[str, Any] = {
         "analysis": _analysis_section(analysis),
         "contract": _contract_section(contract),
-        "inputs": [_input_section(item) for item in inputs],
-        "execution_context": dict(execution_context or {}),
     }
+    if references:
+        package["references"] = [dict(reference) for reference in references]
+    package["inputs"] = [_input_section(item) for item in inputs]
+    package["execution_context"] = dict(execution_context or {})
+    return package

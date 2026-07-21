@@ -10,6 +10,7 @@ from rey_lib.logs.evidence_projection import _run_log_identity, read_run_log_sec
 
 __all__ = [
     "create_llm_package",
+    "load_contract_references",
     "run_configured_log_analysis",
     "run_configured_record_analysis",
 ]
@@ -130,19 +131,19 @@ def _resolve_reference_path(ctx: Any, raw_path: str) -> Path:
     return Path(re.sub(r"\{([^}]+)\}", _sub, str(raw_path))).expanduser()
 
 
-def _load_contract_references(ctx: Any, instructions: Any) -> list[dict[str, Any]] | None:
-    """Load the reference documents a contract declares, if any.
+def load_contract_references(ctx: Any, declared: Any) -> list[dict[str, Any]] | None:
+    """Resolve and load the reference documents a contract declares.
 
-    Reuses the existing path-token resolver (ctx.paths) and the approved text
-    loader (rey_lib.files.read_text_file). Returns None when the contract declares
-    no references, so existing behavior is unchanged. A required reference that
-    cannot be resolved or loaded raises before the LLM request; a non-required one
-    is omitted with a warning.
+    ``declared`` is a contract's ``references`` list (or None/empty). Reuses the
+    existing path-token resolver (ctx.paths) and the approved text loader
+    (rey_lib.files.read_text_file), so every LLM package-construction path attaches
+    the same reference contents. Returns None when nothing is declared. A required
+    reference that cannot be resolved or loaded raises before the LLM request; a
+    non-required one is omitted with a warning.
     """
     from rey_lib.files import read_text_file
     from rey_lib.logs.log_utils import get_logger
 
-    declared = instructions.get("references") if isinstance(instructions, dict) else None
     if not declared:
         return None
 
@@ -197,7 +198,8 @@ def _build_analysis_package(
         "source_record_type": source_record_type,
         "instructions": instructions,
     }
-    references = _load_contract_references(ctx, instructions)
+    declared = instructions.get("references") if isinstance(instructions, dict) else None
+    references = load_contract_references(ctx, declared)
     if references:
         package["references"] = references
     package["source"] = source
