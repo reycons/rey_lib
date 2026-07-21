@@ -14,6 +14,7 @@ from rey_lib.errors.error_utils import ConfigError
 __all__ = [
     "InstallationInventory",
     "build_installation_inventory",
+    "resolve_workflow_run_action",
 ]
 
 
@@ -90,6 +91,46 @@ def build_installation_inventory(ctx: Any) -> InstallationInventory:
         workflows_by_app=_freeze(workflows_by_app),
         validation_errors=(),
     )
+
+
+def resolve_workflow_run_action(
+    ctx: Any,
+    app_name: str,
+    workflow_name: str,
+) -> dict[str, Any]:
+    """Return the canonical run action for one configured workflow.
+
+    This is the narrow public execution-capability boundary for consumers that
+    need one workflow action. It delegates to the same normalization and
+    capability logic used by :func:`build_installation_inventory` without
+    constructing or attaching the full installation inventory.
+    """
+    requested_app = str(app_name or "").strip()
+    requested_workflow = str(workflow_name or "").strip()
+    if not requested_app or not requested_workflow:
+        raise ConfigError("Workflow app and workflow name are required.")
+
+    workflows = [
+        workflow
+        for workflow in _workflow_entries(ctx)
+        if str(workflow.get("app") or "") == requested_app
+        and str(workflow.get("name") or "") == requested_workflow
+    ]
+    if not workflows:
+        raise ConfigError(
+            f"Workflow run action not found: {requested_app}/{requested_workflow}"
+        )
+
+    actions = _workflow_run_actions(
+        ctx,
+        _named_entries(getattr(ctx, "apps", None)),
+        workflows,
+    )
+    if not actions:
+        raise ConfigError(
+            f"Workflow run action not found: {requested_app}/{requested_workflow}"
+        )
+    return actions[0]
 
 
 def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:

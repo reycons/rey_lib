@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 
 from rey_lib.config.config_utils import Namespace, PathResolver, build_ctx_from_path
-from rey_lib.config.inventory import build_installation_inventory
+from rey_lib.config.inventory import (
+    build_installation_inventory,
+    resolve_workflow_run_action,
+)
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -292,3 +295,30 @@ def test_workflow_capabilities_surface_from_execution_block() -> None:
     action = build_installation_inventory(ctx).workflow_run_actions[0]
     assert action["execution"]["step"] is True
     assert action["execution"]["range"] is True
+
+
+def test_resolve_workflow_run_action_reuses_canonical_capability_logic() -> None:
+    """The narrow resolver returns the same action without a full inventory."""
+    ctx = _ctx()
+    ctx.workflows = {
+        "load_only": {
+            "app": "rey_loader",
+            "steps": ["load"],
+            "execution": {"full": True, "dry_run": True, "step": True},
+        }
+    }
+
+    action = resolve_workflow_run_action(ctx, "rey_loader", "load_only")
+
+    inventory_action = build_installation_inventory(ctx).workflow_run_actions[0]
+    assert action["execution"] == inventory_action["execution"]
+    assert action["command_preview"] == inventory_action["command_preview"]
+    assert action["app"] == inventory_action["app"]
+    assert action["workflow"] == inventory_action["workflow"]
+    assert not hasattr(ctx, "inventory")
+
+
+def test_resolve_workflow_run_action_rejects_unknown_workflow() -> None:
+    """Unknown workflow identity fails closed without compatibility lookup."""
+    with pytest.raises(ConfigError, match="Workflow run action not found"):
+        resolve_workflow_run_action(_ctx(), "rey_loader", "missing")
