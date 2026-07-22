@@ -13,6 +13,7 @@ __all__ = [
     "load_contract_references",
     "run_configured_log_analysis",
     "run_configured_record_analysis",
+    "run_uncontracted_record_analysis",
 ]
 
 
@@ -208,23 +209,30 @@ def _build_analysis_package(
 
 def _execute_analysis_package(
     ctx: Any,
-    analysis: Any,
+    execution_profile: str,
+    artifact_type: str,
     package: dict[str, Any],
     max_input_characters: int = 0,
     payload_id: str | None = None,
 ) -> Any:
-    """Send one package to its configured profile and return the parsed artifact.
+    """Send one package to a named execution profile and return the parsed artifact.
 
-    The single execution path for configured analyses: profile resolution, the
-    envelope instruction, the provider call, envelope extraction, and parsing.
-    Callers own record selection, failure recording, and output writing.
+    The single execution path for both configured analyses and No Contract runs:
+    profile resolution, the envelope instruction, the provider call, envelope
+    extraction, and parsing. Callers own record selection, failure recording, and
+    output writing.
 
     Parameters
     ----------
     ctx : Any
         A resolved context carrying ``llm_profiles``.
-    analysis : Any
-        The configured ``log_analysis`` entry being run.
+    execution_profile : str
+        Name of the ``llm_profiles`` entry to run the package against. For a
+        configured analysis this is ``analysis.llm_execution_profile``; for a No
+        Contract run it is the Workbench-selected profile.
+    artifact_type : str
+        Artifact envelope type. ``analysis.artifact_type`` for a configured
+        analysis, ``""`` for a No Contract run.
     package : dict[str, Any]
         The complete, self-contained LLM input.
     max_input_characters : int
@@ -237,7 +245,6 @@ def _execute_analysis_package(
     from rey_lib.llm.exceptions import ConfigurationFailure
     from rey_lib.llm.llm_utils import direct_ask
 
-    artifact_type = str(getattr(analysis, "artifact_type", ""))
     prompt = json.dumps(package) + build_envelope_instruction(artifact_type)
     if max_input_characters and len(prompt) > max_input_characters:
         raise ValueError(
@@ -245,10 +252,10 @@ def _execute_analysis_package(
             f"over the configured limit of {max_input_characters}"
         )
 
-    profile = find_in_ctx(ctx, "llm_profiles", str(analysis.llm_execution_profile))
+    profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
     if profile is None:
         raise ConfigurationFailure(
-            f"llm_execution_profile not found: {analysis.llm_execution_profile}"
+            f"llm_execution_profile not found: {execution_profile}"
         )
     _eval = getattr(ctx, "llm_evaluation", None)
     _payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
@@ -345,8 +352,62 @@ def run_configured_record_analysis(
     )
     result["result"] = _execute_analysis_package(
         ctx,
-        analysis,
+        str(analysis.llm_execution_profile),
+        str(getattr(analysis, "artifact_type", "")),
         package,
+        max_input_characters,
+        payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
+    )
+    result["action"] = "analysed"
+    return result
+
+
+def run_uncontracted_record_analysis(
+    ctx: Any,
+    record: dict[str, Any],
+    execution_profile: str,
+    max_input_characters: int = 0,
+) -> dict[str, Any]:
+    """Run one already-complete package through the LLM with NO contract added.
+
+    The No Contract counterpart to ``run_configured_record_analysis``. No contract
+    is resolved or inserted and no package is assembled: the supplied ``record`` is
+    itself the complete package and is passed unchanged into the same execution
+    path (``_execute_analysis_package``) using the Workbench-selected
+    ``execution_profile``. Only existing rey_lib functions are composed; nothing is
+    written to any log or file.
+
+    Parameters
+    ----------
+    ctx : Any
+        A resolved context carrying ``llm_profiles``.
+    record : dict[str, Any]
+        The already-complete package, passed through exactly as supplied.
+    execution_profile : str
+        Name of the ``llm_profiles`` entry to run against.
+    max_input_characters : int
+        Optional serialized-package size limit. ``0`` disables the check.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"result": parsed_result_or_None, "action": ..., "skipped": [...]}``.
+    """
+    from rey_lib.config.ctx import find_in_ctx
+    from rey_lib.llm.exceptions import ConfigurationFailure
+
+    result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
+
+    if not isinstance(record, dict):
+        raise ValueError("Record analysis requires a JSON object record")
+    if find_in_ctx(ctx, "llm_profiles", execution_profile) is None:
+        raise ConfigurationFailure(f"llm_execution_profile not found: {execution_profile}")
+
+    result["result"] = _execute_analysis_package(
+        ctx,
+        execution_profile,
+        "",
+        record,
         max_input_characters,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
     )
@@ -456,7 +517,12 @@ def run_configured_log_analysis(
             result["action"] = "existing"
             return result
 
-        parsed_result = _execute_analysis_package(ctx, analysis, package)
+        parsed_result = _execute_analysis_package(
+            ctx,
+            str(analysis.llm_execution_profile),
+            str(getattr(analysis, "artifact_type", "")),
+            package,
+        )
     except (
         ProviderFailure, ParseFailure, ConfigurationFailure, json.JSONDecodeError,
         AttributeError, KeyError, TypeError,
