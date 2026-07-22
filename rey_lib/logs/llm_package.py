@@ -372,10 +372,10 @@ def run_uncontracted_record_analysis(
 
     The No Contract counterpart to ``run_configured_record_analysis``. No contract
     is resolved or inserted and no package is assembled: the supplied ``record`` is
-    itself the complete package and is passed unchanged into the same execution
-    path (``_execute_analysis_package``) using the Workbench-selected
-    ``execution_profile``. Only existing rey_lib functions are composed; nothing is
-    written to any log or file.
+    itself the complete package, serialized and sent raw through ``direct_ask``
+    (no envelope instruction appended, raw response returned) using the
+    Workbench-selected ``execution_profile``. Only existing rey_lib functions are
+    composed; nothing is written to any log or file.
 
     Parameters
     ----------
@@ -391,7 +391,7 @@ def run_uncontracted_record_analysis(
     Returns
     -------
     dict[str, Any]
-        ``{"result": parsed_result_or_None, "action": ..., "skipped": [...]}``.
+        ``{"result": raw_response_text_or_None, "action": ..., "skipped": [...]}``.
     """
     import json
 
