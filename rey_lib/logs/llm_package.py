@@ -393,22 +393,40 @@ def run_uncontracted_record_analysis(
     dict[str, Any]
         ``{"result": parsed_result_or_None, "action": ..., "skipped": [...]}``.
     """
+    import json
+
     from rey_lib.config.ctx import find_in_ctx
     from rey_lib.llm.exceptions import ConfigurationFailure
+    from rey_lib.llm.llm_utils import direct_ask
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
 
     if not isinstance(record, dict):
         raise ValueError("Record analysis requires a JSON object record")
-    if find_in_ctx(ctx, "llm_profiles", execution_profile) is None:
+    profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
+    if profile is None:
         raise ConfigurationFailure(f"llm_execution_profile not found: {execution_profile}")
 
-    result["result"] = _execute_analysis_package(
-        ctx,
-        execution_profile,
-        "",
-        record,
-        max_input_characters,
+    # Raw send: the supplied package is serialized and sent exactly as-is. No
+    # envelope instruction is appended and the raw response is returned unparsed
+    # (direct_ask with no output_format sends the prompt exactly as supplied).
+    prompt = json.dumps(record)
+    if max_input_characters and len(prompt) > max_input_characters:
+        raise ValueError(
+            f"Analysis input is {len(prompt)} characters, "
+            f"over the configured limit of {max_input_characters}"
+        )
+
+    _eval = getattr(ctx, "llm_evaluation", None)
+    _payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
+    _run_log = getattr(_eval, "run_log_path", None) if _eval else None
+    result["result"] = direct_ask(
+        prompt,
+        model=profile.model,
+        provider=profile.provider,
+        api_key=getattr(profile, "api_key", ""),
+        eval_payload_log_path=Path(_payload_log) if _payload_log else None,
+        eval_run_log_path=Path(_run_log) if _run_log else None,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
     )
     result["action"] = "analysed"
