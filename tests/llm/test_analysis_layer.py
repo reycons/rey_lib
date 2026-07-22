@@ -171,6 +171,17 @@ class TestLoadAnalysisContract:
         assert contract.spec.output_schema is not None
         assert contract.spec.output_schema["type"] == "object"
 
+    def test_nested_output_config_parsed(self, tmp_path: Path) -> None:
+        """Canonical output.format settings drive raw artifact execution."""
+        path = _write_analysis_contract(tmp_path, extra_yaml=(
+            "output:\n"
+            "  format: raw\n"
+            "  artifact_type: rey_loader_yaml\n"
+        ))
+        contract = load_analysis_contract(path)
+        assert contract.spec.output_format == "raw"
+        assert contract.spec.artifact_type == "rey_loader_yaml"
+
     def test_invalid_source_type_raises(self, tmp_path: Path) -> None:
         """An unrecognised source_type raises ConfigurationFailure."""
         from rey_lib.llm.exceptions import ConfigurationFailure
@@ -515,6 +526,33 @@ class TestAnalyzerEndToEnd:
         assert isinstance(result, AnalysisResult)
         assert result.status == STATUS_SUCCESS
         assert result.data   == {"result": "ok"}
+
+    def test_nested_raw_output_retains_generated_artifact_text(self, tmp_path: Path) -> None:
+        """output.format raw carries extracted model content in raw_text."""
+        contract_path = _write_analysis_contract(
+            tmp_path,
+            extra_yaml=(
+                "output:\n"
+                "  format: raw\n"
+                "  artifact_type: rey_loader_yaml\n"
+            ),
+        )
+        generated = "data_sources:\n  - name: example\n    enabled: true"
+        provider = _make_mock_provider(
+            '{"artifact_type":"rey_loader_yaml","content":'
+            '"data_sources:\\n  - name: example\\n    enabled: true\\n","notes":[]}'
+        )
+        analyzer = Analyzer(contract_path=contract_path, provider="mock", model="m")
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(name="mock", model="m", provider=provider),
+        ):
+            result = analyzer.analyze(TextDataSource("profile"), analysis_id="raw-001")
+
+        assert result.status == STATUS_SUCCESS
+        assert result.data is None
+        assert result.raw_text == generated
 
     def test_prepared_metadata_in_result(self, tmp_path: Path) -> None:
         """AnalysisResult.prepared contains DataProfile from preparation."""

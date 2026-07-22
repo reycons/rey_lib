@@ -257,6 +257,8 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
     raw_seed    = sampling_cfg.get("seed")
     sampling_seed: Optional[int] = int(raw_seed) if raw_seed is not None else None
 
+    output_cfg = fm.get("output") or {}
+
     spec = AnalysisContractSpec(
         source_type      = source_type,
         allowed_columns  = list(fm.get("allowed_columns") or []),
@@ -266,8 +268,12 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
         sampling_seed    = sampling_seed,
         redaction        = list(fm.get("redaction") or []),
         output_schema    = fm.get("output_schema"),
-        output_format    = str(fm.get("output_format", "json")).lower(),
-        artifact_type    = str(fm.get("artifact_type", "")).lower(),
+        output_format    = str(
+            output_cfg.get("format", fm.get("output_format", "json"))
+        ).lower(),
+        artifact_type    = str(
+            output_cfg.get("artifact_type", fm.get("artifact_type", ""))
+        ).lower(),
     )
 
     return AnalysisContract(base=base, spec=spec)
