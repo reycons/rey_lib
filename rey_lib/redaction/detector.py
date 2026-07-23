@@ -1,5 +1,5 @@
 """
-Column PII type detector for file_redactor.
+Column PII type detector for file_operator.
 
 Samples values from a column and returns the mask type that best describes
 the data.  Detection is regex-based with a match-rate threshold — at least

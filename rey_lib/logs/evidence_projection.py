@@ -251,6 +251,8 @@ _MOVE_OPERATIONS = {
 
 
 _APP_TO_PRODUCER = {
+    "file_operator": "redactor",
+    # Read-only compatibility for persisted logs written before the app rename.
     "file_redactor": "redactor",
     "rey_loader": "loader",
     "rey_analyzer": "analyzer",

@@ -190,7 +190,7 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
 
 def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
     """A nonzero integer return is failed evidence but still returned unchanged."""
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_redactor")
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
 
     result = run_app_operation(ctx, "redact", lambda: 1)
 

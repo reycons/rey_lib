@@ -11,7 +11,7 @@ Apps covered:
 - `rey_lib`
 - `rey_console`
 - `rey_loader`
-- `file_redactor`
+- `file_operator`
 - `rey_analyzer`
 - `pipeline_coordinator`
 - `ftp_sync`
@@ -179,7 +179,7 @@ Apps may keep only app-specific orchestration around these utilities.
 
 - `rey_console` uses shared preview/discovery/path utilities
 - `rey_analyzer` uses shared file discovery and filters
-- `file_redactor` uses shared movement and file selection utilities
+- `file_operator` uses shared movement and file selection utilities
 - `rey_loader` uses shared file loading utilities
 - No app package contains generic file finder or mover logic
 
@@ -434,7 +434,7 @@ LLM-facing markdown contracts and reference YAML must agree so YAML can be autho
 
 ## Priority 12 — App-Specific Cleanup
 
-### `file_redactor`
+### `file_operator`
 
 Required:
 

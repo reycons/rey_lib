@@ -116,7 +116,7 @@ _APP_DEFS: dict[str, dict] = {
         "subfolders": [],
         "extra_files": [],
     },
-    "file_redactor": {
+    "file_operator": {
         "subfolders": ["redact"],
         "extra_files": [],
     },

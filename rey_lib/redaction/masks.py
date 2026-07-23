@@ -1,5 +1,5 @@
 """
-Type-aware masking functions for file_redactor column redaction.
+Type-aware masking functions for file_operator column redaction.
 
 Each mask function receives the original value and a per-column counter and
 returns a fixed or counter-derived replacement appropriate for that data type.

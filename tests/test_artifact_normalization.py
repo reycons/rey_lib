@@ -184,7 +184,7 @@ def test_log_artifact_reference_tags_producer_fields(tmp_path: Path) -> None:
 
     run_log = tmp_path / "run_log.20260708_000000.jsonl"
     ctx = SimpleNamespace(run_log_path=str(run_log), run_id="r1",
-                          run_timestamp="20260708_000000", owner_app_name="file_redactor")
+                          run_timestamp="20260708_000000", owner_app_name="file_operator")
     log_artifact_reference(
         ctx, "/artifacts/customers.redacted.csv", role="output",
         producer="redactor", artifact_type="redacted_file",

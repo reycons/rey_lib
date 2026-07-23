@@ -31,7 +31,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         paths=paths,
         run_log_dir=root / "logs",
-        app_name="file_redactor",
+        app_name="file_operator",
         pipeline_name="daily",
     )
 
@@ -66,14 +66,14 @@ def test_move_file_writes_run_log_not_state_file(tmp_path: Path) -> None:
         src,
         dest_dir,
         state_ctx=ctx,
-        app="file_redactor",
+        app="file_operator",
         pipeline="daily",
         reason="processed",
     )
 
     record = read_run_log_sections(ctx.run_log_path)["records"][0]
     assert record["record_type"] == "FILE_OPERATION"
-    assert record["app"] == "file_redactor"
+    assert record["app"] == "file_operator"
     assert record["operation_id"]
     assert record["operation"] == "move"
     assert record["action"] == "move"
@@ -96,6 +96,6 @@ def test_move_does_not_feed_legacy_state_reader(tmp_path: Path) -> None:
     src.parent.mkdir(parents=True)
     src.write_text("a,b\n", encoding="utf-8")
 
-    move_file(src, dest_dir, state_ctx=ctx, app="file_redactor", pipeline="daily")
+    move_file(src, dest_dir, state_ctx=ctx, app="file_operator", pipeline="daily")
 
     assert find_original_relative_path(ctx, pipeline="daily", file_name="feed.csv") is None
