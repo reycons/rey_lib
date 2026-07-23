@@ -52,6 +52,7 @@ from rey_lib.llm.runner import (  # type: ignore[attr-defined]
     _ProviderConfig,
     _attempt_parse,
     _normalize_result_text,
+    _normalized_result_value,
     run,
     run_batch,
 )
@@ -153,6 +154,40 @@ def test_shared_result_normalizer_unwraps_only_one_outer_string_layer(
     expected: str,
 ) -> None:
     assert _normalize_result_text(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"result":{"answer":42},"status":"ok"}',
+        '"{\\"result\\":{\\"answer\\":42},\\"status\\":\\"ok\\"}"',
+    ],
+)
+def test_shared_result_value_normalizes_direct_and_once_encoded_objects(
+    raw: str,
+) -> None:
+    normalized_text = _normalize_result_text(raw)
+
+    assert _normalized_result_value(
+        None, normalized_text, successful=True
+    ) == {"result": {"answer": 42}, "status": "ok"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('"# Heading\\n\\nBody"', "# Heading\n\nBody"),
+        ('"Plain text\\nsecond line"', "Plain text\nsecond line"),
+        ('"\\"legitimately quoted\\""', '"legitimately quoted"'),
+    ],
+)
+def test_shared_result_value_preserves_normalized_text_content(
+    raw: str,
+    expected: str,
+) -> None:
+    normalized_text = _normalize_result_text(raw)
+
+    assert _normalized_result_value(None, normalized_text, successful=True) == expected
 
 class TestApprove:
     """Tests for records.approve()."""
@@ -659,6 +694,45 @@ class TestRunnerEvaluationPersistence:
             "created_at": payload_record["created_at"],
             "payload": "test input",
         }
+
+    @pytest.mark.parametrize(
+        "provider_result",
+        [
+            '{"result":{"answer":42},"status":"ok"}',
+            '"{\\"result\\":{\\"answer\\":42},\\"status\\":\\"ok\\"}"',
+        ],
+    )
+    def test_raw_json_success_stores_normalized_result_value(
+        self, tmp_path: Path, provider_result: str
+    ) -> None:
+        contract_text = "Return JSON exactly."
+        run_log = tmp_path / "runs.jsonl"
+        provider = _make_mock_provider(provider_result)
+        request = RunRequest(
+            pipeline_id="direct_ask",
+            stage_id="direct_ask",
+            contract_path=Path("<direct_ask>"),
+            contract_text=contract_text,
+            input_data="test input",
+            raw_output=True,
+            eval_run_log_path=run_log,
+        )
+
+        with patch(
+            "rey_lib.llm.runner._resolve_provider_config",
+            return_value=_ProviderConfig(
+                name="mock", model="mock-model", provider=provider
+            ),
+        ):
+            response = run(request)
+
+        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        assert run_record["contract"] == contract_text
+        assert run_record["result"] == {
+            "result": {"answer": 42},
+            "status": "ok",
+        }
+        assert response.raw_text == '{"result":{"answer":42},"status":"ok"}'
 
     def test_raw_success_stores_inline_contract_and_returned_text(
         self, tmp_path: Path

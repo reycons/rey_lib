@@ -310,10 +310,10 @@ def run(
                 "execution_profile": provider_cfg.name,
                 "contract":         contract.body,
                 "contract_version": contract.version,
-                "result":           (
-                    record.parsed_response
-                    if record.parsed_response is not None
-                    else result.raw if result.status == STATUS_SUCCESS else None
+                "result":           _normalized_result_value(
+                    record.parsed_response,
+                    result.raw,
+                    successful=result.status == STATUS_SUCCESS,
                 ),
                 "error":            record.validation_errors,
             },
@@ -827,6 +827,24 @@ def _normalize_result_text(raw: str) -> str:
     except (json.JSONDecodeError, ValueError):
         return raw
     return decoded if isinstance(decoded, str) else raw
+
+
+def _normalized_result_value(
+    parsed: Optional[Any],
+    raw: str,
+    *,
+    successful: bool,
+) -> Optional[Any]:
+    """Return one normalized value for shared result persistence."""
+    if parsed is not None:
+        return parsed
+    if not successful:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return raw
+    return decoded if isinstance(decoded, (dict, list)) else raw
 
 
 def _attempt_parse(raw: str) -> tuple[Optional[Any], Optional[ParseFailure]]:
