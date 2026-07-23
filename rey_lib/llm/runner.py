@@ -680,6 +680,8 @@ def _execute_with_retry(
                 )
             continue
 
+        raw = _normalize_result_text(raw)
+
         # Artifact-envelope mode: extract clean content from the JSON envelope.
         # Extraction/validation failures are treated like parse failures so the
         # retry policy applies; the original raw response is preserved on failure.
@@ -817,7 +819,17 @@ def _single_provider_call(
         return str(exc), 0, 0, exc
 
 
-def _attempt_parse(raw: str) -> tuple[Optional[dict[str, Any]], Optional[ParseFailure]]:
+def _normalize_result_text(raw: str) -> str:
+    """Decode exactly one unnecessary outer JSON string layer."""
+    text = (raw or "").strip()
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return raw
+    return decoded if isinstance(decoded, str) else raw
+
+
+def _attempt_parse(raw: str) -> tuple[Optional[Any], Optional[ParseFailure]]:
     """Parse JSON from provider response. Returns (parsed, exc_or_None)."""
     try:
         return json.loads(_strip_code_fences(raw)), None

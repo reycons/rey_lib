@@ -48,7 +48,13 @@ from rey_lib.llm.records import (
     store_record,
 )
 from rey_lib.llm.redaction import NoopRedactor, PatternRedactor
-from rey_lib.llm.runner import _ProviderConfig, run, run_batch  # type: ignore[attr-defined]
+from rey_lib.llm.runner import (  # type: ignore[attr-defined]
+    _ProviderConfig,
+    _attempt_parse,
+    _normalize_result_text,
+    run,
+    run_batch,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,36 @@ def _write_contract(tmp_path: Path, body: str = "Do the thing.") -> Path:
 # ---------------------------------------------------------------------------
 # records — approve / reject / cancel
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"result":{"answer":42},"status":"ok"}',
+        '"{\\"result\\":{\\"answer\\":42},\\"status\\":\\"ok\\"}"',
+    ],
+)
+def test_shared_result_parser_normalizes_direct_and_once_encoded_objects(raw: str) -> None:
+    parsed, error = _attempt_parse(_normalize_result_text(raw))
+
+    assert error is None
+    assert parsed == {"result": {"answer": 42}, "status": "ok"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('"# Heading\\n\\nBody with \\"quotes\\"."', '# Heading\n\nBody with "quotes".'),
+        ('"Plain text\\nsecond line"', "Plain text\nsecond line"),
+        ('{"result":"already structured"}', '{"result":"already structured"}'),
+        ('"\\"legitimately quoted\\""', '"legitimately quoted"'),
+    ],
+)
+def test_shared_result_normalizer_unwraps_only_one_outer_string_layer(
+    raw: str,
+    expected: str,
+) -> None:
+    assert _normalize_result_text(raw) == expected
 
 class TestApprove:
     """Tests for records.approve()."""
