@@ -10,9 +10,10 @@ this module directly — use the provider registry instead.
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+from typing import Any, Callable, Optional
 
-from rey_lib.llm.exceptions import ProviderFailure
+from rey_lib.llm.exceptions import CancellationFailure, ProviderFailure
 from rey_lib.llm.providers.base import (
     BaseProvider,
     Message,
@@ -33,10 +34,39 @@ _DEFAULT_CAPABILITIES = ProviderCapabilities(
     supports_tools           = False,
     supports_images          = False,
     supports_json_mode       = True,
-    supports_streaming       = False,
+    supports_streaming       = True,
     supports_system_messages = True,
     max_context_tokens       = None,
 )
+
+
+def _close_response(response: Any) -> None:
+    """Close one provider response when its transport exposes a close operation."""
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 — cleanup must preserve the terminal result
+            pass
+
+
+def _close_response_on_cancel(
+    response: Any,
+    cancelled: Optional[Callable[[], bool]],
+) -> threading.Event:
+    """Close a blocking response promptly when its owning run is cancelled."""
+    stop = threading.Event()
+    if cancelled is None:
+        return stop
+
+    def _watch() -> None:
+        while not stop.wait(0.05):
+            if cancelled():
+                _close_response(response)
+                return
+
+    threading.Thread(target=_watch, daemon=True).start()
+    return stop
 
 
 class OllamaProvider(BaseProvider):
@@ -150,6 +180,8 @@ class OllamaProvider(BaseProvider):
         max_tokens:      int                          = 4000,
         temperature:     float                        = 0.0,
         response_format: str | dict[str, Any] | None  = None,
+        on_chunk:        Optional[Callable[[str], None]] = None,
+        cancelled:       Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Call the Ollama chat API and return a normalised response.
 
@@ -184,11 +216,13 @@ class OllamaProvider(BaseProvider):
 
         try:
             return self._run_via_sdk(
-                api_messages, model, max_tokens, temperature, response_format
+                api_messages, model, max_tokens, temperature, response_format,
+                on_chunk, cancelled,
             )
         except ImportError:
             return self._run_via_http(
-                api_messages, model, max_tokens, temperature, response_format
+                api_messages, model, max_tokens, temperature, response_format,
+                on_chunk, cancelled,
             )
 
     def _run_via_sdk(
@@ -198,6 +232,8 @@ class OllamaProvider(BaseProvider):
         max_tokens:      int,
         temperature:     float,
         response_format: str | dict[str, Any] | None = None,
+        on_chunk:        Optional[Callable[[str], None]] = None,
+        cancelled:       Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Call Ollama using the ollama Python SDK against the configured endpoint."""
         import ollama  # noqa: PLC0415
@@ -207,7 +243,7 @@ class OllamaProvider(BaseProvider):
         payload: dict[str, Any] = {
             "model":    model,
             "messages": messages,
-            "stream":   False,
+            "stream":   on_chunk is not None,
             "options":  {
                 "num_predict": max_tokens,
                 "temperature": temperature,
@@ -216,6 +252,9 @@ class OllamaProvider(BaseProvider):
         if response_format is not None:
             payload["format"] = response_format
 
+        if cancelled is not None and cancelled():
+            raise CancellationFailure("LLM execution cancelled.")
+
         try:
             response = client.chat(**payload)
         except ollama.ResponseError as exc:
@@ -223,9 +262,45 @@ class OllamaProvider(BaseProvider):
         except OSError as exc:
             raise ProviderFailure(f"Ollama connection error: {exc}") from exc
 
-        content    = response.message.content.strip()
-        tokens_in  = int(getattr(response, "prompt_eval_count", 0) or 0)
-        tokens_out = int(getattr(response, "eval_count",        0) or 0)
+        if on_chunk is not None:
+            content_parts: list[str] = []
+            final_response: Any = None
+            watcher_stop = _close_response_on_cancel(response, cancelled)
+            try:
+                try:
+                    for chunk in response:
+                        if cancelled is not None and cancelled():
+                            raise CancellationFailure("LLM execution cancelled.")
+                        final_response = chunk
+                        message = getattr(chunk, "message", None)
+                        piece = str(getattr(message, "content", "") or "")
+                        thinking = str(getattr(message, "thinking", "") or "")
+                        if thinking:
+                            on_chunk(thinking)
+                        if piece:
+                            content_parts.append(piece)
+                            on_chunk(piece)
+                    if cancelled is not None and cancelled():
+                        raise CancellationFailure("LLM execution cancelled.")
+                except CancellationFailure:
+                    raise
+                except Exception as exc:
+                    if cancelled is not None and cancelled():
+                        raise CancellationFailure("LLM execution cancelled.") from exc
+                    raise
+            finally:
+                watcher_stop.set()
+                _close_response(response)
+            content = "".join(content_parts).strip()
+            tokens_in = int(getattr(final_response, "prompt_eval_count", 0) or 0)
+            tokens_out = int(getattr(final_response, "eval_count", 0) or 0)
+        else:
+            try:
+                content = response.message.content.strip()
+                tokens_in = int(getattr(response, "prompt_eval_count", 0) or 0)
+                tokens_out = int(getattr(response, "eval_count", 0) or 0)
+            finally:
+                _close_response(response)
 
         raw: dict[str, Any] = {
             "model":             model,
@@ -249,6 +324,8 @@ class OllamaProvider(BaseProvider):
         max_tokens:      int,
         temperature:     float,
         response_format: str | dict[str, Any] | None = None,
+        on_chunk:        Optional[Callable[[str], None]] = None,
+        cancelled:       Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Call Ollama directly over HTTP using urllib (no SDK required)."""
         import json
@@ -259,7 +336,7 @@ class OllamaProvider(BaseProvider):
         payload_dict: dict[str, Any] = {
             "model":    model,
             "messages": messages,
-            "stream":   False,
+            "stream":   on_chunk is not None,
             "options":  {
                 "num_predict": max_tokens,
                 "temperature": temperature,
@@ -276,9 +353,43 @@ class OllamaProvider(BaseProvider):
             method  = "POST",
         )
 
+        if cancelled is not None and cancelled():
+            raise CancellationFailure("LLM execution cancelled.")
+
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                watcher_stop = _close_response_on_cancel(resp, cancelled)
+                try:
+                    if on_chunk is None:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    else:
+                        content_parts: list[str] = []
+                        data = {}
+                        for raw_line in resp:
+                            if cancelled is not None and cancelled():
+                                raise CancellationFailure("LLM execution cancelled.")
+                            line = raw_line.decode("utf-8").strip()
+                            if not line:
+                                continue
+                            data = json.loads(line)
+                            message = data.get("message") or {}
+                            thinking = str(message.get("thinking") or "")
+                            piece = str(message.get("content") or "")
+                            if thinking:
+                                on_chunk(thinking)
+                            if piece:
+                                content_parts.append(piece)
+                                on_chunk(piece)
+                        if cancelled is not None and cancelled():
+                            raise CancellationFailure("LLM execution cancelled.")
+                        data = dict(data)
+                        data["message"] = {
+                            "role": "assistant",
+                            "content": "".join(content_parts),
+                        }
+                finally:
+                    watcher_stop.set()
+                    _close_response(resp)
         except urllib.error.URLError as exc:
             raise ProviderFailure(
                 f"Ollama server unreachable at {self._endpoint}: {exc}"
@@ -286,7 +397,13 @@ class OllamaProvider(BaseProvider):
         except json.JSONDecodeError as exc:
             raise ProviderFailure(f"Ollama returned invalid JSON: {exc}") from exc
         except OSError as exc:
+            if cancelled is not None and cancelled():
+                raise CancellationFailure("LLM execution cancelled.") from exc
             raise ProviderFailure(f"Ollama HTTP error: {exc}") from exc
+        except Exception as exc:
+            if cancelled is not None and cancelled():
+                raise CancellationFailure("LLM execution cancelled.") from exc
+            raise
 
         message    = data.get("message", {})
         content    = (message.get("content") or "").strip()

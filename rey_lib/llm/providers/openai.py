@@ -8,9 +8,14 @@ directly — use the provider registry instead.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Optional
 
-from rey_lib.llm.exceptions import ProviderFailure, RateLimitFailure, TimeoutFailure
+from rey_lib.llm.exceptions import (
+    CancellationFailure,
+    ProviderFailure,
+    RateLimitFailure,
+    TimeoutFailure,
+)
 from rey_lib.llm.providers.base import (
     BaseProvider,
     Message,
@@ -59,8 +64,15 @@ class OpenAIProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        on_chunk:    Optional[Callable[[str], None]] = None,
+        cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Call the OpenAI Chat Completions API and return a normalised response.
+
+        When ``on_chunk`` is supplied the Chat Completions streaming API is used
+        (with usage included) and each content delta is passed to it as it
+        arrives; the accumulated response is still returned. When ``on_chunk`` is
+        None the call is a single blocking request (unchanged behaviour).
 
         Parameters
         ----------
@@ -92,7 +104,58 @@ class OpenAIProvider(BaseProvider):
         api_messages = [{"role": m.role, "content": m.content} for m in messages]
 
         try:
-            client   = openai.OpenAI(api_key=self._api_key)
+            client = openai.OpenAI(api_key=self._api_key)
+            if cancelled is not None and cancelled():
+                raise CancellationFailure("LLM execution cancelled.")
+            if on_chunk is not None:
+                # Streaming: emit each content delta as it arrives, accumulate the
+                # full content, and read usage from the final (include_usage) chunk.
+                content_parts: list[str] = []
+                usage = None
+                resp_id = ""
+                resp_model = model
+                stream = client.chat.completions.create(
+                    model          = model,
+                    max_tokens     = max_tokens,
+                    temperature    = temperature,
+                    messages       = api_messages,
+                    stream         = True,
+                    stream_options = {"include_usage": True},
+                )
+                try:
+                    for chunk in stream:
+                        if cancelled is not None and cancelled():
+                            raise CancellationFailure("LLM execution cancelled.")
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            piece = chunk.choices[0].delta.content
+                            content_parts.append(piece)
+                            on_chunk(piece)
+                        if getattr(chunk, "usage", None) is not None:
+                            usage = chunk.usage
+                        if getattr(chunk, "id", ""):
+                            resp_id = chunk.id
+                        if getattr(chunk, "model", ""):
+                            resp_model = chunk.model
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        close()
+                stream_tokens_in = getattr(usage, "prompt_tokens", 0) if usage else 0
+                stream_tokens_out = getattr(usage, "completion_tokens", 0) if usage else 0
+                return ProviderResponse(
+                    content    = "".join(content_parts).strip(),
+                    tokens_in  = stream_tokens_in,
+                    tokens_out = stream_tokens_out,
+                    model      = resp_model,
+                    raw        = {
+                        "id":    resp_id,
+                        "model": resp_model,
+                        "usage": {
+                            "prompt_tokens":     stream_tokens_in,
+                            "completion_tokens": stream_tokens_out,
+                        },
+                    },
+                )
             response = client.chat.completions.create(
                 model       = model,
                 max_tokens  = max_tokens,

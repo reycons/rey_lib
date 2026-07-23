@@ -31,7 +31,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from rey_lib.llm.exceptions import (
     ConfigurationFailure,
@@ -94,19 +94,33 @@ def _cmd_run(args: argparse.Namespace) -> None:
     else:
         input_data = Path(args.data).read_text(encoding="utf-8")
 
+    # When --stream is set, forward an incremental callback that writes each
+    # provider delta straight to stdout as it arrives (captured line-by-line by a
+    # background runner). Execution still goes through runner.run, so recording
+    # and evidence logging are unchanged.
+    stream_out: Optional[Callable[[str], None]] = None
+    if args.stream:
+        def stream_out(text: str) -> None:
+            """Write one streamed response delta to stdout immediately."""
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
     try:
-        response = run(RunRequest(
-            pipeline_id   = args.pipeline_id,
-            stage_id      = args.stage_id,
-            contract_path = Path(args.contract),
-            input_data    = input_data,
-            provider      = args.provider,
-            model         = args.model,
-            max_tokens    = args.max_tokens,
-            max_rows      = args.max_rows,
-            output_schema = schema,
-            log           = Path(args.log) if args.log else None,
-        ))
+        response = run(
+            RunRequest(
+                pipeline_id   = args.pipeline_id,
+                stage_id      = args.stage_id,
+                contract_path = Path(args.contract),
+                input_data    = input_data,
+                provider      = args.provider,
+                model         = args.model,
+                max_tokens    = args.max_tokens,
+                max_rows      = args.max_rows,
+                output_schema = schema,
+                log           = Path(args.log) if args.log else None,
+            ),
+            on_chunk=stream_out,
+        )
     except ConfigurationFailure as exc:
         _logger.error("configuration failure: %s", exc)
         sys.exit(6)
@@ -120,7 +134,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
         _logger.error("orchestrator error: %s", exc)
         sys.exit(1)
 
-    if not args.quiet and response.parsed_response:
+    if args.stream:
+        # Deltas were already written as they arrived; just terminate the final
+        # line so a line-based reader captures it.
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    elif not args.quiet and response.parsed_response:
         sys.stdout.write(
             json.dumps(response.parsed_response, indent=2, default=str) + "\n"
         )
@@ -358,6 +377,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--schema",      default=None,   help="JSON Schema file for output validation.")
     p_run.add_argument("--log",         default=None,   help="JSONL execution log path.")
     p_run.add_argument("--quiet",       action="store_true")
+    p_run.add_argument("--stream",      action="store_true",
+                       help="Stream the raw response to stdout as it is generated.")
     p_run.set_defaults(func=_cmd_run)
 
     # ---- status -------------------------------------------------------------

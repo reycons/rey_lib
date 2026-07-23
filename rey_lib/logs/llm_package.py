@@ -4,7 +4,7 @@ configured log analysis over that package."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rey_lib.logs.evidence_projection import _run_log_identity, read_run_log_sections
 
@@ -14,6 +14,7 @@ __all__ = [
     "run_configured_log_analysis",
     "run_configured_record_analysis",
     "run_uncontracted_record_analysis",
+    "run_workbench_input_stream",
 ]
 
 
@@ -431,6 +432,140 @@ def run_uncontracted_record_analysis(
     )
     result["action"] = "analysed"
     return result
+
+
+def run_workbench_input_stream(
+    ctx: Any,
+    profile_name: str,
+    instruction_mode: str,
+    instruction_value: str,
+    input_text: str,
+    on_chunk: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Any:
+    """Run one AI Workbench request through the configured LLM execution owner.
+
+    The Workbench supplies only the selected execution profile, the instruction
+    mode, an instruction value, and the operator's input text. Provider and
+    credential resolution stay internal: the profile is resolved from
+    ``ctx.llm_profiles`` (its ``api_key`` already resolved by config) and
+    execution goes through ``runner.run``, so recording and evaluation logging are
+    unchanged. When ``on_chunk`` is supplied and the provider supports streaming,
+    each response delta is delivered to it as it arrives.
+
+    Parameters
+    ----------
+    ctx : Any
+        A resolved context carrying ``llm_profiles`` (and ``log_analysis`` for
+        the contract mode).
+    profile_name : str
+        Name of the selected ``llm_profiles`` entry.
+    instruction_mode : str
+        ``'contract'``, ``'none'``, or ``'text_prompt'``.
+    instruction_value : str
+        For ``'contract'`` the configured-contract analysis name; for
+        ``'text_prompt'`` the free-form instructions; ignored for ``'none'``.
+    input_text : str
+        The operator's left-pane input, sent unchanged.
+    on_chunk : Optional[Callable[[str], None]]
+        Optional incremental-output callback forwarded to the provider.
+    cancelled : Optional[Callable[[], bool]]
+        Optional cooperative cancellation check forwarded to the LLM runner.
+
+    Returns
+    -------
+    RunResponse
+        The runner response (its ``raw_text`` / ``parsed_response`` hold the
+        complete result for providers that do not stream).
+    """
+    import json
+
+    from rey_lib.config.ctx import find_in_ctx
+    from rey_lib.llm.api import RunRequest
+    from rey_lib.llm.envelope import build_envelope_instruction
+    from rey_lib.llm.exceptions import ConfigurationFailure
+    from rey_lib.llm.runner import run as _run
+
+    profile = find_in_ctx(ctx, "llm_profiles", profile_name)
+    if profile is None:
+        raise ConfigurationFailure(f"llm_execution_profile not found: {profile_name}")
+
+    _eval = getattr(ctx, "llm_evaluation", None)
+    payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
+    run_log = getattr(_eval, "run_log_path", None) if _eval else None
+
+    common: dict[str, Any] = {
+        "pipeline_id": "ai_workbench",
+        "stage_id": "run",
+        "provider": str(getattr(profile, "provider", "") or ""),
+        "model": str(getattr(profile, "model", "") or ""),
+        "api_key": str(getattr(profile, "api_key", "") or ""),
+        "eval_payload_log_path": Path(payload_log) if payload_log else None,
+        "eval_run_log_path": Path(run_log) if run_log else None,
+    }
+
+    if instruction_mode == "contract":
+        analyses = getattr(ctx, "log_analysis", None)
+        entry = (
+            analyses.get(instruction_value)
+            if analyses is not None and hasattr(analyses, "get") else None
+        )
+        if entry is None or not str(getattr(entry, "contract", "") or ""):
+            raise ConfigurationFailure(
+                f"No contract configured for '{instruction_value}'."
+            )
+        # Match configured AI Analysis exactly: read the configured YAML through
+        # _analysis_instructions(), place that parsed contract in the established
+        # analysis package, include its configured references, and send the whole
+        # package through the inline/direct execution behavior. These analysis
+        # contracts intentionally use Rey's `contract: {name, ...}` document
+        # convention; they are not low-level rey_lib.llm Contract files and must
+        # never be passed to runner.load_contract().
+        try:
+            source: Any = json.loads(input_text)
+        except (TypeError, json.JSONDecodeError):
+            source = input_text
+        source_record_type = (
+            str(source.get("record_type") or "") if isinstance(source, dict) else ""
+        )
+        package = _build_analysis_package(
+            ctx,
+            instruction_value,
+            source_record_type,
+            _analysis_instructions(entry),
+            source,
+        )
+        prompt = json.dumps(package) + build_envelope_instruction(
+            str(getattr(entry, "artifact_type", "") or "")
+        )
+        request = RunRequest(
+            contract_path=Path("<ai_workbench>"),
+            contract_text=prompt,
+            input_data=prompt,
+            raw_output=True,
+            **common,
+        )
+    elif instruction_mode == "text_prompt":
+        # The free-form instructions become the contract body; the input is the
+        # user turn and is sent unchanged.
+        request = RunRequest(
+            contract_path=Path("<ai_workbench>"),
+            contract_text=str(instruction_value or ""),
+            input_data=input_text,
+            raw_output=True,
+            **common,
+        )
+    else:
+        # None: send the input exactly as entered, with no separate instructions.
+        request = RunRequest(
+            contract_path=Path("<ai_workbench>"),
+            contract_text=input_text,
+            input_data=input_text,
+            raw_output=True,
+            **common,
+        )
+
+    return _run(request, on_chunk=on_chunk, cancelled=cancelled)
 
 
 def run_configured_log_analysis(

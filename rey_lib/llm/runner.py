@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.llm import document_loader
@@ -50,6 +50,7 @@ from rey_lib.llm.envelope import (
     rejection_reason_from_notes,
 )
 from rey_lib.llm.exceptions import (
+    CancellationFailure,
     ConfigurationFailure,
     ParseFailure,
     ProviderFailure,
@@ -127,6 +128,8 @@ def run(
     *,
     redaction_filter: Optional[RedactionFilter] = None,
     artifact_store:   Optional[ArtifactStore]   = None,
+    on_chunk:         Optional[Callable[[str], None]] = None,
+    cancelled:        Optional[Callable[[], bool]] = None,
 ) -> RunResponse:
     """Execute a RunRequest and return a RunResponse.
 
@@ -140,6 +143,14 @@ def run(
     artifact_store : Optional[ArtifactStore]
         When provided, the parsed_response is written to the store after
         a successful execution and the URI is recorded in artifact_uris.
+    on_chunk : Optional[Callable[[str], None]]
+        Optional incremental-output callback forwarded to the provider. When
+        supplied and the provider supports streaming, it receives each text
+        delta as it arrives. Recording, evidence logging, and the returned
+        RunResponse are unchanged. When None (the default) execution is a single
+        blocking call — behaviour is identical to before.
+    cancelled : Optional[Callable[[], bool]]
+        Optional cooperative cancellation check forwarded to the provider.
 
     Returns
     -------
@@ -231,6 +242,8 @@ def run(
         raw_output    = getattr(request, "raw_output", False),
         artifact_type = artifact_type,
         artifact_processing = getattr(request, "artifact_processing", None) or {},
+        on_chunk      = on_chunk,
+        cancelled     = cancelled,
     )
 
     # 4. Resolve the final stored status once.
@@ -596,6 +609,8 @@ def _execute_with_retry(
     temperature:   float = 0.0,
     artifact_type: str   = "",
     artifact_processing: Optional[dict[str, Any]] = None,
+    on_chunk:      Optional[Callable[[str], None]] = None,
+    cancelled:     Optional[Callable[[], bool]] = None,
 ) -> _ExecuteResult:
     """Run the provider call up to policy.max_attempts times.
 
@@ -612,8 +627,10 @@ def _execute_with_retry(
     rate_limit_count = 0
 
     for attempt in range(policy.max_attempts):
+        if cancelled is not None and cancelled():
+            raise CancellationFailure("LLM execution cancelled.")
         raw, tokens_in, tokens_out, exc = _single_provider_call(
-            provider, messages, model, max_tokens, temperature
+            provider, messages, model, max_tokens, temperature, on_chunk, cancelled
         )
 
         if exc is not None:
@@ -784,12 +801,17 @@ def _single_provider_call(
     model:       str,
     max_tokens:  int,
     temperature: float = 0.0,
+    on_chunk:    Optional[Callable[[str], None]] = None,
+    cancelled:   Optional[Callable[[], bool]] = None,
 ) -> tuple[str, int, int, Optional[ProviderFailure]]:
     """Make one provider call. Returns (raw, tokens_in, tokens_out, exc_or_None)."""
     try:
         resp = provider.run(
-            messages=messages, model=model, max_tokens=max_tokens, temperature=temperature
+            messages=messages, model=model, max_tokens=max_tokens,
+            temperature=temperature, on_chunk=on_chunk, cancelled=cancelled,
         )
+        if cancelled is not None and cancelled():
+            raise CancellationFailure("LLM execution cancelled.")
         return resp.content, resp.tokens_in, resp.tokens_out, None
     except ProviderFailure as exc:
         return str(exc), 0, 0, exc

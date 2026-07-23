@@ -8,9 +8,14 @@ directly — use the provider registry instead.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Optional
 
-from rey_lib.llm.exceptions import ProviderFailure, RateLimitFailure, TimeoutFailure
+from rey_lib.llm.exceptions import (
+    CancellationFailure,
+    ProviderFailure,
+    RateLimitFailure,
+    TimeoutFailure,
+)
 from rey_lib.llm.providers.base import (
     BaseProvider,
     Message,
@@ -59,8 +64,15 @@ class AnthropicProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        on_chunk:    Optional[Callable[[str], None]] = None,
+        cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Call the Anthropic Messages API and return a normalised response.
+
+        When ``on_chunk`` is supplied the Messages streaming API is used and each
+        text delta is passed to it as it arrives; the accumulated final message is
+        still returned unchanged. When ``on_chunk`` is None the call is a single
+        blocking request (unchanged behaviour).
 
         Parameters
         ----------
@@ -107,8 +119,20 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = "\n\n".join(system_parts)
 
         try:
-            client   = anthropic.Anthropic(api_key=self._api_key)
-            response = client.messages.create(**kwargs)
+            client = anthropic.Anthropic(api_key=self._api_key)
+            if cancelled is not None and cancelled():
+                raise CancellationFailure("LLM execution cancelled.")
+            if on_chunk is not None:
+                # Streaming: emit each text delta as it arrives, then take the
+                # accumulated final message so downstream handling is identical.
+                with client.messages.stream(**kwargs) as stream:
+                    for text in stream.text_stream:
+                        if cancelled is not None and cancelled():
+                            raise CancellationFailure("LLM execution cancelled.")
+                        on_chunk(text)
+                    response = stream.get_final_message()
+            else:
+                response = client.messages.create(**kwargs)
         except anthropic.RateLimitError as exc:
             raise RateLimitFailure(
                 f"Anthropic rate-limit {exc.status_code}: {exc.message}"

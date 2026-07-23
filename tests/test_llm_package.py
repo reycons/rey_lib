@@ -15,6 +15,7 @@ from rey_lib.logs import (
     finalize_run_log,
     run_configured_log_analysis,
     run_configured_record_analysis,
+    run_workbench_input_stream,
     set_nest_level,
 )
 from rey_lib.logs.record_enrichment import log_run_record
@@ -910,3 +911,54 @@ def test_record_analysis_provider_failure_propagates(tmp_path: Path, monkeypatch
     _patch_direct_ask(monkeypatch, raises=ProviderFailure("model unavailable"))
     with pytest.raises(ProviderFailure, match="model unavailable"):
         run_configured_record_analysis(_record_ctx(tmp_path), {"a": 1}, "email_results")
+
+
+def test_workbench_configured_contract_uses_ai_analysis_package_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Workbench treats a configured analysis contract exactly like AI Analysis."""
+    ctx = _record_ctx(tmp_path)
+    contract_path = Path(ctx.log_analysis["email_results"].contract)
+    contract_path.write_text(
+        "contract:\n"
+        "  name: email_results\n"
+        "  version: 2\n"
+        "analysis_rules:\n"
+        "  - explain the supplied record\n",
+        encoding="utf-8",
+    )
+    capture: dict = {}
+    callback = lambda _chunk: None
+    cancellation_check = lambda: False
+
+    def fake_run(request, *, on_chunk=None, cancelled=None):
+        capture["request"] = request
+        capture["on_chunk"] = on_chunk
+        capture["cancelled"] = cancelled
+        return SimpleNamespace(raw_text="complete", parsed_response=None)
+
+    monkeypatch.setattr("rey_lib.llm.runner.run", fake_run)
+    source = {"record_type": "LLM_EVALUATION_PAYLOAD", "value": 7}
+
+    response = run_workbench_input_stream(
+        ctx,
+        "local_precision",
+        "contract",
+        "email_results",
+        json.dumps(source),
+        on_chunk=callback,
+        cancelled=cancellation_check,
+    )
+
+    request = capture["request"]
+    package, _ = json.JSONDecoder().raw_decode(request.contract_text)
+    assert request.contract_path == Path("<ai_workbench>")
+    assert request.input_data == request.contract_text
+    assert request.raw_output is True
+    assert package["analysis_name"] == "email_results"
+    assert package["source_record_type"] == "LLM_EVALUATION_PAYLOAD"
+    assert package["source"] == source
+    assert package["instructions"]["contract"]["name"] == "email_results"
+    assert capture["on_chunk"] is callback
+    assert capture["cancelled"] is cancellation_check
+    assert response.raw_text == "complete"

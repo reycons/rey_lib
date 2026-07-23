@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 __all__ = [
     "Message",
@@ -119,6 +119,8 @@ class BaseProvider(ABC):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        on_chunk:    Optional[Callable[[str], None]] = None,
+        cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Send messages to the provider and return a normalised response.
 
@@ -132,6 +134,15 @@ class BaseProvider(ABC):
             Maximum tokens the provider may generate.
         temperature : float
             Sampling temperature.  0.0 for deterministic output.
+        on_chunk : Optional[Callable[[str], None]]
+            Optional incremental-output callback. When supplied and the provider
+            supports streaming, it is invoked with each text delta as it arrives;
+            the full ProviderResponse is still returned. When None (the default)
+            the call is a single blocking request — behaviour is unchanged.
+            Providers that do not support streaming ignore this callback.
+        cancelled : Optional[Callable[[], bool]]
+            Optional cooperative cancellation check. Streaming providers must
+            stop and release their response when it becomes true.
 
         Returns
         -------

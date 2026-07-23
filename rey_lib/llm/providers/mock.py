@@ -23,7 +23,7 @@ Simulating failure::
 from __future__ import annotations
 
 from itertools import cycle
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from rey_lib.llm.exceptions import ProviderFailure
 from rey_lib.llm.providers.base import (
@@ -101,8 +101,13 @@ class MockProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        on_chunk:    Optional[Callable[[str], None]] = None,
+        cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
         """Return the next pre-configured response without any network call.
+
+        ``on_chunk`` is accepted for interface parity but ignored (the mock does
+        not stream).
 
         Parameters
         ----------
