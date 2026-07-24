@@ -47,6 +47,7 @@ from rey_lib.llm.records import (
     reject,
     store_record,
 )
+from rey_lib.llm.envelope import extract_artifact_envelope, loads_llm_json
 from rey_lib.llm.redaction import NoopRedactor, PatternRedactor
 from rey_lib.llm.runner import (  # type: ignore[attr-defined]
     _ProviderConfig,
@@ -154,6 +155,53 @@ def test_shared_result_normalizer_unwraps_only_one_outer_string_layer(
     expected: str,
 ) -> None:
     assert _normalize_result_text(raw) == expected
+
+
+def test_shared_result_normalizer_recovers_outer_string_with_markdown_escape() -> None:
+    content_value = json.dumps(
+        {"subject": "Result", "markdown": "**execution_status**"}
+    )
+    envelope = json.dumps(
+        {"artifact_type": "json", "content": content_value, "notes": []}
+    )
+    raw = json.dumps(envelope).replace("execution_status", r"execution\_status")
+
+    normalized = _normalize_result_text(raw)
+    content, notes = extract_artifact_envelope(normalized, "json")
+
+    assert json.loads(content) == {
+        "subject": "Result",
+        "markdown": "**execution_status**",
+    }
+    assert notes == []
+
+
+def test_shared_json_loader_accepts_encoded_content_with_markdown_escape() -> None:
+    raw = (
+        '{"artifact_type":"json","content":'
+        '"{\\n  \\"subject\\": \\"Result\\",\\n  \\"markdown\\": '
+        '\\"**execution\\\\_status**: failed\\"\\n}","notes":[]}'
+    )
+
+    envelope = loads_llm_json(raw)
+    content = loads_llm_json(envelope["content"])
+
+    assert content == {
+        "subject": "Result",
+        "markdown": r"**execution\_status**: failed",
+    }
+
+
+def test_shared_json_loader_completes_only_truncated_final_string_and_object() -> None:
+    raw = (
+        '{"subject":"Result","markdown":"# Failed\\n\\n'
+        '**execution_status**: failed.'
+    )
+
+    assert loads_llm_json(raw) == {
+        "subject": "Result",
+        "markdown": "# Failed\n\n**execution_status**: failed.",
+    }
 
 
 @pytest.mark.parametrize(

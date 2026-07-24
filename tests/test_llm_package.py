@@ -938,7 +938,11 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
         return SimpleNamespace(raw_text="complete", parsed_response=None)
 
     monkeypatch.setattr("rey_lib.llm.runner.run", fake_run)
-    source = {"record_type": "LLM_EVALUATION_PAYLOAD", "value": 7}
+    source = {
+        "record_type": "LLM_EVALUATION_PAYLOAD",
+        "payload_id": "existing-payload-id",
+        "value": 7,
+    }
 
     response = run_workbench_input_stream(
         ctx,
@@ -946,6 +950,7 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
         "contract",
         "email_results",
         json.dumps(source),
+        payload_id=source["payload_id"],
         on_chunk=callback,
         cancelled=cancellation_check,
     )
@@ -955,6 +960,7 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
     assert request.contract_path == Path("<ai_workbench>")
     assert request.input_data == request.contract_text
     assert request.raw_output is True
+    assert request.payload_id == "existing-payload-id"
     assert package["analysis_name"] == "email_results"
     assert package["source_record_type"] == "LLM_EVALUATION_PAYLOAD"
     assert package["source"] == source

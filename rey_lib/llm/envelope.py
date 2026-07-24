@@ -18,6 +18,7 @@ wrapped in fencing — both are normalised here.
 from __future__ import annotations
 
 import json
+from typing import Any, Optional
 
 from rey_lib.llm.exceptions import ParseFailure
 
@@ -29,6 +30,7 @@ __all__ = [
     "build_envelope_instruction",
     "extract_artifact",
     "extract_artifact_envelope",
+    "loads_llm_json",
     "rejection_reason_from_notes",
 ]
 
@@ -47,6 +49,86 @@ _STRICT_ARTIFACT_TYPES = frozenset(
     {"sql", "ddl_commented_sql", "python", "shell", "yaml", "rey_loader_yaml",
      "json", "xml", "csv"}
 )
+
+
+def loads_llm_json(text: str) -> Any:
+    """Parse model-produced JSON with one shared, provider-neutral policy.
+
+    Literal control characters inside strings are accepted. If a model emits a
+    non-JSON escape commonly found in Markdown (for example ``\\_``), only that
+    invalid escape marker is protected and parsing is retried. The decoded
+    value retains the backslash so Markdown semantics are unchanged.
+    """
+    try:
+        return json.loads(text, strict=False)
+    except (json.JSONDecodeError, ValueError) as first_error:
+        repaired = _protect_invalid_string_escapes(text)
+        try:
+            return json.loads(repaired, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            completed = _complete_truncated_json_document(repaired)
+            if completed == repaired:
+                raise first_error
+            return json.loads(completed, strict=False)
+
+
+def _protect_invalid_string_escapes(text: str) -> str:
+    """Make invalid backslash escapes legal only while inside JSON strings."""
+    valid_escapes = frozenset('"\\/bfnrtu')
+    output: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == '"' and not in_string:
+            in_string = True
+            output.append(character)
+            index += 1
+            continue
+        if character == '"' and in_string:
+            in_string = False
+            output.append(character)
+            index += 1
+            continue
+        if character == "\\" and in_string and index + 1 < len(text):
+            escaped = text[index + 1]
+            if escaped in valid_escapes:
+                output.extend((character, escaped))
+                index += 2
+                continue
+            output.extend(("\\", "\\"))
+            index += 1
+            continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
+def _complete_truncated_json_document(text: str) -> str:
+    """Close only a final unterminated string and its open JSON containers."""
+    stack: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if in_string and character == "\\" and index + 1 < len(text):
+            index += 2
+            continue
+        if character == '"':
+            in_string = not in_string
+        elif not in_string and character in "{[":
+            stack.append(character)
+        elif not in_string and character in "}]":
+            expected = "{" if character == "}" else "["
+            if not stack or stack[-1] != expected:
+                return text
+            stack.pop()
+        index += 1
+    if not in_string:
+        return text
+    suffix = ['"']
+    suffix.extend("}" if opener == "{" else "]" for opener in reversed(stack))
+    return text + "".join(suffix)
 
 
 def build_envelope_instruction(artifact_type: str) -> str:
@@ -81,7 +163,10 @@ def build_envelope_instruction(artifact_type: str) -> str:
     )
 
 
-def extract_artifact(raw_response: str, artifact_type: str) -> str:
+def extract_artifact(
+    raw_response: str | dict[str, Any],
+    artifact_type: str,
+) -> str:
     """Extract clean artifact content from a JSON-envelope response.
 
     Thin wrapper over :func:`extract_artifact_envelope` returning the content
@@ -109,7 +194,7 @@ def extract_artifact(raw_response: str, artifact_type: str) -> str:
 
 
 def extract_artifact_envelope(
-    raw_response: str,
+    raw_response: str | dict[str, Any],
     artifact_type: str,
 ) -> tuple[str, list[Any]]:
     """Extract ``(content, notes)`` from a JSON-envelope response.
@@ -139,20 +224,18 @@ def extract_artifact_envelope(
         ``content`` field is missing, or the extracted content fails artifact
         validation. The original raw response is left untouched for review.
     """
-    text = _strip_outer_fence((raw_response or "").strip())
-
-    try:
-        # strict=False allows literal control characters (e.g. unescaped
-        # newlines/tabs) inside string values. Models — especially smaller
-        # local ones — routinely emit multi-line artifact content with raw
-        # newlines in the content string; this normalises that uniformly.
-        envelope = json.loads(text, strict=False)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise ParseFailure(
-            "LLM response extraction failed. Expected a JSON envelope with a "
-            f"'{CONTENT_FIELD}' field. Artifact type: {artifact_type or 'text'}. "
-            f"The raw response was preserved for review. JSON parse error: {exc}"
-        ) from exc
+    if isinstance(raw_response, dict):
+        envelope = raw_response
+    else:
+        text = _strip_outer_fence((raw_response or "").strip())
+        try:
+            envelope = loads_llm_json(text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ParseFailure(
+                "LLM response extraction failed. Expected a JSON envelope with a "
+                f"'{CONTENT_FIELD}' field. Artifact type: {artifact_type or 'text'}. "
+                f"The raw response was preserved for review. JSON parse error: {exc}"
+            ) from exc
 
     if not isinstance(envelope, dict) or CONTENT_FIELD not in envelope:
         raise ParseFailure(

@@ -440,6 +440,7 @@ def run_workbench_input_stream(
     instruction_mode: str,
     instruction_value: str,
     input_text: str,
+    payload_id: str | None = None,
     on_chunk: Callable[[str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Any:
@@ -467,6 +468,8 @@ def run_workbench_input_stream(
         ``'text_prompt'`` the free-form instructions; ignored for ``'none'``.
     input_text : str
         The operator's left-pane input, sent unchanged.
+    payload_id : Optional[str]
+        Existing evaluation-payload identity to preserve for a rerun.
     on_chunk : Optional[Callable[[str], None]]
         Optional incremental-output callback forwarded to the provider.
     cancelled : Optional[Callable[[], bool]]
@@ -502,6 +505,7 @@ def run_workbench_input_stream(
         "api_key": str(getattr(profile, "api_key", "") or ""),
         "eval_payload_log_path": Path(payload_log) if payload_log else None,
         "eval_run_log_path": Path(run_log) if run_log else None,
+        "payload_id": payload_id or None,
     }
 
     if instruction_mode == "contract":

@@ -47,6 +47,7 @@ from rey_lib.llm.envelope import (
     REJECTION_PREFIX,
     build_envelope_instruction,
     extract_artifact_envelope,
+    loads_llm_json,
     rejection_reason_from_notes,
 )
 from rey_lib.llm.exceptions import (
@@ -822,11 +823,88 @@ def _single_provider_call(
 def _normalize_result_text(raw: str) -> str:
     """Decode exactly one unnecessary outer JSON string layer."""
     text = (raw or "").strip()
+    if len(text) < 2 or text[0] != '"' or text[-1] != '"':
+        return raw
     try:
         decoded = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        return raw
+        return _decode_lenient_outer_string(text)
     return decoded if isinstance(decoded, str) else raw
+
+
+def _decode_lenient_outer_string(text: str) -> str:
+    """Decode one quoted layer while tolerating model-invalid JSON escapes.
+
+    Some models encode the entire result as a JSON string but emit Markdown
+    escapes such as ``\\_`` inside that layer. Those escapes make the outer
+    string invalid JSON even though its intended contents are otherwise
+    recoverable. Valid JSON escapes are decoded normally; an invalid escape is
+    treated as the escaped character itself. The decoded content is not
+    recursively unwrapped.
+    """
+    inner = text[1:-1]
+    decoded: list[str] = []
+    escapes = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if char != "\\":
+            decoded.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(inner):
+            decoded.append("\\")
+            break
+
+        escape = inner[index + 1]
+        if escape in escapes:
+            decoded.append(escapes[escape])
+            index += 2
+            continue
+        if escape == "u" and index + 6 <= len(inner):
+            digits = inner[index + 2:index + 6]
+            try:
+                codepoint = int(digits, 16)
+            except ValueError:
+                codepoint = -1
+            if codepoint >= 0:
+                index += 6
+                if (
+                    0xD800 <= codepoint <= 0xDBFF
+                    and index + 6 <= len(inner)
+                    and inner[index:index + 2] == "\\u"
+                ):
+                    low_digits = inner[index + 2:index + 6]
+                    try:
+                        low = int(low_digits, 16)
+                    except ValueError:
+                        low = -1
+                    if 0xDC00 <= low <= 0xDFFF:
+                        codepoint = (
+                            0x10000
+                            + ((codepoint - 0xD800) << 10)
+                            + (low - 0xDC00)
+                        )
+                        index += 6
+                decoded.append(chr(codepoint))
+                continue
+
+        # Invalid JSON escape emitted by the model (commonly Markdown ``\_``).
+        # Interpret it as the escaped character so the recovered inner JSON or
+        # Markdown can proceed through its normal parser/renderer.
+        decoded.append(escape)
+        index += 2
+
+    return "".join(decoded)
 
 
 def _normalized_result_value(
@@ -841,7 +919,7 @@ def _normalized_result_value(
     if not successful:
         return None
     try:
-        decoded = json.loads(raw)
+        decoded = loads_llm_json(raw)
     except (json.JSONDecodeError, ValueError):
         return raw
     return decoded if isinstance(decoded, (dict, list)) else raw
@@ -850,7 +928,7 @@ def _normalized_result_value(
 def _attempt_parse(raw: str) -> tuple[Optional[Any], Optional[ParseFailure]]:
     """Parse JSON from provider response. Returns (parsed, exc_or_None)."""
     try:
-        return json.loads(_strip_code_fences(raw)), None
+        return loads_llm_json(_strip_code_fences(raw)), None
     except (json.JSONDecodeError, ValueError) as exc:
         return None, ParseFailure(f"JSON parse error: {exc}")
 
