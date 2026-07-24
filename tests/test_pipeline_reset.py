@@ -1,6 +1,6 @@
 """Shared pipeline reset from execution-log evidence.
 
-Reset planning is driven exclusively by the single PIPELINE_RESTORE_POLICY record
+Reset planning is driven exclusively by the single RUN_RESTORE_POLICY record
 and this run's move FILE_OPERATION records (the production file_utils move schema).
 INPUT_FILE_REFERENCE / ARTIFACT_MANIFEST remain valid provenance records but are no
 longer authoritative for restore
@@ -41,8 +41,9 @@ def _write_run(
     current: Path,
     timestamp: str = "20260713_120000",
     extra_records: list[dict] | None = None,
+    policy_record_type: str = "RUN_RESTORE_POLICY",
 ) -> Path:
-    """Write a run log: a single PIPELINE_RESTORE_POLICY plus a move of ``original``
+    """Write a run log: a single RUN_RESTORE_POLICY plus a move of ``original``
     (under ``restore_to``) to ``current`` (under ``restore_from``). Reset should
     restore the file from its latest location back under ``restore_to``.
     """
@@ -53,7 +54,7 @@ def _write_run(
             "pipeline_name": "daily", "timestamp": "2026-07-13T12:00:00+00:00",
         },
         {
-            "record_type": "PIPELINE_RESTORE_POLICY", "record_group": "execution",
+            "record_type": policy_record_type, "record_group": "execution",
             "run_id": run_id, "run_timestamp": timestamp, "pipeline_name": "daily",
             "restore_rules": [{"from": str(restore_from), "to": str(restore_to)}],
         },
@@ -68,6 +69,26 @@ def _write_run(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
     return path
+
+
+def test_historical_pipeline_restore_policy_remains_read_compatible(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "inbox"
+    processed = tmp_path / "processed"
+    run_log = _write_run(
+        tmp_path / "legacy.jsonl",
+        run_id="legacy",
+        restore_from=processed,
+        restore_to=inbox,
+        original=inbox / "feed.csv",
+        current=processed / "feed.csv",
+        policy_record_type="PIPELINE_RESTORE_POLICY",
+    )
+
+    preview = preview_pipeline_reset_from_run(run_log)
+
+    assert preview["reset_capable"] is True
 
 
 def test_historical_run_restores_from_move_records_and_creates_audit_log(
@@ -218,6 +239,38 @@ def test_latest_pipeline_run_selects_newest_matching_run(tmp_path: Path) -> None
     selected = latest_pipeline_run(tmp_path, "daily")
     assert selected is not None
     assert Path(selected).name == "daily.20260713_130000.jsonl"
+
+
+def test_preview_reports_reset_capability_and_workflow_identity(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    processed = tmp_path / "processed"
+    current = processed / "feed.csv"
+    current.parent.mkdir(parents=True)
+    current.write_text("input", encoding="utf-8")
+    run_log = _write_run(
+        tmp_path / "workflow.jsonl",
+        run_id="workflow-run",
+        restore_from=processed,
+        restore_to=inbox,
+        original=inbox / "feed.csv",
+        current=current,
+    )
+    records = [
+        json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
+    ]
+    for record in records:
+        record.pop("pipeline_name", None)
+        record["workflow"] = "prepare_bmo"
+    run_log.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    preview = preview_pipeline_reset_from_run(run_log)
+
+    assert preview["reset_capable"] is True
+    assert preview["pipeline_name"] == ""
+    assert preview["workflow_name"] == "prepare_bmo"
 
 
 def test_generated_outputs_are_never_restored(tmp_path: Path) -> None:

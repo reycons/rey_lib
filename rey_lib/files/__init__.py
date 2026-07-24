@@ -46,6 +46,23 @@ from rey_lib.files.pipeline_reset import (
     preview_pipeline_reset_from_run,
     reset_pipeline_from_run,
 )
+from rey_lib.files.workbook_conversion import (
+    SUPPORTED_WORKBOOK_EXTENSIONS,
+    ConvertedTableArtifact,
+    EmptyWorkbookError,
+    UnsupportedWorkbookError,
+    WorkbookConversionError,
+    WorkbookConversionResult,
+    WorkbookConversionWarning,
+    WorkbookDependencyError,
+    WorkbookEncryptedError,
+    WorkbookExtractionError,
+    WorkbookOpenError,
+    WorkbookOutputCollisionError,
+    WorkbookWriteError,
+    convert_workbook_to_csv,
+    is_supported_workbook,
+)
 
 __all__ = [
     "discover_inbox_files",
@@ -90,4 +107,19 @@ __all__ = [
     "latest_pipeline_run",
     "preview_pipeline_reset_from_run",
     "reset_pipeline_from_run",
+    "SUPPORTED_WORKBOOK_EXTENSIONS",
+    "ConvertedTableArtifact",
+    "EmptyWorkbookError",
+    "UnsupportedWorkbookError",
+    "WorkbookConversionError",
+    "WorkbookConversionResult",
+    "WorkbookConversionWarning",
+    "WorkbookDependencyError",
+    "WorkbookEncryptedError",
+    "WorkbookExtractionError",
+    "WorkbookOpenError",
+    "WorkbookOutputCollisionError",
+    "WorkbookWriteError",
+    "convert_workbook_to_csv",
+    "is_supported_workbook",
 ]

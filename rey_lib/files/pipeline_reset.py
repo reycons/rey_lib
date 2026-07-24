@@ -40,7 +40,8 @@ def preview_pipeline_reset_from_run(run_log: Path | str) -> dict[str, Any]:
     """Return an evidence-based reset plan without changing the filesystem."""
     source_log, records = _source_records(run_log)
     run_identity = _run_identity(records)
-    inputs, not_restorable = _restore_candidates(records)
+    restore_rules = _restore_rules(records)
+    inputs, not_restorable = _restore_candidates(records, restore_rules)
     moves: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = list(not_restorable)
 
@@ -65,6 +66,8 @@ def preview_pipeline_reset_from_run(run_log: Path | str) -> dict[str, Any]:
     return {
         "run_id": run_identity["run_id"],
         "pipeline_name": run_identity["pipeline_name"],
+        "workflow_name": run_identity["workflow_name"],
+        "reset_capable": bool(restore_rules),
         "source_run_log": str(source_log),
         "moves": moves,
         "move_count": len(moves),
@@ -98,6 +101,7 @@ def reset_pipeline_from_run(
         source_run_id=plan["run_id"],
         source_run_log=plan["source_run_log"],
         source_pipeline_name=plan["pipeline_name"],
+        source_workflow_name=plan["workflow_name"],
         reason=str(reason or ""),
     )
 
@@ -140,6 +144,7 @@ def reset_pipeline_from_run(
         "source_run_id": plan["run_id"],
         "source_run_log": plan["source_run_log"],
         "source_pipeline_name": plan["pipeline_name"],
+        "source_workflow_name": plan["workflow_name"],
         "restored_count": len(restored),
         "skipped_count": len(skipped),
         "failed_count": len(failed),
@@ -153,6 +158,7 @@ def reset_pipeline_from_run(
     return {
         **summary,
         "pipeline_name": plan["pipeline_name"],
+        "workflow_name": plan["workflow_name"],
         "reason": str(reason or ""),
         "audit_log_path": str(audit_ctx.run_log_path),
         "restored": restored,
@@ -183,14 +189,16 @@ def _run_identity(records: list[dict[str, Any]]) -> dict[str, str]:
     return {
         "run_id": str(first.get("run_id") or ""),
         "pipeline_name": str(first.get("pipeline_name") or first.get("pipeline") or ""),
+        "workflow_name": str(first.get("workflow_name") or first.get("workflow") or ""),
     }
 
 
 def _restore_candidates(
     records: list[dict[str, Any]],
+    rules: list[dict[str, str]],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Select restore candidates from this run's move FILE_OPERATION records,
-    constrained by the single PIPELINE_RESTORE_POLICY.
+    constrained by the single run restore policy.
 
     INPUT_FILE_REFERENCE and ARTIFACT_MANIFEST remain valid provenance/display
     records but are not authoritative for restore planning. A file is a candidate
@@ -199,7 +207,6 @@ def _restore_candidates(
     that rule's ``to`` folder under the same basename. Files whose latest location
     matches no rule are reported, not restored.
     """
-    rules = _restore_rules(records)
     latest_locations = _movement_chains(records)
 
     recoverable: list[dict[str, str]] = []
@@ -222,9 +229,10 @@ def _restore_candidates(
 
 
 def _restore_rules(records: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Return resolved from/to rules from the single PIPELINE_RESTORE_POLICY record."""
+    """Return rules from the canonical or historical run restore-policy record."""
     for record in records:
-        if str(record.get("record_type") or "").upper() == "PIPELINE_RESTORE_POLICY":
+        record_type = str(record.get("record_type") or "").upper()
+        if record_type in {"RUN_RESTORE_POLICY", "PIPELINE_RESTORE_POLICY"}:
             rules: list[dict[str, str]] = []
             for rule in record.get("restore_rules") or []:
                 if not isinstance(rule, dict):

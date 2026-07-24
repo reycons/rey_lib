@@ -374,6 +374,71 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert [s["operation"] for s in doc["step_results"]] == ["p1", "p2"]
 
 
+def test_standalone_workflow_emits_run_restore_policy(tmp_path: Path) -> None:
+    """Standalone workflows emit the same run-scoped restore-policy record."""
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "standalone.jsonl"))
+    workflow = {
+        "name": "wf",
+        "restore_mappings": [
+            {"from": "{processed}", "to": "{inbox}"},
+        ],
+        "tokens": {
+            "processed": str(tmp_path / "processing"),
+            "inbox": str(tmp_path / "inbox"),
+        },
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "process": "p1"}],
+    }
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
+        return None
+
+    run_workflow(ctx, workflow, {"p1": handler})
+
+    records = _read(Path(ctx.run_log_path))
+    policies = [
+        record for record in records
+        if record["record_type"] == "RUN_RESTORE_POLICY"
+    ]
+    assert len(policies) == 1
+    assert policies[0]["restore_rules"] == [{
+        "from": str(tmp_path / "processing"),
+        "to": str(tmp_path / "inbox"),
+    }]
+    assert [record["record_type"] for record in records].index(
+        "RUN_RESTORE_POLICY"
+    ) > [record["record_type"] for record in records].index("RUN_START")
+
+
+def test_pipeline_owned_workflow_does_not_duplicate_restore_policy(tmp_path: Path) -> None:
+    """The pipeline remains the sole policy owner for embedded workflow runs."""
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(
+        log_file=str(tmp_path / "embedded.jsonl"),
+        runtime=SimpleNamespace(pipeline_run_id="pipeline-run"),
+    )
+    workflow = {
+        "name": "wf",
+        "restore_mappings": [{"from": "/processing", "to": "/inbox"}],
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "process": "p1"}],
+    }
+
+    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
+        return None
+
+    run_workflow(ctx, workflow, {"p1": handler})
+
+    records = _read(Path(ctx.run_log_path))
+    assert not any(
+        record["record_type"] == "RUN_RESTORE_POLICY"
+        for record in records
+    )
+
+
 def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> None:
     """Workflow coordinator binds step context for handler execution and clears it."""
     from rey_lib.logs import current_step
@@ -867,9 +932,9 @@ def test_config_reference_normalized_fields(tmp_path: Path) -> None:
 
 
 def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> None:
-    """A nested app operation never writes a PIPELINE_RESTORE_POLICY (pipeline-owner only)."""
+    """A nested app operation never writes a RUN_RESTORE_POLICY (run owner only)."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
     run_app_operation(ctx, "transform", lambda: 0)
     records = _read(Path(ctx.run_log_path))
     assert records  # lifecycle records were written
-    assert not any(r["record_type"] == "PIPELINE_RESTORE_POLICY" for r in records)
+    assert not any(r["record_type"] == "RUN_RESTORE_POLICY" for r in records)

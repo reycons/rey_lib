@@ -24,6 +24,8 @@ duckdb = [
 files = [
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
+    "polars>=1.43.0",
+    "fastexcel>=0.20.2",
 ]
 encrypt = [
     "cryptography>=41.0.0",
