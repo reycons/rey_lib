@@ -317,6 +317,75 @@ def test_unknown_key_unchanged() -> None:
     assert out["version"] == "v01"
 
 
+# ---- installation-scoped log root (SGC_Rey_Installation_Scoped_Log_Ownership) --
+
+def _installation_paths(installation: str) -> list[dict[str, str]]:
+    """Mirror the authoritative installation ``paths:`` shape after the migration.
+
+    ``logs`` now derives from ``{configs}`` (the installation directory) rather
+    than the shared ``{root}/logs``; every subordinate runtime log path derives
+    from ``{logs}`` and therefore follows automatically.
+    """
+    return [
+        {"name": "root", "path": "/rey"},
+        {"name": "configs", "path": "{root}/installations/" + installation},
+        {"name": "logs", "path": "{configs}/logs"},
+        {"name": "pipeline_log_dir", "path": "{logs}/pipeline"},
+        {"name": "rey_console_log",
+         "path": "{logs}/rey_console/rey_console.{operation}.{timestamp}.log"},
+        {"name": "llm_evaluation_payload_log",
+         "path": "{logs}/llm_evaluation/llm_evaluation_payloads.{yyymmdd}.jsonl"},
+        {"name": "llm_evaluation_run_log",
+         "path": "{logs}/llm_evaluation/llm_evaluation_runs.{yyymmdd}.jsonl"},
+    ]
+
+
+def test_log_root_is_installation_scoped_and_distinct_per_installation() -> None:
+    """local and wolff_popper resolve distinct roots, each under its own dir."""
+    local = _build_path_resolver(_installation_paths("local"))
+    wolff = _build_path_resolver(_installation_paths("wolff_popper"))
+
+    local_logs = local.resolve("logs")
+    wolff_logs = wolff.resolve("logs")
+
+    assert local_logs != wolff_logs
+    assert local_logs == Path("/rey/installations/local/logs")
+    assert wolff_logs == Path("/rey/installations/wolff_popper/logs")
+    # Each log root is beneath its own installation directory (== {configs}).
+    assert local_logs.parent == local.resolve("configs")
+    assert wolff_logs.parent == wolff.resolve("configs")
+
+
+def test_subordinate_log_paths_follow_the_installation_root() -> None:
+    """Every subordinate runtime log path derives from the installation logs root."""
+    wolff = _build_path_resolver(_installation_paths("wolff_popper"))
+    root = wolff.resolve("logs")
+
+    for name in ("pipeline_log_dir", "rey_console_log",
+                 "llm_evaluation_payload_log", "llm_evaluation_run_log"):
+        resolved = wolff.resolve(name)
+        assert str(resolved).startswith(str(root) + "/"), name
+        # No subordinate path resolves under the former shared /rey/logs root.
+        assert not str(resolved).startswith("/rey/logs/"), name
+
+
+def test_dated_llm_evaluation_filenames_are_preserved_through_resolution() -> None:
+    """The {yyymmdd} rotation token survives path resolution unchanged."""
+    wolff = _build_path_resolver(_installation_paths("wolff_popper"))
+
+    payload = wolff.resolve("llm_evaluation_payload_log")
+    run = wolff.resolve("llm_evaluation_run_log")
+
+    assert payload == Path(
+        "/rey/installations/wolff_popper/logs/llm_evaluation/"
+        "llm_evaluation_payloads.{yyymmdd}.jsonl"
+    )
+    assert run == Path(
+        "/rey/installations/wolff_popper/logs/llm_evaluation/"
+        "llm_evaluation_runs.{yyymmdd}.jsonl"
+    )
+
+
 # ---- predicate is pure membership -----------------------------------------
 
 def test_is_path_key_is_membership_only() -> None:
