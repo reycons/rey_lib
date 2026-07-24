@@ -92,6 +92,8 @@ def _classify_text_content(content: str | None) -> str:
         return "json"
     if _looks_like_sql(text):
         return "sql"
+    if _looks_like_explicit_markdown(text):
+        return "markdown"
     if _looks_like_yaml(text):
         return "yaml"
     if _looks_like_markdown(text):
@@ -146,6 +148,20 @@ def _looks_like_yaml(text: str) -> bool:
     if not lines:
         return False
     return sum(1 for line in lines[:12] if ":" in line and not line.lstrip().startswith(("{", "["))) >= 2
+
+
+def _looks_like_explicit_markdown(text: str) -> bool:
+    """Recognize Markdown structure before broad YAML key/value heuristics."""
+    lines = text.splitlines()
+    first_nonempty = next((line.strip() for line in lines if line.strip()), "")
+    if first_nonempty.lower() in ("```markdown", "```md"):
+        return True
+    heading_count = sum(
+        1
+        for line in lines[:40]
+        if line.startswith(("# ", "## ", "### ", "#### ", "##### ", "###### "))
+    )
+    return heading_count >= 2
 
 
 def _looks_like_markdown(text: str) -> bool:

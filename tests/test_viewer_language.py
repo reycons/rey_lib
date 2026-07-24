@@ -65,3 +65,35 @@ def test_classify_text_language_can_use_preview_content() -> None:
     assert classify_text_language("/opaque/artifact", content="SELECT *\nFROM trades;\n") == "sql"
     assert classify_text_language("/opaque/artifact", content='{"a": 1}\n{"b": 2}\n') == "jsonl"
     assert classify_text_language("/opaque/artifact", content='{"a": 1}\n') == "json"
+
+
+def test_classify_text_language_prefers_structural_markdown_over_yaml_metadata() -> None:
+    """Markdown report labels do not make the complete report YAML."""
+    report = """# Pipeline Result: profiled_csv_generate_apply_ddl
+
+## Summary
+
+The pipeline failed during classification.
+
+## Evidence
+
+- **Run ID:** f0212f1e
+- **Status:** failed
+- **Application:** file_operator
+"""
+
+    assert classify_text_language(content=report) == "markdown"
+
+
+def test_classify_text_language_recognizes_explicit_markdown_fence() -> None:
+    """An explicit outer Markdown fence wins over YAML-like content inside."""
+    report = """```markdown
+# Pipeline Result: profiled_csv_generate_apply_ddl
+
+## Summary
+
+- **Status:** failed
+- **Application:** file_operator
+```"""
+
+    assert classify_text_language(content=report) == "markdown"
