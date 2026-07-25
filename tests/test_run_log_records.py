@@ -382,7 +382,7 @@ def test_standalone_workflow_emits_run_restore_policy(tmp_path: Path) -> None:
     workflow = {
         "name": "wf",
         "restore_mappings": [
-            {"from": "{processed}", "to": "{inbox}"},
+            {"from": "{processed}", "to": "{inbox}", "overwrite": True},
         ],
         "tokens": {
             "processed": str(tmp_path / "processing"),
@@ -406,6 +406,7 @@ def test_standalone_workflow_emits_run_restore_policy(tmp_path: Path) -> None:
     assert policies[0]["restore_rules"] == [{
         "from": str(tmp_path / "processing"),
         "to": str(tmp_path / "inbox"),
+        "overwrite": True,
     }]
     assert [record["record_type"] for record in records].index(
         "RUN_RESTORE_POLICY"

@@ -1,9 +1,9 @@
 """Shared pipeline reset from execution-log evidence.
 
-Reset planning is driven exclusively by the single RUN_RESTORE_POLICY record
-and this run's move FILE_OPERATION records (the production file_utils move schema).
-INPUT_FILE_REFERENCE / ARTIFACT_MANIFEST remain valid provenance records but are no
-longer authoritative for restore
+Reset planning is driven by the single RUN_RESTORE_POLICY record, this run's move
+FILE_OPERATION records, and exact ARTIFACT_REFERENCE ``created`` declarations.
+INPUT_FILE_REFERENCE / ARTIFACT_MANIFEST remain valid provenance records but are
+not authoritative for reset
 (SGC_Rey_Pipeline_Reset_From_Run_Log_Combined).
 """
 
@@ -71,6 +71,58 @@ def _write_run(
     return path
 
 
+def _write_created_run(
+    path: Path,
+    *,
+    run_id: str,
+    created: Path,
+    destination_dir: Path,
+    overwrite: bool = False,
+    event: str = "created",
+) -> Path:
+    """Write a run that explicitly declares one created artifact."""
+    records = [
+        {
+            "record_type": "RUN_START",
+            "record_group": "execution",
+            "run_id": run_id,
+            "run_timestamp": "20260713_120000",
+            "pipeline_name": "daily",
+        },
+        {
+            "record_type": "RUN_RESTORE_POLICY",
+            "record_group": "execution",
+            "run_id": run_id,
+            "restore_rules": [{
+                "from": str(created.parent),
+                "to": str(destination_dir),
+                "overwrite": overwrite,
+            }],
+        },
+        {
+            "record_type": "ARTIFACT_REFERENCE",
+            "record_group": "files",
+            "run_id": run_id,
+            "event": event,
+            "path": str(created),
+            "created_by_step": "convert",
+        },
+        {
+            "record_type": "RUN_COMPLETE",
+            "record_group": "execution",
+            "run_id": run_id,
+            "pipeline_name": "daily",
+            "status": "success",
+        },
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_historical_pipeline_restore_policy_remains_read_compatible(
     tmp_path: Path,
 ) -> None:
@@ -89,6 +141,101 @@ def test_historical_pipeline_restore_policy_remains_read_compatible(
     preview = preview_pipeline_reset_from_run(run_log)
 
     assert preview["reset_capable"] is True
+
+
+def test_created_artifact_is_relocated_through_explicit_restore_rule(
+    tmp_path: Path,
+) -> None:
+    created = tmp_path / "converted_csv" / "result.csv"
+    deleted = tmp_path / "deleted"
+    created.parent.mkdir()
+    created.write_text("new output", encoding="utf-8")
+    run_log = _write_created_run(
+        tmp_path / "created.jsonl",
+        run_id="created",
+        created=created,
+        destination_dir=deleted,
+    )
+
+    preview = preview_pipeline_reset_from_run(run_log)
+    assert preview["created_move_count"] == 1
+    assert preview["created_moves"][0]["action"] == "move_created"
+    assert preview["created_moves"][0]["would_overwrite"] is False
+
+    result = reset_pipeline_from_run(run_log)
+    relocated = deleted / created.name
+    assert result["created_moved_count"] == 1
+    assert result["restored_count"] == 0
+    assert relocated.read_text(encoding="utf-8") == "new output"
+    assert not created.exists()
+
+
+def test_created_artifact_destination_conflict_requires_explicit_overwrite(
+    tmp_path: Path,
+) -> None:
+    created = tmp_path / "converted_csv" / "result.csv"
+    deleted = tmp_path / "deleted"
+    created.parent.mkdir()
+    deleted.mkdir()
+    created.write_text("new output", encoding="utf-8")
+    (deleted / created.name).write_text("existing", encoding="utf-8")
+    run_log = _write_created_run(
+        tmp_path / "conflict-created.jsonl",
+        run_id="conflict-created",
+        created=created,
+        destination_dir=deleted,
+    )
+
+    preview = preview_pipeline_reset_from_run(run_log)
+    assert preview["created_move_count"] == 0
+    assert preview["skipped"][0]["reason"] == "destination conflict"
+    assert preview["overwrite_count"] == 0
+
+
+def test_created_artifact_explicit_overwrite_replaces_destination(
+    tmp_path: Path,
+) -> None:
+    created = tmp_path / "converted_csv" / "result.csv"
+    deleted = tmp_path / "deleted"
+    created.parent.mkdir()
+    deleted.mkdir()
+    created.write_text("new output", encoding="utf-8")
+    (deleted / created.name).write_text("existing", encoding="utf-8")
+    run_log = _write_created_run(
+        tmp_path / "overwrite-created.jsonl",
+        run_id="overwrite-created",
+        created=created,
+        destination_dir=deleted,
+        overwrite=True,
+    )
+
+    preview = preview_pipeline_reset_from_run(run_log)
+    assert preview["created_moves"][0]["would_overwrite"] is True
+    assert preview["overwrite_count"] == 1
+
+    result = reset_pipeline_from_run(run_log)
+    assert result["created_moved_count"] == 1
+    assert (deleted / created.name).read_text(encoding="utf-8") == "new output"
+    assert not created.exists()
+
+
+def test_non_created_artifact_event_cannot_authorize_relocation(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "converted_csv" / "result.csv"
+    artifact.parent.mkdir()
+    artifact.write_text("possibly pre-existing", encoding="utf-8")
+    run_log = _write_created_run(
+        tmp_path / "written.jsonl",
+        run_id="written",
+        created=artifact,
+        destination_dir=tmp_path / "deleted",
+        event="written",
+    )
+
+    preview = preview_pipeline_reset_from_run(run_log)
+    assert preview["created_move_count"] == 0
+    assert artifact.exists()
 
 
 def test_historical_run_restores_from_move_records_and_creates_audit_log(

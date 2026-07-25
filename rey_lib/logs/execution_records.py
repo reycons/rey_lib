@@ -68,11 +68,17 @@ def log_run_restore_policy(
     token resolution, workflow lookup, reset planning, or filesystem access — the
     mappings arrive already resolved by config utils.
     """
-    restore_rules = [
-        {"from": str(mapping.get("from", "")), "to": str(mapping.get("to", ""))}
-        for mapping in (restore_mappings or [])
-        if isinstance(mapping, dict)
-    ]
+    restore_rules = []
+    for mapping in restore_mappings or []:
+        if not isinstance(mapping, dict):
+            continue
+        rule: dict[str, Any] = {
+            "from": str(mapping.get("from", "")),
+            "to": str(mapping.get("to", "")),
+        }
+        if mapping.get("overwrite") is True:
+            rule["overwrite"] = True
+        restore_rules.append(rule)
     log_run_record(ctx, "RUN_RESTORE_POLICY", restore_rules=restore_rules)
 
 
