@@ -29,6 +29,9 @@ SUPPORTED_WORKBOOK_EXTENSIONS = frozenset({".xls", ".xlsx", ".xlsb", ".xlsm"})
 _TABLE_CAPABLE_EXTENSIONS = frozenset({".xlsx", ".xlsm"})
 _INVALID_NAME_CHARS = re.compile(r"""[.\s/\\<>:"|?*\x00-\x1f\x7f]+""")
 
+_WHITESPACE_NORMALIZE_PATTERN = re.compile(r"[\t\r\n\u00a0]+")
+_CSV_REPEATED_SPACES = re.compile(r" {2,}")
+
 __all__ = [
     "SUPPORTED_WORKBOOK_EXTENSIONS",
     "ConvertedTableArtifact",
@@ -218,6 +221,12 @@ def convert_workbook_to_csv(
             "Workbook contains no eligible non-empty worksheets or defined tables.",
             source,
         )
+
+    # Apply normalization to all planned outputs before sorting
+    planned = [
+        _normalize_planned_output(source, item)
+        for item in planned
+    ]
 
     planned = sorted(
         planned,
@@ -428,6 +437,99 @@ def _is_empty_frame(frame: Any) -> bool:
     return int(frame.height) == 0 or int(frame.width) == 0
 
 
+def _remove_control_categories(value: str) -> str:
+    """Remove Unicode Cc and Cf characters from a string value."""
+    return "".join(
+        c for c in value if unicodedata.category(c) not in {"Cc", "Cf"}
+    )
+
+
+def _normalize_header_text(value: str) -> str:
+    """Normalize header text: replace embedded whitespace, remove Cc/Cf, collapse spaces, trim."""
+    # 1. Replace CR, LF, TAB, NBSP with ordinary spaces
+    normalized = _WHITESPACE_NORMALIZE_PATTERN.sub(" ", value)
+    # 2. Remove remaining Unicode Cc and Cf characters (reusing helper)
+    normalized = "".join(
+        c for c in normalized if unicodedata.category(c) not in {"Cc", "Cf"}
+    )
+    # 3. Collapse repeated ordinary spaces to single space
+    normalized = _CSV_REPEATED_SPACES.sub(" ", normalized)
+    # 4. Trim leading and trailing spaces
+    return normalized.strip()
+
+
+def _normalize_extracted_frame(frame: Any) -> Any:
+    """Normalize string values and column names before CSV serialization."""
+
+    import polars as pl  # noqa: PLC0415
+
+    expressions = []
+    for column_name in frame.columns:
+        dtype = frame.schema[column_name]
+        if dtype == pl.String:
+            # Pipeline: Polars whitespace replace → Python Cc/Cf removal → Polars collapse & trim
+            col_expr = (
+                pl.col(column_name)
+                .str.replace_all(_WHITESPACE_NORMALIZE_PATTERN.pattern, " ")
+                .map_elements(
+                    _remove_control_categories,
+                    return_dtype=pl.String,
+                    skip_nulls=True,
+                )
+                .str.replace_all(_CSV_REPEATED_SPACES.pattern, " ")
+                .str.strip_chars()
+            )
+            expressions.append(col_expr.alias(column_name))
+        else:
+            # Preserve numeric and other dtypes exactly
+            expressions.append(pl.col(column_name))
+
+    normalized = frame.with_columns(expressions)
+
+    # Sanitize column names using header normalization function
+    renamed_columns: dict[str, str] = {
+        column_name: _normalize_header_text(str(column_name))
+        for column_name in normalized.columns
+    }
+
+    # Check for empty sanitized headers (before collision check)
+    if any(not name for name in renamed_columns.values()):
+        raise ValueError("CSV column name is empty after control-character normalization.")
+
+    # Check for case-insensitive collisions after sanitization
+    collision_keys = [name.casefold() for name in renamed_columns.values()]
+    if len(collision_keys) != len(set(collision_keys)):
+        raise ValueError("CSV column names collide after control-character normalization.")
+
+    return normalized.rename(renamed_columns)
+
+
+def _normalize_planned_output(
+    source: Path,
+    item: _PlannedOutput,
+) -> _PlannedOutput:
+    """Normalize one extracted output while preserving public errors."""
+
+    try:
+        frame = _normalize_extracted_frame(item.frame)
+    except ValueError as exc:
+        raise WorkbookExtractionError(
+            f"Could not normalize extracted data from worksheet '{item.sheet_name}': {exc}",
+            source,
+            sheet_name=item.sheet_name,
+            table_name=item.table_name,
+        ) from exc
+
+    return _PlannedOutput(
+        frame=frame,
+        artifact_name=item.artifact_name,
+        extraction_kind=item.extraction_kind,
+        sheet_name=item.sheet_name,
+        sheet_index=item.sheet_index,
+        table_name=item.table_name,
+    )
+
+
 def _artifact_name(workbook_component: str, sheet_name: str, table_name: str | None = None) -> str:
     """Build one deterministic dot-notation artifact name."""
 
@@ -498,6 +600,7 @@ def _stage_and_publish(
             try:
                 item.frame.write_csv(
                     staged_path,
+                    float_scientific=False,  # Prevent scientific notation in output
                     include_bom=False,
                     include_header=True,
                     separator=",",

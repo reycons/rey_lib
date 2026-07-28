@@ -235,3 +235,111 @@ def test_handler_error_stops_run_fail_closed() -> None:
     assert run.outcomes[-1].status == "failed"
     assert "nope" in (run.outcomes[-1].error or "")
     assert ran == []
+
+
+# ---------------------------------------------------------------------------
+# Restore policy emission
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_workflow_with_restore_mappings_emits_policy(monkeypatch) -> None:
+    """A standalone workflow with restore_mappings emits RUN_RESTORE_POLICY."""
+    captured: list[dict[str, Any]] = []
+
+    def capture(_ctx, record_type: str, **fields: Any) -> None:
+        if record_type == "RUN_RESTORE_POLICY":
+            captured.append(fields)
+
+    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
+
+    workflow = {
+        "name": "standalone",
+        "restore_mappings": [{"from": "/source", "to": "/dest"}],
+        "processes": {"noop": {}},
+        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
+    }
+
+    run_workflow(object(), workflow, {"noop": lambda *_: None})
+
+    assert len(captured) == 1
+    assert captured[0]["restore_rules"] == [
+        {"from": "/source", "to": "/dest"}
+    ]
+
+
+def test_standalone_workflow_without_restore_mappings_emits_no_policy(
+    monkeypatch,
+) -> None:
+    """A standalone workflow without restore_mappings emits no RUN_RESTORE_POLICY."""
+    captured: list[dict[str, Any]] = []
+
+    def capture(_ctx, record_type: str, **fields: Any) -> None:
+        if record_type == "RUN_RESTORE_POLICY":
+            captured.append(fields)
+
+    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
+
+    workflow = {
+        "name": "standalone",
+        "processes": {"noop": {}},
+        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
+    }
+
+    run_workflow(object(), workflow, {"noop": lambda *_: None})
+
+    assert len(captured) == 0
+
+
+def test_pipeline_owned_workflow_with_restore_mappings_emits_policy(
+    monkeypatch,
+) -> None:
+    """A pipeline-owned workflow with ctx.runtime.pipeline_run_id emits its own restore policy."""
+    captured: list[dict[str, Any]] = []
+
+    def capture(_ctx, record_type: str, **fields: Any) -> None:
+        if record_type == "RUN_RESTORE_POLICY":
+            captured.append(fields)
+
+    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
+
+    # Create a context with runtime containing pipeline_run_id
+    ctx = type("MockCtx", (), {"runtime": type("Runtime", (), {"pipeline_run_id": "pr-123"})()})()
+
+    workflow = {
+        "name": "owned",
+        "restore_mappings": [{"from": "/source", "to": "/dest"}],
+        "processes": {"noop": {}},
+        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
+    }
+
+    run_workflow(ctx, workflow, {"noop": lambda *_: None})
+
+    assert len(captured) == 1
+    assert captured[0]["restore_rules"] == [
+        {"from": "/source", "to": "/dest"}
+    ]
+
+
+def test_pipeline_owned_workflow_without_restore_mappings_emits_no_policy(
+    monkeypatch,
+) -> None:
+    """A pipeline-owned workflow without restore_mappings emits no RUN_RESTORE_POLICY."""
+    captured: list[dict[str, Any]] = []
+
+    def capture(_ctx, record_type: str, **fields: Any) -> None:
+        if record_type == "RUN_RESTORE_POLICY":
+            captured.append(fields)
+
+    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
+
+    ctx = type("MockCtx", (), {"runtime": type("Runtime", (), {"pipeline_run_id": "pr-456"})()})()
+
+    workflow = {
+        "name": "owned",
+        "processes": {"noop": {}},
+        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
+    }
+
+    run_workflow(ctx, workflow, {"noop": lambda *_: None})
+
+    assert len(captured) == 0

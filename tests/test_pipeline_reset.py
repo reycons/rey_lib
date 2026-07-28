@@ -438,3 +438,65 @@ def test_generated_outputs_are_never_restored(tmp_path: Path) -> None:
 
     assert result["deleted_count"] == 0
     assert output.exists()
+
+
+def test_restore_rules_combines_multiple_policy_records(tmp_path: Path) -> None:
+    """Regression test: _restore_rules must collect rules from all policy records,
+    not just the first one.
+    
+    In a pipeline run with workflow-owned policies, the first RUN_RESTORE_POLICY
+    may have an empty restore_rules list (pipeline-owned), while subsequent records
+    contain the actual workflow restore mappings that should be applied."""
+    from rey_lib.files.pipeline_reset import _restore_rules
+
+    # Pipeline-owned RUN_RESTORE_POLICY with empty rules (first - would short-circuit old impl)
+    pipeline_policy = {
+        "record_type": "RUN_RESTORE_POLICY", "record_group": "execution",
+        "run_id": "r1", "run_timestamp": "20260727_120000", "pipeline_name": "daily",
+        "restore_rules": [],
+    }
+    
+    # First workflow RUN_RESTORE_POLICY with valid rules
+    workflow_policy_1 = {
+        "record_type": "RUN_RESTORE_POLICY", "record_group": "execution",
+        "run_id": "r1", "run_timestamp": "20260727_120001", "pipeline_name": "daily",
+        "restore_rules": [
+            {"from": str(tmp_path / "workflow1_from"), "to": str(tmp_path / "workflow1_to")},
+        ],
+    }
+    
+    # Second workflow RUN_RESTORE_POLICY with valid rules
+    workflow_policy_2 = {
+        "record_type": "RUN_RESTORE_POLICY", "record_group": "execution",
+        "run_id": "r1", "run_timestamp": "20260727_120002", "pipeline_name": "daily",
+        "restore_rules": [
+            {"from": str(tmp_path / "workflow2_from"), "to": str(tmp_path / "workflow2_to"), "overwrite": True},
+        ],
+    }
+    
+    records = [pipeline_policy, workflow_policy_1, workflow_policy_2]
+    
+    rules = _restore_rules(records)
+    
+    assert len(rules) == 2
+    assert rules[0]["from"] == str(tmp_path / "workflow1_from")
+    assert rules[0]["to"] == str(tmp_path / "workflow1_to")
+    assert rules[0].get("overwrite") is False
+    assert rules[1]["from"] == str(tmp_path / "workflow2_from")
+    assert rules[1]["to"] == str(tmp_path / "workflow2_to")
+    assert rules[1].get("overwrite") is True
+
+
+def test_restore_rules_empty_rules_when_no_policies(tmp_path: Path) -> None:
+    """_restore_rules returns empty list when no RUN_RESTORE_POLICY or PIPELINE_RESTORE_POLICY records exist."""
+    from rey_lib.files.pipeline_reset import _restore_rules
+
+    records = [
+        {"record_type": "RUN_START", "run_id": "r1"},
+        {"record_type": "FILE_OPERATION", "source_abs": "/src", "destination_abs": "/dst"},
+        {"record_type": "ARTIFACT_REFERENCE", "path": "/artifact"},
+    ]
+
+    rules = _restore_rules(records)
+
+    assert rules == []

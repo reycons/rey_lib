@@ -336,24 +336,30 @@ def _created_relocation_candidates(
 
 
 def _restore_rules(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return rules from the canonical or historical run restore-policy record."""
+    """Return all rules from canonical and historical restore-policy records."""
+    rules: list[dict[str, Any]] = []
+
     for record in records:
         record_type = str(record.get("record_type") or "").upper()
-        if record_type in {"RUN_RESTORE_POLICY", "PIPELINE_RESTORE_POLICY"}:
-            rules: list[dict[str, Any]] = []
-            for rule in record.get("restore_rules") or []:
-                if not isinstance(rule, dict):
-                    continue
-                source = _canonical(rule.get("from"))
-                target = _canonical(rule.get("to"))
-                if source and target:
-                    rules.append({
-                        "from": source,
-                        "to": target,
-                        "overwrite": rule.get("overwrite") is True,
-                    })
-            return rules
-    return []
+        if record_type not in {"RUN_RESTORE_POLICY", "PIPELINE_RESTORE_POLICY"}:
+            continue
+
+        for rule in record.get("restore_rules") or []:
+            if not isinstance(rule, dict):
+                continue
+
+            source = _canonical(rule.get("from"))
+            target = _canonical(rule.get("to"))
+            if not source or not target:
+                continue
+
+            rules.append({
+                "from": source,
+                "to": target,
+                "overwrite": rule.get("overwrite") is True,
+            })
+
+    return rules
 
 
 def _movement_chains(records: list[dict[str, Any]]) -> dict[str, str]:
