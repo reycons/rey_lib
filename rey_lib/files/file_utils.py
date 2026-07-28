@@ -258,6 +258,41 @@ def is_hidden_path(path: Path, root_path: Path) -> bool:
     return any(part.startswith(".") for part in Path(path).relative_to(root_path).parts)
 
 
+def visible_children(folder: Path) -> list[Path]:
+    """Return the immediate non-hidden entries of one directory, ordered.
+
+    Directories sort before files, then by case-insensitive name — the same
+    ordering ``folder_children`` applies, without descending into any child.
+    Hidden entries are excluded by the shared ``is_hidden_path`` rule.
+
+    Parameters
+    ----------
+    folder : Path
+        Directory to list. One level only; no child is traversed.
+
+    Returns
+    -------
+    list[Path]
+        Immediate directory and file entries. Empty when ``folder`` does not
+        exist or is not a directory.
+
+    Raises
+    ------
+    OSError
+        When an existing directory cannot be read. Callers own the presentation
+        of that failure.
+    """
+    directory = Path(folder)
+    if not directory.is_dir():
+        _logger.debug("visible_children: not a directory: %s", directory)
+        return []
+
+    return sorted(
+        (item for item in directory.iterdir() if not is_hidden_path(item, directory)),
+        key=lambda item: (item.is_file(), item.name.lower()),
+    )
+
+
 def folder_children(path: Path, root_path: Path | None = None) -> list[dict[str, Any]]:
     """Return a recursive non-hidden folder tree for display or inspection."""
     root = Path(root_path) if root_path is not None else Path(path)

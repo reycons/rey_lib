@@ -28,6 +28,7 @@ from rey_lib.files.file_utils import (
     read_bytes_file,
     read_text_file,
     resolve_safe_file,
+    visible_children,
     visible_files,
 )
 
@@ -382,3 +383,89 @@ def test_stage_moves_use_configured_paths(tmp_path: Path) -> None:
     assert processing.parent.name == "processing"
     assert success.parent.name == "success"
     assert failed.parent.name == "failed"
+
+
+def _child_tree(tmp_path: Path) -> Path:
+    """Build one directory with nested folders, files, and hidden entries."""
+    root = tmp_path / "tree"
+    (root / "Beta" / "nested").mkdir(parents=True)
+    (root / "alpha").mkdir()
+    (root / ".hidden").mkdir()
+    (root / "Beta" / "nested" / "deep.txt").write_text("d", encoding="utf-8")
+    (root / "Zeta.txt").write_text("z", encoding="utf-8")
+    (root / "apple.txt").write_text("a", encoding="utf-8")
+    (root / ".secret.txt").write_text("s", encoding="utf-8")
+    return root
+
+
+def test_visible_children_orders_directories_first_then_case_insensitive(
+    tmp_path: Path,
+) -> None:
+    """Ordering matches folder_children without descending into any child."""
+    root = _child_tree(tmp_path)
+
+    assert [item.name for item in visible_children(root)] == [
+        "alpha",
+        "Beta",
+        "apple.txt",
+        "Zeta.txt",
+    ]
+
+
+def test_visible_children_excludes_hidden_entries(tmp_path: Path) -> None:
+    """Hidden files and directories use the shared hidden-path rule."""
+    names = {item.name for item in visible_children(_child_tree(tmp_path))}
+
+    assert ".hidden" not in names
+    assert ".secret.txt" not in names
+
+
+def test_visible_children_does_not_descend(tmp_path: Path) -> None:
+    """Only immediate children are returned at any depth."""
+    root = _child_tree(tmp_path)
+
+    assert "nested" not in {item.name for item in visible_children(root)}
+    assert "deep.txt" not in {item.name for item in visible_children(root)}
+    assert [item.name for item in visible_children(root / "Beta")] == ["nested"]
+    assert [item.name for item in visible_children(root / "Beta" / "nested")] == [
+        "deep.txt"
+    ]
+
+
+def test_visible_children_returns_empty_for_missing_or_non_directory(
+    tmp_path: Path,
+) -> None:
+    """A missing path or a file yields an empty list rather than raising."""
+    target = tmp_path / "file.txt"
+    target.write_text("x", encoding="utf-8")
+
+    assert visible_children(tmp_path / "absent") == []
+    assert visible_children(target) == []
+
+
+def test_visible_children_returns_empty_list_for_empty_directory(
+    tmp_path: Path,
+) -> None:
+    """An empty directory is represented as an empty result."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    assert visible_children(empty) == []
+
+
+def test_visible_children_propagates_unreadable_directory(tmp_path: Path) -> None:
+    """Callers own the presentation of an unreadable directory."""
+    import os
+    import stat
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    original = stat.S_IMODE(locked.stat().st_mode)
+    locked.chmod(0o000)
+    try:
+        if os.access(locked, os.R_OK):
+            pytest.skip("Filesystem does not enforce directory read permissions here.")
+        with pytest.raises(OSError):
+            visible_children(locked)
+    finally:
+        locked.chmod(original)

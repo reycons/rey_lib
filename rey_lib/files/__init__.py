@@ -32,6 +32,7 @@ from rey_lib.files.file_utils import (
     read_bytes_file,
     read_text_file,
     resolve_safe_file,
+    visible_children,
     visible_files,
 )
 from rey_lib.files.transformer import (
@@ -98,6 +99,7 @@ __all__ = [
     "read_bytes_file",
     "read_text_file",
     "resolve_safe_file",
+    "visible_children",
     "visible_files",
     "transform_row",
     "match_header",
