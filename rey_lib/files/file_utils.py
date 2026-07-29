@@ -42,6 +42,7 @@ from rey_lib.files import primitive_file_io
 from rey_lib.logs import get_logger, log_run_record, record_file_operation
 
 __all__ = [
+    "blocked_display_reason",
     "bounded_text_preview",
     "bytes_sha256",
     "discover_inbox_files",
@@ -87,6 +88,7 @@ __all__ = [
     "resolve_safe_file",
     "read_text_file",
     "read_bytes_file",
+    "visible_children",
     "visible_files",
 ]
 
@@ -403,13 +405,14 @@ def preview_file_for_display(
         }
 
     data = path.read_bytes()
-    if b"\x00" in data[:4096]:
+    binary = blocked_display_reason(path, data)
+    if binary:
         return {
             **base,
             "supported": False,
             "content": "",
             "truncated": False,
-            "reason": "Binary file preview is not supported.",
+            "reason": binary,
         }
 
     truncated = len(data) > max_bytes
@@ -659,13 +662,39 @@ def _resolve_under_approved_roots(
     return path
 
 
-def _blocked_display_file(path: Path) -> str:
-    """Return a block reason for secret-like files, or empty when allowed."""
-    lowered = path.name.lower()
+def blocked_display_reason(path: Path | str, data: bytes | None = None) -> str:
+    """Return why one file must not be displayed, or empty when it may be.
+
+    The single owner of Rey display-safety policy: secret-like filenames are
+    refused by name, and binary content is refused once bytes are available.
+    Every console file-display boundary consumes this helper so the policy is
+    implemented exactly once.
+
+    Parameters
+    ----------
+    path : Path | str
+        The file being considered for display.
+    data : bytes | None
+        Leading file bytes when already read. Binary detection is skipped when
+        no bytes are supplied.
+
+    Returns
+    -------
+    str
+        The refusal message, or an empty string when display is allowed.
+    """
+    lowered = Path(path).name.lower()
     for pattern in _RELEVANT_SECRET_PATTERNS:
         if fnmatch(lowered, pattern.lower()):
             return "Sensitive file preview is blocked."
+    if data is not None and b"\x00" in data[:4096]:
+        return "Binary file preview is not supported."
     return ""
+
+
+def _blocked_display_file(path: Path) -> str:
+    """Return a block reason for secret-like files, or empty when allowed."""
+    return blocked_display_reason(path)
 
 
 def _relevant_file_spec(metadata: dict[str, Any] | None) -> dict[str, Any]:

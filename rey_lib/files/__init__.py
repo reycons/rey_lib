@@ -1,4 +1,5 @@
 from rey_lib.files.file_utils import (
+    blocked_display_reason,
     bounded_text_preview,
     bytes_sha256,
     discover_inbox_files,
@@ -67,6 +68,7 @@ from rey_lib.files.workbook_conversion import (
 
 __all__ = [
     "discover_inbox_files",
+    "blocked_display_reason",
     "bounded_text_preview",
     "bytes_sha256",
     "file_sha256",

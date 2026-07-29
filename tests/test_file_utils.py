@@ -9,6 +9,7 @@ import pytest
 
 from rey_lib.files.file_utils import (
     bounded_text_preview,
+    blocked_display_reason,
     bytes_sha256,
     discover_inbox_files,
     file_sha256,
@@ -469,3 +470,44 @@ def test_visible_children_propagates_unreadable_directory(tmp_path: Path) -> Non
             visible_children(locked)
     finally:
         locked.chmod(original)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [".env", "prod.env", "server.pem", "signing.key", "app.secret.yaml",
+     "db.credential.json", "aws.credentials"],
+)
+def test_blocked_display_reason_refuses_secret_like_names(tmp_path: Path, name: str) -> None:
+    """Secret-like filenames are refused by the single display-policy owner."""
+    assert blocked_display_reason(tmp_path / name) == "Sensitive file preview is blocked."
+
+
+def test_blocked_display_reason_refuses_binary_content(tmp_path: Path) -> None:
+    """Null bytes in the leading window refuse display."""
+    assert blocked_display_reason(tmp_path / "a.log", b"ok\x00binary") == (
+        "Binary file preview is not supported."
+    )
+    # Beyond the inspected window the file is not treated as binary.
+    assert blocked_display_reason(tmp_path / "a.log", b"x" * 5000 + b"\x00") == ""
+
+
+def test_blocked_display_reason_allows_ordinary_text(tmp_path: Path) -> None:
+    """An ordinary text file is allowed, with or without bytes supplied."""
+    assert blocked_display_reason(tmp_path / "report.sql") == ""
+    assert blocked_display_reason(tmp_path / "report.sql", b"SELECT 1;\n") == ""
+
+
+def test_preview_for_display_consumes_the_same_policy_owner(tmp_path: Path) -> None:
+    """preview_file_for_display refuses through the shared policy, not its own."""
+    secret = tmp_path / "app.secret.yaml"
+    secret.write_text("token: abc\n", encoding="utf-8")
+    binary = tmp_path / "blob.dat"
+    binary.write_bytes(b"\x00\x01\x02")
+
+    refused_secret = preview_file_for_display(secret, approved_roots=[tmp_path])
+    refused_binary = preview_file_for_display(binary, approved_roots=[tmp_path])
+
+    assert refused_secret["supported"] is False
+    assert refused_secret["reason"] == "Sensitive file preview is blocked."
+    assert refused_binary["supported"] is False
+    assert refused_binary["reason"] == "Binary file preview is not supported."
