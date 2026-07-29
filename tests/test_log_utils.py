@@ -14,7 +14,18 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
     import rey_lib.logs as logs
     import rey_lib.logs.log_utils as log_utils
 
-    non_log_utils_exports = {"JsonlHandler", "run_app_operation"}
+    # Names owned by peer modules rather than log_utils itself. The governed
+    # file manifest is a separate destination from the application log, so its
+    # surface lives in rey_lib.logs.file_manifest.
+    non_log_utils_exports = {
+        "JsonlHandler",
+        "run_app_operation",
+        "FileManifestError",
+        "log_file_manifest_record",
+        "manifest_lock_path",
+        "manifest_state_path",
+        "resolve_file_manifest_path",
+    }
     missing = [
         name for name in logs.__all__
         if name not in non_log_utils_exports and name not in log_utils.__all__

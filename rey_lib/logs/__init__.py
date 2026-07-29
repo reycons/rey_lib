@@ -1,4 +1,11 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.file_manifest import (
+    FileManifestError,
+    log_file_manifest_record,
+    manifest_lock_path,
+    manifest_state_path,
+    resolve_file_manifest_path,
+)
 from rey_lib.logs.nest_level import (
     get_nest_level,
     next_nest_level,
@@ -84,6 +91,11 @@ from rey_lib.run_lifecycle import run_app_operation
 
 __all__ = [
     "JsonlHandler",
+    "FileManifestError",
+    "log_file_manifest_record",
+    "manifest_lock_path",
+    "manifest_state_path",
+    "resolve_file_manifest_path",
     "add_jsonl_handler",
     "build_jsonl_event_table",
     "build_artifact_manifest_entries",

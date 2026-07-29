@@ -33,6 +33,7 @@ RUN_RESULT_RECORD_TYPES = frozenset({
 FILES_RECORD_SUBGROUP = {
     "INPUT_FILE_REFERENCE": "input_files",
     "INPUT_DISCOVERED": "input_files",
+    "SOURCE_FILE_INVENTORY": "input_files",
     "CONFIG_FILE_REFERENCE": "config_files",
     "CONFIG_FILE_MANIFEST": "config_files",
     "ARTIFACT_REFERENCE": "artifacts",
@@ -256,7 +257,9 @@ def _has_durable_run_path(ctx: Any) -> bool:
     )
 
 
-def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: Any) -> None:
+def log_run_record(
+    ctx: Any, record_type: str, *, message: str = "", **fields: Any
+) -> int | None:
     """
     Append one typed record to the append-only run log.
 
@@ -280,7 +283,13 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
 
     Returns
     -------
-    None
+    int | None
+        The committed ``record_id`` — the record's one-based row number in the
+        run log — or ``None`` when the record could not be committed. The
+        return is additive: callers that do not need durable record identity
+        may continue to ignore it. A caller that must not act unless its
+        evidence is durable (for example the governed file manifest) treats
+        ``None`` as the failure signal, because this function never raises.
     """
     if _has_durable_run_path(ctx):
         _validate_run_record_fields(record_type, fields)
@@ -307,10 +316,12 @@ def log_run_record(ctx: Any, record_type: str, *, message: str = "", **fields: A
 
         primitive_file_io.append_jsonl(path, record)
         record_parenting.commit_record(ctx, record_id, nest_level)
+        return record_id
     except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
         logging.getLogger(__name__).warning(
             "run log: could not append %s record: %s", record_type, exc
         )
+        return None
 
 
 _CURRENT_RUN: dict[str, Any] = {"run": None}
