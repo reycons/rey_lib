@@ -11,6 +11,7 @@ from rey_lib.files.file_utils import (
     bounded_text_preview,
     blocked_display_reason,
     bytes_sha256,
+    capture_path_variables,
     discover_inbox_files,
     file_sha256,
     find_named_files,
@@ -511,3 +512,104 @@ def test_preview_for_display_consumes_the_same_policy_owner(tmp_path: Path) -> N
     assert refused_secret["reason"] == "Sensitive file preview is blocked."
     assert refused_binary["supported"] is False
     assert refused_binary["reason"] == "Binary file preview is not supported."
+
+
+def test_capture_path_variables_captures_a_declared_segment() -> None:
+    """A braced segment captures the corresponding concrete path segment."""
+    assert capture_path_variables(
+        "/work/bmo/work/converted_csv", "/work/{feed_source}/work/converted_csv"
+    ) == {"feed_source": "bmo"}
+
+
+def test_capture_path_variables_captures_every_declared_segment() -> None:
+    """Each declared segment is captured independently and in place."""
+    assert capture_path_variables(
+        "/data/acme/2026/in", "/data/{client}/{year}/in"
+    ) == {"client": "acme", "year": "2026"}
+
+
+def test_capture_path_variables_matches_literal_only_patterns() -> None:
+    """A pattern with no variables matches literally and captures nothing."""
+    assert capture_path_variables("/a/b", "/a/b") == {}
+    assert capture_path_variables("/a/c", "/a/b") is None
+
+
+def test_capture_path_variables_returns_none_when_a_literal_differs() -> None:
+    """A literal mismatch is a non-match, not an error."""
+    assert capture_path_variables(
+        "/work/bmo/other", "/work/{feed_source}/work/converted_csv"
+    ) is None
+
+
+def test_capture_path_variables_returns_none_on_a_depth_mismatch() -> None:
+    """A path deeper or shallower than the pattern does not match."""
+    assert capture_path_variables(
+        "/work/bmo/work/converted_csv/extra", "/work/{feed_source}/work/converted_csv"
+    ) is None
+    assert capture_path_variables("/work/bmo", "/work/{a}/{b}") is None
+
+
+def test_capture_path_variables_never_spans_a_separator() -> None:
+    """One variable is exactly one segment; it cannot absorb a separator."""
+    assert capture_path_variables("/work/a/b/in", "/work/{name}/in") is None
+
+
+def test_capture_path_variables_distinguishes_absolute_and_relative() -> None:
+    """Anchoring is part of the match; it is never silently added or dropped."""
+    assert capture_path_variables("work/bmo/in", "work/{feed}/in") == {"feed": "bmo"}
+    assert capture_path_variables("/work/bmo/in", "work/{feed}/in") is None
+    assert capture_path_variables("work/bmo/in", "/work/{feed}/in") is None
+
+
+def test_capture_path_variables_accepts_a_path_object() -> None:
+    """A Path argument behaves exactly like its string form."""
+    assert capture_path_variables(
+        Path("/work/bmo/in"), "/work/{feed}/in"
+    ) == {"feed": "bmo"}
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "/work/pre{name}/in",
+        "/work/{name}post/in",
+        "/work/{a}{b}/in",
+        "/work/{name/in",
+        "/work/name}/in",
+    ],
+)
+def test_capture_path_variables_rejects_partial_segment_patterns(pattern: str) -> None:
+    """A braced name must occupy a whole segment."""
+    with pytest.raises(ValueError, match="whole"):
+        capture_path_variables("/work/bmo/in", pattern)
+
+
+def test_capture_path_variables_rejects_an_empty_name() -> None:
+    """An empty brace declares nothing and is malformed."""
+    with pytest.raises(ValueError, match="empty name"):
+        capture_path_variables("/work/bmo/in", "/work/{}/in")
+
+
+def test_capture_path_variables_rejects_duplicate_names() -> None:
+    """A repeated variable name is a malformed pattern."""
+    with pytest.raises(ValueError, match="more than once"):
+        capture_path_variables("/work/a/b", "/work/{name}/{name}")
+
+
+def test_capture_path_variables_validates_the_pattern_before_matching() -> None:
+    """A malformed pattern raises even when the path could never match."""
+    with pytest.raises(ValueError):
+        capture_path_variables("/completely/different", "/work/{a}{b}/in")
+
+
+def test_capture_path_variables_reads_nothing_from_disk(monkeypatch) -> None:
+    """The helper is pure: it performs no filesystem access."""
+    def _forbid(*args, **kwargs):
+        raise AssertionError("capture_path_variables must not touch the filesystem")
+
+    for name in ("exists", "is_dir", "is_file", "resolve", "iterdir", "stat"):
+        monkeypatch.setattr(Path, name, _forbid)
+
+    assert capture_path_variables(
+        "/work/bmo/work/converted_csv", "/work/{feed_source}/work/converted_csv"
+    ) == {"feed_source": "bmo"}

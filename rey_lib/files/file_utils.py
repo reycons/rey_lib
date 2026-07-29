@@ -35,7 +35,7 @@ import uuid
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
 from rey_lib.files import primitive_file_io
@@ -45,6 +45,7 @@ __all__ = [
     "blocked_display_reason",
     "bounded_text_preview",
     "bytes_sha256",
+    "capture_path_variables",
     "discover_inbox_files",
     "folder_children",
     "input_files",
@@ -258,6 +259,76 @@ def open_text_file(
 def is_hidden_path(path: Path, root_path: Path) -> bool:
     """Return true when ``path`` has hidden relative path segments."""
     return any(part.startswith(".") for part in Path(path).relative_to(root_path).parts)
+
+
+def capture_path_variables(
+    path: Path | str,
+    path_pattern: str,
+) -> dict[str, str] | None:
+    """Capture named variables from a path matched against a path pattern.
+
+    ``path_pattern`` is a filesystem path in which each ``{name}`` segment
+    stands for one variable. A braced name must occupy a whole path segment;
+    every other segment is matched literally. Matching is segment-wise, so a
+    captured value can never span a separator.
+
+    Application-neutral and pure: it resolves nothing, reads no configuration,
+    and touches no filesystem.
+
+    Parameters
+    ----------
+    path : Path | str
+        Concrete path to match.
+    path_pattern : str
+        Path pattern containing zero or more ``{name}`` segments.
+
+    Returns
+    -------
+    dict[str, str] | None
+        Captured name-to-value pairs, or ``None`` when the path does not match.
+
+    Raises
+    ------
+    ValueError
+        When a pattern segment mixes a braced name with other characters, uses
+        an empty or malformed brace, or repeats a variable name.
+    """
+    pattern_parts = PurePosixPath(str(path_pattern)).parts
+    names: list[str | None] = []
+    for segment in pattern_parts:
+        if "{" not in segment and "}" not in segment:
+            names.append(None)
+            continue
+        if (
+            segment.count("{") != 1
+            or segment.count("}") != 1
+            or not segment.startswith("{")
+            or not segment.endswith("}")
+        ):
+            raise ValueError(
+                f"Path pattern segment must be a whole '{{name}}' or a literal: {segment}"
+            )
+        name = segment[1:-1]
+        if not name:
+            raise ValueError(f"Path pattern segment has an empty name: {segment}")
+        if name in names:
+            raise ValueError(f"Path pattern declares '{name}' more than once.")
+        names.append(name)
+
+    path_parts = PurePosixPath(str(path)).parts
+    if len(path_parts) != len(pattern_parts):
+        return None
+
+    captured: dict[str, str] = {}
+    for name, pattern_part, path_part in zip(names, pattern_parts, path_parts):
+        if name is None:
+            if pattern_part != path_part:
+                return None
+            continue
+        if not path_part:
+            return None
+        captured[name] = path_part
+    return captured
 
 
 def visible_children(folder: Path) -> list[Path]:
