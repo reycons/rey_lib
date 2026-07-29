@@ -50,6 +50,11 @@ from rey_lib.files.file_transaction import (
     PublishedFileSet,
     publish_file_set,
 )
+from rey_lib.files.jsonl import (
+    JsonlReadError,
+    JsonlRecord,
+    read_jsonl_file,
+)
 from rey_lib.files.file_loader import load_files
 from rey_lib.files.pipeline_reset import (
     latest_pipeline_run,
@@ -76,6 +81,9 @@ from rey_lib.files.workbook_conversion import (
 
 __all__ = [
     "discover_inbox_files",
+    "JsonlReadError",
+    "JsonlRecord",
+    "read_jsonl_file",
     "FileSetCollisionError",
     "FileSetCommitError",
     "FileSetMember",
