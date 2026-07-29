@@ -42,6 +42,14 @@ from rey_lib.files.transformer import (
     parse_date_from_filename,
     TransformError,
 )
+from rey_lib.files.file_transaction import (
+    FileSetCollisionError,
+    FileSetCommitError,
+    FileSetMember,
+    FileSetTransactionError,
+    PublishedFileSet,
+    publish_file_set,
+)
 from rey_lib.files.file_loader import load_files
 from rey_lib.files.pipeline_reset import (
     latest_pipeline_run,
@@ -68,6 +76,12 @@ from rey_lib.files.workbook_conversion import (
 
 __all__ = [
     "discover_inbox_files",
+    "FileSetCollisionError",
+    "FileSetCommitError",
+    "FileSetMember",
+    "FileSetTransactionError",
+    "PublishedFileSet",
+    "publish_file_set",
     "blocked_display_reason",
     "bounded_text_preview",
     "bytes_sha256",
