@@ -6,7 +6,12 @@ import json
 import logging
 from types import SimpleNamespace
 
-from rey_lib.logs.log_utils import log_file_metadata, read_jsonl_records, setup_logging
+from rey_lib.logs.log_utils import (
+    log_file_metadata,
+    read_jsonl_file_record_page,
+    read_jsonl_records,
+    setup_logging,
+)
 
 
 def test_log_utils_public_api_includes_package_facade_exports() -> None:
@@ -170,6 +175,55 @@ def test_read_jsonl_records_returns_requested_page(
     assert [record["record_id"] for record in result["records"]] == list(
         range(251, 301)
     )
+
+
+def test_streamed_jsonl_page_sorts_before_slicing(tmp_path) -> None:
+    path = tmp_path / "app.run.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"record_id": record_id, "name": f"item-{record_id:03d}"})
+            + "\n"
+            for record_id in range(1, 301)
+        ),
+        encoding="utf-8",
+    )
+
+    result = read_jsonl_file_record_page(
+        path,
+        max_records=25,
+        offset=0,
+        sort_field="record_id",
+        sort_direction="desc",
+    )
+
+    assert result["records_matched"] == 300
+    assert result["records_returned"] == 25
+    assert result["has_more"] is True
+    assert [record["record_id"] for record in result["records"]] == list(
+        range(300, 275, -1)
+    )
+    assert result["record_line_numbers"] == list(range(300, 275, -1))
+
+
+def test_streamed_jsonl_page_has_no_byte_window_limit(tmp_path) -> None:
+    path = tmp_path / "large.run.jsonl"
+    padding = "x" * 20_000
+    path.write_text(
+        "".join(
+            json.dumps({"record_id": record_id, "padding": padding}) + "\n"
+            for record_id in range(1, 80)
+        ),
+        encoding="utf-8",
+    )
+
+    result = read_jsonl_file_record_page(path, max_records=10, offset=70)
+
+    assert path.stat().st_size > 1_000_000
+    assert result["records_matched"] == 79
+    assert [record["record_id"] for record in result["records"]] == list(
+        range(71, 80)
+    )
+    assert result["truncated_file"] is False
 
 
 def test_read_jsonl_records_rejects_text_logs(tmp_path) -> None:

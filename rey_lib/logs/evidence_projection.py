@@ -94,6 +94,155 @@ def read_jsonl_records(
     }
 
 
+def read_jsonl_file_record_page(
+    path: Path | str,
+    *,
+    filters: dict[str, str] | None = None,
+    max_records: int = 250,
+    offset: int = 0,
+    sort_field: str = "",
+    sort_direction: str = "asc",
+) -> dict[str, Any]:
+    """Stream one globally ordered JSONL page without a raw byte-window cap.
+
+    Unsorted requests retain only the requested page while scanning the file.
+    Sorted requests retain matching parsed records long enough to order the
+    complete result set before slicing; raw file content is never loaded as one
+    string.
+    """
+    log_path = Path(path).expanduser().resolve()
+    if log_path.suffix != ".jsonl":
+        return {
+            "path": str(log_path),
+            "records": [],
+            "record_line_numbers": [],
+            "records_matched": 0,
+            "records_returned": 0,
+            "truncated_file": False,
+            "parse_errors": [],
+            "error": "Structured log records are available only for JSONL logs.",
+            **log_file_metadata(log_path),
+        }
+    if max_records <= 0:
+        raise ValueError("max_records must be a positive integer.")
+    if offset < 0:
+        raise ValueError("offset must be a non-negative integer.")
+    direction = str(sort_direction or "asc").lower()
+    if direction not in {"asc", "desc"}:
+        raise ValueError("sort_direction must be 'asc' or 'desc'.")
+
+    selected_filters = filters or {}
+    selected_sort = str(sort_field or "")
+    parse_errors: list[str] = []
+    matched_count = 0
+    selected: list[tuple[int, dict[str, Any]]] = []
+    retain_all = bool(selected_sort)
+
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    parse_errors.append(f"line {line_number}: {exc}")
+                    continue
+                if not isinstance(record, dict):
+                    parse_errors.append(
+                        f"line {line_number}: expected a JSON object"
+                    )
+                    continue
+                if not _record_matches(record, selected_filters):
+                    continue
+                if retain_all or offset <= matched_count < offset + max_records:
+                    selected.append((line_number, record))
+                matched_count += 1
+    except OSError as exc:
+        return {
+            "path": str(log_path),
+            "records": [],
+            "record_line_numbers": [],
+            "records_matched": 0,
+            "records_returned": 0,
+            "offset": offset,
+            "limit": max_records,
+            "has_more": False,
+            "next_offset": None,
+            "truncated_file": False,
+            "parse_errors": [str(exc)],
+            "error": str(exc),
+            **log_file_metadata(log_path),
+        }
+
+    if selected_sort:
+        selected = _sort_jsonl_pairs(
+            selected,
+            selected_sort,
+            descending=direction == "desc",
+        )
+        selected = selected[offset:offset + max_records]
+
+    records = [record for _, record in selected]
+    line_numbers = [line_number for line_number, _ in selected]
+    next_offset = offset + len(records)
+    has_more = next_offset < matched_count
+    return {
+        "path": str(log_path),
+        "records": records,
+        "record_line_numbers": line_numbers,
+        "records_matched": matched_count,
+        "records_returned": len(records),
+        "offset": offset,
+        "limit": max_records,
+        "has_more": has_more,
+        "next_offset": next_offset if has_more else None,
+        "truncated_file": False,
+        "parse_errors": parse_errors,
+        "rendered_text": format_jsonl_records(records),
+        "sort_field": selected_sort,
+        "sort_direction": direction,
+        **log_file_metadata(log_path),
+    }
+
+
+def _sort_jsonl_pairs(
+    pairs: list[tuple[int, dict[str, Any]]],
+    field: str,
+    *,
+    descending: bool,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Globally order records while keeping missing values last."""
+    if field == "__rey_line":
+        return sorted(pairs, key=lambda item: item[0], reverse=descending)
+    present = [
+        item
+        for item in pairs
+        if field in item[1] and item[1][field] is not None
+    ]
+    missing = [
+        item
+        for item in pairs
+        if field not in item[1] or item[1][field] is None
+    ]
+    present.sort(
+        key=lambda item: _jsonl_sort_value(item[1][field]),
+        reverse=descending,
+    )
+    return present + missing
+
+
+def _jsonl_sort_value(value: Any) -> tuple[int, Any]:
+    """Return a deterministic cross-type ordering for one JSON value."""
+    if isinstance(value, bool):
+        return (0, int(value))
+    if isinstance(value, (int, float)):
+        return (1, value)
+    if isinstance(value, str):
+        return (2, value.casefold())
+    return (3, json.dumps(value, sort_keys=True, default=str))
+
+
 _JSONL_EVENT_COLUMNS = [
     {"id": "timestamp", "label": "Time", "type": "datetime", "filter": True},
     {"id": "level", "label": "Level", "type": "text", "filter": True},
