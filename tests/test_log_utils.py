@@ -16,18 +16,24 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
 
     # Names owned by peer modules rather than log_utils itself. The governed
     # file manifest is a separate destination from the application log, so its
-    # surface lives in rey_lib.logs.file_manifest.
+    # surface lives in rey_lib.logs.file_manifest, and the run-to-manifest
+    # query that joins them lives in rey_lib.logs.run_file_records.
     non_log_utils_exports = {
         "JsonlHandler",
         "run_app_operation",
-            "FileManifestError",
-            "FileManifestSession",
-            "file_manifest_session",
-            "file_manifest_write_boundary",
+        "FileManifestError",
+        "FileManifestSession",
+        "file_manifest_session",
+        "file_manifest_write_boundary",
         "log_file_manifest_record",
         "manifest_lock_path",
         "manifest_state_path",
         "resolve_file_manifest_path",
+        "RunFileRecord",
+        "RunFileRecords",
+        "RunFileRecordsError",
+        "find_run_file_records",
+        "register_run_file_record_type",
     }
     missing = [
         name for name in logs.__all__

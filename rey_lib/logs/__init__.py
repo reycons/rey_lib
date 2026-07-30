@@ -1,4 +1,11 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.run_file_records import (
+    RunFileRecord,
+    RunFileRecords,
+    RunFileRecordsError,
+    find_run_file_records,
+    register_run_file_record_type,
+)
 from rey_lib.logs.file_manifest import (
     FileManifestError,
     FileManifestSession,
@@ -93,6 +100,11 @@ from rey_lib.run_lifecycle import run_app_operation
 
 __all__ = [
     "JsonlHandler",
+    "RunFileRecord",
+    "RunFileRecords",
+    "RunFileRecordsError",
+    "find_run_file_records",
+    "register_run_file_record_type",
     "FileManifestError",
     "FileManifestSession",
     "file_manifest_session",
