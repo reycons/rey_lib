@@ -21,15 +21,24 @@ boundary: the caller resolves and authorizes the path before calling.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import jmespath
+from jmespath.exceptions import JMESPathError
+
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import open_text_file
 
-__all__ = ["JsonlReadError", "JsonlRecord", "read_jsonl_file"]
+__all__ = [
+    "JsonlReadError",
+    "JsonlRecord",
+    "JsonlSearchResult",
+    "read_jsonl_file",
+    "search_jsonl_file",
+]
 
 
 class JsonlReadError(AppError):
@@ -42,6 +51,14 @@ class JsonlRecord:
 
     line_number: int
     record: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class JsonlSearchResult:
+    """One JMESPath result and the physical JSONL line it came from."""
+
+    line_number: int
+    value: Any
 
 
 def read_jsonl_file(
@@ -91,6 +108,58 @@ def read_jsonl_file(
     projection = _validated_fields(fields)
 
     records: list[JsonlRecord] = []
+    for line_number, parsed in _iter_jsonl_objects(file_path):
+        if not _matches(parsed, selected):
+            continue
+        records.append(
+            JsonlRecord(
+                line_number=line_number,
+                record=_project(parsed, projection),
+            )
+        )
+
+    return records
+
+
+def search_jsonl_file(
+    path: Path | str,
+    expression: str,
+) -> list[JsonlSearchResult]:
+    """
+    Apply one standard JMESPath expression independently to every JSONL record.
+
+    The expression is compiled once before the path is opened. Every parsed
+    nonblank record contributes exactly one result, including results equal to
+    ``False``, ``0``, an empty string, an empty collection, or ``None``.
+    Results retain the source record's physical one-based line number and file
+    order.
+
+    The caller remains responsible for resolving installation tokens and
+    authorizing the supplied path.
+    """
+    if not isinstance(expression, str) or not expression.strip():
+        raise JsonlReadError("JMESPath expression must be a non-empty string.")
+    try:
+        compiled = jmespath.compile(expression)
+    except JMESPathError as exc:
+        raise JsonlReadError(
+            f"Invalid JMESPath expression '{expression}': {exc}"
+        ) from exc
+
+    file_path = _validated_path(path)
+    results: list[JsonlSearchResult] = []
+    for line_number, parsed in _iter_jsonl_objects(file_path):
+        results.append(
+            JsonlSearchResult(
+                line_number=line_number,
+                value=compiled.search(parsed),
+            )
+        )
+    return results
+
+
+def _iter_jsonl_objects(file_path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Yield strict JSON objects with their physical one-based line numbers."""
     try:
         with open_text_file(file_path) as handle:
             # Iterating the handle streams the file, so the complete raw
@@ -98,19 +167,12 @@ def read_jsonl_file(
             for line_number, line in enumerate(handle, start=1):
                 if not line.strip():
                     continue
-                parsed = _parse_line(file_path, line_number, line)
-                if not _matches(parsed, selected):
-                    continue
-                records.append(
-                    JsonlRecord(
-                        line_number=line_number,
-                        record=_project(parsed, projection),
-                    )
+                yield (
+                    line_number,
+                    _parse_line(file_path, line_number, line),
                 )
     except OSError as exc:
         raise JsonlReadError(f"Cannot read JSONL file '{file_path}': {exc}") from exc
-
-    return records
 
 
 def _validated_path(path: Path | str) -> Path:

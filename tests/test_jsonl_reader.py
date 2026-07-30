@@ -169,6 +169,28 @@ def test_directory_path_raises(tmp_path: Path) -> None:
         read_jsonl_file(tmp_path)
 
 
+def test_unreadable_file_raises_shared_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OS read failure is translated through the shared JSONL error."""
+    import rey_lib.files.jsonl as jsonl_module
+
+    path = _write(tmp_path, '{"a": 1}')
+
+    def deny_read(_path: Path):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(jsonl_module, "open_text_file", deny_read)
+
+    with pytest.raises(JsonlReadError) as excinfo:
+        read_jsonl_file(path)
+
+    assert str(path) in str(excinfo.value)
+    assert "permission denied" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, PermissionError)
+
+
 def test_a_non_path_argument_raises(tmp_path: Path) -> None:
     with pytest.raises(JsonlReadError, match="must be a Path or str"):
         read_jsonl_file(42)

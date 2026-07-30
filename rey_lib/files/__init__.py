@@ -53,7 +53,9 @@ from rey_lib.files.file_transaction import (
 from rey_lib.files.jsonl import (
     JsonlReadError,
     JsonlRecord,
+    JsonlSearchResult,
     read_jsonl_file,
+    search_jsonl_file,
 )
 from rey_lib.files.file_loader import load_files
 from rey_lib.files.pipeline_reset import (
@@ -83,7 +85,9 @@ __all__ = [
     "discover_inbox_files",
     "JsonlReadError",
     "JsonlRecord",
+    "JsonlSearchResult",
     "read_jsonl_file",
+    "search_jsonl_file",
     "FileSetCollisionError",
     "FileSetCommitError",
     "FileSetMember",
