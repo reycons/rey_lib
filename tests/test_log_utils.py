@@ -37,6 +37,7 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
         "ManifestRecordSelection",
         "ManifestSelectionError",
         "SelectedManifestRecord",
+        "normalize_manifest_selection",
         "select_manifest_records",
         "RunFileRecord",
         "RunFileRecords",

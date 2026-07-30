@@ -34,6 +34,7 @@ __all__ = [
     "ManifestRecordSelection",
     "ManifestSelectionError",
     "SelectedManifestRecord",
+    "normalize_manifest_selection",
     "select_manifest_records",
 ]
 
@@ -69,6 +70,28 @@ class ManifestRecordSelection:
     def __iter__(self) -> Iterator[SelectedManifestRecord]:
         """Iterate selected records in manifest order."""
         return iter(self.records)
+
+
+def normalize_manifest_selection(manifest_selection: Any) -> Any:
+    """Return a declared selection as plain mappings and lists.
+
+    Configuration reaches a consumer as Namespaces, so normalizing it here keeps
+    every consumer storing, comparing, and recording the one same shape rather
+    than each converting it privately.
+    """
+    if isinstance(manifest_selection, Mapping):
+        return {
+            str(key): normalize_manifest_selection(value)
+            for key, value in manifest_selection.items()
+        }
+    if callable(getattr(manifest_selection, "keys", None)):
+        return {
+            str(key): normalize_manifest_selection(_get(manifest_selection, key))
+            for key in manifest_selection.keys()
+        }
+    if isinstance(manifest_selection, (list, tuple)):
+        return [normalize_manifest_selection(item) for item in manifest_selection]
+    return manifest_selection
 
 
 def select_manifest_records(

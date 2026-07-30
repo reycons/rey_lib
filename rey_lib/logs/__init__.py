@@ -3,6 +3,7 @@ from rey_lib.logs.manifest_selection import (
     ManifestRecordSelection,
     ManifestSelectionError,
     SelectedManifestRecord,
+    normalize_manifest_selection,
     select_manifest_records,
 )
 from rey_lib.logs.run_file_records import (
@@ -110,6 +111,7 @@ __all__ = [
     "ManifestRecordSelection",
     "ManifestSelectionError",
     "SelectedManifestRecord",
+    "normalize_manifest_selection",
     "select_manifest_records",
     "RunFileRecord",
     "RunFileRecords",
