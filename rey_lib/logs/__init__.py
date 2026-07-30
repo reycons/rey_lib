@@ -1,4 +1,10 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.manifest_selection import (
+    ManifestRecordSelection,
+    ManifestSelectionError,
+    SelectedManifestRecord,
+    select_manifest_records,
+)
 from rey_lib.logs.run_file_records import (
     RunFileRecord,
     RunFileRecords,
@@ -101,6 +107,10 @@ from rey_lib.run_lifecycle import run_app_operation
 
 __all__ = [
     "JsonlHandler",
+    "ManifestRecordSelection",
+    "ManifestSelectionError",
+    "SelectedManifestRecord",
+    "select_manifest_records",
     "RunFileRecord",
     "RunFileRecords",
     "RunFileRecordsError",
