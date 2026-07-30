@@ -31,10 +31,17 @@ def read_jsonl_records(
     content: str,
     *,
     filters: dict[str, str] | None = None,
-    max_records: int = 250,
+    max_records: int | None = 250,
+    offset: int = 0,
     truncated_file: bool = False,
 ) -> dict[str, Any]:
-    """Parse and filter authoritative JSONL log records."""
+    """Parse and filter authoritative JSONL log records.
+
+    ``offset`` and ``max_records`` select one stable page after filtering.
+    ``None`` or a non-positive limit returns every match after the offset.
+    Callers remain responsible for applying their existing byte-read boundary
+    before passing ``content``.
+    """
     if path.suffix != ".jsonl":
         return {
             "path": str(path),
@@ -62,12 +69,24 @@ def read_jsonl_records(
         if _record_matches(record, selected_filters):
             records.append(record)
 
-    limited_records = records[:max_records]
+    page_offset = max(0, int(offset))
+    if max_records is None or max_records <= 0:
+        limited_records = records[page_offset:]
+        page_limit = None
+    else:
+        page_limit = int(max_records)
+        limited_records = records[page_offset:page_offset + page_limit]
+    next_offset = page_offset + len(limited_records)
+    has_more = next_offset < len(records)
     return {
         "path": str(path),
         "records": limited_records,
         "records_matched": len(records),
         "records_returned": len(limited_records),
+        "offset": page_offset,
+        "limit": page_limit,
+        "has_more": has_more,
+        "next_offset": next_offset if has_more else None,
         "truncated_file": truncated_file,
         "parse_errors": parse_errors,
         "rendered_text": format_jsonl_records(limited_records),

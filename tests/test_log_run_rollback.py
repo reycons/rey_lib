@@ -10,13 +10,14 @@ import pytest
 
 from rey_lib.files import (
     LogRunRollbackError,
+    log_source_file_mutation,
     preview_log_run_rollback,
     register_file_compensation,
     rollback_log_run,
     serialize_source_file_mutation,
     unregister_file_compensation,
 )
-from rey_lib.logs import log_file_manifest_record
+from rey_lib.logs import log_file_manifest_record, resolve_run_identity
 from rey_lib.logs.file_manifest import FileManifestError, FileManifestSession
 
 
@@ -34,6 +35,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         paths=_Paths(tmp_path / "file_manifest.jsonl"),
         installation="test",
         config_root="test",
+        run_log_path=str(tmp_path / "run.jsonl"),
     )
 
 
@@ -77,6 +79,49 @@ def _rows(ctx: SimpleNamespace) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def test_shared_mutation_boundary_commits_evidence_before_manifest(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    resolve_run_identity(ctx)
+
+    manifest_record_id = log_source_file_mutation(
+        ctx,
+        action="create",
+        status="success",
+        destination_path=tmp_path / "created.csv",
+        application_name="test",
+        fields={"file_id": "file-a"},
+    )
+
+    run_rows = [
+        json.loads(line)
+        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+    ]
+    manifest_record = _rows(ctx)[0]
+    assert manifest_record_id == 1
+    assert run_rows[0]["record_type"] == "SOURCE_FILE_MUTATION"
+    assert manifest_record["record_type"] == "source_file_mutation"
+    assert manifest_record["file_id"] == "file-a"
+    assert manifest_record["evidence"] == {
+        "run_log_file": "run.jsonl",
+        "run_log_record_id": run_rows[0]["record_id"],
+    }
+
+
+def test_shared_mutation_boundary_rejects_authoritative_field_override(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(LogRunRollbackError, match="authoritative field"):
+        log_source_file_mutation(
+            _ctx(tmp_path),
+            action="create",
+            status="success",
+            destination_path=tmp_path / "created.csv",
+            fields={"evidence": {}},
+        )
 
 
 def test_preview_selects_exact_run_and_reverses_manifest_order(
@@ -166,6 +211,9 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
 
     assert result["status"] == "success"
     assert result["succeeded_count"] == 2
+    assert result["appended_rollback_evidence_count"] == 4
+    assert result["rollback_run_log_file"].startswith("log_run_rollback.")
+    assert result["rollback_run_log_file"].endswith(".jsonl")
     assert original.read_text(encoding="utf-8") == "input"
     assert not current.exists()
     assert not created.exists()
@@ -253,7 +301,21 @@ def test_failure_is_recorded_and_remaining_compensations_continue(
     assert result["status"] == "partial_success"
     assert result["succeeded_count"] == 1
     assert result["failed_count"] == 1
+    assert result["appended_rollback_evidence_count"] == 4
     assert not created.exists()
+    audit_rows = [
+        json.loads(line)
+        for line in Path(result["audit_log_path"]).read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    durable_summary = next(
+        row["summary"]
+        for row in audit_rows
+        if row["record_type"] == "RUN_SUMMARY"
+    )
+    assert durable_summary["failures"] == result["failed"]
+    assert durable_summary["failures"][0]["failure_reason"]
     finals = [
         row
         for row in _rows(ctx)
@@ -358,6 +420,7 @@ def test_unknown_action_is_reported_without_filesystem_inference(
     result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "failure"
+    assert result["appended_rollback_evidence_count"] == 2
     finals = [
         row
         for row in _rows(ctx)
@@ -426,6 +489,7 @@ def test_attempt_append_failure_prevents_filesystem_compensation(
 
     assert created.exists()
     assert result["status"] == "failure"
+    assert result["appended_rollback_evidence_count"] == 0
 
 
 def test_final_append_failure_leaves_traceable_indeterminate_attempt(
@@ -456,8 +520,35 @@ def test_final_append_failure_leaves_traceable_indeterminate_attempt(
 
     assert not created.exists()
     assert result["status"] == "failure"
+    assert result["appended_rollback_evidence_count"] == 1
     plan = preview_log_run_rollback(ctx, "run.jsonl")
     assert plan["indeterminate"] == [mutation_id]
+
+
+def test_preview_is_read_only_and_execution_rereads_manifest(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    first = tmp_path / "first.csv"
+    first.write_text("first", encoding="utf-8")
+    _append_mutation(ctx, action="create", destination_path=str(first))
+    manifest_before = ctx.paths.manifest.read_bytes()
+
+    preview = preview_log_run_rollback(ctx, "run.jsonl")
+
+    assert preview["candidate_count"] == 1
+    assert ctx.paths.manifest.read_bytes() == manifest_before
+    assert not list(tmp_path.glob("log_run_rollback.*.jsonl"))
+
+    second = tmp_path / "second.csv"
+    second.write_text("second", encoding="utf-8")
+    _append_mutation(ctx, action="create", destination_path=str(second))
+
+    result = rollback_log_run(ctx, _run_log(tmp_path))
+
+    assert result["succeeded_count"] == 2
+    assert not first.exists()
+    assert not second.exists()
 
 
 @pytest.mark.parametrize("value", ["", None])

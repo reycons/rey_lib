@@ -60,6 +60,7 @@ from rey_lib.files.jsonl import (
 from rey_lib.files.file_loader import load_files
 from rey_lib.files.log_run_rollback import (
     LogRunRollbackError,
+    log_source_file_mutation,
     preview_log_run_rollback,
     register_file_compensation,
     rollback_log_run,
@@ -138,6 +139,7 @@ __all__ = [
     "TransformError",
     "load_files",
     "LogRunRollbackError",
+    "log_source_file_mutation",
     "preview_log_run_rollback",
     "register_file_compensation",
     "rollback_log_run",

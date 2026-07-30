@@ -22,6 +22,7 @@ from rey_lib.logs import (
     bind_run,
     clear_run,
     file_manifest_session,
+    log_file_manifest_record,
     log_run_complete,
     log_run_record,
     log_run_start,
@@ -121,6 +122,89 @@ def serialize_source_file_mutation(
     }
 
 
+def log_source_file_mutation(
+    ctx: Any,
+    *,
+    action: str,
+    status: str,
+    source_path: Path | str = "",
+    destination_path: Path | str = "",
+    recovery_path: Path | str = "",
+    previous_version_path: Path | str = "",
+    application_name: str = "",
+    message: str = "",
+    fields: Mapping[str, Any] | None = None,
+) -> int:
+    """Commit run evidence, then append its linked mutation manifest record.
+
+    This is the shared producer boundary for governed filesystem operations.
+    It deliberately records no inferred compensation data: callers must pass
+    the exact paths made durable by the operation they performed.
+    """
+    extra_fields = dict(fields or {})
+    reserved = {
+        "record_id",
+        "record_type",
+        "schema_version",
+        "action",
+        "status",
+        "source_path",
+        "destination_path",
+        "recovery_path",
+        "previous_version_path",
+        "application_name",
+        "evidence",
+        "recorded_at",
+    }
+    overlap = sorted(reserved.intersection(extra_fields))
+    if overlap:
+        raise LogRunRollbackError(
+            "Mutation extension fields cannot replace authoritative field(s): "
+            + ", ".join(overlap)
+        )
+
+    normalized_action = _non_empty(action, "action")
+    normalized_status = _non_empty(status, "status")
+    run_log_record_id = log_run_record(
+        ctx,
+        "SOURCE_FILE_MUTATION",
+        message=message,
+        application_name=str(application_name or ""),
+        action=normalized_action,
+        status=normalized_status,
+        source_path=_path_text(source_path),
+        destination_path=_path_text(destination_path),
+        recovery_path=_path_text(recovery_path),
+        previous_version_path=_path_text(previous_version_path),
+        **extra_fields,
+    )
+    if run_log_record_id is None:
+        raise LogRunRollbackError(
+            "Source-file mutation run-log evidence did not commit; the file "
+            "manifest was not modified."
+        )
+
+    record = serialize_source_file_mutation(
+        action=normalized_action,
+        status=normalized_status,
+        source_path=source_path,
+        destination_path=destination_path,
+        recovery_path=recovery_path,
+        previous_version_path=previous_version_path,
+        run_log_file=_context_run_log_name(ctx),
+        run_log_record_id=run_log_record_id,
+        application_name=application_name,
+    )
+    record.update(extra_fields)
+    try:
+        return log_file_manifest_record(ctx, record)
+    except FileManifestError as exc:
+        raise LogRunRollbackError(
+            f"{MUTATION_RECORD_TYPE} lifecycle record could not be appended "
+            f"to the file manifest: {exc}"
+        ) from exc
+
+
 def preview_log_run_rollback(
     ctx: Any,
     run_log_file: Path | str,
@@ -155,6 +239,7 @@ def rollback_log_run(
 
     succeeded: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    appended_rollback_record_ids: list[int] = []
     bind_run(audit_ctx)
     try:
         with file_manifest_session(ctx) as session:
@@ -189,7 +274,8 @@ def rollback_log_run(
                         status="attempted",
                         reason=str(reason or ""),
                     )
-                    _append_rollback_evidence(
+                    appended_rollback_record_ids.append(attempt_id)
+                    final_id = _append_rollback_evidence(
                         session,
                         audit_ctx,
                         original=original,
@@ -200,6 +286,7 @@ def rollback_log_run(
                         failure_reason=str(issue["reason"]),
                         reason=str(reason or ""),
                     )
+                    appended_rollback_record_ids.append(final_id)
                 except (FileManifestError, LogRunRollbackError):
                     continue
             for candidate in plan["candidates"]:
@@ -216,6 +303,7 @@ def rollback_log_run(
                         status="attempted",
                         reason=str(reason or ""),
                     )
+                    appended_rollback_record_ids.append(attempt_id)
                 except (FileManifestError, LogRunRollbackError) as exc:
                     failed.append(_failed_result(original, str(exc)))
                     continue
@@ -226,7 +314,7 @@ def rollback_log_run(
                     failure = _failed_result(original, str(exc))
                     failed.append(failure)
                     try:
-                        _append_rollback_evidence(
+                        final_id = _append_rollback_evidence(
                             session,
                             audit_ctx,
                             original=original,
@@ -237,6 +325,7 @@ def rollback_log_run(
                             failure_reason=str(exc),
                             reason=str(reason or ""),
                         )
+                        appended_rollback_record_ids.append(final_id)
                     except (FileManifestError, LogRunRollbackError):
                         pass
                     continue
@@ -248,7 +337,7 @@ def rollback_log_run(
                     **result,
                 }
                 try:
-                    _append_rollback_evidence(
+                    final_id = _append_rollback_evidence(
                         session,
                         audit_ctx,
                         original=original,
@@ -258,6 +347,7 @@ def rollback_log_run(
                         attempt_record_id=attempt_id,
                         reason=str(reason or ""),
                     )
+                    appended_rollback_record_ids.append(final_id)
                 except (FileManifestError, LogRunRollbackError) as exc:
                     failed.append(_failed_result(original, str(exc)))
                     continue
@@ -268,9 +358,11 @@ def rollback_log_run(
         clear_run()
 
     status = _aggregate_status(len(succeeded), len(failed))
+    rollback_run_log_file = Path(str(audit_ctx.run_log_path)).name
     summary = {
         "operation": "log_run_rollback",
         "original_run_log_file": selected_file,
+        "rollback_run_log_file": rollback_run_log_file,
         "status": status,
         "succeeded_count": len(succeeded),
         "failed_count": len(failed),
@@ -278,6 +370,10 @@ def rollback_log_run(
         "non_recoverable_count": plan["non_recoverable_count"],
         "already_compensated_count": plan["already_compensated_count"],
         "indeterminate_count": plan["indeterminate_count"],
+        "appended_rollback_evidence_count": len(
+            appended_rollback_record_ids
+        ),
+        "failures": failed,
     }
     log_run_summary(audit_ctx, summary)
     log_run_complete(
@@ -682,6 +778,17 @@ def _run_log_name(value: Path | str) -> str:
     if not text:
         raise LogRunRollbackError("run_log_file must be a non-empty path or filename.")
     return Path(text).name
+
+
+def _context_run_log_name(ctx: Any) -> str:
+    for field in ("run_log_path", "log_file"):
+        value = getattr(ctx, field, None)
+        if value:
+            return _run_log_name(value)
+    raise LogRunRollbackError(
+        "Source-file mutation evidence committed without an addressable run-log "
+        "filename."
+    )
 
 
 def _path_text(value: Any) -> str:

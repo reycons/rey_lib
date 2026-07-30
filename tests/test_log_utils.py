@@ -144,6 +144,28 @@ def test_read_jsonl_records_filters_errors(tmp_path) -> None:
     assert "failed" in result["rendered_text"]
 
 
+def test_read_jsonl_records_returns_requested_page(
+    tmp_path,
+) -> None:
+    path = tmp_path / "app.run.jsonl"
+    content = "".join(
+        json.dumps({"record_id": record_id}) + "\n"
+        for record_id in range(1, 301)
+    )
+
+    result = read_jsonl_records(path, content, max_records=50, offset=250)
+
+    assert result["records_matched"] == 300
+    assert result["records_returned"] == 50
+    assert result["offset"] == 250
+    assert result["limit"] == 50
+    assert result["has_more"] is False
+    assert result["next_offset"] is None
+    assert [record["record_id"] for record in result["records"]] == list(
+        range(251, 301)
+    )
+
+
 def test_read_jsonl_records_rejects_text_logs(tmp_path) -> None:
     """Text logs are not parsed as structured records."""
     result = read_jsonl_records(tmp_path / "app.run.log", "ERROR failed\n")
