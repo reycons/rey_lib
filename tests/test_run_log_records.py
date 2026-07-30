@@ -374,46 +374,12 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert [s["operation"] for s in doc["step_results"]] == ["p1", "p2"]
 
 
-def test_standalone_workflow_restore_mapping_emits_no_policy(
+def test_workflow_declaring_the_retired_restore_key_is_rejected(
     tmp_path: Path,
 ) -> None:
-    """Rollback no longer derives authority from workflow restore mappings."""
-    from rey_lib.workflow import RunContext, run_workflow
+    """Rollback is manifest-driven; the retired key fails closed on both paths."""
+    from rey_lib.workflow import WorkflowError, run_workflow
 
-    ctx = SimpleNamespace(log_file=str(tmp_path / "standalone.jsonl"))
-    workflow = {
-        "name": "wf",
-        "restore_mappings": [
-            {"from": "{processed}", "to": "{inbox}", "overwrite": True},
-        ],
-        "tokens": {
-            "processed": str(tmp_path / "processing"),
-            "inbox": str(tmp_path / "inbox"),
-        },
-        "processes": {"p1": {}},
-        "steps": [{"id": "s1", "process": "p1"}],
-    }
-
-    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
-        return None
-
-    run_workflow(ctx, workflow, {"p1": handler})
-
-    records = _read(Path(ctx.run_log_path))
-    assert not any(
-        record["record_type"] == "RUN_RESTORE_POLICY"
-        for record in records
-    )
-
-
-def test_pipeline_owned_workflow_does_not_duplicate_restore_policy(tmp_path: Path) -> None:
-    """The pipeline remains the sole policy owner for embedded workflow runs."""
-    from rey_lib.workflow import RunContext, run_workflow
-
-    ctx = SimpleNamespace(
-        log_file=str(tmp_path / "embedded.jsonl"),
-        runtime=SimpleNamespace(pipeline_run_id="pipeline-run"),
-    )
     workflow = {
         "name": "wf",
         "restore_mappings": [{"from": "/processing", "to": "/inbox"}],
@@ -421,16 +387,16 @@ def test_pipeline_owned_workflow_does_not_duplicate_restore_policy(tmp_path: Pat
         "steps": [{"id": "s1", "process": "p1"}],
     }
 
-    def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
-        return None
+    for ctx in (
+        SimpleNamespace(log_file=str(tmp_path / "standalone.jsonl")),
+        SimpleNamespace(
+            log_file=str(tmp_path / "embedded.jsonl"),
+            runtime=SimpleNamespace(pipeline_run_id="pipeline-run"),
+        ),
+    ):
+        with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
+            run_workflow(ctx, workflow, {"p1": lambda *_: None})
 
-    run_workflow(ctx, workflow, {"p1": handler})
-
-    records = _read(Path(ctx.run_log_path))
-    assert not any(
-        record["record_type"] == "RUN_RESTORE_POLICY"
-        for record in records
-    )
 
 
 def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> None:

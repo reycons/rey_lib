@@ -236,22 +236,12 @@ def test_handler_error_stops_run_fail_closed() -> None:
     assert "nope" in (run.outcomes[-1].error or "")
     assert ran == []
 
-
 # ---------------------------------------------------------------------------
-# Restore mappings do not participate in rollback
+# Retired configuration (SGC_Log_Run_Rollback)
 # ---------------------------------------------------------------------------
 
-
-def test_standalone_workflow_restore_mappings_emit_no_policy(monkeypatch) -> None:
-    """Rollback is manifest-driven, so workflow mappings emit no policy."""
-    captured: list[dict[str, Any]] = []
-
-    def capture(_ctx, record_type: str, **fields: Any) -> None:
-        if record_type == "RUN_RESTORE_POLICY":
-            captured.append(fields)
-
-    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
-
+def test_retired_restore_mappings_key_is_rejected() -> None:
+    """A retired key fails closed rather than being silently ignored."""
     workflow = {
         "name": "standalone",
         "restore_mappings": [{"from": "/source", "to": "/dest"}],
@@ -259,81 +249,35 @@ def test_standalone_workflow_restore_mappings_emit_no_policy(monkeypatch) -> Non
         "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
     }
 
-    run_workflow(object(), workflow, {"noop": lambda *_: None})
+    with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
+        run_workflow(object(), workflow, {"noop": lambda *_: None})
 
-    assert captured == []
+
+def test_retired_key_is_rejected_before_any_step_runs() -> None:
+    """Rejection happens during validation, so no handler is invoked."""
+    calls, handler = _recorder()
+    workflow = {
+        "name": "standalone",
+        "restore_mappings": [],
+        "processes": {"noop": {}},
+        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
+    }
+
+    with pytest.raises(WorkflowError, match="retired key"):
+        run_workflow(object(), workflow, {"noop": handler})
+
+    assert calls == []
 
 
-def test_standalone_workflow_without_restore_mappings_emits_no_policy(
-    monkeypatch,
-) -> None:
-    """A standalone workflow without restore_mappings emits no RUN_RESTORE_POLICY."""
-    captured: list[dict[str, Any]] = []
-
-    def capture(_ctx, record_type: str, **fields: Any) -> None:
-        if record_type == "RUN_RESTORE_POLICY":
-            captured.append(fields)
-
-    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
-
+def test_workflow_without_the_retired_key_runs_normally() -> None:
+    calls, handler = _recorder()
     workflow = {
         "name": "standalone",
         "processes": {"noop": {}},
         "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
     }
 
-    run_workflow(object(), workflow, {"noop": lambda *_: None})
+    run = run_workflow(object(), workflow, {"noop": handler})
 
-    assert len(captured) == 0
-
-
-def test_pipeline_owned_workflow_restore_mappings_emit_no_policy(
-    monkeypatch,
-) -> None:
-    """Pipeline ownership does not reintroduce restore-policy evidence."""
-    captured: list[dict[str, Any]] = []
-
-    def capture(_ctx, record_type: str, **fields: Any) -> None:
-        if record_type == "RUN_RESTORE_POLICY":
-            captured.append(fields)
-
-    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
-
-    # Create a context with runtime containing pipeline_run_id
-    ctx = type("MockCtx", (), {"runtime": type("Runtime", (), {"pipeline_run_id": "pr-123"})()})()
-
-    workflow = {
-        "name": "owned",
-        "restore_mappings": [{"from": "/source", "to": "/dest"}],
-        "processes": {"noop": {}},
-        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
-    }
-
-    run_workflow(ctx, workflow, {"noop": lambda *_: None})
-
-    assert captured == []
-
-
-def test_pipeline_owned_workflow_without_restore_mappings_emits_no_policy(
-    monkeypatch,
-) -> None:
-    """A pipeline-owned workflow without restore_mappings emits no RUN_RESTORE_POLICY."""
-    captured: list[dict[str, Any]] = []
-
-    def capture(_ctx, record_type: str, **fields: Any) -> None:
-        if record_type == "RUN_RESTORE_POLICY":
-            captured.append(fields)
-
-    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
-
-    ctx = type("MockCtx", (), {"runtime": type("Runtime", (), {"pipeline_run_id": "pr-456"})()})()
-
-    workflow = {
-        "name": "owned",
-        "processes": {"noop": {}},
-        "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
-    }
-
-    run_workflow(ctx, workflow, {"noop": lambda *_: None})
-
-    assert len(captured) == 0
+    assert run.status == "success"
+    assert len(calls) == 1

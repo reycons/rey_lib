@@ -185,9 +185,6 @@ def test_pipeline_local_tokens_resolve_across_owned_entry() -> None:
                     "trade_inbox": "{trade_root}/inbox",
                     "trade_processed": "{trade_root}/processed",
                 },
-                "restore_mappings": [
-                    {"from": "{trade_processed}", "to": "{trade_inbox}"}
-                ],
                 "steps": [
                     {
                         "name": "prepare",
@@ -207,8 +204,6 @@ def test_pipeline_local_tokens_resolve_across_owned_entry() -> None:
     pipeline = ctx.pipelines[0]
     assert pipeline.tokens.trade_root == "/rey/data/trade"
     assert pipeline.tokens.trade_inbox == "/rey/data/trade/inbox"
-    assert getattr(pipeline.restore_mappings[0], "from") == "/rey/data/trade/processed"
-    assert pipeline.restore_mappings[0].to == "/rey/data/trade/inbox"
     assert pipeline.steps[0].args == ["--inbox", "/rey/data/trade/inbox"]
     assert pipeline.steps[0].ctx_overrides.processed == "/rey/data/trade/processed"
     assert pipeline.steps[0].ctx_overrides.nested[0].source == "/rey/data/trade/inbox"
@@ -256,31 +251,6 @@ def test_approved_late_bound_pipeline_token_may_survive() -> None:
     _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
 
     assert ctx.pipelines[0].value == "/rey/data/processed/{source_subfolder}"
-
-
-def test_legacy_restore_mapping_paths_still_resolve_as_configuration() -> None:
-    """Removing rollback policy does not change generic path-key resolution."""
-    ctx = Namespace({
-        "pipelines": [
-            {
-                "name": "trade",
-                "tokens": {
-                    "inbox": "{data}/trade/inbox",
-                    "processed": "{data}/trade/processed",
-                },
-                "restore_mappings": [{"from": "{processed}", "to": "{inbox}"}],
-            }
-        ]
-    })
-    _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
-    resolved_mappings = [
-        {key: getattr(mapping, key) for key in mapping.keys()}
-        for mapping in ctx.pipelines[0].restore_mappings
-    ]
-
-    assert resolved_mappings == [
-        {"from": "/rey/data/trade/processed", "to": "/rey/data/trade/inbox"}
-    ]
 
 
 def test_contract_remains_string() -> None:

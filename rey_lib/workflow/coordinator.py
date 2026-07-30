@@ -49,6 +49,10 @@ __all__ = ["StepOutcome", "WorkflowRun", "run_workflow", "ProcessHandler"]
 
 _logger = get_logger(__name__)
 
+# Workflow configuration this engine no longer honours. Declaring one is a hard
+# error, never a silently ignored key (SGC_Log_Run_Rollback).
+_RETIRED_WORKFLOW_KEYS = ("restore_mappings",)
+
 # A process handler: (ctx, effective_config, run_context) -> result-or-None.
 # The result may be any object exposing ``status``/``detail``; None means "ok".
 ProcessHandler = Callable[[Any, dict[str, Any], RunContext], Any]
@@ -176,6 +180,19 @@ def run_workflow(
                 f"workflow '{name}': step '{step_id}' is missing required 'process'."
             )
         step_views.append((step_id, label, process))
+
+    # Configuration this engine no longer honours is a hard error, never a
+    # silently ignored key: leaving it parseable implies it is still supported
+    # and invites new code to depend on it. Rollback is manifest-driven and
+    # selects source_file_mutation records, so folder-based restore mappings
+    # have no consumer (SGC_Log_Run_Rollback).
+    for retired in _RETIRED_WORKFLOW_KEYS:
+        if _get(workflow, retired) is not None:
+            raise WorkflowError(
+                f"workflow '{name}' declares retired key '{retired}'. Rollback "
+                "is manifest-driven; remove this key from the workflow "
+                "definition."
+            )
 
     # ``only`` is the legacy single-step-by-id parameter; treat it as ``step``.
     if only is not None and step is None:

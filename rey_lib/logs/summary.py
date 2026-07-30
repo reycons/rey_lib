@@ -130,6 +130,17 @@ def create_results_summary(
         result["skipped"].append("no_terminal_record")
         return result
 
+    # A completed run owns exactly one RESULTS_SUMMARY. Finalization nests — the
+    # shared coordinator finalizes a standalone workflow run and the run-owning
+    # application finalizes again in its own lifecycle — so repeated calls must
+    # return the summary already on the log rather than append a second one.
+    # This mirrors the existing ARTIFACT_MANIFEST idempotency.
+    existing = _last_record_of_type(records, _RESULTS_SUMMARY)
+    if existing is not None:
+        result["summary"] = existing
+        result["skipped"].append("already_summarized")
+        return result
+
     try:
         source_records = records
         sections = _run_log_sections(source_records)
@@ -187,6 +198,17 @@ def _is_record_type(record: dict[str, Any], record_type: str) -> bool:
 def _has_record_type(records: list[dict[str, Any]], record_type: str) -> bool:
     """Return True when any record matches ``record_type`` (case-insensitive)."""
     return any(_is_record_type(r, record_type) for r in records)
+
+
+def _last_record_of_type(
+    records: list[dict[str, Any]],
+    record_type: str,
+) -> dict[str, Any] | None:
+    """Return the most recent record of ``record_type``, or None when absent."""
+    for record in reversed(records or []):
+        if _is_record_type(record, record_type):
+            return record
+    return None
 
 
 def _normalize_execution_details(execution_details: dict[str, Any] | None) -> dict[str, Any]:
