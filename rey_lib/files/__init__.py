@@ -58,10 +58,13 @@ from rey_lib.files.jsonl import (
     search_jsonl_file,
 )
 from rey_lib.files.file_loader import load_files
-from rey_lib.files.pipeline_reset import (
-    latest_pipeline_run,
-    preview_pipeline_reset_from_run,
-    reset_pipeline_from_run,
+from rey_lib.files.log_run_rollback import (
+    LogRunRollbackError,
+    preview_log_run_rollback,
+    register_file_compensation,
+    rollback_log_run,
+    serialize_source_file_mutation,
+    unregister_file_compensation,
 )
 from rey_lib.files.workbook_conversion import (
     SUPPORTED_WORKBOOK_EXTENSIONS,
@@ -134,9 +137,12 @@ __all__ = [
     "parse_date_from_filename",
     "TransformError",
     "load_files",
-    "latest_pipeline_run",
-    "preview_pipeline_reset_from_run",
-    "reset_pipeline_from_run",
+    "LogRunRollbackError",
+    "preview_log_run_rollback",
+    "register_file_compensation",
+    "rollback_log_run",
+    "serialize_source_file_mutation",
+    "unregister_file_compensation",
     "SUPPORTED_WORKBOOK_EXTENSIONS",
     "ConvertedTableArtifact",
     "EmptyWorkbookError",

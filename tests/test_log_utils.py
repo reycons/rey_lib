@@ -20,7 +20,10 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
     non_log_utils_exports = {
         "JsonlHandler",
         "run_app_operation",
-        "FileManifestError",
+            "FileManifestError",
+            "FileManifestSession",
+            "file_manifest_session",
+            "file_manifest_write_boundary",
         "log_file_manifest_record",
         "manifest_lock_path",
         "manifest_state_path",

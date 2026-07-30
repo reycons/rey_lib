@@ -21,7 +21,6 @@ from rey_lib.config.config_utils import (
 )
 from rey_lib.config.config_paths import _build_path_resolver
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs.execution_records import log_run_restore_policy
 
 _BASE = Path("/base")
 
@@ -259,8 +258,8 @@ def test_approved_late_bound_pipeline_token_may_survive() -> None:
     assert ctx.pipelines[0].value == "/rey/data/processed/{source_subfolder}"
 
 
-def test_run_restore_policy_receives_resolved_paths(monkeypatch) -> None:
-    """The log helper receives resolved mappings and performs no token resolution."""
+def test_legacy_restore_mapping_paths_still_resolve_as_configuration() -> None:
+    """Removing rollback policy does not change generic path-key resolution."""
     ctx = Namespace({
         "pipelines": [
             {
@@ -274,24 +273,14 @@ def test_run_restore_policy_receives_resolved_paths(monkeypatch) -> None:
         ]
     })
     _apply_path_resolver(ctx, PathResolver({"data": Path("/rey/data")}))
-    captured: dict[str, object] = {}
-
-    def capture(_ctx, record_type, **fields):
-        captured.update({"record_type": record_type, **fields})
-
-    monkeypatch.setattr("rey_lib.logs.execution_records.log_run_record", capture)
     resolved_mappings = [
         {key: getattr(mapping, key) for key in mapping.keys()}
         for mapping in ctx.pipelines[0].restore_mappings
     ]
-    log_run_restore_policy(ctx, resolved_mappings)
 
-    assert captured == {
-        "record_type": "RUN_RESTORE_POLICY",
-        "restore_rules": [
-            {"from": "/rey/data/trade/processed", "to": "/rey/data/trade/inbox"}
-        ],
-    }
+    assert resolved_mappings == [
+        {"from": "/rey/data/trade/processed", "to": "/rey/data/trade/inbox"}
+    ]
 
 
 def test_contract_remains_string() -> None:

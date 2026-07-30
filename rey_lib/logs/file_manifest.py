@@ -41,6 +41,8 @@ from typing import Any, Iterator
 
 __all__ = [
     "FileManifestError",
+    "FileManifestSession",
+    "file_manifest_session",
     "file_manifest_write_boundary",
     "log_file_manifest_record",
     "manifest_lock_path",
@@ -146,13 +148,7 @@ def log_file_manifest_record(ctx: Any, record: dict[str, Any]) -> int:
         If the manifest path is unconfigured, the record is malformed, or the
         record could not be sequenced and appended.
     """
-    if not isinstance(record, dict):
-        raise FileManifestError("A manifest record must be a JSON object.")
-    if "record_id" in record:
-        raise FileManifestError(
-            "A manifest record must not supply 'record_id'; the manifest writer "
-            "owns durable sequencing."
-        )
+    _validate_unsequenced_record(record)
 
     manifest_path = resolve_file_manifest_path(ctx)
     try:
@@ -163,25 +159,41 @@ def log_file_manifest_record(ctx: Any, record: dict[str, Any]) -> int:
         ) from exc
 
     with _ManifestLock(manifest_path):
-        state = _load_state(manifest_path)
-        record_id = int(state[_LAST_RECORD_ID]) + 1
-        sequenced = {"record_id": record_id, **record}
+        return _append_locked(manifest_path, record)
 
-        # Imported lazily because the rey_lib.files package eagerly loads
-        # file_utils, which imports this logging layer — a module-level import
-        # would form a cycle (SGC_Rey_Lib_Primitive_File_IO_Layer).
-        from rey_lib.files import primitive_file_io
 
-        try:
-            primitive_file_io.append_jsonl(manifest_path, sequenced)
-        except (OSError, TypeError, ValueError) as exc:
-            raise FileManifestError(
-                f"Manifest record could not be appended to '{manifest_path}': {exc}"
-            ) from exc
+class FileManifestSession:
+    """Public append/read surface held under the shared manifest lock."""
 
-        _commit_state(manifest_path, record_id)
+    def __init__(self, manifest_path: Path) -> None:
+        self.path = manifest_path
 
-    return record_id
+    def read_records(self) -> list[dict[str, Any]]:
+        """Strictly read every current manifest record in physical order."""
+        if not self.path.exists():
+            return []
+        from rey_lib.files.jsonl import read_jsonl_file
+
+        return [dict(item.record) for item in read_jsonl_file(self.path)]
+
+    def append(self, record: dict[str, Any]) -> int:
+        """Append one record without reacquiring the already-held lock."""
+        _validate_unsequenced_record(record)
+        return _append_locked(self.path, record)
+
+
+@contextmanager
+def file_manifest_session(ctx: Any) -> Iterator[FileManifestSession]:
+    """Yield a lock-aware manifest session for governed multi-record work."""
+    manifest_path = resolve_file_manifest_path(ctx)
+    try:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise FileManifestError(
+            f"Manifest directory cannot be created for '{manifest_path}': {exc}"
+        ) from exc
+    with _ManifestLock(manifest_path):
+        yield FileManifestSession(manifest_path)
 
 
 @contextmanager
@@ -196,6 +208,35 @@ def file_manifest_write_boundary(ctx: Any) -> Iterator[Path]:
     with _ManifestLock(manifest_path):
         yield manifest_path
         _commit_state(manifest_path, _highest_record_id(manifest_path))
+
+
+def _validate_unsequenced_record(record: Any) -> None:
+    """Reject malformed records before entering the append primitive."""
+    if not isinstance(record, dict):
+        raise FileManifestError("A manifest record must be a JSON object.")
+    if "record_id" in record:
+        raise FileManifestError(
+            "A manifest record must not supply 'record_id'; the manifest writer "
+            "owns durable sequencing."
+        )
+
+
+def _append_locked(manifest_path: Path, record: dict[str, Any]) -> int:
+    """Sequence and append one record while the caller holds the manifest lock."""
+    state = _load_state(manifest_path)
+    record_id = int(state[_LAST_RECORD_ID]) + 1
+    sequenced = {"record_id": record_id, **record}
+
+    from rey_lib.files import primitive_file_io
+
+    try:
+        primitive_file_io.append_jsonl(manifest_path, sequenced)
+    except (OSError, TypeError, ValueError) as exc:
+        raise FileManifestError(
+            f"Manifest record could not be appended to '{manifest_path}': {exc}"
+        ) from exc
+    _commit_state(manifest_path, record_id)
+    return record_id
 
 
 class _ManifestLock:

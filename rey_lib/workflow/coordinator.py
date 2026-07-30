@@ -35,7 +35,6 @@ from rey_lib.logs import (
     get_logger,
     finalize_run_log,
     log_artifact_manifest_from_run_log,
-    log_run_restore_policy,
     log_run_complete,
     log_run_start,
     set_nest_level,
@@ -203,13 +202,6 @@ def run_workflow(
     # sits below the app base (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
     set_nest_level(ctx, "workflow")
     log_run_start(ctx, workflow=name, apply=apply)
-    restore_mappings = [
-        _expand_config(_to_mapping(item), tokens)
-        for item in _as_list(_get(workflow, "restore_mappings"))
-        if _to_mapping(item)
-    ]
-    if restore_mappings:
-        log_run_restore_policy(ctx, restore_mappings)
     # Bind the current run so file_utils records file operations to this run log
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
     bind_run(ctx)

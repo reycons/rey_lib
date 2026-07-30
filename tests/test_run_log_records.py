@@ -374,8 +374,10 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert [s["operation"] for s in doc["step_results"]] == ["p1", "p2"]
 
 
-def test_standalone_workflow_emits_run_restore_policy(tmp_path: Path) -> None:
-    """Standalone workflows emit the same run-scoped restore-policy record."""
+def test_standalone_workflow_restore_mapping_emits_no_policy(
+    tmp_path: Path,
+) -> None:
+    """Rollback no longer derives authority from workflow restore mappings."""
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "standalone.jsonl"))
@@ -398,19 +400,10 @@ def test_standalone_workflow_emits_run_restore_policy(tmp_path: Path) -> None:
     run_workflow(ctx, workflow, {"p1": handler})
 
     records = _read(Path(ctx.run_log_path))
-    policies = [
-        record for record in records
-        if record["record_type"] == "RUN_RESTORE_POLICY"
-    ]
-    assert len(policies) == 1
-    assert policies[0]["restore_rules"] == [{
-        "from": str(tmp_path / "processing"),
-        "to": str(tmp_path / "inbox"),
-        "overwrite": True,
-    }]
-    assert [record["record_type"] for record in records].index(
-        "RUN_RESTORE_POLICY"
-    ) > [record["record_type"] for record in records].index("RUN_START")
+    assert not any(
+        record["record_type"] == "RUN_RESTORE_POLICY"
+        for record in records
+    )
 
 
 def test_pipeline_owned_workflow_does_not_duplicate_restore_policy(tmp_path: Path) -> None:

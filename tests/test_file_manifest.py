@@ -10,6 +10,7 @@ import pytest
 
 from rey_lib.logs import (
     FileManifestError,
+    file_manifest_session,
     file_manifest_write_boundary,
     log_file_manifest_record,
     log_run_record,
@@ -96,6 +97,21 @@ def test_append_preserves_existing_records(tmp_path: Path) -> None:
 
     rows = _rows(manifest)
     assert [row["path"] for row in rows] == ["/first", "/second"]
+
+
+def test_lock_aware_session_reads_and_appends_without_reacquiring(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(tmp_path)
+    ctx = _ctx(manifest)
+    log_file_manifest_record(ctx, _record(path="/first"))
+
+    with file_manifest_session(ctx) as session:
+        assert [row["path"] for row in session.read_records()] == ["/first"]
+        record_id = session.append(_record(path="/second"))
+
+    assert record_id == 2
+    assert [row["path"] for row in _rows(manifest)] == ["/first", "/second"]
 
 
 def test_one_object_per_line(tmp_path: Path) -> None:

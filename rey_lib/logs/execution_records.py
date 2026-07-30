@@ -58,30 +58,6 @@ def log_run_summary(ctx: Any, summary: dict[str, Any]) -> None:
     log_run_record(ctx, "RUN_SUMMARY", summary=summary)
 
 
-def log_run_restore_policy(
-    ctx: Any, restore_mappings: list[dict[str, Any]]
-) -> None:
-    """Append the RUN_RESTORE_POLICY record for an executable run.
-
-    Normalizes the supplied restore mappings to resolved ``from``/``to`` rules
-    (order preserved) and delegates to the canonical run-record writer. Performs no
-    token resolution, workflow lookup, reset planning, or filesystem access — the
-    mappings arrive already resolved by config utils.
-    """
-    restore_rules = []
-    for mapping in restore_mappings or []:
-        if not isinstance(mapping, dict):
-            continue
-        rule: dict[str, Any] = {
-            "from": str(mapping.get("from", "")),
-            "to": str(mapping.get("to", "")),
-        }
-        if mapping.get("overwrite") is True:
-            rule["overwrite"] = True
-        restore_rules.append(rule)
-    log_run_record(ctx, "RUN_RESTORE_POLICY", restore_rules=restore_rules)
-
-
 def log_step_failure(
     ctx: Any,
     *,

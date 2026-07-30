@@ -1,6 +1,8 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
 from rey_lib.logs.file_manifest import (
     FileManifestError,
+    FileManifestSession,
+    file_manifest_session,
     file_manifest_write_boundary,
     log_file_manifest_record,
     manifest_lock_path,
@@ -78,7 +80,6 @@ from rey_lib.logs.log_utils import (
     log_run_record,
     log_run_start,
     log_run_summary,
-    log_run_restore_policy,
     log_row_count,
     log_sql_execution,
     log_step_failure,
@@ -93,6 +94,8 @@ from rey_lib.run_lifecycle import run_app_operation
 __all__ = [
     "JsonlHandler",
     "FileManifestError",
+    "FileManifestSession",
+    "file_manifest_session",
     "file_manifest_write_boundary",
     "log_file_manifest_record",
     "manifest_lock_path",
@@ -140,7 +143,6 @@ __all__ = [
     "log_error",
     "log_run_complete",
     "log_run_summary",
-    "log_run_restore_policy",
     "run_app_operation",
     "log_app_execution",
     "log_input_discovered",

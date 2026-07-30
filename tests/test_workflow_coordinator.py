@@ -238,12 +238,12 @@ def test_handler_error_stops_run_fail_closed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Restore policy emission
+# Restore mappings do not participate in rollback
 # ---------------------------------------------------------------------------
 
 
-def test_standalone_workflow_with_restore_mappings_emits_policy(monkeypatch) -> None:
-    """A standalone workflow with restore_mappings emits RUN_RESTORE_POLICY."""
+def test_standalone_workflow_restore_mappings_emit_no_policy(monkeypatch) -> None:
+    """Rollback is manifest-driven, so workflow mappings emit no policy."""
     captured: list[dict[str, Any]] = []
 
     def capture(_ctx, record_type: str, **fields: Any) -> None:
@@ -261,10 +261,7 @@ def test_standalone_workflow_with_restore_mappings_emits_policy(monkeypatch) -> 
 
     run_workflow(object(), workflow, {"noop": lambda *_: None})
 
-    assert len(captured) == 1
-    assert captured[0]["restore_rules"] == [
-        {"from": "/source", "to": "/dest"}
-    ]
+    assert captured == []
 
 
 def test_standalone_workflow_without_restore_mappings_emits_no_policy(
@@ -290,10 +287,10 @@ def test_standalone_workflow_without_restore_mappings_emits_no_policy(
     assert len(captured) == 0
 
 
-def test_pipeline_owned_workflow_with_restore_mappings_emits_policy(
+def test_pipeline_owned_workflow_restore_mappings_emit_no_policy(
     monkeypatch,
 ) -> None:
-    """A pipeline-owned workflow with ctx.runtime.pipeline_run_id emits its own restore policy."""
+    """Pipeline ownership does not reintroduce restore-policy evidence."""
     captured: list[dict[str, Any]] = []
 
     def capture(_ctx, record_type: str, **fields: Any) -> None:
@@ -314,10 +311,7 @@ def test_pipeline_owned_workflow_with_restore_mappings_emits_policy(
 
     run_workflow(ctx, workflow, {"noop": lambda *_: None})
 
-    assert len(captured) == 1
-    assert captured[0]["restore_rules"] == [
-        {"from": "/source", "to": "/dest"}
-    ]
+    assert captured == []
 
 
 def test_pipeline_owned_workflow_without_restore_mappings_emits_no_policy(
