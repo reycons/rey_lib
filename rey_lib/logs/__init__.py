@@ -1,6 +1,7 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
 from rey_lib.logs.file_manifest import (
     FileManifestError,
+    file_manifest_write_boundary,
     log_file_manifest_record,
     manifest_lock_path,
     manifest_state_path,
@@ -92,6 +93,7 @@ from rey_lib.run_lifecycle import run_app_operation
 __all__ = [
     "JsonlHandler",
     "FileManifestError",
+    "file_manifest_write_boundary",
     "log_file_manifest_record",
     "manifest_lock_path",
     "manifest_state_path",

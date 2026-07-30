@@ -20,10 +20,11 @@ assign ``record_id``, append, commit state — is held under an exclusive
 
 State carries the committed manifest size in bytes alongside the last record
 id. A writer interrupted after the append but before the state commit leaves
-the recorded size disagreeing with the file, and the next writer recounts the
-manifest and repairs the state before assigning. Two concurrent writers can
-therefore never receive the same ``record_id``, and an interrupted writer
-cannot make later row numbers wrong.
+the recorded size disagreeing with the file, and the next writer inspects the
+manifest and repairs state to its highest retained ID before assigning. Two
+concurrent writers can therefore never receive the same ``record_id``.
+Governed rewrites may intentionally leave ID gaps; retained IDs are never
+renumbered and the next append continues above the highest retained ID.
 
 ``flock`` is released by the kernel when a holding process dies, so an
 interrupted writer cannot wedge the manifest. This requires a POSIX filesystem.
@@ -34,11 +35,13 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 __all__ = [
     "FileManifestError",
+    "file_manifest_write_boundary",
     "log_file_manifest_record",
     "manifest_lock_path",
     "manifest_state_path",
@@ -134,8 +137,8 @@ def log_file_manifest_record(ctx: Any, record: dict[str, Any]) -> int:
     Returns
     -------
     int
-        The committed ``record_id`` — the record's one-based physical row
-        number in the manifest.
+        The committed monotonically assigned ``record_id``. Governed deletion
+        may leave gaps, so this identity is not necessarily the physical row.
 
     Raises
     ------
@@ -181,6 +184,20 @@ def log_file_manifest_record(ctx: Any, record: dict[str, Any]) -> int:
     return record_id
 
 
+@contextmanager
+def file_manifest_write_boundary(ctx: Any) -> Iterator[Path]:
+    """Yield the governed manifest under its shared exclusive write lock.
+
+    Domain owners may perform a validated atomic rewrite while this boundary is
+    held. On successful exit, shared sequencing state is synchronized to the
+    highest retained record ID, preserving intentional ID gaps.
+    """
+    manifest_path = resolve_file_manifest_path(ctx)
+    with _ManifestLock(manifest_path):
+        yield manifest_path
+        _commit_state(manifest_path, _highest_record_id(manifest_path))
+
+
 class _ManifestLock:
     """Exclusive advisory lock over one manifest's complete critical section."""
 
@@ -220,9 +237,9 @@ def _load_state(manifest_path: Path) -> dict[str, int]:
     """
     Return sequencing state, repaired against the manifest when it disagrees.
 
-    A recorded size that does not match the manifest means a previous writer was
-    interrupted between its append and its state commit, so the manifest itself
-    is re-counted and becomes authoritative.
+    A recorded size that does not match the manifest means an append or governed
+    rewrite occurred after the last state commit, so the manifest's highest
+    retained record ID becomes authoritative.
     """
     state = _read_state(manifest_path)
     actual_size = _manifest_size(manifest_path)
@@ -230,7 +247,7 @@ def _load_state(manifest_path: Path) -> dict[str, int]:
         return state
 
     repaired = {
-        _LAST_RECORD_ID: _count_records(manifest_path),
+        _LAST_RECORD_ID: _highest_record_id(manifest_path),
         _MANIFEST_SIZE_BYTES: actual_size,
     }
     _logger.warning(
@@ -287,13 +304,29 @@ def _manifest_size(manifest_path: Path) -> int:
         return 0
 
 
-def _count_records(manifest_path: Path) -> int:
-    """Return the number of non-empty JSONL records currently in the manifest."""
+def _highest_record_id(manifest_path: Path) -> int:
+    """Return the highest valid record ID, preserving intentional gaps."""
+    if not manifest_path.exists():
+        return 0
     try:
         with manifest_path.open("r", encoding="utf-8") as handle:
-            return sum(1 for line in handle if line.strip())
-    except OSError:
-        return 0
+            highest = 0
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                record_id = record.get("record_id") if isinstance(record, dict) else None
+                if (
+                    isinstance(record_id, int)
+                    and not isinstance(record_id, bool)
+                    and record_id > highest
+                ):
+                    highest = record_id
+            return highest
+    except (OSError, ValueError) as exc:
+        raise FileManifestError(
+            f"Manifest record IDs cannot be inspected in '{manifest_path}': {exc}"
+        ) from exc
 
 
 def _as_int(value: Any, default: int) -> int:

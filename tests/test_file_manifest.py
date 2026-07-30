@@ -10,6 +10,7 @@ import pytest
 
 from rey_lib.logs import (
     FileManifestError,
+    file_manifest_write_boundary,
     log_file_manifest_record,
     log_run_record,
     manifest_lock_path,
@@ -171,6 +172,35 @@ def test_malformed_state_file_is_recovered(tmp_path: Path) -> None:
     manifest_state_path(manifest).write_text("not json", encoding="utf-8")
 
     assert log_file_manifest_record(ctx, _record()) == 2
+
+
+def test_public_write_boundary_preserves_highest_id_after_gap(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(tmp_path)
+    manifest.write_text(
+        json.dumps({"record_id": 1, "record_type": "one"})
+        + "\n"
+        + json.dumps({"record_id": 7, "record_type": "seven"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with file_manifest_write_boundary(_ctx(manifest)) as locked_path:
+        assert locked_path == manifest
+
+    assert log_file_manifest_record(_ctx(manifest), _record()) == 8
+
+
+def test_public_write_boundary_rejects_malformed_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(tmp_path)
+    manifest.write_text("{bad json}\n", encoding="utf-8")
+
+    with pytest.raises(FileManifestError, match="cannot be inspected"):
+        with file_manifest_write_boundary(_ctx(manifest)):
+            pass
 
 
 # ---------------------------------------------------------------------------
