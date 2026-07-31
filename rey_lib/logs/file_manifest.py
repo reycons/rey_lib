@@ -364,15 +364,18 @@ def _read_state(manifest_path: Path) -> dict[str, int]:
 
 def _commit_state(manifest_path: Path, record_id: int) -> None:
     """Persist the committed record id and the manifest size it corresponds to."""
-    from rey_lib.files import primitive_file_io
+    from rey_lib.files.json import write_json_file
 
     state = {
         _LAST_RECORD_ID: int(record_id),
         _MANIFEST_SIZE_BYTES: _manifest_size(manifest_path),
     }
     try:
-        primitive_file_io.atomic_write_text(
-            manifest_state_path(manifest_path), json.dumps(state)
+        write_json_file(
+            manifest_state_path(manifest_path),
+            state,
+            mode="compact",
+            newline=False,
         )
     except OSError as exc:
         raise FileManifestError(

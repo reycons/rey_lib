@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.errors.error_utils import StateError
+from rey_lib.files.json import JsonReadError, read_json_file
 from rey_lib.files.file_utils import write_file
 from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
 
@@ -131,12 +132,11 @@ def load_state(ctx: Any, conn: Any) -> dict[str, str]:
         return {}
 
     try:
-        with state_file.open(encoding="utf-8") as f:
-            state: dict[str, str] = json.load(f)
+        state: dict[str, str] = read_json_file(state_file)
         log.info("Loaded state: %d entry/entries from '%s'", len(state), state_file)
         log_exit(ctx, "load_state done", log)
         return state
-    except (OSError, json.JSONDecodeError) as exc:
+    except JsonReadError as exc:
         raise StateError(f"Cannot read state file '{state_file}'.") from exc
 
 
@@ -417,9 +417,8 @@ def load_failed_files(failed_file: Path) -> list[dict]:
     if not failed_file.exists():
         return []
     try:
-        with failed_file.open(encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+        return read_json_file(failed_file)
+    except JsonReadError as exc:
         raise StateError(f"Cannot read failed file '{failed_file}'.") from exc
 
 

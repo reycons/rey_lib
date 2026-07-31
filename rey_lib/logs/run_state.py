@@ -150,9 +150,9 @@ def _read(path: Path) -> dict[str, Any]:
 
 def _write(path: Path, state: dict[str, Any]) -> None:
     """Atomically persist state through the shared primitive file layer."""
-    from rey_lib.files import primitive_file_io
+    from rey_lib.files.json import write_json_file
 
-    primitive_file_io.atomic_write_text(path, json.dumps(_serializable(state)))
+    write_json_file(path, _serializable(state), mode="compact", newline=False)
 
 
 def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
