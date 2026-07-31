@@ -35,8 +35,13 @@ class ReyRequestHandler(BaseHTTPRequestHandler):
         payload: object,
         status: HTTPStatus = HTTPStatus.OK,
     ) -> None:
-        """Send a JSON response body."""
-        body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+        """Send a JSON response body.
+
+        Keys keep the order the payload was built in. A governed record carries
+        a deliberate field order — flat identity first, then its objects — and
+        sorting the response would show the reader an order no producer wrote.
+        """
+        body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status.value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
