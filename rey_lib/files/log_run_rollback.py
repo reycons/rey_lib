@@ -32,7 +32,6 @@ from rey_lib.logs import (
 
 MUTATION_RECORD_TYPE = "source_file_mutation"
 ROLLBACK_RECORD_TYPE = "source_file_rollback"
-SCHEMA_VERSION = "1.0"
 
 
 class LogRunRollbackError(Exception):
@@ -97,9 +96,23 @@ def serialize_source_file_mutation(
     run_log_file: str,
     run_log_record_id: int,
     application_name: str = "",
+    file_id: str = "",
+    conversion: Mapping[str, Any] | None = None,
+    reason_code: str = "",
+    reason: str = "",
     recorded_at: str | None = None,
 ) -> dict[str, Any]:
-    """Build one authoritative canonical filesystem-mutation manifest record."""
+    """Build one authoritative canonical filesystem-mutation manifest record.
+
+    This function owns the shape of ``file``, ``rollback``, ``result``,
+    ``producer``, and ``evidence``, and omits a section whose values are all
+    absent rather than emitting it empty.
+
+    ``conversion`` is the one section whose contents belong to the converting
+    producer: it is written unchanged under that key and interpreted nowhere
+    here. It is also the only thing a caller may place in the record wholesale
+    — no input reaches the record root.
+    """
     normalized_action = _non_empty(action, "action")
     normalized_status = _non_empty(status, "status")
     evidence_file = _run_log_name(run_log_file)
@@ -136,6 +149,12 @@ def serialize_source_file_mutation(
     if previous_version:
         rollback_object["previous_version_path"] = previous_version
 
+    result_object: dict[str, Any] = {}
+    if _path_text(reason_code):
+        result_object["reason_code"] = _path_text(reason_code)
+    if _path_text(reason):
+        result_object["reason"] = _path_text(reason)
+
     record: dict[str, Any] = {
         "record_type": MUTATION_RECORD_TYPE,
         "action": normalized_action,
@@ -150,8 +169,76 @@ def serialize_source_file_mutation(
         },
         "recorded_at": recorded_at or _timestamp(),
     }
+    if _path_text(file_id):
+        record["file_id"] = _path_text(file_id)
     if rollback_object:
         record["rollback"] = rollback_object
+    if conversion:
+        # The converting producer owns what its conversion payload says. This
+        # function neither reads nor interprets it; it only places it in the
+        # one canonical section it is allowed to occupy.
+        record["conversion"] = dict(conversion)
+    if result_object:
+        record["result"] = result_object
+    return record
+
+
+def serialize_source_file_rollback(
+    *,
+    original_record_id: int,
+    phase: str,
+    status: str,
+    run_log_file: str,
+    run_log_record_id: int,
+    attempt_record_id: int | None = None,
+    application_name: str = "",
+    reason: str = "",
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    """Build one canonical rollback-evidence manifest record.
+
+    The record references the compensated lifecycle record rather than
+    duplicating its data, so it carries no ``file`` section. ``rollback``
+    carries the reference plus the linkage that makes compensation
+    idempotent: which phase this record is, and which attempt a final record
+    concludes. An attempt record has no attempt of its own to reference, so
+    that field is omitted rather than recorded null.
+    """
+    normalized_phase = _non_empty(phase, "phase")
+    if normalized_phase not in {"attempt", "final"}:
+        raise LogRunRollbackError(
+            "source_file_rollback.phase must be 'attempt' or 'final'."
+        )
+    normalized_status = _non_empty(status, "status")
+
+    rollback_object: dict[str, Any] = {
+        "original_record_id": _positive_int(
+            original_record_id, "rollback.original_record_id"
+        ),
+        "phase": normalized_phase,
+    }
+    if attempt_record_id is not None:
+        rollback_object["attempt_record_id"] = _positive_int(
+            attempt_record_id, "rollback.attempt_record_id"
+        )
+
+    record: dict[str, Any] = {
+        "record_type": ROLLBACK_RECORD_TYPE,
+        "status": normalized_status,
+        "producer": {
+            "application": str(application_name or ""),
+        },
+        "evidence": {
+            "run_log_file": _run_log_name(run_log_file),
+            "run_log_record_id": _positive_int(
+                run_log_record_id, "run_log_record_id"
+            ),
+        },
+        "rollback": rollback_object,
+        "recorded_at": recorded_at or _timestamp(),
+    }
+    if _path_text(reason):
+        record["result"] = {"reason": _path_text(reason)}
     return record
 
 
@@ -165,37 +252,24 @@ def log_source_file_mutation(
     recovery_path: Path | str = "",
     previous_version_path: Path | str = "",
     application_name: str = "",
+    file_id: str = "",
+    conversion: Mapping[str, Any] | None = None,
+    reason_code: str = "",
+    reason: str = "",
     message: str = "",
-    fields: Mapping[str, Any] | None = None,
+    run_log_fields: Mapping[str, Any] | None = None,
 ) -> int:
     """Commit run evidence, then append its linked mutation manifest record.
 
     This is the shared producer boundary for governed filesystem operations.
     It deliberately records no inferred compensation data: callers must pass
     the exact paths made durable by the operation they performed.
-    """
-    extra_fields = dict(fields or {})
-    # The canonical fields this boundary and the manifest writer own. An
-    # extension field may add a canonical object the serializer does not
-    # produce, but it may never replace one that it does.
-    reserved = {
-        "record_id",
-        "record_type",
-        "action",
-        "status",
-        "producer",
-        "file",
-        "evidence",
-        "rollback",
-        "recorded_at",
-    }
-    overlap = sorted(reserved.intersection(extra_fields))
-    if overlap:
-        raise LogRunRollbackError(
-            "Mutation extension fields cannot replace authoritative field(s): "
-            + ", ".join(overlap)
-        )
 
+    Every manifest field is a governed value forwarded to the serializer, so a
+    caller cannot inject or replace a canonical section. ``run_log_fields``
+    enriches the run-log record only and never reaches the manifest.
+    """
+    extra_run_log_fields = dict(run_log_fields or {})
     normalized_action = _non_empty(action, "action")
     normalized_status = _non_empty(status, "status")
     run_log_record_id = log_run_record(
@@ -209,7 +283,7 @@ def log_source_file_mutation(
         destination_path=_path_text(destination_path),
         recovery_path=_path_text(recovery_path),
         previous_version_path=_path_text(previous_version_path),
-        **extra_fields,
+        **extra_run_log_fields,
     )
     if run_log_record_id is None:
         raise LogRunRollbackError(
@@ -227,8 +301,11 @@ def log_source_file_mutation(
         run_log_file=_context_run_log_name(ctx),
         run_log_record_id=run_log_record_id,
         application_name=application_name,
+        file_id=file_id,
+        conversion=conversion,
+        reason_code=reason_code,
+        reason=reason,
     )
-    record.update(extra_fields)
     try:
         return log_file_manifest_record(ctx, record)
     except FileManifestError as exc:
@@ -438,12 +515,13 @@ def _build_plan(
             _validate_rollback_record(record)
         if record.get("record_type") != ROLLBACK_RECORD_TYPE:
             continue
-        source_id = _optional_positive_int(
-            record.get("original_manifest_record_id")
-        )
+        rollback = record.get("rollback")
+        if not isinstance(rollback, Mapping):
+            continue
+        source_id = _optional_positive_int(rollback.get("original_record_id"))
         if source_id is None:
             continue
-        phase = record.get("phase")
+        phase = rollback.get("phase")
         status = record.get("status")
         if phase == "attempt" and status == "attempted":
             attempt_id = _optional_positive_int(record.get("record_id"))
@@ -451,7 +529,7 @@ def _build_plan(
                 attempts[attempt_id] = source_id
         if phase == "final":
             attempt_id = _optional_positive_int(
-                record.get("rollback_attempt_record_id")
+                rollback.get("attempt_record_id")
             )
             if attempt_id is not None:
                 finalized_attempts.add(attempt_id)
@@ -624,19 +702,20 @@ def _validate_mutation_record(record: Mapping[str, Any]) -> None:
 def _validate_rollback_record(record: Mapping[str, Any]) -> None:
     """Reject malformed linkage that could undermine idempotency."""
     _positive_int(record.get("record_id"), "source_file_rollback.record_id")
-    if record.get("schema_version") != SCHEMA_VERSION:
+    rollback = record.get("rollback")
+    if not isinstance(rollback, Mapping):
         raise LogRunRollbackError(
-            "source_file_rollback.schema_version must be '1.0'."
+            "source_file_rollback.rollback must be an object."
         )
     _positive_int(
-        record.get("original_manifest_record_id"),
-        "source_file_rollback.original_manifest_record_id",
+        rollback.get("original_record_id"),
+        "source_file_rollback.rollback.original_record_id",
     )
-    phase = record.get("phase")
+    phase = rollback.get("phase")
     status = record.get("status")
     if phase not in {"attempt", "final"}:
         raise LogRunRollbackError(
-            "source_file_rollback.phase must be 'attempt' or 'final'."
+            "source_file_rollback.rollback.phase must be 'attempt' or 'final'."
         )
     if phase == "attempt" and status != "attempted":
         raise LogRunRollbackError(
@@ -648,26 +727,9 @@ def _validate_rollback_record(record: Mapping[str, Any]) -> None:
         )
     if phase == "final":
         _positive_int(
-            record.get("rollback_attempt_record_id"),
-            "source_file_rollback.rollback_attempt_record_id",
+            rollback.get("attempt_record_id"),
+            "source_file_rollback.rollback.attempt_record_id",
         )
-    _run_log_name(record.get("original_run_log_file"))
-    _non_empty(record.get("original_action"), "source_file_rollback.original_action")
-    _non_empty(
-        record.get("compensating_action"),
-        "source_file_rollback.compensating_action",
-    )
-    for field in (
-        "source_path",
-        "destination_path",
-        "recovery_path",
-        "previous_version_path",
-        "failure_reason",
-    ):
-        if not isinstance(record.get(field), str):
-            raise LogRunRollbackError(
-                f"source_file_rollback.{field} must be a string."
-            )
     evidence = record.get("evidence")
     if not isinstance(evidence, Mapping):
         raise LogRunRollbackError(
@@ -719,27 +781,18 @@ def _append_rollback_evidence(
             "Rollback run-log evidence did not commit; no manifest evidence "
             "or filesystem compensation was performed."
         )
-    # A rollback record references the original lifecycle record rather than
-    # duplicating its data, so none of the original's paths or actions are
-    # copied into the manifest. The run-log record above keeps the full
-    # compensation detail.
-    record: dict[str, Any] = {
-        "record_type": ROLLBACK_RECORD_TYPE,
-        "status": status,
-        "producer": {
-            "application": "rey_lib",
-        },
-        "evidence": {
-            "run_log_file": Path(str(audit_ctx.run_log_path)).name,
-            "run_log_record_id": run_record_id,
-        },
-        "rollback": {
-            "original_record_id": int(original["record_id"]),
-        },
-        "recorded_at": _timestamp(),
-    }
-    if reason:
-        record["result"] = {"reason": reason}
+    # The record shape belongs to the serializer; this function gathers its
+    # inputs and appends the result through the already-locked session.
+    record = serialize_source_file_rollback(
+        original_record_id=int(original["record_id"]),
+        phase=phase,
+        status=status,
+        run_log_file=Path(str(audit_ctx.run_log_path)).name,
+        run_log_record_id=run_record_id,
+        attempt_record_id=attempt_record_id,
+        application_name="rey_lib",
+        reason=reason,
+    )
     return session.append(record)
 
 

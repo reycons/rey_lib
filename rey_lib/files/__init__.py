@@ -65,6 +65,7 @@ from rey_lib.files.log_run_rollback import (
     register_file_compensation,
     rollback_log_run,
     serialize_source_file_mutation,
+    serialize_source_file_rollback,
     unregister_file_compensation,
 )
 from rey_lib.files.workbook_conversion import (
@@ -144,6 +145,7 @@ __all__ = [
     "register_file_compensation",
     "rollback_log_run",
     "serialize_source_file_mutation",
+    "serialize_source_file_rollback",
     "unregister_file_compensation",
     "SUPPORTED_WORKBOOK_EXTENSIONS",
     "ConvertedTableArtifact",

@@ -15,6 +15,7 @@ from rey_lib.files import (
     register_file_compensation,
     rollback_log_run,
     serialize_source_file_mutation,
+    serialize_source_file_rollback,
     unregister_file_compensation,
 )
 from rey_lib.logs import log_file_manifest_record, resolve_run_identity
@@ -93,7 +94,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
         status="success",
         destination_path=tmp_path / "created.csv",
         application_name="test",
-        fields={"file_id": "file-a"},
+        file_id="file-a",
     )
 
     run_rows = [
@@ -105,23 +106,192 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     assert run_rows[0]["record_type"] == "SOURCE_FILE_MUTATION"
     assert manifest_record["record_type"] == "source_file_mutation"
     assert manifest_record["file_id"] == "file-a"
+    assert manifest_record["producer"] == {"application": "test"}
+    assert manifest_record["file"] == {
+        "path": str(tmp_path / "created.csv"),
+        "file_name": "created.csv",
+        "file_extension": "csv",
+    }
     assert manifest_record["evidence"] == {
         "run_log_file": "run.jsonl",
         "run_log_record_id": run_rows[0]["record_id"],
     }
 
 
-def test_shared_mutation_boundary_rejects_authoritative_field_override(
+def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None:
+    """Every field the canonical layout groups is gone from the record root."""
+    ctx = _ctx(tmp_path)
+    resolve_run_identity(ctx)
+
+    log_source_file_mutation(
+        ctx,
+        action="move",
+        status="success",
+        source_path=tmp_path / "in" / "a.xlsx",
+        destination_path=tmp_path / "proc" / "a.xlsx",
+        recovery_path=tmp_path / "trash" / "a.xlsx",
+        application_name="test",
+    )
+
+    manifest_record = _rows(ctx)[0]
+    for legacy in (
+        "schema_version",
+        "source_path",
+        "destination_path",
+        "recovery_path",
+        "previous_version_path",
+        "application_name",
+    ):
+        assert legacy not in manifest_record, legacy
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    ["record_id", "record_type", "producer", "file", "evidence", "rollback",
+     "result", "recorded_at", "fields"],
+)
+def test_caller_cannot_inject_a_canonical_root_field(
     tmp_path: Path,
+    reserved: str,
 ) -> None:
-    with pytest.raises(LogRunRollbackError, match="authoritative field"):
+    """The boundary takes governed values only; there is no injection surface."""
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
         log_source_file_mutation(
             _ctx(tmp_path),
             action="create",
             status="success",
             destination_path=tmp_path / "created.csv",
-            fields={"evidence": {}},
+            **{reserved: {}},
         )
+
+
+def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
+    """Run-log enrichment is evidence, not a way into the governed record."""
+    ctx = _ctx(tmp_path)
+    resolve_run_identity(ctx)
+
+    log_source_file_mutation(
+        ctx,
+        action="create",
+        status="success",
+        destination_path=tmp_path / "created.csv",
+        application_name="test",
+        run_log_fields={"workbook_name": "book.xlsx", "extraction_kind": "sheet"},
+    )
+
+    manifest_record = _rows(ctx)[0]
+    assert "workbook_name" not in manifest_record
+    assert "extraction_kind" not in manifest_record
+    run_rows = [
+        json.loads(line)
+        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+    ]
+    assert run_rows[0]["workbook_name"] == "book.xlsx"
+
+
+def test_approved_conversion_and_result_inputs_build_canonical_sections(
+    tmp_path: Path,
+) -> None:
+    record = serialize_source_file_mutation(
+        action="create",
+        status="success",
+        destination_path="/out/a.csv",
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+        conversion={
+            "operator": "some_other_producer",
+            "name": "wolff_popper",
+            "source": {"sheet_name": "Sheet1", "table_name": "Table1"},
+        },
+        reason_code="converted",
+        reason="workbook converted",
+    )
+
+    # The payload is written exactly as the producer supplied it, including a
+    # field this framework has never heard of.
+    assert record["conversion"] == {
+        "operator": "some_other_producer",
+        "name": "wolff_popper",
+        "source": {"sheet_name": "Sheet1", "table_name": "Table1"},
+    }
+    assert record["result"] == {
+        "reason_code": "converted",
+        "reason": "workbook converted",
+    }
+
+
+def test_absent_conversion_and_result_sections_are_omitted() -> None:
+    record = serialize_source_file_mutation(
+        action="move",
+        status="success",
+        source_path="/in/a.xlsx",
+        destination_path="/proc/a.xlsx",
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+    )
+
+    assert "conversion" not in record
+    assert "result" not in record
+    assert "file_id" not in record
+
+
+@pytest.mark.parametrize(
+    ("action", "source_path", "destination_path", "expected_file"),
+    [
+        ("move", "/in/a.xlsx", "/proc/a.xlsx",
+         {"path": "/proc/a.xlsx", "original_path": "/in/a.xlsx",
+          "file_name": "a.xlsx", "file_extension": "xlsx"}),
+        ("create", "", "/out/a.csv",
+         {"path": "/out/a.csv", "file_name": "a.csv", "file_extension": "csv"}),
+        ("delete", "/in/a.xlsx", "",
+         {"original_path": "/in/a.xlsx", "file_name": "a.xlsx",
+          "file_extension": "xlsx"}),
+        ("replace", "/in/a.xlsx", "/out/a.csv",
+         {"path": "/out/a.csv", "original_path": "/in/a.xlsx",
+          "file_name": "a.csv", "file_extension": "csv"}),
+    ],
+)
+def test_serialized_file_object_follows_the_lifecycle_action(
+    action: str,
+    source_path: str,
+    destination_path: str,
+    expected_file: dict[str, str],
+) -> None:
+    """A location the action never had is omitted, not recorded empty."""
+    record = serialize_source_file_mutation(
+        action=action,
+        status="success",
+        source_path=source_path,
+        destination_path=destination_path,
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+    )
+
+    assert record["file"] == expected_file
+    assert "rollback" not in record
+
+
+def test_compensation_metadata_is_grouped_and_omitted_when_absent() -> None:
+    recorded = serialize_source_file_mutation(
+        action="delete",
+        status="success",
+        source_path="/in/a.xlsx",
+        recovery_path="/trash/a.xlsx",
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+    )
+    assert recorded["rollback"] == {"recovery_path": "/trash/a.xlsx"}
+
+    replaced = serialize_source_file_mutation(
+        action="replace",
+        status="success",
+        source_path="/in/a.xlsx",
+        destination_path="/out/a.csv",
+        previous_version_path="/bak/a.csv",
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+    )
+    assert replaced["rollback"] == {"previous_version_path": "/bak/a.csv"}
 
 
 def test_preview_selects_exact_run_and_reverses_manifest_order(
@@ -220,16 +390,21 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
     rollback_rows = [
         row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
     ]
-    assert [(row["phase"], row["status"]) for row in rollback_rows] == [
+    assert [
+        (row["rollback"]["phase"], row["status"]) for row in rollback_rows
+    ] == [
         ("attempt", "attempted"),
         ("final", "success"),
         ("attempt", "attempted"),
         ("final", "success"),
     ]
     assert [
-        row["original_manifest_record_id"] for row in rollback_rows
+        row["rollback"]["original_record_id"] for row in rollback_rows
     ] == [create_id, create_id, move_id, move_id]
-    assert rollback_rows[1]["rollback_attempt_record_id"] == rollback_rows[0]["record_id"]
+    assert (
+        rollback_rows[1]["rollback"]["attempt_record_id"]
+        == rollback_rows[0]["record_id"]
+    )
 
 
 def test_delete_and_replace_require_recorded_recovery_paths(
@@ -320,10 +495,12 @@ def test_failure_is_recorded_and_remaining_compensations_continue(
         row
         for row in _rows(ctx)
         if row["record_type"] == "source_file_rollback"
-        and row["phase"] == "final"
+        and row["rollback"]["phase"] == "final"
     ]
     assert [row["status"] for row in finals] == ["success", "failure"]
-    assert finals[1]["failure_reason"]
+    # The canonical rollback record carries no failure_reason; the run log and
+    # the returned summary above hold the detail.
+    assert "failure_reason" not in finals[1]
 
 
 def test_successful_compensation_is_idempotently_excluded(
@@ -357,25 +534,14 @@ def test_unfinished_attempt_is_indeterminate_and_not_reapplied(
     )
     log_file_manifest_record(
         ctx,
-        {
-            "record_type": "source_file_rollback",
-            "schema_version": "1.0",
-            "original_manifest_record_id": mutation_id,
-            "original_run_log_file": "run.jsonl",
-            "original_action": "create",
-            "compensating_action": "delete_created_file",
-            "phase": "attempt",
-            "status": "attempted",
-            "source_path": "",
-            "destination_path": str(tmp_path / "created.csv"),
-            "recovery_path": "",
-            "previous_version_path": "",
-            "failure_reason": "",
-            "evidence": {
-                "run_log_file": "rollback.jsonl",
-                "run_log_record_id": 1,
-            },
-        },
+        serialize_source_file_rollback(
+            original_record_id=mutation_id,
+            phase="attempt",
+            status="attempted",
+            run_log_file="rollback.jsonl",
+            run_log_record_id=1,
+            application_name="rey_lib",
+        ),
     )
 
     plan = preview_log_run_rollback(ctx, "run.jsonl")
@@ -425,10 +591,13 @@ def test_unknown_action_is_reported_without_filesystem_inference(
         row
         for row in _rows(ctx)
         if row["record_type"] == "source_file_rollback"
-        and row["phase"] == "final"
+        and row["rollback"]["phase"] == "final"
     ]
     assert finals[0]["status"] == "failure"
-    assert finals[0]["failure_reason"] == "no registered compensating operation"
+    assert "failure_reason" not in finals[0]
+    assert result["failed"][0]["failure_reason"] == (
+        "no registered compensating operation"
+    )
 
 
 def test_malformed_manifest_fails_before_compensation(tmp_path: Path) -> None:
@@ -454,10 +623,8 @@ def test_malformed_mutation_schema_fails_before_compensation(
         ctx,
         {
             "record_type": "source_file_mutation",
-            "schema_version": "1.0",
             "action": "create",
             "status": "success",
-            "destination_path": "/created/file",
             "evidence": {
                 "run_log_file": "run.jsonl",
                 "run_log_record_id": 1,
@@ -465,7 +632,29 @@ def test_malformed_mutation_schema_fails_before_compensation(
         },
     )
 
-    with pytest.raises(LogRunRollbackError, match="source_path"):
+    with pytest.raises(LogRunRollbackError, match="file must be an object"):
+        preview_log_run_rollback(ctx, "run.jsonl")
+
+
+def test_malformed_mutation_location_fails_before_compensation(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    log_file_manifest_record(
+        ctx,
+        {
+            "record_type": "source_file_mutation",
+            "action": "create",
+            "status": "success",
+            "file": {"path": ["/created/file"]},
+            "evidence": {
+                "run_log_file": "run.jsonl",
+                "run_log_record_id": 1,
+            },
+        },
+    )
+
+    with pytest.raises(LogRunRollbackError, match="file.path must be a string"):
         preview_log_run_rollback(ctx, "run.jsonl")
 
 
@@ -555,3 +744,116 @@ def test_preview_is_read_only_and_execution_rereads_manifest(
 def test_run_log_file_is_required(tmp_path: Path, value: object) -> None:
     with pytest.raises(LogRunRollbackError, match="run_log_file"):
         preview_log_run_rollback(_ctx(tmp_path), value)  # type: ignore[arg-type]
+
+
+def test_rollback_records_are_written_only_through_the_serializer(
+    tmp_path: Path,
+) -> None:
+    """Every appended rollback row matches the serializer's canonical shape."""
+    ctx = _ctx(tmp_path)
+    created = tmp_path / "created.csv"
+    created.write_text("created", encoding="utf-8")
+    _append_mutation(ctx, action="create", destination_path=str(created))
+
+    rollback_log_run(ctx, _run_log(tmp_path))
+
+    rollback_rows = [
+        row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
+    ]
+    assert rollback_rows
+    for row in rollback_rows:
+        expected = serialize_source_file_rollback(
+            original_record_id=row["rollback"]["original_record_id"],
+            phase=row["rollback"]["phase"],
+            status=row["status"],
+            run_log_file=row["evidence"]["run_log_file"],
+            run_log_record_id=row["evidence"]["run_log_record_id"],
+            attempt_record_id=row["rollback"].get("attempt_record_id"),
+            application_name=row["producer"]["application"],
+            recorded_at=row["recorded_at"],
+        )
+        assert {key: value for key, value in row.items() if key != "record_id"} == (
+            expected
+        )
+
+
+def test_canonical_rollback_records_pass_validation(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    mutation_id = _append_mutation(
+        ctx, action="create", destination_path=str(tmp_path / "created.csv")
+    )
+    for record in (
+        serialize_source_file_rollback(
+            original_record_id=mutation_id,
+            phase="attempt",
+            status="attempted",
+            run_log_file="rollback.jsonl",
+            run_log_record_id=1,
+        ),
+        serialize_source_file_rollback(
+            original_record_id=mutation_id,
+            phase="final",
+            status="success",
+            run_log_file="rollback.jsonl",
+            run_log_record_id=2,
+            attempt_record_id=2,
+        ),
+    ):
+        log_file_manifest_record(ctx, record)
+
+    plan = preview_log_run_rollback(ctx, "run.jsonl")
+    assert plan["already_compensated"] == [mutation_id]
+
+
+def test_legacy_rollback_records_are_rejected(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    mutation_id = _append_mutation(
+        ctx, action="create", destination_path=str(tmp_path / "created.csv")
+    )
+    log_file_manifest_record(
+        ctx,
+        {
+            "record_type": "source_file_rollback",
+            "schema_version": "1.0",
+            "original_manifest_record_id": mutation_id,
+            "original_run_log_file": "run.jsonl",
+            "original_action": "create",
+            "compensating_action": "delete_created_file",
+            "phase": "attempt",
+            "status": "attempted",
+            "source_path": "",
+            "destination_path": "",
+            "recovery_path": "",
+            "previous_version_path": "",
+            "failure_reason": "",
+            "evidence": {"run_log_file": "rollback.jsonl", "run_log_record_id": 1},
+        },
+    )
+
+    with pytest.raises(LogRunRollbackError, match="rollback must be an object"):
+        preview_log_run_rollback(ctx, "run.jsonl")
+
+
+def test_optional_rollback_fields_are_omitted_when_absent() -> None:
+    attempt = serialize_source_file_rollback(
+        original_record_id=5,
+        phase="attempt",
+        status="attempted",
+        run_log_file="rollback.jsonl",
+        run_log_record_id=1,
+    )
+    assert "attempt_record_id" not in attempt["rollback"]
+    assert "result" not in attempt
+    assert "file" not in attempt
+
+    final = serialize_source_file_rollback(
+        original_record_id=5,
+        phase="final",
+        status="failure",
+        run_log_file="rollback.jsonl",
+        run_log_record_id=2,
+        attempt_record_id=7,
+        reason="operator asked",
+    )
+    assert final["rollback"]["attempt_record_id"] == 7
+    assert final["result"] == {"reason": "operator asked"}
