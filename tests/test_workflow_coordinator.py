@@ -281,3 +281,161 @@ def test_workflow_without_the_retired_key_runs_normally() -> None:
 
     assert run.status == "success"
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Disabled workflows and pre-execution failure evidence
+# ---------------------------------------------------------------------------
+
+def test_disabled_workflow_is_refused_without_raising() -> None:
+    """enabled: false is a governed outcome, not a fault: no exception."""
+    workflow = {
+        "name": "reduce_source_files",
+        "enabled": False,
+        "processes": {"p": {}},
+        "steps": [{"id": "s", "process": "p"}],
+    }
+    calls: list[str] = []
+
+    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+        calls.append("ran")
+
+    run = run_workflow(object(), workflow, {"p": handler})
+
+    assert run.status == "refused"
+    assert run.status != "success"
+    assert run.name == "reduce_source_files"
+    assert calls == []
+
+
+def test_a_disabled_workflow_is_refused_before_its_definition_is_parsed() -> None:
+    """A workflow that will not run is never rejected for an unrelated defect."""
+    workflow = {
+        "name": "w",
+        "enabled": False,
+        "processes": {},
+        "steps": [{"label": "no id here"}],
+    }
+
+    assert run_workflow(object(), workflow, {}).status == "refused"
+
+
+def test_a_workflow_without_an_enabled_key_still_runs() -> None:
+    """Absent means enabled; only an explicit false refuses."""
+    calls: list[str] = []
+
+    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+        calls.append("ran")
+
+    workflow = {
+        "name": "w",
+        "processes": {"p": {}},
+        "steps": [{"id": "s", "process": "p"}],
+    }
+    assert run_workflow(object(), workflow, {"p": handler}).status == "success"
+    assert calls == ["ran"]
+    assert run_workflow(
+        object(), {**workflow, "enabled": True}, {"p": handler}
+    ).status == "success"
+
+
+def _run_log_records(tmp_path: Any) -> list[dict[str, Any]]:
+    """Read the run log the logging layer named for itself."""
+    import json
+    from pathlib import Path
+
+    logs = sorted(Path(tmp_path).glob("*.jsonl"))
+    assert len(logs) == 1, f"expected one run log, found {logs}"
+    return [
+        json.loads(line)
+        for line in logs[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _log_ctx(tmp_path: Any) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        log_file=str(tmp_path / "app.jsonl"), owner_app_name="file_operator"
+    )
+
+
+def test_missing_handler_writes_failure_evidence_before_raising(
+    tmp_path: Any,
+) -> None:
+    """A failure between RUN_START and the first step is still evidenced."""
+    import json
+
+    ctx = _log_ctx(tmp_path)
+    workflow = {
+        "name": "reduce_source_files",
+        "processes": {"prepare_rule_set_inputs": {}},
+        "steps": [
+            {
+                "id": "reduce_source_files",
+                "label": "Reduce classified CSV sources",
+                "process": "prepare_rule_set_inputs",
+            }
+        ],
+    }
+
+    with pytest.raises(WorkflowError, match="no registered handler"):
+        run_workflow(ctx, workflow, {})
+
+    records = _run_log_records(tmp_path)
+    types = [record.get("record_type") for record in records]
+    assert "RUN_START" in types
+    assert "RUN_COMPLETE" in types
+
+    complete = next(r for r in records if r.get("record_type") == "RUN_COMPLETE")
+    assert complete["status"] == "failed"
+    assert complete["failed_step_id"] == "reduce_source_files"
+    assert "no registered handler" in complete["failure_message"]
+
+    failure = next(
+        r
+        for r in records
+        if r.get("record_type") not in {"RUN_START", "RUN_COMPLETE"}
+        and "no registered handler" in json.dumps(r)
+    )
+    assert failure["error_type"] == "WorkflowError"
+    assert failure["process"] == "prepare_rule_set_inputs"
+
+
+def test_undefined_process_writes_failure_evidence_before_raising(
+    tmp_path: Any,
+) -> None:
+    ctx = _log_ctx(tmp_path)
+    workflow = {"name": "w", "processes": {}, "steps": [{"id": "s", "process": "nope"}]}
+
+    with pytest.raises(WorkflowError, match="undefined process"):
+        run_workflow(ctx, workflow, {"nope": lambda *a: None})
+
+    complete = next(
+        r for r in _run_log_records(tmp_path) if r.get("record_type") == "RUN_COMPLETE"
+    )
+    assert complete["status"] == "failed"
+
+
+def test_disabled_workflow_is_recorded_through_the_normal_run_path(
+    tmp_path: Any,
+) -> None:
+    """The attempt is evidence: a run starts, completes, and is finalized."""
+    ctx = _log_ctx(tmp_path)
+
+    run = run_workflow(
+        ctx,
+        {"name": "w", "enabled": False, "processes": {}, "steps": []},
+        {},
+    )
+
+    assert run.status == "refused"
+    records = _run_log_records(tmp_path)
+    types = [record.get("record_type") for record in records]
+    assert "RUN_START" in types
+    assert "RUN_COMPLETE" in types
+
+    complete = next(r for r in records if r.get("record_type") == "RUN_COMPLETE")
+    assert complete["status"] == "refused"
+    assert "is disabled and was not executed" in complete["message"]

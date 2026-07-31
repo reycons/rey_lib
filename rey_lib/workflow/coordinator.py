@@ -96,6 +96,92 @@ def _finalize_run(ctx: Any) -> None:
     log_artifact_manifest_from_run_log(ctx)
 
 
+def _refused_disabled_workflow(
+    ctx: Any,
+    name: str,
+    *,
+    apply: bool,
+    metadata: Optional[dict[str, Any]],
+) -> "WorkflowRun":
+    """Record a disabled workflow as a refused run and return it.
+
+    The attempt is still evidence worth keeping — someone asked for this
+    workflow and it did not run — so it goes through the normal run result
+    path: a RUN_START, a terminal RUN_COMPLETE, and a finalized run. No step
+    is resolved and no handler is consulted.
+    """
+    message = (
+        f"workflow '{name}' is disabled and was not executed. Set "
+        f"'enabled: true' on the workflow definition to run it."
+    )
+    run = WorkflowRun(
+        name=name,
+        status="refused",
+        context=RunContext(
+            apply=apply, metadata=dict(metadata or {}), data={"ctx": ctx}
+        ),
+    )
+    try:
+        ctx.workflow_name = name
+    except (AttributeError, TypeError):
+        pass
+    set_nest_level(ctx, "workflow")
+    log_run_start(ctx, workflow=name, apply=apply)
+    bind_run(ctx)
+    _logger.warning("%s", message)
+    log_run_complete(ctx, "refused", message=message)
+    _finalize_run(ctx)
+    clear_run()
+    return run
+
+
+def _pre_execution_failure(
+    ctx: Any,
+    run: "WorkflowRun",
+    *,
+    step_id: str,
+    label: str,
+    process: str,
+    sequence: int,
+    message: str,
+) -> "WorkflowError":
+    """Record a resolution failure as normal run evidence, then hand it back.
+
+    A workflow that fails between RUN_START and its first step would otherwise
+    leave a run log with no outcome at all. The failure is written through the
+    same records an in-step failure uses, the run is finalized and unbound, and
+    the caller raises the returned error so the existing contract is unchanged.
+    """
+    failure_id = log_step_failure(
+        ctx,
+        failed_step_id=step_id,
+        failed_step_name=label or step_id,
+        message=message,
+        error_type="WorkflowError",
+        error_message=message,
+        sanitized_exception=message,
+        failed_step_sequence=sequence,
+        process=process,
+    )
+    run.outcomes.append(
+        StepOutcome(step_id, label, process, "failed", error=message)
+    )
+    run.status = "failed"
+    _logger.error("%s", message)
+    log_run_complete(
+        ctx,
+        "failed",
+        message=message,
+        failure_record_id=failure_id,
+        failed_step_id=step_id,
+        failed_step_name=label or step_id,
+        failure_message=message,
+    )
+    _finalize_run(ctx)
+    clear_run()
+    return WorkflowError(message)
+
+
 def run_workflow(
     ctx: Any,
     workflow: Any,
@@ -160,6 +246,14 @@ def run_workflow(
         selection — always fail closed, never guess.
     """
     name = str(_get(workflow, "name", "") or "")
+    # Being switched off is a governed outcome, not a fault: it is reported as
+    # a run with a terminal status like any other result, so the caller exits
+    # non-zero without a traceback. Absent means enabled; only an explicit
+    # false refuses, so a definition that omits the key is unaffected. This is
+    # decided before the definition is parsed, so a disabled workflow is never
+    # rejected for some unrelated defect in steps it will not run.
+    if _get(workflow, "enabled", True) is False:
+        return _refused_disabled_workflow(ctx, name, apply=apply, metadata=metadata)
     tokens = _resolve_tokens(_get(workflow, "tokens"))
     processes = _to_mapping(_get(workflow, "processes"))
     steps = _as_list(_get(workflow, "steps"))
@@ -232,15 +326,31 @@ def run_workflow(
             continue
         step_id, label, process = step_views[index]
         if process not in processes:
-            raise WorkflowError(
-                f"workflow '{name}': step '{step_id}' calls undefined process "
-                f"'{process}'. Define it under workflow.processes."
+            raise _pre_execution_failure(
+                ctx,
+                run,
+                step_id=step_id,
+                label=label,
+                process=process,
+                sequence=sequence + 1,
+                message=(
+                    f"workflow '{name}': step '{step_id}' calls undefined process "
+                    f"'{process}'. Define it under workflow.processes."
+                ),
             )
         handler = registry.get(process)
         if handler is None:
-            raise WorkflowError(
-                f"workflow '{name}': process '{process}' has no registered handler "
-                f"in this app."
+            raise _pre_execution_failure(
+                ctx,
+                run,
+                step_id=step_id,
+                label=label,
+                process=process,
+                sequence=sequence + 1,
+                message=(
+                    f"workflow '{name}': process '{process}' has no registered "
+                    f"handler in this app."
+                ),
             )
 
         effective = _expand_config(
