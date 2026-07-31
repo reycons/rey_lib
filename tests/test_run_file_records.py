@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from rey_lib.files import serialize_source_file_mutation
 from rey_lib.logs import (
     RunFileRecordsError,
     find_run_file_records,
@@ -46,16 +47,19 @@ def _mutation(
     source_path: str = "",
     destination_path: str = "",
 ) -> dict[str, Any]:
+    # Built through the real serializer so these fixtures are exactly what a
+    # producer writes; the manifest writer owns record_id, so it is added here.
     return {
         "record_id": record_id,
-        "record_type": "source_file_mutation",
-        "schema_version": "1.0",
-        "action": action,
-        "status": status,
-        "source_path": source_path,
-        "destination_path": destination_path,
-        "application_name": "file_operator",
-        "evidence": {"run_log_file": run_log_file, "run_log_record_id": record_id},
+        **serialize_source_file_mutation(
+            action=action,
+            status=status,
+            source_path=source_path,
+            destination_path=destination_path,
+            run_log_file=run_log_file,
+            run_log_record_id=record_id,
+            application_name="file_operator",
+        ),
     }
 
 
@@ -166,7 +170,7 @@ def test_inventory_records_use_their_recorded_path(manifest: Path) -> None:
             "record_id": 1,
             "record_type": "source_file_inventory",
             "file_id": "f1",
-            "path": "/data/feed/inbox/book.xls",
+            "file": {"path": "/data/feed/inbox/book.xls"},
             "evidence": {"run_log_file": "app.run.log", "run_log_record_id": 1},
         },
     )
