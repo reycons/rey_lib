@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rey_lib.files.file_utils import append_jsonl
+from rey_lib.files.jsonl import read_jsonl_file
 
 __all__ = [
     # Status constants
@@ -497,13 +498,14 @@ def _append_jsonl(data: dict[str, Any], path: Path) -> None:
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read all non-empty lines from a JSONL file as dicts."""
+    """Read all non-empty lines from a JSONL file as dicts.
+
+    An absent file is an empty history, not a failure. A malformed one is a
+    failure: reading through the shared strict reader keeps that, and gains its
+    error contract — the path and the physical line number of the offending
+    record, rather than a bare JSONDecodeError.
+    """
     path = Path(path)
     if not path.exists():
         return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
+    return [dict(item.record) for item in read_jsonl_file(path)]

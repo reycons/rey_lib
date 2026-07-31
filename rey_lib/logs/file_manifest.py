@@ -393,22 +393,23 @@ def _highest_record_id(manifest_path: Path) -> int:
     """Return the highest valid record ID, preserving intentional gaps."""
     if not manifest_path.exists():
         return 0
+    # The governed store is read through the one strict JSONL reader rather
+    # than parsed here: a manifest that cannot be read must fail, not be
+    # silently recounted from whatever lines happened to parse.
+    from rey_lib.files.jsonl import read_jsonl_file
+
     try:
-        with manifest_path.open("r", encoding="utf-8") as handle:
-            highest = 0
-            for line in handle:
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                record_id = record.get("record_id") if isinstance(record, dict) else None
-                if (
-                    isinstance(record_id, int)
-                    and not isinstance(record_id, bool)
-                    and record_id > highest
-                ):
-                    highest = record_id
-            return highest
-    except (OSError, ValueError) as exc:
+        highest = 0
+        for item in read_jsonl_file(manifest_path):
+            record_id = item.record.get("record_id")
+            if (
+                isinstance(record_id, int)
+                and not isinstance(record_id, bool)
+                and record_id > highest
+            ):
+                highest = record_id
+        return highest
+    except Exception as exc:
         raise FileManifestError(
             f"Manifest record IDs cannot be inspected in '{manifest_path}': {exc}"
         ) from exc

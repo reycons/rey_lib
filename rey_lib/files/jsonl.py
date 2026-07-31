@@ -31,12 +31,15 @@ from jmespath.exceptions import JMESPathError
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import open_text_file
+from rey_lib.files.primitive_file_io import render_jsonl_line, write_jsonl_file
 
 __all__ = [
     "JsonlReadError",
     "JsonlRecord",
     "JsonlSearchResult",
     "read_jsonl_file",
+    "render_jsonl_line",
+    "write_jsonl_file",
     "search_jsonl_file",
 ]
 

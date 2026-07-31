@@ -381,3 +381,35 @@ def test_an_unknown_root_field_is_refused(tmp_path: Path) -> None:
             {"record_type": "source_file_mutation", "mutation_kind": "excel_to_csv"},
         )
     assert not manifest.exists() or _rows(manifest) == []
+
+
+def test_a_governed_rewrite_preserves_retained_rows_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """Deleting one record must not silently re-encode the rows kept.
+
+    An append-only evidence store whose retained lines change bytes is no
+    longer byte-comparable, so every writer renders through one encoder.
+    """
+    from rey_lib.files.jsonl import read_jsonl_file, render_jsonl_line
+
+    ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    manifest = ctx.paths.resolve("file_manifest")
+    for index in range(3):
+        log_file_manifest_record(
+            ctx,
+            {
+                "record_type": "source_file_inventory",
+                "source_name": "feed",
+                # Non-ASCII and a null-valued field: the two places encoders
+                # most often disagree.
+                "file": {"path": f"/data/Ünïcode/{index}.csv"},
+            },
+        )
+
+    appended = manifest.read_bytes()
+    rewritten = "".join(
+        render_jsonl_line(item.record) + "\n" for item in read_jsonl_file(manifest)
+    ).encode("utf-8")
+
+    assert appended == rewritten

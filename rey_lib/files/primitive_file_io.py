@@ -31,6 +31,8 @@ __all__ = [
     "write_bytes",
     "append_text",
     "append_jsonl",
+    "render_jsonl_line",
+    "write_jsonl_file",
     "atomic_write_text",
     "atomic_write_bytes",
 ]
@@ -133,6 +135,42 @@ def append_text(
     return target
 
 
+def render_jsonl_line(record: Any) -> str:
+    """Return one record as its canonical JSONL line, without the newline.
+
+    The single encoding for this format. Every writer uses it so that a record
+    holding the same content is the same bytes wherever it was written — an
+    append-only store whose rows are re-encoded by a later rewrite is no longer
+    byte-comparable evidence.
+
+    ``default=str`` stringifies a non-JSON-native value rather than raising, so
+    a caller is never silently unable to record something.
+    """
+    return json.dumps(record, default=str)
+
+
+def write_jsonl_file(
+    path: Path | str,
+    records: Any,
+    *,
+    encoding: str = "utf-8",
+    create_parents: bool = True,
+) -> Path:
+    """Atomically write every record as one JSONL file, replacing any existing.
+
+    The whole-file counterpart to :func:`append_jsonl`, for an artifact built
+    in one pass rather than accumulated. Both render through
+    :func:`render_jsonl_line`, so a record holding the same content is the same
+    bytes whichever writer produced it.
+
+    The write is atomic: a reader never observes a partially written artifact.
+    """
+    lines = "".join(render_jsonl_line(record) + "\n" for record in records)
+    return atomic_write_text(
+        path, lines, encoding=encoding, create_parents=create_parents
+    )
+
+
 def append_jsonl(
     path: Path | str,
     record: Any,
@@ -164,7 +202,7 @@ def append_jsonl(
     """
     target = Path(path)
     _ensure_parent(target, create_parents)
-    line = json.dumps(record, default=str) + "\n"
+    line = render_jsonl_line(record) + "\n"
     with target.open("a", encoding=encoding) as handle:
         handle.write(line)
     return target
