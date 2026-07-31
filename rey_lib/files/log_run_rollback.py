@@ -99,27 +99,60 @@ def serialize_source_file_mutation(
     application_name: str = "",
     recorded_at: str | None = None,
 ) -> dict[str, Any]:
-    """Build one authoritative filesystem-mutation manifest record."""
+    """Build one authoritative canonical filesystem-mutation manifest record."""
     normalized_action = _non_empty(action, "action")
     normalized_status = _non_empty(status, "status")
     evidence_file = _run_log_name(run_log_file)
     evidence_id = _positive_int(run_log_record_id, "run_log_record_id")
-    return {
+
+    # The file object describes the logical file's lifecycle state: its current
+    # location, and the location it came from. A caller passes only the paths
+    # its operation actually had, so an absent value is exactly the omission
+    # the canonical layout requires — no file after a delete, no previous file
+    # before a create.
+    current_path = _path_text(destination_path)
+    original_path = _path_text(source_path)
+    file_object: dict[str, Any] = {}
+    if current_path:
+        file_object["path"] = current_path
+    if original_path:
+        file_object["original_path"] = original_path
+    # Both locations name the same logical file, so its name and extension come
+    # from whichever location the action left recorded.
+    named_path = current_path or original_path
+    if named_path:
+        file_name = Path(named_path).name
+        file_object["file_name"] = file_name
+        file_object["file_extension"] = (
+            Path(file_name).suffix.removeprefix(".").lower()
+        )
+
+    # Compensation metadata stays separate from file identity.
+    rollback_object: dict[str, Any] = {}
+    recovery = _path_text(recovery_path)
+    previous_version = _path_text(previous_version_path)
+    if recovery:
+        rollback_object["recovery_path"] = recovery
+    if previous_version:
+        rollback_object["previous_version_path"] = previous_version
+
+    record: dict[str, Any] = {
         "record_type": MUTATION_RECORD_TYPE,
-        "schema_version": SCHEMA_VERSION,
         "action": normalized_action,
         "status": normalized_status,
-        "source_path": _path_text(source_path),
-        "destination_path": _path_text(destination_path),
-        "recovery_path": _path_text(recovery_path),
-        "previous_version_path": _path_text(previous_version_path),
-        "application_name": str(application_name or ""),
+        "producer": {
+            "application": str(application_name or ""),
+        },
+        "file": file_object,
         "evidence": {
             "run_log_file": evidence_file,
             "run_log_record_id": evidence_id,
         },
         "recorded_at": recorded_at or _timestamp(),
     }
+    if rollback_object:
+        record["rollback"] = rollback_object
+    return record
 
 
 def log_source_file_mutation(
@@ -142,18 +175,18 @@ def log_source_file_mutation(
     the exact paths made durable by the operation they performed.
     """
     extra_fields = dict(fields or {})
+    # The canonical fields this boundary and the manifest writer own. An
+    # extension field may add a canonical object the serializer does not
+    # produce, but it may never replace one that it does.
     reserved = {
         "record_id",
         "record_type",
-        "schema_version",
         "action",
         "status",
-        "source_path",
-        "destination_path",
-        "recovery_path",
-        "previous_version_path",
-        "application_name",
+        "producer",
+        "file",
         "evidence",
+        "rollback",
         "recorded_at",
     }
     overlap = sorted(reserved.intersection(extra_fields))
@@ -644,20 +677,27 @@ def _append_rollback_evidence(
             "Rollback run-log evidence did not commit; no manifest evidence "
             "or filesystem compensation was performed."
         )
-    record = {
+    # A rollback record references the original lifecycle record rather than
+    # duplicating its data, so none of the original's paths or actions are
+    # copied into the manifest. The run-log record above keeps the full
+    # compensation detail.
+    record: dict[str, Any] = {
         "record_type": ROLLBACK_RECORD_TYPE,
-        "schema_version": SCHEMA_VERSION,
-        **fields,
-        "rollback_run_id": str(getattr(audit_ctx, "run_id", "") or ""),
-        "application_name": "rey_lib",
+        "status": status,
+        "producer": {
+            "application": "rey_lib",
+        },
         "evidence": {
             "run_log_file": Path(str(audit_ctx.run_log_path)).name,
             "run_log_record_id": run_record_id,
         },
+        "rollback": {
+            "original_record_id": int(original["record_id"]),
+        },
         "recorded_at": _timestamp(),
     }
-    if attempt_record_id is None:
-        record.pop("rollback_attempt_record_id")
+    if reason:
+        record["result"] = {"reason": reason}
     return session.append(record)
 
 
