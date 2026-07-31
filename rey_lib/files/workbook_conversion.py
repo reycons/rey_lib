@@ -24,6 +24,7 @@ from typing import Any, Literal
 import unicodedata
 
 from rey_lib.errors.error_utils import AppError
+from rey_lib.files.text import clean_text_value
 
 SUPPORTED_WORKBOOK_EXTENSIONS = frozenset({".xls", ".xlsx", ".xlsb", ".xlsm"})
 _TABLE_CAPABLE_EXTENSIONS = frozenset({".xlsx", ".xlsm"})
@@ -437,21 +438,12 @@ def _is_empty_frame(frame: Any) -> bool:
     return int(frame.height) == 0 or int(frame.width) == 0
 
 
-def _remove_control_categories(value: str) -> str:
-    """Remove Unicode Cc and Cf characters from a string value."""
-    return "".join(
-        c for c in value if unicodedata.category(c) not in {"Cc", "Cf"}
-    )
-
-
 def _normalize_header_text(value: str) -> str:
     """Normalize header text: replace embedded whitespace, remove Cc/Cf, collapse spaces, trim."""
     # 1. Replace CR, LF, TAB, NBSP with ordinary spaces
     normalized = _WHITESPACE_NORMALIZE_PATTERN.sub(" ", value)
-    # 2. Remove remaining Unicode Cc and Cf characters (reusing helper)
-    normalized = "".join(
-        c for c in normalized if unicodedata.category(c) not in {"Cc", "Cf"}
-    )
+    # 2. Remove remaining Unicode Cc and Cf characters
+    normalized = clean_text_value(normalized)
     # 3. Collapse repeated ordinary spaces to single space
     normalized = _CSV_REPEATED_SPACES.sub(" ", normalized)
     # 4. Trim leading and trailing spaces
@@ -472,7 +464,7 @@ def _normalize_extracted_frame(frame: Any) -> Any:
                 pl.col(column_name)
                 .str.replace_all(_WHITESPACE_NORMALIZE_PATTERN.pattern, " ")
                 .map_elements(
-                    _remove_control_categories,
+                    clean_text_value,
                     return_dtype=pl.String,
                     skip_nulls=True,
                 )

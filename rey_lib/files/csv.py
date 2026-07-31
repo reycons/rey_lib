@@ -37,6 +37,7 @@ from typing import Iterator, Sequence
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import read_text_file
+from rey_lib.files.text import clean_text_value
 
 __all__ = [
     "CsvRead",
@@ -576,11 +577,17 @@ def parse_delimited_line(
     error carries only what this module knows — the parse failure itself — so
     the caller adds the path and line number it is reporting against, and
     decides whether that is fatal or collected.
+
+    Each field is cleaned once the parser has established where it begins and
+    ends, so a control character inside a value is removed while the tabs and
+    newlines that separate values keep doing their job. Cleaning happens after
+    the split, never before it.
     """
     try:
-        return list(next(_csv.reader([line], delimiter=delimiter, strict=strict), []))
+        fields = next(_csv.reader([line], delimiter=delimiter, strict=strict), [])
     except _csv.Error as exc:
         raise CsvReadError(str(exc)) from exc
+    return [clean_text_value(field) for field in fields]
 
 
 def looks_like_csv(text: str, delimiter: str | None = None) -> bool:
