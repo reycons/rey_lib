@@ -33,18 +33,20 @@ import io
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import read_text_file
 
 __all__ = [
     "CsvRead",
+    "CsvStream",
     "CsvReadError",
     "CsvRow",
     "HeaderMatch",
     "looks_like_csv",
     "normalized_header",
+    "open_csv",
     "parse_delimited_line",
     "read_csv",
     "read_csv_text",
@@ -55,6 +57,11 @@ __all__ = [
 # Header discovery is bounded to the opening rows. Every line is already in
 # memory, so this bounds the comparison work rather than the read.
 _HEADER_SEARCH_ROWS = 50
+
+# A streaming read buffers this many lines to determine the delimiter and
+# locate the header. Header discovery is already bounded to the opening rows,
+# so this holds everything that decision can consider and nothing more.
+_PROLOGUE_LINES = _HEADER_SEARCH_ROWS * 2
 
 # Tried in this order, so an ambiguous file resolves the same way every run.
 _CANDIDATE_DELIMITERS: tuple[str, ...] = (",", "\t", ";", "|")
@@ -109,10 +116,141 @@ class CsvRead:
     source_text_sha256: str
 
 
+@dataclass(frozen=True)
+class CsvStream:
+    """A delimited file's structure, with its data rows still unread."""
+
+    path: str
+    encoding: str
+    delimiter: str
+    has_header: bool
+    header_line_number: int | None
+    header_fields: tuple[str, ...]
+    header_matches: tuple[HeaderMatch, ...]
+    header_matched_all: bool
+    rows: Iterator[CsvRow]
+
+
+def open_csv(
+    path: Path | str,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+    delimiter: str | None = None,
+    required_header: Sequence[str] = (),
+    skip_blank_lines: bool = False,
+) -> CsvStream:
+    """Answer a file's structure, then stream its rows without holding them.
+
+    For a caller that processes rows one at a time and must not pay for the
+    whole file in memory. The structural decisions are the same ones
+    :func:`read_csv` makes, reached by the same functions: the delimiter is
+    determined and the header located from a bounded opening window, which is
+    all header discovery ever examines. Only the data rows stream.
+
+    The returned ``rows`` iterator holds the file open until it is exhausted
+    or closed, and each row carries its physical line number as it would from
+    a whole-file read.
+
+    Counts that require seeing every row — blank, ragged, total — are not
+    available here; a caller needing those wants :func:`read_csv`.
+    """
+    source_path = Path(path)
+    try:
+        handle = source_path.open(encoding=encoding, errors=errors, newline="")
+    except OSError as exc:
+        raise CsvReadError(f"Cannot read '{source_path}': {exc}") from exc
+
+    required = tuple(str(text) for text in required_header if str(text).strip())
+    prologue: list[str] = []
+    try:
+        for line in handle:
+            prologue.append(line.rstrip("\n").rstrip("\r"))
+            if len(prologue) >= _PROLOGUE_LINES:
+                break
+    except (OSError, UnicodeError) as exc:
+        handle.close()
+        raise CsvReadError(f"Cannot read '{source_path}': {exc}") from exc
+
+    resolved = delimiter if delimiter is not None else _detect_delimiter(prologue)
+    parsed = [parse_delimited_line(line, resolved) for line in prologue]
+    header_index = _locate_header(prologue, parsed, required)
+    header_fields = () if header_index is None else tuple(parsed[header_index])
+    matches = _evaluate_header(header_fields, required)
+
+    return CsvStream(
+        path=str(source_path),
+        encoding=encoding,
+        delimiter=resolved,
+        has_header=header_index is not None,
+        header_line_number=None if header_index is None else header_index + 1,
+        header_fields=header_fields,
+        header_matches=matches,
+        header_matched_all=all(match.found for match in matches),
+        rows=_stream_rows(
+            handle,
+            prologue,
+            header_index,
+            len(header_fields),
+            resolved,
+            skip_blank_lines,
+        ),
+    )
+
+
+def _stream_rows(
+    handle: Any,
+    prologue: list[str],
+    header_index: int | None,
+    expected_width: int,
+    delimiter: str,
+    skip_blank_lines: bool,
+) -> Iterator[CsvRow]:
+    """Yield data rows, buffered prologue first, then the rest of the file."""
+    first_data_index = 0 if header_index is None else header_index + 1
+    try:
+        index = 0
+        for line in prologue:
+            if index >= first_data_index:
+                row = _row(line, index, expected_width, delimiter)
+                if not (row.is_blank and skip_blank_lines):
+                    yield row
+            index += 1
+        for raw in handle:
+            line = raw.rstrip("\n").rstrip("\r")
+            row = _row(line, index, expected_width, delimiter)
+            if not (row.is_blank and skip_blank_lines):
+                yield row
+            index += 1
+    finally:
+        handle.close()
+
+
+def _row(
+    line: str,
+    index: int,
+    expected_width: int,
+    delimiter: str,
+) -> CsvRow:
+    """Describe one physical line exactly as a whole-file read would."""
+    is_blank = not line.strip()
+    fields = tuple(parse_delimited_line(line, delimiter))
+    return CsvRow(
+        physical_line_number=index + 1,
+        text=line,
+        fields=fields,
+        field_count=len(fields),
+        is_ragged=bool(expected_width) and not is_blank and len(fields) != expected_width,
+        is_blank=is_blank,
+        is_header_candidate=_is_header_candidate(list(fields)),
+    )
+
+
 def read_csv(
     path: Path | str,
     *,
     encoding: str = "utf-8",
+    errors: str = "strict",
     delimiter: str | None = None,
     required_header: Sequence[str] = (),
     sample_size: int = 0,
@@ -130,6 +268,9 @@ def read_csv(
         Source file, already resolved and authorized by the caller.
     encoding : str
         Character encoding, for example ``'utf-8-sig'``.
+    errors : str
+        Decoding error policy, as :func:`open`. ``'replace'`` for a caller that
+        must not fail on undecodable bytes.
     delimiter : str | None
         The delimiter to use. ``None`` asks this module to determine it.
     required_header : Sequence[str]
@@ -157,7 +298,7 @@ def read_csv(
     """
     source_path = Path(path)
     try:
-        source_text = read_text_file(source_path, encoding=encoding)
+        source_text = read_text_file(source_path, encoding=encoding, errors=errors)
     except OSError as exc:
         raise CsvReadError(f"Cannot read '{source_path}': {exc}") from exc
 

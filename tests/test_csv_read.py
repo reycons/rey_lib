@@ -14,6 +14,7 @@ import pytest
 from rey_lib.files.csv import (
     CsvReadError,
     looks_like_csv,
+    open_csv,
     read_csv,
     read_csv_text,
 )
@@ -326,3 +327,63 @@ def test_looks_like_csv_is_the_reader_s_own_answer(tmp_path: Path) -> None:
     text = "Report\n\nAccount,Qty\nA1,10\nA2,20\n"
 
     assert looks_like_csv(text) is read_csv_text(text).has_header is True
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+# ---------------------------------------------------------------------------
+
+def test_streaming_matches_the_whole_file_read(tmp_path: Path) -> None:
+    """open_csv answers the same structure and yields the same rows."""
+    text = "Acme Report\n\nAccount,Symbol,Qty\nA1,IBM,10\n\nA2,X,30,EXTRA\nA3,Y,1\n"
+    source = _write(tmp_path, "p.csv", text)
+
+    whole = read_csv(source)
+    stream = open_csv(source)
+
+    assert (
+        stream.delimiter,
+        stream.has_header,
+        stream.header_line_number,
+        stream.header_fields,
+    ) == (
+        whole.delimiter,
+        whole.has_header,
+        whole.header_line_number,
+        whole.header_fields,
+    )
+    assert list(stream.rows) == list(whole.rows)
+
+
+def test_streaming_reads_beyond_the_prologue_window(tmp_path: Path) -> None:
+    """A file longer than the header-search window still streams every row."""
+    body = "".join(f"{i},{i * 2}\n" for i in range(1, 501))
+    source = _write(tmp_path, "big.csv", f"A,B\n{body}")
+
+    rows = list(open_csv(source).rows)
+
+    assert len(rows) == 500
+    assert rows[-1].physical_line_number == 501
+    assert rows[-1].fields == ("500", "1000")
+
+
+def test_streaming_does_not_materialise_rows(tmp_path: Path) -> None:
+    source = _write(tmp_path, "f.csv", "A,B\n1,2\n3,4\n")
+
+    rows = open_csv(source).rows
+
+    assert not isinstance(rows, (list, tuple))
+    assert next(iter(rows)).fields == ("1", "2")
+
+
+def test_streaming_honours_skip_blank_lines(tmp_path: Path) -> None:
+    source = _write(tmp_path, "f.csv", "A,B\n1,2\n\n3,4\n")
+
+    kept = [row.physical_line_number for row in open_csv(source).rows]
+    skipped = [
+        row.physical_line_number
+        for row in open_csv(source, skip_blank_lines=True).rows
+    ]
+
+    assert kept == [2, 3, 4]
+    assert skipped == [2, 4]

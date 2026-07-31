@@ -1734,44 +1734,47 @@ def _csv_reader(
 
     Skips blank lines and mid-file header-repeat rows. Applies row_filter
     when provided. The file handle is managed via a context manager.
-    """
-    with infile.open(newline="", encoding=encoding, errors="replace") as fh:
-        header = ""
-        if header_line is None:
-            # Skip blank lines to find the first non-empty header line.
-            for line in fh:
-                stripped = line.strip()
-                if stripped:
-                    header = stripped
-                    break
-        else:
-            # Scan until the matched header line is found.
-            for line in fh:
-                stripped = line.strip()
-                if stripped == header_line:
-                    header = stripped
-                    break
 
-        if not header:
+    Parsing and header location belong to ``rey_lib.files.csv``; what remains
+    here is this caller's policy — the exact ``header_line`` match, dropping
+    headers repeated mid-file, the ``row_filter`` predicate, and the
+    ``dict[str, str]`` shape. Rows stream, so a large file is never held whole.
+    """
+    # Imported here because rey_lib.files.csv reads through this module; a
+    # module-level import would close the cycle.
+    from rey_lib.files.csv import open_csv
+
+    stream = open_csv(
+        infile,
+        encoding=encoding,
+        errors="replace",
+        delimiter=delimiter,
+        required_header=[header_line] if header_line else (),
+        skip_blank_lines=True,
+    )
+
+    fieldnames = [name.strip() for name in stream.header_fields]
+    if not fieldnames:
+        return
+    if header_line is not None:
+        # An exact whole line is this caller's contract, stricter than the
+        # per-field match the reader reports: the located header must be that
+        # line, or there are no rows.
+        wanted = [name.strip() for name in header_line.split(delimiter)]
+        if fieldnames != wanted:
             return
 
-        fieldnames = [c.strip() for c in header.split(delimiter)]
-        reader     = csv.DictReader(fh, fieldnames=fieldnames, delimiter=delimiter)
-
-        for row in reader:
-            # Skip blank rows, including rows that contain only whitespace.
-            if not any((v or "").strip() for v in row.values()):
-                continue
-
-            # Skip repeated header rows embedded mid-file.
-            first_col = fieldnames[0] if fieldnames else ""
-            if row.get(first_col, "").strip() == first_col:
-                continue
-
-            if row_filter is not None and not row_filter(row):
-                continue
-
-            yield row
+    first_column = fieldnames[0]
+    for row in stream.rows:
+        if not any((value or "").strip() for value in row.fields):
+            continue
+        record = dict(zip(fieldnames, row.fields))
+        # A header repeated mid-file is not data.
+        if (record.get(first_column, "") or "").strip() == first_column:
+            continue
+        if row_filter is not None and not row_filter(record):
+            continue
+        yield record
 
 
 def _resolve_path_key(paths: Any, key: str) -> Path:
@@ -1820,27 +1823,37 @@ def _read_date_range_from_column(
     date_format: str,
 ) -> tuple[datetime, datetime]:
     """Read CSV rows and return (min_date, max_date) from source_column."""
+    # Imported here because rey_lib.files.csv reads through this module; a
+    # module-level import would close the cycle.
+    from rey_lib.files.csv import read_csv
+
     dates: list[datetime] = []
 
-    with file_path.open(newline="", encoding="utf-8-sig", errors="replace") as fh:
-        reader = csv.DictReader(fh)
-        if source_column not in (reader.fieldnames or []):
-            fh.seek(0)
-            reader = _find_header_reader(fh, source_column)
-
-        for row in reader:
-            raw = (row.get(source_column, "") or "").strip()
-            if not raw:
-                continue
-            try:
-                dates.append(datetime.strptime(raw, date_format))
-            except ValueError:
-                _logger.debug(
-                    "Skipping unparseable %s value '%s' in %s",
-                    source_column,
-                    raw,
-                    file_path.name,
-                )
+    # Locating the header is a CSV question: naming the column as required
+    # header text finds the header line wherever it sits, which is what the
+    # previous hand-rolled header scan did.
+    read = read_csv(
+        file_path,
+        encoding="utf-8-sig",
+        errors="replace",
+        required_header=[source_column],
+    )
+    columns = list(read.header_fields)
+    if source_column not in columns:
+        raise ValueError(f"Column '{source_column}' not found in file.")
+    for row in read.rows:
+        raw = (dict(zip(columns, row.fields)).get(source_column, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            dates.append(datetime.strptime(raw, date_format))
+        except ValueError:
+            _logger.debug(
+                "Skipping unparseable %s value '%s' in %s",
+                source_column,
+                raw,
+                file_path.name,
+            )
 
     if not dates:
         raise ValueError(
@@ -1848,15 +1861,6 @@ def _read_date_range_from_column(
         )
 
     return min(dates), max(dates)
-
-
-def _find_header_reader(fh: TextIO, source_column: str) -> csv.DictReader:
-    """Return DictReader positioned at the header line that contains source_column."""
-    for line in fh:
-        if source_column in line:
-            remaining = line + fh.read()
-            return csv.DictReader(StringIO(remaining))
-    raise ValueError(f"Column '{source_column}' not found in file.")
 
 
 def _display_root(ctx: Any) -> Path | None:
