@@ -531,6 +531,34 @@ def _read_required_manifest(session: Any) -> list[dict[str, Any]]:
     return session.read_records()
 
 
+# Logical compensation input -> (canonical object, canonical field). The two
+# lifecycle locations are grouped under ``file`` and the two compensation
+# locations under ``rollback``.
+_RECORDED_PATHS: dict[str, tuple[str, str]] = {
+    "current_path": ("file", "path"),
+    "original_path": ("file", "original_path"),
+    "recovery_path": ("rollback", "recovery_path"),
+    "previous_version_path": ("rollback", "previous_version_path"),
+}
+
+
+def _record_path(record: Mapping[str, Any], name: str) -> str:
+    """Resolve one recorded location from its canonical object."""
+    object_name, field = _RECORDED_PATHS[name]
+    grouped = record.get(object_name)
+    if not isinstance(grouped, Mapping):
+        return ""
+    return _path_text(grouped.get(field))
+
+
+def _record_run_log_file(record: Mapping[str, Any]) -> str:
+    """Resolve the canonical run-log pointer."""
+    evidence = record.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return ""
+    return _path_text(evidence.get("run_log_file"))
+
+
 def _is_selected_mutation(record: Mapping[str, Any], run_log_file: str) -> bool:
     if record.get("record_type") != MUTATION_RECORD_TYPE:
         return False
@@ -541,38 +569,52 @@ def _is_selected_mutation(record: Mapping[str, Any], run_log_file: str) -> bool:
     action = record.get("action")
     if not isinstance(action, str) or not action.strip():
         return False
-    evidence = record.get("evidence")
-    return (
-        isinstance(evidence, Mapping)
-        and evidence.get("run_log_file") == run_log_file
-    )
+    return _record_run_log_file(record) == run_log_file
+
+
+def _validate_recorded_paths(
+    record: Mapping[str, Any],
+    record_type: str,
+) -> None:
+    """Require the canonical location objects and their recorded values.
+
+    ``file`` is mandatory: every mutation leaves the logical file somewhere or
+    took it from somewhere. ``rollback`` is optional because an action may
+    carry no compensation metadata. A location the action never had is absent
+    rather than empty, so only present fields are type-checked.
+    """
+    file_object = record.get("file")
+    if not isinstance(file_object, Mapping):
+        raise LogRunRollbackError(f"{record_type}.file must be an object.")
+    rollback_object = record.get("rollback")
+    if rollback_object is not None and not isinstance(rollback_object, Mapping):
+        raise LogRunRollbackError(f"{record_type}.rollback must be an object.")
+    for object_name, fields in (
+        ("file", ("path", "original_path")),
+        ("rollback", ("recovery_path", "previous_version_path")),
+    ):
+        grouped = record.get(object_name)
+        if not isinstance(grouped, Mapping):
+            continue
+        for field in fields:
+            if field in grouped and not isinstance(grouped[field], str):
+                raise LogRunRollbackError(
+                    f"{record_type}.{object_name}.{field} must be a string."
+                )
 
 
 def _validate_mutation_record(record: Mapping[str, Any]) -> None:
     """Reject malformed authoritative mutations before planning any work."""
     _positive_int(record.get("record_id"), "source_file_mutation.record_id")
-    if record.get("schema_version") != SCHEMA_VERSION:
-        raise LogRunRollbackError(
-            "source_file_mutation.schema_version must be '1.0'."
-        )
     _non_empty(record.get("action"), "source_file_mutation.action")
     _non_empty(record.get("status"), "source_file_mutation.status")
-    for field in (
-        "source_path",
-        "destination_path",
-        "recovery_path",
-        "previous_version_path",
-    ):
-        if not isinstance(record.get(field), str):
-            raise LogRunRollbackError(
-                f"source_file_mutation.{field} must be a string."
-            )
+    _validate_recorded_paths(record, MUTATION_RECORD_TYPE)
     evidence = record.get("evidence")
     if not isinstance(evidence, Mapping):
         raise LogRunRollbackError(
             "source_file_mutation.evidence must be an object."
         )
-    _run_log_name(evidence.get("run_log_file"))
+    _run_log_name(_record_run_log_file(record))
     _positive_int(
         evidence.get("run_log_record_id"),
         "source_file_mutation.evidence.run_log_record_id",
@@ -702,22 +744,22 @@ def _append_rollback_evidence(
 
 
 def _validate_move(record: Mapping[str, Any]) -> str | None:
-    return _require_paths(record, "source_path", "destination_path")
+    return _require_paths(record, "original_path", "current_path")
 
 
 def _execute_move(record: Mapping[str, Any]) -> dict[str, Any]:
-    current = Path(str(record["destination_path"]))
-    original = Path(str(record["source_path"]))
+    current = Path(_record_path(record, "current_path"))
+    original = Path(_record_path(record, "original_path"))
     _move_exact(current, original)
     return {"from_path": str(current), "to_path": str(original)}
 
 
 def _validate_create(record: Mapping[str, Any]) -> str | None:
-    return _require_paths(record, "destination_path")
+    return _require_paths(record, "current_path")
 
 
 def _execute_create(record: Mapping[str, Any]) -> dict[str, Any]:
-    created = Path(str(record["destination_path"]))
+    created = Path(_record_path(record, "current_path"))
     if not created.is_file():
         raise FileNotFoundError(f"Created file is missing: {created}")
     created.unlink()
@@ -725,23 +767,23 @@ def _execute_create(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_delete(record: Mapping[str, Any]) -> str | None:
-    return _require_paths(record, "source_path", "recovery_path")
+    return _require_paths(record, "original_path", "recovery_path")
 
 
 def _execute_delete(record: Mapping[str, Any]) -> dict[str, Any]:
-    recovery = Path(str(record["recovery_path"]))
-    original = Path(str(record["source_path"]))
+    recovery = Path(_record_path(record, "recovery_path"))
+    original = Path(_record_path(record, "original_path"))
     _move_exact(recovery, original)
     return {"from_path": str(recovery), "to_path": str(original)}
 
 
 def _validate_replace(record: Mapping[str, Any]) -> str | None:
-    return _require_paths(record, "destination_path", "previous_version_path")
+    return _require_paths(record, "current_path", "previous_version_path")
 
 
 def _execute_replace(record: Mapping[str, Any]) -> dict[str, Any]:
-    previous = Path(str(record["previous_version_path"]))
-    destination = Path(str(record["destination_path"]))
+    previous = Path(_record_path(record, "previous_version_path"))
+    destination = Path(_record_path(record, "current_path"))
     _move_exact(previous, destination)
     return {"from_path": str(previous), "to_path": str(destination)}
 
@@ -757,11 +799,7 @@ def _require_paths(
     record: Mapping[str, Any],
     *names: str,
 ) -> str | None:
-    missing = [
-        name
-        for name in names
-        if not isinstance(record.get(name), str) or not record.get(name)
-    ]
+    missing = [name for name in names if not _record_path(record, name)]
     if missing:
         return f"missing recorded compensation field(s): {', '.join(missing)}"
     return None

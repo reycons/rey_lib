@@ -87,12 +87,22 @@ class RunFileRecords:
         return iter(self.records)
 
 
+def _file_path(record: Mapping[str, Any], field: str) -> str:
+    """Return one recorded location from the canonical ``file`` object."""
+    file_object = record.get("file")
+    if not isinstance(file_object, Mapping):
+        return ""
+    return _text(file_object.get(field))
+
+
 def _mutation_path(record: Mapping[str, Any]) -> str:
     """Return the authoritative display path for one mutation record."""
     action = str(record.get("action") or "").strip().lower()
     status = str(record.get("status") or "").strip().lower()
-    destination = _text(record.get("destination_path"))
-    source = _text(record.get("source_path"))
+    # The file object records the logical file's current location and the
+    # location it came from.
+    destination = _file_path(record, "path")
+    source = _file_path(record, "original_path")
 
     if status == _FAILED_STATUS:
         # A failed mutation shows what it attempted, not an invented result.
@@ -105,7 +115,7 @@ def _mutation_path(record: Mapping[str, Any]) -> str:
 
 
 def _inventory_path(record: Mapping[str, Any]) -> str:
-    return _text(record.get("path"))
+    return _file_path(record, "path")
 
 
 # record_type -> the callable that returns its authoritative display path.
