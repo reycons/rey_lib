@@ -57,6 +57,29 @@ _PATH_NAME = "file_manifest"
 _LAST_RECORD_ID = "last_record_id"
 _MANIFEST_SIZE_BYTES = "manifest_size_bytes"
 
+# The canonical persisted order of manifest root fields, shared by every record
+# type. This is the final serialization boundary, so it owns the order; a
+# record-type serializer owns which of these fields exist and what they hold,
+# never where they sit. Fields a record type does not carry are omitted, and a
+# root field that is not listed here is rejected rather than written.
+_CANONICAL_ROOT_FIELDS: tuple[str, ...] = (
+    "record_id",
+    "file_id",
+    "recorded_at",
+    "record_type",
+    "action",
+    "status",
+    "source_name",
+    "evidence",
+    "file",
+    "lineage",
+    "classification",
+    "rollback",
+    "conversion",
+    "result",
+    "producer",
+)
+
 _logger = logging.getLogger(__name__)
 
 
@@ -221,11 +244,32 @@ def _validate_unsequenced_record(record: Any) -> None:
         )
 
 
+def _canonical_record(record: dict[str, Any], record_id: int) -> dict[str, Any]:
+    """Assign ``record_id`` and return the record in canonical root order.
+
+    An unknown root field is rejected rather than written: the manifest is an
+    append-only evidence store, so a field nobody can name must not become
+    permanent. Nested content is untouched — each section belongs to the
+    record-type serializer that built it.
+    """
+    unknown = sorted(set(record) - set(_CANONICAL_ROOT_FIELDS))
+    if unknown:
+        raise FileManifestError(
+            "Manifest record carries unknown root field(s): " + ", ".join(unknown)
+        )
+    sequenced = {"record_id": record_id, **record}
+    return {
+        name: sequenced[name]
+        for name in _CANONICAL_ROOT_FIELDS
+        if name in sequenced
+    }
+
+
 def _append_locked(manifest_path: Path, record: dict[str, Any]) -> int:
     """Sequence and append one record while the caller holds the manifest lock."""
     state = _load_state(manifest_path)
     record_id = int(state[_LAST_RECORD_ID]) + 1
-    sequenced = {"record_id": record_id, **record}
+    sequenced = _canonical_record(record, record_id)
 
     from rey_lib.files import primitive_file_io
 

@@ -325,18 +325,14 @@ def test_preview_selects_exact_run_and_reverses_manifest_order(
 
 
 @pytest.mark.parametrize(
-    "surface_fields",
-    [
-        {"pipeline_name": "daily"},
-        {"workflow_name": "prepare"},
-        {"application_name": "file_operator"},
-    ],
+    "surface_field",
+    ["pipeline_name", "workflow_name", "application_name"],
 )
-def test_execution_surface_fields_do_not_change_selection(
+def test_execution_surface_fields_cannot_reach_the_manifest(
     tmp_path: Path,
-    surface_fields: dict[str, str],
+    surface_field: str,
 ) -> None:
-    ctx = _ctx(tmp_path)
+    """Run type never participates: such a field is refused, not stored."""
     record = serialize_source_file_mutation(
         action="create",
         status="success",
@@ -344,15 +340,10 @@ def test_execution_surface_fields_do_not_change_selection(
         run_log_file="run.jsonl",
         run_log_record_id=1,
     )
-    record.update(surface_fields)
-    mutation_id = log_file_manifest_record(ctx, record)
+    record[surface_field] = "daily"
 
-    plan = preview_log_run_rollback(ctx, "run.jsonl")
-
-    assert [
-        candidate["original_manifest_record_id"]
-        for candidate in plan["candidates"]
-    ] == [mutation_id]
+    with pytest.raises(FileManifestError, match="unknown root field"):
+        log_file_manifest_record(_ctx(tmp_path), record)
 
 
 def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
@@ -806,13 +797,19 @@ def test_canonical_rollback_records_pass_validation(tmp_path: Path) -> None:
 
 
 def test_legacy_rollback_records_are_rejected(tmp_path: Path) -> None:
+    """The legacy layout is not readable, and is no longer writable either.
+
+    The row is written straight to the file because the manifest writer now
+    refuses to create one. Nothing here interprets it: the canonical reader
+    must fail on it rather than tolerate it.
+    """
     ctx = _ctx(tmp_path)
     mutation_id = _append_mutation(
         ctx, action="create", destination_path=str(tmp_path / "created.csv")
     )
-    log_file_manifest_record(
-        ctx,
-        {
+    with ctx.paths.manifest.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "record_id": mutation_id + 1,
             "record_type": "source_file_rollback",
             "schema_version": "1.0",
             "original_manifest_record_id": mutation_id,
@@ -821,14 +818,8 @@ def test_legacy_rollback_records_are_rejected(tmp_path: Path) -> None:
             "compensating_action": "delete_created_file",
             "phase": "attempt",
             "status": "attempted",
-            "source_path": "",
-            "destination_path": "",
-            "recovery_path": "",
-            "previous_version_path": "",
-            "failure_reason": "",
             "evidence": {"run_log_file": "rollback.jsonl", "run_log_record_id": 1},
-        },
-    )
+        }) + "\n")
 
     with pytest.raises(LogRunRollbackError, match="rollback must be an object"):
         preview_log_run_rollback(ctx, "run.jsonl")
@@ -857,3 +848,52 @@ def test_optional_rollback_fields_are_omitted_when_absent() -> None:
     )
     assert final["rollback"]["attempt_record_id"] == 7
     assert final["result"] == {"reason": "operator asked"}
+
+
+def test_flat_fields_lead_every_governed_record() -> None:
+    """Identity and type come first; the record's objects follow."""
+    mutation = serialize_source_file_mutation(
+        action="delete",
+        status="success",
+        source_path="/in/a.xlsx",
+        recovery_path="/trash/a.xlsx",
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+        application_name="file_operator",
+        file_id="f1",
+        conversion={"operator": "excel_conversion", "name": "all"},
+        reason="processing",
+    )
+    assert list(mutation) == [
+        "file_id",
+        "recorded_at",
+        "record_type",
+        "action",
+        "status",
+        "evidence",
+        "file",
+        "rollback",
+        "conversion",
+        "result",
+        "producer",
+    ]
+
+    rollback = serialize_source_file_rollback(
+        original_record_id=57,
+        phase="final",
+        status="success",
+        run_log_file="rollback.jsonl",
+        run_log_record_id=4,
+        attempt_record_id=61,
+        application_name="rey_lib",
+        reason="operator reset",
+    )
+    assert list(rollback) == [
+        "recorded_at",
+        "record_type",
+        "status",
+        "evidence",
+        "rollback",
+        "result",
+        "producer",
+    ]

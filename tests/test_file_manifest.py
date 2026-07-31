@@ -39,7 +39,10 @@ def _manifest(tmp_path: Path) -> Path:
 
 
 def _record(**overrides: object) -> dict:
-    record = {"record_type": "source_file_inventory", "path": "/x", "size_bytes": 1}
+    record = {
+        "record_type": "source_file_inventory",
+        "file": {"path": "/x", "size_bytes": 1},
+    }
     record.update(overrides)
     return record
 
@@ -92,11 +95,11 @@ def test_append_preserves_existing_records(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
 
-    log_file_manifest_record(ctx, _record(path="/first"))
-    log_file_manifest_record(ctx, _record(path="/second"))
+    log_file_manifest_record(ctx, _record(file={"path": "/first"}))
+    log_file_manifest_record(ctx, _record(file={"path": "/second"}))
 
     rows = _rows(manifest)
-    assert [row["path"] for row in rows] == ["/first", "/second"]
+    assert [row["file"]["path"] for row in rows] == ["/first", "/second"]
 
 
 def test_lock_aware_session_reads_and_appends_without_reacquiring(
@@ -104,21 +107,21 @@ def test_lock_aware_session_reads_and_appends_without_reacquiring(
 ) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
-    log_file_manifest_record(ctx, _record(path="/first"))
+    log_file_manifest_record(ctx, _record(file={"path": "/first"}))
 
     with file_manifest_session(ctx) as session:
-        assert [row["path"] for row in session.read_records()] == ["/first"]
-        record_id = session.append(_record(path="/second"))
+        assert [row["file"]["path"] for row in session.read_records()] == ["/first"]
+        record_id = session.append(_record(file={"path": "/second"}))
 
     assert record_id == 2
-    assert [row["path"] for row in _rows(manifest)] == ["/first", "/second"]
+    assert [row["file"]["path"] for row in _rows(manifest)] == ["/first", "/second"]
 
 
 def test_one_object_per_line(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
     for index in range(3):
-        log_file_manifest_record(ctx, _record(path=f"/f{index}"))
+        log_file_manifest_record(ctx, _record(file={"path": f"/f{index}"}))
 
     lines = manifest.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 3
@@ -133,7 +136,7 @@ def test_one_object_per_line(tmp_path: Path) -> None:
 def test_record_id_is_the_physical_row_number(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
-    returned = [log_file_manifest_record(ctx, _record(path=f"/f{i}")) for i in range(5)]
+    returned = [log_file_manifest_record(ctx, _record(file={"path": f"/f{i}"})) for i in range(5)]
 
     assert returned == [1, 2, 3, 4, 5]
     rows = _rows(manifest)
@@ -318,3 +321,63 @@ def test_normal_run_log_writing_is_unaffected(tmp_path: Path) -> None:
     ]
     assert [row["record_type"] for row in rows] == ["STEP_START", "STEP_END"]
     assert all(row["record_group"] == "execution" for row in rows)
+
+
+def test_root_fields_are_written_in_canonical_order(tmp_path: Path) -> None:
+    """The writer owns persisted order; a serializer's order does not survive."""
+    ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    log_file_manifest_record(
+        ctx,
+        {
+            "producer": {"application": "file_operator"},
+            "file": {"path": "/x"},
+            "status": "success",
+            "record_type": "source_file_mutation",
+            "action": "create",
+            "evidence": {"run_log_file": "r.jsonl", "run_log_record_id": 1},
+            "recorded_at": "2026-07-31T00:00:00.000+00:00",
+            "file_id": "f1",
+        },
+    )
+
+    assert list(_rows(ctx.paths.resolve("file_manifest"))[0]) == [
+        "record_id",
+        "file_id",
+        "recorded_at",
+        "record_type",
+        "action",
+        "status",
+        "evidence",
+        "file",
+        "producer",
+    ]
+
+
+def test_a_record_type_omits_the_fields_it_does_not_carry(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    log_file_manifest_record(
+        ctx,
+        {
+            "record_type": "source_file_rollback",
+            "status": "attempted",
+            "rollback": {"original_record_id": 5, "phase": "attempt"},
+        },
+    )
+
+    assert list(_rows(ctx.paths.resolve("file_manifest"))[0]) == [
+        "record_id",
+        "record_type",
+        "status",
+        "rollback",
+    ]
+
+
+def test_an_unknown_root_field_is_refused(tmp_path: Path) -> None:
+    """An append-only store must never make an unnameable field permanent."""
+    manifest = tmp_path / "file_manifest.jsonl"
+    with pytest.raises(FileManifestError, match="unknown root field\\(s\\): mutation_kind"):
+        log_file_manifest_record(
+            _ctx(manifest),
+            {"record_type": "source_file_mutation", "mutation_kind": "excel_to_csv"},
+        )
+    assert not manifest.exists() or _rows(manifest) == []

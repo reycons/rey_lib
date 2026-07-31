@@ -156,21 +156,20 @@ def serialize_source_file_mutation(
         result_object["reason"] = _path_text(reason)
 
     record: dict[str, Any] = {
+        "recorded_at": recorded_at or _timestamp(),
         "record_type": MUTATION_RECORD_TYPE,
         "action": normalized_action,
         "status": normalized_status,
-        "producer": {
-            "application": str(application_name or ""),
-        },
-        "file": file_object,
-        "evidence": {
-            "run_log_file": evidence_file,
-            "run_log_record_id": evidence_id,
-        },
-        "recorded_at": recorded_at or _timestamp(),
     }
     if _path_text(file_id):
-        record["file_id"] = _path_text(file_id)
+        # Flat identity leads the record, so file_id is placed before the
+        # objects rather than appended after them.
+        record = {"file_id": _path_text(file_id), **record}
+    record["evidence"] = {
+        "run_log_file": evidence_file,
+        "run_log_record_id": evidence_id,
+    }
+    record["file"] = file_object
     if rollback_object:
         record["rollback"] = rollback_object
     if conversion:
@@ -180,6 +179,7 @@ def serialize_source_file_mutation(
         record["conversion"] = dict(conversion)
     if result_object:
         record["result"] = result_object
+    record["producer"] = {"application": str(application_name or "")}
     return record
 
 
@@ -223,11 +223,9 @@ def serialize_source_file_rollback(
         )
 
     record: dict[str, Any] = {
+        "recorded_at": recorded_at or _timestamp(),
         "record_type": ROLLBACK_RECORD_TYPE,
         "status": normalized_status,
-        "producer": {
-            "application": str(application_name or ""),
-        },
         "evidence": {
             "run_log_file": _run_log_name(run_log_file),
             "run_log_record_id": _positive_int(
@@ -235,10 +233,10 @@ def serialize_source_file_rollback(
             ),
         },
         "rollback": rollback_object,
-        "recorded_at": recorded_at or _timestamp(),
     }
     if _path_text(reason):
         record["result"] = {"reason": _path_text(reason)}
+    record["producer"] = {"application": str(application_name or "")}
     return record
 
 
