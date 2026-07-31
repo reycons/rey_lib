@@ -1,9 +1,10 @@
-"""One authoritative control-character cleaning, shared by every format.
+"""One authoritative control-character cleaning, available to every format.
 
-The point of these tests is agreement: a value carrying the same corruption
-must come out identical whether it arrived from a spreadsheet cell or a
-delimited field, and the characters that carry a file's structure must survive
-until the parser has used them.
+Cleaning is a governed workflow step, not something a reader does on its own:
+a CSV read returns exactly what the file holds, and the step applies
+clean_text_value to the fields it has decided to clean. These tests state that
+the primitive is shared, that Excel and a cleaning step agree on the same
+corrupted value, and that a reader never cleans behind a caller's back.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def test_leading_and_trailing_whitespace_is_untouched() -> None:
     assert clean_text_value("double  space") == "double  space"
 
 
-def test_an_excel_cell_and_a_csv_field_clean_identically(tmp_path: Path) -> None:
+def test_an_excel_cell_and_a_cleaned_csv_field_agree(tmp_path: Path) -> None:
     """The regression this shared primitive exists to prevent."""
     from rey_lib.files.workbook_conversion import _normalize_extracted_frame
 
@@ -58,36 +59,61 @@ def test_an_excel_cell_and_a_csv_field_clean_identically(tmp_path: Path) -> None
     source.write_text(
         f"Column,Other\n{CORRUPT_VALUE},x\n{CORRUPT_VALUE},y\n", encoding="utf-8"
     )
-    csv_field = read_csv(source).rows[0].fields[0]
+    # A cleaning step reads the source as it is, then cleans what it chose to.
+    csv_field = clean_text_value(read_csv(source).rows[0].fields[0])
 
     assert excel_cell == csv_field == CLEAN_VALUE
 
 
-def test_structure_characters_survive_until_parsing(tmp_path: Path) -> None:
-    """Tabs and newlines separate values; they are only noise inside one."""
+def test_structure_characters_are_used_before_any_cleaning(tmp_path: Path) -> None:
+    """Tabs and newlines separate values; a step only cleans inside one."""
     source = tmp_path / "t.tsv"
-    source.write_text("A\x00cc\tSym﻿bol\nA1\tIBM\nA2\tMSFT\n", encoding="utf-8")
+    source.write_text(f"A\x00cc\tSym\ufeffbol\nA1\tIBM\nA2\tMSFT\n", encoding="utf-8")
 
     read = read_csv(source)
 
     # The tab still delimited, the newlines still split lines.
     assert read.delimiter == "\t"
-    assert read.header_fields == ("Acc", "Symbol")
     assert read.data_line_numbers == (2, 3)
-    assert [row.fields for row in read.rows] == [("A1", "IBM"), ("A2", "MSFT")]
+    # The reader reports the header exactly as the file holds it.
+    assert read.header_fields == ("A\x00cc", "Sym\ufeffbol")
+    assert tuple(clean_text_value(f) for f in read.header_fields) == ("Acc", "Symbol")
 
 
-def test_the_raw_line_is_preserved_as_evidence(tmp_path: Path) -> None:
-    """Fields are cleaned; the physical line is what the file actually held."""
+def test_a_read_never_cleans_behind_the_caller(tmp_path: Path) -> None:
+    """Both the fields and the physical line are what the file actually held."""
     source = tmp_path / "f.csv"
     source.write_text("A,B\nx\x01y,z\n", encoding="utf-8")
 
     row = read_csv(source).rows[0]
 
-    assert row.fields == ("xy", "z")
+    assert row.fields == ("x\x01y", "z")
     assert row.text == "x\x01y,z"
 
 
-def test_cleaning_happens_after_the_split_not_before() -> None:
-    """A delimiter inside the line is used first, then each field is cleaned."""
-    assert parse_delimited_line("a\x00b,c\x07d", ",") == ["ab", "cd"]
+def test_a_step_cleans_fields_after_the_split_never_raw_text() -> None:
+    """Structure is used first; cleaning applies to values, one at a time."""
+    fields = parse_delimited_line("a\x00b,c\x07d", ",")
+
+    assert fields == ["a\x00b", "c\x07d"]
+    assert [clean_text_value(field) for field in fields] == ["ab", "cd"]
+
+
+def test_the_difference_between_read_and_cleaned_is_the_step_s_evidence(
+    tmp_path: Path,
+) -> None:
+    """What a cleaning step records: which values it changed, and where."""
+    source = tmp_path / "corrupt.csv"
+    source.write_text(
+        f"Column,Other\n{CORRUPT_VALUE},clean\nplain,also clean\n", encoding="utf-8"
+    )
+
+    read = read_csv(source)
+    changed = [
+        (row.physical_line_number, field)
+        for row in read.rows
+        for field in row.fields
+        if clean_text_value(field) != field
+    ]
+
+    assert changed == [(2, CORRUPT_VALUE)]
