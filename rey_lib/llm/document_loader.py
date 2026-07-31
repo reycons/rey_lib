@@ -24,8 +24,8 @@ from_string(text)
 
 from __future__ import annotations
 
-import csv
 import hashlib
+from rey_lib.files.csv import read_csv
 from pathlib import Path
 from typing import Any, Optional
 
@@ -64,16 +64,17 @@ def from_csv(
         (markdown_table, sha256_hex)
     """
     path = Path(path)
-    rows: list[dict[str, Any]] = []
-    truncated = False
-    with path.open(encoding="utf-8-sig", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            if len(rows) >= max_rows:
-                truncated = True
-                break
-            rows.append(dict(row))
-    return _rows_to_markdown(rows, source=path.name, truncated=truncated)
+    read = read_csv(path, encoding="utf-8-sig", skip_blank_lines=True)
+    columns = list(read.header_fields)
+    rows = [
+        dict(zip(columns, row.fields))
+        for row in read.rows[:max_rows]
+    ]
+    return _rows_to_markdown(
+        rows,
+        source=path.name,
+        truncated=len(read.rows) > max_rows,
+    )
 
 
 def from_excel(

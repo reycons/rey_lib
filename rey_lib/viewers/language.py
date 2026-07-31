@@ -6,9 +6,10 @@ return rendering-engine language identifiers.
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
+
+from rey_lib.files.csv import looks_like_csv
 
 APPROVED_TEXT_LANGUAGES = frozenset({
     "sql",
@@ -178,15 +179,8 @@ def _looks_like_python(text: str) -> bool:
 
 
 def _looks_like_csv(text: str) -> bool:
-    lines = [line for line in text.splitlines() if line.strip()]
-    if len(lines) < 2 or "," not in lines[0]:
-        return False
-    try:
-        parsed = list(csv.reader(lines[:5]))
-    except csv.Error:
-        return False
-    widths = {len(row) for row in parsed if row}
-    return len(widths) == 1 and next(iter(widths), 0) > 1
+    """Whether the text is delimited is a CSV question, answered there."""
+    return looks_like_csv(text)
 
 
 def _looks_like_log(text: str) -> bool:

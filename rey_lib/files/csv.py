@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv as _csv
 import hashlib
+import io
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +43,12 @@ __all__ = [
     "CsvReadError",
     "CsvRow",
     "HeaderMatch",
+    "looks_like_csv",
+    "normalized_header",
     "parse_delimited_line",
     "read_csv",
+    "read_csv_text",
+    "render_delimited_line",
     "sample_indices",
 ]
 
@@ -115,6 +120,10 @@ def read_csv(
 ) -> CsvRead:
     """Read one delimited file and answer every structural question about it.
 
+    Opening and decoding happen here; every structural answer comes from
+    :func:`read_csv_text`, so a file and a string in hand are analysed by one
+    code path and cannot disagree.
+
     Parameters
     ----------
     path : Path | str
@@ -152,13 +161,44 @@ def read_csv(
     except OSError as exc:
         raise CsvReadError(f"Cannot read '{source_path}': {exc}") from exc
 
-    lines = source_text.splitlines()
-    source_text_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    return read_csv_text(
+        source_text,
+        delimiter=delimiter,
+        required_header=required_header,
+        sample_size=sample_size,
+        skip_blank_lines=skip_blank_lines,
+        source=str(source_path),
+        encoding=encoding,
+    )
+
+
+def read_csv_text(
+    text: str,
+    *,
+    delimiter: str | None = None,
+    required_header: Sequence[str] = (),
+    sample_size: int = 0,
+    skip_blank_lines: bool = False,
+    source: str = "",
+    encoding: str = "utf-8",
+) -> CsvRead:
+    """Answer every structural question about delimited text already in hand.
+
+    The whole analysis lives here: delimiter determination, header location,
+    header matching, row positions, blank and ragged counting, and sampling.
+    :func:`read_csv` is this function plus opening a file, so nothing can be
+    true of a file that is not true of its content.
+
+    ``source`` and ``encoding`` are recorded on the result for a caller that
+    has them; neither affects the analysis.
+    """
+    lines = text.splitlines()
+    source_text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     required = tuple(str(text) for text in required_header if str(text).strip())
 
     if not lines:
         return CsvRead(
-            path=str(source_path),
+            path=source,
             encoding=encoding,
             delimiter=delimiter or _CANDIDATE_DELIMITERS[0],
             delimiter_supplied=delimiter is not None,
@@ -235,7 +275,7 @@ def read_csv(
         data_line_numbers.append(index + 1)
 
     return CsvRead(
-        path=str(source_path),
+        path=source,
         encoding=encoding,
         delimiter=resolved_delimiter,
         delimiter_supplied=delimiter is not None,
@@ -383,9 +423,68 @@ def sample_indices(total: int, size: int) -> list[int]:
     return selected
 
 
-def parse_delimited_line(line: str, delimiter: str) -> list[str]:
-    """Parse one in-memory source line with the given delimiter."""
-    return list(next(_csv.reader([line], delimiter=delimiter), []))
+def parse_delimited_line(
+    line: str,
+    delimiter: str,
+    *,
+    strict: bool = False,
+) -> list[str]:
+    """Parse one in-memory source line with the given delimiter.
+
+    ``strict`` rejects malformed quoting instead of recovering from it. The
+    error carries only what this module knows — the parse failure itself — so
+    the caller adds the path and line number it is reporting against, and
+    decides whether that is fatal or collected.
+    """
+    try:
+        return list(next(_csv.reader([line], delimiter=delimiter, strict=strict), []))
+    except _csv.Error as exc:
+        raise CsvReadError(str(exc)) from exc
+
+
+def looks_like_csv(text: str, delimiter: str | None = None) -> bool:
+    """Return whether ``text`` reads as delimited records.
+
+    Not a separate heuristic: the text is analysed by :func:`read_csv_text`,
+    and the answer is whether that analysis found a header of more than one
+    field. Content the reader handles is therefore recognised here — a title
+    line above the header included — because it is the same analysis.
+
+    Name the ``delimiter`` to ask about exactly that separator, or leave it
+    unset to have it determined from the common candidates: comma, tab,
+    semicolon, pipe.
+    """
+    try:
+        read = read_csv_text(text, delimiter=delimiter)
+    except CsvReadError:
+        return False
+    return read.has_header and len(read.header_fields) > 1
+
+
+def normalized_header(header_fields: Sequence[str]) -> list[str]:
+    """Return the normalised snake_case column names, preserving order.
+
+    Header names are format, not meaning: this says what a column is called
+    once punctuation and case stop mattering, never what its values are. The
+    normalisation rule itself belongs to profiling, so it is borrowed rather
+    than restated.
+    """
+    # Imported here because rey_lib.profiling re-exports this function; a
+    # module-level import would close the cycle.
+    from rey_lib.profiling.value_patterns import normalize_name
+
+    return [normalize_name(name) for name in header_fields]
+
+
+def render_delimited_line(fields: Sequence[str], delimiter: str) -> str:
+    """Render one row as a delimited line, quoting exactly as parsing expects.
+
+    The inverse of :func:`parse_delimited_line`, so a value written here reads
+    back as the same value. No line terminator is appended.
+    """
+    output = io.StringIO(newline="")
+    _csv.writer(output, delimiter=delimiter, lineterminator="").writerow(list(fields))
+    return output.getvalue()
 
 
 def _is_header_candidate(fields: list[str]) -> bool:

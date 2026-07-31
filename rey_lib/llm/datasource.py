@@ -26,13 +26,14 @@ TextDataSource
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+from rey_lib.files.csv import read_csv
 
 __all__ = [
     "SourceData",
@@ -184,17 +185,13 @@ class CSVDataSource(DataSource):
 
     def extract(self, max_extract: int = _DEFAULT_MAX_EXTRACT) -> SourceData:
         """Read up to ``max_extract`` rows from the CSV file."""
-        rows: list[dict[str, Any]] = []
-        truncated = False
-        with self._path.open(encoding="utf-8-sig", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                if len(rows) >= max_extract:
-                    truncated = True
-                    break
-                rows.append(dict(row))
-
-        col_names = list(rows[0].keys()) if rows else []
+        read = read_csv(self._path, encoding="utf-8-sig", skip_blank_lines=True)
+        truncated = len(read.rows) > max_extract
+        col_names = list(read.header_fields)
+        rows = [
+            dict(zip(col_names, row.fields))
+            for row in read.rows[:max_extract]
+        ]
         return SourceData(
             rows        = rows,
             raw_text    = "",

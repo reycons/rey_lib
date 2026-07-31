@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from rey_lib.files.csv import CsvReadError, read_csv
+from rey_lib.files.csv import (
+    CsvReadError,
+    looks_like_csv,
+    read_csv,
+    read_csv_text,
+)
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
@@ -252,3 +257,72 @@ def test_an_empty_file_answers_without_failing(tmp_path: Path) -> None:
 def test_an_unreadable_path_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(CsvReadError, match="Cannot read"):
         read_csv(tmp_path / "does_not_exist.csv")
+
+
+# ---------------------------------------------------------------------------
+# Text-level recognition
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("delimiter", [",", "\t", ";", "|"])
+def test_looks_like_csv_recognises_each_common_delimiter(delimiter: str) -> None:
+    header = delimiter.join(["Account", "Symbol", "Qty"])
+    row = delimiter.join(["A1", "IBM", "10"])
+
+    assert looks_like_csv(f"{header}\n{row}\n{row}") is True
+
+
+def test_looks_like_csv_agrees_with_the_reader_on_a_preamble(
+    tmp_path: Path,
+) -> None:
+    """The text test is the reader's test, so they cannot disagree."""
+    text = "Acme Holdings Report\n\nAccount,Symbol,Qty\nA1,IBM,10\nA2,MSFT,20\n"
+    source = _write(tmp_path, "preamble.csv", text)
+
+    assert read_csv(source).has_header is True
+    assert looks_like_csv(text) is True
+
+
+def test_looks_like_csv_rejects_prose_and_single_columns() -> None:
+    assert looks_like_csv("Hello there.\nThis is prose, with a comma.") is False
+    assert looks_like_csv("alpha\nbeta\ngamma") is False
+    assert looks_like_csv("a,b,c") is False
+    assert looks_like_csv("") is False
+
+
+def test_a_named_delimiter_constrains_the_question() -> None:
+    assert looks_like_csv("a,b\n1,2") is True
+    assert looks_like_csv("a,b\n1,2", "\t") is False
+
+
+def test_a_file_and_its_text_produce_the_same_analysis(tmp_path: Path) -> None:
+    """read_csv is read_csv_text plus opening a file, and nothing more."""
+    text = "Acme Holdings Report\n\nAccount,Symbol,Qty\nA1,IBM,10\nA2,X,30,EXTRA\n"
+    source = _write(tmp_path, "preamble.csv", text)
+
+    from_file = read_csv(source, sample_size=2)
+    from_text = read_csv_text(text, sample_size=2)
+
+    # Everything except where the content came from is identical.
+    assert from_text.path == ""
+    assert from_file.path.endswith("preamble.csv")
+    for field in (
+        "delimiter",
+        "has_header",
+        "header_line_number",
+        "header_fields",
+        "all_rows",
+        "rows",
+        "data_line_numbers",
+        "total_line_count",
+        "blank_row_count",
+        "ragged_row_count",
+        "sample",
+        "source_text_sha256",
+    ):
+        assert getattr(from_file, field) == getattr(from_text, field), field
+
+
+def test_looks_like_csv_is_the_reader_s_own_answer(tmp_path: Path) -> None:
+    text = "Report\n\nAccount,Qty\nA1,10\nA2,20\n"
+
+    assert looks_like_csv(text) is read_csv_text(text).has_header is True

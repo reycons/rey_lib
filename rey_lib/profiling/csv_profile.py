@@ -28,6 +28,10 @@ from typing import Any
 from rey_lib.logs import get_logger
 from rey_lib.profiling import value_patterns as vp
 
+# Header-name normalisation is CSV format, not profiling semantics, so it is
+# owned by rey_lib.files.csv. Re-exported here for existing callers.
+from rey_lib.files.csv import normalized_header  # noqa: F401
+
 __all__ = [
     "enrich_csv_profile",
     "normalized_header",
@@ -46,11 +50,6 @@ _ALLOWED_TYPE_HINTS = frozenset(
 
 _DEFAULT_MAX_SAMPLE_VALUES = 10
 _STAGING_SCHEMA = "trade_analysis_staging"
-
-
-def normalized_header(header_fields: list[str]) -> list[str]:
-    """Return the normalised snake_case names for a header, preserving order."""
-    return [vp.normalize_name(name) for name in header_fields]
 
 
 def same_header_errors(file_headers: list[tuple[str, list[str]]]) -> list[str]:
