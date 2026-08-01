@@ -1,28 +1,92 @@
-"""Encryption and environment-key helpers.
+"""Encryption, content digests, and environment-key helpers.
 
 This module centralizes Fernet key generation plus `.env` file update helpers.
 It also provides a config-driven generator that reads `config/config.<env>.yaml`
 entries under the top-level `env` block and generates missing keys only when
 `generate: true`.
+
+Content digests
+---------------
+SHA-256 has one owner, and this is it: no other module calls ``hashlib.sha256``
+directly. Three primitives cover every use — bytes, text with a named encoding,
+and a file read in chunks.
+
+The split between this module and the format modules is deliberate. A format
+module decides *what* is hashed, because deterministic rendering is a format
+question: ``render_json(value, mode="canonical")`` produces the bytes, and a
+caller composes that with :func:`sha256_text`. This module only turns a
+representation into a digest, and never chooses or normalizes one. Centralizing
+the digest must not change any input representation, because every digest these
+functions produce has already been persisted somewhere.
 """
 
 from __future__ import annotations
 
 import getpass
+import hashlib
 import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from rey_lib.config.config_utils import parse_yaml
-from rey_lib.errors.error_utils import ConfigError, validate_env
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.file_utils import read_text_file
 
 __all__ = [
     "generate_fernet_key",
     "ensure_env_key",
     "ensure_generated_env_keys",
+    "sha256_bytes",
+    "sha256_file",
+    "sha256_text",
 ]
+
+# Chunk size for streamed file hashing. Only affects memory, never the digest.
+_FILE_CHUNK_BYTES = 1024 * 1024
+
+
+def sha256_bytes(data: bytes) -> str:
+    """Return the SHA-256 hex digest of ``data``.
+
+    The primitive the other two are defined in terms of. A caller holding a
+    representation it has already decided on hashes it here.
+    """
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_text(text: str, *, encoding: str = "utf-8") -> str:
+    """Return the SHA-256 hex digest of ``text`` encoded with ``encoding``.
+
+    The encoding is part of the identity, not an implementation detail: the
+    same string under two encodings is two different digests. It is named here
+    rather than assumed so that a stored digest can be reproduced from the
+    function signature alone. Every current caller uses UTF-8.
+
+    This does not normalize the text. Whitespace, key order, escaping, and line
+    endings are the caller's representation decision, already made before the
+    text arrives — a format module owns that, and this function must not
+    silently change what a persisted digest was computed over.
+    """
+    return sha256_bytes(text.encode(encoding))
+
+
+def sha256_file(path: Path | str) -> str:
+    """Return the SHA-256 hex digest of the bytes in the file at ``path``.
+
+    Read in chunks so an arbitrarily large file does not have to be held in
+    memory. The chunking is invisible in the result: the digest is of the whole
+    byte sequence, identical to hashing the file's contents in one piece.
+
+    The file's bytes are hashed exactly as they are on disk, with no decoding
+    and no newline translation, so a text file's digest does not depend on the
+    platform reading it.
+    """
+    hasher = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_FILE_CHUNK_BYTES), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def generate_fernet_key() -> str:
@@ -92,7 +156,11 @@ def ensure_generated_env_keys(
     list[str]
         Environment variable names that were generated and written.
     """
-    env = validate_env(env)
+    # validate_env was removed with env-based config (3080748), which left
+    # this module unimportable. The normalization it performed is kept; the
+    # whitelist it checked against described a config model that no longer
+    # exists.
+    env = env.strip().lower()
     project_root = Path(project_root).resolve()
     cfg_path = project_root / "config" / f"config.{env}.yaml"
     target_env_file = env_file.resolve() if env_file else project_root / ".env"
