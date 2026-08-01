@@ -7,6 +7,12 @@ from rey_lib.profiling.csv_profile import (
 )
 from rey_lib.profiling.file_profiler import infer_col_type, infer_sql_type, profile_rows
 from rey_lib.profiling.profile_validation import validate_csv_profile
+from rey_lib.profiling.structural_analysis import (
+    ANALYSIS_LIMITS,
+    AnalysisLimits,
+    StructuralAnalysis,
+    build_structural_analysis,
+)
 
 __all__ = [
     "profile_rows",
@@ -16,4 +22,8 @@ __all__ = [
     "normalized_header",
     "same_header_errors",
     "validate_csv_profile",
+    "ANALYSIS_LIMITS",
+    "AnalysisLimits",
+    "StructuralAnalysis",
+    "build_structural_analysis",
 ]
