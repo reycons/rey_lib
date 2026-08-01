@@ -34,7 +34,6 @@ from rey_lib.logs import (
     clear_run,
     get_logger,
     finalize_run_log,
-    log_artifact_manifest_from_run_log,
     log_run_complete,
     log_run_start,
     set_nest_level,
@@ -93,7 +92,6 @@ def _finalize_run(ctx: Any) -> None:
         return
     if getattr(ctx, "run_log_path", None):
         finalize_run_log(ctx.run_log_path)
-    log_artifact_manifest_from_run_log(ctx)
 
 
 def _refused_disabled_workflow(

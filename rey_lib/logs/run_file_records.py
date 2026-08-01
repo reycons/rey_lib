@@ -36,6 +36,7 @@ __all__ = [
 
 _MUTATION_RECORD_TYPE = "source_file_mutation"
 _INVENTORY_RECORD_TYPE = "source_file_inventory"
+_CLASSIFICATION_RECORD_TYPE = "source_file_classification"
 
 # Mutation actions whose authoritative display path is the destination the
 # producer recorded. A failed mutation shows the path it attempted.
@@ -124,6 +125,7 @@ def _inventory_path(record: Mapping[str, Any]) -> str:
 _PATH_RESOLVERS: dict[str, Callable[[Mapping[str, Any]], str]] = {
     _MUTATION_RECORD_TYPE: _mutation_path,
     _INVENTORY_RECORD_TYPE: _inventory_path,
+    _CLASSIFICATION_RECORD_TYPE: _inventory_path,
 }
 
 

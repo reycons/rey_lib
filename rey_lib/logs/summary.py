@@ -134,7 +134,6 @@ def create_results_summary(
     # shared coordinator finalizes a standalone workflow run and the run-owning
     # application finalizes again in its own lifecycle — so repeated calls must
     # return the summary already on the log rather than append a second one.
-    # This mirrors the existing ARTIFACT_MANIFEST idempotency.
     existing = _last_record_of_type(records, _RESULTS_SUMMARY)
     if existing is not None:
         result["summary"] = existing

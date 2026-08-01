@@ -3,7 +3,8 @@
 A standalone workflow run is finalized by the shared coordinator, and the
 run-owning application finalizes again in its own lifecycle. That nesting must
 not duplicate terminal evidence: an operator inspecting the run log sees one
-completion, one results summary, and one artifact manifest.
+completion and one results summary. File evidence is owned by the installation
+file manifest and no run-level artifact manifest is generated.
 
 Pipeline-owned runs are finalized once by pipeline_coordinator and are covered
 separately; nothing here changes that path.
@@ -21,7 +22,6 @@ import pytest
 from rey_lib.logs import (
     create_results_summary,
     finalize_run_log,
-    log_artifact_manifest_from_run_log,
     log_artifact_reference,
 
     open_run_log,
@@ -90,21 +90,18 @@ def _run_top_level_workflow(tmp_path: Path, ctx: SimpleNamespace) -> None:
     run_app_operation(ctx, "run-workflow", operation_body)
 
     # The run-owning application finalizes again because it is not a pipeline step.
-    try:
-        finalize_run_log(ctx.run_log_path)
-    finally:
-        log_artifact_manifest_from_run_log(ctx)
+    finalize_run_log(ctx.run_log_path)
 
 
 def test_top_level_run_workflow_summarizes_exactly_once(tmp_path: Path) -> None:
-    """Nested finalization yields one summary and one manifest, not two."""
+    """Nested finalization yields one summary and no artifact manifest."""
     ctx = _ctx(tmp_path)
 
     _run_top_level_workflow(tmp_path, ctx)
 
     records = _records(ctx.run_log_path)
     assert _count(records, "RESULTS_SUMMARY") == 1
-    assert _count(records, "ARTIFACT_MANIFEST") == 1
+    assert _count(records, "ARTIFACT_MANIFEST") == 0
 
 
 def test_repeated_finalization_appends_no_further_summary(tmp_path: Path) -> None:
@@ -114,11 +111,10 @@ def test_repeated_finalization_appends_no_further_summary(tmp_path: Path) -> Non
 
     before = _records(ctx.run_log_path)
     finalize_run_log(ctx.run_log_path)
-    log_artifact_manifest_from_run_log(ctx)
 
     after = _records(ctx.run_log_path)
     assert _count(after, "RESULTS_SUMMARY") == 1
-    assert _count(after, "ARTIFACT_MANIFEST") == 1
+    assert _count(after, "ARTIFACT_MANIFEST") == 0
     assert len(after) == len(before)
 
 
@@ -155,22 +151,15 @@ def test_top_level_run_workflow_completes_exactly_once(tmp_path: Path) -> None:
     assert _count(_records(ctx.run_log_path), "RUN_COMPLETE") == 1
 
 
-def test_top_level_run_workflow_keeps_the_declared_artifact(tmp_path: Path) -> None:
-    """The single manifest still carries the run's declared output."""
+def test_top_level_run_workflow_does_not_generate_artifact_manifest(tmp_path: Path) -> None:
+    """Run-log artifact declarations never produce ARTIFACT_MANIFEST."""
     ctx = _ctx(tmp_path)
 
     _run_top_level_workflow(tmp_path, ctx)
 
     records = _records(ctx.run_log_path)
-    manifest = next(
-        record
-        for record in records
-        if str(record.get("record_type") or "").upper() == "ARTIFACT_MANIFEST"
-    )
-    artifacts = manifest.get("artifacts") or []
-    assert [str(entry.get("path")) for entry in artifacts] == [
-        str(tmp_path / "out" / "converted.csv")
-    ]
+    assert _count(records, "ARTIFACT_REFERENCE") == 1
+    assert _count(records, "ARTIFACT_MANIFEST") == 0
 
 
 def test_terminal_records_are_the_last_records_in_the_log(tmp_path: Path) -> None:
@@ -183,4 +172,5 @@ def test_terminal_records_are_the_last_records_in_the_log(tmp_path: Path) -> Non
         str(record.get("record_type") or "").upper() for record in _records(ctx.run_log_path)
     ]
     assert types.index("RUN_COMPLETE") < types.index("RESULTS_SUMMARY")
-    assert types.index("RESULTS_SUMMARY") < types.index("ARTIFACT_MANIFEST")
+    assert types[-1] == "RUN_COMPLETE"
+    assert "ARTIFACT_MANIFEST" not in types

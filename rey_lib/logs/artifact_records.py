@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -52,45 +51,3 @@ def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
         artifact_role=role, event=event, created_by_step=created_by_step,
         **declaration, **extra, **fields,
     )
-
-
-def log_artifact_manifest(ctx: Any, artifacts: list[dict[str, Any]]) -> None:
-    """Append the consolidated ARTIFACT_MANIFEST record (files/artifacts) at completion."""
-    log_run_record(ctx, "ARTIFACT_MANIFEST", artifacts=artifacts)
-
-
-def log_artifact_manifest_from_run_log(ctx: Any) -> None:
-    """Append a consolidated ARTIFACT_MANIFEST built from this run's own records.
-
-    Collects explicit input, config, and created-artifact declarations already
-    recorded on this run's append-only log, then appends the single canonical
-    ARTIFACT_MANIFEST. It never rescans directories, classifies from filenames, or
-    promotes FILE_OPERATION execution evidence. Meant to run after RUN_COMPLETE;
-    repeated finalization is idempotent and emission is fail-safe.
-    """
-    try:
-        path = getattr(ctx, "run_log_path", None)
-        if not path:
-            return
-        from rey_lib.logs.evidence_projection import (
-            build_artifact_manifest_entries,
-            read_run_log_sections,
-        )
-
-        payload = read_run_log_sections(path)
-        records = payload["records"]
-        if not any(str(record.get("record_type") or "").upper() == "RUN_COMPLETE"
-                   for record in records):
-            return
-        if any(str(record.get("record_type") or "").upper() == "ARTIFACT_MANIFEST"
-               for record in records):
-            return
-        artifacts = build_artifact_manifest_entries(records)
-        # A completed run owns exactly one manifest, including when its inventory is
-        # empty. This makes finalization idempotent and keeps cardinality independent
-        # of whether the run happened to produce files.
-        log_artifact_manifest(ctx, artifacts)
-    except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
-        logging.getLogger(__name__).warning(
-            "run log: could not append ARTIFACT_MANIFEST: %s", exc
-        )

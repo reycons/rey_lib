@@ -359,12 +359,12 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert types[0] == "RUN_START"
     assert types.count("STEP_START") == 2
     assert types.count("STEP_END") == 2
-    assert types[-1] == "ARTIFACT_MANIFEST"
-    assert types.count("ARTIFACT_MANIFEST") == 1
+    assert types[-1] == "RESULTS_SUMMARY"
+    assert types.count("ARTIFACT_MANIFEST") == 0
     assert "RUN_SUMMARY" not in types
     assert types.count("RESULTS_SUMMARY") == 1
     assert all(r["run_id"] == ctx.run_id for r in records)
-    # The canonical results projection is an explicit record before the manifest.
+    # The canonical results projection is the terminal finalized record.
     doc = next(record for record in records if record["record_type"] == "RESULTS_SUMMARY")
     assert doc["record_type"] == "RESULTS_SUMMARY"
     assert doc["run"]["execution_kind"] == "workflow"
@@ -711,24 +711,10 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     assert result.status == "success"
 
     records = _read(Path(ctx.run_log_path))
-    # The manifest is appended once at completion, after the results summary.
-    assert records[-1]["record_type"] == "ARTIFACT_MANIFEST"
-    manifest = records[-1]
-    assert manifest["record_group"] == "files"
-    assert manifest["record_subgroup"] == "artifacts"
-    # Built from the run's own ARTIFACT_REFERENCE records; the moved file is excluded.
-    names = [Path(item["path"]).name for item in manifest["artifacts"]]
-    assert names == ["report.json"]
-    artifact = manifest["artifacts"][0]
-    assert artifact["file_role"] == "report"
-    assert artifact["artifact_group"] == "output_files"
-    assert artifact["producing_app"] == "test_workflow"
-    assert artifact["producing_step"] == "s1"
-    assert {
-        "path", "display_name", "artifact_group", "file_role",
-        "producing_app", "producing_step", "status", "actions", "exists",
-        "safe_to_preview", "size_bytes", "modified_at",
-    } <= set(artifact)
+    assert records[-1]["record_type"] == "RESULTS_SUMMARY"
+    assert not any(record["record_type"] == "ARTIFACT_MANIFEST" for record in records)
+    declared = next(record for record in records if record["record_type"] == "ARTIFACT_REFERENCE")
+    assert Path(declared["path"]).name == "report.json"
 
 
 def test_run_log_sections_project_execution_files_and_results(tmp_path: Path) -> None:

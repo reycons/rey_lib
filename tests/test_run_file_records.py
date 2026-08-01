@@ -180,6 +180,25 @@ def test_inventory_records_use_their_recorded_path(manifest: Path) -> None:
     assert [item.path for item in found] == ["/data/feed/inbox/book.xls"]
 
 
+def test_classification_records_with_a_governed_path_are_eligible(
+    manifest: Path,
+) -> None:
+    _write(
+        manifest,
+        {
+            "record_id": 1,
+            "record_type": "source_file_classification",
+            "file_id": "f1",
+            "file": {"path": "/data/feed/inbox/book.xls"},
+            "evidence": {"run_log_file": "app.run.log", "run_log_record_id": 1},
+        },
+    )
+
+    found = find_run_file_records(_ctx(manifest), "app.run.log")
+
+    assert [item.path for item in found] == ["/data/feed/inbox/book.xls"]
+
+
 # ---------------------------------------------------------------------------
 # Path selection per action
 # ---------------------------------------------------------------------------

@@ -7,8 +7,6 @@ remains the stable public import surface for existing applications and tests.
 from __future__ import annotations
 
 from rey_lib.logs.artifact_records import (
-    log_artifact_manifest,
-    log_artifact_manifest_from_run_log,
     log_artifact_reference,
 )
 from rey_lib.logs.evidence_projection import (
@@ -154,8 +152,6 @@ __all__ = [
     "log_row_count",
     "log_validation_result",
     "log_artifact_reference",
-    "log_artifact_manifest",
-    "log_artifact_manifest_from_run_log",
     "normalize_artifacts",
     "group_artifacts_by_producer",
     "validate_run_log_completeness",

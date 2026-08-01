@@ -11,7 +11,6 @@ import pytest
 
 from rey_lib.logs import (
     create_results_summary,
-    log_artifact_manifest,
     log_error,
     log_file_operation,
     log_run_complete,
@@ -170,7 +169,6 @@ def test_durable_result_record_matrix_preserves_hierarchy_invariant(
     )
     for record_type in result_types:
         log_run_record(ctx, record_type, record_group="results", value=record_type)
-    log_artifact_manifest(ctx, [])
     log_file_operation(ctx, "read", source_path=str(log))
 
     records = _records(log)
