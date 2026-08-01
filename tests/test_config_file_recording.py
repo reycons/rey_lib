@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.config.config_utils import record_config_file_references
+from rey_lib.config.config_utils import PathResolver, record_config_file_references
 from rey_lib.config.provenance import ConfigMetadata
 from rey_lib.logs import read_run_log_sections
 
@@ -75,6 +75,31 @@ def test_effective_context_emits_config_records(tmp_path: Path) -> None:
     assert install["safe_to_preview"] is True
     assert workflow["config_name"] == "wf.yaml"
     assert workflow["config_type"] == "workflow"
+
+
+def test_config_references_are_also_governed_in_the_file_manifest(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
+    manifest = tmp_path / "file_manifest.jsonl"
+    ctx.paths = PathResolver({"file_manifest": manifest})
+
+    record_config_file_references(ctx)
+
+    rows = [
+        json.loads(line)
+        for line in manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["record_type"] for row in rows] == [
+        "run_config_file_reference", "run_config_file_reference",
+    ]
+    assert [row["evidence"]["run_log_file"] for row in rows] == [
+        Path(ctx.run_log_path).name, Path(ctx.run_log_path).name,
+    ]
+    assert [row["file"]["path"] for row in rows] == [
+        "/cfg/config.yaml", "/cfg/workflows/wf.yaml",
+    ]
 
 
 def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
