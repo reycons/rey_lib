@@ -1,9 +1,8 @@
 """Encryption, content digests, and environment-key helpers.
 
-This module centralizes Fernet key generation plus `.env` file update helpers.
-It also provides a config-driven generator that reads `config/config.<env>.yaml`
-entries under the top-level `env` block and generates missing keys only when
-`generate: true`.
+Fernet key generation, `.env` file update helpers, and SHA-256. The module
+depends on nothing else in rey_lib beyond the canonical error type, which is
+what a primitive should look like.
 
 Content digests
 ---------------
@@ -27,15 +26,12 @@ import hashlib
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
 
-from rey_lib.config.config_utils import parse_yaml
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "generate_fernet_key",
     "ensure_env_key",
-    "ensure_generated_env_keys",
     "sha256_bytes",
     "sha256_file",
     "sha256_text",
@@ -125,84 +121,6 @@ def ensure_env_key(env_file: Path, env_var: str) -> bool:
     _write_env_file(env_file, existing_lines, [new_line])
     _secure_env_file_permissions(env_file)
     return True
-
-
-def ensure_generated_env_keys(
-    project_root: Path,
-    env: str,
-    env_file: Path | None = None,
-) -> list[str]:
-    """Generate keys for config env entries where generate=true and missing.
-
-    Reads `config/config.<env>.yaml` and expects top-level entries like:
-
-        env:
-          - name: account_encryption_key
-            env_var: ACCOUNT_ENCRYPTION_KEY
-            generate: true
-
-    Parameters
-    ----------
-    project_root : Path
-        Project root directory containing config/.
-    env : str
-        Runtime environment (dev or prod).
-    env_file : Path | None
-        Optional .env file path; defaults to <project_root>/.env.
-
-    Returns
-    -------
-    list[str]
-        Environment variable names that were generated and written.
-    """
-    # validate_env was removed with env-based config (3080748), which left
-    # this module unimportable. The normalization it performed is kept; the
-    # whitelist it checked against described a config model that no longer
-    # exists.
-    env = env.strip().lower()
-    project_root = Path(project_root).resolve()
-    cfg_path = project_root / "config" / f"config.{env}.yaml"
-    target_env_file = env_file.resolve() if env_file else project_root / ".env"
-
-    config_data = _load_yaml(cfg_path)
-    entries = config_data.get("env", [])
-
-    generated: list[str] = []
-    for entry in entries:
-        entry_dict = _to_dict(entry)
-        if not entry_dict:
-            continue
-
-        should_generate = bool(entry_dict.get("generate", False))
-        env_var = str(entry_dict.get("env_var", "")).strip()
-
-        if should_generate and env_var:
-            if ensure_env_key(target_env_file, env_var):
-                generated.append(env_var)
-
-    return generated
-
-
-def _load_yaml(path: Path) -> dict[str, Any]:
-    """Read and parse a YAML file, returning empty dict for blank files."""
-    if not path.exists():
-        raise ConfigError(f"Config file not found: {path}")
-
-    # Imported here rather than at module scope: file_utils now delegates its
-    # digests to this module, and a top-level import would close that loop.
-    from rey_lib.files.file_utils import read_text_file  # noqa: PLC0415
-
-    data = parse_yaml(read_text_file(path))
-    return data if isinstance(data, dict) else {}
-
-
-def _to_dict(value: Any) -> dict[str, Any]:
-    """Convert Namespace-like values to dict; return empty dict otherwise."""
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "items"):
-        return {k: v for k, v in value.items()}
-    return {}
 
 
 def _read_env_file(env_file: Path) -> tuple[list[str], set[str]]:
