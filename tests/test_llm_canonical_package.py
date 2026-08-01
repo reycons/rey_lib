@@ -148,7 +148,9 @@ def test_legacy_llm_package_wire_shape_is_unchanged() -> None:
     """The log-analysis package keeps its four-field wire shape."""
     from rey_lib.logs.llm_package import _build_analysis_package
 
+    # No references are declared, so ctx is never consulted.
     package = _build_analysis_package(
+        ctx=None,
         analysis_name="log_interpreter",
         source_record_type="RESULTS_SUMMARY",
         instructions={"rules": ["explain failures"]},
@@ -166,7 +168,7 @@ def test_legacy_and_canonical_packages_are_distinct_shapes() -> None:
     from rey_lib.logs.llm_package import _build_analysis_package
 
     legacy = _build_analysis_package(
-        "a", "RESULTS_SUMMARY", {"r": 1}, {"record_type": "RESULTS_SUMMARY"},
+        None, "a", "RESULTS_SUMMARY", {"r": 1}, {"record_type": "RESULTS_SUMMARY"},
     )
     canonical = build_package(
         analysis="a", contract=LlmPackageContract(path="/c", hash="h", content="R"),
