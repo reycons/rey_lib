@@ -174,6 +174,54 @@ def test_canonical_carries_no_indentation_or_spacing() -> None:
     assert " " not in rendered
 
 
+def test_canonical_leaves_non_ascii_literal() -> None:
+    """Deliberate: escaping would change hashes two contracts already persist.
+
+    canonical is not a formatting preference. rule_sets and inspection each
+    arrived at this representation independently, for identity, and hold
+    stored hashes against it.
+    """
+    assert render_json({"p": "Ünïcode"}, mode="canonical") == '{"p":"Ünïcode"}'
+    # The other modes are unaffected and still escape.
+    assert render_json({"p": "Ünïcode"}) == '{"p": "\\u00dcn\\u00efcode"}'
+
+
+# Captured from the two live identity implementations before any migration.
+# A change here is a change to persisted identity, never a formatting tidy-up.
+CANONICAL_FIXTURES: tuple[tuple[str, object, str, str], ...] = (
+    ("ascii_nested", {"b": 1, "a": {"z": 2, "y": [1, 2]}},
+     '{"a":{"y":[1,2],"z":2},"b":1}', "1ac1a410f5c8cd26"),
+    ("unicode", {"path": "/data/Ünïcode/x.csv", "name": "café"},
+     '{"name":"café","path":"/data/Ünïcode/x.csv"}', "5cc55f1815ed16a5"),
+    ("cjk", {"col": "字段", "v": "値"}, '{"col":"字段","v":"値"}', "dccf70f311020085"),
+    ("null_and_bool", {"n": None, "t": True, "f": False},
+     '{"f":false,"n":null,"t":true}', "22e00dc2f7b01420"),
+    ("empty", {}, "{}", "44136fa355b3678a"),
+    ("list_root", [{"b": 2, "a": 1}, "Ünïcode"], '[{"a":1,"b":2},"Ünïcode"]',
+     "d0e7d6cc0d68d34e"),
+    ("deep", {"a": {"b": {"c": {"d": "é"}}}}, '{"a":{"b":{"c":{"d":"é"}}}}',
+     "dd24bf0103b67cbe"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "expected_text", "expected_sha"), CANONICAL_FIXTURES
+)
+def test_canonical_matches_the_persisted_identity_representation(
+    label: str,
+    value: object,
+    expected_text: str,
+    expected_sha: str,
+) -> None:
+    """These bytes and hashes are a contract, not an implementation detail."""
+    import hashlib
+
+    rendered = render_json(value, mode="canonical")
+
+    assert rendered == expected_text, label
+    assert hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16] == expected_sha
+
+
 def test_each_mode_renders_its_own_shape() -> None:
     value = {"b": 1, "a": 2}
 

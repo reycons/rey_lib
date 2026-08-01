@@ -21,7 +21,8 @@ Rendering modes
 ---------------
 ``compact``   one line, the default for storage and transport
 ``pretty``    indented for a human reading the file
-``canonical`` sorted keys and fixed separators, for hashing and comparison
+``canonical`` sorted keys, fixed separators, literal non-ASCII — the identity
+              representation, for hashing and comparison
 
 Non-JSON-native values are stringified rather than raising, so a caller is
 never silently unable to record something it holds.
@@ -51,7 +52,15 @@ RenderMode = Literal["compact", "pretty", "canonical"]
 _RENDER_MODES: dict[str, dict[str, Any]] = {
     "compact": {},
     "pretty": {"indent": 2, "sort_keys": True},
-    "canonical": {"sort_keys": True, "separators": (",", ":")},
+    # The identity representation already arrived at independently by
+    # file_operator.rule_sets and file_operator.inspection, both for hashing.
+    # Non-ASCII stays literal: escaping it would change every hash those two
+    # contracts have already persisted.
+    "canonical": {
+        "sort_keys": True,
+        "separators": (",", ":"),
+        "ensure_ascii": False,
+    },
 }
 
 
@@ -103,9 +112,13 @@ def render_json(value: Any, *, mode: RenderMode = "compact") -> str:
     """Return ``value`` as JSON text in the requested mode.
 
     ``canonical`` is the mode to use whenever the result will be hashed or
-    compared: it fixes key order and separators, so equal content is equal
-    bytes. ``pretty`` is for a file a person will read. ``compact`` is the
-    default for storage and transport.
+    compared: it fixes key order and separators and leaves non-ASCII literal,
+    so equal content is equal bytes. Its definition is not a preference — it
+    matches the representation two identity contracts in this codebase already
+    persist hashes against.
+
+    ``pretty`` is for a file a person will read; sorted keys do not make it
+    canonical. ``compact`` is the default for storage and transport.
     """
     if mode not in _RENDER_MODES:
         raise JsonReadError(
