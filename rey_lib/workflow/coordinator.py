@@ -36,6 +36,7 @@ from rey_lib.logs import (
     finalize_run_log,
     log_run_complete,
     log_run_start,
+    next_nest_level,
     set_nest_level,
     log_error,
     log_step_failure,
@@ -373,6 +374,9 @@ def run_workflow(
             log_step_start(
                 ctx, step_name, sequence, step_type=process, step_id=step_id
             )
+            # STEP_START anchors the workflow-step scope. Handler, lifecycle, file,
+            # and result evidence belongs one level beneath that durable record.
+            next_nest_level(ctx)
 
             if not apply and bool(effective.get("apply_only")):
                 log_step_end(ctx, step_name, "skipped", message="dry-run")
@@ -410,6 +414,7 @@ def run_workflow(
                 )
                 run.status = "failed"
                 _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
+                set_nest_level(ctx, "workflow")
                 log_run_complete(
                     ctx,
                     "failed",
@@ -441,6 +446,7 @@ def run_workflow(
                     sanitized_exception=failure_message,
                     failed_step_sequence=sequence,
                 )
+                set_nest_level(ctx, "workflow")
                 log_run_complete(
                     ctx,
                     "failed",
@@ -456,6 +462,7 @@ def run_workflow(
         finally:
             clear_step()
 
+    set_nest_level(ctx, "workflow")
     log_run_complete(ctx, "success")
     _finalize_run(ctx)
     clear_run()

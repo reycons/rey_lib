@@ -427,6 +427,37 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
     assert current_step() is None
 
 
+def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> None:
+    """Evidence emitted while a handler runs descends from its STEP_START record."""
+    from rey_lib.logs import log_run_record
+    from rey_lib.workflow import run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    workflow = {
+        "name": "wf",
+        "processes": {"p1": {}},
+        "steps": [{"id": "s1", "label": "One", "process": "p1"}],
+    }
+
+    def handler(handler_ctx: object, _config: dict, _run: object) -> None:
+        log_run_record(handler_ctx, "ROW_COUNT", count_name="created", count=2)
+
+    result = run_workflow(ctx, workflow, {"p1": handler})
+
+    assert result.status == "success"
+    records = _read(Path(ctx.run_log_path))
+    run_start = next(row for row in records if row["record_type"] == "RUN_START")
+    step_start = next(row for row in records if row["record_type"] == "STEP_START")
+    row_count = next(row for row in records if row["record_type"] == "ROW_COUNT")
+    step_end = next(row for row in records if row["record_type"] == "STEP_END")
+    run_complete = next(row for row in records if row["record_type"] == "RUN_COMPLETE")
+
+    assert step_start["parent_record_id"] == run_start["record_id"]
+    assert row_count["parent_record_id"] == step_start["record_id"]
+    assert step_end["parent_record_id"] == step_start["record_id"]
+    assert run_complete["parent_record_id"] == run_start["parent_record_id"]
+
+
 def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     tmp_path: Path,
 ) -> None:
