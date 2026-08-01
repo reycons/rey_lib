@@ -43,11 +43,11 @@ prepare(source_data, ...)
 
 from __future__ import annotations
 
-import hashlib
 import random as _random
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from rey_lib.encryption import sha256_text
 from rey_lib.llm.datasource import SourceData
 
 __all__ = ["DataProfile", "PreparedInput", "prepare"]
@@ -385,4 +385,4 @@ def _prepare_text(
 
 def _sha256(text: str) -> str:
     """Return the SHA-256 hex digest of a UTF-8 string."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_text(text)

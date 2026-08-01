@@ -26,13 +26,13 @@ TextDataSource
 
 from __future__ import annotations
 
-import hashlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from rey_lib.encryption import sha256_text
 from rey_lib.files.csv import read_csv
 
 __all__ = [
@@ -306,7 +306,7 @@ class TextDataSource(DataSource):
 
     def extract(self, max_extract: int = _DEFAULT_MAX_EXTRACT) -> SourceData:
         """Return the text wrapped in a SourceData with empty rows."""
-        content_hash = hashlib.sha256(self._text.encode("utf-8")).hexdigest()
+        content_hash = sha256_text(self._text)
         return SourceData(
             rows        = [],
             raw_text    = self._text,
@@ -325,6 +325,6 @@ class TextDataSource(DataSource):
 def _hash_rows(rows: list[dict[str, Any]]) -> str:
     """Return the SHA-256 hex digest of the JSON-serialised row list."""
     content = json.dumps(rows, default=str, sort_keys=True)
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return sha256_text(content)
 
 

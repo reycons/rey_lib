@@ -28,7 +28,6 @@ run_from_file(data_path, contract_path, ...)
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 import uuid
@@ -37,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.json import read_json_file
 from rey_lib.llm import document_loader
@@ -1074,7 +1074,7 @@ def _strip_code_fences(text: str) -> str:
 
 def _hash_text(text: str) -> str:
     """Return the SHA-256 hex digest of a UTF-8 string."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_text(text)
 
 
 def _hash_messages(messages: list[Message]) -> str:

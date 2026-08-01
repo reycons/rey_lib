@@ -31,7 +31,6 @@ from typing import Any
 
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files.file_utils import read_text_file
 
 __all__ = [
     "generate_fernet_key",
@@ -188,6 +187,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     """Read and parse a YAML file, returning empty dict for blank files."""
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
+
+    # Imported here rather than at module scope: file_utils now delegates its
+    # digests to this module, and a top-level import would close that loop.
+    from rey_lib.files.file_utils import read_text_file  # noqa: PLC0415
 
     data = parse_yaml(read_text_file(path))
     return data if isinstance(data, dict) else {}

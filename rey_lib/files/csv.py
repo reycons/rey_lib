@@ -28,13 +28,13 @@ authorizes the path.
 from __future__ import annotations
 
 import csv as _csv
-import hashlib
 import io
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import read_text_file
 
@@ -334,7 +334,7 @@ def read_csv_text(
     has them; neither affects the analysis.
     """
     lines = text.splitlines()
-    source_text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    source_text_sha256 = sha256_text(text)
     required = tuple(str(text) for text in required_header if str(text).strip())
 
     if not lines:

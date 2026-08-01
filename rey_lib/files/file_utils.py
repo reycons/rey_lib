@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import csv
 from fnmatch import fnmatch
-import hashlib
 import json
 import re
 import shutil
@@ -38,6 +37,7 @@ from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
+from rey_lib.encryption import sha256_bytes, sha256_file, sha256_text
 from rey_lib.files import primitive_file_io
 from rey_lib.logs import get_logger, log_run_record, record_file_operation
 
@@ -208,17 +208,20 @@ def find_named_files(folder: Path, filename: str) -> list[Path]:
 
 
 def file_sha256(path: Path | str) -> str:
-    """Return the SHA-256 hex digest for a file."""
-    hasher = hashlib.sha256()
-    with Path(path).open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+    """Return the SHA-256 hex digest for a file.
+
+    The digest itself belongs to rey_lib.encryption; this name is kept because
+    callers in several repositories already use it.
+    """
+    return sha256_file(path)
 
 
 def bytes_sha256(data: bytes) -> str:
-    """Return the SHA-256 hex digest for raw bytes."""
-    return hashlib.sha256(data).hexdigest()
+    """Return the SHA-256 hex digest for raw bytes.
+
+    As with :func:`file_sha256`, the computation lives in rey_lib.encryption.
+    """
+    return sha256_bytes(data)
 
 
 def read_text_file(
@@ -952,7 +955,8 @@ def _relevant_file_role(
 
 def _relevant_file_id(path: Path) -> str:
     """Return a stable non-content identifier for one relevant file path."""
-    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+    # The path, not the content: this identifies a location, not a file's bytes.
+    return sha256_text(str(path))[:16]
 
 
 def converted_output_path(

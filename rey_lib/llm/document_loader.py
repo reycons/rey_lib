@@ -24,7 +24,7 @@ from_string(text)
 
 from __future__ import annotations
 
-import hashlib
+from rey_lib.encryption import sha256_text
 from rey_lib.files.csv import read_csv
 from pathlib import Path
 from typing import Any, Optional
@@ -235,7 +235,7 @@ def from_string(text: str) -> tuple[str, str]:
 
 def _hash(text: str) -> str:
     """Return the SHA-256 hex digest of a UTF-8 string."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_text(text)
 
 
 def _rows_to_markdown(

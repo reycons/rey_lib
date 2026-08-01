@@ -18,7 +18,6 @@ load(path)
 
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -26,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.config.config_utils import parse_yaml
+from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["Contract", "load"]
@@ -99,7 +99,7 @@ def load(path: Path) -> Contract:
         raise ConfigError(f"Contract file not found: {path}")
 
     raw          = path.read_text(encoding="utf-8")
-    content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    content_hash = sha256_text(raw)
 
     suffix = path.suffix.lower()
     if suffix in (".yaml", ".yml"):
