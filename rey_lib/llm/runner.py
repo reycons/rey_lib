@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from rey_lib.errors.error_utils import ConfigError
+from rey_lib.files.json import read_json_file
 from rey_lib.llm import document_loader
 from rey_lib.llm.api import RunRequest, RunResponse
 from rey_lib.llm.artifacts import ArtifactStore
@@ -1051,7 +1052,11 @@ def _load_sidecar_schema(contract_path: Path) -> Optional[dict[str, Any]]:
     schema_path = contract_path.with_name(contract_path.stem + ".schema.json")
     if schema_path.exists():
         _logger.debug("runner: loaded sidecar schema from %s", schema_path)
-        return json.loads(schema_path.read_text(encoding="utf-8"))
+        # A malformed sidecar names itself: JsonReadError carries the path, so
+        # an operator is not left with a line and column belonging to no file.
+        # No expect is asserted -- whether a schema must be an object is a
+        # schema decision, not a reading one.
+        return read_json_file(schema_path)
     return None
 
 

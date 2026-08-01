@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from rey_lib.files.json import read_json_file
 from rey_lib.llm.exceptions import (
     ConfigurationFailure,
     OrchestratorError,
@@ -87,7 +88,9 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     schema: Optional[dict[str, Any]] = None
     if args.schema:
-        schema = json.loads(Path(args.schema).read_text(encoding="utf-8"))
+        # JsonReadError names the file, so a bad --schema path and a bad schema
+        # are distinguishable to whoever typed the argument.
+        schema = read_json_file(Path(args.schema))
 
     if args.data == "-":
         input_data: str = sys.stdin.read()
