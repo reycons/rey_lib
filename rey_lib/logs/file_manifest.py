@@ -363,7 +363,17 @@ def _read_state(manifest_path: Path) -> dict[str, int]:
 
 
 def _commit_state(manifest_path: Path, record_id: int) -> None:
-    """Persist the committed record id and the manifest size it corresponds to."""
+    """Persist the committed record id and the manifest size it corresponds to.
+
+    Recovery, not durability. A writer interrupted between appending a record
+    and committing this state leaves the two inconsistent, and that is repaired
+    by recounting the manifest. The recount fixes inconsistent state; it does
+    not make an acknowledged append survive power loss. Neither the append nor
+    this state file is flushed to stable storage, so a machine that loses power
+    can lose a record the caller was told was written. Choosing synchronization
+    boundaries for the append path -- run, batch, checkpoint, or close -- is a
+    separate decision and deliberately not made here.
+    """
     from rey_lib.files.json import write_json_file
 
     state = {

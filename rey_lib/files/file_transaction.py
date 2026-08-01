@@ -9,6 +9,14 @@ handling, commit ordering, and rollback. Callers retain ownership of artifact
 selection, naming, content, evidence, and publication policy; no application
 semantics belong here.
 
+Tier: visibility-atomic. Members are staged and installed atomically, so no
+destination is ever seen partially written, but no persistence claim is made --
+nothing here is flushed to stable storage before it is installed. That is a
+deliberate choice rather than an omission: this boundary has no governed
+production caller yet, its backup and rollback already bound the failure window,
+and per-member flushing would be a cost with no one asking for it. Revisit when
+a caller publishes governed evidence through it.
+
 Every member is staged as a temporary file inside its own destination's parent
 directory, so each commit is a same-filesystem ``os.replace`` and never a
 cross-device copy. Nothing reaches a final destination until every member has
