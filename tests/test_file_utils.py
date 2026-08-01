@@ -7,13 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from rey_lib.encryption import sha256_bytes, sha256_file
 from rey_lib.files.file_utils import (
     bounded_text_preview,
     blocked_display_reason,
-    bytes_sha256,
     capture_path_variables,
     discover_inbox_files,
-    file_sha256,
     find_named_files,
     folder_children,
     input_files,
@@ -140,7 +139,7 @@ def test_file_hash_helpers_use_shared_sha256(tmp_path: Path) -> None:
     file_path = tmp_path / "sample.txt"
     file_path.write_text("abc", encoding="utf-8")
 
-    assert file_sha256(file_path) == bytes_sha256(b"abc")
+    assert sha256_file(file_path) == sha256_bytes(b"abc")
 
 
 def test_read_text_file_reads_through_shared_boundary(tmp_path: Path) -> None:

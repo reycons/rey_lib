@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rey_lib.files import file_sha256, read_text_file
+from rey_lib.encryption import sha256_file
+from rey_lib.files import read_text_file
 
 __all__ = [
     "LlmPackageContract",
@@ -125,7 +126,7 @@ def read_input(
     return LlmPackageInput(
         source_path=path,
         content=read_text_file(source_path),
-        input_hash=file_sha256(source_path),
+        input_hash=sha256_file(source_path),
         name=name,
         artifact_id=artifact_id,
         media_type=media_type,

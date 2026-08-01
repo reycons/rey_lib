@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from rey_lib.files.csv import read_csv_text
-from rey_lib.files.file_utils import bytes_sha256, file_sha256
+from rey_lib.encryption import sha256_bytes, sha256_file
 from rey_lib.llm import contract as llm_contract
 from rey_lib.llm import datasource as llm_datasource
 from rey_lib.llm import document_loader, preparation
@@ -47,14 +47,14 @@ def _utf8(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("text", SAMPLES)
-def test_file_sha256_is_unchanged(tmp_path: Path, text: str) -> None:
+def test_the_file_digest_is_unchanged(tmp_path: Path, text: str) -> None:
     target = tmp_path / "sample.bin"
     target.write_bytes(text.encode("utf-8"))
 
-    assert file_sha256(target) == _utf8(text)
+    assert sha256_file(target) == _utf8(text)
 
 
-def test_file_sha256_still_streams_a_file_larger_than_one_chunk(
+def test_the_file_digest_still_streams_a_file_larger_than_one_chunk(
     tmp_path: Path,
 ) -> None:
     """The chunked read was the part with room to go wrong."""
@@ -62,12 +62,12 @@ def test_file_sha256_still_streams_a_file_larger_than_one_chunk(
     target = tmp_path / "big.bin"
     target.write_bytes(payload)
 
-    assert file_sha256(target) == hashlib.sha256(payload).hexdigest()
+    assert sha256_file(target) == hashlib.sha256(payload).hexdigest()
 
 
 @pytest.mark.parametrize("text", SAMPLES)
-def test_bytes_sha256_is_unchanged(text: str) -> None:
-    assert bytes_sha256(text.encode("utf-8")) == _utf8(text)
+def test_the_bytes_digest_is_unchanged(text: str) -> None:
+    assert sha256_bytes(text.encode("utf-8")) == _utf8(text)
 
 
 def test_the_relevant_file_id_keeps_its_length_and_value() -> None:

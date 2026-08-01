@@ -37,21 +37,19 @@ from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
 
-from rey_lib.encryption import sha256_bytes, sha256_file, sha256_text
+from rey_lib.encryption import sha256_file, sha256_text
 from rey_lib.files import primitive_file_io
 from rey_lib.logs import get_logger, log_run_record, record_file_operation
 
 __all__ = [
     "blocked_display_reason",
     "bounded_text_preview",
-    "bytes_sha256",
     "capture_path_variables",
     "discover_inbox_files",
     "folder_children",
     "input_files",
     "input_tree_files",
     "is_hidden_path",
-    "file_sha256",
     "matched_tree_files",
     "matches_file_pattern",
     "list_relevant_files",
@@ -205,23 +203,6 @@ def find_named_files(folder: Path, filename: str) -> list[Path]:
         for path in sorted(root.rglob(filename))
         if path.is_file() and not is_hidden_path(path, root)
     ]
-
-
-def file_sha256(path: Path | str) -> str:
-    """Return the SHA-256 hex digest for a file.
-
-    The digest itself belongs to rey_lib.encryption; this name is kept because
-    callers in several repositories already use it.
-    """
-    return sha256_file(path)
-
-
-def bytes_sha256(data: bytes) -> str:
-    """Return the SHA-256 hex digest for raw bytes.
-
-    As with :func:`file_sha256`, the computation lives in rey_lib.encryption.
-    """
-    return sha256_bytes(data)
 
 
 def read_text_file(
@@ -1592,7 +1573,7 @@ def _file_operation_fingerprint(path: Path) -> dict[str, Any]:
     fingerprint.update(
         {
             "size_bytes": stat.st_size,
-            "sha256": file_sha256(file_path),
+            "sha256": sha256_file(file_path),
         }
     )
     return fingerprint

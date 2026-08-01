@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.config.config_utils import PathResolver
+from rey_lib.encryption import sha256_file
 from rey_lib.files.file_utils import (
-    file_sha256,
     file_operation_log_path,
     file_movement_log_path,
     find_original_relative_path,
@@ -82,7 +82,7 @@ def test_move_file_writes_run_log_not_state_file(tmp_path: Path) -> None:
     assert record["file_fingerprint"]["name"] == "feed.csv"
     assert record["file_fingerprint"]["exists"] is True
     assert record["file_fingerprint"]["size_bytes"] == 4
-    assert record["file_fingerprint"]["sha256"] == file_sha256(dest_dir / "feed.csv")
+    assert record["file_fingerprint"]["sha256"] == sha256_file(dest_dir / "feed.csv")
 
     assert list(iter_file_operations(ctx)) == []
     assert list(iter_file_movements(ctx)) == []

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rey_lib.files import file_sha256
+from rey_lib.encryption import sha256_file
 from rey_lib.llm.package import (
     LlmPackageContract,
     LlmPackageInput,
@@ -103,20 +103,23 @@ def test_optional_evidence_fields_appear_only_when_populated() -> None:
 
 
 def test_read_input_uses_shared_file_utilities(tmp_path: Path) -> None:
-    """read_input reads content and hash through rey_lib.files, not a new layer."""
+    """read_input composes shared primitives rather than adding a layer.
+
+    Content comes from rey_lib.files, the digest from rey_lib.encryption.
+    """
     source = tmp_path / "profile.json"
     source.write_text('{"columns": ["a", "b"]}', encoding="utf-8")
 
     entry = read_input(source, name="profile", media_type="application/json")
     assert entry.source_path == str(source)
     assert entry.content == '{"columns": ["a", "b"]}'
-    # Hash is the shared file utility's hash, not a re-implementation.
-    assert entry.input_hash == file_sha256(source)
+    # The shared digest primitive, not a re-implementation.
+    assert entry.input_hash == sha256_file(source)
     assert entry.name == "profile"
 
     # It composes into a package as one input.
     package = build_package(analysis="a", contract=_contract(), inputs=[entry])
-    assert package["inputs"][0]["input_hash"] == file_sha256(source)
+    assert package["inputs"][0]["input_hash"] == sha256_file(source)
 
 
 def test_builder_does_not_invoke_a_provider() -> None:
