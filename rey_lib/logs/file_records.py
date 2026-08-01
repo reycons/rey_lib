@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from rey_lib.logs.file_manifest import FileManifestError, log_file_manifest_record
 from rey_lib.logs.record_enrichment import _CURRENT_RUN, log_run_record
 
 
@@ -99,42 +98,10 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
     payload["safe_to_preview"] = bool(safe_to_preview)
     if "config_hash" in payload and "hash" not in payload:
         payload["hash"] = payload["config_hash"]
-    run_log_record_id = log_run_record(
+    log_run_record(
         ctx, "CONFIG_FILE_REFERENCE",
         **payload,
     )
-    if run_log_record_id is None:
-        return
-    try:
-        run_log_file = Path(str(getattr(ctx, "run_log_path", "") or "")).name
-        if not run_log_file:
-            return
-        log_file_manifest_record(ctx, {
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-            "record_type": "run_config_file_reference",
-            "status": "available" if payload["exists"] else "missing",
-            "evidence": {
-                "run_log_file": run_log_file,
-                "run_log_record_id": run_log_record_id,
-            },
-            "file": {
-                "path": str(path),
-                "display_name": str(payload["display_name"]),
-                "role": role,
-                "config_name": cfg_name,
-                "config_type": cfg_type,
-            },
-            "producer": {
-                "application": str(declaration.get("producing_app") or "unknown"),
-            },
-        })
-    except (FileManifestError, OSError, ValueError) as exc:
-        # Config evidence remains fail-safe like its run-log counterpart. The
-        # Console will report unavailable governed evidence rather than falling
-        # back to the run-log path.
-        logging.getLogger(__name__).warning(
-            "run log: could not append governed config file reference: %s", exc
-        )
 
 
 def log_config_file_manifest(ctx: Any, files: list[dict[str, Any]]) -> None:
