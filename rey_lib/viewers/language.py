@@ -6,10 +6,10 @@ return rendering-engine language identifiers.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from rey_lib.files.csv import looks_like_csv
+from rey_lib.files.json import looks_like_json, looks_like_jsonl
 
 APPROVED_TEXT_LANGUAGES = frozenset({
     "sql",
@@ -109,23 +109,13 @@ def _classify_text_content(content: str | None) -> str:
 
 
 def _looks_like_json(text: str) -> bool:
-    if not text.startswith(("{", "[")):
-        return False
-    try:
-        json.loads(text)
-    except json.JSONDecodeError:
-        return False
-    return True
+    """Whether the text is one JSON document is a JSON question, answered there."""
+    return looks_like_json(text)
 
 
 def _looks_like_jsonl(text: str) -> bool:
-    lines = [line for line in text.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return False
-    try:
-        return all(isinstance(json.loads(line), (dict, list)) for line in lines[:5])
-    except json.JSONDecodeError:
-        return False
+    """Whether the text is one record per line is a JSON question, answered there."""
+    return looks_like_jsonl(text)
 
 
 def _looks_like_sql(text: str) -> bool:
