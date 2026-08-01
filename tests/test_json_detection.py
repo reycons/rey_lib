@@ -1,4 +1,9 @@
-"""Detection contract for rey_lib.files.json.
+"""Detection contract for looks_like_json and looks_like_jsonl.
+
+Each lives with its own format -- looks_like_json in rey_lib.files.json,
+looks_like_jsonl in rey_lib.files.jsonl -- but they are tested together because
+the viewer asks them in order and the interesting cases are the ones where they
+disagree about the same text.
 
 These cases were captured from the viewer implementation that owned this logic
 before it moved, and they are a regression net rather than a specification of
@@ -13,7 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from rey_lib.files.json import looks_like_json, looks_like_jsonl
+from rey_lib.files.json import looks_like_json
+from rey_lib.files.jsonl import looks_like_jsonl
 from rey_lib.viewers.language import classify_text_language
 
 

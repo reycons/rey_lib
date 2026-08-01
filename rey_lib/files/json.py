@@ -42,16 +42,11 @@ __all__ = [
     "JsonReadError",
     "RenderMode",
     "looks_like_json",
-    "looks_like_jsonl",
     "parse_json_text",
     "read_json_file",
     "render_json",
     "write_json_file",
 ]
-
-# How many record lines a JSONL guess examines. Detection runs on previews, so
-# it answers from the opening records rather than reading a whole file.
-_JSONL_SAMPLE_LINES = 5
 
 RenderMode = Literal["compact", "pretty", "canonical"]
 
@@ -154,30 +149,6 @@ def looks_like_json(text: str) -> bool:
     except (_json.JSONDecodeError, ValueError):
         return False
     return True
-
-
-def looks_like_jsonl(text: str) -> bool:
-    """Return whether ``text`` reads as JSON Lines -- one record per line.
-
-    Blank lines are skipped rather than treated as records, so they neither
-    count toward the total nor interrupt a run. Two records are the minimum,
-    since a single line cannot distinguish JSON Lines from a JSON document.
-
-    Only the first few records are examined, so a malformed line later in the
-    text does not change the answer. That bound is the point: this runs on
-    previews. Every line examined must be an object or an array; a line
-    holding a scalar is valid JSON and is not a record.
-    """
-    lines = [line for line in text.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return False
-    try:
-        return all(
-            isinstance(_json.loads(line), (dict, list))
-            for line in lines[:_JSONL_SAMPLE_LINES]
-        )
-    except (_json.JSONDecodeError, ValueError):
-        return False
 
 
 def read_json_file(

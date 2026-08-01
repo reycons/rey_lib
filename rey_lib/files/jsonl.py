@@ -35,6 +35,7 @@ from rey_lib.files.primitive_file_io import render_jsonl_line, write_jsonl_file
 
 __all__ = [
     "JsonlReadError",
+    "looks_like_jsonl",
     "JsonlRecord",
     "JsonlSearchResult",
     "read_jsonl_file",
@@ -42,6 +43,40 @@ __all__ = [
     "write_jsonl_file",
     "search_jsonl_file",
 ]
+
+
+# How many record lines a JSONL guess examines. Detection runs on previews, so
+# it answers from the opening records rather than reading a whole file.
+_JSONL_SAMPLE_LINES = 5
+
+
+def looks_like_jsonl(text: str) -> bool:
+    """Return whether ``text`` reads as JSON Lines -- one record per line.
+
+    A guess for a caller deciding how to present unknown content, not a
+    validator. It parses JSON per line, but the structural question it answers
+    -- whether the text is one record per line -- is a JSONL question, so it is
+    owned here rather than by the JSON module.
+
+    Blank lines are skipped rather than treated as records, so they neither
+    count toward the total nor interrupt a run. Two records are the minimum,
+    since a single line cannot distinguish JSON Lines from a JSON document.
+
+    Only the first few records are examined, so a malformed line later in the
+    text does not change the answer. That bound is the point: this runs on
+    previews. Every line examined must be an object or an array; a line
+    holding a scalar is valid JSON and is not a record.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    try:
+        return all(
+            isinstance(json.loads(line), (dict, list))
+            for line in lines[:_JSONL_SAMPLE_LINES]
+        )
+    except (json.JSONDecodeError, ValueError):
+        return False
 
 
 class JsonlReadError(AppError):

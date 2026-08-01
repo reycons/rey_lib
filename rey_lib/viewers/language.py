@@ -9,7 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from rey_lib.files.csv import looks_like_csv
-from rey_lib.files.json import looks_like_json, looks_like_jsonl
+from rey_lib.files.json import looks_like_json
+from rey_lib.files.jsonl import looks_like_jsonl
 
 APPROVED_TEXT_LANGUAGES = frozenset({
     "sql",
@@ -114,7 +115,7 @@ def _looks_like_json(text: str) -> bool:
 
 
 def _looks_like_jsonl(text: str) -> bool:
-    """Whether the text is one record per line is a JSON question, answered there."""
+    """Whether the text is one record per line is a JSONL question, answered there."""
     return looks_like_jsonl(text)
 
 
