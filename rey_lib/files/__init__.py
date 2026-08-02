@@ -58,6 +58,8 @@ from rey_lib.files.jsonl import (
 from rey_lib.files.file_loader import load_files
 from rey_lib.files.log_run_rollback import (
     LogRunRollbackError,
+    SourceFileMutationEvidenceError,
+    SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
     preview_log_run_rollback,
     register_file_compensation,
@@ -65,6 +67,16 @@ from rey_lib.files.log_run_rollback import (
     serialize_source_file_mutation,
     serialize_source_file_rollback,
     unregister_file_compensation,
+)
+from rey_lib.files.file_routing import (
+    CollisionPolicy,
+    FileRoutingContext,
+    FileRoutingError,
+    FileRoutingEvidenceError,
+    FileRoutingResult,
+    FileRoutingRole,
+    FileRoutingRollbackInformation,
+    GovernedFileReference,
 )
 from rey_lib.files.workbook_conversion import (
     SUPPORTED_WORKBOOK_EXTENSIONS,
@@ -136,6 +148,8 @@ __all__ = [
     "TransformError",
     "load_files",
     "LogRunRollbackError",
+    "SourceFileMutationEvidenceError",
+    "SourceFileMutationEvidenceFailurePhase",
     "log_source_file_mutation",
     "preview_log_run_rollback",
     "register_file_compensation",
@@ -143,6 +157,14 @@ __all__ = [
     "serialize_source_file_mutation",
     "serialize_source_file_rollback",
     "unregister_file_compensation",
+    "CollisionPolicy",
+    "FileRoutingContext",
+    "FileRoutingError",
+    "FileRoutingEvidenceError",
+    "FileRoutingResult",
+    "FileRoutingRole",
+    "FileRoutingRollbackInformation",
+    "GovernedFileReference",
     "SUPPORTED_WORKBOOK_EXTENSIONS",
     "ConvertedTableArtifact",
     "EmptyWorkbookError",

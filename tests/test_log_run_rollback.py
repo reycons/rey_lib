@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from rey_lib.files import (
     LogRunRollbackError,
+    SourceFileMutationEvidenceError,
+    SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
     preview_log_run_rollback,
     register_file_compensation,
@@ -122,6 +125,167 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
         "run_log_file": "run.jsonl",
         "run_log_record_id": run_rows[0]["record_id"],
     }
+
+
+def test_mutation_evidence_failure_before_run_log_commit_is_structured(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    with patch(
+        "rey_lib.files.log_run_rollback.log_run_record", return_value=None
+    ), patch(
+        "rey_lib.files.log_run_rollback.log_file_manifest_record"
+    ) as manifest_append:
+        with pytest.raises(SourceFileMutationEvidenceError) as raised:
+            log_source_file_mutation(ctx, action="move", status="success")
+
+    error = raised.value
+    assert error.phase is SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED
+    assert error.run_log_committed is False
+    assert error.run_log_record_id is None
+    assert error.run_log_file is None
+    assert error.manifest_record_id is None
+    assert error.complete_evidence_acknowledged is False
+    assert isinstance(error, LogRunRollbackError)
+    assert str(error) == (
+        "Source-file mutation run-log evidence did not commit; the file manifest "
+        "was not modified."
+    )
+    manifest_append.assert_not_called()
+
+
+def test_mutation_evidence_filename_failure_preserves_committed_record_id(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    del ctx.run_log_path
+    with patch(
+        "rey_lib.files.log_run_rollback.log_run_record", return_value=17
+    ):
+        with pytest.raises(SourceFileMutationEvidenceError) as raised:
+            log_source_file_mutation(ctx, action="move", status="success")
+
+    error = raised.value
+    assert error.phase is (
+        SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+    )
+    assert error.run_log_committed is True
+    assert error.run_log_record_id == 17
+    assert error.run_log_file is None
+    assert error.complete_evidence_acknowledged is False
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        LogRunRollbackError("serialization failed"),
+        TypeError("copy failed"),
+        ValueError("copy failed"),
+    ],
+)
+def test_mutation_serialization_failure_after_run_log_commit_is_structured(
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    ctx = _ctx(tmp_path)
+    with patch(
+        "rey_lib.files.log_run_rollback.log_run_record", return_value=19
+    ), patch(
+        "rey_lib.files.log_run_rollback.serialize_source_file_mutation",
+        side_effect=failure,
+    ):
+        with pytest.raises(SourceFileMutationEvidenceError) as raised:
+            log_source_file_mutation(ctx, action="move", status="success")
+
+    error = raised.value
+    assert error.run_log_committed is True
+    assert error.run_log_record_id == 19
+    assert error.run_log_file == "run.jsonl"
+    assert error.__cause__ is failure
+
+
+def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    with patch(
+        "rey_lib.files.log_run_rollback.log_run_record", return_value=23
+    ), patch(
+        "rey_lib.files.primitive_file_io.append_jsonl",
+        side_effect=OSError("append blocked"),
+    ):
+        with pytest.raises(SourceFileMutationEvidenceError) as raised:
+            log_source_file_mutation(ctx, action="move", status="success")
+
+    error = raised.value
+    assert error.phase is (
+        SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+    )
+    assert error.run_log_committed is True
+    assert error.run_log_record_id == 23
+    assert error.run_log_file == "run.jsonl"
+    assert error.complete_evidence_acknowledged is False
+    assert error.manifest_record_id is None
+    assert not ctx.paths.manifest.exists()
+
+
+def test_sequencing_state_failure_preserves_appended_manifest_row(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    with patch(
+        "rey_lib.files.log_run_rollback.log_run_record", return_value=29
+    ), patch(
+        "rey_lib.logs.file_manifest._commit_state",
+        side_effect=FileManifestError("sequencing state failed after append"),
+    ):
+        with pytest.raises(SourceFileMutationEvidenceError) as raised:
+            log_source_file_mutation(
+                ctx,
+                action="move",
+                status="success",
+                source_path=tmp_path / "inbox" / "source.csv",
+                destination_path=tmp_path / "processing" / "source.csv",
+                file_id="file-29",
+            )
+
+    error = raised.value
+    assert error.phase is (
+        SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+    )
+    assert error.run_log_committed is True
+    assert error.run_log_record_id == 29
+    assert error.run_log_file == "run.jsonl"
+    assert error.manifest_record_id is None
+    assert error.complete_evidence_acknowledged is False
+    assert not hasattr(error, "manifest_committed")
+    rows = _rows(ctx)
+    assert len(rows) == 1
+    assert rows[0]["record_id"] == 1
+    assert rows[0]["file_id"] == "file-29"
+    assert rows[0]["evidence"] == {
+        "run_log_file": "run.jsonl",
+        "run_log_record_id": 29,
+    }
+
+
+def test_mutation_evidence_phase_owns_commit_state() -> None:
+    with pytest.raises(ValueError, match="cannot carry"):
+        SourceFileMutationEvidenceError(
+            "failed",
+            phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
+            run_log_file="run.jsonl",
+            run_log_record_id=1,
+        )
+    with pytest.raises(ValueError, match="positive"):
+        SourceFileMutationEvidenceError(
+            "failed",
+            phase=(
+                SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+            ),
+            run_log_file=None,
+            run_log_record_id=None,
+        )
 
 
 def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None:

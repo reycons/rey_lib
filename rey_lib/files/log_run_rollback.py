@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
@@ -36,6 +37,67 @@ ROLLBACK_RECORD_TYPE = "source_file_rollback"
 
 class LogRunRollbackError(Exception):
     """Raised when a rollback request cannot be planned or governed safely."""
+
+
+class SourceFileMutationEvidenceFailurePhase(str, Enum):
+    """Provable acknowledgement phase for mutation-evidence failure."""
+
+    RUN_LOG_NOT_COMMITTED = "run_log_not_committed"
+    RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED = (
+        "run_log_committed_complete_evidence_not_acknowledged"
+    )
+
+
+class SourceFileMutationEvidenceError(LogRunRollbackError):
+    """Report mutation-evidence acknowledgement without inferring manifest state."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: SourceFileMutationEvidenceFailurePhase,
+        run_log_file: str | None,
+        run_log_record_id: int | None,
+    ) -> None:
+        normalized_phase = SourceFileMutationEvidenceFailurePhase(phase)
+        committed = (
+            normalized_phase
+            is SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+        )
+        if committed:
+            if _optional_positive_int(run_log_record_id) is None:
+                raise ValueError(
+                    "The post-run-log mutation-evidence phase requires a positive "
+                    "run_log_record_id."
+                )
+        elif run_log_file is not None or run_log_record_id is not None:
+            raise ValueError(
+                "The pre-run-log mutation-evidence phase cannot carry a committed "
+                "run-log reference."
+            )
+
+        super().__init__(message)
+        self.phase = normalized_phase
+        self.run_log_file = run_log_file
+        self.run_log_record_id = run_log_record_id
+
+    @property
+    def run_log_committed(self) -> bool:
+        """Whether the run-log row is known to have committed."""
+        return (
+            self.phase
+            is SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+        )
+
+    @property
+    def manifest_record_id(self) -> None:
+        """No manifest ID was acknowledged by a successful function return."""
+        return None
+
+    @property
+    def complete_evidence_acknowledged(self) -> bool:
+        """Failure never acknowledges the complete canonical evidence pair."""
+        return False
 
 
 @dataclass(frozen=True)
@@ -290,33 +352,48 @@ def log_source_file_mutation(
         **extra_run_log_fields,
     )
     if run_log_record_id is None:
-        raise LogRunRollbackError(
+        raise SourceFileMutationEvidenceError(
             "Source-file mutation run-log evidence did not commit; the file "
-            "manifest was not modified."
+            "manifest was not modified.",
+            phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
+            run_log_file=None,
+            run_log_record_id=None,
         )
 
-    record = serialize_source_file_mutation(
-        action=normalized_action,
-        status=normalized_status,
-        source_path=source_path,
-        destination_path=destination_path,
-        recovery_path=recovery_path,
-        previous_version_path=previous_version_path,
-        run_log_file=_context_run_log_name(ctx),
-        run_log_record_id=run_log_record_id,
-        application_name=application_name,
-        file_id=file_id,
-        classification=classification,
-        conversion=conversion,
-        reason_code=reason_code,
-        reason=reason,
-    )
+    run_log_file: str | None = None
     try:
+        run_log_file = _context_run_log_name(ctx)
+        record = serialize_source_file_mutation(
+            action=normalized_action,
+            status=normalized_status,
+            source_path=source_path,
+            destination_path=destination_path,
+            recovery_path=recovery_path,
+            previous_version_path=previous_version_path,
+            run_log_file=run_log_file,
+            run_log_record_id=run_log_record_id,
+            application_name=application_name,
+            file_id=file_id,
+            classification=classification,
+            conversion=conversion,
+            reason_code=reason_code,
+            reason=reason,
+        )
         return log_file_manifest_record(ctx, record)
-    except FileManifestError as exc:
-        raise LogRunRollbackError(
-            f"{MUTATION_RECORD_TYPE} lifecycle record could not be appended "
-            f"to the file manifest: {exc}"
+    except Exception as exc:
+        message = str(exc)
+        if isinstance(exc, FileManifestError):
+            message = (
+                f"{MUTATION_RECORD_TYPE} lifecycle record could not be appended "
+                f"to the file manifest: {exc}"
+            )
+        raise SourceFileMutationEvidenceError(
+            message,
+            phase=(
+                SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
+            ),
+            run_log_file=run_log_file,
+            run_log_record_id=run_log_record_id,
         ) from exc
 
 
