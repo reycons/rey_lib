@@ -139,6 +139,7 @@ def open_csv(
     delimiter: str | None = None,
     required_header: Sequence[str] = (),
     skip_blank_lines: bool = False,
+    include_all_rows: bool = False,
 ) -> CsvStream:
     """Answer a file's structure, then stream its rows without holding them.
 
@@ -154,6 +155,18 @@ def open_csv(
 
     Counts that require seeing every row — blank, ragged, total — are not
     available here; a caller needing those wants :func:`read_csv`.
+
+    ``include_all_rows`` widens what streams without changing what is decided.
+    By default the iterator yields data rows only, as it always has. Set it to
+    stream every physical source row exactly once instead — the preamble above
+    the header, blank lines, the located header row itself, and everything
+    after. The structural decisions are untouched: the delimiter is detected the
+    same way, the header is located in the same window, and ``header_fields``
+    and ``header_line_number`` report the same values in both modes. Only the
+    caller that must account for every line in the file needs it.
+
+    ``skip_blank_lines`` remains independent and still applies, so a caller
+    requiring one row per physical line leaves it unset.
     """
     source_path = Path(path)
     try:
@@ -194,6 +207,7 @@ def open_csv(
             len(header_fields),
             resolved,
             skip_blank_lines,
+            include_all_rows,
         ),
     )
 
@@ -205,9 +219,16 @@ def _stream_rows(
     expected_width: int,
     delimiter: str,
     skip_blank_lines: bool,
+    include_all_rows: bool = False,
 ) -> Iterator[CsvRow]:
-    """Yield data rows, buffered prologue first, then the rest of the file."""
-    first_data_index = 0 if header_index is None else header_index + 1
+    """Yield rows, buffered prologue first, then the rest of the file.
+
+    Data rows only by default. With ``include_all_rows`` the first yielded row
+    is the file's first physical line, so nothing above the header is skipped.
+    """
+    first_data_index = (
+        0 if include_all_rows or header_index is None else header_index + 1
+    )
     try:
         index = 0
         for line in prologue:

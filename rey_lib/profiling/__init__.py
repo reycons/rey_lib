@@ -12,6 +12,9 @@ from rey_lib.profiling.structural_analysis import (
     AnalysisLimits,
     StructuralAnalysis,
     build_structural_analysis,
+    field_characteristic,
+    length_bucket,
+    structural_descriptor,
 )
 
 __all__ = [
@@ -26,4 +29,7 @@ __all__ = [
     "AnalysisLimits",
     "StructuralAnalysis",
     "build_structural_analysis",
+    "field_characteristic",
+    "length_bucket",
+    "structural_descriptor",
 ]

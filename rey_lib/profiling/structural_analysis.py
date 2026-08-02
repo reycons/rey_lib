@@ -36,6 +36,9 @@ __all__ = [
     "AnalysisLimits",
     "StructuralAnalysis",
     "build_structural_analysis",
+    "field_characteristic",
+    "length_bucket",
+    "structural_descriptor",
 ]
 
 # ---------------------------------------------------------------------------
@@ -301,7 +304,7 @@ def _aggregate_structural_patterns(
         previous_region: str | None = None
         previous_shape: tuple[Any, ...] | None = None
         for row in rows:
-            descriptor = _structural_descriptor(
+            descriptor = structural_descriptor(
                 row,
                 delimiter=delimiter,
                 expected_headers=expected_headers,
@@ -372,7 +375,7 @@ def _aggregate_structural_patterns(
     return patterns, row_facts
 
 
-def _structural_descriptor(
+def structural_descriptor(
     row: dict[str, Any],
     *,
     delimiter: str,
@@ -406,7 +409,7 @@ def _structural_descriptor(
     return {
         "field_count": field_count,
         "blank": is_blank,
-        "line_length_bucket": _length_bucket(int(row.get("line_length") or len(text))),
+        "line_length_bucket": length_bucket(int(row.get("line_length") or len(text))),
         "delimiter_count": int(
             row.get("delimiter_count")
             if row.get("delimiter_count") is not None
@@ -414,7 +417,7 @@ def _structural_descriptor(
         ),
         "parse_status": parse_status,
         "normalized_field_characteristics": _run_length_encode(
-            [_field_characteristic(field) for field in parsed_fields]
+            [field_characteristic(field) for field in parsed_fields]
         ),
         "header_candidate": header_candidate,
         "header_identity_sha256": header_identity,
@@ -425,7 +428,7 @@ def _structural_descriptor(
     }
 
 
-def _field_characteristic(value: str) -> str:
+def field_characteristic(value: str) -> str:
     token = value.strip()
     if not token:
         kind = "blank"
@@ -448,7 +451,7 @@ def _field_characteristic(value: str) -> str:
         kind = "punctuation"
     else:
         kind = "mixed"
-    return f"{kind}:{_length_bucket(len(token))}"
+    return f"{kind}:{length_bucket(len(token))}"
 
 
 def _run_length_encode(values: list[str]) -> list[dict[str, Any]]:
@@ -461,7 +464,7 @@ def _run_length_encode(values: list[str]) -> list[dict[str, Any]]:
     return encoded
 
 
-def _length_bucket(length: int) -> str:
+def length_bucket(length: int) -> str:
     if length == 0:
         return "0"
     for maximum, label in (
