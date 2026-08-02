@@ -97,6 +97,7 @@ def serialize_source_file_mutation(
     run_log_record_id: int,
     application_name: str = "",
     file_id: str = "",
+    classification: Mapping[str, Any] | None = None,
     conversion: Mapping[str, Any] | None = None,
     reason_code: str = "",
     reason: str = "",
@@ -170,6 +171,10 @@ def serialize_source_file_mutation(
         "run_log_record_id": evidence_id,
     }
     record["file"] = file_object
+    if classification is not None:
+        # Classification was governed before this serialization boundary.  It
+        # is preserved as supplied and is never resolved or interpreted here.
+        record["classification"] = dict(classification)
     if rollback_object:
         record["rollback"] = rollback_object
     if conversion:
@@ -251,6 +256,7 @@ def log_source_file_mutation(
     previous_version_path: Path | str = "",
     application_name: str = "",
     file_id: str = "",
+    classification: Mapping[str, Any] | None = None,
     conversion: Mapping[str, Any] | None = None,
     reason_code: str = "",
     reason: str = "",
@@ -300,6 +306,7 @@ def log_source_file_mutation(
         run_log_record_id=run_log_record_id,
         application_name=application_name,
         file_id=file_id,
+        classification=classification,
         conversion=conversion,
         reason_code=reason_code,
         reason=reason,

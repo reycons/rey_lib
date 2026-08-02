@@ -87,6 +87,10 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
 ) -> None:
     ctx = _ctx(tmp_path)
     resolve_run_identity(ctx)
+    classification = {
+        "type": "file_name_regex",
+        "values": {"Unfamiliar": "Kept"},
+    }
 
     manifest_record_id = log_source_file_mutation(
         ctx,
@@ -95,6 +99,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
         destination_path=tmp_path / "created.csv",
         application_name="test",
         file_id="file-a",
+        classification=classification,
     )
 
     run_rows = [
@@ -106,6 +111,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     assert run_rows[0]["record_type"] == "SOURCE_FILE_MUTATION"
     assert manifest_record["record_type"] == "source_file_mutation"
     assert manifest_record["file_id"] == "file-a"
+    assert manifest_record["classification"] == classification
     assert manifest_record["producer"] == {"application": "test"}
     assert manifest_record["file"] == {
         "path": str(tmp_path / "created.csv"),
@@ -220,6 +226,26 @@ def test_approved_conversion_and_result_inputs_build_canonical_sections(
     }
 
 
+def test_supplied_classification_is_serialized_unchanged() -> None:
+    classification = {
+        "type": "MiXeD",
+        "source_field": None,
+        "values": {"Unfamiliar": "Kept", "optional": None},
+        "future": {"items": [2, 1]},
+    }
+
+    record = serialize_source_file_mutation(
+        action="create",
+        status="success",
+        destination_path="/out/a.csv",
+        run_log_file="run.jsonl",
+        run_log_record_id=1,
+        classification=classification,
+    )
+
+    assert record["classification"] == classification
+
+
 def test_absent_conversion_and_result_sections_are_omitted() -> None:
     record = serialize_source_file_mutation(
         action="move",
@@ -233,6 +259,7 @@ def test_absent_conversion_and_result_sections_are_omitted() -> None:
     assert "conversion" not in record
     assert "result" not in record
     assert "file_id" not in record
+    assert "classification" not in record
 
 
 @pytest.mark.parametrize(
