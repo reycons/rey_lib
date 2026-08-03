@@ -2,9 +2,8 @@
 
 Cleaning is a governed workflow step, not something a reader does on its own:
 a CSV read returns exactly what the file holds, and the step applies
-clean_text_value to the fields it has decided to clean. These tests state that
-the primitive is shared, that Excel and a cleaning step agree on the same
-corrupted value, and that a reader never cleans behind a caller's back.
+clean_text_value to the content it has decided to clean. These tests state that
+the primitive is shared and that a reader never cleans behind a caller's back.
 """
 
 from __future__ import annotations
@@ -46,14 +45,7 @@ def test_leading_and_trailing_whitespace_is_untouched() -> None:
     assert clean_text_value("double  space") == "double  space"
 
 
-def test_an_excel_cell_and_a_cleaned_csv_field_agree(tmp_path: Path) -> None:
-    """The regression this shared primitive exists to prevent."""
-    from rey_lib.files.workbook_conversion import _normalize_extracted_frame
-
-    polars = pytest.importorskip("polars")
-    frame = polars.DataFrame({"Column": [CORRUPT_VALUE]})
-    excel_cell = _normalize_extracted_frame(frame)["Column"][0]
-
+def test_a_cleaning_step_uses_the_shared_primitive(tmp_path: Path) -> None:
     # Two columns, so the header is detectable and row one is data.
     source = tmp_path / "native.csv"
     source.write_text(
@@ -62,13 +54,13 @@ def test_an_excel_cell_and_a_cleaned_csv_field_agree(tmp_path: Path) -> None:
     # A cleaning step reads the source as it is, then cleans what it chose to.
     csv_field = clean_text_value(read_csv(source).rows[0].fields[0])
 
-    assert excel_cell == csv_field == CLEAN_VALUE
+    assert csv_field == CLEAN_VALUE
 
 
 def test_structure_characters_are_used_before_any_cleaning(tmp_path: Path) -> None:
     """Tabs and newlines separate values; a step only cleans inside one."""
     source = tmp_path / "t.tsv"
-    source.write_text(f"A\x00cc\tSym\ufeffbol\nA1\tIBM\nA2\tMSFT\n", encoding="utf-8")
+    source.write_text("A\x00cc\tSym\ufeffbol\nA1\tIBM\nA2\tMSFT\n", encoding="utf-8")
 
     read = read_csv(source)
 

@@ -13,6 +13,7 @@ from rey_lib.files import (
     LogRunRollbackError,
     SourceFileMutationEvidenceError,
     SourceFileMutationEvidenceFailurePhase,
+    SourceFileMutationEvidenceResult,
     log_source_file_mutation,
     preview_log_run_rollback,
     register_file_compensation,
@@ -111,6 +112,11 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     ]
     manifest_record = _rows(ctx)[0]
     assert manifest_record_id == 1
+    assert isinstance(manifest_record_id, int)
+    assert isinstance(manifest_record_id, SourceFileMutationEvidenceResult)
+    assert manifest_record_id.manifest_record_id == 1
+    assert manifest_record_id.run_log_record_id == 1
+    assert manifest_record_id.run_log_file == "run.jsonl"
     assert run_rows[0]["record_type"] == "SOURCE_FILE_MUTATION"
     assert manifest_record["record_type"] == "source_file_mutation"
     assert manifest_record["file_id"] == "file-a"

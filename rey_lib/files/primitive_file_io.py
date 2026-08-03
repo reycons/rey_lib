@@ -61,9 +61,11 @@ except ImportError:  # pragma: no cover - platform dependent
 
 __all__ = [
     "StagedWrite",
+    "StagedStreamWrite",
     "durable_write_bytes",
     "flushed_write_bytes",
     "stage_write_bytes",
+    "stage_stream_write",
     "write_text",
     "write_bytes",
     "append_text",
@@ -367,6 +369,82 @@ class StagedWrite:
             pass
 
 
+class StagedStreamWrite:
+    """Incremental binary staging with explicit atomic installation."""
+
+    def __init__(
+        self,
+        path: Path,
+        destination: Path,
+        tier: str,
+        handle: Any,
+    ) -> None:
+        self.path = path
+        self.destination = destination
+        self.tier = tier
+        self.handle = handle
+        self.installed = False
+        self.closed = False
+
+    def __enter__(self) -> "StagedStreamWrite":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.discard()
+
+    def write(self, data: bytes) -> int:
+        """Write one encoded chunk without materializing the complete file."""
+        if self.closed:
+            raise ValueError("Cannot write to a closed staged stream.")
+        return int(self.handle.write(data))
+
+    def install(self, *, overwrite: bool = False) -> Path:
+        """Flush, fsync, and atomically expose the staged file."""
+        if self.installed:
+            return self.destination
+        if self.closed:
+            raise ValueError("Cannot install a closed staged stream.")
+        self.handle.flush()
+        if self.tier in (_TIER_FLUSHED, _TIER_MAXIMUM):
+            _flush_file(self.handle.fileno(), self.tier)
+        self.handle.close()
+        self.closed = True
+
+        if overwrite:
+            os.replace(self.path, self.destination)
+        else:
+            os.link(self.path, self.destination)
+            try:
+                self.path.unlink()
+            except OSError:
+                # The no-clobber publication happened, but its staging name
+                # could not be removed. Roll publication back before surfacing
+                # failure so callers never receive an ambiguous success.
+                self.destination.unlink(missing_ok=True)
+                raise
+        self.installed = True
+        if self.tier in (_TIER_FLUSHED, _TIER_MAXIMUM):
+            _sync_directory(
+                self.destination.parent,
+                required=self.tier == _TIER_MAXIMUM,
+            )
+        return self.destination
+
+    def discard(self) -> None:
+        """Close and remove an uninstalled staged stream."""
+        if self.installed:
+            return
+        if not self.closed:
+            try:
+                self.handle.close()
+            finally:
+                self.closed = True
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+
+
 def stage_write_bytes(
     path: Path | str,
     data: bytes,
@@ -388,6 +466,34 @@ def stage_write_bytes(
     _ensure_parent(target, create_parents)
     staged = _write_staged(target, data, _checked_tier(tier))
     return StagedWrite(staged, target, _checked_tier(tier))
+
+
+def stage_stream_write(
+    path: Path | str,
+    *,
+    tier: str = "visibility-atomic",
+    create_parents: bool = True,
+) -> StagedStreamWrite:
+    """Open a sibling temporary file for incremental binary staging."""
+    target = Path(path)
+    _ensure_parent(target, create_parents)
+    checked_tier = _checked_tier(tier)
+    fd, staged_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        handle = os.fdopen(fd, "wb")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(staged_name)
+        except OSError:
+            pass
+        raise
+    return StagedStreamWrite(Path(staged_name), target, checked_tier, handle)
 
 
 def flushed_write_bytes(

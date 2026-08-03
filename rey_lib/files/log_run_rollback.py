@@ -100,6 +100,39 @@ class SourceFileMutationEvidenceError(LogRunRollbackError):
         return False
 
 
+class SourceFileMutationEvidenceResult(int):
+    """Acknowledged manifest ID with its committed run-log reference.
+
+    This remains an ``int`` for every existing caller while allowing consumers
+    that need the complete acknowledged evidence pair to use its references
+    without a manifest or run-log lookup.
+    """
+
+    def __new__(
+        cls,
+        manifest_record_id: int,
+        *,
+        run_log_record_id: int,
+        run_log_file: str,
+    ) -> "SourceFileMutationEvidenceResult":
+        value = _positive_int(manifest_record_id, "manifest_record_id")
+        instance = int.__new__(cls, value)
+        instance.run_log_record_id = _positive_int(
+            run_log_record_id,
+            "run_log_record_id",
+        )
+        instance.run_log_file = _run_log_name(run_log_file)
+        return instance
+
+    @property
+    def manifest_record_id(self) -> int:
+        return int(self)
+
+    @property
+    def complete_evidence_acknowledged(self) -> bool:
+        return True
+
+
 @dataclass(frozen=True)
 class Compensation:
     """Registered validation and execution for one filesystem action."""
@@ -379,7 +412,12 @@ def log_source_file_mutation(
             reason_code=reason_code,
             reason=reason,
         )
-        return log_file_manifest_record(ctx, record)
+        manifest_record_id = log_file_manifest_record(ctx, record)
+        return SourceFileMutationEvidenceResult(
+            manifest_record_id,
+            run_log_record_id=run_log_record_id,
+            run_log_file=run_log_file,
+        )
     except Exception as exc:
         message = str(exc)
         if isinstance(exc, FileManifestError):

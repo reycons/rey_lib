@@ -25,6 +25,7 @@ from rey_lib.files.primitive_file_io import (
     durable_write_bytes,
     flushed_write_bytes,
     stage_write_bytes,
+    stage_stream_write,
 )
 
 
@@ -250,6 +251,46 @@ def test_the_staged_file_is_a_sibling_of_its_destination(tmp_path: Path) -> None
 
     with stage_write_bytes(target, b"content\n") as staged:
         assert staged.path.parent == target.parent
+
+
+def test_streaming_stage_flushes_and_publishes_incremental_chunks(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "streamed.txt"
+
+    with stage_stream_write(target, tier="flushed") as staged:
+        staged.write(b"first")
+        staged.write(b" second\n")
+        staged.install()
+
+    assert target.read_bytes() == b"first second\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["streamed.txt"]
+
+
+def test_streaming_stage_collision_is_no_clobber_and_cleans_staging(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "streamed.txt"
+    target.write_bytes(b"existing")
+
+    with pytest.raises(FileExistsError):
+        with stage_stream_write(target, tier="flushed") as staged:
+            staged.write(b"replacement")
+            staged.install()
+
+    assert target.read_bytes() == b"existing"
+    assert [path.name for path in tmp_path.iterdir()] == ["streamed.txt"]
+
+
+def test_streaming_stage_overwrite_is_explicit(tmp_path: Path) -> None:
+    target = tmp_path / "streamed.txt"
+    target.write_bytes(b"existing")
+
+    with stage_stream_write(target, tier="flushed") as staged:
+        staged.write(b"replacement")
+        staged.install(overwrite=True)
+
+    assert target.read_bytes() == b"replacement"
 
 
 # ---------------------------------------------------------------------------

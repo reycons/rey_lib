@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import csv
 import os
 from pathlib import Path
 import shutil
 from typing import Any
-
-import unicodedata
 
 from openpyxl import Workbook
 import polars as pl
@@ -18,7 +17,6 @@ from rey_lib.files import (
     EmptyWorkbookError,
     UnsupportedWorkbookError,
     WorkbookEncryptedError,
-    WorkbookExtractionError,
     WorkbookOutputCollisionError,
     WorkbookWriteError,
     convert_workbook_to_csv,
@@ -195,13 +193,13 @@ def test_csv_contract_is_exact_and_deterministic(tmp_path: Path) -> None:
 
     result = convert_workbook_to_csv(source, tmp_path / "out")
 
-    # Note: embedded newlines in cell values are normalized to spaces by the
-    # control-character sanitization contract.
+    # Workbook conversion preserves cell content. Sanitization is a separate
+    # governed workflow step.
     table_bytes = result.outputs[0].output_path.read_bytes()
     assert table_bytes == (
         b'Account,Amount,Memo\n'
         b'A-1,10.5,"x,y"\n'
-        b'A-2,,line break\n'
+        b'A-2,,"line\nbreak"\n'
     )
     assert not table_bytes.startswith(b"\xef\xbb\xbf")
     assert b"\r\n" not in table_bytes
@@ -366,36 +364,31 @@ def test_unsupported_extension_is_structured(tmp_path: Path) -> None:
 
 
 # ============================================================================
-# Cc/Cf control character removal from cell values
+# Cell-content preservation before the separate sanitization step
 # ============================================================================
 
 
-def test_cc_removal_from_cell_values(tmp_path: Path) -> None:
-    """Test that Cc (control characters) are removed from cell values."""
+def test_tab_is_preserved_in_cell_values(tmp_path: Path) -> None:
     source = tmp_path / "cc_test.xlsx"
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["Value"])
-    # Tab is a Cc category character - will be replaced by space first, then trimmed
-    sheet.append(["before\tafter_tab"])  # Tab in middle
+    sheet.append(["before\tafter_tab"])
     workbook.save(source)
     output_dir = tmp_path / "out"
 
     result = convert_workbook_to_csv(source, output_dir)
 
     assert len(result.outputs) == 1
-    content = result.outputs[0].output_path.read_text()
-    # Tab should be replaced with space
-    assert "before after_tab" in content
+    content = result.outputs[0].output_path.read_text(encoding="utf-8")
+    assert "before\tafter_tab" in content
 
 
-def test_cf_removal_from_cell_values(tmp_path: Path) -> None:
-    """Test that Cf (format control characters) are removed from cell values."""
+def test_format_character_is_preserved_in_cell_values(tmp_path: Path) -> None:
     source = tmp_path / "cf_test.xlsx"
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["Value"])
-    # Unicode format marker U+008F is a Cf character - will be removed entirely
     sheet.append([f"before{chr(0x008F)}after_caret"])
     workbook.save(source)
     output_dir = tmp_path / "out"
@@ -403,13 +396,11 @@ def test_cf_removal_from_cell_values(tmp_path: Path) -> None:
     result = convert_workbook_to_csv(source, output_dir)
 
     assert len(result.outputs) == 1
-    content = result.outputs[0].output_path.read_text()
-    # Format marker should be removed entirely
-    assert "beforeafter_caret" in content
+    content = result.outputs[0].output_path.read_text(encoding="utf-8")
+    assert f"before{chr(0x008F)}after_caret" in content
 
 
-def test_cr_lf_tab_nbsp_normalization(tmp_path: Path) -> None:
-    """Test that CR, LF, TAB, and NBSP are normalized to spaces."""
+def test_cr_lf_tab_and_nbsp_are_preserved_for_later_sanitization(tmp_path: Path) -> None:
     source = tmp_path / "whitespace_test.xlsx"
     workbook = Workbook()
     sheet = workbook.active
@@ -428,15 +419,11 @@ def test_cr_lf_tab_nbsp_normalization(tmp_path: Path) -> None:
     result = convert_workbook_to_csv(source, output_dir)
 
     assert len(result.outputs) == 1
-    content = result.outputs[0].output_path.read_bytes()
-    # All embedded whitespace in cell values should be normalized to spaces and trimmed
-    assert b"start end" in content
-    # CR, LF, TAB, NBSP within cell values should not appear (as bytes)
-    assert cr.encode() not in content
-    # Note: \n is the standard CSV line terminator. We have 3 lines: header + 2 data rows.
-    lines = content.strip().split(b"\n")
-    assert len(lines) == 3, f"Expected 3 lines (header + 2 data), got {len(lines)}"
-    assert tab.encode() not in content
+    with result.outputs[0].output_path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.reader(stream))
+    # OOXML normalizes a bare CR to LF while loading. Conversion performs no
+    # further sanitization: embedded LF, TAB, and NBSP remain intact.
+    assert rows[1][0] == f"{lf}start{lf}{tab}{nbsp}end{nbsp}"
 
 
 # ============================================================================
@@ -444,7 +431,7 @@ def test_cr_lf_tab_nbsp_normalization(tmp_path: Path) -> None:
 # ============================================================================
 
 
-def test_null_remains_null_in_normalized_frame(tmp_path: Path) -> None:
+def test_null_remains_null_in_converted_frame(tmp_path: Path) -> None:
     """Test that null values remain as null in the Polars frame."""
     source = tmp_path / "null_test.xlsx"
     workbook = Workbook()
@@ -576,25 +563,23 @@ def test_negative_exponent_writes_without_e_or_e(tmp_path: Path) -> None:
 
 
 # ============================================================================
-# Header normalization tests (errors)
+# Header preservation before the separate sanitization step
 # ============================================================================
 
 
-def test_header_normalizing_to_empty_raises_error(tmp_path: Path) -> None:
-    """Test that a header normalizing to empty raises WorkbookExtractionError."""
+def test_control_only_header_is_not_sanitized_by_conversion(tmp_path: Path) -> None:
     source = _create_workbook_with_empty_header(tmp_path)
 
-    with pytest.raises(WorkbookExtractionError) as exc_info:
-        convert_workbook_to_csv(source, tmp_path / "out")
+    result = convert_workbook_to_csv(source, tmp_path / "out")
 
-    assert "CSV column name is empty after control-character normalization" in str(exc_info.value)
+    # OOXML normalizes CRLF to LF while loading; conversion retains the
+    # resulting control-only header for the separate sanitization boundary.
+    assert result.outputs[0].column_names[0] == "\t\n"
 
 
-def test_colliding_headers_after_normalization_raises_error(tmp_path: Path) -> None:
-    """Test that headers colliding case-insensitively after normalization raise WorkbookExtractionError."""
+def test_headers_that_would_collide_after_sanitization_are_preserved(tmp_path: Path) -> None:
     source = _create_workbook_with_colliding_headers(tmp_path)
 
-    with pytest.raises(WorkbookExtractionError) as exc_info:
-        convert_workbook_to_csv(source, tmp_path / "out")
+    result = convert_workbook_to_csv(source, tmp_path / "out")
 
-    assert "collide" in str(exc_info.value).lower()
+    assert result.outputs[0].column_names == ("Header1", f"Header{chr(0x008F)}1")

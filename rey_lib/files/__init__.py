@@ -48,6 +48,16 @@ from rey_lib.files.file_transaction import (
     PublishedFileSet,
     publish_file_set,
 )
+from rey_lib.files.sanitization import (
+    EffectiveSanitizationPolicy,
+    FileSanitizationCollisionPolicy,
+    FileSanitizationContext,
+    FileSanitizationError,
+    FileSanitizationEvidenceError,
+    FileSanitizationResult,
+    compose_sanitization_policy,
+    sanitize_file,
+)
 from rey_lib.files.jsonl import (
     JsonlReadError,
     JsonlRecord,
@@ -59,6 +69,7 @@ from rey_lib.files.file_loader import load_files
 from rey_lib.files.log_run_rollback import (
     LogRunRollbackError,
     SourceFileMutationEvidenceError,
+    SourceFileMutationEvidenceResult,
     SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
     preview_log_run_rollback,
@@ -109,6 +120,14 @@ __all__ = [
     "FileSetTransactionError",
     "PublishedFileSet",
     "publish_file_set",
+    "FileSanitizationCollisionPolicy",
+    "EffectiveSanitizationPolicy",
+    "FileSanitizationContext",
+    "FileSanitizationError",
+    "FileSanitizationEvidenceError",
+    "FileSanitizationResult",
+    "compose_sanitization_policy",
+    "sanitize_file",
     "blocked_display_reason",
     "bounded_text_preview",
     "find_named_files",
@@ -149,6 +168,7 @@ __all__ = [
     "load_files",
     "LogRunRollbackError",
     "SourceFileMutationEvidenceError",
+    "SourceFileMutationEvidenceResult",
     "SourceFileMutationEvidenceFailurePhase",
     "log_source_file_mutation",
     "preview_log_run_rollback",

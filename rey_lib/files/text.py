@@ -1,14 +1,10 @@
 """Application-neutral text normalization shared by every file format.
 
-One authoritative implementation, so a value that arrives from a spreadsheet
-cell, a delimited field, or a fixed-width column is cleaned identically.
+One authoritative implementation for application-owned value cleaning.
 
-Scope is deliberately narrow: this operates on an already-decoded, already-
-separated value. It performs no I/O, no parsing, no delimiter detection, and
-no format interpretation, and it is never applied to raw file text — control
-characters carry a file's structure before it is parsed, and removing them
-from whole text would destroy the line and field boundaries the parser
-depends on.
+Scope is deliberately narrow: this operates on an already-decoded value. It
+performs no I/O, parsing, delimiter detection, or format interpretation. The
+governed whole-file sanitizer uses its configured policy engine instead.
 """
 
 from __future__ import annotations
@@ -26,9 +22,7 @@ _REMOVED_CATEGORIES = frozenset({"Cc", "Cf"})
 def clean_text_value(text: str) -> str:
     """Return ``text`` with Unicode Cc and Cf characters removed.
 
-    Applied to one value at a time — a spreadsheet cell, a parsed delimited
-    field, a fixed-width column — after the format has already established
-    where that value begins and ends.
+    Applied to one application-owned decoded value at a time.
 
     Parameters
     ----------
