@@ -34,6 +34,30 @@ def _inventory(record_id: int, file_id: str, feed: str, name: str, path: str) ->
     }
 
 
+def _classification(
+    record_id: int,
+    file_id: str,
+    feed: str,
+    source_record_id: int | None = None,
+) -> dict:
+    """One governed classification record declaring the file's feed."""
+    record = {
+        "record_id": record_id,
+        "record_type": "source_file_classification",
+        "file_id": file_id,
+        "status": "classified",
+        "file": {"file_name": f"{file_id}.csv", "path": f"/in/{file_id}.csv"},
+        "classification": {
+            "type": "file_name_regex",
+            "source_field": "file.file_name",
+            "values": {"feed": feed},
+        },
+    }
+    if source_record_id is not None:
+        record["lineage"] = {"source_record_id": source_record_id}
+    return record
+
+
 def _mutation(
     record_id: int,
     file_id: str,
@@ -90,7 +114,10 @@ def test_library_has_only_canonical_shared_data_dependencies() -> None:
 
 
 def test_reads_only_through_shared_jsonl_boundary(tmp_path, monkeypatch) -> None:
-    path = _write(tmp_path, [_inventory(1, "file-a", "feed-a", "a.csv", "/in/a.csv")])
+    path = _write(tmp_path, [
+        _inventory(1, "file-a", "feed-a", "a.csv", "/in/a.csv"),
+        _classification(2, "file-a", "feed-a"),
+    ])
     import rey_lib.files.jsonl as jsonl_boundary
 
     calls = []
@@ -107,14 +134,16 @@ def test_reads_only_through_shared_jsonl_boundary(tmp_path, monkeypatch) -> None
     assert calls == [(path, {})]
 
 
-def test_only_inventory_records_create_files_and_group_by_exact_source(tmp_path) -> None:
+def test_only_inventory_records_create_files_and_group_by_classified_feed(tmp_path) -> None:
     path = _write(
         tmp_path,
         [
             {"record_id": 7, "record_type": "source_file_classification", "file_id": "classified"},
-            _inventory(4, "file-b", "Zulu", "b.csv", "/in/b.csv"),
-            _inventory(2, "file-a", "alpha", "a.csv", "/in/a.csv"),
+            _inventory(4, "file-b", "feed_inbox", "b.csv", "/in/b.csv"),
+            _inventory(2, "file-a", "feed_inbox", "a.csv", "/in/a.csv"),
             _mutation(8, "orphan", "move", path="/processing/a.csv", original_path="/in/a.csv"),
+            _classification(10, "file-b", "Zulu"),
+            _classification(11, "file-a", "alpha"),
         ],
     )
 
@@ -128,7 +157,9 @@ def test_mutations_join_only_by_exact_file_id_not_name_or_path(tmp_path) -> None
     inventory = _inventory(1, "governed-a", "feed", "same.csv", "/in/same.csv")
     exact = _mutation(5, "governed-a", "move", path="/processing/same.csv", original_path="/in/same.csv")
     lookalike = _mutation(6, "governed-b", "create", path="/processing/same.csv")
-    page = build_file_hierarchy(_ctx(_write(tmp_path, [inventory, lookalike, exact])))
+    page = build_file_hierarchy(_ctx(_write(
+        tmp_path, [inventory, lookalike, exact, _classification(7, "governed-a", "feed")]
+    )))
 
     file = _files(page)[0]
     assert [mutation.record_id for mutation in file.mutations] == [5]
@@ -143,6 +174,8 @@ def test_committed_record_id_controls_file_and_mutation_order(tmp_path) -> None:
             _inventory(9, "file-b", "feed", "b.csv", "/in/b.csv"),
             _mutation(10, "file-a", "move", path="/work/a.csv", original_path="/in/a.csv"),
             _inventory(3, "file-a", "feed", "a.csv", "/in/a.csv"),
+            _classification(20, "file-a", "feed"),
+            _classification(21, "file-b", "feed"),
         ],
     )
 
@@ -155,6 +188,9 @@ def test_committed_record_id_controls_file_and_mutation_order(tmp_path) -> None:
 def test_page_is_bounded_and_model_is_immutable(tmp_path) -> None:
     records = [
         _inventory(index, f"file-{index}", "feed", f"{index}.csv", f"/in/{index}.csv")
+        for index in range(1, 302)
+    ] + [
+        _classification(1000 + index, f"file-{index}", "feed")
         for index in range(1, 302)
     ]
     ctx = _ctx(_write(tmp_path, records))
@@ -176,7 +212,9 @@ def test_page_is_bounded_and_model_is_immutable(tmp_path) -> None:
 def test_payload_preserves_supplied_governed_values(tmp_path) -> None:
     inventory = _inventory(1, "file-a", "Feed A", "a.csv", "/in/a.csv")
     mutation = _mutation(2, "file-a", "create", path="/out/a.csv")
-    payload = build_file_hierarchy(_ctx(_write(tmp_path, [inventory, mutation]))).to_payload()
+    payload = build_file_hierarchy(_ctx(_write(
+        tmp_path, [inventory, mutation, _classification(3, "file-a", "Feed A")]
+    ))).to_payload()
 
     assert payload["feeds"][0]["display_label"] == "Feed A"
     assert payload["feeds"][0]["files"][0]["metadata"] == inventory
@@ -186,7 +224,7 @@ def test_payload_preserves_supplied_governed_values(tmp_path) -> None:
 def test_phase_two_queries_lazy_load_feed_files_and_exact_file_stages(tmp_path) -> None:
     inventory = _inventory(1, "file-a", "Feed A", "a.csv", "/in/a.csv")
     move = _mutation(2, "file-a", "move", path="/processing/a.csv", original_path="/in/a.csv")
-    ctx = _ctx(_write(tmp_path, [inventory, move]))
+    ctx = _ctx(_write(tmp_path, [inventory, move, _classification(3, "file-a", "Feed A")]))
 
     feeds = build_file_hierarchy_feeds(ctx).to_payload()
     assert feeds["feeds"] == [{
@@ -256,3 +294,70 @@ def test_profiles_join_only_by_exact_governed_file_id(tmp_path) -> None:
     assert page.stages[-1].path == "/profiles/a.profile.json"
     with pytest.raises(FileHierarchyError, match="does not match"):
         build_file_hierarchy_stages(ctx, 1, profile_artifacts=({**profile, "source_file_id": "other"},))
+
+
+def test_configured_inventory_source_name_is_never_a_feed(tmp_path) -> None:
+    """`feed_inbox` is discovery configuration, not governed feed identity."""
+    ctx = _ctx(_write(tmp_path, [
+        _inventory(1, "file-a", "feed_inbox", "CWATranMay26.xls", "/in/CWATranMay26.xls"),
+        _classification(2, "file-a", "bny"),
+    ]))
+
+    identities = [feed.feed_identity for feed in build_file_hierarchy(ctx).feeds]
+    summaries = [feed.feed_identity for feed in build_file_hierarchy_feeds(ctx).feeds]
+
+    assert identities == ["bny"]
+    assert summaries == ["bny"]
+    assert "feed_inbox" not in identities
+    assert "feed_inbox" not in summaries
+
+
+def test_records_from_different_feeds_group_under_separate_feed_nodes(tmp_path) -> None:
+    """One shared inventory source still yields one node per classified feed."""
+    ctx = _ctx(_write(tmp_path, [
+        _inventory(1, "file-a", "feed_inbox", "CWATranMay26.xls", "/in/a.xls"),
+        _inventory(2, "file-b", "feed_inbox", "BmoHoldMay26.csv", "/in/b.csv"),
+        _inventory(3, "file-c", "feed_inbox", "AmalTranMay26.csv", "/in/c.csv"),
+        _classification(4, "file-a", "bny"),
+        _classification(5, "file-b", "bmo"),
+        _classification(6, "file-c", "amalgamated"),
+    ]))
+
+    page = build_file_hierarchy(ctx)
+
+    assert [feed.feed_identity for feed in page.feeds] == ["amalgamated", "bmo", "bny"]
+    assert [[file.file_id for file in feed.files] for feed in page.feeds] == [
+        ["file-c"], ["file-b"], ["file-a"],
+    ]
+    assert [item["file_id"] for item in
+            build_file_hierarchy_feed(ctx, "bny").to_payload()["feeds"][0]["files"]] == ["file-a"]
+
+
+def test_file_lifecycle_children_are_unchanged_by_feed_grouping(tmp_path) -> None:
+    """Grouping changed; the file's lifecycle stages are rendered as before."""
+    ctx = _ctx(_write(tmp_path, [
+        _inventory(1, "file-a", "feed_inbox", "CWATranMay26.xls", "/in/CWATranMay26.xls"),
+        _mutation(2, "file-a", "move", path="/processing/CWATranMay26.xls",
+                  original_path="/in/CWATranMay26.xls"),
+        _classification(3, "file-a", "bny", source_record_id=1),
+        _mutation(4, "file-a", "create", path="/converted/CWATranMay26.csv"),
+    ]))
+
+    stages = build_file_hierarchy_stages(ctx, 1).to_payload()
+
+    assert [stage["stage_type"] for stage in stages["stages"]] == [
+        "inventory", "mutation", "classification", "mutation",
+    ]
+    assert stages["current_path"] == "/processing/CWATranMay26.xls"
+
+
+def test_a_file_without_a_classified_feed_is_not_grouped_under_a_feed(tmp_path) -> None:
+    """No feed is invented for unclassified evidence; its lifecycle still reads."""
+    ctx = _ctx(_write(tmp_path, [
+        _inventory(1, "file-a", "feed_inbox", "a.csv", "/in/a.csv"),
+        _mutation(2, "file-a", "move", path="/processing/a.csv", original_path="/in/a.csv"),
+    ]))
+
+    assert build_file_hierarchy(ctx).feeds == ()
+    assert build_file_hierarchy_feeds(ctx).feeds == ()
+    assert build_file_hierarchy_stages(ctx, 1).to_payload()["current_path"] == "/processing/a.csv"

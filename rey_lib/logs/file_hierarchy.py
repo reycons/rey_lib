@@ -32,6 +32,7 @@ __all__ = [
 
 _INVENTORY = "source_file_inventory"
 _MUTATION = "source_file_mutation"
+_CLASSIFICATION = "source_file_classification"
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 250
 _MAX_STAGE_LIMIT = 500
@@ -293,11 +294,38 @@ def _mutation_node(record: Mapping[str, Any]) -> FileHierarchyMutation:
     )
 
 
-def _inventory_node(record: Mapping[str, Any]) -> _InventoryNode:
+def _classified_feeds(records: list[Mapping[str, Any]]) -> dict[str, str]:
+    """Map each governed file to the feed its classification record declares.
+
+    Feed identity is governed evidence and comes only from
+    ``classification.values.feed``. The configured inventory ``source_name`` is
+    configuration metadata that names a discovery source, never a feed, so a
+    file without a classified feed is reported here as belonging to none.
+    """
+    feeds: dict[str, str] = {}
+    for record in records:
+        if record.get("record_type") != _CLASSIFICATION:
+            continue
+        record_id = _positive_int(record.get("record_id"), f"{_CLASSIFICATION}.record_id")
+        classification = record.get("classification")
+        if not isinstance(classification, Mapping):
+            continue
+        values = classification.get("values")
+        if not isinstance(values, Mapping) or values.get("feed") is None:
+            continue
+        file_id = _nonblank(record.get("file_id"), f"{_CLASSIFICATION}[{record_id}].file_id")
+        feeds[file_id] = _nonblank(
+            values.get("feed"),
+            f"{_CLASSIFICATION}[{record_id}].classification.values.feed",
+        )
+    return feeds
+
+
+def _inventory_node(record: Mapping[str, Any], feed: str) -> _InventoryNode:
     record_id = _positive_int(record.get("record_id"), "source_file_inventory.record_id")
     file_data = _file_mapping(record, f"source_file_inventory[{record_id}]")
     return _InventoryNode(
-        feed=_nonblank(record.get("source_name"), f"source_file_inventory[{record_id}].source_name"),
+        feed=feed,
         record_id=record_id,
         file_id=_nonblank(record.get("file_id"), f"source_file_inventory[{record_id}].file_id"),
         file_name=_nonblank(
@@ -349,6 +377,7 @@ def _build_page(
     seen_record_ids: set[int] = set()
     inventories: list[_InventoryNode] = []
     mutations_by_file: dict[str, list[FileHierarchyMutation]] = {}
+    feeds_by_file = _classified_feeds(records)
 
     for record in records:
         record_type = record.get("record_type")
@@ -359,7 +388,12 @@ def _build_page(
             raise FileHierarchyError(f"Manifest record_id {record_id} is duplicated.")
         seen_record_ids.add(record_id)
         if record_type == _INVENTORY:
-            inventories.append(_inventory_node(record))
+            file_id = _nonblank(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
+            feed = feeds_by_file.get(file_id, "")
+            # A file with no classified feed belongs to no feed and is not
+            # grouped under one; its lifecycle remains readable by record.
+            if feed:
+                inventories.append(_inventory_node(record, feed))
             continue
         file_id = _nonblank(record.get("file_id"), f"source_file_mutation[{record_id}].file_id")
         mutations_by_file.setdefault(file_id, []).append(_mutation_node(record))
@@ -417,10 +451,17 @@ def build_file_hierarchy_feeds(ctx: Any) -> FileHierarchyFeedPage:
     """Return lightweight feed roots; no primary or stage payload is retained."""
     counts: dict[str, int] = {}
     seen: set[int] = set()
-    for record in _read_manifest_records(ctx):
+    records = _read_manifest_records(ctx)
+    feeds_by_file = _classified_feeds(records)
+    for record in records:
         if record.get("record_type") != _INVENTORY:
             continue
-        node = _inventory_node(record)
+        record_id = _positive_int(record.get("record_id"), f"{_INVENTORY}.record_id")
+        file_id = _nonblank(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
+        feed = feeds_by_file.get(file_id, "")
+        if not feed:
+            continue
+        node = _inventory_node(record, feed)
         if node.record_id in seen:
             raise FileHierarchyError(f"Manifest record_id {node.record_id} is duplicated.")
         seen.add(node.record_id)
@@ -442,17 +483,23 @@ def build_file_hierarchy_feed(
     feed = _nonblank(feed_identity, "feed_identity")
     page_offset, page_limit = _validated_page(offset, limit)
     records = _read_manifest_records(ctx)
+    feeds_by_file = _classified_feeds(records)
     selected_ids = {
         _positive_int(record.get("record_id"), "source_file_inventory.record_id")
         for record in records
         if record.get("record_type") == _INVENTORY
-        and record.get("source_name") == feed
+        and feeds_by_file.get(str(record.get("file_id") or "")) == feed
     }
+    # Classification records travel with the selection: the page groups by
+    # classified feed, so it must still see the evidence that declares it.
     page = _build_page(
         [
             record for record in records
-            if record.get("record_type") == _INVENTORY
-            and _positive_int(record.get("record_id"), "source_file_inventory.record_id") in selected_ids
+            if record.get("record_type") == _CLASSIFICATION
+            or (
+                record.get("record_type") == _INVENTORY
+                and _positive_int(record.get("record_id"), "source_file_inventory.record_id") in selected_ids
+            )
         ],
         offset=page_offset,
         limit=page_limit,
@@ -545,8 +592,12 @@ def build_file_hierarchy_stages(
         seen_record_ids.add(record_id)
         ordered_records.append(record)
     ordered_records.sort(key=lambda item: int(item["record_id"]))
+    # Stages are keyed by the exact inventory record, so a file that is not yet
+    # classified still resolves its full lifecycle here.
+    stage_feeds = _classified_feeds(ordered_records)
     inventories = [
-        _inventory_node(record) for record in ordered_records
+        _inventory_node(record, stage_feeds.get(str(record.get("file_id") or ""), ""))
+        for record in ordered_records
         if record.get("record_type") == _INVENTORY and record.get("record_id") == inventory_id
     ]
     if len(inventories) != 1:
