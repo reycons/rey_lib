@@ -178,6 +178,7 @@ def convert_workbook_to_csv(
     *,
     include_hidden_sheets: bool = False,
     include_empty_sheets: bool = False,
+    overwrite: bool = False,
 ) -> WorkbookConversionResult:
     """Convert one supported workbook into deterministic flat CSV artifacts.
 
@@ -186,13 +187,16 @@ def convert_workbook_to_csv(
     tables. Legacy XLS and binary XLSB workbooks use worksheet fallback because
     FastExcel does not expose table enumeration for those formats.
 
-    All output is staged before publication. Final destinations are created
-    using atomic, no-clobber hard links, so existing files are never replaced.
-    Any failure removes all outputs newly published by this call.
+    All output is staged before publication. Existing files are replaced only
+    when the caller's declared output folder authorizes ``overwrite``. Any
+    failure restores replaced files and removes outputs newly published by this
+    call.
     """
 
     source = Path(source_path).expanduser().resolve()
     destination = Path(output_dir).expanduser().resolve()
+    if not isinstance(overwrite, bool):
+        raise TypeError("overwrite must be a boolean.")
     extension = source.suffix.lower()
 
     if extension not in SUPPORTED_WORKBOOK_EXTENSIONS:
@@ -227,8 +231,13 @@ def convert_workbook_to_csv(
             item.artifact_name.casefold(),
         ),
     )
-    _validate_output_names(source, destination, planned)
-    outputs = _stage_and_publish(source, destination, planned)
+    _validate_output_names(source, destination, planned, overwrite=overwrite)
+    outputs = _stage_and_publish(
+        source,
+        destination,
+        planned,
+        overwrite=overwrite,
+    )
 
     return WorkbookConversionResult(
         source_path=source,
@@ -448,6 +457,8 @@ def _validate_output_names(
     source: Path,
     destination: Path,
     planned: list[_PlannedOutput],
+    *,
+    overwrite: bool,
 ) -> None:
     """Preflight internal and filesystem output collisions."""
 
@@ -463,7 +474,7 @@ def _validate_output_names(
             )
         seen[collision_key] = item.artifact_name
         target = destination / item.artifact_name
-        if target.exists():
+        if target.exists() and not overwrite:
             raise WorkbookOutputCollisionError(
                 f"Workbook output already exists: {target}",
                 source,
@@ -475,8 +486,10 @@ def _stage_and_publish(
     source: Path,
     destination: Path,
     planned: list[_PlannedOutput],
+    *,
+    overwrite: bool,
 ) -> list[ConvertedTableArtifact]:
-    """Stage all CSVs, then atomically publish them without overwriting."""
+    """Stage all CSVs, then atomically publish under folder collision policy."""
 
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -490,6 +503,7 @@ def _stage_and_publish(
 
     staged: list[tuple[_PlannedOutput, Path, Path]] = []
     published: list[Path] = []
+    backups: dict[Path, Path] = {}
     try:
         for item in planned:
             staged_path = staging_dir / item.artifact_name
@@ -515,14 +529,20 @@ def _stage_and_publish(
                 ) from exc
             staged.append((item, staged_path, final_path))
 
-        for item, staged_path, final_path in staged:
+        for index, (item, staged_path, final_path) in enumerate(staged):
             try:
-                # A hard link exposes the complete staged file atomically and
-                # fails when the destination already exists. Both paths are in
-                # the same output filesystem by construction.
-                os.link(staged_path, final_path)
+                if overwrite:
+                    if final_path.exists():
+                        backup = staging_dir / f".backup.{index}"
+                        os.replace(final_path, backup)
+                        backups[final_path] = backup
+                    os.replace(staged_path, final_path)
+                else:
+                    # A hard link exposes the complete staged file atomically
+                    # and fails when the destination already exists.
+                    os.link(staged_path, final_path)
+                    staged_path.unlink()
                 published.append(final_path)
-                staged_path.unlink()
             except FileExistsError as exc:
                 raise WorkbookOutputCollisionError(
                     f"Workbook output already exists: {final_path}",
@@ -548,6 +568,9 @@ def _stage_and_publish(
         # Publication is all-or-nothing even for unexpected interruption.
         for path in reversed(published):
             path.unlink(missing_ok=True)
+        for final_path, backup in backups.items():
+            if backup.exists():
+                os.replace(backup, final_path)
         raise
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)

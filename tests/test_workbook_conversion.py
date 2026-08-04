@@ -302,6 +302,32 @@ def test_existing_destination_is_never_overwritten(tmp_path: Path) -> None:
     assert existing.read_text(encoding="utf-8") == "keep me"
 
 
+def test_existing_destination_is_replaced_only_when_folder_authorizes_overwrite(
+    tmp_path: Path,
+) -> None:
+    source = sheet_only_workbook(tmp_path / "book.xlsx", ("Sheet",))
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    existing = output_dir / "book.Sheet.csv"
+    existing.write_text("keep me", encoding="utf-8")
+
+    result = convert_workbook_to_csv(source, output_dir, overwrite=True)
+
+    assert result.outputs[0].output_path == existing.resolve()
+    assert existing.read_text(encoding="utf-8") != "keep me"
+
+
+def test_overwrite_authority_must_be_boolean(tmp_path: Path) -> None:
+    source = sheet_only_workbook(tmp_path / "book.xlsx", ("Sheet",))
+
+    with pytest.raises(TypeError, match="overwrite must be a boolean"):
+        convert_workbook_to_csv(
+            source,
+            tmp_path / "out",
+            overwrite="yes",  # type: ignore[arg-type]
+        )
+
+
 def test_publish_failure_removes_new_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = sheet_only_workbook(tmp_path / "book.xlsx", ("One", "Two"))
     output_dir = tmp_path / "out"
