@@ -40,6 +40,7 @@ __all__ = [
     "FileSetTransactionError",
     "PublishedFileSet",
     "publish_file_set",
+    "redacted_companion_path",
 ]
 
 # Explicit destination-collision policies. There is no implicit default that
@@ -66,12 +67,18 @@ class FileSetMember:
 
     Exactly one of ``text`` or ``data`` must be supplied. ``encoding`` applies
     only to ``text``.
+
+    ``redacted_text`` publishes a redacted companion beside this member, named
+    by :func:`redacted_companion_path`. The companion joins the same
+    publication set, so a producer never has to invent its own two-artifact
+    semantics: either both land or neither does.
     """
 
     destination: Path
     text: str | None = None
     data: bytes | None = None
     encoding: str = "utf-8"
+    redacted_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,11 +143,42 @@ def publish_file_set(
             f"Unknown collision policy '{on_collision}'; "
             f"expected one of {', '.join(_COLLISION_POLICIES)}."
         )
-    ordered = _validate(members)
+    ordered = _validate(_with_redacted_companions(members))
     _check_collisions(ordered, on_collision)
 
     staged = _stage_all(ordered)
     return _commit_all(staged)
+
+
+def redacted_companion_path(artifact_path: Path | str) -> Path:
+    """Return the redacted companion that sits beside one published artifact.
+
+    One naming rule for every artifact: the marker is inserted before the final
+    extension of the path actually being published, never derived from an
+    upstream source name. ``a.csv`` becomes ``a.redacted.csv`` and
+    ``a.kickouts.jsonl`` becomes ``a.kickouts.redacted.jsonl``.
+    """
+    path = Path(artifact_path)
+    if not path.suffix:
+        return path.with_name(f"{path.name}.redacted")
+    return path.with_name(f"{path.stem}.redacted{path.suffix}")
+
+
+def _with_redacted_companions(
+    members: Sequence[FileSetMember],
+) -> list[FileSetMember]:
+    """Expand every member declaring a redacted companion into both members."""
+    expanded: list[FileSetMember] = []
+    for member in members:
+        expanded.append(member)
+        if member.redacted_text is None:
+            continue
+        expanded.append(FileSetMember(
+            destination=redacted_companion_path(member.destination),
+            text=member.redacted_text,
+            encoding=member.encoding,
+        ))
+    return expanded
 
 
 def _validate(members: Sequence[FileSetMember]) -> list[tuple[Path, bytes]]:

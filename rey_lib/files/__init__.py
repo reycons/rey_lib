@@ -47,6 +47,7 @@ from rey_lib.files.file_transaction import (
     FileSetTransactionError,
     PublishedFileSet,
     publish_file_set,
+    redacted_companion_path,
 )
 from rey_lib.files.sanitization import (
     EffectiveSanitizationPolicy,
@@ -120,6 +121,7 @@ __all__ = [
     "FileSetTransactionError",
     "PublishedFileSet",
     "publish_file_set",
+    "redacted_companion_path",
     "FileSanitizationCollisionPolicy",
     "EffectiveSanitizationPolicy",
     "FileSanitizationContext",
