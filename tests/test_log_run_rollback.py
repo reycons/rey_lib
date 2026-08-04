@@ -125,6 +125,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     assert manifest_record["file"] == {
         "path": str(tmp_path / "created.csv"),
         "file_name": "created.csv",
+        "base_name": "created",
         "file_extension": "csv",
     }
     assert manifest_record["evidence"] == {
