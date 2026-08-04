@@ -528,10 +528,22 @@ def _mutation_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchySta
     mutation = _mutation_node(record)
     conversion = record.get("conversion") if isinstance(record.get("conversion"), Mapping) else {}
     result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
+    # A created artifact is named for what it is, so a node says exactly what
+    # opens when it is clicked. Anything else stays a generic lifecycle event.
     if conversion.get("operator") == "excel_conversion":
-        stage_type, label = "converted", "Converted file"
+        stage_type, label = "converted", "Converted CSV"
     elif result.get("reason") == "file_sanitization":
-        stage_type, label = "sanitized", "Sanitized file"
+        stage_type, label = "sanitized", "Sanitized CSV"
+    elif result.get("reason") == "prepared_file":
+        stage_type, label = "prepared", "Prepared CSV"
+    elif result.get("reason") == "kickout_file":
+        stage_type, label = "kickout", "Kickout JSONL"
+    elif result.get("reason") == "redacted_kickout_file":
+        stage_type, label = "kickout_redacted", "Redacted Kickout JSONL"
+    elif result.get("reason") == "redacted_sanitized_file":
+        stage_type, label = "sanitized_redacted", "Redacted Sanitized CSV"
+    elif result.get("reason") == "redacted_prepared_file":
+        stage_type, label = "prepared_redacted", "Redacted Prepared CSV"
     else:
         stage_type, label = "mutation", mutation.label
     return FileHierarchyStage(
@@ -565,7 +577,7 @@ def _profile_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStag
     return FileHierarchyStage(
         stage_identity=f"run-log:{sha256(run_log.encode('utf-8')).hexdigest()}:{record_id}",
         stage_type="profile",
-        label="Profile", record_id=record_id, file_id=file_id, path=path,
+        label="Structural Profile", record_id=record_id, file_id=file_id, path=path,
         original_path=None, status="created", is_current_primary=False,
         metadata=_freeze(record),
     )

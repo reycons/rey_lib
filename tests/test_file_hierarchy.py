@@ -361,3 +361,81 @@ def test_a_file_without_a_classified_feed_is_not_grouped_under_a_feed(tmp_path) 
     assert build_file_hierarchy(ctx).feeds == ()
     assert build_file_hierarchy_feeds(ctx).feeds == ()
     assert build_file_hierarchy_stages(ctx, 1).to_payload()["current_path"] == "/processing/a.csv"
+
+
+def _created(record_id: int, file_id: str, path: str, reason: str) -> dict:
+    """One governed create mutation carrying its produced-artifact reason."""
+    return {
+        "record_id": record_id,
+        "record_type": "source_file_mutation",
+        "file_id": file_id,
+        "action": "create",
+        "status": "success",
+        "file": {"file_name": path.rsplit("/", 1)[-1], "path": path},
+        "result": {"reason_code": "create_prepared_files", "reason": reason},
+        "evidence": {"run_log_record_id": record_id},
+    }
+
+
+def test_created_artifacts_are_labelled_for_what_they_are(tmp_path) -> None:
+    """A node names the artifact it opens, never a generic lifecycle verb."""
+    ctx = _ctx(_write(tmp_path, [
+        _inventory(1, "file-a", "feed_inbox", "a.xls", "/in/a.xls"),
+        _mutation(2, "file-a", "move", path="/proc/a.xls", original_path="/in/a.xls"),
+        _classification(3, "file-a", "bny", source_record_id=1),
+        {
+            **_mutation(4, "file-a", "create", path="/work/converted/a.csv"),
+            "conversion": {"operator": "excel_conversion", "name": "all"},
+        },
+        {
+            **_mutation(5, "file-a", "create", path="/work/sanitized/a.csv"),
+            "result": {"reason": "file_sanitization"},
+        },
+        _created(6, "file-a", "/work/prepared/a.csv", "prepared_file"),
+        _created(7, "file-a", "/work/kickouts/a.kickouts.jsonl", "kickout_file"),
+        _created(
+            8, "file-a", "/work/kickouts/a.kickouts.redacted.jsonl",
+            "redacted_kickout_file",
+        ),
+        _created(
+            9, "file-a", "/work/sanitized_csv/a.redacted.csv",
+            "redacted_sanitized_file",
+        ),
+        _created(
+            10, "file-a", "/work/prepared/a.redacted.csv",
+            "redacted_prepared_file",
+        ),
+    ]))
+
+    stages = build_file_hierarchy_stages(ctx, 1).to_payload()["stages"]
+    named = {stage["stage_type"]: stage["label"] for stage in stages}
+
+    assert named["converted"] == "Converted CSV"
+    assert named["sanitized"] == "Sanitized CSV"
+    assert named["prepared"] == "Prepared CSV"
+    assert named["kickout"] == "Kickout JSONL"
+    assert named["kickout_redacted"] == "Redacted Kickout JSONL"
+    assert named["sanitized_redacted"] == "Redacted Sanitized CSV"
+    assert named["prepared_redacted"] == "Redacted Prepared CSV"
+    # Every created artifact lands on a named stage. Only a genuine lifecycle
+    # event — here the move — may fall to the generic type; a created artifact
+    # that does is invisible in the Feeds tree.
+    created = {
+        stage["stage_type"]
+        for stage in stages
+        if stage["metadata"].get("action") == "create"
+    }
+    assert "mutation" not in created
+    assert "Create" not in set(named.values())
+
+
+def test_a_profile_stage_is_named_for_the_artifact_it_opens(tmp_path) -> None:
+    ctx = _ctx(_write(tmp_path, [_inventory(1, "file-a", "feed", "a.csv", "/in/a.csv")]))
+    profile = {
+        "record_id": 8, "record_type": "ARTIFACT_REFERENCE", "artifact_group": "profiles",
+        "artifact_type": "row_shape_analysis", "source_file_id": "file-a",
+        "path": "/work/profiles/a.profile.json", "__run_log_file": "/logs/run.jsonl",
+    }
+    page = build_file_hierarchy_stages(ctx, 1, profile_artifacts=(profile,))
+
+    assert page.stages[-1].label == "Structural Profile"
