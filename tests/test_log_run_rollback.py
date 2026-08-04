@@ -437,15 +437,16 @@ def test_absent_conversion_and_result_sections_are_omitted() -> None:
     [
         ("move", "/in/a.xlsx", "/proc/a.xlsx",
          {"path": "/proc/a.xlsx", "original_path": "/in/a.xlsx",
-          "file_name": "a.xlsx", "file_extension": "xlsx"}),
+          "file_name": "a.xlsx", "base_name": "a", "file_extension": "xlsx"}),
         ("create", "", "/out/a.csv",
-         {"path": "/out/a.csv", "file_name": "a.csv", "file_extension": "csv"}),
+         {"path": "/out/a.csv", "file_name": "a.csv", "base_name": "a",
+          "file_extension": "csv"}),
         ("delete", "/in/a.xlsx", "",
          {"original_path": "/in/a.xlsx", "file_name": "a.xlsx",
-          "file_extension": "xlsx"}),
+          "base_name": "a", "file_extension": "xlsx"}),
         ("replace", "/in/a.xlsx", "/out/a.csv",
          {"path": "/out/a.csv", "original_path": "/in/a.xlsx",
-          "file_name": "a.csv", "file_extension": "csv"}),
+          "file_name": "a.csv", "base_name": "a", "file_extension": "csv"}),
     ],
 )
 def test_serialized_file_object_follows_the_lifecycle_action(

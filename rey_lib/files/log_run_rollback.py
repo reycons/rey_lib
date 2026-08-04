@@ -232,6 +232,7 @@ def serialize_source_file_mutation(
     if named_path:
         file_name = Path(named_path).name
         file_object["file_name"] = file_name
+        file_object["base_name"] = Path(file_name).stem
         file_object["file_extension"] = (
             Path(file_name).suffix.removeprefix(".").lower()
         )
