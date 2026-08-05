@@ -16,16 +16,28 @@ execute(conn, sql_name, params)     Execute a named SQL file.
 fetch(conn, sql_name, params)       Execute and return all rows as raw tuples.
 load_sql(name)                      Return the SQL string for a named query.
 DB_PATH                             Public alias to the current database file path.
+
+Governed SQL-file transformation
+--------------------------------
+open_memory_connection()            Caller-governed in-memory connection.
+register_csv_source(conn, path)     Register a normalized CSV as relation source.
+register_text_line_source(...)      Register a fixed-width file as source_lines.
+load_sql_file(sql_path)             Return a governed .sql file's text unchanged.
+fetch_sql_rows(conn, sql_text)      Execute SQL and return its columns and rows.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import duckdb
 
+from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.files.file_utils import read_text_file
 from rey_lib.logs import get_logger
 
 __all__ = [
@@ -41,6 +53,15 @@ __all__ = [
     "load_sql",
     "bulk_insert",
     "create_staging_table_if_not_exists",
+    "CSV_SOURCE_RELATION",
+    "TEXT_LINE_SOURCE_RELATION",
+    "TEXT_LINE_COLUMN",
+    "SqlResult",
+    "open_memory_connection",
+    "register_csv_source",
+    "register_text_line_source",
+    "load_sql_file",
+    "fetch_sql_rows",
 ]
 
 _logger = get_logger(__name__)
@@ -398,6 +419,256 @@ def _table_exists(
         [schema, table],
     ).fetchall()
     return len(rows) > 0
+
+
+# ---------------------------------------------------------------------------
+# Governed SQL-file transformation
+#
+# A caller-owned connection queries one registered source file. Nothing here
+# is module state: the connection lives for the length of one transformation
+# and closes with it, so concurrent transformations cannot see each other.
+# ---------------------------------------------------------------------------
+
+# The logical relation names governed SQL is written against. Transformation
+# SQL never names a physical path — it selects from these.
+CSV_SOURCE_RELATION       = "source"
+TEXT_LINE_SOURCE_RELATION = "source_lines"
+
+# Fixed-width input is one opaque line per row. The SQL file defines columns
+# from it with substr, trim, and try_cast.
+TEXT_LINE_COLUMN = "line"
+
+# A delimiter that cannot occur in text a caller would fixed-width parse, so
+# every physical line arrives as exactly one field.
+_TEXT_LINE_DELIMITER = "\x1f"
+
+# Ordinary execution is local and offline. DuckDB otherwise fetches and loads
+# known extensions on demand, which is a network call from inside a query.
+_OFFLINE_CONNECTION_CONFIG: dict[str, Any] = {
+    "autoinstall_known_extensions": False,
+    "autoload_known_extensions":    False,
+}
+
+
+class SqlResult(NamedTuple):
+    """One query's column names and rows, in the order the query declared."""
+
+    columns: list[str]
+    rows: list[tuple]
+
+
+@contextmanager
+def open_memory_connection() -> Iterator[duckdb.DuckDBPyConnection]:
+    """
+    Yield an in-memory DuckDB connection that closes deterministically.
+
+    The connection is caller-governed: it holds no module state, persists
+    nothing, and is closed on both success and failure. Extension autoload
+    and autoinstall are disabled, so ordinary execution performs no network
+    access.
+
+    Yields
+    ------
+    duckdb.DuckDBPyConnection
+        Open connection to a private in-memory database.
+    """
+    conn = duckdb.connect(":memory:", config=dict(_OFFLINE_CONNECTION_CONFIG))
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def register_csv_source(
+    conn: duckdb.DuckDBPyConnection,
+    source_path: Path | str,
+    *,
+    relation_name: str = CSV_SOURCE_RELATION,
+    delimiter: str | None = None,
+    encoding: str | None = None,
+) -> None:
+    """
+    Register a normalized CSV file as a logical relation.
+
+    The file's first row is its header — DuckDB is told so rather than left
+    to discover it, because header discovery already happened upstream and
+    belongs to exactly one owner. Every column is VARCHAR so transformation
+    SQL casts deliberately, and short rows are padded with NULL rather than
+    rejected.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open connection to register the relation on.
+    source_path : Path | str
+        Normalized CSV file to read. Never modified.
+    relation_name : str
+        Logical relation name governed SQL selects from.
+    delimiter : str | None
+        Field separator. DuckDB's default applies when omitted.
+    encoding : str | None
+        Source encoding. DuckDB's default applies when omitted.
+
+    Raises
+    ------
+    DatabaseError
+        If the file cannot be registered as a relation.
+    """
+    options: dict[str, Any] = {
+        "header":       True,
+        "all_varchar":  True,
+        "null_padding": True,
+    }
+    if delimiter is not None:
+        options["delimiter"] = delimiter
+    if encoding is not None:
+        options["encoding"] = encoding
+
+    path = Path(source_path).expanduser()
+    try:
+        relation = conn.read_csv(str(path), **options)
+        relation.create_view(relation_name, replace=True)
+    except duckdb.Error as exc:
+        raise DatabaseError(
+            f"Could not register CSV source '{path}' as relation "
+            f"'{relation_name}': {exc}"
+        ) from exc
+
+    _logger.debug(
+        "Registered CSV relation '%s' from %s", relation_name, path
+    )
+
+
+def register_text_line_source(
+    conn: duckdb.DuckDBPyConnection,
+    source_path: Path | str,
+    *,
+    relation_name: str = TEXT_LINE_SOURCE_RELATION,
+    encoding: str | None = None,
+) -> None:
+    """
+    Register a fixed-width file as one raw text line per row.
+
+    The relation has a single VARCHAR column holding the line exactly as it
+    appears — quoting and embedded separators are not interpreted. Column
+    positions are the referenced SQL file's business; no schema is inferred
+    here and no second fixed-width parser exists.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open connection to register the relation on.
+    source_path : Path | str
+        Fixed-width source file. Never modified.
+    relation_name : str
+        Logical relation name governed SQL selects from.
+    encoding : str | None
+        Source encoding. DuckDB's default applies when omitted.
+
+    Raises
+    ------
+    DatabaseError
+        If the file cannot be registered as a relation.
+    """
+    options: dict[str, Any] = {
+        "header":     False,
+        "columns":    {TEXT_LINE_COLUMN: "VARCHAR"},
+        "delimiter":  _TEXT_LINE_DELIMITER,
+        "quotechar":  "",
+        "escapechar": "",
+    }
+    if encoding is not None:
+        options["encoding"] = encoding
+
+    path = Path(source_path).expanduser()
+    try:
+        relation = conn.read_csv(str(path), **options)
+        relation.create_view(relation_name, replace=True)
+    except duckdb.Error as exc:
+        raise DatabaseError(
+            f"Could not register text-line source '{path}' as relation "
+            f"'{relation_name}': {exc}"
+        ) from exc
+
+    _logger.debug(
+        "Registered text-line relation '%s' from %s", relation_name, path
+    )
+
+
+def load_sql_file(sql_path: Path | str) -> str:
+    """
+    Return the SQL text of a governed .sql file, unchanged.
+
+    Transformation logic lives in the file, not in this module. The text is
+    returned exactly as written — nothing is substituted into it and nothing
+    is rewritten. A file that cannot supply SQL fails here rather than
+    producing an empty or partial result downstream.
+
+    Parameters
+    ----------
+    sql_path : Path | str
+        Path to the governed .sql file.
+
+    Returns
+    -------
+    str
+        The file's SQL text.
+
+    Raises
+    ------
+    ConfigError
+        If the path does not end in .sql, does not exist, is not a file, or
+        contains no SQL.
+    """
+    path = Path(sql_path).expanduser()
+    if path.suffix.lower() != ".sql":
+        raise ConfigError(
+            f"SQL file '{path}' must use the .sql extension."
+        )
+    if not path.is_file():
+        raise ConfigError(f"SQL file not found: {path}")
+
+    sql_text = read_text_file(path)
+    if not sql_text.strip():
+        raise ConfigError(f"SQL file is empty: {path}")
+    return sql_text
+
+
+def fetch_sql_rows(
+    conn: duckdb.DuckDBPyConnection,
+    sql_text: str,
+) -> SqlResult:
+    """
+    Execute SQL text and return its columns and rows.
+
+    Column names and their order come from the query itself, so a caller
+    writing the result out reproduces the SELECT list — including aliases —
+    without restating it.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open connection.
+    sql_text : str
+        SQL to execute, unchanged.
+
+    Returns
+    -------
+    SqlResult
+        Column names and result rows.
+
+    Raises
+    ------
+    DatabaseError
+        If DuckDB rejects the SQL or fails while executing it.
+    """
+    try:
+        result  = conn.execute(sql_text)
+        columns = [column[0] for column in result.description or []]
+        rows    = result.fetchall()
+    except duckdb.Error as exc:
+        raise DatabaseError(f"SQL execution failed: {exc}") from exc
+    return SqlResult(columns=columns, rows=rows)
 
 
 # ---------------------------------------------------------------------------
