@@ -505,7 +505,7 @@ def _locate_header(
             if all(text in line for text in required):
                 return index
 
-    candidates: list[tuple[tuple[int, int, int], int]] = []
+    candidates: list[tuple[tuple[int, ...], int, int]] = []
     non_blank = [index for index, line in enumerate(lines) if line.strip()]
     for index in non_blank[:_HEADER_SEARCH_ROWS]:
         fields = parsed[index]
@@ -551,12 +551,19 @@ def _locate_header(
                 lexical,
             ),
             index,
+            len(fields),
         ))
 
     if not candidates:
         return None
+    # A header names every column of its table, so a candidate narrower than
+    # the widest one on offer is not naming this table. Prose carrying two
+    # commas parses as three fields and reads like column names; it loses here
+    # on width rather than on any judgement about its wording.
+    widest = max(width for _, _, width in candidates)
+    candidates = [item for item in candidates if item[2] == widest]
     candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
-    best_score, best_index = candidates[0]
+    best_score, best_index, _ = candidates[0]
     if len(candidates) > 1 and candidates[1][0] == best_score:
         # Two rows are equally plausible; claiming either would be a guess.
         return None
