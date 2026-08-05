@@ -58,6 +58,10 @@ __all__ = [
 # memory, so this bounds the comparison work rather than the read.
 _HEADER_SEARCH_ROWS = 50
 
+# A column needs this many values below a candidate before its agreement, or
+# a candidate's break from it, means anything.
+_MINIMUM_CONTRAST_ROWS = 2
+
 # A streaming read buffers this many lines to determine the delimiter and
 # locate the header. Header discovery is already bounded to the opening rows,
 # so this holds everything that decision can consider and nothing more.
@@ -515,7 +519,37 @@ def _locate_header(
             continue
         consistency = (len(matching_width) * 1000) // len(following)
         lexical = sum(_looks_like_header_name(field) for field in fields)
-        candidates.append(((len(matching_width), consistency, lexical), index))
+        # A row of plausible words is not yet a header. What separates one from
+        # a title of the same width is that a header does not read like the
+        # values beneath it: labels over dates are not dates, labels over
+        # account codes do not share their shape. A title padded to the table's
+        # width has more rows agreeing with it than the real header does — the
+        # header is one of them — so width alone picks the title.
+        contrast = _breaks_from_columns(fields, matching_width)
+        distinct = _distinct_name_count(fields)
+        # A header may be repeated, but it cannot sit above a *different*
+        # header. A title padded to the table's width has the real header among
+        # the rows beneath it, and outscores it on width for that very reason.
+        leads_another = _leads_a_different_header(fields, matching_width)
+        # Position carries weight in its own right: a file's first usable row
+        # is its header until something disproves it. Only the disqualifiers
+        # outrank it — a row that leads a different header, or that reads like
+        # the values beneath it, has been disproved and loses to a later row.
+        # Everything after position only separates rows that are otherwise
+        # equal, which no two rows are, so a candidate is never abandoned for
+        # being indistinguishable.
+        candidates.append((
+            (
+                1 - leads_another,
+                contrast,
+                -index,
+                distinct,
+                len(matching_width),
+                consistency,
+                lexical,
+            ),
+            index,
+        ))
 
     if not candidates:
         return None
@@ -655,15 +689,176 @@ def render_delimited_line(fields: Sequence[str], delimiter: str) -> str:
     return output.getvalue()
 
 
+def _distinct_name_count(fields: list[str]) -> int:
+    """Return how many of a candidate's column names are distinct.
+
+    Repeated names do not disqualify a header, but a header whose names are all
+    distinct is the better one where both are on offer.
+    """
+    return len({
+        re.sub(r"[^a-z0-9]+", "_", field.strip().lower()).strip("_")
+        for field in fields
+    })
+
+
+def _leads_a_different_header(
+    fields: list[str],
+    following: list[list[str]],
+) -> int:
+    """Whether a different header row sits among the rows below a candidate.
+
+    The repeated header of a report is the same header and is not counted.
+    Descriptive rows under a header also read like column names, so a differing
+    row only disqualifies the candidate when the candidate reads like it too: a
+    title above the real header shares its words and case, while a header above
+    its own descriptions does not.
+    """
+    identity = tuple(field.strip() for field in fields)
+    for row in following:
+        if not _is_header_candidate(row):
+            continue
+        if tuple(field.strip() for field in row) == identity:
+            continue
+        if not _breaks_from_row(fields, row):
+            return 1
+    return 0
+
+
+def _breaks_from_row(fields: list[str], other: list[str]) -> bool:
+    """Whether a candidate reads differently from one other row."""
+    compared = 0
+    breaks = 0
+    for column, label in enumerate(fields):
+        token = label.strip()
+        if column >= len(other):
+            continue
+        value = other[column].strip()
+        if not token or not value:
+            continue
+        compared += 1
+        if _breaks_from_values(token, [value, value]):
+            breaks += 1
+    return bool(compared) and breaks * 2 >= compared
+
+
+def _breaks_from_columns(
+    fields: list[str],
+    following: list[list[str]],
+) -> int:
+    """Return whether a candidate reads as labels over the rows beneath it.
+
+    Each populated field is compared against what its own column holds below:
+    by datatype, by the shape of its characters, and by case. Any one of those
+    differing is a break, and a candidate that breaks in most of its columns is
+    behaving as a header rather than as another record.
+
+    Returns an int so it can lead the candidate's score tuple directly.
+    """
+    if not following:
+        return 0
+    compared = 0
+    breaks = 0
+    for column, label in enumerate(fields):
+        token = label.strip()
+        if not token:
+            continue
+        values = [
+            row[column].strip()
+            for row in following
+            if column < len(row) and row[column].strip()
+        ]
+        if len(values) < _MINIMUM_CONTRAST_ROWS:
+            continue
+        compared += 1
+        if _breaks_from_values(token, values):
+            breaks += 1
+    if not compared:
+        return 0
+    return int(breaks * 2 >= compared)
+
+
+def _breaks_from_values(label: str, values: list[str]) -> bool:
+    """Whether one label differs from the values of its own column."""
+    from rey_lib.profiling.file_profiler import detect_datatype
+
+    if detect_datatype(label) != _dominant(detect_datatype(v) for v in values):
+        return True
+    if _symbol_sequence(label) != _dominant(_symbol_sequence(v) for v in values):
+        return True
+    return _case_style(label) != _dominant(_case_style(v) for v in values)
+
+
+def _dominant(observations: Iterator[str]) -> str:
+    """Return the most common observation, or "" when the column agrees on none.
+
+    A column that agrees on nothing cannot be broken from, so it yields no
+    evidence rather than false contrast.
+    """
+    from collections import Counter
+
+    counts = Counter(observations)
+    if not counts:
+        return ""
+    value, hits = counts.most_common(1)[0]
+    return value if hits > 1 or len(counts) == 1 else ""
+
+
+def _symbol_sequence(value: str) -> str:
+    """Return the value's character-class shape, carrying no source values.
+
+    Consecutive characters of one class collapse to one symbol, so "2026-08-05"
+    and "1999-01-02" share a shape while "Post_Date" does not.
+    """
+    token = value.strip()
+    if not token:
+        return "E"
+    classes = []
+    for character in token:
+        if character.isalpha():
+            symbol = "A"
+        elif character.isdigit():
+            symbol = "D"
+        elif character.isspace():
+            symbol = "S"
+        else:
+            symbol = "P"
+        if not classes or symbol != classes[-1]:
+            classes.append(symbol)
+    return "-".join(classes)
+
+
+def _case_style(value: str) -> str:
+    """Return the value's case style."""
+    token = value.strip()
+    if not token:
+        return "none"
+    if not any(character.isalpha() for character in token):
+        return "numeric"
+    if "_" in token:
+        return "snake"
+    if token.isupper():
+        return "upper"
+    if token.islower():
+        return "lower"
+    if token.istitle():
+        return "title"
+    return "mixed"
+
+
 def _is_header_candidate(fields: list[str]) -> bool:
     """Return whether ``fields`` are structurally plausible column names."""
     stripped = [field.strip() for field in fields]
     if len(stripped) < 2 or any(not field for field in stripped):
         return False
+    # A name that normalizes to nothing is not a name. Repeated names are a
+    # different matter: a report joining two record types into one row
+    # legitimately carries "Account ID" in both halves, and rejecting the row
+    # for it leaves the file with no header at all. Uniqueness is scored
+    # instead, so a cleaner candidate still wins where one exists.
     normalized = [
         re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_") for field in stripped
     ]
-    if any(not field for field in normalized) or len(set(normalized)) != len(normalized):
+    if any(not field for field in normalized):
         return False
     lexical = sum(_looks_like_header_name(field) for field in stripped)
     return lexical * 2 >= len(stripped)
