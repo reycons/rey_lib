@@ -527,6 +527,7 @@ def _locate_header(
         # header is one of them — so width alone picks the title.
         contrast = _breaks_from_columns(fields, matching_width)
         distinct = _distinct_name_count(fields)
+        named = _usable_name_count(fields)
         # A header may be repeated, but it cannot sit above a *different*
         # header. A title padded to the table's width has the real header among
         # the rows beneath it, and outscores it on width for that very reason.
@@ -543,6 +544,7 @@ def _locate_header(
                 1 - leads_another,
                 contrast,
                 -index,
+                named,
                 distinct,
                 len(matching_width),
                 consistency,
@@ -687,6 +689,19 @@ def render_delimited_line(fields: Sequence[str], delimiter: str) -> str:
     output = io.StringIO(newline="")
     _csv.writer(output, delimiter=delimiter, lineterminator="").writerow(list(fields))
     return output.getvalue()
+
+
+def _usable_name_count(fields: list[str]) -> int:
+    """Return how many of a candidate's columns carry a usable name.
+
+    An unnamed column does not disqualify a header, but a header naming all of
+    its columns is the better one where both are on offer.
+    """
+    return sum(
+        1
+        for field in fields
+        if re.sub(r"[^a-z0-9]+", "_", field.strip().lower()).strip("_")
+    )
 
 
 def _distinct_name_count(fields: list[str]) -> int:
@@ -848,18 +863,18 @@ def _case_style(value: str) -> str:
 def _is_header_candidate(fields: list[str]) -> bool:
     """Return whether ``fields`` are structurally plausible column names."""
     stripped = [field.strip() for field in fields]
-    if len(stripped) < 2 or any(not field for field in stripped):
+    if len(stripped) < 2:
         return False
-    # A name that normalizes to nothing is not a name. Repeated names are a
-    # different matter: a report joining two record types into one row
-    # legitimately carries "Account ID" in both halves, and rejecting the row
-    # for it leaves the file with no header at all. Uniqueness is scored
-    # instead, so a cleaner candidate still wins where one exists.
-    normalized = [
-        re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_") for field in stripped
-    ]
-    if any(not field for field in normalized):
-        return False
+    # One unusable name does not make a row stop being the header. A column
+    # left unnamed, or named with a stray character that normalizes to
+    # nothing, is ordinary in an exported report; rejecting the row for it
+    # leaves the file with no header at all, and every consumer then behaves as
+    # though the file has no columns. Both are scored instead, so a fully named
+    # header still wins wherever one exists.
+    #
+    # What still gates is the majority: most of the row must read like column
+    # names. That is what keeps a padded title or a row of punctuation out,
+    # without depending on any single field.
     lexical = sum(_looks_like_header_name(field) for field in stripped)
     return lexical * 2 >= len(stripped)
 
