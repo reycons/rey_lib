@@ -544,6 +544,10 @@ def _mutation_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchySta
         stage_type, label = "sanitized_redacted", "Redacted Sanitized CSV"
     elif result.get("reason") == "redacted_prepared_file":
         stage_type, label = "prepared_redacted", "Redacted Prepared CSV"
+    elif result.get("reason") == "structural_profile":
+        # A profile is shared by every file of its identity, so this node hangs
+        # under the file whose profiling run created or appended to it.
+        stage_type, label = "profile", "Structural Profile"
     else:
         stage_type, label = "mutation", mutation.label
     return FileHierarchyStage(

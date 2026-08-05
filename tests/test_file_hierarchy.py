@@ -405,6 +405,9 @@ def test_created_artifacts_are_labelled_for_what_they_are(tmp_path) -> None:
             10, "file-a", "/work/prepared/a.redacted.csv",
             "redacted_prepared_file",
         ),
+        _created(
+            11, "file-a", "/profiles/AcmeHold.profile.json", "structural_profile",
+        ),
     ]))
 
     stages = build_file_hierarchy_stages(ctx, 1).to_payload()["stages"]
@@ -417,6 +420,8 @@ def test_created_artifacts_are_labelled_for_what_they_are(tmp_path) -> None:
     assert named["kickout_redacted"] == "Redacted Kickout JSONL"
     assert named["sanitized_redacted"] == "Redacted Sanitized CSV"
     assert named["prepared_redacted"] == "Redacted Prepared CSV"
+    # The profile hangs under the file whose profiling run wrote it.
+    assert named["profile"] == "Structural Profile"
     # Every created artifact lands on a named stage. Only a genuine lifecycle
     # event — here the move — may fall to the generic type; a created artifact
     # that does is invisible in the Feeds tree.
