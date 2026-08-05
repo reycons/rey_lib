@@ -14,12 +14,13 @@ infer_col_type   Infer the dominant data type for a column's values.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Any
 
 from rey_lib.logs import get_logger
 
-__all__ = ["profile_rows", "infer_col_type", "infer_sql_type"]
+__all__ = ["infer_col_type", "infer_sql_type", "profile_rows"]
 
 _logger = get_logger(__name__)
 
@@ -174,8 +175,8 @@ def infer_col_type(values: list[str]) -> str:
     checkers = [
         ("integer",  _is_integer),
         ("decimal",  _is_decimal),
-        ("date",     _is_date),
-        ("datetime", _is_datetime),
+        ("date",     is_date),
+        ("datetime", is_datetime),
         ("boolean",  _is_boolean),
     ]
 
@@ -209,7 +210,7 @@ def _is_decimal(value: str) -> bool:
     return False
 
 
-def _is_date(value: str) -> bool:
+def is_date(value: str) -> bool:
     """Return True if value looks like a date string (no time component)."""
     import re
     patterns = [
@@ -223,7 +224,7 @@ def _is_date(value: str) -> bool:
     return any(re.match(p, value.strip()) for p in patterns)
 
 
-def _is_datetime(value: str) -> bool:
+def is_datetime(value: str) -> bool:
     """Return True if value looks like a datetime string."""
     import re
     patterns = [
@@ -313,3 +314,95 @@ def _whole_digits(value: str) -> str:
     cleaned = value.strip().lstrip("+-")
     whole = cleaned.split(".", 1)[0]
     return "".join(ch for ch in whole if ch.isdigit())
+
+
+# ---------------------------------------------------------------------------
+# Canonical datatype detection
+# ---------------------------------------------------------------------------
+# One value, one datatype. Every consumer — structural profiling, redaction,
+# column inference — asks this function, so a datatype means the same thing
+# everywhere and there is one place to change what it means.
+#
+# The order is the definition. It is read top to bottom and the first match
+# wins, so a more specific shape must sit above a more general one that would
+# also accept it.
+#
+# Numbers sit above dates deliberately. A bare run of digits can be read as a
+# date by any format that allows one, and account and reference numbers of that
+# width are ordinary; a date needs a separator or a month name to be called one.
+
+_EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_SSN_PATTERN = re.compile(r"\d{3}-\d{2}-\d{4}")
+_PHONE_PATTERN = re.compile(
+    r"\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]\d{4}"
+    r"|\+?1[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]\d{4}"
+)
+_ZIP_PATTERN = re.compile(r"\d{5}(-\d{4})?")
+_ACCOUNT_PATTERN = re.compile(r"\d{8,20}")
+_NAME_PATTERN = re.compile(r"[A-Z][a-zA-Z'\-]+([ ][A-Z][a-zA-Z'\-]+){0,3}")
+_ALPHA_PATTERN = re.compile(r"[A-Za-z]+")
+_ALPHANUMERIC_PATTERN = re.compile(r"[A-Za-z0-9]+")
+_PUNCTUATION_PATTERN = re.compile(r"[^A-Za-z0-9]+")
+# Grouped thousands are how feeds write numbers; the definition accepts
+# them so a number is a number wherever it is read.
+_INTEGER_PATTERN = re.compile(r"[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)")
+_DECIMAL_PATTERN = re.compile(
+    r"[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)\.\d*|[+-]?\.\d+"
+)
+
+DATATYPE_TEXT = "text"
+
+
+def _is_integer_token(token: str) -> bool:
+    return bool(_INTEGER_PATTERN.fullmatch(token))
+
+
+def _is_integer_leading_zero(token: str) -> bool:
+    if not _is_integer_token(token):
+        return False
+    unsigned = token.lstrip("+-").replace(",", "")
+    return len(unsigned) > 1 and unsigned.startswith("0")
+
+
+def _is_decimal_token(token: str) -> bool:
+    return bool(_DECIMAL_PATTERN.fullmatch(token))
+
+
+# (datatype, predicate) in priority order. First match wins.
+_DATATYPE_RULES: tuple[tuple[str, Any], ...] = (
+    ("email", lambda t: bool(_EMAIL_PATTERN.fullmatch(t))),
+    ("ssn", lambda t: bool(_SSN_PATTERN.fullmatch(t))),
+    ("phone", lambda t: bool(_PHONE_PATTERN.fullmatch(t))),
+    ("decimal", _is_decimal_token),
+    ("integer_leading_zero", _is_integer_leading_zero),
+    ("integer", _is_integer_token),
+    ("datetime", is_datetime),
+    ("date", is_date),
+    ("boolean", _is_boolean),
+    ("zip", lambda t: bool(_ZIP_PATTERN.fullmatch(t))),
+    ("account", lambda t: bool(_ACCOUNT_PATTERN.fullmatch(t))),
+    ("alpha", lambda t: bool(_ALPHA_PATTERN.fullmatch(t))),
+    ("alphanumeric", lambda t: bool(_ALPHANUMERIC_PATTERN.fullmatch(t))),
+    ("punctuation", lambda t: bool(_PUNCTUATION_PATTERN.fullmatch(t))),
+    ("name", lambda t: bool(_NAME_PATTERN.fullmatch(t))),
+)
+
+DATATYPE_PRIORITY: tuple[str, ...] = (
+    ("blank",) + tuple(name for name, _ in _DATATYPE_RULES) + (DATATYPE_TEXT,)
+)
+
+
+def detect_datatype(value: str) -> str:
+    """Return the one canonical datatype of a single value.
+
+    This is the only definition of what each datatype is. Column-level callers
+    sample values, call this for each, and aggregate the results; none of them
+    decides for itself what a date or a number looks like.
+    """
+    token = str(value).strip()
+    if not token:
+        return "blank"
+    for datatype, matches in _DATATYPE_RULES:
+        if matches(token):
+            return datatype
+    return DATATYPE_TEXT

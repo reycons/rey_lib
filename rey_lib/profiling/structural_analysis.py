@@ -429,29 +429,16 @@ def structural_descriptor(
 
 
 def field_characteristic(value: str) -> str:
+    """Return one value's canonical datatype with its length bucket.
+
+    The datatype comes from the one canonical detector; this adds only the
+    length bucket that structural comparison needs. It owns no datatype
+    definition of its own, so a date here is the same date everywhere.
+    """
+    from rey_lib.profiling.file_profiler import detect_datatype
+
     token = value.strip()
-    if not token:
-        kind = "blank"
-    elif re.fullmatch(r"[+-]?\d+", token):
-        unsigned = token.lstrip("+-")
-        kind = (
-            "integer_leading_zero"
-            if len(unsigned) > 1 and unsigned.startswith("0")
-            else "integer"
-        )
-    elif re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+)", token):
-        kind = "decimal"
-    elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
-        kind = "iso_date"
-    elif re.fullmatch(r"[A-Za-z]+", token):
-        kind = "alpha"
-    elif re.fullmatch(r"[A-Za-z0-9]+", token):
-        kind = "alphanumeric"
-    elif re.fullmatch(r"[^A-Za-z0-9]+", token):
-        kind = "punctuation"
-    else:
-        kind = "mixed"
-    return f"{kind}:{length_bucket(len(token))}"
+    return f"{detect_datatype(token)}:{length_bucket(len(token))}"
 
 
 def _run_length_encode(values: list[str]) -> list[dict[str, Any]]:
