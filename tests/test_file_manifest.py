@@ -413,3 +413,31 @@ def test_a_governed_rewrite_preserves_retained_rows_byte_for_byte(
     ).encode("utf-8")
 
     assert appended == rewritten
+
+
+def test_sequencing_never_moves_backwards_after_a_rewrite(tmp_path) -> None:
+    """A removed id is never reissued, however much of the manifest goes.
+
+    Manifest ids are stored permanently outside the manifest — the run log
+    records file_manifest_record_id, and a compensation record references the
+    mutation it compensated. Reissuing an id would silently retarget evidence
+    that is already written.
+    """
+    ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    with file_manifest_session(ctx) as session:
+        ids = [
+            session.append({"record_type": "source_file_inventory", "status": "ok"})
+            for _ in range(5)
+        ]
+        # Remove the highest records, then every remaining record.
+        session.remove_records(ids[3:])
+        assert session.append(
+            {"record_type": "source_file_inventory", "status": "ok"}
+        ) > max(ids)
+        session.remove_records(
+            [record["record_id"] for record in session.read_records()]
+        )
+        assert session.read_records() == []
+        assert session.append(
+            {"record_type": "source_file_inventory", "status": "ok"}
+        ) > max(ids) + 1

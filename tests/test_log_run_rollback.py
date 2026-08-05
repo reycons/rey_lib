@@ -577,24 +577,24 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
     assert original.read_text(encoding="utf-8") == "input"
     assert not current.exists()
     assert not created.exists()
-    rollback_rows = [
-        row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
-    ]
-    assert [
-        (row["rollback"]["phase"], row["status"]) for row in rollback_rows
-    ] == [
-        ("attempt", "attempted"),
-        ("final", "success"),
-        ("attempt", "attempted"),
-        ("final", "success"),
-    ]
-    assert [
-        row["rollback"]["original_record_id"] for row in rollback_rows
-    ] == [create_id, create_id, move_id, move_id]
-    assert (
-        rollback_rows[1]["rollback"]["attempt_record_id"]
-        == rollback_rows[0]["record_id"]
+    # Attempt and final evidence is written for each compensation as it runs,
+    # which is what the count reports. It then leaves the manifest with the
+    # records it references: a compensation record whose mutation is gone is
+    # evidence no consumer can resolve.
+    rows = _rows(ctx)
+    # Ids are recomputed from what remains, so absence is asserted by type:
+    # the reversed mutations and their compensation evidence are both gone.
+    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
+    assert [row for row in rows if row["record_type"] == "source_file_mutation"] == []
+    summary = next(
+        row for row in rows if row["record_type"] == "run_rollback"
     )
+    assert summary["status"] == "success"
+    assert summary["rollback"]["records_removed"] == 6
+    assert summary["rollback"]["filesystem_operations_reversed"] == 2
+    # Sequencing never moves backwards, so the summary is sequenced above
+    # every id the rollback removed.
+    assert summary["record_id"] > max(create_id, move_id)
 
 
 def test_delete_and_replace_require_recorded_recovery_paths(
@@ -647,7 +647,9 @@ def test_failure_is_recorded_and_remaining_compensations_continue(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    _append_mutation(
+    # Neither location holds the file, so nothing can be restored and nothing
+    # may be assumed — a real failure, not an already-reversed one.
+    failing_id = _append_mutation(
         ctx,
         action="move",
         source_path=str(tmp_path / "missing-original"),
@@ -681,16 +683,14 @@ def test_failure_is_recorded_and_remaining_compensations_continue(
     )
     assert durable_summary["failures"] == result["failed"]
     assert durable_summary["failures"][0]["failure_reason"]
-    finals = [
-        row
-        for row in _rows(ctx)
-        if row["record_type"] == "source_file_rollback"
-        and row["rollback"]["phase"] == "final"
-    ]
-    assert [row["status"] for row in finals] == ["success", "failure"]
-    # The canonical rollback record carries no failure_reason; the run log and
-    # the returned summary above hold the detail.
-    assert "failure_reason" not in finals[1]
+    # Compensation evidence does not outlive the rollback that wrote it: the
+    # audit run log holds every attempt, and leaving rows here would make a
+    # retried rollback grow the manifest without bound.
+    rows = _rows(ctx)
+    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
+    # The record that could not be reversed is still governed state.
+    assert [row["record_id"] for row in rows
+            if row["record_type"] == "source_file_mutation"] == [failing_id]
 
 
 def test_successful_compensation_is_idempotently_excluded(
@@ -709,8 +709,13 @@ def test_successful_compensation_is_idempotently_excluded(
     rollback_log_run(ctx, run_log)
     plan = preview_log_run_rollback(ctx, run_log)
 
+    # The reversed record has left the manifest, so it is simply not selected
+    # a second time; nothing has to remember that it was compensated.
     assert plan["candidate_count"] == 0
-    assert plan["already_compensated"] == [mutation_id]
+    assert plan["already_compensated"] == []
+    assert [
+        row for row in _rows(ctx) if row["record_type"] == "source_file_mutation"
+    ] == []
 
 
 def test_unfinished_attempt_is_indeterminate_and_not_reapplied(
@@ -777,14 +782,12 @@ def test_unknown_action_is_reported_without_filesystem_inference(
 
     assert result["status"] == "failure"
     assert result["appended_rollback_evidence_count"] == 2
-    finals = [
-        row
-        for row in _rows(ctx)
-        if row["record_type"] == "source_file_rollback"
-        and row["rollback"]["phase"] == "final"
-    ]
-    assert finals[0]["status"] == "failure"
-    assert "failure_reason" not in finals[0]
+    # Evidence is written while the rollback runs and cleaned up after it, so
+    # the unreversible record survives with no evidence attached to it.
+    rows = _rows(ctx)
+    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
+    assert [row["record_id"] for row in rows
+            if row["record_type"] == "source_file_mutation"] == [mutation_id]
     assert result["failed"][0]["failure_reason"] == (
         "no registered compensating operation"
     )
@@ -871,7 +874,7 @@ def test_attempt_append_failure_prevents_filesystem_compensation(
     assert result["appended_rollback_evidence_count"] == 0
 
 
-def test_final_append_failure_leaves_traceable_indeterminate_attempt(
+def test_a_reversal_stands_even_when_its_evidence_cannot_be_written(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -897,11 +900,19 @@ def test_final_append_failure_leaves_traceable_indeterminate_attempt(
 
     result = rollback_log_run(ctx, _run_log(tmp_path))
 
+    # The file was deleted, so the record describing it must go too. Losing
+    # the note about the deletion cannot resurrect the file, and keeping the
+    # record would leave the manifest describing something that is gone.
     assert not created.exists()
-    assert result["status"] == "failure"
+    assert result["status"] == "success"
     assert result["appended_rollback_evidence_count"] == 1
+    rows = _rows(ctx)
+    assert [row for row in rows
+            if row["record_type"] == "source_file_mutation"] == []
     plan = preview_log_run_rollback(ctx, "run.jsonl")
-    assert plan["indeterminate"] == [mutation_id]
+    assert plan["indeterminate"] == []
+    assert plan["candidate_count"] == 0
+    assert mutation_id
 
 
 def test_preview_is_read_only_and_execution_rereads_manifest(
@@ -941,11 +952,16 @@ def test_rollback_records_are_written_only_through_the_serializer(
 ) -> None:
     """Every appended rollback row matches the serializer's canonical shape."""
     ctx = _ctx(tmp_path)
-    created = tmp_path / "created.csv"
-    created.write_text("created", encoding="utf-8")
-    _append_mutation(ctx, action="create", destination_path=str(created))
+    # A compensation that cannot succeed, so its record and its evidence both
+    # stay in the manifest and can be checked against the serializer.
+    _append_mutation(
+        ctx, action="delete", recovery_path=str(tmp_path / "missing.csv")
+    )
 
-    rollback_log_run(ctx, _run_log(tmp_path))
+    # Evidence is cleaned up when the rollback finishes, so removal is held
+    # off here to inspect exactly what the engine appended.
+    with patch.object(FileManifestSession, "remove_records", return_value=0):
+        rollback_log_run(ctx, _run_log(tmp_path))
 
     rollback_rows = [
         row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
@@ -1096,3 +1112,217 @@ def test_flat_fields_lead_every_governed_record() -> None:
         "result",
         "producer",
     ]
+
+
+def _append_state_record(
+    ctx: SimpleNamespace,
+    *,
+    record_type: str,
+    run_log_file: str = "run.jsonl",
+) -> int:
+    """Append one inventory or classification record, which carries no action."""
+    return log_file_manifest_record(
+        ctx,
+        {
+            "recorded_at": "2026-08-05T00:00:00.000+00:00",
+            "record_type": record_type,
+            "status": "classified",
+            "file_id": "governed-1",
+            "evidence": {"run_log_file": run_log_file, "run_log_record_id": 1},
+            "file": {"path": "/inbox/a.csv", "file_name": "a.csv"},
+            "producer": {"application": "test"},
+        },
+    )
+
+
+def test_records_without_an_action_are_rolled_back(tmp_path: Path) -> None:
+    """Inventory and classification carry no action and must still reverse.
+
+    Their inverse is the removal of the record and nothing else, so anything
+    that reaches for a filesystem action would fail on them.
+    """
+    ctx = _ctx(tmp_path)
+    inventory_id = _append_state_record(ctx, record_type="source_file_inventory")
+    classification_id = _append_state_record(
+        ctx, record_type="source_file_classification"
+    )
+
+    plan = preview_log_run_rollback(ctx, _run_log(tmp_path))
+    assert plan["candidate_count"] == 2
+    assert [item["compensating_action"] for item in plan["candidates"]] == [
+        "remove_record",
+        "remove_record",
+    ]
+
+    result = rollback_log_run(ctx, _run_log(tmp_path))
+
+    assert result["status"] == "success"
+    assert result["succeeded_count"] == 2
+    # No filesystem operation was performed for either record.
+    assert result["filesystem_operations_reversed"] == 0
+    rows = _rows(ctx)
+    assert [
+        row for row in rows
+        if row["record_type"] in {
+            "source_file_inventory", "source_file_classification"
+        }
+    ] == []
+    summary = next(row for row in rows if row["record_type"] == "run_rollback")
+    assert summary["rollback"]["records_removed"] >= 2
+    assert inventory_id and classification_id
+
+
+def test_a_failed_mutation_is_removed_without_touching_the_filesystem(
+    tmp_path: Path,
+) -> None:
+    """A mutation that never happened leaves a record, and the record goes.
+
+    Its operation did not take place, so compensating it would act on a file
+    this run never wrote. It is reversed by removing the record alone.
+    """
+    ctx = _ctx(tmp_path)
+    survivor = tmp_path / "never_created.csv"
+    survivor.write_text("someone else's file", encoding="utf-8")
+    _append_mutation(
+        ctx,
+        action="create",
+        destination_path=str(survivor),
+        status="failed",
+    )
+
+    plan = preview_log_run_rollback(ctx, _run_log(tmp_path))
+    assert [item["compensating_action"] for item in plan["candidates"]] == [
+        "remove_record"
+    ]
+
+    result = rollback_log_run(ctx, _run_log(tmp_path))
+
+    assert result["status"] == "success"
+    assert result["filesystem_operations_reversed"] == 0
+    # The registered create compensation would have deleted this file.
+    assert survivor.read_text(encoding="utf-8") == "someone else's file"
+    assert [
+        row for row in _rows(ctx) if row["record_type"] == "source_file_mutation"
+    ] == []
+
+
+def test_rolling_back_twice_finishes_the_job_and_adds_no_junk(
+    tmp_path: Path,
+) -> None:
+    """A second rollback completes the first one instead of failing on it.
+
+    The first run's files are already gone, which is the goal reached. Treating
+    that as failure left the records behind describing files that no longer
+    existed, and every retry appended two more evidence rows per file that were
+    never reclaimed.
+    """
+    ctx = _ctx(tmp_path)
+    created = tmp_path / "created.csv"
+    created.write_text("created", encoding="utf-8")
+    _append_mutation(ctx, action="create", destination_path=str(created))
+    moved = tmp_path / "moved.csv"
+    moved.write_text("moved", encoding="utf-8")
+    origin = tmp_path / "origin.csv"
+    _append_mutation(
+        ctx, action="move",
+        source_path=str(origin), destination_path=str(moved),
+    )
+
+    first = rollback_log_run(ctx, _run_log(tmp_path))
+    assert first["status"] == "success"
+    assert first["filesystem_operations_reversed"] == 2
+    after_first = len(_rows(ctx))
+
+    # Everything is already reversed; the second pass must not fail on that.
+    second = rollback_log_run(ctx, _run_log(tmp_path))
+
+    assert second["status"] == "success"
+    assert second["failed_count"] == 0
+    # Nothing moved the second time, and nothing was left behind.
+    assert second["filesystem_operations_reversed"] == 0
+    rows = _rows(ctx)
+    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
+    assert [row for row in rows if row["record_type"] == "source_file_mutation"] == []
+    # One summary per rollback, and no accumulation of compensation evidence.
+    assert len(rows) == after_first + 1
+    assert not created.exists()
+    assert origin.read_text(encoding="utf-8") == "moved"
+
+
+def test_a_fully_rolled_back_run_log_is_deleted(tmp_path: Path) -> None:
+    """A run with nothing left to reverse stops offering itself in the Console."""
+    ctx = _ctx(tmp_path)
+    created = tmp_path / "created.csv"
+    created.write_text("created", encoding="utf-8")
+    _append_mutation(ctx, action="create", destination_path=str(created))
+    run_log = _run_log(tmp_path)
+    sidecar = run_log.parent / f"{run_log.name}.hstate.json"
+    sidecar.write_text("{}", encoding="utf-8")
+    results = run_log.parent / f"{run_log.name.split('.jsonl')[0]}.results.json"
+    results.write_text("{}", encoding="utf-8")
+
+    result = rollback_log_run(ctx, run_log)
+
+    assert result["status"] == "success"
+    assert not run_log.exists()
+    # Its companions describe a log that is no longer there.
+    assert not sidecar.exists()
+    assert not results.exists()
+    assert set(result["deleted_run_log_files"]) == {
+        run_log.name, sidecar.name, results.name
+    }
+
+
+def test_a_run_log_survives_a_rollback_that_did_not_finish(tmp_path: Path) -> None:
+    """A retry selects by the log, so an unfinished rollback must keep it."""
+    ctx = _ctx(tmp_path)
+    _append_mutation(
+        ctx,
+        action="move",
+        source_path=str(tmp_path / "missing-original"),
+        destination_path=str(tmp_path / "missing-current"),
+    )
+    run_log = _run_log(tmp_path)
+
+    result = rollback_log_run(ctx, run_log)
+
+    assert result["status"] == "failure"
+    assert run_log.exists()
+    assert result["deleted_run_log_files"] == []
+
+
+def test_an_indeterminate_record_keeps_the_run_log(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A record left in limbo is not a failure, and still needs its log.
+
+    An attempt with no final outcome is neither reversed nor failed, so the
+    rollback can report success while that record remains. Deleting the log on
+    a status alone would leave no way to select the run again.
+    """
+    ctx = _ctx(tmp_path)
+    created = tmp_path / "created.csv"
+    created.write_text("created", encoding="utf-8")
+    mutation_id = _append_mutation(
+        ctx, action="create", destination_path=str(created)
+    )
+    log_file_manifest_record(
+        ctx,
+        serialize_source_file_rollback(
+            original_record_id=mutation_id,
+            phase="attempt",
+            status="attempted",
+            run_log_file="run.jsonl",
+            run_log_record_id=1,
+        ),
+    )
+    run_log = _run_log(tmp_path)
+
+    result = rollback_log_run(ctx, run_log)
+
+    assert result["status"] == "success"
+    assert result["indeterminate_count"] == 1
+    # Nothing was reversed, so the run still owns a record and keeps its log.
+    assert run_log.exists()
+    assert result["deleted_run_log_files"] == []

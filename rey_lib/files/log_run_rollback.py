@@ -9,14 +9,15 @@ operation-specific behavior to the compensation registry.
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any
 
-from rey_lib.files.file_utils import run_artifact_path
+from rey_lib.files.file_utils import delete_file, run_artifact_path
 from rey_lib.files.jsonl import JsonlReadError
 from rey_lib.logs import (
     FileManifestError,
@@ -33,6 +34,25 @@ from rey_lib.logs import (
 
 MUTATION_RECORD_TYPE = "source_file_mutation"
 ROLLBACK_RECORD_TYPE = "source_file_rollback"
+INVENTORY_RECORD_TYPE = "source_file_inventory"
+CLASSIFICATION_RECORD_TYPE = "source_file_classification"
+RUN_ROLLBACK_RECORD_TYPE = "run_rollback"
+
+# The manifest describes current governed state, so a rolled-back run's records
+# are removed. These are the types a run introduces; the run log keeps the
+# history permanently and is never modified.
+_SELECTABLE_RECORD_TYPES = (
+    INVENTORY_RECORD_TYPE,
+    CLASSIFICATION_RECORD_TYPE,
+    MUTATION_RECORD_TYPE,
+)
+
+# A structural profile is shared by every file of its identity, so its inverse
+# is not the generic action compensation: a profile "replace" carries no
+# previous version to restore, and restoring one would discard the appends of
+# every other run. It is dispatched on what the mutation did, not how it acted.
+PROFILE_REASON = "structural_profile"
+PROFILE_ATTRIBUTION_FIELD = "added_by_run_log_file"
 
 
 class LogRunRollbackError(Exception):
@@ -114,7 +134,7 @@ class SourceFileMutationEvidenceResult(int):
         *,
         run_log_record_id: int,
         run_log_file: str,
-    ) -> "SourceFileMutationEvidenceResult":
+    ) -> SourceFileMutationEvidenceResult:
         value = _positive_int(manifest_record_id, "manifest_record_id")
         instance = int.__new__(cls, value)
         instance.run_log_record_id = _positive_int(
@@ -341,6 +361,66 @@ def serialize_source_file_rollback(
     return record
 
 
+def serialize_run_rollback(
+    *,
+    rollback_run_id: str,
+    original_run_id: str,
+    status: str,
+    records_removed: int,
+    filesystem_operations_reversed: int,
+    affected_file_ids: Sequence[str] = (),
+    started_at: str,
+    ended_at: str,
+    failure_details: Sequence[Mapping[str, Any]] = (),
+    application_name: str = "",
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    """Build the one summary record for an operator-initiated run rollback.
+
+    Exactly one of these is written per rolled-back run, however many records
+    the run touched. The per-record detail already exists in the original run
+    log, which the rollback reads to reverse the run; copying every reversed
+    action into new records would duplicate an audit trail in a store whose job
+    is current state.
+
+    This is not ``source_file_rollback``. That type is per-file compensation
+    created during normal execution, it references the mutation it compensates,
+    and the lifecycle projection consumes it. Its shape and meaning are
+    unchanged by this contract.
+    """
+    normalized_status = _non_empty(status, "status")
+    if normalized_status not in {"success", "partial_success", "failure"}:
+        raise LogRunRollbackError(
+            "run_rollback.status must be 'success', 'partial_success', or "
+            "'failure'."
+        )
+    rollback_object: dict[str, Any] = {
+        "rollback_run_id": _non_empty(rollback_run_id, "rollback_run_id"),
+        "original_run_id": _non_empty(original_run_id, "original_run_id"),
+        "records_removed": _count(records_removed, "records_removed"),
+        "filesystem_operations_reversed": _count(
+            filesystem_operations_reversed, "filesystem_operations_reversed"
+        ),
+        "affected_file_ids": [str(value) for value in affected_file_ids],
+        "started_at": _non_empty(started_at, "started_at"),
+        "ended_at": _non_empty(ended_at, "ended_at"),
+    }
+    if failure_details:
+        # Every record that could not be reversed, so a partial outcome is
+        # never reported as a bare count.
+        rollback_object["failure_details"] = [
+            dict(detail) for detail in failure_details
+        ]
+
+    return {
+        "recorded_at": recorded_at or _timestamp(),
+        "record_type": RUN_ROLLBACK_RECORD_TYPE,
+        "status": normalized_status,
+        "rollback": rollback_object,
+        "producer": {"application": str(application_name or "")},
+    }
+
+
 def log_source_file_mutation(
     ctx: Any,
     *,
@@ -471,6 +551,12 @@ def rollback_log_run(
     succeeded: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     appended_rollback_record_ids: list[int] = []
+    reversed_record_ids: set[int] = set()
+    affected_file_ids: set[str] = set()
+    filesystem_reversals = 0
+    records_removed = 0
+    run_is_clear = False
+    started_at = _timestamp()
     bind_run(audit_ctx)
     try:
         with file_manifest_session(ctx) as session:
@@ -522,7 +608,9 @@ def rollback_log_run(
                     continue
             for candidate in plan["candidates"]:
                 original = candidate["original_record"]
-                compensation = _COMPENSATIONS[candidate["action"]]
+                compensation = _resolved_compensation(
+                    candidate, selected_file
+                )
                 attempt_id: int | None = None
                 try:
                     attempt_id = _append_rollback_evidence(
@@ -563,7 +651,7 @@ def rollback_log_run(
 
                 success = {
                     "original_manifest_record_id": original["record_id"],
-                    "action": original["action"],
+                    "action": original.get("action", candidate["action"]),
                     "compensating_action": compensation.compensating_action,
                     **result,
                 }
@@ -580,9 +668,60 @@ def rollback_log_run(
                     )
                     appended_rollback_record_ids.append(final_id)
                 except (FileManifestError, LogRunRollbackError) as exc:
-                    failed.append(_failed_result(original, str(exc)))
-                    continue
+                    # The compensation already happened. Failing to write a
+                    # note about it cannot un-happen it, and abandoning the
+                    # record here is what leaves a manifest describing files
+                    # that are no longer there. The reversal stands and the
+                    # bookkeeping failure is reported.
+                    log_run_record(
+                        audit_ctx,
+                        "ERROR",
+                        message=(
+                            "Compensation succeeded but its evidence could not "
+                            f"be appended: {exc}"
+                        ),
+                        original_manifest_record_id=int(original["record_id"]),
+                        original_run_log_file=selected_file,
+                    )
                 succeeded.append(success)
+                reversed_record_ids.add(int(original["record_id"]))
+                if _is_filesystem_reversal(candidate, result):
+                    filesystem_reversals += 1
+                file_id = original.get("file_id")
+                if isinstance(file_id, str) and file_id.strip():
+                    affected_file_ids.add(file_id.strip())
+
+            # The manifest describes current state, so the records whose
+            # effects were undone leave it, together with the compensation
+            # evidence that references them. This runs under the session's own
+            # lock: entering the write boundary here would block on the lock
+            # this session already holds.
+            orphaned = {
+                int(record["record_id"])
+                for record in session.read_records()
+                if _is_run_owned_rollback(record, reversed_record_ids)
+                and _optional_positive_int(record.get("record_id"))
+            }
+            # This rollback's own compensation evidence goes too, whatever the
+            # outcome was. It exists to make one run's compensation
+            # inspectable while it happens; afterwards the audit run log holds
+            # every attempt permanently. Leaving it in the manifest means a
+            # rollback that is retried writes two rows per file every time and
+            # never reclaims them, so the store grows without bound on exactly
+            # the runs that need retrying most.
+            removable = (
+                reversed_record_ids | orphaned | set(appended_rollback_record_ids)
+            )
+            if removable:
+                records_removed = session.remove_records(removable)
+            # Whether anything of this run is left is read from the manifest,
+            # not inferred from a status. A record can survive without being a
+            # failure — an indeterminate attempt is neither reversed nor
+            # failed — and a run log is the only way to select that run again.
+            run_is_clear = not any(
+                _record_run_log_file(record) == selected_file
+                for record in session.read_records()
+            )
     except (FileManifestError, JsonlReadError, OSError, ValueError) as exc:
         raise LogRunRollbackError(str(exc)) from exc
     finally:
@@ -590,11 +729,34 @@ def rollback_log_run(
 
     status = _aggregate_status(len(succeeded), len(failed))
     rollback_run_log_file = Path(str(audit_ctx.run_log_path)).name
+    run_rollback_record_id = _write_run_rollback_summary(
+        ctx,
+        status=status,
+        rollback_run_id=str(getattr(audit_ctx, "run_id", "") or rollback_run_log_file),
+        original_run_id=selected_file,
+        records_removed=records_removed,
+        filesystem_operations_reversed=filesystem_reversals,
+        affected_file_ids=sorted(affected_file_ids),
+        started_at=started_at,
+        failed=failed,
+    )
+    # The log is retired only when the run has nothing left in the manifest.
+    # Anything still there — failed, unsupported, or indeterminate — needs this
+    # log to be selected again, so it stays.
+    deleted_run_log_files = (
+        _delete_rolled_back_run_log(source_path)
+        if status == "success" and run_is_clear
+        else []
+    )
     summary = {
         "operation": "log_run_rollback",
+        "deleted_run_log_files": deleted_run_log_files,
         "original_run_log_file": selected_file,
         "rollback_run_log_file": rollback_run_log_file,
         "status": status,
+        "records_removed": records_removed,
+        "filesystem_operations_reversed": filesystem_reversals,
+        "run_rollback_record_id": run_rollback_record_id,
         "succeeded_count": len(succeeded),
         "failed_count": len(failed),
         "unsupported_count": plan["unsupported_count"],
@@ -671,7 +833,7 @@ def _build_plan(
     mutations = [
         record
         for record in records
-        if _is_selected_mutation(record, run_log_file)
+        if _is_selected_record(record, run_log_file)
     ]
     mutations.sort(key=lambda item: int(item["record_id"]), reverse=True)
     for record in mutations:
@@ -681,6 +843,37 @@ def _build_plan(
             continue
         if record_id in indeterminate_ids:
             indeterminate.append(record_id)
+            continue
+        if record.get("record_type") != MUTATION_RECORD_TYPE:
+            # Inventory and classification describe state rather than change
+            # it, so removing the record is the whole inverse.
+            candidates.append({
+                "original_manifest_record_id": record_id,
+                "action": "record_only",
+                "compensating_action": "remove_record",
+                "original_record": record,
+            })
+            continue
+        if record.get("status") != "success":
+            # The operation did not happen, so there is nothing to undo and
+            # nothing to be careful about: compensating a failed create would
+            # delete a file this run never wrote. Only the record goes.
+            candidates.append({
+                "original_manifest_record_id": record_id,
+                "action": "record_only",
+                "compensating_action": "remove_record",
+                "original_record": record,
+            })
+            continue
+        if _is_profile_mutation(record):
+            # Dispatched on what it did, ahead of the action registry: a
+            # profile "replace" has no previous version to restore.
+            candidates.append({
+                "original_manifest_record_id": record_id,
+                "action": PROFILE_REASON,
+                "compensating_action": "reverse_profile_signatures",
+                "original_record": record,
+            })
             continue
         action = str(record["action"]).strip().lower()
         compensation = _COMPENSATIONS.get(action)
@@ -759,9 +952,14 @@ def _record_run_log_file(record: Mapping[str, Any]) -> str:
 
 
 def _is_selected_mutation(record: Mapping[str, Any], run_log_file: str) -> bool:
+    """Whether this run wrote the mutation, whatever its outcome was.
+
+    A failed mutation is selected too. Its operation never happened, so there
+    is nothing on disk to reverse — but the record it left behind is still one
+    this run introduced, and rollback leaves no mutation records from the run.
+    What it did decides how it is reversed, not whether it is selected.
+    """
     if record.get("record_type") != MUTATION_RECORD_TYPE:
-        return False
-    if record.get("status") != "success":
         return False
     if _optional_positive_int(record.get("record_id")) is None:
         return False
@@ -769,6 +967,247 @@ def _is_selected_mutation(record: Mapping[str, Any], run_log_file: str) -> bool:
     if not isinstance(action, str) or not action.strip():
         return False
     return _record_run_log_file(record) == run_log_file
+
+
+def _is_selected_record(record: Mapping[str, Any], run_log_file: str) -> bool:
+    """Whether this run introduced the record, whatever its canonical type.
+
+    Inventory and classification records have no filesystem effect, so their
+    inverse is the removal of the record and nothing more. They are selected on
+    the same evidence key as a mutation, because that key is what ties any
+    manifest record to the run that wrote it.
+    """
+    if record.get("record_type") == MUTATION_RECORD_TYPE:
+        return _is_selected_mutation(record, run_log_file)
+    if record.get("record_type") not in _SELECTABLE_RECORD_TYPES:
+        return False
+    if _optional_positive_int(record.get("record_id")) is None:
+        return False
+    return _record_run_log_file(record) == run_log_file
+
+
+def _is_profile_mutation(record: Mapping[str, Any]) -> bool:
+    """Whether this mutation wrote a shared structural profile."""
+    result = record.get("result")
+    return (
+        record.get("record_type") == MUTATION_RECORD_TYPE
+        and isinstance(result, Mapping)
+        and result.get("reason") == PROFILE_REASON
+    )
+
+
+def _is_run_owned_rollback(record: Mapping[str, Any], removed: set[int]) -> bool:
+    """Whether this compensation record belongs to a record being removed.
+
+    ``source_file_rollback`` references the mutation it compensated by
+    ``rollback.original_record_id``, and the lifecycle projection only renders
+    it while that mutation is present. Removing the mutation and leaving the
+    reference behind would strand evidence that no consumer can resolve, so the
+    compensation records for a rolled-back run leave with it.
+    """
+    if record.get("record_type") != ROLLBACK_RECORD_TYPE:
+        return False
+    rollback = record.get("rollback")
+    if not isinstance(rollback, Mapping):
+        return False
+    return _optional_positive_int(rollback.get("original_record_id")) in removed
+
+
+def _delete_rolled_back_run_log(source_path: Path) -> list[str]:
+    """Delete a fully rolled-back run's log and its companions.
+
+    The run's governed state is gone, so its log stops offering itself as
+    something to inspect or roll back again. Its results summary and sequencing
+    state go with it: neither means anything once the log they describe is not
+    there.
+
+    Only a rollback that reversed everything reaches this. A run that still has
+    records keeps its log, because that log is what a retry selects by.
+    """
+    stem = source_path.name.split(".jsonl")[0]
+    deleted: list[str] = []
+    for companion in sorted(source_path.parent.glob(f"{stem}.*")):
+        if companion.is_file() and delete_file(companion):
+            deleted.append(companion.name)
+    return deleted
+
+
+def _is_filesystem_reversal(
+    candidate: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> bool:
+    """Whether reversing this record actually changed the filesystem.
+
+    Inventory and classification records describe state without touching the
+    filesystem. Neither does a reversal that found its work already done — the
+    record is still removed, but nothing moved, and the summary must not claim
+    otherwise.
+    """
+    if str(candidate.get("action")) == "record_only":
+        return False
+    return str(result.get("outcome") or "") not in {
+        "already_absent",
+        "already_restored",
+        "unchanged",
+        "frozen",
+    }
+
+
+def _write_run_rollback_summary(
+    ctx: Any,
+    *,
+    status: str,
+    rollback_run_id: str,
+    original_run_id: str,
+    records_removed: int,
+    filesystem_operations_reversed: int,
+    affected_file_ids: Sequence[str],
+    started_at: str,
+    failed: Sequence[Mapping[str, Any]],
+) -> int | None:
+    """Append the one summary record for this rollback.
+
+    Written on every outcome, including failure, because an operator needs to
+    see that a rollback was attempted and what it managed to do. A summary that
+    cannot itself be appended is reported rather than raised: the reversals it
+    describes have already happened, and losing the record of them would be
+    worse than a rollback whose summary is missing.
+    """
+    record = serialize_run_rollback(
+        rollback_run_id=rollback_run_id,
+        original_run_id=original_run_id,
+        status=status,
+        records_removed=records_removed,
+        filesystem_operations_reversed=filesystem_operations_reversed,
+        affected_file_ids=affected_file_ids,
+        started_at=started_at,
+        ended_at=_timestamp(),
+        failure_details=failed,
+        application_name="rey_lib",
+    )
+    try:
+        return log_file_manifest_record(ctx, record)
+    except FileManifestError:
+        return None
+
+
+def _resolved_compensation(
+    candidate: Mapping[str, Any],
+    run_log_file: str,
+) -> Compensation:
+    """Return the compensation for one planned candidate.
+
+    Dispatch is on what the record did. A structural profile and a plain
+    record removal are resolved here rather than through the action registry,
+    which keys on the four filesystem verbs and would mishandle both.
+    """
+    action = str(candidate["action"])
+    if action == PROFILE_REASON:
+        return Compensation(
+            action=PROFILE_REASON,
+            compensating_action="reverse_profile_signatures",
+            validate=lambda _record: None,
+            execute=lambda record: _compensate_structural_profile(
+                record, run_log_file
+            ),
+        )
+    if action == "record_only":
+        return Compensation(
+            action="record_only",
+            compensating_action="remove_record",
+            validate=lambda _record: None,
+            execute=lambda _record: {},
+        )
+    return _COMPENSATIONS[action]
+
+
+def _compensate_structural_profile(
+    record: Mapping[str, Any],
+    run_log_file: str,
+) -> dict[str, Any]:
+    """Undo only what the rolled-back run put into a shared profile.
+
+    A profile belongs to a classification identity, not to a run: many runs
+    append to it and an operator edits it. So the inverse is neither "delete
+    the created file" nor "restore the previous version" — it is the removal of
+    exactly the signatures this run added, identified by their own attribution.
+
+    An element carrying no attribution is an operator edit and is out of reach.
+    The profile itself is removed only when nothing of anyone else's remains.
+    """
+    from rey_lib.files.json import read_json_file, write_json_file
+
+    file_section = record.get("file")
+    path_text = (
+        file_section.get("path") if isinstance(file_section, Mapping) else None
+    )
+    if not isinstance(path_text, str) or not path_text.strip():
+        raise LogRunRollbackError(
+            "Structural profile mutation carries no file.path to reverse."
+        )
+    target = Path(path_text).expanduser()
+    if not target.is_file():
+        return {"profile_path": str(target), "profile_outcome": "already_absent"}
+
+    try:
+        document = read_json_file(target, expect=dict)
+    except Exception as exc:
+        raise LogRunRollbackError(
+            f"Structural profile '{target}' could not be read: {exc}"
+        ) from exc
+
+    if document.get("frozen") is True:
+        # A frozen profile was never written by the run, so nothing is undone.
+        return {"profile_path": str(target), "profile_outcome": "frozen"}
+
+    signatures = list(document.get("exclude_signatures") or [])
+    retained = [
+        signature
+        for signature in signatures
+        if not (
+            isinstance(signature, Mapping)
+            and signature.get(PROFILE_ATTRIBUTION_FIELD) == run_log_file
+        )
+    ]
+    removed = len(signatures) - len(retained)
+
+    # The profile may be deleted only when every element left behind was this
+    # run's, and no operator edit remains to be destroyed.
+    operator_owned = any(
+        not isinstance(signature, Mapping)
+        or PROFILE_ATTRIBUTION_FIELD not in signature
+        for signature in retained
+    )
+    approval = document.get("approval_metadata")
+    operator_approved = (
+        isinstance(approval, Mapping) and bool(approval.get("approved_by"))
+    )
+    if not retained and not operator_owned and not operator_approved:
+        try:
+            target.unlink()
+        except OSError as exc:
+            raise LogRunRollbackError(
+                f"Structural profile '{target}' could not be removed: {exc}"
+            ) from exc
+        return {
+            "profile_path": str(target),
+            "profile_outcome": "removed",
+            "signatures_removed": removed,
+        }
+
+    if removed:
+        document["exclude_signatures"] = retained
+        try:
+            write_json_file(target, dict(document), mode="pretty")
+        except Exception as exc:
+            raise LogRunRollbackError(
+                f"Structural profile '{target}' could not be rewritten: {exc}"
+            ) from exc
+    return {
+        "profile_path": str(target),
+        "profile_outcome": "signatures_removed" if removed else "unchanged",
+        "signatures_removed": removed,
+    }
 
 
 def _validate_recorded_paths(
@@ -878,7 +1317,10 @@ def _append_rollback_evidence(
     fields = {
         "original_manifest_record_id": int(original["record_id"]),
         "original_run_log_file": str(original["evidence"]["run_log_file"]),
-        "original_action": str(original["action"]),
+        # Inventory and classification records describe state rather than a
+        # filesystem action, so they carry no action of their own. The
+        # compensation names what is being done to them instead.
+        "original_action": str(original.get("action") or compensation.action),
         "compensating_action": compensation.compensating_action,
         "phase": phase,
         "status": status,
@@ -924,8 +1366,12 @@ def _validate_move(record: Mapping[str, Any]) -> str | None:
 def _execute_move(record: Mapping[str, Any]) -> dict[str, Any]:
     current = Path(_record_path(record, "current_path"))
     original = Path(_record_path(record, "original_path"))
-    _move_exact(current, original)
-    return {"from_path": str(current), "to_path": str(original)}
+    outcome = _move_exact(current, original)
+    return {
+        "from_path": str(current),
+        "to_path": str(original),
+        "outcome": outcome,
+    }
 
 
 def _validate_create(record: Mapping[str, Any]) -> str | None:
@@ -935,9 +1381,10 @@ def _validate_create(record: Mapping[str, Any]) -> str | None:
 def _execute_create(record: Mapping[str, Any]) -> dict[str, Any]:
     created = Path(_record_path(record, "current_path"))
     if not created.is_file():
-        raise FileNotFoundError(f"Created file is missing: {created}")
+        # The point of reversing a create is that the file is gone. It is.
+        return {"deleted_path": str(created), "outcome": "already_absent"}
     created.unlink()
-    return {"deleted_path": str(created)}
+    return {"deleted_path": str(created), "outcome": "deleted"}
 
 
 def _validate_delete(record: Mapping[str, Any]) -> str | None:
@@ -947,8 +1394,12 @@ def _validate_delete(record: Mapping[str, Any]) -> str | None:
 def _execute_delete(record: Mapping[str, Any]) -> dict[str, Any]:
     recovery = Path(_record_path(record, "recovery_path"))
     original = Path(_record_path(record, "original_path"))
-    _move_exact(recovery, original)
-    return {"from_path": str(recovery), "to_path": str(original)}
+    outcome = _move_exact(recovery, original)
+    return {
+        "from_path": str(recovery),
+        "to_path": str(original),
+        "outcome": outcome,
+    }
 
 
 def _validate_replace(record: Mapping[str, Any]) -> str | None:
@@ -958,15 +1409,32 @@ def _validate_replace(record: Mapping[str, Any]) -> str | None:
 def _execute_replace(record: Mapping[str, Any]) -> dict[str, Any]:
     previous = Path(_record_path(record, "previous_version_path"))
     destination = Path(_record_path(record, "current_path"))
-    _move_exact(previous, destination)
-    return {"from_path": str(previous), "to_path": str(destination)}
+    outcome = _move_exact(previous, destination)
+    return {
+        "from_path": str(previous),
+        "to_path": str(destination),
+        "outcome": outcome,
+    }
 
 
-def _move_exact(source: Path, destination: Path) -> None:
+def _move_exact(source: Path, destination: Path) -> str:
+    """Put the file back, or report that it is already back.
+
+    Reversal is judged by the end state, not by the act. A rollback that is run
+    twice finds the first one's work already done, and that is the goal
+    reached, not a failure: treating it as one leaves the record behind
+    forever, describing a state that no longer exists.
+
+    The file being in neither place is a real failure. Nothing can be restored
+    and nothing may be assumed.
+    """
     if not source.is_file():
+        if destination.is_file():
+            return "already_restored"
         raise FileNotFoundError(f"Recovery source is missing: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(destination))
+    return "restored"
 
 
 def _require_paths(
@@ -1047,6 +1515,17 @@ def _path_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _count(value: Any, field: str) -> int:
+    """Validate one non-negative count for the rollback summary."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LogRunRollbackError(f"{field} must be an integer.") from exc
+    if number < 0:
+        raise LogRunRollbackError(f"{field} must not be negative.")
+    return number
+
+
 def _non_empty(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise LogRunRollbackError(f"{field} must be a non-empty string.")
@@ -1067,7 +1546,7 @@ def _optional_positive_int(value: Any) -> int | None:
 
 
 def _timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 register_file_compensation(

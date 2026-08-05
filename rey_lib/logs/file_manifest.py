@@ -35,9 +35,10 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 __all__ = [
     "FileManifestError",
@@ -204,6 +205,30 @@ class FileManifestSession:
         _validate_unsequenced_record(record)
         return _append_locked(self.path, record)
 
+    def remove_records(self, record_ids: Iterable[int]) -> int:
+        """Drop the named records, returning how many were removed.
+
+        This is the governed-rewrite counterpart of :meth:`append`, and exists
+        because the lock is not reentrant: ``file_manifest_write_boundary``
+        opens its own handle and takes the same exclusive lock, so a domain
+        owner holding a session cannot enter the boundary to rewrite. This
+        performs the rewrite under the lock the session already holds.
+
+        Removal is atomic and leaves intentional ID gaps: retained records keep
+        their IDs, and sequencing state is synchronized to the highest retained
+        ID so the next append still lands above everything that came before.
+        """
+        targets = {_removable_record_id(value) for value in record_ids}
+        if not targets:
+            return 0
+        retained = [
+            record
+            for record in self.read_records()
+            if record.get("record_id") not in targets
+        ]
+        _rewrite_locked(self.path, retained)
+        return len(targets)
+
 
 @contextmanager
 def file_manifest_session(ctx: Any) -> Iterator[FileManifestSession]:
@@ -224,13 +249,16 @@ def file_manifest_write_boundary(ctx: Any) -> Iterator[Path]:
     """Yield the governed manifest under its shared exclusive write lock.
 
     Domain owners may perform a validated atomic rewrite while this boundary is
-    held. On successful exit, shared sequencing state is synchronized to the
-    highest retained record ID, preserving intentional ID gaps.
+    held. On successful exit, sequencing is resynchronized through the one rule
+    every governed rewrite shares.
     """
     manifest_path = resolve_file_manifest_path(ctx)
     with _ManifestLock(manifest_path):
+        # Read before the domain owner rewrites: afterwards the removed ids
+        # are gone from the manifest and cannot be recovered from state.
+        previous = int(_load_state(manifest_path)[_LAST_RECORD_ID])
         yield manifest_path
-        _commit_state(manifest_path, _highest_record_id(manifest_path))
+        _commit_after_rewrite(manifest_path, previous)
 
 
 def _validate_unsequenced_record(record: Any) -> None:
@@ -283,6 +311,72 @@ def _append_locked(manifest_path: Path, record: dict[str, Any]) -> int:
     return record_id
 
 
+def _commit_after_rewrite(
+    manifest_path: Path,
+    previous_last_record_id: int,
+) -> None:
+    """Resynchronize sequencing after a governed rewrite.
+
+    Every rewrite path commits through here, so the rule cannot differ between
+    them. Retained IDs keep their identity and removed IDs leave gaps, and the
+    sequence never moves backwards: removing the highest records, or all of
+    them, must not hand their IDs to a later append. The run log stores manifest
+    IDs permanently, so a reissued ID would silently retarget evidence that is
+    already written and can never be corrected.
+
+    The previous high-water mark must be read before the rewrite. Afterwards it
+    is unrecoverable: state repair recounts it from the manifest, which no
+    longer holds the removed records.
+    """
+    _commit_state(
+        manifest_path,
+        max(_highest_record_id(manifest_path), int(previous_last_record_id)),
+    )
+
+
+def _removable_record_id(value: Any) -> int:
+    """Reject anything that is not a durable record ID before a rewrite."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise FileManifestError(
+            f"Manifest record id to remove must be an integer, got {value!r}."
+        ) from exc
+    if number < 1:
+        raise FileManifestError(
+            f"Manifest record id to remove must be positive, got {number}."
+        )
+    return number
+
+
+def _rewrite_locked(
+    manifest_path: Path,
+    retained: list[dict[str, Any]],
+) -> None:
+    """Replace the manifest with ``retained`` while the caller holds the lock.
+
+    The replacement is staged and moved into place, so a failure mid-write
+    leaves the existing manifest untouched rather than truncated.
+    """
+    from rey_lib.files import primitive_file_io
+
+    previous = int(_load_state(manifest_path)[_LAST_RECORD_ID])
+    staged = manifest_path.with_name(f"{manifest_path.name}.rewrite")
+    try:
+        staged.unlink(missing_ok=True)
+        for record in retained:
+            primitive_file_io.append_jsonl(staged, record)
+        if not retained:
+            staged.touch()
+        staged.replace(manifest_path)
+    except (OSError, TypeError, ValueError) as exc:
+        staged.unlink(missing_ok=True)
+        raise FileManifestError(
+            f"Manifest could not be rewritten at '{manifest_path}': {exc}"
+        ) from exc
+    _commit_after_rewrite(manifest_path, previous)
+
+
 class _ManifestLock:
     """Exclusive advisory lock over one manifest's complete critical section."""
 
@@ -291,7 +385,7 @@ class _ManifestLock:
         self._lock_path = manifest_lock_path(manifest_path)
         self._handle: Any = None
 
-    def __enter__(self) -> "_ManifestLock":
+    def __enter__(self) -> _ManifestLock:
         """Open the companion lock file and block until the lock is acquired."""
         try:
             # Opened in append mode so acquiring the lock never truncates it and
@@ -307,7 +401,7 @@ class _ManifestLock:
             ) from exc
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         """Release the lock and close the companion handle."""
         if self._handle is None:
             return
