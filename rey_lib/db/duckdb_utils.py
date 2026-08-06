@@ -53,6 +53,7 @@ __all__ = [
     "load_sql",
     "bulk_insert",
     "create_staging_table_if_not_exists",
+    "MEMORY_DATABASE",
     "CSV_SOURCE_RELATION",
     "TEXT_LINE_SOURCE_RELATION",
     "TEXT_LINE_COLUMN",
@@ -62,6 +63,8 @@ __all__ = [
     "register_text_line_source",
     "load_sql_file",
     "fetch_sql_rows",
+    "default_file_select_sql",
+    "file_source_expression",
 ]
 
 _logger = get_logger(__name__)
@@ -85,6 +88,15 @@ _NEUTRAL_TYPE_MAP: dict[str, str] = {
 # Pattern that matches NVARCHAR(n) / VARCHAR(n) with an explicit length.
 _NVARCHAR_RE = re.compile(r"^N?VARCHAR\s*\(\s*\d+\s*\)$", re.IGNORECASE)
 _NVARCHAR_MAX_RE = re.compile(r"^N?VARCHAR\s*\(\s*MAX\s*\)$", re.IGNORECASE)
+
+
+def _config_value(db_cfg: Any, name: str) -> Any:
+    """Read one field from a connection config, mapping or namespace alike."""
+    if db_cfg is None:
+        return None
+    if isinstance(db_cfg, dict):
+        return db_cfg.get(name)
+    return getattr(db_cfg, name, None)
 
 
 def _map_type(sql_type: str) -> str:
@@ -159,13 +171,25 @@ def init_db(db_path: Path, sql_dir: Path) -> None:
 
 def get_connection(db_cfg: Any = None) -> duckdb.DuckDBPyConnection:
     """
-    Return an open DuckDB connection.
+    Return an open DuckDB connection for ``db_cfg``.
 
-    ``db_cfg`` is accepted for interface compatibility with other backends
-    but ignored — DuckDB uses the path set by ``init_db()``.
+    This is the connection the shared adapter dispatches to, so a caller that
+    selects a DuckDB connection by name gets one the same way it would get any
+    other backend's — there is no separate path for DuckDB.
 
-    Creates the database file and its parent directories if they do not
-    exist. No schema DDL is run — that is the application's responsibility.
+    The configuration decides what is opened:
+
+    * ``database: ':memory:'`` opens a private in-memory database, which is
+      what a connection that queries files rather than storing them declares.
+    * ``path`` opens that file, creating it and its parent on first use.
+
+    With no configuration the module state set by :func:`init_db` is used, so
+    applications that initialise DuckDB once at startup are unaffected.
+
+    Parameters
+    ----------
+    db_cfg : Any
+        A connection config exposing ``database`` and/or ``path``. Optional.
 
     Returns
     -------
@@ -175,8 +199,18 @@ def get_connection(db_cfg: Any = None) -> duckdb.DuckDBPyConnection:
     Raises
     ------
     RuntimeError
-        If init_db() has not been called yet.
+        If no configuration is supplied and init_db() has not been called.
     """
+    database = str(_config_value(db_cfg, "database") or "")
+    if database == MEMORY_DATABASE:
+        return duckdb.connect(MEMORY_DATABASE, config=dict(_OFFLINE_CONNECTION_CONFIG))
+
+    configured = _config_value(db_cfg, "path") or (database or None)
+    if configured:
+        path = Path(str(configured)).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return duckdb.connect(str(path))
+
     _require_init()
     _db_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
     return duckdb.connect(str(_db_path))
@@ -444,6 +478,9 @@ _TEXT_LINE_DELIMITER = "\x1f"
 
 # Ordinary execution is local and offline. DuckDB otherwise fetches and loads
 # known extensions on demand, which is a network call from inside a query.
+# The database name a connection declares when it holds nothing of its own.
+MEMORY_DATABASE = ":memory:"
+
 _OFFLINE_CONNECTION_CONFIG: dict[str, Any] = {
     "autoinstall_known_extensions": False,
     "autoload_known_extensions":    False,
@@ -593,6 +630,81 @@ def register_text_line_source(
     _logger.debug(
         "Registered text-line relation '%s' from %s", relation_name, path
     )
+
+
+# How DuckDB reads each file format. One entry per extension, so a caller with
+# a path never has to know which reader its format needs.
+#
+# The CSV form matches register_csv_source: the first row names the columns,
+# every column is VARCHAR so a caller casts deliberately, and short rows are
+# padded rather than rejected.
+_FILE_SOURCE_EXPRESSIONS: dict[str, str] = {
+    ".csv":     "read_csv({literal}, header = true, all_varchar = true, null_padding = true)",
+    ".jsonl":   "read_json_auto({literal}, format = 'newline_delimited')",
+    ".ndjson":  "read_json_auto({literal}, format = 'newline_delimited')",
+    ".json":    "read_json_auto({literal})",
+    ".parquet": "read_parquet({literal})",
+    # Spreadsheets are deliberately absent. read_xlsx lives in DuckDB's excel
+    # extension, which is not in the default build and which these connections
+    # do not load — they run offline. A workbook reaches the Workbench as the
+    # CSV it is converted to upstream.
+}
+
+
+def _sql_string_literal(value: str) -> str:
+    """Quote one value as a SQL string, doubling any quote it contains."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def file_source_expression(file_path: Path | str) -> str:
+    """Return the DuckDB source expression that reads ``file_path``.
+
+    The reader is chosen by extension, matched case-insensitively.
+
+    Raises
+    ------
+    ConfigError
+        If no path is given, or its format has no DuckDB reader.
+    """
+    text = str(file_path or "").strip()
+    if not text:
+        raise ConfigError("A file path is required to build a DuckDB query.")
+
+    path = Path(text).expanduser()
+    suffix = path.suffix.lower()
+    expression = _FILE_SOURCE_EXPRESSIONS.get(suffix)
+    if expression is None:
+        supported = ", ".join(sorted(_FILE_SOURCE_EXPRESSIONS))
+        raise ConfigError(
+            f"DuckDB cannot read '{path.name}': {suffix or 'no extension'} is "
+            f"not a supported file format. Supported: {supported}."
+        )
+    return expression.format(literal=_sql_string_literal(str(path)))
+
+
+def default_file_select_sql(file_path: Path | str) -> str:
+    """Return the default read-only query for one file.
+
+    This is the statement a surface opens a file on. It is the one place that
+    knows a `.parquet` needs read_parquet and a `.jsonl` needs newline-delimited
+    JSON settings, so no caller builds file SQL of its own.
+
+    Parameters
+    ----------
+    file_path : Path | str
+        The file to read. Its extension selects the reader.
+
+    Returns
+    -------
+    str
+        ``SELECT * FROM <source expression>``.
+
+    Raises
+    ------
+    ConfigError
+        If no path is given, or its format has no DuckDB reader.
+    """
+    return f"SELECT * FROM {file_source_expression(file_path)}"
 
 
 def load_sql_file(sql_path: Path | str) -> str:

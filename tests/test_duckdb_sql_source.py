@@ -422,3 +422,185 @@ def test_csv_module_owns_no_duckdb_or_sql_execution() -> None:
     ).read_text(encoding="utf-8")
     assert "duckdb" not in csv_source.lower()
     assert "read_csv_auto" not in csv_source
+
+
+# ---------------------------------------------------------------------------
+# Connections opened through the shared dispatcher
+# ---------------------------------------------------------------------------
+
+
+def test_a_memory_connection_opens_from_its_configuration(tmp_path: Path) -> None:
+    """A caller selects a connection by name; the provider reads the config.
+
+    Every backend is reached through the one adapter, so DuckDB has to open
+    from a connection config like the others rather than from module state a
+    caller had to initialise first.
+    """
+    from types import SimpleNamespace
+
+    from rey_lib.db.duckdb_utils import MEMORY_DATABASE, get_connection
+
+    conn = get_connection(SimpleNamespace(provider="duckdb", database=MEMORY_DATABASE))
+    try:
+        assert conn.execute("SELECT 42").fetchall() == [(42,)]
+        # In memory: nothing was written anywhere.
+        assert all(not row[2] for row in conn.execute("PRAGMA database_list").fetchall())
+    finally:
+        conn.close()
+
+
+def test_a_file_connection_opens_the_configured_path(tmp_path: Path) -> None:
+    """A path in the configuration is the database, created on first use."""
+    from types import SimpleNamespace
+
+    from rey_lib.db.duckdb_utils import get_connection
+
+    target = tmp_path / "nested" / "warehouse.duckdb"
+    conn = get_connection(SimpleNamespace(provider="duckdb", path=str(target)))
+    try:
+        conn.execute("CREATE TABLE kept (a INTEGER)")
+    finally:
+        conn.close()
+    assert target.exists()
+
+
+def test_the_shared_adapter_dispatches_to_duckdb() -> None:
+    """The caller names a connection; nothing above the adapter names a driver."""
+    from types import SimpleNamespace
+
+    from rey_lib.db.db_adapter import DBAdapter
+    from rey_lib.db.duckdb_utils import MEMORY_DATABASE
+
+    adapter = DBAdapter()
+    conn = adapter.get_connection(
+        SimpleNamespace(provider="duckdb", database=MEMORY_DATABASE)
+    )
+    try:
+        columns, rows = adapter.query_rows(conn, "SELECT 1 AS answer")
+        assert columns == ["answer"]
+        assert rows == [{"answer": 1}]
+    finally:
+        conn.close()
+
+
+def test_module_state_still_serves_a_caller_that_initialised_it(
+    tmp_path: Path,
+) -> None:
+    """init_db callers are unaffected: with no config, module state is used."""
+    from rey_lib.db.duckdb_utils import get_connection, init_db
+
+    sql_dir = tmp_path / "sql"
+    sql_dir.mkdir()
+    init_db(tmp_path / "app.duckdb", sql_dir)
+    conn = get_connection()
+    try:
+        assert conn.execute("SELECT 1").fetchall() == [(1,)]
+    finally:
+        conn.close()
+    assert (tmp_path / "app.duckdb").exists()
+
+
+# ---------------------------------------------------------------------------
+# The default query for a file
+# ---------------------------------------------------------------------------
+
+
+def test_each_format_gets_the_reader_duckdb_needs_for_it() -> None:
+    """One helper knows which reader a file's extension calls for."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    assert default_file_select_sql("/data/holdings.csv") == (
+        "SELECT * FROM read_csv('/data/holdings.csv', header = true, "
+        "all_varchar = true, null_padding = true)"
+    )
+    assert default_file_select_sql("/data/records.json") == (
+        "SELECT * FROM read_json_auto('/data/records.json')"
+    )
+    assert default_file_select_sql("/data/shapes.parquet") == (
+        "SELECT * FROM read_parquet('/data/shapes.parquet')"
+    )
+
+
+def test_newline_delimited_json_is_read_as_such() -> None:
+    """A record-per-line file is not one JSON document, and says so."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    for name in ("run.jsonl", "run.ndjson"):
+        sql = default_file_select_sql(f"/data/{name}")
+        assert "read_json_auto(" in sql
+        assert "format = 'newline_delimited'" in sql
+
+
+def test_the_extension_is_matched_whatever_its_case() -> None:
+    """A file named in capitals is the same format as one in lower case."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    assert "read_parquet(" in default_file_select_sql("/data/SHAPES.PARQUET")
+    assert "read_csv(" in default_file_select_sql("/data/Holdings.Csv")
+
+
+def test_a_path_with_spaces_survives_intact() -> None:
+    """A path is a value, not something to be reformatted."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    sql = default_file_select_sql("/Users/joe/Rey Apps/data/May 26 holdings.csv")
+    assert "'/Users/joe/Rey Apps/data/May 26 holdings.csv'" in sql
+
+
+def test_a_quote_in_the_path_cannot_end_the_literal() -> None:
+    """A single quote is doubled, so a path can never become SQL."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    sql = default_file_select_sql("/data/O'Brien/report'.csv")
+    assert "'/data/O''Brien/report''.csv'" in sql
+    # The statement still has exactly one opening and one closing quote pair
+    # around the literal: nothing escaped out of it.
+    assert sql.count("'") % 2 == 0
+
+
+def test_an_unreadable_format_fails_clearly() -> None:
+    """A legacy workbook is refused with what would work instead."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    with pytest.raises(ConfigError, match=r"\.xls is not a supported file format"):
+        default_file_select_sql("/data/legacy.xls")
+    # Spreadsheets are out of scope for now: a workbook is converted to CSV
+    # upstream, and DuckDB's excel extension is not loaded by these connections.
+    with pytest.raises(ConfigError, match=r"\.xlsx is not a supported file format"):
+        default_file_select_sql("/data/book.xlsx")
+    with pytest.raises(ConfigError, match="not a supported file format"):
+        default_file_select_sql("/data/notes")
+
+
+def test_no_path_is_refused() -> None:
+    """An empty path produces no statement rather than a broken one."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    for empty in ("", "   ", None):
+        with pytest.raises(ConfigError, match="file path is required"):
+            default_file_select_sql(empty)  # type: ignore[arg-type]
+
+
+def test_the_default_query_actually_runs(tmp_path: Path) -> None:
+    """Proof against DuckDB, not just against the string it produced."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    csv = _write(tmp_path, "holdings.csv", "Acct,Name\nA1,Alice\nA2,Bob\n")
+    jsonl = _write(tmp_path, "run.jsonl", '{"a": 1}\n{"a": 2}\n')
+
+    with open_memory_connection() as conn:
+        assert fetch_sql_rows(conn, default_file_select_sql(csv)).rows == [
+            ("A1", "Alice"), ("A2", "Bob"),
+        ]
+        assert fetch_sql_rows(conn, default_file_select_sql(jsonl)).rows == [
+            (1,), (2,),
+        ]
+
+
+def test_a_quoted_path_still_runs(tmp_path: Path) -> None:
+    """The escaping holds against a real file, not only in the string."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    awkward = _write(tmp_path, "O'Brien holdings.csv", "Acct\nA1\n")
+    with open_memory_connection() as conn:
+        assert fetch_sql_rows(conn, default_file_select_sql(awkward)).rows == [("A1",)]
