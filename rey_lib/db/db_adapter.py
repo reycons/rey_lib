@@ -256,6 +256,27 @@ class DBAdapter:
             )
         return backend.execute_named_sql(conn, sql_text, named_params, result_mode)
 
+    def query_rows(
+        self,
+        conn: Any,
+        sql_text: str,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Run one read query and return its columns with at most ``limit`` rows."""
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql_text)
+            columns = [str(column[0]) for column in (cursor.description or [])]
+            values = cursor.fetchmany(max(1, int(limit))) if columns else []
+            return columns, [dict(zip(columns, row)) for row in values]
+        except Exception as exc:
+            raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
+        finally:
+            if cursor is not None and hasattr(cursor, "close"):
+                cursor.close()
+
     # ------------------------------------------------------------------
     # Stored procedures
     # ------------------------------------------------------------------
