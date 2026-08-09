@@ -1,8 +1,9 @@
 """
 PostgreSQL connection and execution layer.
 
-Owns all PostgreSQL connections and control database calls. No raw psycopg2
-calls are permitted outside this module.
+Owns all PostgreSQL connections and control database calls. SQLAlchemy Core
+owns generic execution; raw psycopg2 cursors remain only for approved catalog
+and DDL fallbacks.
 
 Connection details are passed as a Namespace object resolved from ctx at
 call time — this module has no knowledge of ctx structure or application
@@ -18,7 +19,7 @@ match the PostgreSQL distinction between functions and procedures.
 Public API
 ----------
 get_connection(db_cfg)
-    Return an open psycopg2 connection.
+    Return an internal-compatible Rey connection handle.
 execute_function(conn, routine, named_params)
     Call a PostgreSQL function via SELECT and return the scalar result.
 execute_procedure(conn, routine, named_params)
@@ -30,7 +31,6 @@ is_truncation_error(exc)
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Optional
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
@@ -43,6 +43,7 @@ __all__ = [
     "get_object_ddl",
     "execute_function",
     "execute_procedure",
+    "query_rows",
     "is_truncation_error",
 ]
 
@@ -71,7 +72,7 @@ def _psycopg2() -> Any:
 
 def get_connection(db_cfg: Any) -> Any:
     """
-    Open a psycopg2 connection from a connection config Namespace.
+    Open a SQLAlchemy-backed connection from a connection config Namespace.
 
     Parameters
     ----------
@@ -81,8 +82,8 @@ def get_connection(db_cfg: Any) -> Any:
 
     Returns
     -------
-    psycopg2.connection
-        Open database connection with autocommit disabled.
+    ReyConnection
+        Connection-like Rey handle with SQLAlchemy kept internal.
 
     Raises
     ------
@@ -91,7 +92,7 @@ def get_connection(db_cfg: Any) -> Any:
     DatabaseError
         If the connection attempt fails.
     """
-    psycopg2 = _psycopg2()
+    _psycopg2()
 
     host     = getattr(db_cfg, "host",     None)
     port     = getattr(db_cfg, "port",     5432)
@@ -107,15 +108,17 @@ def get_connection(db_cfg: Any) -> Any:
         )
 
     try:
-        conn = psycopg2.connect(
-            host=host,
+        from rey_lib.db._sqlalchemy import open_connection  # noqa: PLC0415
+
+        return open_connection(
+            "postgres",
+            "postgresql+psycopg2",
+            host=str(host),
             port=int(port),
-            dbname=database,
-            user=username,
-            password=password,
+            database=str(database),
+            username=str(username),
+            password=str(password),
         )
-        conn.autocommit = False
-        return conn
     except Exception as exc:
         raise DatabaseError(
             f"postgres_utils: failed to connect to '{database}' on '{host}': {exc}"
@@ -141,7 +144,7 @@ def execute_function(
     Parameters
     ----------
     conn : Any
-        Open psycopg2 connection.
+        Open Rey connection handle.
     routine : str
         Fully-qualified function name (e.g. control.f_start_batch).
     named_params : dict[str, Any]
@@ -157,21 +160,17 @@ def execute_function(
     DatabaseError
         If execution fails.
     """
+    from rey_lib.db._sqlalchemy import core_connection
+
+    serialised = _serialise_jsonb(named_params)
+    placeholders = ", ".join(f":{key}" for key in serialised)
+    sql = f"SELECT {routine}({placeholders})"
     try:
-        cursor = conn.cursor()
-        serialised = _serialise_jsonb(named_params)
+        from sqlalchemy import text
 
-        if serialised:
-            placeholders = ", ".join(f"%({k})s" for k in serialised)
-            sql = f"SELECT {routine}({placeholders})"
-            cursor.execute(sql, serialised)
-        else:
-            cursor.execute(f"SELECT {routine}()")
-
-        row = cursor.fetchone()
+        row = core_connection(conn).execute(text(sql), serialised).first()
         conn.commit()
         return row[0] if row else None
-
     except Exception as exc:
         conn.rollback()
         raise DatabaseError(
@@ -192,7 +191,7 @@ def execute_procedure(
     Parameters
     ----------
     conn : Any
-        Open psycopg2 connection.
+        Open Rey connection handle.
     routine : str
         Fully-qualified procedure name (e.g. control.p_end_batch).
     named_params : dict[str, Any]
@@ -203,19 +202,17 @@ def execute_procedure(
     DatabaseError
         If execution fails.
     """
+    from rey_lib.db._sqlalchemy import core_connection
+
+    serialised = _serialise_jsonb(named_params)
+    placeholders = ", ".join(f":{key}" for key in serialised)
+    sql = f"CALL {routine}({placeholders})"
     try:
-        cursor = conn.cursor()
-        serialised = _serialise_jsonb(named_params)
+        from sqlalchemy import text
 
-        if serialised:
-            placeholders = ", ".join(f"%({k})s" for k in serialised)
-            sql = f"CALL {routine}({placeholders})"
-            cursor.execute(sql, serialised)
-        else:
-            cursor.execute(f"CALL {routine}()")
-
+        core_connection(conn).execute(text(sql), serialised)
         conn.commit()
-
+        return
     except Exception as exc:
         conn.rollback()
         raise DatabaseError(
@@ -245,7 +242,7 @@ def run_sql(
     Parameters
     ----------
     conn : Any
-        Open psycopg2 connection.
+        Open Rey connection handle.
     sql_text : str
         SQL statement(s) to execute.
     params : Optional[list[Any]]
@@ -262,10 +259,12 @@ def run_sql(
     DatabaseError
         If execution fails. The transaction is rolled back before raising.
     """
+    from rey_lib.db._sqlalchemy import core_connection
+
     try:
-        cursor = conn.cursor()
-        cursor.execute(sql_text, params if params else None)
-        rowcount = cursor.rowcount
+        parameters = tuple(params) if params else None
+        result = core_connection(conn).exec_driver_sql(sql_text, parameters)
+        rowcount = result.rowcount
         conn.commit()
         return rowcount
     except Exception as exc:
@@ -275,8 +274,24 @@ def run_sql(
         ) from exc
 
 
-# Named bind parameter ``:name`` (not a ``::type`` cast) -> psycopg ``%(name)s``.
-_NAMED_PARAM_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
+def query_rows(
+    conn: Any,
+    sql_text: str,
+    *,
+    limit: int = 1_000,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Execute one bounded read query and normalize its result."""
+    from rey_lib.db._sqlalchemy import core_connection
+
+    try:
+        from sqlalchemy import text
+
+        result = core_connection(conn).execute(text(sql_text))
+        columns = [str(column) for column in result.keys()]
+        values = result.fetchmany(max(1, int(limit))) if columns else []
+        return columns, [dict(zip(columns, row)) for row in values]
+    except Exception as exc:
+        raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
 
 
 def execute_named_sql(
@@ -288,14 +303,13 @@ def execute_named_sql(
     """
     Execute parameter-bound SQL text and return a value per ``result_mode``.
 
-    Named ``:param`` placeholders (never ``::type`` casts) are bound safely via
-    psycopg's ``%(name)s`` mechanism — values are always bound, never
-    interpolated into the SQL string.
+    Named ``:param`` placeholders (never ``::type`` casts) are bound safely by
+    SQLAlchemy Core; values are always bound and never interpolated.
 
     Parameters
     ----------
     conn : Any
-        Open psycopg2 connection.
+        Open Rey connection handle.
     sql_text : str
         SQL statement with ``:name`` bind placeholders.
     named_params : dict[str, Any]
@@ -316,38 +330,43 @@ def execute_named_sql(
         that returns no row / more than one value.
     """
     serialised = _serialise_jsonb(named_params or {})
-    bound_sql = _NAMED_PARAM_RE.sub(lambda m: f"%({m.group(1)})s", sql_text)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(bound_sql, serialised)
+    from rey_lib.db._sqlalchemy import core_connection
 
+    try:
+        from sqlalchemy import text
+
+        result = core_connection(conn).execute(text(sql_text), serialised)
         if result_mode == "no_return":
             conn.commit()
             return None
         if result_mode == "scalar_result":
-            row = cursor.fetchone()
+            row = result.first()
             conn.commit()
             if row is None:
-                raise DatabaseError("execute_named_sql: scalar_result expected a "
-                                    "row but none was returned.")
+                raise DatabaseError(
+                    "execute_named_sql: scalar_result expected a row but none was returned."
+                )
             if len(row) > 1:
-                raise DatabaseError("execute_named_sql: scalar_result expected one "
-                                    f"value but {len(row)} were returned.")
+                raise DatabaseError(
+                    "execute_named_sql: scalar_result expected one "
+                    f"value but {len(row)} were returned."
+                )
             return row[0]
         if result_mode == "dataset_result":
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = [dict(zip(columns, record)) for record in cursor.fetchall()]
+            rows = [dict(row) for row in result.mappings().all()]
             conn.commit()
             return rows
-
-        raise DatabaseError(f"execute_named_sql: unsupported result_mode '{result_mode}'.")
-
+        raise DatabaseError(
+            f"execute_named_sql: unsupported result_mode '{result_mode}'."
+        )
     except DatabaseError:
         conn.rollback()
         raise
     except Exception as exc:
         conn.rollback()
-        raise DatabaseError(f"postgres_utils: execute_named_sql failed: {exc}") from exc
+        raise DatabaseError(
+            f"postgres_utils: execute_named_sql failed: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +388,9 @@ def is_truncation_error(exc: Exception) -> bool:
     bool
         True if the exception is SQLSTATE 22001.
     """
-    pgcode = getattr(exc, "pgcode", None) or getattr(
-        getattr(exc, "pgerror", None), "pgcode", None
+    original = getattr(exc, "orig", exc)
+    pgcode = getattr(original, "pgcode", None) or getattr(
+        getattr(original, "pgerror", None), "pgcode", None
     )
     return pgcode == _TRUNCATION_SQLSTATE
 
@@ -382,16 +402,11 @@ def is_truncation_error(exc: Exception) -> bool:
 
 def get_current_database(conn: Any) -> str:
     """Return the connected PostgreSQL database name."""
-    dbname = getattr(getattr(conn, "info", None), "dbname", None)
-    if dbname:
-        return str(dbname)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT current_database()")
-        row = cursor.fetchone()
-        return str(row[0]) if row else "postgres"
-    finally:
-        cursor.close()
+    from rey_lib.db._sqlalchemy import core_connection
+    from sqlalchemy import text
+
+    value = core_connection(conn).execute(text("SELECT current_database()")).scalar()
+    return str(value) if value else "postgres"
 
 
 def list_database_objects(conn: Any, database: str | None = None) -> list[dict[str, Any]]:
@@ -856,6 +871,33 @@ def _postgres_table_ddl(conn: Any, schema: str, table: str) -> str:
     ``format_type`` yields the exact column type, including length and
     precision modifiers.
     """
+    from rey_lib.db._sqlalchemy import inspect_schema, is_sqlalchemy_connection
+
+    if is_sqlalchemy_connection(conn):
+        metadata = inspect_schema(conn, schema)
+        table_metadata = next(
+            (item for item in metadata["tables"] if item["name"] == table), None
+        )
+        if table_metadata is None:
+            raise DatabaseError(f"postgres_utils: table not found: {schema}.{table}")
+        columns = []
+        for column in table_metadata["columns"]:
+            nullable = "NULL" if column["nullable"] else "NOT NULL"
+            default = (
+                f" DEFAULT {column['default']}"
+                if column["default"] is not None
+                else ""
+            )
+            col_name = str(column["name"]).replace('"', '""')
+            columns.append(
+                f'    "{col_name}" {column["type"]}{default} {nullable}'
+            )
+        return (
+            f'CREATE TABLE "{schema}"."{table}" (\n'
+            + ",\n".join(columns)
+            + "\n);"
+        )
+
     cursor = conn.cursor()
     try:
         cursor.execute(

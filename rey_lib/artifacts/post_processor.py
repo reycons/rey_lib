@@ -10,11 +10,34 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from rey_lib.artifacts.engines import get_engine
+from rey_lib.artifacts.engines import ArtifactDiagnostic, get_engine
 from rey_lib.artifacts.errors import ArtifactProcessingError
 from rey_lib.logs import get_logger
 
 _logger = get_logger(__name__)
+
+
+def lint_artifact(
+    content: str,
+    artifact_type: str,
+    config: Optional[dict[str, Any]] = None,
+) -> list[ArtifactDiagnostic]:
+    """Check an artifact through its configured engine without rewriting it."""
+    if not artifact_type or not config:
+        return []
+    spec = config.get(artifact_type)
+    if not isinstance(spec, dict) or not spec.get("enabled", False):
+        return []
+    engine_name = str(spec.get("engine") or "")
+    engine = get_engine(engine_name)
+    lint = getattr(engine, "lint", None) if engine is not None else None
+    if not callable(lint):
+        raise ArtifactProcessingError(
+            "Artifact linting failed. Artifact type: "
+            f"{artifact_type}. Reason: configured engine '{engine_name}' does not "
+            "provide lint diagnostics."
+        )
+    return lint(content, artifact_type, spec)
 
 
 def process_artifact(

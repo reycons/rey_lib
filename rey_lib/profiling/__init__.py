@@ -15,6 +15,7 @@ from rey_lib.profiling.file_profiler import (
     profile_rows,
 )
 from rey_lib.profiling.profile_validation import validate_csv_profile
+from rey_lib.profiling.profile_redaction import redact_profile
 from rey_lib.profiling.structural_analysis import (
     ANALYSIS_LIMITS,
     AnalysisLimits,
@@ -33,6 +34,7 @@ __all__ = [
     "normalized_header",
     "same_header_errors",
     "validate_csv_profile",
+    "redact_profile",
     "ANALYSIS_LIMITS",
     "AnalysisLimits",
     "StructuralAnalysis",

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from rey_lib.artifacts.engines.base import ArtifactEngine
+from rey_lib.artifacts.engines.base import ArtifactDiagnostic, ArtifactEngine
 from rey_lib.artifacts.engines.rey_loader_engine import ReyLoaderValidateEngine
 from rey_lib.artifacts.engines.rey_yaml_engine import ReyYamlValidateEngine
 from rey_lib.artifacts.engines.sqlfluff_engine import SqlFluffEngine
 
-__all__ = ["ArtifactEngine", "get_engine", "register_engine"]
+__all__ = ["ArtifactDiagnostic", "ArtifactEngine", "get_engine", "register_engine"]
 
 _ENGINES: dict[str, ArtifactEngine] = {}
 

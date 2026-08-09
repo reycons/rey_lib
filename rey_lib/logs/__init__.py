@@ -23,6 +23,13 @@ from rey_lib.logs.file_manifest import (
     manifest_state_path,
     resolve_file_manifest_path,
 )
+from rey_lib.logs.profile_library import (
+    ProfileLibraryError,
+    append_profile_record,
+    lookup_profile_record,
+    read_profile_records,
+    resolve_profile_library_path,
+)
 from rey_lib.logs.file_hierarchy import (
     FileHierarchyError,
     FileHierarchyFeed,
@@ -139,6 +146,11 @@ __all__ = [
     "manifest_lock_path",
     "manifest_state_path",
     "resolve_file_manifest_path",
+    "ProfileLibraryError",
+    "append_profile_record",
+    "lookup_profile_record",
+    "read_profile_records",
+    "resolve_profile_library_path",
     "FileHierarchyError",
     "FileHierarchyFeed",
     "FileHierarchyFile",

@@ -38,6 +38,14 @@ class TestSampleIndices:
         idx = sample_indices(1000, 30)
         assert 28 <= len(idx) <= 30
 
+    def test_large_population_is_bounded_and_not_first_n(self) -> None:
+        idx = sample_indices(1000, 30)
+        assert len(idx) <= 30
+        assert idx != list(range(30))
+        assert idx == sample_indices(1000, 30)
+        assert min(idx) == 0
+        assert max(idx) == 999
+
     def test_parallel_application(self) -> None:
         """Same indices applied to lines and dicts stay aligned."""
         lines = [f"line_{i}" for i in range(1000)]

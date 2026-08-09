@@ -192,6 +192,26 @@ def test_shared_json_loader_accepts_encoded_content_with_markdown_escape() -> No
     }
 
 
+def test_shared_artifact_extractor_accepts_existing_sql_envelope() -> None:
+    content, notes = extract_artifact_envelope(
+        '```json\n{"sql": "SELECT 1"}\n```',
+        "sql",
+    )
+
+    assert content == "SELECT 1"
+    assert notes == []
+
+
+def test_shared_artifact_extractor_unwraps_nested_sql_envelope() -> None:
+    content, notes = extract_artifact_envelope(
+        {"sql": '{"sql": "SELECT 2"}'},
+        "sql",
+    )
+
+    assert content == "SELECT 2"
+    assert notes == []
+
+
 def test_shared_json_loader_completes_only_truncated_final_string_and_object() -> None:
     raw = (
         '{"subject":"Result","markdown":"# Failed\\n\\n'

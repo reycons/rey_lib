@@ -264,6 +264,15 @@ class DBAdapter:
         limit: int = 1_000,
     ) -> tuple[list[str], list[dict[str, Any]]]:
         """Run one read query and return its columns with at most ``limit`` rows."""
+        try:
+            provider = self._provider_for_conn(conn)
+        except ConfigError:
+            provider = ""
+        if provider in {"postgres", "mysql"}:
+            backend = _backend(provider)
+            if hasattr(backend, "query_rows"):
+                return backend.query_rows(conn, sql_text, limit=limit)
+
         cursor = None
         try:
             cursor = conn.cursor()

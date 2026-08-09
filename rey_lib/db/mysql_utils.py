@@ -16,7 +16,7 @@ from typing import Any, Optional
 import mysql.connector
 from mysql.connector import Error as MySQLError
 
-from rey_lib.errors.error_utils import DatabaseError, ConfigError
+from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.logs import get_logger
 
 __all__ = [
@@ -25,8 +25,6 @@ __all__ = [
 	"get_current_database",
 	"list_database_objects",
 	"get_object_ddl",
-	"execute",
-	"fetch",
 	"fetch_dicts",
 	"bulk_insert",
 	"call_proc",
@@ -77,43 +75,48 @@ def init_db(sql_dir: Path) -> None:
 	)
 
 
-def get_connection(db_cfg: Any) -> mysql.connector.MySQLConnection:
+def get_connection(db_cfg: Any) -> Any:
 	timeout = int(getattr(db_cfg, "timeout", 30))
 	return _connect_with_retry(db_cfg, timeout)
 
 
-def execute(
-	conn: mysql.connector.MySQLConnection,
-	sql_name: str,
-	params: Optional[list[Any]] = None,
-) -> Any:
-	sql = load_sql(sql_name)
-	return _run_cursor(conn, sql, params, error_context=f"Query '{sql_name}'")
-
-
-def fetch(
-	conn: mysql.connector.MySQLConnection,
+def fetch_dicts(
+	conn: Any,
 	sql_name: str,
 	params: Optional[list[Any]] = None,
 ) -> list[dict[str, Any]]:
-	cursor = execute(conn, sql_name, params)
+	from rey_lib.db._sqlalchemy import core_connection
+
+	sql = load_sql(sql_name)
+	try:
+		result = core_connection(conn).exec_driver_sql(sql, tuple(params or []))
+		return [dict(row) for row in result.mappings().all()]
+	except Exception as exc:
+		raise DatabaseError(f"Query '{sql_name}' failed: {exc}") from exc
+
+
+def query_rows(
+	conn: Any,
+	sql_text: str,
+	*,
+	limit: int = 1_000,
+) -> tuple[list[str], list[dict[str, Any]]]:
+	"""Execute one bounded read query and normalize its result."""
+	from rey_lib.db._sqlalchemy import core_connection
 
 	try:
-		return cursor.fetchall()
-	finally:
-		cursor.close()
+		from sqlalchemy import text
 
-
-def fetch_dicts(
-	conn: mysql.connector.MySQLConnection,
-	sql_name: str,
-	params: Optional[list[Any]] = None,
-) -> list[dict[str, Any]]:
-	return fetch(conn, sql_name, params)
+		result = core_connection(conn).execute(text(sql_text))
+		columns = [str(column) for column in result.keys()]
+		values = result.fetchmany(max(1, int(limit))) if columns else []
+		return columns, [dict(zip(columns, row)) for row in values]
+	except Exception as exc:
+		raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
 
 
 def bulk_insert(
-	conn: mysql.connector.MySQLConnection,
+	conn: Any,
 	schema: str,
 	table: str,
 	rows: list[dict[str, Any]],
@@ -129,53 +132,36 @@ def bulk_insert(
 	for col in columns:
 		_validate_identifier(col, "column")
 
-	col_list = ", ".join(quote_identifier(col) for col in columns)
-	placeholders = ", ".join(["%s"] * len(columns))
-
-	sql = (
-		f"INSERT INTO {quote_identifier(schema)}.{quote_identifier(table)} "
-		f"({col_list}) VALUES ({placeholders})"
-	)
-
 	value_rows = _prepare_bulk_insert_rows(rows, columns)
 
-	cursor = conn.cursor()
+	from rey_lib.db._sqlalchemy import core_connection
 
 	try:
-		cursor.executemany(sql, value_rows)
+		from sqlalchemy import column, insert, table as sql_table
 
-		row_count = len(rows)
-
-		_logger.debug(
-			"bulk_insert: %d row(s) → %s.%s",
-			row_count,
-			schema,
-			table,
+		statement = insert(
+			sql_table(table, *(column(name) for name in columns), schema=schema)
 		)
-
-		return row_count
-
-	except MySQLError as exc:
-		_logger.error("bulk_insert failed table=%s.%s", schema, table)
-		_logger.error("bulk_insert columns=%s", columns)
-
-		if value_rows:
-			for col, val in zip(columns, value_rows[0]):
-				_logger.error("bulk_insert first_row column=%s value=%r", col, val)
-
+		parameter_rows = [
+			{column_name: value for column_name, value in zip(columns, value_row)}
+			for value_row in value_rows
+		]
+		core_connection(conn).execute(statement, parameter_rows)
+		return len(rows)
+	except Exception as exc:
 		raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
-
-	finally:
-		cursor.close()
 
 
 def call_proc(
-	conn: mysql.connector.MySQLConnection,
+	conn: Any,
 	proc_name: str,
 	params: Optional[list[Any]] = None,
 ) -> Any:
+	from rey_lib.db._sqlalchemy import is_sqlalchemy_connection, raw_dbapi_connection
+
 	p = params or []
-	cursor = conn.cursor(dictionary=True)
+	driver_conn = raw_dbapi_connection(conn) if is_sqlalchemy_connection(conn) else conn
+	cursor = driver_conn.cursor(dictionary=True)
 
 	try:
 		cursor.callproc(proc_name, p)
@@ -200,22 +186,15 @@ def call_proc_with_output(
 
 
 def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
-	sql = """
-		SELECT
-			column_name
-		FROM information_schema.columns
-		WHERE table_schema = %s
-			AND table_name = %s
-		ORDER BY ordinal_position
-	"""
+	from rey_lib.db._sqlalchemy import inspect_schema
 
-	cursor = conn.cursor()
-
-	try:
-		cursor.execute(sql, [schema, table])
-		return [row[0] for row in cursor.fetchall()]
-	finally:
-		cursor.close()
+	metadata = inspect_schema(conn, schema)
+	table_metadata = next(
+		(item for item in metadata["tables"] if item["name"] == table), None
+	)
+	if table_metadata is None:
+		return []
+	return [str(column["name"]) for column in table_metadata["columns"]]
 
 
 def quote_identifier(value: str) -> str:
@@ -235,7 +214,7 @@ def load_sql(name: str) -> str:
 
 
 def create_staging_table_if_not_exists(
-	conn: mysql.connector.MySQLConnection,
+	conn: Any,
 	schema: str,
 	table: str,
 	column_defs: list[tuple[str, str]],
@@ -257,24 +236,18 @@ def create_staging_table_if_not_exists(
 		f")"
 	)
 
-	cursor = conn.cursor()
+	from rey_lib.db._sqlalchemy import core_connection
 
 	try:
-		cursor.execute(ddl)
+		core_connection(conn).exec_driver_sql(ddl)
 		conn.commit()
-
 		_logger.info("Staging table ready: %s.%s", schema, table)
-
 		return True
-
-	except MySQLError as exc:
+	except Exception as exc:
 		conn.rollback()
 		raise DatabaseError(
 			f"Failed to create staging table '{schema}.{table}': {exc}"
 		) from exc
-
-	finally:
-		cursor.close()
 
 
 def is_truncation_error(exc: Exception) -> bool:
@@ -286,38 +259,28 @@ def _require_init() -> None:
 		raise RuntimeError("mysql_utils.init_db() must be called before using the database.")
 
 
-def _run_cursor(
-	conn: mysql.connector.MySQLConnection,
-	sql: str,
-	params: Optional[list[Any]],
-	error_context: str,
-) -> Any:
-	cursor = conn.cursor(dictionary=True)
-
-	try:
-		cursor.execute(sql, params or [])
-		_logger.debug("_run_cursor: %s", error_context)
-		return cursor
-
-	except MySQLError as exc:
-		cursor.close()
-		raise DatabaseError(f"{error_context} failed: {exc}") from exc
-
-
-def _connect_with_retry(db_cfg: Any, timeout: int) -> mysql.connector.MySQLConnection:
+def _connect_with_retry(db_cfg: Any, timeout: int) -> Any:
 	last_exc: Exception | None = None
 
 	for attempt in range(1, _MAX_CONNECT_ATTEMPTS + 1):
 		try:
-			conn = mysql.connector.connect(
+			from rey_lib.db._sqlalchemy import open_connection
+
+			conn = open_connection(
+				"mysql",
+				"mysql+mysqlconnector",
 				host=str(db_cfg.host),
 				port=int(getattr(db_cfg, "port", 3306)),
 				database=str(db_cfg.database),
-				user=str(getattr(db_cfg, "user", "")),
+				username=str(getattr(db_cfg, "user", "")),
 				password=str(getattr(db_cfg, "password", "")),
-				connection_timeout=timeout,
-				autocommit=False,
-				allow_local_infile=bool(getattr(db_cfg, "allow_local_infile", False)),
+				connect_args={
+					"connection_timeout": timeout,
+					"autocommit": False,
+					"allow_local_infile": bool(
+						getattr(db_cfg, "allow_local_infile", False)
+					),
+				},
 			)
 
 			_logger.debug(
@@ -328,7 +291,7 @@ def _connect_with_retry(db_cfg: Any, timeout: int) -> mysql.connector.MySQLConne
 
 			return conn
 
-		except MySQLError as exc:
+		except Exception as exc:
 			last_exc = exc
 
 			if attempt < _MAX_CONNECT_ATTEMPTS:
@@ -379,15 +342,16 @@ def _prepare_bulk_insert_rows(
 
 
 def _is_mysql_error(exc: Exception, error_code: int) -> bool:
-	if not isinstance(exc, MySQLError):
+	original = getattr(exc, "orig", exc)
+	if not isinstance(original, MySQLError):
 		return False
 
-	errno = getattr(exc, "errno", None)
+	errno = getattr(original, "errno", None)
 
 	if errno == error_code:
 		return True
 
-	return str(error_code) in str(exc)
+	return str(error_code) in str(original)
 
 
 def _validate_identifier(name: str, label: str) -> None:
@@ -398,83 +362,124 @@ def _validate_identifier(name: str, label: str) -> None:
 		)
 
 
-def get_current_database(conn: mysql.connector.MySQLConnection) -> str:
+def get_current_database(conn: Any) -> str:
 	"""Return the current MySQL database."""
-	cursor = conn.cursor()
-	try:
-		cursor.execute("SELECT DATABASE()")
-		row = cursor.fetchone()
-		return str(row[0]) if row and row[0] else ""
-	finally:
-		cursor.close()
+	from rey_lib.db._sqlalchemy import core_connection
+	from sqlalchemy import text
+
+	value = core_connection(conn).execute(text("SELECT DATABASE()")).scalar()
+	return str(value) if value else ""
 
 
 def list_database_objects(
-	conn: mysql.connector.MySQLConnection,
+	conn: Any,
 	database: str | None = None,
 ) -> list[dict[str, Any]]:
 	"""Return exportable MySQL objects and discoverable dependencies."""
 	db_name = database or get_current_database(conn)
+	from rey_lib.db._sqlalchemy import inspect_schema
+
+	metadata = inspect_schema(conn, db_name)
+	objects: list[dict[str, Any]] = [
+		{
+			"database": db_name,
+			"object_type": "schema",
+			"schema": db_name,
+			"name": db_name,
+			"dependencies": [],
+		}
+	]
+	for table_metadata in metadata["tables"]:
+		table_name = str(table_metadata["name"])
+		dependency = {
+			"object_type": "table",
+			"schema": db_name,
+			"name": table_name,
+		}
+		objects.append(
+			{
+				"database": db_name,
+				"object_type": "table",
+				"schema": db_name,
+				"name": table_name,
+				"dependencies": [],
+			}
+		)
+		for index in table_metadata["indexes"]:
+			name = str(index.get("name") or "")
+			if name:
+				objects.append(
+					{
+						"database": db_name,
+						"object_type": "index",
+						"schema": db_name,
+						"name": name,
+						"dependencies": [dict(dependency)],
+					}
+				)
+		constraints = [table_metadata["primary_key"]]
+		constraints.extend(table_metadata["foreign_keys"])
+		constraints.extend(table_metadata["unique_constraints"])
+		for constraint in constraints:
+			name = str(constraint.get("name") or "")
+			if name:
+				objects.append(
+					{
+						"database": db_name,
+						"object_type": "constraint",
+						"schema": db_name,
+						"name": name,
+						"dependencies": [dict(dependency)],
+					}
+				)
+	for view in metadata["views"]:
+		objects.append(
+			{
+				"database": db_name,
+				"object_type": "view",
+				"schema": db_name,
+				"name": str(view["name"]),
+				"dependencies": [],
+			}
+		)
+
+	# Inspector has no routines/triggers API; retain the narrow catalog fallback.
 	cursor = conn.cursor(dictionary=True)
 	try:
 		cursor.execute(
 			"""
-			SELECT 'schema' AS object_type, schema_name AS schema_name, schema_name AS object_name
-			FROM information_schema.schemata
-			WHERE schema_name = %s
-			UNION ALL
-			SELECT 'table', table_schema, table_name
-			FROM information_schema.tables
-			WHERE table_schema = %s AND table_type = 'BASE TABLE'
-			UNION ALL
-			SELECT 'view', table_schema, table_name
-			FROM information_schema.views
-			WHERE table_schema = %s
-			UNION ALL
-			SELECT CASE routine_type WHEN 'PROCEDURE' THEN 'procedure' ELSE 'function' END,
-				routine_schema,
-				routine_name
-			FROM information_schema.routines
-			WHERE routine_schema = %s
+			SELECT CASE routine_type WHEN 'PROCEDURE' THEN 'procedure' ELSE 'function' END AS object_type,
+				routine_schema AS schema_name, routine_name AS object_name
+			FROM information_schema.routines WHERE routine_schema = %s
 			UNION ALL
 			SELECT 'trigger', trigger_schema, trigger_name
-			FROM information_schema.triggers
-			WHERE trigger_schema = %s
-			UNION ALL
-			SELECT 'index', table_schema, index_name
-			FROM information_schema.statistics
-			WHERE table_schema = %s
-			GROUP BY table_schema, index_name
-			UNION ALL
-			SELECT 'constraint', constraint_schema, constraint_name
-			FROM information_schema.table_constraints
-			WHERE constraint_schema = %s
-			GROUP BY constraint_schema, constraint_name
-			ORDER BY object_type, schema_name, object_name
+			FROM information_schema.triggers WHERE trigger_schema = %s
 			""",
-			[db_name, db_name, db_name, db_name, db_name, db_name, db_name],
+			[db_name, db_name],
 		)
-		rows = cursor.fetchall()
+		for row in cursor.fetchall():
+			objects.append(
+				{
+					"database": db_name,
+					"object_type": str(row["object_type"]),
+					"schema": str(row["schema_name"]),
+					"name": str(row["object_name"]),
+					"dependencies": [],
+				}
+			)
 	finally:
 		cursor.close()
 
-	deps = _mysql_dependencies(conn, db_name)
-	objects: list[dict[str, Any]] = []
-	for row in rows:
-		obj_type = str(row["object_type"])
-		schema_name = str(row["schema_name"])
-		obj_name = str(row["object_name"])
-		key = f"{obj_type}:{schema_name}.{obj_name}"
-		objects.append(
-			{
-				"database": db_name,
-				"object_type": obj_type,
-				"schema": schema_name,
-				"name": obj_name,
-				"dependencies": deps.get(key, []),
-			}
-		)
-	return objects
+	fallback_dependencies = _mysql_dependencies(conn, db_name)
+	for obj in objects:
+		key = f"{obj['object_type']}:{obj['schema']}.{obj['name']}"
+		if key in fallback_dependencies:
+			obj["dependencies"] = fallback_dependencies[key]
+	unique = {
+		(str(obj["object_type"]), str(obj["schema"]), str(obj["name"])): obj
+		for obj in objects
+	}
+	return [unique[key] for key in sorted(unique)]
 
 
 def get_object_ddl(

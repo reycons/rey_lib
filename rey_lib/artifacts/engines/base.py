@@ -8,7 +8,20 @@ by name and calls ``process``.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypedDict, runtime_checkable
+
+
+class ArtifactDiagnostic(TypedDict, total=False):
+    """One engine-neutral finding produced while checking an artifact."""
+
+    message: str
+    severity: str
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    code: str
+    source: str
 
 
 @runtime_checkable

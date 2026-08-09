@@ -237,6 +237,35 @@ def extract_artifact_envelope(
                 f"The raw response was preserved for review. JSON parse error: {exc}"
             ) from exc
 
+    expected_type = (artifact_type or "").lower()
+    if (
+        isinstance(envelope, dict)
+        and CONTENT_FIELD not in envelope
+        and expected_type == "sql"
+        and isinstance(envelope.get("sql"), str)
+    ):
+        # SQL callers historically request the narrow {"sql": "..."}
+        # envelope. Normalize that established contract here so it receives
+        # the same fence stripping and strict artifact validation.
+        content = envelope["sql"]
+        for _depth in range(3):
+            text = _strip_outer_fence(str(content).strip())
+            try:
+                nested = loads_llm_json(text)
+            except (json.JSONDecodeError, ValueError):
+                content = text
+                break
+            if isinstance(nested, dict) and isinstance(nested.get("sql"), str):
+                content = nested["sql"]
+                continue
+            content = text
+            break
+        envelope = {
+            ARTIFACT_TYPE_FIELD: "sql",
+            CONTENT_FIELD: content,
+            NOTES_FIELD: envelope.get(NOTES_FIELD, []),
+        }
+
     if not isinstance(envelope, dict) or CONTENT_FIELD not in envelope:
         raise ParseFailure(
             "LLM response extraction failed. The JSON response did not contain "
@@ -244,14 +273,14 @@ def extract_artifact_envelope(
         )
 
     content = envelope[CONTENT_FIELD]
-    if (artifact_type or "").lower() == "json":
+    if expected_type == "json":
         # For json artifacts the content may be a JSON-serialisable value.
         content = content if isinstance(content, str) else json.dumps(content, indent=2)
     elif not isinstance(content, str):
         content = str(content)
     content = content.strip()
 
-    _validate_content(content, (artifact_type or "").lower())
+    _validate_content(content, expected_type)
 
     notes = envelope.get(NOTES_FIELD)
     return content, (notes if isinstance(notes, list) else [])

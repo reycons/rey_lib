@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rey_lib.db._sqlalchemy import ReyConnection
 from rey_lib.db.postgres_utils import execute_named_sql
 from rey_lib.db.procedure_map import (
     execute_mapped_routine,
@@ -412,29 +413,22 @@ def test_execute_sql_text_delegates_to_adapter_run_sql(tmp_path: Path):
     assert "secret_value" not in json.dumps(records[0])
 
 
-def test_execute_sql_text_runs_through_postgres_cursor(tmp_path: Path):
-    # End-to-end through the real DBAdapter + postgres_utils: a psycopg2-shaped
-    # connection exposes cursor()/commit()/rollback() and NO .execute(). This
-    # proves the old 'connection object has no attribute execute' failure is gone.
+def test_execute_sql_text_runs_through_postgres_core_connection(tmp_path: Path):
+    # End-to-end through the real DBAdapter + postgres_utils: SQLAlchemy remains
+    # behind the Rey connection handle and the application sees no execute API.
     ctx = _log_ctx(tmp_path)
 
-    class FakeCursor:
+    class FakeResult:
+        rowcount = 3
+
+    class FakeCore:
         def __init__(self) -> None:
             self.executed: list[str] = []
-            self.rowcount = 3
-
-        def execute(self, sql: str, _params=None) -> None:
-            self.executed.append(sql)
-
-    class FakePgConn:
-        provider = "postgres"
-
-        def __init__(self) -> None:
-            self.cur = FakeCursor()
             self.commits = 0
 
-        def cursor(self) -> FakeCursor:
-            return self.cur
+        def exec_driver_sql(self, sql: str, _params=None) -> FakeResult:
+            self.executed.append(sql)
+            return FakeResult()
 
         def commit(self) -> None:
             self.commits += 1
@@ -442,7 +436,8 @@ def test_execute_sql_text_runs_through_postgres_cursor(tmp_path: Path):
         def rollback(self) -> None:  # pragma: no cover — success path
             raise AssertionError("rollback must not run on success")
 
-    conn = FakePgConn()
+    core = FakeCore()
+    conn = ReyConnection("postgres", object(), core)
     assert not hasattr(conn, "execute")  # guard: no DuckDB-style connection API
     execute_sql_text(
         ctx,
@@ -454,8 +449,8 @@ def test_execute_sql_text_runs_through_postgres_cursor(tmp_path: Path):
         safe_to_preview=True,
     )
 
-    assert conn.cur.executed == ["select secret_value from source"]
-    assert conn.commits == 1
+    assert core.executed == ["select secret_value from source"]
+    assert core.commits == 1
     records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
     assert len(records) == 1
     assert records[0]["status"] == "success"
@@ -543,23 +538,25 @@ class _FakeCursor:
         self.description = description
         self.executed: list[tuple] = []
 
-    def execute(self, sql, params=None):
-        self.executed.append((sql, params))
-
-    def fetchone(self):
+    def first(self):
         return self._one
 
-    def fetchall(self):
-        return list(self._all)
+    def mappings(self):
+        return self
+
+    def all(self):
+        columns = [item[0] for item in (self.description or [])]
+        return [dict(zip(columns, row)) for row in self._all]
 
 
-class _FakeConn:
+class _FakeCore:
     def __init__(self, cursor):
         self._cursor = cursor
         self.committed = False
         self.rolledback = False
 
-    def cursor(self):
+    def execute(self, sql, params=None):
+        self._cursor.executed.append((str(sql), params))
         return self._cursor
 
     def commit(self):
@@ -569,6 +566,25 @@ class _FakeConn:
         self.rolledback = True
 
 
+class _FakeEngine:
+    def dispose(self):
+        pass
+
+
+class _FakeConn(ReyConnection):
+    def __init__(self, cursor):
+        self.core = _FakeCore(cursor)
+        super().__init__("postgres", _FakeEngine(), self.core)
+
+    @property
+    def committed(self):
+        return self.core.committed
+
+    @property
+    def rolledback(self):
+        return self.core.rolledback
+
+
 def test_named_sql_scalar_binds_named_params():
     cur = _FakeCursor(one=(42,))
     conn = _FakeConn(cur)
@@ -576,7 +592,7 @@ def test_named_sql_scalar_binds_named_params():
                               {"run_id": "R", "name": "N"}, "scalar_result")
     assert value == 42
     sql, params = cur.executed[0]
-    assert sql == "SELECT f(%(run_id)s, %(name)s)"
+    assert sql == "SELECT f(:run_id, :name)"
     assert params == {"run_id": "R", "name": "N"}
     assert conn.committed
 
@@ -584,7 +600,7 @@ def test_named_sql_scalar_binds_named_params():
 def test_named_sql_leaves_type_casts_alone():
     cur = _FakeCursor(one=(1,))
     execute_named_sql(_FakeConn(cur), "SELECT (:x)::text", {"x": "1"}, "scalar_result")
-    assert cur.executed[0][0] == "SELECT (%(x)s)::text"
+    assert cur.executed[0][0] == "SELECT (:x)::text"
 
 
 def test_named_sql_scalar_no_row_fails_closed():

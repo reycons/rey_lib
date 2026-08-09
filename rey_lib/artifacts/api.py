@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from rey_lib.artifacts.config import artifact_config_from_ctx
 from rey_lib.artifacts.config_validation import validate_artifact_processing
-from rey_lib.artifacts.post_processor import process_artifact
+from rey_lib.artifacts.post_processor import lint_artifact, process_artifact
 
 __all__ = [
     "artifact_config_from_ctx",
+    "lint_artifact",
     "process_artifact",
     "validate_artifact_processing",
 ]
