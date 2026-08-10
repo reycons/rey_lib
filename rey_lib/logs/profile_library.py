@@ -354,6 +354,9 @@ def _validate_structure(structure: Mapping[str, Any]) -> None:
     distribution = structure.get("distribution")
     if not isinstance(distribution, Mapping):
         raise ProfileLibraryError("distribution must be a JSON object.")
+    # distribution says what the dataset looks like. Read instructions belong to
+    # loader_hints, and the csv subsection restated both, so all three are
+    # refused here rather than allowed to drift apart in two places.
     moved = sorted(
         set(distribution)
         & {
@@ -363,6 +366,9 @@ def _validate_structure(structure: Mapping[str, Any]) -> None:
             "detected_header",
             "header",
             "llm_hints",
+            "csv",
+            "delimiter",
+            "encoding",
         }
     )
     if moved:

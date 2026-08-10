@@ -240,6 +240,27 @@ def test_retired_metadata_is_rejected(tmp_path: Path) -> None:
         append_profile_record(ctx, retired_distribution)
 
 
+def test_distribution_rejects_the_retired_csv_subsection(tmp_path: Path) -> None:
+    """distribution says what the dataset looks like, and says it once.
+
+    The csv subsection restated the row and column counts, the delimiter and the
+    encoding, each of which already had a home. A stored record carrying it, or
+    carrying a read instruction that belongs to loader_hints, is refused rather
+    than left to disagree with itself.
+    """
+    ctx = _ctx(tmp_path)
+    with_subsection = _record()
+    with_subsection["structure"]["distribution"]["csv"] = {"delimiter": ","}
+    with pytest.raises(ProfileLibraryError, match="csv"):
+        append_profile_record(ctx, with_subsection)
+
+    for instruction in ("delimiter", "encoding"):
+        duplicated = _record()
+        duplicated["structure"]["distribution"][instruction] = ","
+        with pytest.raises(ProfileLibraryError, match=instruction):
+            append_profile_record(ctx, duplicated)
+
+
 def test_canonical_header_must_match_columns(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     mismatch = _record()

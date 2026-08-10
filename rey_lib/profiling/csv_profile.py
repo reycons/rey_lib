@@ -7,9 +7,13 @@ steps (staging/final DDL, ``rey_loader`` YAML) have better facts and guess less.
 
 Enrichment is purely additive: every existing profile key is preserved so the
 current DDL/loader contracts keep working. The new information includes a
-``profile_version``, a structured ``csv`` section, per-column hints (ordinal,
-normalised/safe SQL names, ``type_hint``, value-pattern hints), and the
-``loader_hints`` and ``llm_hints`` sections.
+``profile_version``, per-column hints (ordinal, normalised/safe SQL names,
+``type_hint``, value-pattern hints), and the ``loader_hints`` and ``llm_hints``
+sections.
+
+Two sections, two questions. The distribution facts say what the dataset looks
+like; ``loader_hints`` says how to read it. Delimiter, encoding, quoting and the
+header flag are read instructions and are stated once, in ``loader_hints``.
 
 CSV-only by design — fixed-width and Excel are out of scope and are not touched.
 This module performs no I/O and no LLM calls; pattern detection lives in
@@ -142,7 +146,6 @@ def enrich_csv_profile(
     profile = dict(base_profile)
     redacted_set = set(profile.get("redacted_columns") or [])
     columns = list(profile.get("columns") or [])
-    profiled_row_count = int(profile.get("row_count", len(redacted_rows)))
 
     warnings: list[str] = []
     enriched_columns: list[dict[str, Any]] = []
@@ -180,24 +183,22 @@ def enrich_csv_profile(
     profile["file_count"] = file_count
     profile["columns"] = enriched_columns
 
-    csv_section = {
-        "encoding": encoding,
-        "delimiter": delimiter,
-        "quote_char": quote_char,
-        "has_header": has_header,
-        "column_count": int(profile.get("column_count", len(columns))),
-        "profiled_row_count": profiled_row_count,
-        "blank_line_count": blank_line_count,
-        "ragged_row_count": ragged_row_count,
-    }
+    # What the dataset looks like. Counts belong here beside row_count and
+    # column_count, which already state the same kind of fact; the retired csv
+    # subsection restated those two and nothing else that was not a read
+    # instruction.
+    profile["blank_line_count"] = blank_line_count
+    profile["ragged_row_count"] = ragged_row_count
     if combined_row_count is not None:
-        csv_section["combined_profiled_row_count"] = combined_row_count
-    profile["csv"] = csv_section
+        profile["combined_profiled_row_count"] = combined_row_count
 
+    # How to read it. Delimiter, encoding, quoting and the header flag are read
+    # instructions, so they are stated once, here, and nowhere else.
     profile["loader_hints"] = {
         "file_type": "CSV",
         "delimiter": delimiter,
         "encoding": encoding,
+        "quote_char": quote_char,
         "header": has_header,
     }
     # Combined profiles are named for the feed; single-file profiles keep the

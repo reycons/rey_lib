@@ -23,8 +23,11 @@ _logger = get_logger(__name__)
 
 _REQUIRED_TOP_LEVEL = (
     "source",
-    "csv",
     "columns",
+    # Dataset facts that used to live in the retired csv subsection. Named here
+    # so promoting them cannot silently drop them.
+    "blank_line_count",
+    "ragged_row_count",
     "loader_hints",
     "llm_hints",
     "profile_scope",
