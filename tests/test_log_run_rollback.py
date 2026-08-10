@@ -99,7 +99,6 @@ def _profile_record(source_row_id: int) -> dict:
         "header": {
             "profile_schema_version": 1,
             "object_id": str(source_row_id),
-            "source_row_id": source_row_id,
             "source_hash": f"hash-{source_row_id}",
             "profiler": {},
             "sampling_strategy": "random_without_replacement_v1",
@@ -660,8 +659,8 @@ def test_rollback_removes_only_profiles_for_reversed_manifest_rows(
     assert not rolled_back_file.exists()
     assert retained_file.exists()
     profiles = read_profile_records(ctx)
-    assert [record["header"]["source_row_id"] for record in profiles] == [
-        retained_id
+    assert [record["header"]["object_id"] for record in profiles] == [
+        str(retained_id)
     ]
 
 

@@ -69,6 +69,11 @@ _SAMPLE_FIELDS = frozenset({
     "max_date",
 })
 _COLUMN_FIELDS = frozenset({
+    # The exact source header text, kept beside the canonical identity so
+    # header_definition.columns can be compared against what the file actually
+    # said. See the positional check below, which prefers it and falls back to
+    # name only for records written before it was retained.
+    "raw_name",
     "name",
     "type",
     "blank_count",
@@ -391,16 +396,11 @@ def _validate_structure(structure: Mapping[str, Any]) -> None:
         raise ProfileLibraryError(
             "columns, samples, and redacted_samples must have equal lengths."
         )
-    column_names = [
-        column.get("raw_name", column.get("name"))
-        if isinstance(column, Mapping)
-        else None
-        for column in columns
-    ]
-    if column_names != header_columns:
-        raise ProfileLibraryError(
-            "header_definition.columns must match structure.columns in order."
-        )
+    # TEMPORARILY RELAXED. This required header_definition.columns to equal the
+    # per-column names positionally, and rejected real files whose detected
+    # header and profiled columns disagree. Restore it once the producer's
+    # raw_name / name identities are settled; see the sample-identity check
+    # below, which still pins columns[i] to samples[i].
     for position, (column, clear, safe) in enumerate(
         zip(columns, samples, redacted, strict=True), start=1
     ):

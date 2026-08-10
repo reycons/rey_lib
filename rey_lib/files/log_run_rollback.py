@@ -798,6 +798,10 @@ def _remove_profiles_for_source_rows(ctx: Any, source_row_ids: set[int]) -> int:
             f"Profile records could not be read from '{target}': {exc}"
         ) from exc
 
+    # object_id is the manifest row of the profiled object, carried as text.
+    # The reversed manifest record ids are integers, so the comparison is made
+    # in the canonical text space rather than parsing the header back to int.
+    reversed_object_ids = {str(value) for value in source_row_ids}
     retained: list[dict[str, Any]] = []
     removed = 0
     for record in records:
@@ -806,12 +810,12 @@ def _remove_profiles_for_source_rows(ctx: Any, source_row_ids: set[int]) -> int:
             raise LogRunRollbackError(
                 "Stored profile record must contain a canonical header object."
             )
-        source_row_id = _optional_positive_int(header.get("source_row_id"))
-        if source_row_id is None:
+        object_id = str(header.get("object_id") or "").strip()
+        if not object_id:
             raise LogRunRollbackError(
-                "Stored profile header requires a positive source_row_id."
+                "Stored profile header requires a non-empty object_id."
             )
-        if source_row_id in source_row_ids:
+        if object_id in reversed_object_ids:
             removed += 1
         else:
             retained.append(record)
