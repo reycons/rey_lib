@@ -133,9 +133,13 @@ def append_profile_record(ctx: Any, record: Mapping[str, Any]) -> str:
         "structure": content["structure"],
     }
     target = resolve_profile_library_path(ctx)
-    try:
-        from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
+    # Imported inside the function because rey_lib.files imports rey_lib.logs, so
+    # a module-scope import would cycle. It is kept outside the try because the
+    # except clause names JsonlReadError: binding it inside would turn any import
+    # failure into an UnboundLocalError that hides the real cause.
+    from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
 
+    try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with file_manifest_session(ctx):
             current = (
@@ -162,9 +166,11 @@ def read_profile_records(ctx: Any) -> list[dict[str, Any]]:
     target = resolve_profile_library_path(ctx)
     if not target.exists():
         return []
-    try:
-        from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file
+    # Function-local and outside the try for the reasons given in
+    # append_profile_record.
+    from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file
 
+    try:
         with file_manifest_session(ctx):
             records = [dict(item.record) for item in read_jsonl_file(target)]
         for record in records:
@@ -198,9 +204,11 @@ def remove_profile_records(ctx: Any, *, log_record_ids: Iterable[str]) -> int:
     target = resolve_profile_library_path(ctx)
     if not target.exists():
         return 0
-    try:
-        from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
+    # Function-local and outside the try for the reasons given in
+    # append_profile_record.
+    from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
 
+    try:
         with file_manifest_session(ctx):
             current = [dict(item.record) for item in read_jsonl_file(target)]
             for record in current:

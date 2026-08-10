@@ -26,9 +26,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import jmespath
-from jmespath.exceptions import JMESPathError
-
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import open_text_file
 from rey_lib.files.primitive_file_io import render_jsonl_line, write_jsonl_file
@@ -177,6 +174,13 @@ def search_jsonl_file(
     """
     if not isinstance(expression, str) or not expression.strip():
         raise JsonlReadError("JMESPath expression must be a non-empty string.")
+    # jmespath is imported here rather than at module scope because searching is
+    # the only thing in this module that needs it. Importing it at module scope
+    # made every reader of read_jsonl_file/write_jsonl_file — including the
+    # profile library, which never searches — require the package to import.
+    import jmespath
+    from jmespath.exceptions import JMESPathError
+
     try:
         compiled = jmespath.compile(expression)
     except JMESPathError as exc:
