@@ -31,8 +31,27 @@ def _current_state() -> dict:
         "status": "profile_available",
         "object_id": "file-1",
         "record": {
-            "redacted_profile": {"columns": [{"distinct_sample": ["TOKEN"]}]},
-            "unredacted_profile": {"columns": [{"distinct_sample": ["Alice"]}]},
+            "header": {"object_id": "file-1", "source_hash": "hash-1"},
+            "structure": {
+                "header_definition": {
+                    "row_number": 1,
+                    "columns": ["Customer Name"],
+                },
+                "distribution": {},
+                "columns": [{"name": "Customer Name", "type": "text"}],
+                "redacted_samples": [
+                    {
+                        "column": "Customer Name",
+                        "sample_values": [{"value": "TOKEN", "count": 5}],
+                    }
+                ],
+                "samples": [
+                    {
+                        "column": "Customer Name",
+                        "sample_values": [{"value": "Alice", "count": 5}],
+                    }
+                ],
+            },
         },
     }
 
@@ -64,7 +83,13 @@ def test_configured_default_selects_redacted_profile() -> None:
             _ctx(), "profile-1", "file-1", "hash-1"
         )
 
-    assert resolved == {"columns": [{"distinct_sample": ["TOKEN"]}]}
+    assert resolved["structure"]["redacted_samples"] == [
+        {
+            "column": "Customer Name",
+            "sample_values": [{"value": "TOKEN", "count": 5}],
+        }
+    ]
+    assert "samples" not in resolved["structure"]
     lookup.assert_called_once_with(ANY, "file-1", "hash-1")
 
 
@@ -80,7 +105,13 @@ def test_authorized_unredacted_selection_is_explicit() -> None:
             "hash-1",
             profile_access="unredacted",
         )
-    assert resolved == {"columns": [{"distinct_sample": ["Alice"]}]}
+    assert resolved["structure"]["samples"] == [
+        {
+            "column": "Customer Name",
+            "sample_values": [{"value": "Alice", "count": 5}],
+        }
+    ]
+    assert "redacted_samples" not in resolved["structure"]
 
 
 def test_disallowed_session_selection_is_rejected_before_lookup() -> None:
@@ -109,8 +140,8 @@ def test_available_record_never_falls_back_between_presentations() -> None:
     state = {
         "status": "profile_available",
         "object_id": "file-1",
-        "record": {"unredacted_profile": {"secret": "Alice"}},
+        "record": {"structure": {"samples": [{"secret": "Alice"}]}},
     }
     with patch("rey_lib.llm.profiles.lookup_profile_record", return_value=state):
-        with pytest.raises(ValidationFailure, match="redacted_profile"):
+        with pytest.raises(ValidationFailure, match="redacted_samples"):
             resolve_profile_for_llm(_ctx(), "profile-1", "file-1", "hash-1")

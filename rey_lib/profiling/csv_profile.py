@@ -22,6 +22,7 @@ enrich_csv_profile   Return a CSV-enriched copy of a base profile.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -236,7 +237,6 @@ def _enrich_column(
     enriched = dict(col)
     type_non_blank = [v for v in original_values if v.strip()]
     sample_source = redacted_values if redacted else original_values
-    non_blank_sample = [v for v in sample_source if v.strip()]
 
     normalized = vp.normalize_name(raw_name)
     occurrence = seen_names.get(normalized, 0)
@@ -252,7 +252,10 @@ def _enrich_column(
     enriched["normalized_name"] = resolved
     enriched["safe_sql_name"] = vp.safe_sql_name(resolved)
     enriched["non_blank_count"] = len(type_non_blank)
-    enriched["sample_values"] = _sample_values(sample_source, max_sample_values)
+    enriched["sample_values"] = _ranked_value_samples(
+        sample_source,
+        max_sample_values,
+    )
 
     base_type = str(col.get("type", "text"))
     type_hint, hints = _detect_hints(raw_name, type_non_blank, base_type)
@@ -350,19 +353,25 @@ def _detect_hints(
     return ("text" if base_type not in _ALLOWED_TYPE_HINTS else base_type), hints
 
 
-def _sample_values(values: list[str], limit: int) -> list[str]:
-    """Return up to ``limit`` distinct values preserving first-seen order."""
-    seen: list[str] = []
-    seen_set: set[str] = set()
+def _ranked_value_samples(
+    values: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Rank populated values by count, then their existing first-seen order."""
+    counts: Counter[str] = Counter()
+    first_seen: dict[str, int] = {}
     for value in values:
         token = value.strip()
-        if not token or token in seen_set:
+        if not token:
             continue
-        seen.append(token)
-        seen_set.add(token)
-        if len(seen) >= limit:
-            break
-    return seen
+        if token not in first_seen:
+            first_seen[token] = len(first_seen)
+        counts[token] += 1
+    ranked = sorted(counts, key=lambda token: (-counts[token], first_seen[token]))
+    return [
+        {"value": token, "count": counts[token]}
+        for token in ranked[:max(limit, 0)]
+    ]
 
 
 def _numeric_digits(values: list[str]) -> dict[str, Any]:

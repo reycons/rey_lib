@@ -1,80 +1,133 @@
-"""Focused tests for profile-only representative-value redaction."""
+"""Focused tests for canonical profile-sample redaction."""
 
 from __future__ import annotations
 
-import json
+from copy import deepcopy
+from datetime import datetime
 
 from rey_lib.profiling import redact_profile
+from rey_lib.profiling import profile_redaction
 
 
-def _profile() -> dict:
-    return {
-        "source": "customers.csv",
-        "profile_version": "csv_v1",
-        "llm_hints": {"recommended_source_name": "customers"},
-        "redacted_columns": [],
-        "columns": [
-            {
-                "name": "customer_name",
-                "raw_name": "customer_name",
-                "ordinal": 1,
-                "type": "text",
-                "distinct_sample": ["ACME", "BETA"],
-                "sample_values": ["ACME", "BETA"],
-                "constant_value": "ACME",
-                "null_like_values": ["UNKNOWN"],
-                "min_length": 4,
-            },
-            {
-                "name": "vendor_name",
-                "raw_name": "vendor_name",
-                "ordinal": 2,
-                "type": "text",
-                "distinct_sample": ["ACME"],
-                "sample_values": ["ACME"],
-                "min_numeric": 1.0,
-                "max_numeric": 9.0,
-                "min_date": "2026-01-01",
-                "max_date": "2026-12-31",
-                "max_length": 4,
-            },
-        ],
-    }
+def _samples() -> list[dict]:
+    return [
+        {
+            "column": "Customer Name",
+            "sample_values": [
+                {"value": "ACME", "count": 7},
+                {"value": "BETA", "count": 3},
+            ],
+            "constant_value": "ACME",
+            "null_like_values": ["UNKNOWN"],
+        },
+        {
+            "column": "Trade Date",
+            "sample_values": [{"value": "2026-03-04", "count": 4}],
+            "min_numeric": 1.0,
+            "max_numeric": 9.0,
+            "min_date": "2026-01-01",
+            "max_date": "2026-12-31",
+        },
+    ]
 
 
-def test_profile_redaction_is_column_scoped_and_consistent() -> None:
-    original = _profile()
+def test_profile_redaction_preserves_shape_and_does_not_mutate_input(
+    monkeypatch,
+) -> None:
+    original = _samples()
+    before = deepcopy(original)
+    monkeypatch.setattr(profile_redaction.secrets, "choice", lambda values: values[-1])
+    monkeypatch.setattr(profile_redaction.secrets, "randbelow", lambda _limit: 0)
+
     redacted = redact_profile(original)
 
-    first = redacted["columns"][0]
-    second = redacted["columns"][1]
-    assert first["distinct_sample"][0] == first["sample_values"][0]
-    assert first["distinct_sample"][0] == first["constant_value"]
-    assert first["distinct_sample"][0] != second["distinct_sample"][0]
-    assert "ACME" not in json.dumps(redacted)
-    assert "BETA" not in json.dumps(redacted)
-    assert "UNKNOWN" not in json.dumps(redacted)
-    assert original == _profile()
+    assert original == before
+    assert [set(item) for item in redacted] == [set(item) for item in original]
+    assert [item["column"] for item in redacted] == [
+        "Customer Name",
+        "Trade Date",
+    ]
+    assert redacted[0]["sample_values"] == [
+        {"value": "ZZZZ", "count": 7},
+        {"value": "ZZZZ", "count": 3},
+    ]
+    assert redacted[0]["constant_value"] == "ZZZZ"
+    assert redacted[0]["null_like_values"] == ["ZZZZZZZ"]
 
 
-def test_only_enumerated_column_value_fields_are_transformed() -> None:
-    redacted = redact_profile(_profile())
+def test_numeric_and_date_values_are_randomized_in_their_existing_fields(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(profile_redaction.secrets, "choice", lambda values: values[-1])
+    monkeypatch.setattr(profile_redaction.secrets, "randbelow", lambda _limit: 0)
 
-    assert redacted["source"] == "customers.csv"
-    assert redacted["llm_hints"] == {"recommended_source_name": "customers"}
-    assert redacted["columns"][0]["name"] == "customer_name"
-    assert redacted["columns"][0]["type"] == "text"
-    assert redacted["columns"][0]["min_length"] == 4
-    assert redacted["columns"][1]["max_length"] == 4
+    redacted = redact_profile(_samples())[1]
+
+    assert redacted["sample_values"] == [
+        {"value": "1900-01-01", "count": 4}
+    ]
+    assert redacted["min_numeric"] == 9.9
+    assert redacted["max_numeric"] == 9.9
+    assert redacted["min_date"] == "1900-01-01"
+    assert redacted["max_date"] == "1900-01-01"
 
 
-def test_exact_numeric_and_date_ranges_are_removed_but_shape_facts_remain() -> None:
-    redacted = redact_profile(_profile())
-    column = redacted["columns"][1]
+def test_identical_clear_values_are_randomized_independently(monkeypatch) -> None:
+    replacements = iter([*"AAAA", *"BBBB"])
+    monkeypatch.setattr(
+        profile_redaction.secrets,
+        "choice",
+        lambda _values: next(replacements),
+    )
 
-    assert "min_numeric" not in column
-    assert "max_numeric" not in column
-    assert "min_date" not in column
-    assert "max_date" not in column
-    assert column["type"] == "text"
-    assert column["max_length"] == 4
+    redacted = redact_profile([
+        {
+            "column": "Name",
+            "sample_values": [
+                {"value": "ACME", "count": 2},
+                {"value": "ACME", "count": 1},
+            ],
+        },
+    ])
+
+    assert redacted[0]["sample_values"] == [
+        {"value": "AAAA", "count": 2},
+        {"value": "BBBB", "count": 1},
+    ]
+
+
+def test_numeric_text_preserves_format_and_digit_bias_favors_zero_and_one(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(profile_redaction.secrets, "choice", lambda values: values[0])
+
+    redacted = redact_profile([
+        {
+            "column": "Amount",
+            "sample_values": [{"value": "-$1,234.50%", "count": 6}],
+        },
+    ])[0]["sample_values"][0]["value"]
+
+    assert redacted == "-$0,000.00%"
+    digits = profile_redaction._DIGITS
+    assert digits.count("0") == digits.count("1") == 2
+    assert all(digits.count(value) == 1 for value in "23456789")
+
+
+def test_supported_date_representations_remain_valid(monkeypatch) -> None:
+    monkeypatch.setattr(profile_redaction.secrets, "randbelow", lambda _limit: 0)
+    source_dates = ["2026-04-30", "04/30/2026", "04-30-2026", "20260430"]
+
+    values = redact_profile([
+        {
+            "column": "Date",
+            "sample_values": [
+                {"value": value, "count": 1} for value in source_dates
+            ],
+        },
+    ])[0]["sample_values"]
+
+    formats = ["%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y%m%d"]
+    for entry, expected_format in zip(values, formats, strict=True):
+        datetime.strptime(entry["value"], expected_format)
+        assert entry["count"] == 1

@@ -12,6 +12,7 @@ from rey_lib.profiling.file_profiler import (
     infer_sql_type,
     is_date,
     is_datetime,
+    is_profile_excluded_column,
     profile_rows,
 )
 from rey_lib.profiling.profile_validation import validate_csv_profile
@@ -44,6 +45,7 @@ __all__ = [
     "field_characteristic",
     "is_date",
     "is_datetime",
+    "is_profile_excluded_column",
     "length_bucket",
     "structural_descriptor",
 ]

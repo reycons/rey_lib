@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import csv as _csv
 import io
+import random as _random
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import AppError
@@ -600,32 +601,19 @@ def _sample(rows: tuple[CsvRow, ...], size: int) -> tuple[CsvRow, ...]:
 
 
 def sample_indices(total: int, size: int) -> list[int]:
-    """Return the indices a representative sample selects, in file order.
+    """Randomly select distinct row indices in randomized evidence order.
 
-    Deterministic rather than random: the opening rows, the middle of the
-    file, and the closing rows, so a consumer sees every part of the source.
-    Exported so a caller can apply one selection across parallel sequences and
-    keep them aligned.
+    The caller first supplies the eligible row count.  Selection is then made
+    without replacement across that complete population. The randomized order
+    is retained because downstream column evidence is bounded: restoring file
+    order would make those bounded values favor the beginning of the file even
+    though the selected population itself was uniform.
     """
-    if total <= size or size <= 0:
-        return list(range(total))
-
-    third = max(1, size // 3)
-    extra = size - (third * 3)  # the remainder goes to the opening segment
-    first_n = third + extra
-    last_n = third
-    mid_n = third
-    mid_start = max(first_n, (total - mid_n) // 2)
-    mid_end = min(total - last_n, mid_start + mid_n)
-
-    seen: set[int] = set()
-    selected: list[int] = []
-    for start, end in ((0, first_n), (mid_start, mid_end), (total - last_n, total)):
-        for index in range(start, end):
-            if index not in seen:
-                seen.add(index)
-                selected.append(index)
-    return selected
+    population_size = max(total, 0)
+    if population_size == 0:
+        return []
+    sample_size = population_size if size <= 0 else min(population_size, size)
+    return _random.sample(range(population_size), sample_size)
 
 
 def parse_delimited_line(

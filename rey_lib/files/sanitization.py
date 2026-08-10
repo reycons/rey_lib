@@ -188,6 +188,7 @@ class FileSanitizationContext:
     policy: EffectiveSanitizationPolicy
     collision_policy: FileSanitizationCollisionPolicy = FileSanitizationCollisionPolicy.FAIL
     dry_run: bool = False
+    add_source_line_number: bool = False
     file_operation_metadata: Mapping[str, Any] | None = None
     mutation_run_log_fields: Mapping[str, Any] | None = None
 
@@ -203,6 +204,8 @@ class FileSanitizationContext:
         object.__setattr__(self, "destination_path", Path(self.destination_path).expanduser().resolve())
         object.__setattr__(self, "governed_roots", tuple(Path(root).expanduser().resolve() for root in self.governed_roots))
         object.__setattr__(self, "collision_policy", FileSanitizationCollisionPolicy(self.collision_policy))
+        if not isinstance(self.add_source_line_number, bool):
+            raise ValueError("add_source_line_number must be true or false.")
         for field in ("file_operation_metadata", "mutation_run_log_fields"):
             value = getattr(self, field)
             object.__setattr__(self, field, MappingProxyType(deepcopy(dict(value))) if value is not None else None)
@@ -269,6 +272,17 @@ class _TransformState:
     line_repair: dict[str, int] | None = None
     line_buffer: list[str] | None = None
     line_length: int = 0
+
+
+@dataclass
+class _SourceLineState:
+    """Streaming CSV state for prepending original physical line numbers."""
+
+    physical_line: int = 1
+    at_record_start: bool = True
+    in_quotes: bool = False
+    pending_quote: bool = False
+    previous_cr: bool = False
 
 
 @dataclass(frozen=True)
@@ -389,19 +403,78 @@ def _transform_and_publish(ctx: FileSanitizationContext, source: Path, destinati
     rules = {codepoint: (action, rule) for codepoint, action, rule in ctx.policy.character_rules}
     decoder = codecs.getincrementaldecoder(plan.decoder_encoding)(errors="strict")
     encoder = codecs.getincrementalencoder(_OUTPUT_ENCODING)(errors="strict")
+    source_lines = _SourceLineState() if ctx.add_source_line_number else None
     with source.open("rb") as reader, stage_stream_write(destination, tier="flushed") as staged:
         prefix = reader.read(plan.bom_size)
         if len(prefix) != plan.bom_size:
             raise UnicodeError("Source ended inside its configured byte-order mark.")
         while raw := reader.read(_CHUNK_BYTES):
             rendered = _render(decoder.decode(raw, final=False), state, rules, ctx.policy, final=False)
+            if source_lines is not None:
+                rendered = _add_source_line_numbers(rendered, source_lines)
             staged.write(encoder.encode(rendered, final=False))
         rendered = _render(decoder.decode(b"", final=True), state, rules, ctx.policy, final=True)
+        if source_lines is not None:
+            rendered = _add_source_line_numbers(rendered, source_lines)
         staged.write(encoder.encode(rendered, final=True))
         if sha256_file(source) != source_hash or source.stat().st_size != source_size:
             raise FileSanitizationError(f"Sanitization source changed while it was being read: {source}")
         staged.install(overwrite=overwrite)
     return source_hash, source_size, state, sha256_file(destination)
+
+
+def _add_source_line_numbers(text: str, state: _SourceLineState) -> str:
+    """Prepend ``source_line_number`` while preserving streaming CSV quoting."""
+    output: list[str] = []
+    for character in text:
+        if state.pending_quote:
+            state.pending_quote = False
+            if character == '"':
+                if state.at_record_start:
+                    _start_numbered_record(output, state)
+                output.append(character)
+                state.previous_cr = False
+                continue
+            state.in_quotes = False
+
+        if state.at_record_start:
+            _start_numbered_record(output, state)
+
+        if character == '"':
+            if state.in_quotes:
+                state.pending_quote = True
+            else:
+                state.in_quotes = True
+            output.append(character)
+            state.previous_cr = False
+            continue
+
+        output.append(character)
+        if character == "\r":
+            state.physical_line += 1
+            state.previous_cr = True
+            if not state.in_quotes:
+                state.at_record_start = True
+            continue
+        if character == "\n":
+            if not state.previous_cr:
+                state.physical_line += 1
+            state.previous_cr = False
+            if not state.in_quotes:
+                state.at_record_start = True
+            continue
+        state.previous_cr = False
+    return "".join(output)
+
+
+def _start_numbered_record(output: list[str], state: _SourceLineState) -> None:
+    prefix = (
+        "source_line_number"
+        if state.physical_line == 1
+        else str(state.physical_line)
+    )
+    output.extend((prefix, ","))
+    state.at_record_start = False
 
 
 def _render(text: str, state: _TransformState, rules: Mapping[str, tuple[str, _CharacterRule]], policy: EffectiveSanitizationPolicy, *, final: bool) -> str:

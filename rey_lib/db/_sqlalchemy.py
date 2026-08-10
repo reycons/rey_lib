@@ -173,3 +173,176 @@ def inspect_schema(conn: Any, schema: str) -> dict[str, Any]:
         "tables": tables,
         "views": views,
     }
+
+
+def _inspector(conn: Any) -> tuple[Any, Any]:
+    try:
+        from sqlalchemy import inspect  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - dependency installation guard
+        raise ConfigError("SQLAlchemy is required for database inspection.") from exc
+    sa_conn = core_connection(conn)
+    return inspect(sa_conn), sa_conn
+
+
+def _schema_name(inspector: Any, schema: str | None) -> str:
+    value = schema if schema is not None else inspector.default_schema_name
+    return str(value or "")
+
+
+def _name_list(values: Any) -> list[str]:
+    return [str(value) for value in (values or []) if value is not None]
+
+
+def _optional_name(value: Any) -> str | None:
+    return None if value is None or value == "" else str(value)
+
+
+def _primitive(value: Any) -> str | int | float | bool | None:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def metadata_list_schemas(conn: Any, catalog: str) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    return [
+        {"catalog": str(catalog), "name": str(name)}
+        for name in inspector.get_schema_names()
+    ]
+
+
+def metadata_list_tables(
+    conn: Any,
+    catalog: str,
+    schema: str | None,
+) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    schema_name = _schema_name(inspector, schema)
+    return [
+        {"catalog": str(catalog), "schema": schema_name, "name": str(name)}
+        for name in inspector.get_table_names(schema=schema or None)
+    ]
+
+
+def metadata_list_views(
+    conn: Any,
+    catalog: str,
+    schema: str | None,
+) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    schema_name = _schema_name(inspector, schema)
+    return [
+        {"catalog": str(catalog), "schema": schema_name, "name": str(name)}
+        for name in inspector.get_view_names(schema=schema or None)
+    ]
+
+
+def metadata_get_columns(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    table: str,
+) -> list[dict[str, Any]]:
+    inspector, sa_conn = _inspector(conn)
+    result: list[dict[str, Any]] = []
+    for position, column in enumerate(
+        inspector.get_columns(table, schema=schema), start=1
+    ):
+        column_type = column.get("type")
+        type_text = (
+            str(column_type.compile(dialect=sa_conn.dialect))
+            if hasattr(column_type, "compile")
+            else str(column_type or "")
+        )
+        result.append(
+            {
+                "catalog": str(catalog),
+                "schema": str(schema),
+                "table": str(table),
+                "name": str(column.get("name", "")),
+                "ordinal_position": position,
+                "type": type_text,
+                "nullable": bool(column.get("nullable", True)),
+                "default": _primitive(column.get("default")),
+            }
+        )
+    return result
+
+
+def metadata_get_primary_key(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    table: str,
+) -> dict[str, Any]:
+    inspector, _sa_conn = _inspector(conn)
+    value = inspector.get_pk_constraint(table, schema=schema) or {}
+    return {
+        "catalog": str(catalog),
+        "schema": str(schema),
+        "table": str(table),
+        "name": _optional_name(value.get("name")),
+        "columns": _name_list(value.get("constrained_columns")),
+    }
+
+
+def metadata_get_foreign_keys(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    table: str,
+) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    return [
+        {
+            "catalog": str(catalog),
+            "schema": str(schema),
+            "table": str(table),
+            "name": _optional_name(value.get("name")),
+            "columns": _name_list(value.get("constrained_columns")),
+            "referenced_catalog": str(catalog),
+            "referenced_schema": _optional_name(value.get("referred_schema")),
+            "referenced_table": str(value.get("referred_table") or ""),
+            "referenced_columns": _name_list(value.get("referred_columns")),
+        }
+        for value in inspector.get_foreign_keys(table, schema=schema)
+    ]
+
+
+def metadata_get_indexes(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    table: str,
+) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    return [
+        {
+            "catalog": str(catalog),
+            "schema": str(schema),
+            "table": str(table),
+            "name": _optional_name(value.get("name")),
+            "columns": _name_list(value.get("column_names")),
+            "unique": bool(value.get("unique", False)),
+        }
+        for value in inspector.get_indexes(table, schema=schema)
+    ]
+
+
+def metadata_get_unique_constraints(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    table: str,
+) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    return [
+        {
+            "catalog": str(catalog),
+            "schema": str(schema),
+            "table": str(table),
+            "name": _optional_name(value.get("name")),
+            "columns": _name_list(value.get("column_names")),
+        }
+        for value in inspector.get_unique_constraints(table, schema=schema)
+    ]

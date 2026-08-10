@@ -101,6 +101,27 @@ def test_canonical_utf8_lf_input_is_byte_identical(tmp_path: Path) -> None:
     assert result.destination_path.read_bytes() == payload
     assert result.output_bytes_differ is False
     assert result.destination_encoding == "utf-8"
+
+
+def test_source_line_number_is_the_first_csv_column_when_enabled(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "positions.csv"
+    source.write_text(
+        'A,B\n1,"one\ntwo"\n3,4',
+        encoding="utf-8",
+    )
+
+    result = _sanitize(
+        replace(_ctx(tmp_path), add_source_line_number=True),
+        _file(source),
+    )
+
+    assert result.destination_path.read_text(encoding="utf-8") == (
+        'source_line_number,A,B\n'
+        '2,1,"one\ntwo"\n'
+        '4,3,4'
+    )
     assert result.resolved_source_encoding == "utf-8"
     assert result.source_encoding_resolution_method == "utf8_validation"
     assert result.source_bom == "absent"

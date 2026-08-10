@@ -33,7 +33,11 @@ import importlib
 import re
 from typing import Any, Optional
 
-from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.errors.error_utils import (
+    ConfigError,
+    DatabaseError,
+    UnsupportedDatabaseCapabilityError,
+)
 
 # NOTE: rey_lib.files imports are deferred into the DDL-export methods below.
 # rey_lib.files.file_loader imports DBAdapter from this module, so importing
@@ -67,8 +71,31 @@ _REGISTRY: dict[str, str] = {
 _MODULE_PREFIXES: dict[str, str] = {
 	"pyodbc":          "sqlserver",
 	"duckdb":          "duckdb",
+	"_duckdb":         "duckdb",
 	"mysql.connector": "mysql",
 	"psycopg2":        "postgres",
+}
+
+_METADATA_CAPABILITIES = frozenset(
+    {
+        "catalogs",
+        "schemas",
+        "tables",
+        "views",
+        "columns",
+        "primary_keys",
+        "foreign_keys",
+        "indexes",
+        "unique_constraints",
+    }
+)
+
+_SQLALCHEMY_METADATA_CAPABILITIES = _METADATA_CAPABILITIES
+_PROVIDER_METADATA_CAPABILITIES: dict[str, frozenset[str]] = {
+    "postgres": _SQLALCHEMY_METADATA_CAPABILITIES,
+    "mysql": _SQLALCHEMY_METADATA_CAPABILITIES,
+    "duckdb": frozenset({"catalogs", "schemas", "tables", "views"}),
+    "sqlserver": frozenset(),
 }
 
 _DEFAULT_BUILD_ORDER: list[str] = [
@@ -285,6 +312,173 @@ class DBAdapter:
         finally:
             if cursor is not None and hasattr(cursor, "close"):
                 cursor.close()
+
+    # ------------------------------------------------------------------
+    # Provider-neutral metadata
+    # ------------------------------------------------------------------
+
+    def supports(self, conn: Any, capability: str) -> bool:
+        """Return whether ``conn`` supports a declared metadata capability."""
+        normalized = str(capability).strip().lower()
+        if normalized not in _METADATA_CAPABILITIES:
+            raise ConfigError(
+                f"DBAdapter: unknown metadata capability '{capability}'. "
+                f"Known capabilities: {sorted(_METADATA_CAPABILITIES)}."
+            )
+        provider = self._provider_for_conn(conn)
+        return normalized in _PROVIDER_METADATA_CAPABILITIES.get(provider, frozenset())
+
+    def list_catalogs(self, conn: Any) -> list[dict[str, str]]:
+        """Return the catalog/database to which ``conn`` is attached."""
+        provider = self._require_metadata_capability(conn, "catalogs")
+        catalog = str(_backend(provider).get_current_database(conn))
+        return [{"name": catalog}]
+
+    def list_schemas(self, conn: Any) -> list[dict[str, str]]:
+        """Return normalized schemas visible to the current connection."""
+        provider = self._require_metadata_capability(conn, "schemas")
+        catalog = self._metadata_catalog(conn, provider)
+        if provider in {"postgres", "mysql"}:
+            from rey_lib.db._sqlalchemy import metadata_list_schemas
+
+            return metadata_list_schemas(conn, catalog)
+        objects = _backend(provider).list_database_objects(conn, catalog)
+        names = {
+            str(obj.get("schema") or obj.get("name") or "")
+            for obj in objects
+            if str(obj.get("object_type", "")).lower().rstrip("s") == "schema"
+        }
+        return [
+            {"catalog": catalog, "name": name}
+            for name in sorted(name for name in names if name)
+        ]
+
+    def list_tables(
+        self,
+        conn: Any,
+        schema: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return normalized tables, optionally restricted to one schema."""
+        return self._list_relations(conn, "tables", schema)
+
+    def list_views(
+        self,
+        conn: Any,
+        schema: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return normalized views, optionally restricted to one schema."""
+        return self._list_relations(conn, "views", schema)
+
+    def get_columns(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> list[dict[str, Any]]:
+        """Return normalized columns in ordinal order."""
+        provider = self._require_metadata_capability(conn, "columns")
+        catalog = self._metadata_catalog(conn, provider)
+        from rey_lib.db._sqlalchemy import metadata_get_columns
+
+        return metadata_get_columns(conn, catalog, schema, table)
+
+    def get_primary_key(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> dict[str, Any]:
+        """Return a normalized primary-key record, including the empty-PK shape."""
+        provider = self._require_metadata_capability(conn, "primary_keys")
+        catalog = self._metadata_catalog(conn, provider)
+        from rey_lib.db._sqlalchemy import metadata_get_primary_key
+
+        return metadata_get_primary_key(conn, catalog, schema, table)
+
+    def get_foreign_keys(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> list[dict[str, Any]]:
+        """Return normalized foreign keys for a table."""
+        provider = self._require_metadata_capability(conn, "foreign_keys")
+        catalog = self._metadata_catalog(conn, provider)
+        from rey_lib.db._sqlalchemy import metadata_get_foreign_keys
+
+        return metadata_get_foreign_keys(conn, catalog, schema, table)
+
+    def get_indexes(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> list[dict[str, Any]]:
+        """Return normalized indexes for a table."""
+        provider = self._require_metadata_capability(conn, "indexes")
+        catalog = self._metadata_catalog(conn, provider)
+        from rey_lib.db._sqlalchemy import metadata_get_indexes
+
+        return metadata_get_indexes(conn, catalog, schema, table)
+
+    def get_unique_constraints(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> list[dict[str, Any]]:
+        """Return normalized unique constraints for a table."""
+        provider = self._require_metadata_capability(conn, "unique_constraints")
+        catalog = self._metadata_catalog(conn, provider)
+        from rey_lib.db._sqlalchemy import metadata_get_unique_constraints
+
+        return metadata_get_unique_constraints(conn, catalog, schema, table)
+
+    def _require_metadata_capability(self, conn: Any, capability: str) -> str:
+        provider = self._provider_for_conn(conn)
+        if not self.supports(conn, capability):
+            raise UnsupportedDatabaseCapabilityError(
+                f"DBAdapter: provider '{provider}' does not support metadata "
+                f"capability '{capability}'."
+            )
+        return provider
+
+    def _metadata_catalog(self, conn: Any, provider: str) -> str:
+        return str(_backend(provider).get_current_database(conn))
+
+    def _list_relations(
+        self,
+        conn: Any,
+        capability: str,
+        schema: str | None,
+    ) -> list[dict[str, str]]:
+        provider = self._require_metadata_capability(conn, capability)
+        catalog = self._metadata_catalog(conn, provider)
+        if provider in {"postgres", "mysql"}:
+            if capability == "tables":
+                from rey_lib.db._sqlalchemy import metadata_list_tables
+
+                return metadata_list_tables(conn, catalog, schema)
+            from rey_lib.db._sqlalchemy import metadata_list_views
+
+            return metadata_list_views(conn, catalog, schema)
+
+        relation_type = capability.rstrip("s")
+        objects = _backend(provider).list_database_objects(conn, catalog)
+        result = []
+        for obj in objects:
+            object_type = str(obj.get("object_type", "")).lower().rstrip("s")
+            object_schema = str(obj.get("schema") or "")
+            if object_type != relation_type or (schema and object_schema != schema):
+                continue
+            result.append(
+                {
+                    "catalog": catalog,
+                    "schema": object_schema,
+                    "name": str(obj.get("name") or ""),
+                }
+            )
+        return sorted(result, key=lambda item: (item["schema"], item["name"]))
 
     # ------------------------------------------------------------------
     # Stored procedures

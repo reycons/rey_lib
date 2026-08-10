@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from rey_lib.files.csv import sample_indices
 
 
@@ -9,42 +11,49 @@ class TestSampleIndices:
     """sample_indices — index selection."""
 
     def test_small_total_returns_all(self) -> None:
-        assert sample_indices(5, 10) == list(range(5))
+        chosen = [4, 1, 3, 0, 2]
+        with patch("rey_lib.files.csv._random.sample", return_value=chosen) as sample:
+            assert sample_indices(5, 10) == chosen
+        sample.assert_called_once_with(range(5), 5)
 
     def test_exact_total_returns_all(self) -> None:
-        assert sample_indices(10, 10) == list(range(10))
+        chosen = list(reversed(range(10)))
+        with patch("rey_lib.files.csv._random.sample", return_value=chosen) as sample:
+            assert sample_indices(10, 10) == chosen
+        sample.assert_called_once_with(range(10), 10)
 
     def test_zero_size_returns_all(self) -> None:
-        assert sample_indices(5, 0) == list(range(5))
-
-    def test_first_index_included(self) -> None:
-        assert 0 in sample_indices(1000, 30)
-
-    def test_last_index_included(self) -> None:
-        assert 999 in sample_indices(1000, 30)
-
-    def test_middle_index_included(self) -> None:
-        assert any(400 <= i <= 600 for i in sample_indices(1000, 30))
+        chosen = [2, 4, 0, 3, 1]
+        with patch("rey_lib.files.csv._random.sample", return_value=chosen) as sample:
+            assert sample_indices(5, 0) == chosen
+        sample.assert_called_once_with(range(5), 5)
 
     def test_no_duplicates(self) -> None:
         idx = sample_indices(1000, 30)
         assert len(idx) == len(set(idx))
 
-    def test_ascending_order(self) -> None:
-        idx = sample_indices(1000, 30)
-        assert idx == sorted(idx)
+    def test_does_not_restore_file_order(self) -> None:
+        chosen = [999, 400, 17]
+        with patch("rey_lib.files.csv._random.sample", return_value=chosen):
+            assert sample_indices(1000, 3) == chosen
 
-    def test_count_near_size(self) -> None:
+    def test_count_equals_size(self) -> None:
         idx = sample_indices(1000, 30)
-        assert 28 <= len(idx) <= 30
+        assert len(idx) == 30
 
-    def test_large_population_is_bounded_and_not_first_n(self) -> None:
-        idx = sample_indices(1000, 30)
-        assert len(idx) <= 30
-        assert idx != list(range(30))
-        assert idx == sample_indices(1000, 30)
-        assert min(idx) == 0
-        assert max(idx) == 999
+    def test_selects_from_complete_population_without_replacement(self) -> None:
+        chosen = [999, 400, 17]
+        with patch("rey_lib.files.csv._random.sample", return_value=chosen) as sample:
+            assert sample_indices(1000, 3) == chosen
+        sample.assert_called_once_with(range(1000), 3)
+
+    def test_does_not_force_top_middle_or_bottom_rows(self) -> None:
+        chosen = list(range(100, 130))
+        with patch("rey_lib.files.csv._random.sample", return_value=chosen):
+            idx = sample_indices(1000, 30)
+        assert 0 not in idx
+        assert not any(400 <= index <= 600 for index in idx)
+        assert 999 not in idx
 
     def test_parallel_application(self) -> None:
         """Same indices applied to lines and dicts stay aligned."""

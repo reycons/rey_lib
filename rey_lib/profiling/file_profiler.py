@@ -20,12 +20,23 @@ from typing import Any
 
 from rey_lib.logs import get_logger
 
-__all__ = ["infer_col_type", "infer_sql_type", "profile_rows"]
+__all__ = [
+    "infer_col_type",
+    "infer_sql_type",
+    "is_profile_excluded_column",
+    "profile_rows",
+]
 
 _logger = get_logger(__name__)
+_EXCLUDED_PROFILE_COLUMNS = frozenset({"source_line_number"})
 
-# Number of representative distinct values to include per column.
-_SAMPLE_DISTINCT_VALUES: int = 5
+
+def is_profile_excluded_column(value: Any) -> bool:
+    """Return whether an operational column is excluded from all profiling."""
+    return (
+        isinstance(value, str)
+        and value.strip().casefold() in _EXCLUDED_PROFILE_COLUMNS
+    )
 
 
 def infer_sql_type(values: list[str]) -> str | None:
@@ -96,7 +107,10 @@ def profile_rows(
     dict[str, Any]
         Structured profile suitable for JSON serialisation.
     """
-    redacted_set = set(redacted_columns or [])
+    redacted_set = {
+        value for value in (redacted_columns or [])
+        if not is_profile_excluded_column(value)
+    }
 
     if not rows:
         return {
@@ -108,24 +122,23 @@ def profile_rows(
             "redacted_columns": list(redacted_set),
         }
 
-    columns = list(rows[0].keys())
+    columns = [
+        value for value in rows[0]
+        if not is_profile_excluded_column(value)
+    ]
     col_profiles: list[dict[str, Any]] = []
     type_source = type_rows or rows
 
     for col in columns:
-        # All profile FACTS are derived from the unredacted ``type_source`` so
+        # All profile facts are derived from the unredacted ``type_source`` so
         # masking never distorts type, blank counts, or lengths (which drive
-        # DDL sizing). Only the displayed ``distinct_sample`` is taken from the
-        # redacted ``rows`` so sensitive values are never written to the JSON.
+        # DDL sizing). Representative values belong to CSV enrichment.
         type_values    = [str(row.get(col, "") or "") for row in type_source]
-        display_values = [str(row.get(col, "") or "") for row in rows]
         type_non_blank = [v for v in type_values if v.strip()]
-        display_blank  = [v for v in display_values if v.strip()]
         blank_count = len(type_values) - len(type_non_blank)
         lengths     = [len(v) for v in type_non_blank] if type_non_blank else [0]
 
         col_type = infer_col_type(type_non_blank)
-        distinct  = _distinct_sample(display_blank)
         numeric_profile = _numeric_profile(type_non_blank, col_type)
 
         col_profile = {
@@ -136,7 +149,6 @@ def profile_rows(
             "blank_count":   blank_count,
             "min_length":    min(lengths),
             "max_length":    max(lengths),
-            "distinct_sample": distinct,
         }
         col_profile.update(numeric_profile)
         col_profiles.append(col_profile)
@@ -237,19 +249,6 @@ def is_datetime(value: str) -> bool:
 def _is_boolean(value: str) -> bool:
     """Return True if value is a common boolean representation."""
     return value.strip().lower() in {"true", "false", "yes", "no", "y", "n", "1", "0", "t", "f"}
-
-
-def _distinct_sample(values: list[str]) -> list[str]:
-    """Return up to N distinct non-blank values preserving first-seen order."""
-    seen: list[str] = []
-    seen_set: set[str] = set()
-    for v in values:
-        if v not in seen_set:
-            seen.append(v)
-            seen_set.add(v)
-        if len(seen) >= _SAMPLE_DISTINCT_VALUES:
-            break
-    return seen
 
 
 def _numeric_profile(values: list[str], col_type: str) -> dict[str, Any]:

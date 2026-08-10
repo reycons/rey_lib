@@ -22,9 +22,9 @@ __all__ = [
 
 PROFILE_ACCESS_REDACTED = "redacted"
 PROFILE_ACCESS_UNREDACTED = "unredacted"
-_ACCESS_FIELDS = {
-    PROFILE_ACCESS_REDACTED: "redacted_profile",
-    PROFILE_ACCESS_UNREDACTED: "unredacted_profile",
+_ACCESS_SAMPLE_FIELDS = {
+    PROFILE_ACCESS_REDACTED: "redacted_samples",
+    PROFILE_ACCESS_UNREDACTED: "samples",
 }
 
 
@@ -46,7 +46,7 @@ def profile_access_policy(profile: Any) -> dict[str, Any]:
     allowed: list[str] = []
     for value in allowed_value:
         mode = str(value or "").strip()
-        if mode not in _ACCESS_FIELDS:
+        if mode not in _ACCESS_SAMPLE_FIELDS:
             raise ConfigurationFailure(
                 "profile_access.allowed may contain only redacted or unredacted."
             )
@@ -94,13 +94,28 @@ def resolve_profile_for_llm(
         return None
 
     record = state.get("record")
-    field = _ACCESS_FIELDS[selected]
-    resolved = record.get(field) if isinstance(record, Mapping) else None
-    if not isinstance(resolved, Mapping):
+    if not isinstance(record, Mapping):
         raise ValidationFailure(
-            f"Current profile record for object_id '{object_id}' has no valid {field}."
+            f"Current profile record for object_id '{object_id}' is invalid."
         )
-    return deepcopy(dict(resolved))
+    resolved = deepcopy(dict(record))
+    structure = resolved.get("structure")
+    if not isinstance(structure, dict):
+        raise ValidationFailure(
+            f"Current profile record for object_id '{object_id}' has no valid structure."
+        )
+    selected_field = _ACCESS_SAMPLE_FIELDS[selected]
+    rejected_field = (
+        "samples" if selected_field == "redacted_samples" else "redacted_samples"
+    )
+    selected_samples = structure.get(selected_field)
+    if not isinstance(selected_samples, list):
+        raise ValidationFailure(
+            f"Current profile record for object_id '{object_id}' has no valid "
+            f"{selected_field}."
+        )
+    structure.pop(rejected_field, None)
+    return resolved
 
 
 def _value(item: Any, field: str) -> Any:

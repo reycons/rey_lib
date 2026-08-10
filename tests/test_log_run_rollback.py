@@ -22,17 +22,25 @@ from rey_lib.files import (
     serialize_source_file_rollback,
     unregister_file_compensation,
 )
-from rey_lib.logs import log_file_manifest_record, resolve_run_identity
+from rey_lib.logs import (
+    append_profile_record,
+    log_file_manifest_record,
+    read_profile_records,
+    resolve_run_identity,
+)
 from rey_lib.logs.file_manifest import FileManifestError, FileManifestSession
 
 
 class _Paths:
     def __init__(self, manifest: Path) -> None:
         self.manifest = manifest
+        self.profiles = manifest.with_name("profiles.jsonl")
 
     def resolve(self, name: str) -> Path:
-        assert name == "file_manifest"
-        return self.manifest
+        return {
+            "file_manifest": self.manifest,
+            "file_profiles": self.profiles,
+        }[name]
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -84,6 +92,33 @@ def _rows(ctx: SimpleNamespace) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _profile_record(source_row_id: int) -> dict:
+    return {
+        "header": {
+            "profile_schema_version": 1,
+            "object_id": str(source_row_id),
+            "source_row_id": source_row_id,
+            "source_hash": f"hash-{source_row_id}",
+            "profiler": {},
+            "sampling_strategy": "random_without_replacement_v1",
+            "requested_sample_rows": 500,
+            "sampled_rows": 1,
+            "eligible_population_rows": 1,
+            "sampling_provenance": {},
+        },
+        "structure": {
+            "header_definition": {
+                "row_number": 1,
+                "columns": ["value"],
+            },
+            "distribution": {},
+            "columns": [{"name": "value"}],
+            "samples": [{"column": "value"}],
+            "redacted_samples": [{"column": "value"}],
+        },
+    }
 
 
 def test_shared_mutation_boundary_commits_evidence_before_manifest(
@@ -597,6 +632,39 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
     assert summary["record_id"] > max(create_id, move_id)
 
 
+def test_rollback_removes_only_profiles_for_reversed_manifest_rows(
+    tmp_path: Path,
+) -> None:
+    ctx = _ctx(tmp_path)
+    rolled_back_file = tmp_path / "rolled-back.csv"
+    rolled_back_file.write_text("rolled back", encoding="utf-8")
+    retained_file = tmp_path / "retained.csv"
+    retained_file.write_text("retained", encoding="utf-8")
+    rolled_back_id = _append_mutation(
+        ctx,
+        action="create",
+        destination_path=str(rolled_back_file),
+    )
+    retained_id = _append_mutation(
+        ctx,
+        action="create",
+        run_log_file="other.jsonl",
+        destination_path=str(retained_file),
+    )
+    append_profile_record(ctx, _profile_record(rolled_back_id))
+    append_profile_record(ctx, _profile_record(retained_id))
+
+    result = rollback_log_run(ctx, _run_log(tmp_path))
+
+    assert result["status"] == "success"
+    assert not rolled_back_file.exists()
+    assert retained_file.exists()
+    profiles = read_profile_records(ctx)
+    assert [record["header"]["source_row_id"] for record in profiles] == [
+        retained_id
+    ]
+
+
 def test_delete_and_replace_require_recorded_recovery_paths(
     tmp_path: Path,
 ) -> None:
@@ -699,7 +767,7 @@ def test_successful_compensation_is_idempotently_excluded(
     ctx = _ctx(tmp_path)
     created = tmp_path / "created.csv"
     created.write_text("created", encoding="utf-8")
-    mutation_id = _append_mutation(
+    _append_mutation(
         ctx,
         action="create",
         destination_path=str(created),

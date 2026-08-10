@@ -249,6 +249,10 @@ class DatabaseError(AppError):
     """Raised when a database operation fails — connection, DDL, or DML."""
 
 
+class UnsupportedDatabaseCapabilityError(DatabaseError):
+    """Raised when a database provider lacks a requested DBAdapter capability."""
+
+
 class StateError(AppError):
     """Raised when a JSON state file cannot be read, parsed, or written."""
 

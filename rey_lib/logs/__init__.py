@@ -28,6 +28,7 @@ from rey_lib.logs.profile_library import (
     append_profile_record,
     lookup_profile_record,
     read_profile_records,
+    remove_profile_records,
     resolve_profile_library_path,
 )
 from rey_lib.logs.file_hierarchy import (
@@ -150,6 +151,7 @@ __all__ = [
     "append_profile_record",
     "lookup_profile_record",
     "read_profile_records",
+    "remove_profile_records",
     "resolve_profile_library_path",
     "FileHierarchyError",
     "FileHierarchyFeed",

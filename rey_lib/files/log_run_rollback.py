@@ -18,9 +18,10 @@ from types import SimpleNamespace
 from typing import Any
 
 from rey_lib.files.file_utils import delete_file, run_artifact_path
-from rey_lib.files.jsonl import JsonlReadError
+from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
 from rey_lib.logs import (
     FileManifestError,
+    ProfileLibraryError,
     bind_run,
     clear_run,
     file_manifest_session,
@@ -30,6 +31,7 @@ from rey_lib.logs import (
     log_run_start,
     log_run_summary,
     resolve_run_identity,
+    resolve_profile_library_path,
 )
 
 MUTATION_RECORD_TYPE = "source_file_mutation"
@@ -46,14 +48,6 @@ _SELECTABLE_RECORD_TYPES = (
     CLASSIFICATION_RECORD_TYPE,
     MUTATION_RECORD_TYPE,
 )
-
-# A structural profile is shared by every file of its identity, so its inverse
-# is not the generic action compensation: a profile "replace" carries no
-# previous version to restore, and restoring one would discard the appends of
-# every other run. It is dispatched on what the mutation did, not how it acted.
-PROFILE_REASON = "structural_profile"
-PROFILE_ATTRIBUTION_FIELD = "added_by_run_log_file"
-
 
 class LogRunRollbackError(Exception):
     """Raised when a rollback request cannot be planned or governed safely."""
@@ -608,9 +602,7 @@ def rollback_log_run(
                     continue
             for candidate in plan["candidates"]:
                 original = candidate["original_record"]
-                compensation = _resolved_compensation(
-                    candidate, selected_file
-                )
+                compensation = _resolved_compensation(candidate)
                 attempt_id: int | None = None
                 try:
                     attempt_id = _append_rollback_evidence(
@@ -713,6 +705,7 @@ def rollback_log_run(
                 reversed_record_ids | orphaned | set(appended_rollback_record_ids)
             )
             if removable:
+                _remove_profiles_for_source_rows(ctx, reversed_record_ids)
                 records_removed = session.remove_records(removable)
             # Whether anything of this run is left is read from the manifest,
             # not inferred from a status. A record can survive without being a
@@ -781,6 +774,55 @@ def rollback_log_run(
         "succeeded": succeeded,
         "failed": failed,
     }
+
+
+def _remove_profiles_for_source_rows(ctx: Any, source_row_ids: set[int]) -> int:
+    """Remove canonical profiles whose manifest source rows were reversed.
+
+    The caller already holds the manifest lock used by profile-library writers,
+    so this performs the canonical JSONL rewrite directly without reacquiring
+    that non-reentrant lock.
+    """
+    if not source_row_ids:
+        return 0
+    try:
+        target = resolve_profile_library_path(ctx)
+    except ProfileLibraryError:
+        return 0
+    if not target.exists():
+        return 0
+    try:
+        records = [dict(item.record) for item in read_jsonl_file(target)]
+    except (JsonlReadError, OSError) as exc:
+        raise LogRunRollbackError(
+            f"Profile records could not be read from '{target}': {exc}"
+        ) from exc
+
+    retained: list[dict[str, Any]] = []
+    removed = 0
+    for record in records:
+        header = record.get("header")
+        if not isinstance(header, Mapping):
+            raise LogRunRollbackError(
+                "Stored profile record must contain a canonical header object."
+            )
+        source_row_id = _optional_positive_int(header.get("source_row_id"))
+        if source_row_id is None:
+            raise LogRunRollbackError(
+                "Stored profile header requires a positive source_row_id."
+            )
+        if source_row_id in source_row_ids:
+            removed += 1
+        else:
+            retained.append(record)
+    if removed:
+        try:
+            write_jsonl_file(target, retained)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LogRunRollbackError(
+                f"Profile records could not be rewritten in '{target}': {exc}"
+            ) from exc
+    return removed
 
 
 def _build_plan(
@@ -862,16 +904,6 @@ def _build_plan(
                 "original_manifest_record_id": record_id,
                 "action": "record_only",
                 "compensating_action": "remove_record",
-                "original_record": record,
-            })
-            continue
-        if _is_profile_mutation(record):
-            # Dispatched on what it did, ahead of the action registry: a
-            # profile "replace" has no previous version to restore.
-            candidates.append({
-                "original_manifest_record_id": record_id,
-                "action": PROFILE_REASON,
-                "compensating_action": "reverse_profile_signatures",
                 "original_record": record,
             })
             continue
@@ -986,16 +1018,6 @@ def _is_selected_record(record: Mapping[str, Any], run_log_file: str) -> bool:
     return _record_run_log_file(record) == run_log_file
 
 
-def _is_profile_mutation(record: Mapping[str, Any]) -> bool:
-    """Whether this mutation wrote a shared structural profile."""
-    result = record.get("result")
-    return (
-        record.get("record_type") == MUTATION_RECORD_TYPE
-        and isinstance(result, Mapping)
-        and result.get("reason") == PROFILE_REASON
-    )
-
-
 def _is_run_owned_rollback(record: Mapping[str, Any], removed: set[int]) -> bool:
     """Whether this compensation record belongs to a record being removed.
 
@@ -1093,24 +1115,13 @@ def _write_run_rollback_summary(
 
 def _resolved_compensation(
     candidate: Mapping[str, Any],
-    run_log_file: str,
 ) -> Compensation:
     """Return the compensation for one planned candidate.
 
-    Dispatch is on what the record did. A structural profile and a plain
-    record removal are resolved here rather than through the action registry,
-    which keys on the four filesystem verbs and would mishandle both.
+    Dispatch is on what the record did. A plain record removal is resolved here
+    rather than through the filesystem action registry.
     """
     action = str(candidate["action"])
-    if action == PROFILE_REASON:
-        return Compensation(
-            action=PROFILE_REASON,
-            compensating_action="reverse_profile_signatures",
-            validate=lambda _record: None,
-            execute=lambda record: _compensate_structural_profile(
-                record, run_log_file
-            ),
-        )
     if action == "record_only":
         return Compensation(
             action="record_only",
@@ -1119,95 +1130,6 @@ def _resolved_compensation(
             execute=lambda _record: {},
         )
     return _COMPENSATIONS[action]
-
-
-def _compensate_structural_profile(
-    record: Mapping[str, Any],
-    run_log_file: str,
-) -> dict[str, Any]:
-    """Undo only what the rolled-back run put into a shared profile.
-
-    A profile belongs to a classification identity, not to a run: many runs
-    append to it and an operator edits it. So the inverse is neither "delete
-    the created file" nor "restore the previous version" — it is the removal of
-    exactly the signatures this run added, identified by their own attribution.
-
-    An element carrying no attribution is an operator edit and is out of reach.
-    The profile itself is removed only when nothing of anyone else's remains.
-    """
-    from rey_lib.files.json import read_json_file, write_json_file
-
-    file_section = record.get("file")
-    path_text = (
-        file_section.get("path") if isinstance(file_section, Mapping) else None
-    )
-    if not isinstance(path_text, str) or not path_text.strip():
-        raise LogRunRollbackError(
-            "Structural profile mutation carries no file.path to reverse."
-        )
-    target = Path(path_text).expanduser()
-    if not target.is_file():
-        return {"profile_path": str(target), "profile_outcome": "already_absent"}
-
-    try:
-        document = read_json_file(target, expect=dict)
-    except Exception as exc:
-        raise LogRunRollbackError(
-            f"Structural profile '{target}' could not be read: {exc}"
-        ) from exc
-
-    if document.get("frozen") is True:
-        # A frozen profile was never written by the run, so nothing is undone.
-        return {"profile_path": str(target), "profile_outcome": "frozen"}
-
-    signatures = list(document.get("exclude_signatures") or [])
-    retained = [
-        signature
-        for signature in signatures
-        if not (
-            isinstance(signature, Mapping)
-            and signature.get(PROFILE_ATTRIBUTION_FIELD) == run_log_file
-        )
-    ]
-    removed = len(signatures) - len(retained)
-
-    # The profile may be deleted only when every element left behind was this
-    # run's, and no operator edit remains to be destroyed.
-    operator_owned = any(
-        not isinstance(signature, Mapping)
-        or PROFILE_ATTRIBUTION_FIELD not in signature
-        for signature in retained
-    )
-    approval = document.get("approval_metadata")
-    operator_approved = (
-        isinstance(approval, Mapping) and bool(approval.get("approved_by"))
-    )
-    if not retained and not operator_owned and not operator_approved:
-        try:
-            target.unlink()
-        except OSError as exc:
-            raise LogRunRollbackError(
-                f"Structural profile '{target}' could not be removed: {exc}"
-            ) from exc
-        return {
-            "profile_path": str(target),
-            "profile_outcome": "removed",
-            "signatures_removed": removed,
-        }
-
-    if removed:
-        document["exclude_signatures"] = retained
-        try:
-            write_json_file(target, dict(document), mode="pretty")
-        except Exception as exc:
-            raise LogRunRollbackError(
-                f"Structural profile '{target}' could not be rewritten: {exc}"
-            ) from exc
-    return {
-        "profile_path": str(target),
-        "profile_outcome": "signatures_removed" if removed else "unchanged",
-        "signatures_removed": removed,
-    }
 
 
 def _validate_recorded_paths(
