@@ -12,7 +12,6 @@ from rey_lib.logs import (
     append_profile_record,
     lookup_profile_record,
     read_profile_records,
-    remove_profile_records,
     resolve_profile_library_path,
 )
 
@@ -39,6 +38,10 @@ def _record(**header_overrides: object) -> dict:
         "profile_schema_version": 1,
         "object_id": "1",
         "source_hash": "abc123",
+        "evidence": {
+            "run_log_file": "inventory_and_prepare_files.20260810_163217.jsonl",
+            "run_log_record_id": 44,
+        },
         "profiler": {
             "application": "file_operator",
         },
@@ -100,11 +103,14 @@ def test_different_source_rows_coexist(tmp_path: Path) -> None:
         second_id,
     ]
     assert [record["header"]["object_id"] for record in records] == ["1", "2"]
-    # The profile log assigns each record its own identity, distinct from the
-    # manifest object it describes and from the profile artifact's UUID.
-    log_ids = [record["header"]["log_record_id"] for record in records]
-    assert len(set(log_ids)) == 2
-    assert all(log_id and log_id not in {"1", "2"} for log_id in log_ids)
+    # Every record points back at the run-log record that produced it, which is
+    # how rollback resolves a profile to its run.
+    assert [record["header"]["evidence"] for record in records] == [
+        {
+            "run_log_file": "inventory_and_prepare_files.20260810_163217.jsonl",
+            "run_log_record_id": 44,
+        },
+    ] * 2
     assert all(
         record["header"]["created_at"].endswith("+00:00") for record in records
     )
@@ -170,7 +176,7 @@ def test_invalid_sampling_counts_are_rejected_before_append(tmp_path: Path) -> N
 
 
 def test_the_retired_source_row_id_is_rejected(tmp_path: Path) -> None:
-    """object_id and log_record_id are two identity spaces, never one value.
+    """object_id and the run-log evidence are two identity spaces, never one.
 
     source_row_id straddled them, which is why it had to be equal to object_id
     and why nothing could own a rollback. A header still carrying it is refused
@@ -291,71 +297,95 @@ def test_columns_reject_derived_and_duplicate_fields(
         append_profile_record(ctx, duplicate)
 
 
-def _log_record_id(record: dict) -> str:
-    return record["header"]["log_record_id"]
+def test_canonical_header_must_match_columns(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    mismatch = _record()
+    mismatch["structure"]["header_definition"]["columns"] = ["Other"]
+    with pytest.raises(ProfileLibraryError, match="match structure.columns"):
+        append_profile_record(ctx, mismatch)
 
 
-def test_removal_deletes_exactly_the_named_profile_record(tmp_path: Path) -> None:
-    """The dangerous case: one record goes, the other is untouched.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type_hint", "text"),
+        ("ordinal", 1),
+        ("row_count", 42),
+        ("integer_digit_counts", {"7": 42}),
+        ("has_negative", False),
+    ],
+)
+def test_columns_reject_derived_and_duplicate_fields(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    ctx = _ctx(tmp_path)
+    duplicate = _record()
+    duplicate["structure"]["columns"][0][field] = value
+    with pytest.raises(ProfileLibraryError, match=f"non-canonical.*{field}"):
+        append_profile_record(ctx, duplicate)
 
-    log_record_id is the only field consulted. Matching on object_id or
-    profile_id would delete by the wrong identity space, and with two objects
-    present that mistake is visible rather than silent.
+
+
+def test_the_retired_log_record_id_uuid_is_rejected(tmp_path: Path) -> None:
+    """A profile points at its run-log record, not at a UUID of its own.
+
+    log_record_id was a UUID this module minted for itself. It resolved to
+    nothing: rollback selects governed records by evidence.run_log_file, so a
+    profile carrying only that UUID could never be found by the run that wrote
+    it. A header still carrying it is refused rather than quietly stored.
     """
     ctx = _ctx(tmp_path)
-    append_profile_record(ctx, _record(object_id="1"))
-    append_profile_record(ctx, _record(object_id="2"))
-    before = read_profile_records(ctx)
-    doomed, survivor = before[0], before[1]
-
-    removed = remove_profile_records(ctx, log_record_ids=[_log_record_id(doomed)])
-
-    assert removed == 1
-    assert read_profile_records(ctx) == [survivor]
-
-
-def test_removal_ignores_an_id_that_matches_nothing(tmp_path: Path) -> None:
-    """No match removes nothing and is not an error, as the manifest helper."""
-    ctx = _ctx(tmp_path)
-    append_profile_record(ctx, _record(object_id="1"))
-    before = read_profile_records(ctx)
-
-    assert remove_profile_records(ctx, log_record_ids=["not-a-real-id"]) == 0
-    assert remove_profile_records(ctx, log_record_ids=[]) == 0
-    assert read_profile_records(ctx) == before
-
-
-def test_removing_a_superseded_object_resurrects_nothing(tmp_path: Path) -> None:
-    """Removing the current profile leaves the object with no profile at all.
-
-    append_profile_record physically drops the records it supersedes, so there
-    is no earlier profile left to come back. This pins that consequence: an
-    empty result is the retention model working, not a rollback bug, and
-    resurrecting history would require retaining it in the first place.
-    """
-    ctx = _ctx(tmp_path)
-    append_profile_record(ctx, _record(object_id="1", source_hash="first"))
-    append_profile_record(ctx, _record(object_id="1", source_hash="second"))
-    current = read_profile_records(ctx)
-    assert len(current) == 1
-    assert current[0]["header"]["source_hash"] == "second"
-
-    removed = remove_profile_records(ctx, log_record_ids=[_log_record_id(current[0])])
-
-    assert removed == 1
+    with pytest.raises(ProfileLibraryError, match="log_record_id"):
+        append_profile_record(ctx, _record(log_record_id="6096a153-957c"))
     assert read_profile_records(ctx) == []
 
 
-def test_removal_leaves_supersession_behaviour_unchanged(tmp_path: Path) -> None:
-    """Appending after a removal still replaces by object_id, as before."""
+def test_evidence_is_required(tmp_path: Path) -> None:
+    """A profile that cannot be resolved back to its run is not stored."""
     ctx = _ctx(tmp_path)
-    append_profile_record(ctx, _record(object_id="1"))
-    append_profile_record(ctx, _record(object_id="2"))
-    first = read_profile_records(ctx)[0]
-    remove_profile_records(ctx, log_record_ids=[_log_record_id(first)])
+    without = _record()
+    del without["header"]["evidence"]
+    with pytest.raises(ProfileLibraryError, match="evidence"):
+        append_profile_record(ctx, without)
+    assert read_profile_records(ctx) == []
 
-    append_profile_record(ctx, _record(object_id="2", source_hash="replacement"))
 
-    records = read_profile_records(ctx)
-    assert [record["header"]["object_id"] for record in records] == ["2"]
-    assert records[0]["header"]["source_hash"] == "replacement"
+def test_evidence_requires_both_halves_of_the_pointer(tmp_path: Path) -> None:
+    """The filename alone is a half-contract; so is the row number alone."""
+    ctx = _ctx(tmp_path)
+    for partial in ({"run_log_file": "run.jsonl"}, {"run_log_record_id": 44}):
+        with pytest.raises(ProfileLibraryError, match="missing required field"):
+            append_profile_record(ctx, _record(evidence=partial))
+
+    with pytest.raises(ProfileLibraryError, match="unknown field"):
+        append_profile_record(ctx, _record(evidence={
+            "run_log_file": "run.jsonl",
+            "run_log_record_id": 44,
+            "run_id": "extra",
+        }))
+    assert read_profile_records(ctx) == []
+
+
+def test_run_log_record_id_must_be_a_positive_integer(tmp_path: Path) -> None:
+    """The row number is an integer, as it is in every other governed record."""
+    ctx = _ctx(tmp_path)
+    for bad in ("44", 0, -1, True, None):
+        with pytest.raises(ProfileLibraryError, match="run_log_record_id"):
+            append_profile_record(ctx, _record(evidence={
+                "run_log_file": "run.jsonl",
+                "run_log_record_id": bad,
+            }))
+    assert read_profile_records(ctx) == []
+
+
+def test_run_log_file_is_a_filename_not_a_path(tmp_path: Path) -> None:
+    """Rollback matches the filename exactly, so a path would never match."""
+    ctx = _ctx(tmp_path)
+    with pytest.raises(ProfileLibraryError, match="filename"):
+        append_profile_record(ctx, _record(evidence={
+            "run_log_file": "/var/logs/run.jsonl",
+            "run_log_record_id": 44,
+        }))
+    assert read_profile_records(ctx) == []

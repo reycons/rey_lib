@@ -705,7 +705,7 @@ def rollback_log_run(
                 reversed_record_ids | orphaned | set(appended_rollback_record_ids)
             )
             if removable:
-                _remove_profiles_for_source_rows(ctx, reversed_record_ids)
+                _remove_profiles_for_run_log(ctx, selected_file)
                 records_removed = session.remove_records(removable)
             # Whether anything of this run is left is read from the manifest,
             # not inferred from a status. A record can survive without being a
@@ -776,14 +776,20 @@ def rollback_log_run(
     }
 
 
-def _remove_profiles_for_source_rows(ctx: Any, source_row_ids: set[int]) -> int:
-    """Remove canonical profiles whose manifest source rows were reversed.
+def _remove_profiles_for_run_log(ctx: Any, run_log_file: str) -> int:
+    """Remove the canonical profiles this run log produced.
+
+    Selection is the one the rest of rollback already uses: an exact
+    ``evidence.run_log_file`` match. Matching on the profiled object's
+    manifest row instead was the earlier mistake — a profile's object_id names
+    what was profiled, not which run wrote the profile, so a rollback whose
+    reversed rows happened not to be the profiled rows removed nothing at all.
 
     The caller already holds the manifest lock used by profile-library writers,
     so this performs the canonical JSONL rewrite directly without reacquiring
     that non-reentrant lock.
     """
-    if not source_row_ids:
+    if not run_log_file:
         return 0
     try:
         target = resolve_profile_library_path(ctx)
@@ -798,10 +804,6 @@ def _remove_profiles_for_source_rows(ctx: Any, source_row_ids: set[int]) -> int:
             f"Profile records could not be read from '{target}': {exc}"
         ) from exc
 
-    # object_id is the manifest row of the profiled object, carried as text.
-    # The reversed manifest record ids are integers, so the comparison is made
-    # in the canonical text space rather than parsing the header back to int.
-    reversed_object_ids = {str(value) for value in source_row_ids}
     retained: list[dict[str, Any]] = []
     removed = 0
     for record in records:
@@ -810,12 +812,18 @@ def _remove_profiles_for_source_rows(ctx: Any, source_row_ids: set[int]) -> int:
             raise LogRunRollbackError(
                 "Stored profile record must contain a canonical header object."
             )
-        object_id = str(header.get("object_id") or "").strip()
-        if not object_id:
+        evidence = header.get("evidence")
+        if not isinstance(evidence, Mapping):
             raise LogRunRollbackError(
-                "Stored profile header requires a non-empty object_id."
+                "Stored profile header requires an evidence object naming the "
+                "run log that produced it."
             )
-        if object_id in reversed_object_ids:
+        produced_by = str(evidence.get("run_log_file") or "").strip()
+        if not produced_by:
+            raise LogRunRollbackError(
+                "Stored profile evidence requires a non-empty run_log_file."
+            )
+        if produced_by == run_log_file:
             removed += 1
         else:
             retained.append(record)

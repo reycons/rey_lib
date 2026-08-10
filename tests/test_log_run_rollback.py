@@ -94,12 +94,18 @@ def _rows(ctx: SimpleNamespace) -> list[dict]:
     ]
 
 
-def _profile_record(source_row_id: int) -> dict:
+def _profile_record(source_row_id: int, run_log_file: str = "run.jsonl") -> dict:
     return {
         "header": {
             "profile_schema_version": 1,
             "object_id": str(source_row_id),
             "source_hash": f"hash-{source_row_id}",
+            # A profile names the run that produced it, which is how rollback
+            # selects it — the same evidence pair every governed record carries.
+            "evidence": {
+                "run_log_file": run_log_file,
+                "run_log_record_id": source_row_id,
+            },
             "profiler": {},
             "sampling_strategy": "random_without_replacement_v1",
             "requested_sample_rows": 500,
@@ -631,9 +637,14 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
     assert summary["record_id"] > max(create_id, move_id)
 
 
-def test_rollback_removes_only_profiles_for_reversed_manifest_rows(
+def test_rollback_removes_only_the_profiles_its_own_run_log_produced(
     tmp_path: Path,
 ) -> None:
+    """Profiles are selected by evidence.run_log_file, as manifest rows are.
+
+    Selecting them by the profiled object's manifest row was the earlier bug: a
+    rollback whose reversed rows were not the profiled rows removed nothing.
+    """
     ctx = _ctx(tmp_path)
     rolled_back_file = tmp_path / "rolled-back.csv"
     rolled_back_file.write_text("rolled back", encoding="utf-8")
@@ -650,8 +661,8 @@ def test_rollback_removes_only_profiles_for_reversed_manifest_rows(
         run_log_file="other.jsonl",
         destination_path=str(retained_file),
     )
-    append_profile_record(ctx, _profile_record(rolled_back_id))
-    append_profile_record(ctx, _profile_record(retained_id))
+    append_profile_record(ctx, _profile_record(rolled_back_id, "run.jsonl"))
+    append_profile_record(ctx, _profile_record(retained_id, "other.jsonl"))
 
     result = rollback_log_run(ctx, _run_log(tmp_path))
 
@@ -659,6 +670,9 @@ def test_rollback_removes_only_profiles_for_reversed_manifest_rows(
     assert not rolled_back_file.exists()
     assert retained_file.exists()
     profiles = read_profile_records(ctx)
+    assert [record["header"]["evidence"]["run_log_file"] for record in profiles] == [
+        "other.jsonl"
+    ]
     assert [record["header"]["object_id"] for record in profiles] == [
         str(retained_id)
     ]

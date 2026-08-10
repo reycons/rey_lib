@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Iterable
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -15,22 +14,24 @@ __all__ = [
     "append_profile_record",
     "lookup_profile_record",
     "read_profile_records",
-    "remove_profile_records",
     "resolve_profile_library_path",
 ]
 
 _PATH_NAME = "file_profiles"
 _PROFILE_SCHEMA_VERSION = 1
-_WRITER_FIELDS = frozenset({"profile_id", "log_record_id", "created_at"})
-# Writer-owned fields a stored record must already carry. log_record_id is
-# deliberately absent: it is assigned to everything written from now on, but a
-# record stored before the field existed is still a valid record, and failing
-# its validation would make every existing profile library unreadable.
-_RETIRED_HEADER_FIELDS = frozenset({"source_row_id"})
+_WRITER_FIELDS = frozenset({"profile_id", "created_at"})
+# log_record_id was a UUID this module minted for itself. It pointed at nothing:
+# a profile carrying it could not be resolved back to the run that wrote it, and
+# rollback selects on evidence.run_log_file like every other governed record.
+# The canonical evidence pair replaces it.
+_RETIRED_HEADER_FIELDS = frozenset({"source_row_id", "log_record_id"})
 _REQUIRED_HEADER_FIELDS = frozenset({
     "profile_schema_version",
     "object_id",
     "source_hash",
+    # The supporting run-log record, supplied by the producer before this
+    # record is appended. Evidence-first, as the governed mutation model is.
+    "evidence",
     "profiler",
     "sampling_strategy",
     "requested_sample_rows",
@@ -38,13 +39,14 @@ _REQUIRED_HEADER_FIELDS = frozenset({
     "eligible_population_rows",
     "sampling_provenance",
 })
+_EVIDENCE_FIELDS = frozenset({"run_log_file", "run_log_record_id"})
 _CANONICAL_HEADER_FIELDS = (
     "profile_id",
-    "log_record_id",
     "profile_schema_version",
     "object_id",
     "source_hash",
     "created_at",
+    "evidence",
     "profiler",
     "sampling_strategy",
     "requested_sample_rows",
@@ -117,11 +119,6 @@ def append_profile_record(ctx: Any, record: Mapping[str, Any]) -> str:
     header = content["header"]
     complete_header = {
         "profile_id": profile_id,
-        # The profile log's own identity for this record, and what a rollback
-        # names to remove exactly it. A UUID rather than a position: the append
-        # below rewrites the file without the records this one supersedes, so a
-        # positional id would move under a later write.
-        "log_record_id": str(uuid4()),
         **header,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
     }
@@ -180,50 +177,6 @@ def read_profile_records(ctx: Any) -> list[dict[str, Any]]:
         raise ProfileLibraryError(
             f"Profile records could not be read from '{target}': {exc}"
         ) from exc
-
-
-def remove_profile_records(ctx: Any, *, log_record_ids: Iterable[str]) -> int:
-    """Remove exactly the profile records named by ``log_record_ids``.
-
-    The governed-rewrite counterpart of :func:`append_profile_record`, and the
-    deletion primitive a rollback calls once it knows which profile-log record
-    it owns. ``header.log_record_id`` is the only field consulted: the manifest
-    identities carried on a record say what was profiled, not which profile-log
-    row this is, so matching on them would delete by the wrong identity space.
-
-    Removal is exact. Every other record survives unchanged, no superseded
-    profile is restored — those were already dropped when they were superseded —
-    and no compensating record is appended.
-
-    Returns how many records were removed. An id matching nothing removes
-    nothing and is not an error, following the manifest's removal helper.
-    """
-    targets = {_required_text(value, "log_record_id") for value in log_record_ids}
-    if not targets:
-        return 0
-    target = resolve_profile_library_path(ctx)
-    if not target.exists():
-        return 0
-    # Function-local and outside the try for the reasons given in
-    # append_profile_record.
-    from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
-
-    try:
-        with file_manifest_session(ctx):
-            current = [dict(item.record) for item in read_jsonl_file(target)]
-            for record in current:
-                _validate_stored_record(record)
-            retained = [
-                record for record in current
-                if _record_log_record_id(record) not in targets
-            ]
-            if len(retained) != len(current):
-                write_jsonl_file(target, retained)
-    except (OSError, TypeError, ValueError, JsonlReadError, FileManifestError) as exc:
-        raise ProfileLibraryError(
-            f"Profile records could not be removed from '{target}': {exc}"
-        ) from exc
-    return len(current) - len(retained)
 
 
 def lookup_profile_record(
@@ -308,14 +261,15 @@ def _validate_header(header: Mapping[str, Any], *, stored: bool) -> None:
     if header.get("profile_schema_version") != _PROFILE_SCHEMA_VERSION:
         raise ProfileLibraryError("profile_schema_version must be 1.")
     _required_text(header.get("object_id"), "object_id")
-    # object_id is the manifest row of the profiled object; log_record_id is the
-    # profile log's own row. Two identity spaces, never compared — requiring
-    # them equal is what made the retired field ambiguous.
+    # object_id is the manifest row of the profiled object; evidence points at
+    # the run-log record that produced this profile. Two identity spaces, never
+    # compared — requiring them equal is what made the retired field ambiguous.
     retired = sorted(supplied & _RETIRED_HEADER_FIELDS)
     if retired:
         raise ProfileLibraryError(
             "header carries retired field(s): " + ", ".join(retired)
         )
+    _validate_evidence(header.get("evidence"))
     for field in ("source_hash", "sampling_strategy"):
         _required_text(header.get(field), field)
     for field in ("profiler", "sampling_provenance"):
@@ -509,11 +463,33 @@ def _required_text(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _record_log_record_id(record: Mapping[str, Any]) -> str:
-    header = record.get("header")
-    if not isinstance(header, Mapping):
-        return ""
-    return str(header.get("log_record_id") or "").strip()
+def _validate_evidence(evidence: Any) -> None:
+    """Validate the pointer back to the run-log record that produced a profile.
+
+    The same pair every governed record carries: the run log's filename, which
+    rollback selects exact matches on, and the positive integer row number of
+    the supporting record within it. A profile that cannot be resolved back to
+    its run is unverifiable, so an incomplete pointer fails before it is stored.
+    """
+    if not isinstance(evidence, Mapping):
+        raise ProfileLibraryError("evidence must be a JSON object.")
+    supplied = set(evidence)
+    if supplied != _EVIDENCE_FIELDS:
+        missing = sorted(_EVIDENCE_FIELDS - supplied)
+        if missing:
+            raise ProfileLibraryError(
+                "evidence is missing required field(s): " + ", ".join(missing)
+            )
+        raise ProfileLibraryError(
+            "evidence carries unknown field(s): "
+            + ", ".join(sorted(supplied - _EVIDENCE_FIELDS))
+        )
+    run_log_file = _required_text(evidence.get("run_log_file"), "run_log_file")
+    if Path(run_log_file).name != run_log_file:
+        raise ProfileLibraryError(
+            "run_log_file must be a filename, not a path."
+        )
+    _positive_int(evidence.get("run_log_record_id"), "run_log_record_id")
 
 
 def _record_object_id(record: Mapping[str, Any]) -> str:
