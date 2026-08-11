@@ -902,7 +902,15 @@ def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any
     log_dir : Path | str
         Root of a workflow/pipeline/app's run-log folder (searched recursively).
     limit : int
-        Maximum number of runs to return (most recent first). 0 means no limit.
+        Maximum number of runs to return, and the point at which reading stops.
+        0 means no limit, and reads every candidate.
+
+        Candidates are ordered by file modification time before any log is
+        opened, so a limit bounds the work rather than trimming its result.
+        Where mtime and run_timestamp disagree — a log copied or rewritten after
+        its run — the selected set can differ from ordering every parsed run by
+        timestamp. That is the cost of making the limit real; an unlimited call
+        is unaffected.
 
     Returns
     -------
@@ -913,10 +921,12 @@ def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any
     if not directory.is_dir():
         return []
     summaries: list[dict[str, Any]] = []
-    run_log_paths = sorted(
-        set(directory.rglob("*.jsonl")) | set(directory.rglob("*.log"))
-    )
-    for path in run_log_paths:
+    # Candidates are ordered by modification time before anything is opened, so
+    # a limit stops the reading rather than trimming the result of it. Ordering
+    # by mtime is a filesystem-cheap proxy for recency: a run's identity still
+    # comes only from its parsed records, and the returned list is still sorted
+    # by run_timestamp below.
+    for path in _run_log_candidates(directory):
         payload = read_run_log_sections(path)
         if not _is_typed_run_log(payload["records"]):
             continue
@@ -934,8 +944,42 @@ def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any
             "pipeline": identity["pipeline"],
             "run_log_path": identity["log_path"],
         })
+        # Stop as soon as the caller has what it asked for. Counting typed runs
+        # rather than candidates means a directory holding audit or rollback
+        # logs still yields a full page.
+        if limit and len(summaries) >= limit:
+            break
     summaries.sort(key=lambda run: str(run.get("run_timestamp") or ""), reverse=True)
-    return summaries[:limit] if limit else summaries
+    return summaries
+
+
+def _run_log_candidates(directory: Path) -> list[Path]:
+    """Return candidate run-log paths under *directory*, newest first.
+
+    Discovery is a directory walk and one ``stat`` per file — no log is opened.
+    A file that disappears between the walk and the stat is skipped rather than
+    raising, because discovery races with runs that are still writing.
+
+    Parameters
+    ----------
+    directory : Path
+        Root of a run-log folder, searched recursively.
+
+    Returns
+    -------
+    list[Path]
+        Paths ordered by modification time descending, then by path so equal
+        timestamps keep a stable order.
+    """
+    candidates: list[tuple[float, str, Path]] = []
+    for path in set(directory.rglob("*.jsonl")) | set(directory.rglob("*.log")):
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append((modified, str(path), path))
+    candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return [entry[2] for entry in candidates]
 
 
 def get_run_section(path: Path | str, section: str) -> dict[str, Any]:
