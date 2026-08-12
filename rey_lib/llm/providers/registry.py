@@ -5,8 +5,8 @@ The registry maps logical provider names to BaseProvider instances.
 Providers are registered by name and resolved at runtime so the rest of
 the framework never needs to import SDK-specific modules directly.
 
-Built-in provider names are 'anthropic', 'openai', and 'mock'.  Custom
-providers can be registered by the caller before the first run.
+Built-in provider names are 'anthropic', 'openai', 'gemini', 'ollama', and
+'mock'.  Custom providers can be registered by the caller before the first run.
 
 Public API
 ----------
@@ -84,7 +84,8 @@ def resolve(
     """Return or construct a provider by logical name.
 
     Checks the registry first.  If not found, constructs a built-in
-    provider (anthropic, openai, ollama, mock) using the supplied api_key.
+    provider (anthropic, openai, gemini, ollama, mock) using the supplied
+    api_key.
 
     Parameters
     ----------
@@ -122,6 +123,10 @@ def resolve(
         from rey_lib.llm.providers.openai import OpenAIProvider  # noqa: PLC0415
         return OpenAIProvider(api_key=api_key)
 
+    if normalised == "gemini":
+        from rey_lib.llm.providers.gemini import GeminiProvider  # noqa: PLC0415
+        return GeminiProvider(api_key=api_key)
+
     if normalised == "mock":
         from rey_lib.llm.providers.mock import MockProvider  # noqa: PLC0415
         return MockProvider()
@@ -141,6 +146,6 @@ def resolve(
 
     raise ConfigurationFailure(
         f"Unknown provider '{name}'. "
-        "Known built-ins: anthropic, openai, ollama, mock. "
+        "Known built-ins: anthropic, openai, gemini, ollama, mock. "
         "Register custom providers with registry.register() before use."
     )

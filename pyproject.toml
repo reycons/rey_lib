@@ -48,6 +48,11 @@ artifacts = [
     # formatting/linting engine adapter.
     "sqlfluff>=4.0.0",
 ]
+gemini = [
+    # Google Gemini provider (rey_lib/llm/providers/gemini.py). The SDK is
+    # imported inside run(), so it is only needed when that provider is used.
+    "google-genai>=1.0.0",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-mock>=3.14.0",
