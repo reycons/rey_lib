@@ -110,6 +110,100 @@ def test_an_undeclared_reference_fails_loudly(
         build_ctx_from_path(_write(tmp_path, undeclared), app_name="fixture_app")
 
 
+_WITH_ROOT = _INSTALLATION.replace(
+    """paths:
+  - name: root
+    path: '{config_dir}'
+""",
+    """paths:
+  - name: root
+    path: '{config_dir}'
+  - name: installation_root
+    path: '{config_dir}'
+""",
+)
+
+
+def test_the_env_file_is_read_from_the_declared_installation_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared installation_root is where the installation's .env lives.
+
+    Installations lay their configuration out differently, so the root is
+    declared rather than derived from the config file's position.
+    """
+    monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("FIXTURE_GEMINI_API_KEY", raising=False)
+
+    config_path = _write(tmp_path, _WITH_ROOT)
+    # The root is tmp_path; the config lives a directory below it.
+    (tmp_path / ".env").write_text(
+        "FIXTURE_OPENAI_API_KEY=from-installation-root\n"
+        "FIXTURE_GEMINI_API_KEY=gemini-from-root\n",
+        encoding="utf-8",
+    )
+
+    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
+    profiles = {profile.name: profile for profile in ctx.llm}
+
+    assert profiles["hosted"].api_key == "from-installation-root"
+    assert profiles["gemini"].api_key == "gemini-from-root"
+
+
+def test_without_a_declared_root_the_config_directory_is_still_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The long-standing location stays the default for undeclared installations."""
+    monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
+
+    config_path = _write(tmp_path, _INSTALLATION)
+    (config_path.parent / ".env").write_text(
+        "FIXTURE_OPENAI_API_KEY=beside-the-config\n", encoding="utf-8"
+    )
+
+    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
+    profiles = {profile.name: profile for profile in ctx.llm}
+
+    assert profiles["hosted"].api_key == "beside-the-config"
+
+
+def test_a_root_env_file_is_not_read_when_no_root_is_declared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No upward search: an undeclared installation never reaches outside itself."""
+    monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
+
+    config_path = _write(tmp_path, _INSTALLATION)
+    (tmp_path / ".env").write_text(
+        "FIXTURE_OPENAI_API_KEY=should-not-be-read\n", encoding="utf-8"
+    )
+
+    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
+    profiles = {profile.name: profile for profile in ctx.llm}
+
+    assert profiles["hosted"].api_key == ""
+
+
+def test_a_real_environment_value_still_wins_over_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """load_dotenv runs with override=False, so the process environment leads."""
+    monkeypatch.setenv("FIXTURE_OPENAI_API_KEY", "from-the-process")
+    monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
+
+    config_path = _write(tmp_path, _WITH_ROOT)
+    (tmp_path / ".env").write_text(
+        "FIXTURE_OPENAI_API_KEY=from-the-file\n", encoding="utf-8"
+    )
+
+    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
+    profiles = {profile.name: profile for profile in ctx.llm}
+
+    assert profiles["hosted"].api_key == "from-the-process"
+
+
 def test_the_declaration_block_is_not_rewritten_by_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

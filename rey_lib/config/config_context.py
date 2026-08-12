@@ -43,6 +43,10 @@ from rey_lib.logs import get_logger, log_config_file_reference
 
 _logger = get_logger(__name__)
 
+# Named path an installation declares to say where it begins. It locates the
+# installation's .env; every other path stays resolved as before.
+_INSTALLATION_ROOT_PATH = "installation_root"
+
 # Config precedence layers map to human-facing configuration roles. Roles come
 # from recorded provenance (the layer a file contributed at), never from the
 # file name or extension (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
@@ -158,8 +162,6 @@ def build_ctx_from_path(
         "yyymmdd": date,
     }
 
-    _load_env_file(config_dir / _ENV_FILE_NAME)
-
     # Step 1 — root config only; no rglob yet.
     root_raw: dict[str, Any] = _load_yaml(config_path)
     _logger.info("config_loader root=%s app=%s", config_path, app_name or "(none)")
@@ -173,7 +175,11 @@ def build_ctx_from_path(
         k: str(v) for k, v in prelim_resolver._paths.items()
     })
 
-    # Step 3 — determine the ordered list of include folders.
+    # Step 3 — the installation's own .env, read after the root config because
+    # the root config is what says where the installation begins.
+    _load_env_file(_env_directory(prelim_resolver, config_dir) / _ENV_FILE_NAME)
+
+    # Step 4 — determine the ordered list of include folders.
     include_folders = _resolve_include_folders(
         root_raw, resolver_strs, app_name, config_path, full_installation
     )
@@ -446,6 +452,47 @@ def print_ctx(ctx: Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Private — loading and merging
 # ---------------------------------------------------------------------------
+def _env_directory(prelim_resolver: Any, config_dir: Path) -> Path:
+    """Return the directory holding this installation's ``.env``.
+
+    An installation declares where it begins by naming an
+    ``installation_root`` path; the ``.env`` is read from there. Installations
+    lay their configuration out differently — one keeps it at the installation
+    root, another nests it under ``config/install`` — so the root is declared
+    rather than derived. Counting parent directories or matching directory
+    names would be a guess that happens to hold for today's layouts.
+
+    Without that declaration the file is read from the directory holding the
+    root config, which is the long-standing behaviour and stays the default.
+
+    Parameters
+    ----------
+    prelim_resolver : Any
+        Preliminary PathResolver built from the root config's ``paths``.
+    config_dir : Path
+        Directory holding the root config file.
+
+    Returns
+    -------
+    Path
+        Directory to read ``.env`` from. Never leaves the installation: an
+        undeclared or unusable root falls back to ``config_dir`` rather than
+        searching upward, so one installation can never read another's file.
+    """
+    declared = getattr(prelim_resolver, "_paths", {}).get(_INSTALLATION_ROOT_PATH)
+    if declared is None:
+        return config_dir
+
+    root = Path(str(declared)).expanduser()
+    if not root.is_dir():
+        _logger.warning(
+            "installation_root '%s' is not a directory; reading .env from %s.",
+            root, config_dir,
+        )
+        return config_dir
+    return root
+
+
 def _inject_env_blocks(ns: Namespace) -> None:
     """
     Recursively scan a Namespace for 'env:' child blocks and inject
