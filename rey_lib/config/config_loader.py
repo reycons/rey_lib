@@ -112,10 +112,78 @@ def _merge_named_lists(left: list[Any], right: list[Any], *, label: str) -> list
 
         existing = merged[name_to_index[name]]
         if existing != item:
-            raise ConfigError(
-                f"Conflicting duplicate '{label}' entry named '{name}'."
+            merged[name_to_index[name]] = _merge_named_entry(
+                existing, item, label=label, name=name
             )
 
+    return merged
+
+
+def _merge_named_entry(
+    left: Any,
+    right: Any,
+    *,
+    label: str,
+    name: str,
+) -> Any:
+    """Fold a repeated named entry into the one already merged.
+
+    Two configuration files may each declare part of the same named entry —
+    one workflow whose processes are split one per file, for example. Keys
+    only one file declares are added; keys both declare as mappings or lists
+    merge recursively. A key both files declare with different scalar values
+    is a genuine contradiction and still fails closed, so the duplicate guard
+    survives for the case it was written to catch.
+
+    Parameters
+    ----------
+    left : Any
+        The entry already merged, taking precedence for ordering.
+    right : Any
+        The later entry contributing its own keys.
+    label : str
+        Collection name, used to report where a conflict was found.
+    name : str
+        The shared ``name`` value of the two entries.
+
+    Returns
+    -------
+    Any
+        A new merged entry.
+
+    Raises
+    ------
+    ConfigError
+        If both entries declare the same key with different values.
+    """
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        if left == right:
+            return deepcopy(left)
+        raise ConfigError(
+            f"Conflicting duplicate '{label}' entry named '{name}'."
+        )
+
+    merged = deepcopy(left)
+    for key, value in right.items():
+        if key not in merged or merged[key] is None:
+            # A section declared with nothing under it is a placeholder naming
+            # where the split files merge, not a value contradicting them.
+            merged[key] = deepcopy(value)
+        elif value is None:
+            continue
+        elif isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _merge_named_entry(
+                merged[key], value, label=f"{label}.{key}", name=name
+            )
+        elif isinstance(merged[key], list) and isinstance(value, list):
+            merged[key] = _merge_named_lists(
+                merged[key], value, label=f"{label}.{key}"
+            )
+        elif merged[key] != value:
+            raise ConfigError(
+                f"Conflicting duplicate '{label}' entry named '{name}': "
+                f"key '{key}' is declared with different values."
+            )
     return merged
 
 def _merge_compatible_mapping(left: Any, right: Any, *, label: str) -> Any:
