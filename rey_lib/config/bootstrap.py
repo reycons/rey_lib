@@ -1,15 +1,17 @@
 """
 Shared startup bootstrap for Rey process entry points.
 
-The bootstrap owns both context acquisition and logging initialization, and
-every Rey process goes through it. The only variation is whether the bootstrap
-receives an existing context or builds one itself. Logging is never owned by the
-application entry point.
+The bootstrap owns context acquisition, logging initialization and the process
+error boundary, and every Rey process goes through it. The only variation is
+whether the bootstrap receives an existing context or builds one itself. Neither
+logging nor process-level error handling is ever owned by the application entry
+point.
 
     process entry point
         -> bootstrap
         -> ctx supplied?  yes: use it   no: load and resolve configuration
         -> initialize logging from ctx
+        -> install the process error boundary
         -> return ctx
         -> application logic
 
@@ -17,6 +19,10 @@ Logging is initialized after the context exists because the log destination is
 configuration: there is nowhere to write until the context names it. A failure
 resolving configuration therefore reaches the process stream and nothing else,
 which is the one startup window no run log can cover.
+
+The error boundary is installed next, so it writes through the logger that now
+exists. It covers only what nothing else caught; every error an application
+handles stays inside the application.
 
 Public API
 ----------
@@ -29,7 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import ConfigError, install_process_error_boundary
 from rey_lib.logs import setup_logging
 
 __all__ = ["build_ctx_for_app"]
@@ -86,6 +92,7 @@ def build_ctx_for_app(
         ctx = _resolve_ctx(installation_config_path, app_name, project_root)
 
     setup_logging(ctx, operation=operation)
+    install_process_error_boundary(ctx)
     return ctx
 
 

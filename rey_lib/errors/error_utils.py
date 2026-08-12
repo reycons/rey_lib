@@ -17,6 +17,8 @@ StateError            Raised when a JSON state file cannot be read or written.
 FtpConnectionError    Raised when an FTP connection cannot be established.
 FtpDownloadError      Raised when a file download fails or is incomplete.
 handle_exception      Log and re-raise with chained traceback context.
+install_process_error_boundary
+                      Install the process-level safety net for uncaught failures.
 validate_path         Validate that a required path exists on disk.
 validate_required     Validate that a required string value is non-empty.
 """
@@ -25,6 +27,8 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
+import threading
 import traceback
 import uuid
 from typing import Any
@@ -39,6 +43,7 @@ __all__ = [
     "FtpConnectionError",
     "FtpDownloadError",
     "handle_exception",
+    "install_process_error_boundary",
     "build_error_record_payload",
     "build_process_failure_payload",
     "build_safe_error_payload",
@@ -366,3 +371,92 @@ def validate_required(value: str, label: str) -> str:
             f"Required configuration value '{label}' is missing or empty."
         )
     return stripped
+
+
+# ---------------------------------------------------------------------------
+# Process error boundary
+# ---------------------------------------------------------------------------
+
+_boundary_installed = False
+
+
+def install_process_error_boundary(ctx: Any | None = None) -> None:
+    """Install the process-level safety net for failures nothing else caught.
+
+    An exception that escapes every application handler was printed by the
+    interpreter to the process stream and never reached the run log, so the
+    record of why a process died lived somewhere different from the record of
+    everything it did. This routes those three cases — the uncaught main-thread
+    exception, an unhandled exception in a worker thread, and an unraisable
+    exception — through the Rey logger the bootstrap has already initialized.
+
+    It is a net, not a handler. Each hook records and then delegates to the hook
+    it replaced, so tracebacks, exit codes and interpreter behaviour are exactly
+    what they were. Nothing is swallowed, and an error an application handles
+    itself never arrives here.
+
+    KeyboardInterrupt and SystemExit pass straight through: neither is a
+    failure, and logging them as one would train readers to ignore the record.
+
+    Installing twice is a no-op rather than a chain, so a process that starts
+    the bootstrap more than once does not log its failures more than once.
+
+    Parameters
+    ----------
+    ctx : Any | None
+        The resolved context, accepted so the boundary can be scoped to the run
+        it belongs to. Reserved; the logger already carries run identity.
+    """
+    global _boundary_installed
+    if _boundary_installed:
+        return
+    _boundary_installed = True
+
+    logger = get_logger(__name__)
+    previous_excepthook = sys.excepthook
+    previous_threadhook = threading.excepthook
+    previous_unraisablehook = sys.unraisablehook
+
+    def _main_thread_boundary(exc_type, exc, tb) -> None:
+        """Record an uncaught main-thread exception, then let it behave as before."""
+        if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+            previous_excepthook(exc_type, exc, tb)
+            return
+        logger.error(
+            "Unhandled exception: %s",
+            _redact_error_text(exc),
+            exc_info=(exc_type, exc, tb),
+        )
+        previous_excepthook(exc_type, exc, tb)
+
+    def _thread_boundary(args: Any) -> None:
+        """Record an unhandled exception in a worker thread."""
+        exc_type = getattr(args, "exc_type", None)
+        if exc_type is not None and issubclass(exc_type, SystemExit):
+            previous_threadhook(args)
+            return
+        thread = getattr(args, "thread", None)
+        logger.error(
+            "Unhandled exception in thread %s: %s",
+            getattr(thread, "name", "unknown"),
+            _redact_error_text(getattr(args, "exc_value", None)),
+            exc_info=(
+                exc_type,
+                getattr(args, "exc_value", None),
+                getattr(args, "exc_traceback", None),
+            ),
+        )
+        previous_threadhook(args)
+
+    def _unraisable_boundary(args: Any) -> None:
+        """Record an exception the interpreter could not raise."""
+        logger.error(
+            "Unraisable exception in %r: %s",
+            getattr(args, "object", None),
+            _redact_error_text(getattr(args, "exc_value", None)),
+        )
+        previous_unraisablehook(args)
+
+    sys.excepthook = _main_thread_boundary
+    threading.excepthook = _thread_boundary
+    sys.unraisablehook = _unraisable_boundary
