@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -497,3 +498,76 @@ def _record_object_id(record: Mapping[str, Any]) -> str:
     if not isinstance(header, Mapping):
         return ""
     return str(header.get("object_id") or "").strip()
+
+PROFILE_ACCESS_REDACTED = "redacted"
+PROFILE_ACCESS_UNREDACTED = "unredacted"
+_ACCESS_SAMPLE_FIELDS = {
+    PROFILE_ACCESS_REDACTED: "redacted_samples",
+    PROFILE_ACCESS_UNREDACTED: "samples",
+}
+
+
+def resolve_profile_presentation(
+    record: Mapping[str, Any],
+    access: str,
+    *,
+    object_id: str = "",
+) -> dict[str, Any]:
+    """Return the record carrying one sample presentation, with the other removed.
+
+    A stored profile holds both presentations side by side — ``structure.samples``
+    and ``structure.redacted_samples``. This selects one and deletes the other
+    from the copy it returns, so a caller handed the redacted view has no path
+    back to the clear values.
+
+    This answers only "give me the clear or redacted representation of this
+    record". Whether a particular consumer may receive that representation is a
+    separate question, asked one layer up: ``profile_access.allowed`` and
+    ``profile_access.default`` govern what a model may be sent and are enforced by
+    ``rey_lib.llm.profiles.resolve_profile_for_llm``. An operator reading the two
+    presentations in the tree is not subject to that policy and does not consult
+    it.
+
+    Parameters
+    ----------
+    record : Mapping[str, Any]
+        The stored profile record. Never modified.
+    access : str
+        ``redacted`` or ``unredacted``.
+    object_id : str
+        Identity used in failure messages only.
+
+    Returns
+    -------
+    dict[str, Any]
+        A copy carrying exactly one sample presentation.
+
+    Raises
+    ------
+    ProfileLibraryError
+        If ``access`` names no known presentation, or the record has no valid
+        structure, or it lacks the requested presentation.
+    """
+    selected = str(access or "").strip()
+    if selected not in _ACCESS_SAMPLE_FIELDS:
+        raise ProfileLibraryError(
+            "profile access may be only redacted or unredacted."
+        )
+
+    resolved = deepcopy(dict(record))
+    structure = resolved.get("structure")
+    if not isinstance(structure, dict):
+        raise ProfileLibraryError(
+            f"Current profile record for object_id '{object_id}' has no valid structure."
+        )
+    selected_field = _ACCESS_SAMPLE_FIELDS[selected]
+    rejected_field = (
+        "samples" if selected_field == "redacted_samples" else "redacted_samples"
+    )
+    if not isinstance(structure.get(selected_field), list):
+        raise ProfileLibraryError(
+            f"Current profile record for object_id '{object_id}' has no valid "
+            f"{selected_field}."
+        )
+    structure.pop(rejected_field, None)
+    return resolved

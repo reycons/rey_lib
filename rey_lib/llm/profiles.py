@@ -11,21 +11,23 @@ from rey_lib.llm.exceptions import (
     PermissionFailure,
     ValidationFailure,
 )
-from rey_lib.logs.profile_library import lookup_profile_record
+from rey_lib.logs.profile_library import (
+    PROFILE_ACCESS_REDACTED,
+    PROFILE_ACCESS_UNREDACTED,
+    ProfileLibraryError,
+    _ACCESS_SAMPLE_FIELDS,
+    lookup_profile_record,
+    resolve_profile_presentation,
+)
 
 __all__ = [
     "PROFILE_ACCESS_REDACTED",
     "PROFILE_ACCESS_UNREDACTED",
     "profile_access_policy",
     "resolve_profile_for_llm",
+    "resolve_profile_presentation",
 ]
 
-PROFILE_ACCESS_REDACTED = "redacted"
-PROFILE_ACCESS_UNREDACTED = "unredacted"
-_ACCESS_SAMPLE_FIELDS = {
-    PROFILE_ACCESS_REDACTED: "redacted_samples",
-    PROFILE_ACCESS_UNREDACTED: "samples",
-}
 
 
 def profile_access_policy(profile: Any) -> dict[str, Any]:
@@ -98,24 +100,13 @@ def resolve_profile_for_llm(
         raise ValidationFailure(
             f"Current profile record for object_id '{object_id}' is invalid."
         )
-    resolved = deepcopy(dict(record))
-    structure = resolved.get("structure")
-    if not isinstance(structure, dict):
-        raise ValidationFailure(
-            f"Current profile record for object_id '{object_id}' has no valid structure."
-        )
-    selected_field = _ACCESS_SAMPLE_FIELDS[selected]
-    rejected_field = (
-        "samples" if selected_field == "redacted_samples" else "redacted_samples"
-    )
-    selected_samples = structure.get(selected_field)
-    if not isinstance(selected_samples, list):
-        raise ValidationFailure(
-            f"Current profile record for object_id '{object_id}' has no valid "
-            f"{selected_field}."
-        )
-    structure.pop(rejected_field, None)
-    return resolved
+    try:
+        return resolve_profile_presentation(record, selected, object_id=object_id)
+    except ProfileLibraryError as exc:
+        # The record layer raises in its own vocabulary. Callers of this
+        # function answer to the LLM contract, so it is translated here rather
+        # than leaking a storage error into an LLM caller.
+        raise ValidationFailure(str(exc)) from exc
 
 
 def _value(item: Any, field: str) -> Any:
