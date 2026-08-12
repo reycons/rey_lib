@@ -87,8 +87,18 @@ _METADATA_CAPABILITIES = frozenset(
         "foreign_keys",
         "indexes",
         "unique_constraints",
+        "procedures",
+        "functions",
     }
 )
+
+# Routine capability → the backend's routine kind. The SQLAlchemy Inspector has
+# no routines API, so both providers answer these from their own catalog rather
+# than through the shared inspector helpers.
+_ROUTINE_KINDS: dict[str, str] = {
+    "procedures": "procedure",
+    "functions": "function",
+}
 
 _SQLALCHEMY_METADATA_CAPABILITIES = _METADATA_CAPABILITIES
 _PROVIDER_METADATA_CAPABILITIES: dict[str, frozenset[str]] = {
@@ -434,6 +444,30 @@ class DBAdapter:
 
         return metadata_get_unique_constraints(conn, catalog, schema, table)
 
+    def list_procedures(
+        self,
+        conn: Any,
+        schema: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return normalized procedures, optionally restricted to one schema."""
+        return self._list_routines(conn, "procedures", schema)
+
+    def list_functions(
+        self,
+        conn: Any,
+        schema: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return normalized functions, optionally restricted to one schema."""
+        return self._list_routines(conn, "functions", schema)
+
+    def get_procedure_definition(self, conn: Any, identity: dict[str, Any]) -> str:
+        """Return one procedure's provider-native definition SQL."""
+        return self._routine_definition(conn, "procedures", identity)
+
+    def get_function_definition(self, conn: Any, identity: dict[str, Any]) -> str:
+        """Return one function's provider-native definition SQL."""
+        return self._routine_definition(conn, "functions", identity)
+
     def _require_metadata_capability(self, conn: Any, capability: str) -> str:
         provider = self._provider_for_conn(conn)
         if not self.supports(conn, capability):
@@ -479,6 +513,68 @@ class DBAdapter:
                 }
             )
         return sorted(result, key=lambda item: (item["schema"], item["name"]))
+
+    def _list_routines(
+        self,
+        conn: Any,
+        capability: str,
+        schema: str | None,
+    ) -> list[dict[str, str]]:
+        """Return Rey-owned routine records for one capability.
+
+        The signature is the provider's identity argument list, normalized to a
+        string. It is empty for a routine taking no arguments, and it is what
+        keeps overloaded routines distinguishable — a routine is identified by
+        catalog, schema, name, object_type and signature together, never by
+        name alone.
+        """
+        provider = self._require_metadata_capability(conn, capability)
+        catalog = self._metadata_catalog(conn, provider)
+        kind = _ROUTINE_KINDS[capability]
+        rows = _backend(provider).list_routines(conn, catalog, schema, kind)
+        result = [
+            {
+                "catalog": str(catalog),
+                "schema": str(row.get("schema") or ""),
+                "name": str(row.get("name") or ""),
+                "object_type": kind,
+                "signature": str(row.get("signature") or ""),
+            }
+            for row in rows
+        ]
+        return sorted(
+            result,
+            key=lambda item: (item["schema"], item["name"], item["signature"]),
+        )
+
+    def _routine_definition(
+        self,
+        conn: Any,
+        capability: str,
+        identity: dict[str, Any],
+    ) -> str:
+        """Resolve one routine's definition from a normalized routine identity."""
+        provider = self._require_metadata_capability(conn, capability)
+        kind = _ROUTINE_KINDS[capability]
+        requested_type = str(identity.get("object_type") or kind)
+        if requested_type != kind:
+            raise ConfigError(
+                f"DBAdapter: routine identity object_type '{requested_type}' does "
+                f"not match the requested '{kind}' definition."
+            )
+        name = str(identity.get("name") or "")
+        if not name:
+            raise ConfigError("DBAdapter: routine identity requires a name.")
+        return str(
+            _backend(provider).get_routine_definition(
+                conn,
+                self._metadata_catalog(conn, provider),
+                str(identity.get("schema") or ""),
+                name,
+                str(identity.get("signature") or ""),
+                kind,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Stored procedures

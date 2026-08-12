@@ -626,6 +626,102 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
     return objects
 
 
+_ROUTINE_PROKIND: dict[str, str] = {"procedure": "p", "function": "f"}
+
+
+def list_routines(
+    conn: Any,
+    catalog: str,
+    schema: str | None,
+    kind: str,
+) -> list[dict[str, str]]:
+    """Return one routine kind from the catalog, with its identity arguments.
+
+    Read from ``pg_proc`` so overloaded routines are listed once each, and
+    carry ``pg_get_function_identity_arguments`` as the signature. That is the
+    argument list PostgreSQL itself uses to name one routine among its
+    overloads, so a routine is addressable later without an oid.
+    """
+    prokind = _ROUTINE_PROKIND.get(kind)
+    if prokind is None:
+        raise DatabaseError(f"postgres_utils: unsupported routine kind '{kind}'.")
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.prokind = %s
+                AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                AND (%s IS NULL OR n.nspname = %s)
+            ORDER BY n.nspname, p.proname
+            """,
+            [prokind, schema, schema],
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    return [
+        {
+            "schema": str(schema_name),
+            "name": str(routine_name),
+            "signature": str(signature or ""),
+        }
+        for schema_name, routine_name, signature in rows
+    ]
+
+
+def get_routine_definition(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    name: str,
+    signature: str,
+    kind: str,
+) -> str:
+    """Return one routine's definition, resolved by schema, name and signature.
+
+    The oid is resolved here rather than carried by the caller, so an overloaded
+    routine is addressed by the same provider-neutral identity the listing
+    returned and no provider handle leaves this module.
+    """
+    prokind = _ROUTINE_PROKIND.get(kind)
+    if prokind is None:
+        raise DatabaseError(f"postgres_utils: unsupported routine kind '{kind}'.")
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT pg_get_functiondef(p.oid)
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = %s
+                AND p.proname = %s
+                AND pg_get_function_identity_arguments(p.oid) = %s
+                AND p.prokind = %s
+            """,
+            [schema, name, signature, prokind],
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    if not rows:
+        raise DatabaseError(
+            f"postgres_utils: {kind} not found: {schema}.{name}({signature})"
+        )
+    if len(rows) > 1:
+        raise DatabaseError(
+            f"postgres_utils: {kind} identity is ambiguous: "
+            f"{schema}.{name}({signature})"
+        )
+    return str(rows[0][0]).rstrip() + ";"
+
+
 def get_object_ddl(conn: Any, obj: dict[str, Any]) -> str:
     """Return provider-native PostgreSQL DDL for one object."""
     object_type = str(obj["object_type"])

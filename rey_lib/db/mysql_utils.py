@@ -482,6 +482,88 @@ def list_database_objects(
 	return [unique[key] for key in sorted(unique)]
 
 
+_ROUTINE_TYPES: dict[str, str] = {"procedure": "PROCEDURE", "function": "FUNCTION"}
+
+
+def list_routines(
+	conn: Any,
+	catalog: str,
+	schema: str | None,
+	kind: str,
+) -> list[dict[str, str]]:
+	"""Return one routine kind from information_schema.
+
+	MySQL does not overload routines, so a name is unique within its schema and
+	the returned signature is always empty. It is present because the shared
+	routine record carries it, not because MySQL needs one to address a routine.
+	"""
+	routine_type = _ROUTINE_TYPES.get(kind)
+	if routine_type is None:
+		raise DatabaseError(f"mysql_utils: unsupported routine kind '{kind}'.")
+
+	target_schema = schema or catalog
+	cursor = conn.cursor(dictionary=True)
+	try:
+		cursor.execute(
+			"""
+			SELECT routine_schema AS schema_name, routine_name AS routine_name
+			FROM information_schema.routines
+			WHERE routine_type = %s AND routine_schema = %s
+			ORDER BY routine_schema, routine_name
+			""",
+			[routine_type, target_schema],
+		)
+		rows = cursor.fetchall()
+	finally:
+		cursor.close()
+
+	return [
+		{
+			"schema": str(row["schema_name"]),
+			"name": str(row["routine_name"]),
+			"signature": "",
+		}
+		for row in rows
+	]
+
+
+def get_routine_definition(
+	conn: Any,
+	catalog: str,
+	schema: str,
+	name: str,
+	signature: str,
+	kind: str,
+) -> str:
+	"""Return one routine's definition through SHOW CREATE.
+
+	SHOW CREATE takes no parameters, so both identifiers are validated before
+	they are quoted into the statement. The signature is not part of a MySQL
+	routine's address and takes no part in resolving one.
+	"""
+	routine_type = _ROUTINE_TYPES.get(kind)
+	if routine_type is None:
+		raise DatabaseError(f"mysql_utils: unsupported routine kind '{kind}'.")
+
+	target_schema = schema or catalog
+	_validate_identifier(target_schema, "routine schema")
+	_validate_identifier(name, "routine name")
+
+	cursor = conn.cursor(dictionary=True)
+	try:
+		cursor.execute(f"SHOW CREATE {routine_type} `{target_schema}`.`{name}`")
+		row = cursor.fetchone() or {}
+	finally:
+		cursor.close()
+
+	definition = row.get(f"Create {routine_type.capitalize()}")
+	if not definition:
+		raise DatabaseError(
+			f"mysql_utils: {kind} not found: {target_schema}.{name}"
+		)
+	return str(definition).rstrip() + ";"
+
+
 def get_object_ddl(
 	conn: mysql.connector.MySQLConnection,
 	obj: dict[str, Any],
