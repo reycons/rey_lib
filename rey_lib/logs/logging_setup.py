@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +98,10 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     Initialise logging for the application.
 
     Sets up handlers based on what is configured in ctx:
-      - Console (stderr): always active, respects log level (live transport).
+      - Console (stderr): the live transport, for a reader watching a terminal.
+        Removed once the JSONL log is live if stdout is not a terminal, because
+        a redirected stream turns every governed record into a second text copy
+        of the run log at a destination configuration never named.
       - JSONL: active by default unless disabled in ctx.logging.jsonl_enabled
         or ctx.jsonl_enabled. This is the single durable execution log.
       - Human-readable file: opt-in legacy only (readable_enabled=true). New runs
@@ -194,6 +198,23 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
         root.addHandler(jsonl_handler)
         log_file = str(jsonl_path)  # JSONL takes precedence for ctx.log_file
 
+        # The live transport is for a reader watching a terminal. When stderr is
+        # not a terminal it is a file or a pipe somebody redirected, and every
+        # governed record written there becomes a second, text copy of the run
+        # log at a destination configuration never named -- which is the one
+        # thing the JSONL run log exists to be the only one of.
+        #
+        # Capturing stderr before this point is right: there is no governed
+        # logger yet, and a run log at a configured destination cannot record
+        # that configuration failing to resolve. That capture ends here. After
+        # it, an error belongs in the run log, so anything still writing to
+        # stderr is an ungoverned error path -- a defect to fix or a bridge to
+        # add, not a second log to keep.
+        if not _stderr_is_terminal():
+            root.removeHandler(console_handler)
+            console_handler.close()
+            _bridge_stderr_to_logger()
+
     ctx.log_level = level_name
     ctx.log_depth = getattr(ctx, "log_depth", 0)
     _current_depth = ctx.log_depth
@@ -281,6 +302,76 @@ def get_logger(name: str) -> logging.Logger:
         A configured logger instance.
     """
     return logging.getLogger(name)
+
+
+class _UngovernedStderr:
+    """Post-handover stderr, reported through the logger instead of a file.
+
+    The startup capture is still open at the file-descriptor level, so anything
+    written to stderr after handover would keep accumulating in it -- a shadow
+    text log growing beside the run log nobody asked for.
+
+    Writing here is not an error in itself; writing here *after* the governed
+    logger exists is, because an error that never reaches the run log is an
+    error nobody finds. So each line becomes a governed record naming the path
+    it took, which makes an ungoverned write visible enough to fix or bridge
+    deliberately rather than quietly persisted.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._buffer = ""
+        self._reporting = False
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._report(line)
+        return len(text)
+
+    def _report(self, line: str) -> None:
+        # A report that itself wrote to stderr would recurse; nothing routes
+        # there now, but the guard keeps that true if a handler is ever added.
+        if self._reporting or not line.strip():
+            return
+        self._reporting = True
+        try:
+            get_logger("rey_lib.logs").error("ungoverned stderr write: %s", line)
+        finally:
+            self._reporting = False
+
+    def flush(self) -> None:
+        if self._buffer.strip():
+            self._report(self._buffer)
+        self._buffer = ""
+
+    def isatty(self) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
+def _bridge_stderr_to_logger() -> None:
+    """Send post-handover stderr to the run log rather than the startup capture."""
+    if isinstance(sys.stderr, _UngovernedStderr):
+        return
+    sys.stderr = _UngovernedStderr(sys.stderr)
+
+
+def _stderr_is_terminal() -> bool:
+    """Whether stderr is a terminal a reader is actually watching.
+
+    The console handler writes to stderr, so stderr is the stream that decides.
+    A detached or redirected stream is not a terminal; a stream that cannot
+    answer is treated as one, so an unusual environment keeps its output rather
+    than losing it silently.
+    """
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError, OSError):
+        return True
 
 
 def add_jsonl_handler(
