@@ -13,6 +13,7 @@ line, every record carrying record_type and record_id.
 
 from __future__ import annotations
 
+from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
     LANGUAGE_EXTRACTORS,
     LanguageExtractor,
@@ -20,7 +21,12 @@ from rey_lib.repository_map.extractors import (
     extract_symbols,
     supported_languages,
 )
+from rey_lib.repository_map.globals_scan import (
+    GlobalReport,
+    extract_global_publications_and_consumers,
+)
 from rey_lib.repository_map.inventory import inventory_files, load_scan_rules
+from rey_lib.repository_map.registrations import extract_registrations
 from rey_lib.repository_map.records import (
     EDGE_KIND_BACKEND_STRING_REFERENCE,
     EDGE_KIND_CALL,
@@ -80,12 +86,16 @@ __all__ = [
     "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
     "FileRecord",
+    "GlobalReport",
     "LanguageExtractor",
     "ReferenceEdge",
     "ScanRules",
     "SymbolInventory",
     "SymbolRecord",
     "extract_executable_references",
+    "extract_global_publications_and_consumers",
+    "extract_registrations",
+    "extract_runtime_entry_points",
     "extract_symbols",
     "inventory_files",
     "load_scan_rules",

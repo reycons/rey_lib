@@ -60,6 +60,33 @@ LANGUAGE_UNKNOWN = "unknown"
 RECORD_TYPE_FILE = "file"
 RECORD_TYPE_SYMBOL = "symbol"
 RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
+RECORD_TYPE_REGISTRATION = "registration"
+RECORD_TYPE_ENTRY_POINT = "entry_point"
+RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
+RECORD_TYPE_GLOBAL_CONSUMER = "global_consumer"
+
+# registration_kind vocabulary.
+REGISTRATION_KIND_ACTION = "action"
+REGISTRATION_KIND_EMBEDDED_OBJECT = "embedded_object"
+REGISTRATION_KIND_VIEWER = "viewer"
+REGISTRATION_KIND_TREE = "tree"
+REGISTRATION_KIND_PROVIDER = "provider"
+REGISTRATION_KIND_OTHER = "other"
+
+# entry_point_kind vocabulary.
+ENTRY_POINT_KIND_BUNDLE = "bundle"
+ENTRY_POINT_KIND_MODULE = "module"
+ENTRY_POINT_KIND_CLASSIC_SCRIPT = "classic_script"
+ENTRY_POINT_KIND_TEMPLATE = "template"
+ENTRY_POINT_KIND_INLINE_CALL = "inline_call"
+ENTRY_POINT_KIND_ALTERNATE_WINDOW = "alternate_window"
+
+# access_kind vocabulary for a global consumer.
+ACCESS_KIND_CALL = "call"
+ACCESS_KIND_OPTIONAL_CALL = "optional_call"
+ACCESS_KIND_PROPERTY_ACCESS = "property_access"
+ACCESS_KIND_TYPEOF = "typeof"
+ACCESS_KIND_BRACKET_ACCESS = "bracket_access"
 
 # symbol_kind vocabulary. Only syntax-confirmed top-level declarations are
 # emitted; a local never becomes a symbol record. A TypeScript interface, enum
@@ -271,6 +298,243 @@ class FileRecord:
 
 
 @dataclass(frozen=True)
+class RegistrationRule:
+    """How one registry's call-site registrations are recognized.
+
+    Registries are matched by method name plus receiver, because one registry
+    concept is reached through several receiver spellings — a module-local
+    alias, a global, or the result of an accessor call.
+
+    Attributes:
+        registry: Name recorded on matching registrations.
+        registration_kind: One of the ``REGISTRATION_KIND_*`` constants.
+        method: Method name that performs the registration.
+        receiver_globs: Globs matched against the receiver expression text.
+        id_argument: Zero-based index of the argument holding the id.
+        id_property: Property to read when the id argument is an object rather
+            than a string, or None when the argument is the id itself.
+    """
+
+    registry: str
+    registration_kind: str
+    method: str
+    receiver_globs: tuple[str, ...]
+    id_argument: int = 0
+    id_property: str | None = None
+
+
+@dataclass(frozen=True)
+class DeclaredRegistrationRule:
+    """How registrations declared as object literals are recognized.
+
+    Some registries are populated from a literal collection rather than by a
+    call, so the id is a property of each entry.
+
+    Attributes:
+        registry: Name recorded on matching registrations.
+        registration_kind: One of the ``REGISTRATION_KIND_*`` constants.
+        id_property: Property holding the declared id.
+        path_globs: Files this rule applies to.
+    """
+
+    registry: str
+    registration_kind: str
+    id_property: str
+    path_globs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BackendRegistrationRule:
+    """How a backend collection that names frontend objects is recognized.
+
+    This is the declaration that makes a frontend file reachable from the
+    backend by string, with no JavaScript caller anywhere.
+
+    Attributes:
+        registry: Name recorded on matching registrations.
+        registration_kind: One of the ``REGISTRATION_KIND_*`` constants.
+        symbol: Module-level name holding the collection.
+        id_key: Mapping key holding the registered id.
+        implementation_keys: Mapping keys naming implementations.
+        path_globs: Files this rule applies to.
+    """
+
+    registry: str
+    registration_kind: str
+    symbol: str
+    id_key: str
+    implementation_keys: tuple[str, ...]
+    path_globs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RegistrationRecord:
+    """One explicit id-to-object registration.
+
+    Attributes:
+        source_path: Path the registration is written in.
+        source_line: 1-indexed line of the registration call or entry.
+        source_column: 0-indexed column of the registration.
+        registry: Name of the registry being written to.
+        registered_id: The id as written. When the id is not a literal this
+            holds the expression text instead.
+        registered_id_resolved: False when the id could not be read as a
+            literal. A syntax scanner cannot follow a variable, and inventing
+            an id would be worse than recording that one exists.
+        implementation: What is being registered, as written.
+        registration_kind: One of the ``REGISTRATION_KIND_*`` constants.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    registry: str
+    registered_id: str
+    implementation: str
+    registration_kind: str
+    registered_id_resolved: bool = True
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this registration fact."""
+        return (
+            f"{RECORD_TYPE_REGISTRATION}:{self.registry}:{self.registered_id}"
+            f":{self.source_path}:{self.source_line}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this registration as a JSONL 'registration' record."""
+        return {
+            "record_type": RECORD_TYPE_REGISTRATION,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "registry": self.registry,
+            "registered_id": self.registered_id,
+            "registered_id_resolved": self.registered_id_resolved,
+            "implementation": self.implementation,
+            "registration_kind": self.registration_kind,
+        }
+
+
+@dataclass(frozen=True)
+class EntryPointRecord:
+    """One runtime entry point: a place execution can begin.
+
+    Attributes:
+        source_path: Path declaring the entry point.
+        source_line: 1-indexed line of the declaration.
+        source_column: 0-indexed column of the declaration.
+        entry_point_kind: One of the ``ENTRY_POINT_KIND_*`` constants.
+        target: What is loaded or executed, as written.
+        window_or_host: The window or host document that bootstraps it.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    entry_point_kind: str
+    target: str
+    window_or_host: str
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this entry-point fact."""
+        return (
+            f"{RECORD_TYPE_ENTRY_POINT}:{self.source_path}:{self.source_line}"
+            f":{self.source_column}:{self.entry_point_kind}:{self.target}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this entry point as a JSONL 'entry_point' record."""
+        return {
+            "record_type": RECORD_TYPE_ENTRY_POINT,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "entry_point_kind": self.entry_point_kind,
+            "target": self.target,
+            "window_or_host": self.window_or_host,
+        }
+
+
+@dataclass(frozen=True)
+class GlobalPublicationRecord:
+    """One assignment publishing onto a global object.
+
+    Attributes:
+        source_path: Path the publication is written in.
+        source_line: 1-indexed line of the assignment.
+        source_column: 0-indexed column of the assignment.
+        global_name: The published global, such as window.ReyX.
+        implementation: What is assigned to it, as written.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    global_name: str
+    implementation: str
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this publication fact."""
+        return (
+            f"{RECORD_TYPE_GLOBAL_PUBLICATION}:{self.global_name}"
+            f":{self.source_path}:{self.source_line}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this publication as a JSONL 'global_publication' record."""
+        return {
+            "record_type": RECORD_TYPE_GLOBAL_PUBLICATION,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "global": self.global_name,
+            "implementation": self.implementation,
+        }
+
+
+@dataclass(frozen=True)
+class GlobalConsumerRecord:
+    """One executable consumer of a global.
+
+    Attributes:
+        source_path: Path the consumption is written in.
+        source_line: 1-indexed line of the reference.
+        source_column: 0-indexed column of the reference.
+        global_name: The consumed global, such as window.ReyX.
+        access_kind: One of the ``ACCESS_KIND_*`` constants.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    global_name: str
+    access_kind: str
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this consumer fact."""
+        return (
+            f"{RECORD_TYPE_GLOBAL_CONSUMER}:{self.global_name}"
+            f":{self.source_path}:{self.source_line}:{self.source_column}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this consumer as a JSONL 'global_consumer' record."""
+        return {
+            "record_type": RECORD_TYPE_GLOBAL_CONSUMER,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "global": self.global_name,
+            "access_kind": self.access_kind,
+        }
+
+
+@dataclass(frozen=True)
 class ScanRules:
     """Per-repository scan configuration supplied as data, never as code.
 
@@ -317,6 +581,14 @@ class ScanRules:
     # facts. Suppression is always an explicit choice in the rules file.
     extract_facts_from_generated: bool = True
     extract_facts_from_vendor: bool = True
+    # Root discovery (INC-003). Absent sections mean the repository declares no
+    # registries or templates, never that detection is skipped silently.
+    registration_rules: tuple[RegistrationRule, ...] = ()
+    declared_registration_rules: tuple[DeclaredRegistrationRule, ...] = ()
+    backend_registration_rules: tuple[BackendRegistrationRule, ...] = ()
+    template_globs: tuple[str, ...] = ()
+    bundle_globs: tuple[str, ...] = ()
+    primary_template: str | None = None
 
     def extracts_facts_from(self, file_record: "FileRecord") -> bool:
         """Return whether a file should yield symbol and edge records.
@@ -367,6 +639,12 @@ class ScanRules:
             test_path_globs=tuple(_require_str_list(data, "test_path_globs")),
             extract_facts_from_generated=extraction.get("generated", True),
             extract_facts_from_vendor=extraction.get("vendor", True),
+            registration_rules=_registration_rules(data),
+            declared_registration_rules=_declared_registration_rules(data),
+            backend_registration_rules=_backend_registration_rules(data),
+            template_globs=tuple(_require_str_list(data, "template_globs")),
+            bundle_globs=tuple(_require_str_list(data, "bundle_globs")),
+            primary_template=data.get("primary_template"),
         )
 
 
@@ -389,6 +667,122 @@ def _require_str_list(data: dict[str, Any], key: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"Scan rules section '{key}' must be a list of strings.")
     return value
+
+
+def _rule_entries(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Return a section's rule entries, defaulting to empty when absent.
+
+    Args:
+        data: Parsed rules mapping.
+        key: Section name to read.
+
+    Returns:
+        The entries.
+
+    Raises:
+        ValueError: If the section is not a list of mappings.
+    """
+    value = data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError(f"Scan rules section '{key}' must be a list of mappings.")
+    return value
+
+
+def _required(entry: dict[str, Any], key: str, section: str) -> Any:
+    """Return a required rule field.
+
+    Args:
+        entry: One rule entry.
+        key: Field name.
+        section: Section name, for the error message.
+
+    Returns:
+        The field value.
+
+    Raises:
+        ValueError: If the field is missing.
+    """
+    if key not in entry:
+        raise ValueError(f"Scan rules section '{section}' entry is missing '{key}'.")
+    return entry[key]
+
+
+def _registration_rules(data: dict[str, Any]) -> tuple[RegistrationRule, ...]:
+    """Build call-site registration rules from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "registrations"
+    return tuple(
+        RegistrationRule(
+            registry=_required(entry, "registry", section),
+            registration_kind=_required(entry, "registration_kind", section),
+            method=_required(entry, "method", section),
+            receiver_globs=tuple(entry.get("receiver_globs", ())),
+            id_argument=entry.get("id_argument", 0),
+            id_property=entry.get("id_property"),
+        )
+        for entry in _rule_entries(data, section)
+    )
+
+
+def _declared_registration_rules(data: dict[str, Any]) -> tuple[DeclaredRegistrationRule, ...]:
+    """Build literal-declaration registration rules from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "declared_registrations"
+    return tuple(
+        DeclaredRegistrationRule(
+            registry=_required(entry, "registry", section),
+            registration_kind=_required(entry, "registration_kind", section),
+            id_property=_required(entry, "id_property", section),
+            path_globs=tuple(entry.get("path_globs", ())),
+        )
+        for entry in _rule_entries(data, section)
+    )
+
+
+def _backend_registration_rules(data: dict[str, Any]) -> tuple[BackendRegistrationRule, ...]:
+    """Build backend-collection registration rules from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "backend_registrations"
+    return tuple(
+        BackendRegistrationRule(
+            registry=_required(entry, "registry", section),
+            registration_kind=_required(entry, "registration_kind", section),
+            symbol=_required(entry, "symbol", section),
+            id_key=_required(entry, "id_key", section),
+            implementation_keys=tuple(entry.get("implementation_keys", ())),
+            path_globs=tuple(entry.get("path_globs", ())),
+        )
+        for entry in _rule_entries(data, section)
+    )
 
 
 def _require_bool_mapping(data: dict[str, Any], key: str) -> dict[str, bool]:

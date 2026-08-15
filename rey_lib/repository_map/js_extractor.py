@@ -45,7 +45,15 @@ from rey_lib.repository_map.records import (
     SymbolRecord,
 )
 
-__all__ = ["extract_js_references", "extract_js_symbols", "supported_js_languages"]
+__all__ = [
+    "extract_js_references",
+    "extract_js_symbols",
+    "js_dotted_name",
+    "js_text",
+    "parse_js_root",
+    "supported_js_languages",
+    "walk_js_nodes",
+]
 
 # Language name to the grammar it is parsed with. TSX is a distinct grammar
 # rather than TypeScript with a flag, so it is registered separately.
@@ -223,6 +231,61 @@ def extract_js_references(
         key=lambda edge: (edge.source_line, edge.source_column, edge.edge_kind, edge.to)
     )
     return edges
+
+
+def parse_js_root(path: Path, language: str) -> Node:
+    """Parse a JS, TS or TSX file and return its root node.
+
+    Shared with the registration, entry-point and globals scanners so every
+    detector reads the same tree from the same grammars.
+
+    Args:
+        path: File to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+
+    Returns:
+        The parse tree's root node.
+
+    Raises:
+        ValueError: If the language has no grammar registered.
+    """
+    return _parse(path, language)
+
+
+def walk_js_nodes(root: Node) -> list[Node]:
+    """Return every named node in a tree, in source order.
+
+    Args:
+        root: Root node to walk.
+
+    Returns:
+        The named nodes.
+    """
+    return _walk(root)
+
+
+def js_dotted_name(node: Node) -> str | None:
+    """Return the dotted name for a pure identifier/member chain.
+
+    Args:
+        node: Expression node to describe.
+
+    Returns:
+        The dotted name, or None when the expression is not a plain chain.
+    """
+    return _dotted_name(node)
+
+
+def js_text(node: Node) -> str:
+    """Return a node's source text.
+
+    Args:
+        node: Node to read.
+
+    Returns:
+        The decoded source text.
+    """
+    return _text(node)
 
 
 def _parse(path: Path, language: str) -> Node:
