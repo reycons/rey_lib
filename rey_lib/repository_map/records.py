@@ -333,6 +333,46 @@ class BoundaryRule:
 
 
 @dataclass(frozen=True)
+class PublicationRule:
+    """A guard on what may be published onto the global object.
+
+    A mechanism that is meant to be reached through one entry point must not
+    also be reachable from a global surface, or the entry point is advisory.
+
+    Attributes:
+        rule_id: Stable identifier recorded on every violation.
+        forbidden_global_globs: Globs matched against a published global name.
+        allowed_path_globs: Files permitted to publish it.
+        scope_path_globs: Files the rule applies to.
+    """
+
+    rule_id: str
+    forbidden_global_globs: tuple[str, ...]
+    allowed_path_globs: tuple[str, ...] = ()
+    scope_path_globs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PresenceRule:
+    """A guard on what must not exist or be loaded at all.
+
+    Some boundaries are enforced by absence: a deleted namespace stays deleted,
+    and nothing loads it. Absence is a structural fact, so the inventory and
+    the entry points answer it directly.
+
+    Attributes:
+        rule_id: Stable identifier recorded on every violation.
+        forbidden_path_globs: Paths that must not appear in the inventory.
+        forbidden_entry_point_globs: Entry-point targets that must not be
+            loaded by any window.
+    """
+
+    rule_id: str
+    forbidden_path_globs: tuple[str, ...] = ()
+    forbidden_entry_point_globs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ViolationRecord:
     """One deterministic architecture-boundary violation.
 
@@ -700,6 +740,8 @@ class ScanRules:
     # Root discovery (INC-003). Absent sections mean the repository declares no
     # registries or templates, never that detection is skipped silently.
     boundary_rules: tuple["BoundaryRule", ...] = ()
+    publication_rules: tuple["PublicationRule", ...] = ()
+    presence_rules: tuple["PresenceRule", ...] = ()
     registration_rules: tuple[RegistrationRule, ...] = ()
     declared_registration_rules: tuple[DeclaredRegistrationRule, ...] = ()
     backend_registration_rules: tuple[BackendRegistrationRule, ...] = ()
@@ -767,6 +809,8 @@ class ScanRules:
             extract_facts_from_generated=extraction.get("generated", True),
             extract_facts_from_vendor=extraction.get("vendor", True),
             boundary_rules=_boundary_rules(data),
+            publication_rules=_publication_rules(data),
+            presence_rules=_presence_rules(data),
             registration_rules=_registration_rules(data),
             declared_registration_rules=_declared_registration_rules(data),
             backend_registration_rules=_backend_registration_rules(data),
@@ -914,6 +958,53 @@ def _boundary_rules(data: dict[str, Any]) -> tuple[BoundaryRule, ...]:
             allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
             scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
             edge_kinds=tuple(entry.get("edge_kinds", ())),
+        )
+        for entry in _rule_entries(data, section)
+    )
+
+
+def _publication_rules(data: dict[str, Any]) -> tuple[PublicationRule, ...]:
+    """Build global-publication guards from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "publication_rules"
+    return tuple(
+        PublicationRule(
+            rule_id=_required(entry, "rule_id", section),
+            forbidden_global_globs=tuple(_required(entry, "forbidden_global_globs", section)),
+            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
+            scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
+        )
+        for entry in _rule_entries(data, section)
+    )
+
+
+def _presence_rules(data: dict[str, Any]) -> tuple[PresenceRule, ...]:
+    """Build absence guards from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "presence_rules"
+    return tuple(
+        PresenceRule(
+            rule_id=_required(entry, "rule_id", section),
+            forbidden_path_globs=tuple(entry.get("forbidden_path_globs", ())),
+            forbidden_entry_point_globs=tuple(entry.get("forbidden_entry_point_globs", ())),
         )
         for entry in _rule_entries(data, section)
     )
