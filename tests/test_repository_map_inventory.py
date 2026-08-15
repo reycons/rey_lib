@@ -5,6 +5,7 @@ Contract: rey_repository_map_generator.sgc.yaml (INC-001).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,30 @@ def test_symlinks_are_skipped(repo: Path, rules: ScanRules) -> None:
     (repo / "link.py").symlink_to(repo / "app.py")
 
     assert "link.py" not in _paths(repo, rules)
+
+
+def test_file_serializes_to_the_jsonl_file_record_shape(repo: Path, rules: ScanRules) -> None:
+    """FileRecord serializes as a 'file' record, not as a YAML fragment."""
+    records = {record.path: record for record in inventory_files(repo, rules)}
+
+    assert records["tests/test_app.py"].to_dict() == {
+        "record_type": "file",
+        "record_id": "file:tests/test_app.py",
+        "path": "tests/test_app.py",
+        "language": "Python",
+        "size_bytes": 1,
+        "classification": {"generated": False, "vendor": False, "test": True},
+        "entry_point_load_state": ENTRY_POINT_LOAD_UNKNOWN,
+    }
+
+
+def test_file_record_is_one_json_line(repo: Path, rules: ScanRules) -> None:
+    """Every record serializes to exactly one line of complete JSON."""
+    for record in inventory_files(repo, rules):
+        line = json.dumps(record.to_dict(), separators=(",", ":"))
+
+        assert "\n" not in line
+        assert json.loads(line)["record_id"] == f"file:{record.path}"
 
 
 def test_missing_repository_root_is_rejected(tmp_path: Path, rules: ScanRules) -> None:

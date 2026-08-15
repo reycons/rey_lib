@@ -3,8 +3,9 @@
 Contract: rey_repository_map_generator.sgc.yaml (INC-001).
 
 Records are frozen so a completed scan cannot be mutated afterwards, and every
-record serializes through ``to_dict`` so YAML output stays deterministic across
-runs from the same commit.
+record serializes through ``to_dict`` into one JSONL record with a fixed key
+order, so the generated fact stream stays byte-stable across runs from the same
+commit. The generated factual map is JSONL, never a YAML document.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ __all__ = [
     "ENTRY_POINT_LOAD_NOT_LOADED",
     "ENTRY_POINT_LOAD_UNKNOWN",
     "LANGUAGE_UNKNOWN",
+    "RECORD_TYPE_FILE",
     "FileRecord",
     "ScanRules",
 ]
@@ -30,6 +32,10 @@ ENTRY_POINT_LOAD_UNKNOWN = "unknown"
 
 # Language recorded when no configured extension mapping matches the file.
 LANGUAGE_UNKNOWN = "unknown"
+
+# JSONL record_type values. The generated factual map is a JSONL fact stream,
+# never a YAML document, and every record carries record_type and record_id.
+RECORD_TYPE_FILE = "file"
 
 
 @dataclass(frozen=True)
@@ -55,14 +61,24 @@ class FileRecord:
     entry_point_load_state: str = ENTRY_POINT_LOAD_UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a YAML-safe mapping with a fixed key order."""
+        """Return this file as a JSONL 'file' record.
+
+        Key order is fixed so the serialized stream is byte-stable across runs.
+
+        Returns:
+            The record, conforming to jsonl_record_contract.record_types.file.
+        """
         return {
+            "record_type": RECORD_TYPE_FILE,
+            "record_id": f"{RECORD_TYPE_FILE}:{self.path}",
             "path": self.path,
             "language": self.language,
             "size_bytes": self.size_bytes,
-            "is_generated": self.is_generated,
-            "is_vendor": self.is_vendor,
-            "is_test": self.is_test,
+            "classification": {
+                "generated": self.is_generated,
+                "vendor": self.is_vendor,
+                "test": self.is_test,
+            },
             "entry_point_load_state": self.entry_point_load_state,
         }
 
