@@ -14,13 +14,32 @@ from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
+    "EDGE_KIND_BACKEND_STRING_REFERENCE",
+    "EDGE_KIND_CALL",
+    "EDGE_KIND_GLOBAL_REFERENCE",
+    "EDGE_KIND_IMPORT",
+    "EDGE_KIND_PROPERTY_ACCESS",
+    "EDGE_KIND_REGISTRATION",
+    "EDGE_KIND_RE_EXPORT",
+    "EDGE_KIND_TEMPLATE_LOAD",
     "ENTRY_POINT_LOAD_LOADED",
     "ENTRY_POINT_LOAD_NOT_LOADED",
     "ENTRY_POINT_LOAD_UNKNOWN",
     "LANGUAGE_UNKNOWN",
+    "RECORD_TYPE_DEPENDENCY_EDGE",
     "RECORD_TYPE_FILE",
+    "RECORD_TYPE_SYMBOL",
+    "SYMBOL_KIND_CLASS",
+    "SYMBOL_KIND_EXPORT",
+    "SYMBOL_KIND_FUNCTION",
+    "SYMBOL_KIND_GLOBAL_PUBLICATION",
+    "SYMBOL_KIND_RE_EXPORT",
+    "SYMBOL_KIND_VARIABLE",
     "FileRecord",
+    "ReferenceEdge",
     "ScanRules",
+    "SymbolInventory",
+    "SymbolRecord",
 ]
 
 # Tri-state for REQ-011's "loaded by a known runtime entry point".
@@ -36,6 +55,154 @@ LANGUAGE_UNKNOWN = "unknown"
 # JSONL record_type values. The generated factual map is a JSONL fact stream,
 # never a YAML document, and every record carries record_type and record_id.
 RECORD_TYPE_FILE = "file"
+RECORD_TYPE_SYMBOL = "symbol"
+RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
+
+# symbol_kind vocabulary. Only syntax-confirmed top-level declarations are
+# emitted; a local never becomes a symbol record.
+SYMBOL_KIND_FUNCTION = "function"
+SYMBOL_KIND_CLASS = "class"
+SYMBOL_KIND_VARIABLE = "variable"
+SYMBOL_KIND_EXPORT = "export"
+SYMBOL_KIND_RE_EXPORT = "re_export"
+SYMBOL_KIND_GLOBAL_PUBLICATION = "global_publication"
+
+# edge_kind vocabulary. Extractors emit only the kinds they can prove from
+# executable syntax; registration, template_load and backend_string_reference
+# come from the INC-003 scanners, not from per-file extraction.
+EDGE_KIND_CALL = "call"
+EDGE_KIND_IMPORT = "import"
+EDGE_KIND_RE_EXPORT = "re_export"
+EDGE_KIND_PROPERTY_ACCESS = "property_access"
+EDGE_KIND_GLOBAL_REFERENCE = "global_reference"
+EDGE_KIND_REGISTRATION = "registration"
+EDGE_KIND_TEMPLATE_LOAD = "template_load"
+EDGE_KIND_BACKEND_STRING_REFERENCE = "backend_string_reference"
+
+
+@dataclass(frozen=True)
+class SymbolRecord:
+    """One syntax-confirmed top-level declaration.
+
+    A declaration nested inside a function or class body is not a top-level
+    declaration and never reaches this record (REQ-022, AC-003).
+
+    Attributes:
+        source_path: Path the declaration is written in.
+        source_line: 1-indexed declaration line (REQ-023).
+        name: Declared name as written in source.
+        symbol_kind: One of the ``SYMBOL_KIND_*`` constants.
+        exported: True when the module publishes the name.
+    """
+
+    source_path: str
+    source_line: int
+    name: str
+    symbol_kind: str
+    exported: bool = False
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this symbol fact."""
+        return f"{RECORD_TYPE_SYMBOL}:{self.source_path}:{self.name}"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this declaration as a JSONL 'symbol' record."""
+        return {
+            "record_type": RECORD_TYPE_SYMBOL,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "name": self.name,
+            "symbol_kind": self.symbol_kind,
+            "exported": self.exported,
+        }
+
+
+@dataclass(frozen=True)
+class SymbolInventory:
+    """The top-level declarations of one source file.
+
+    This is a per-file container, not itself a generated record: each contained
+    declaration serializes to its own ``symbol`` record.
+
+    Attributes:
+        path: Path of the analysed file.
+        language: Language the file was parsed as.
+        symbols: The file's top-level declarations, deterministically ordered.
+    """
+
+    path: str
+    language: str
+    symbols: tuple[SymbolRecord, ...] = ()
+
+    def to_records(self) -> list[dict[str, Any]]:
+        """Return one JSONL 'symbol' record per declaration."""
+        return [symbol.to_dict() for symbol in self.symbols]
+
+    def of_kind(self, symbol_kind: str) -> tuple[SymbolRecord, ...]:
+        """Return the declarations of one kind, preserving order.
+
+        Args:
+            symbol_kind: One of the ``SYMBOL_KIND_*`` constants.
+
+        Returns:
+            The matching declarations.
+        """
+        return tuple(symbol for symbol in self.symbols if symbol.symbol_kind == symbol_kind)
+
+
+@dataclass(frozen=True)
+class ReferenceEdge:
+    """One executable reference, carrying the evidence that proves it.
+
+    An edge is only created from executable syntax. Text inside a comment,
+    docstring or string literal never produces one (REQ-032 to REQ-034).
+
+    Attributes:
+        source_path: Path the reference is written in.
+        source_line: 1-indexed line of the referencing expression.
+        source_column: 0-indexed column, used to keep record_id unique when one
+            line carries several references.
+        from_id: record_id of the fact making the reference.
+        to: Referenced name as written, dotted for member expressions. It stays
+            unresolved here; resolving it to a record_id is graph work.
+        edge_kind: One of the ``EDGE_KIND_*`` constants.
+        evidence: The syntax node kind that proves the reference.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    from_id: str
+    to: str
+    edge_kind: str
+    evidence: str
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this edge fact.
+
+        Line and column locate the reference precisely, so two references on
+        one line stay distinct without depending on emission order.
+        """
+        return (
+            f"edge:{self.source_path}:{self.source_line}:{self.source_column}"
+            f":{self.edge_kind}:{self.to}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this reference as a JSONL 'dependency_edge' record."""
+        return {
+            "record_type": RECORD_TYPE_DEPENDENCY_EDGE,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "from": self.from_id,
+            "to": self.to,
+            "edge_kind": self.edge_kind,
+            "evidence": self.evidence,
+        }
 
 
 @dataclass(frozen=True)
