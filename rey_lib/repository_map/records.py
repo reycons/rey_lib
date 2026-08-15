@@ -418,6 +418,34 @@ class PublicationRule:
 
 
 @dataclass(frozen=True)
+class DispatcherRule:
+    """A guard on where a decision point over a vocabulary may live.
+
+    The generator records that a dispatcher exists and what it branches on;
+    this decides whether that is permitted. Which vocabularies are objectionable
+    is policy data, never a judgement the scanner makes — a vocabulary is only
+    forbidden because a repository says so here.
+
+    Attributes:
+        rule_id: Stable identifier recorded on every violation.
+        forbidden_vocabulary_globs: Globs matched against the branched-on
+            expression. Use '*' to forbid any dispatcher within the scope.
+        allowed_path_globs: Locations where such a dispatcher is legitimate,
+            typically the one central place that owns the decision.
+        scope_path_globs: Files the rule applies to.
+        minimum_branch_count: Branch count at or above which the rule bites,
+            so a rule can target wide dispatch without flagging a two-way
+            choice.
+    """
+
+    rule_id: str
+    forbidden_vocabulary_globs: tuple[str, ...]
+    allowed_path_globs: tuple[str, ...] = ()
+    scope_path_globs: tuple[str, ...] = ()
+    minimum_branch_count: int = 2
+
+
+@dataclass(frozen=True)
 class PresenceRule:
     """A guard on what must not exist or be loaded at all.
 
@@ -807,6 +835,7 @@ class ScanRules:
     boundary_rules: tuple["BoundaryRule", ...] = ()
     publication_rules: tuple["PublicationRule", ...] = ()
     presence_rules: tuple["PresenceRule", ...] = ()
+    dispatcher_rules: tuple["DispatcherRule", ...] = ()
     registration_rules: tuple[RegistrationRule, ...] = ()
     declared_registration_rules: tuple[DeclaredRegistrationRule, ...] = ()
     backend_registration_rules: tuple[BackendRegistrationRule, ...] = ()
@@ -876,6 +905,7 @@ class ScanRules:
             boundary_rules=_boundary_rules(data),
             publication_rules=_publication_rules(data),
             presence_rules=_presence_rules(data),
+            dispatcher_rules=_dispatcher_rules(data),
             registration_rules=_registration_rules(data),
             declared_registration_rules=_declared_registration_rules(data),
             backend_registration_rules=_backend_registration_rules(data),
@@ -1047,6 +1077,33 @@ def _publication_rules(data: dict[str, Any]) -> tuple[PublicationRule, ...]:
             forbidden_global_globs=tuple(_required(entry, "forbidden_global_globs", section)),
             allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
             scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
+        )
+        for entry in _rule_entries(data, section)
+    )
+
+
+def _dispatcher_rules(data: dict[str, Any]) -> tuple[DispatcherRule, ...]:
+    """Build dispatcher guards from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "dispatcher_rules"
+    return tuple(
+        DispatcherRule(
+            rule_id=_required(entry, "rule_id", section),
+            forbidden_vocabulary_globs=tuple(
+                _required(entry, "forbidden_vocabulary_globs", section)
+            ),
+            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
+            scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
+            minimum_branch_count=entry.get("minimum_branch_count", 2),
         )
         for entry in _rule_entries(data, section)
     )

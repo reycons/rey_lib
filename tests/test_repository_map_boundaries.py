@@ -13,6 +13,8 @@ from rey_lib.repository_map.records import (
     EntryPointRecord,
     FileRecord,
     GlobalPublicationRecord,
+    DispatcherRecord,
+    DispatcherRule,
     PresenceRule,
     PublicationRule,
     ReferenceEdge,
@@ -262,3 +264,79 @@ def test_all_three_rule_families_answer_one_call() -> None:
         "viewer_mechanism_not_publicly_reachable",
         "generic_ui_namespace_stays_deleted",
     }
+
+
+DISPATCH_RULE = DispatcherRule(
+    rule_id="action_registry_holds_no_dispatch",
+    forbidden_vocabulary_globs=("*",),
+    scope_path_globs=("frontend/src/action_registry/*",),
+)
+
+
+def _dispatcher(path: str, vocabulary: str, branches: int = 3) -> DispatcherRecord:
+    """Return one dispatcher fact."""
+    return DispatcherRecord(
+        source_path=path,
+        source_line=12,
+        source_column=2,
+        symbol="resolve",
+        vocabulary=vocabulary,
+        branch_count=branches,
+        branch_values=tuple(str(index) for index in range(branches)),
+    )
+
+
+def test_a_dispatcher_in_a_forbidden_place_is_a_violation() -> None:
+    """Adding a named thing must not mean editing routing code."""
+    dispatchers = [_dispatcher("frontend/src/action_registry/registry.ts", "action.id")]
+
+    violations = _check(dispatcher_rules=(DISPATCH_RULE,), dispatchers=dispatchers)
+
+    assert [v.rule_id for v in violations] == ["action_registry_holds_no_dispatch"]
+    assert violations[0].callee == "action.id"
+    assert violations[0].edge_kind == "dispatch"
+
+
+def test_the_same_dispatcher_elsewhere_is_not_a_violation() -> None:
+    """Scope decides where a decision point may live."""
+    dispatchers = [_dispatcher("frontend/src/tree_client/TreeClient.ts", "action.id")]
+
+    assert _check(dispatcher_rules=(DISPATCH_RULE,), dispatchers=dispatchers) == []
+
+
+def test_a_central_owner_may_hold_the_decision() -> None:
+    """A vocabulary can be legitimate in exactly one place."""
+    rule = DispatcherRule(
+        rule_id="node_type_decided_centrally",
+        forbidden_vocabulary_globs=("node_type", "node.type"),
+        allowed_path_globs=("frontend/src/tree_client/*",),
+        scope_path_globs=("frontend/src/*",),
+    )
+    dispatchers = [
+        _dispatcher("frontend/src/tree_client/TreeClient.ts", "node_type"),
+        _dispatcher("frontend/src/panels/info_panel.ts", "node_type"),
+    ]
+
+    violations = _check(dispatcher_rules=(rule,), dispatchers=dispatchers)
+
+    assert [v.source_path for v in violations] == ["frontend/src/panels/info_panel.ts"]
+
+
+def test_minimum_branch_count_narrows_a_rule() -> None:
+    """A rule can target wide dispatch without flagging a two-way choice."""
+    rule = DispatcherRule(
+        rule_id="wide_dispatch_only",
+        forbidden_vocabulary_globs=("*",),
+        scope_path_globs=("frontend/src/*",),
+        minimum_branch_count=5,
+    )
+    dispatchers = [_dispatcher("frontend/src/a.ts", "kind", branches=3)]
+
+    assert _check(dispatcher_rules=(rule,), dispatchers=dispatchers) == []
+
+
+def test_policy_decides_the_vocabulary_not_the_scanner() -> None:
+    """node_type is only objectionable because a rule says so."""
+    dispatchers = [_dispatcher("frontend/src/panels/info_panel.ts", "node_type")]
+
+    assert _check(dispatcher_rules=(), dispatchers=dispatchers) == []

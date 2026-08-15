@@ -25,6 +25,8 @@ from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
     EDGE_KIND_GLOBAL_REFERENCE,
     BoundaryRule,
+    DispatcherRecord,
+    DispatcherRule,
     EntryPointRecord,
     FileRecord,
     GlobalPublicationRecord,
@@ -47,15 +49,17 @@ def check_architecture_boundaries(
     publications: Sequence[GlobalPublicationRecord] = (),
     files: Sequence[FileRecord] = (),
     entry_points: Sequence[EntryPointRecord] = (),
+    dispatchers: Sequence[DispatcherRecord] = (),
 ) -> list[ViolationRecord]:
     """Evaluate every declared architectural boundary against generated facts.
 
-    The one entry point. Three rule families are evaluated here so a consumer
+    The one entry point. Four rule families are evaluated here so a consumer
     asks a single question and no subsystem interprets a boundary of its own:
 
     - reference rules, over who may reach what
     - publication rules, over what may reach a global surface
     - presence rules, over what must not exist or be loaded at all
+    - dispatcher rules, over where a decision point may live
 
     A boundary that cannot be expressed as one of these does not belong here.
     Coding-style rules are not architectural boundaries and stay outside.
@@ -66,6 +70,7 @@ def check_architecture_boundaries(
         publications: Global publications from root discovery.
         files: The inventoried files.
         entry_points: Runtime entry points from root discovery.
+        dispatchers: Dispatcher facts from the dispatcher inventory.
 
     Returns:
         Violations sorted by rule, path and line. Empty when every rule holds.
@@ -74,6 +79,7 @@ def check_architecture_boundaries(
     violations.extend(_reference_violations(rules.boundary_rules, references))
     violations.extend(_publication_violations(rules.publication_rules, publications))
     violations.extend(_presence_violations(rules.presence_rules, files, entry_points))
+    violations.extend(_dispatcher_violations(rules.dispatcher_rules, dispatchers))
 
     violations.sort(
         key=lambda violation: (
@@ -201,6 +207,43 @@ def _presence_violations(
                 )
             )
     return violations
+
+
+def _dispatcher_violations(
+    rules: Sequence[DispatcherRule],
+    dispatchers: Sequence[DispatcherRecord],
+) -> list[ViolationRecord]:
+    """Return violations of the rules governing where a decision point may live.
+
+    The dispatcher facts say a decision point exists and what it branches on.
+    Whether that is permitted is decided here, from policy data — the scanner
+    never decides a vocabulary is objectionable on its own.
+
+    Args:
+        rules: Dispatcher rules.
+        dispatchers: Dispatcher facts from the inventory.
+
+    Returns:
+        The violations found.
+    """
+    return [
+        ViolationRecord(
+            source_path=dispatcher.source_path,
+            source_line=dispatcher.source_line,
+            source_column=dispatcher.source_column,
+            rule_id=rule.rule_id,
+            caller=f"{dispatcher.source_path}:{dispatcher.symbol}",
+            callee=dispatcher.vocabulary,
+            edge_kind="dispatch",
+            evidence_record_ids=(dispatcher.record_id,),
+        )
+        for rule in rules
+        for dispatcher in dispatchers
+        if dispatcher.branch_count >= rule.minimum_branch_count
+        and _matches_any(dispatcher.source_path, rule.scope_path_globs)
+        and _matches_any(dispatcher.vocabulary, rule.forbidden_vocabulary_globs)
+        and not _matches_any(dispatcher.source_path, rule.allowed_path_globs)
+    ]
 
 
 def _applies(rule: BoundaryRule, reference: ReferenceEdge) -> bool:
