@@ -42,6 +42,42 @@ test_path_globs:
 runtime_entry_paths:
   - rey_lib/artifacts/cli.py
 
+# Architectural policy this repository asserts, declared as data. Only what the
+# evidence model can prove is claimed here; see rey_lib_architecture_policy for
+# the statements deliberately not asserted.
+architecture_rules:
+  # A proxy for one dimension of "owns no application business logic": it proves
+  # the import relationship and nothing wider.
+  - rule_id: shared_framework_imports_no_application
+    forbidden_target_globs:
+      - "rey_console*"
+      - "rey_loader*"
+      - "rey_analyzer*"
+      - "file_operator*"
+      - "trade_analyzer*"
+      - "rey_messaging*"
+      - "ftp_sync*"
+      - "rey_db_admin*"
+      - "pipeline_coordinator*"
+    scope_path_globs:
+      - "rey_lib/*"
+    edge_kinds:
+      - import
+      - re_export
+  # logging_setup wraps logging.getLogger, so it cannot route through itself.
+  # That is the only exemption: this list names infrastructure owners and is not
+  # a grandfather list for sites that have not been corrected.
+  - rule_id: logging_routes_through_the_logging_owner
+    forbidden_target_globs:
+      - logging.getLogger
+      - print
+    allowed_path_globs:
+      - "rey_lib/logs/logging_setup.py"
+    scope_path_globs:
+      - "rey_lib/*"
+    edge_kinds:
+      - call
+
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
   - ".py"
