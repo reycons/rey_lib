@@ -523,32 +523,56 @@ def _classification_stage(record: Mapping[str, Any], file_id: str) -> FileHierar
     )
 
 
+# What a created artifact is called, keyed by the manifest reason that created
+# it. A node is named for what it is, so a reader knows what opens when it is
+# clicked; anything not named here stays a generic lifecycle event.
+#
+# This is data, not a decision. Adding a mutation reason is an entry here, never
+# a branch — recorded as a migrate finding in the rey_lib dispatcher review,
+# because a seven-armed chain meant every new reason edited the function that
+# was supposed to merely present it.
+_MUTATION_PRESENTATION: dict[str, tuple[str, str]] = {
+    "file_sanitization": ("sanitized", "Sanitized CSV"),
+    "prepared_file": ("prepared", "Prepared CSV"),
+    "kickout_file": ("kickout", "Kickout JSONL"),
+    "redacted_kickout_file": ("kickout_redacted", "Redacted Kickout JSONL"),
+    "redacted_sanitized_file": ("sanitized_redacted", "Redacted Sanitized CSV"),
+    "redacted_prepared_file": ("prepared_redacted", "Redacted Prepared CSV"),
+    # A profile is shared by every file of its identity, so this node hangs
+    # under the file whose profiling run created or appended to it.
+    "structural_profile": ("profile", "Structural Profile"),
+}
+
+# The same, keyed by conversion operator. Kept separate because it is read from
+# a different field, and collapsing the two would make one table lie about
+# where its keys come from.
+_CONVERSION_PRESENTATION: dict[str, tuple[str, str]] = {
+    "excel_conversion": ("converted", "Converted CSV"),
+}
+
+
 def _mutation_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStage:
+    """Return the hierarchy stage for one governed mutation record.
+
+    Args:
+        record: The manifest record.
+        file_id: Governed file identity the stage hangs under.
+
+    Returns:
+        The stage, named for the artifact it created where one is recognised.
+    """
     mutation = _mutation_node(record)
     conversion = record.get("conversion") if isinstance(record.get("conversion"), Mapping) else {}
     result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
-    # A created artifact is named for what it is, so a node says exactly what
-    # opens when it is clicked. Anything else stays a generic lifecycle event.
-    if conversion.get("operator") == "excel_conversion":
-        stage_type, label = "converted", "Converted CSV"
-    elif result.get("reason") == "file_sanitization":
-        stage_type, label = "sanitized", "Sanitized CSV"
-    elif result.get("reason") == "prepared_file":
-        stage_type, label = "prepared", "Prepared CSV"
-    elif result.get("reason") == "kickout_file":
-        stage_type, label = "kickout", "Kickout JSONL"
-    elif result.get("reason") == "redacted_kickout_file":
-        stage_type, label = "kickout_redacted", "Redacted Kickout JSONL"
-    elif result.get("reason") == "redacted_sanitized_file":
-        stage_type, label = "sanitized_redacted", "Redacted Sanitized CSV"
-    elif result.get("reason") == "redacted_prepared_file":
-        stage_type, label = "prepared_redacted", "Redacted Prepared CSV"
-    elif result.get("reason") == "structural_profile":
-        # A profile is shared by every file of its identity, so this node hangs
-        # under the file whose profiling run created or appended to it.
-        stage_type, label = "profile", "Structural Profile"
-    else:
-        stage_type, label = "mutation", mutation.label
+
+    # Conversion is consulted first, preserving the order the branches had: an
+    # excel conversion is named for the conversion even when it also carries a
+    # result reason.
+    presentation = _CONVERSION_PRESENTATION.get(conversion.get("operator"))
+    if presentation is None:
+        presentation = _MUTATION_PRESENTATION.get(result.get("reason"))
+    stage_type, label = presentation or ("mutation", mutation.label)
+
     return FileHierarchyStage(
         stage_identity=f"manifest:{mutation.record_id}",
         stage_type=stage_type,

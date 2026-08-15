@@ -444,3 +444,60 @@ def test_a_profile_stage_is_named_for_the_artifact_it_opens(tmp_path) -> None:
     page = build_file_hierarchy_stages(ctx, 1, profile_artifacts=(profile,))
 
     assert page.stages[-1].label == "Structural Profile"
+
+
+def test_every_mutation_reason_is_named_by_data_not_a_branch() -> None:
+    """The rey_lib dispatcher review put _mutation_stage in the migrate set.
+
+    Seven named reasons meant every new one edited the function that was only
+    supposed to present it. The mapping is now a table, so adding a reason is
+    an entry.
+    """
+    from rey_lib.logs.file_hierarchy import _MUTATION_PRESENTATION
+
+    assert set(_MUTATION_PRESENTATION) == {
+        "file_sanitization",
+        "prepared_file",
+        "kickout_file",
+        "redacted_kickout_file",
+        "redacted_sanitized_file",
+        "redacted_prepared_file",
+        "structural_profile",
+    }
+    assert all(len(v) == 2 for v in _MUTATION_PRESENTATION.values())
+
+
+def test_conversion_is_named_before_the_result_reason() -> None:
+    """Order preserved from the branches it replaced.
+
+    An excel conversion is named for the conversion even when the record also
+    carries a result reason, which the old chain achieved by testing it first.
+    """
+    from rey_lib.logs.file_hierarchy import _mutation_stage
+
+    stage = _mutation_stage(
+        {
+            "record_id": 1,
+            "action": "create",
+            "conversion": {"operator": "excel_conversion"},
+            "result": {"reason": "prepared_file"},
+            "file": {"path": "a.csv"},
+            "status": "created",
+        },
+        file_id="f1",
+    )
+
+    assert stage.stage_type == "converted"
+
+
+def test_an_unrecognised_reason_stays_a_generic_lifecycle_event() -> None:
+    """The fallback the chain ended with."""
+    from rey_lib.logs.file_hierarchy import _mutation_stage
+
+    stage = _mutation_stage(
+        {"record_id": 2, "action": "create", "result": {"reason": "something_new"},
+         "file": {"path": "b.csv"}, "status": "created"},
+        file_id="f1",
+    )
+
+    assert stage.stage_type == "mutation"
