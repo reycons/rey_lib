@@ -1,0 +1,50 @@
+# App: rey_lib
+# Purpose: Repository-map scan rules — inventory pruning, language mapping, file classification.
+# Used-by: rey_lib.repository_map
+#
+# Shared application-neutral framework.
+# Hidden entries are excluded by the scanner itself and are not listed here.
+#
+# This repository declares no architecture policy, so its generated map reports
+# architecture_policy_status: not_configured. That is not the same as clean.
+
+ignored_directory_names:
+  - node_modules
+  - __pycache__
+  - build
+  - dist
+  - venv
+
+ignored_path_globs:
+  - "*.egg-info/*"
+  - "*.zip"
+  - "*.log"
+  - "*.jsonl"
+
+language_by_extension:
+  ".py": Python
+  ".yaml": YAML
+  ".yml": YAML
+
+generated_path_globs: []
+
+vendor_path_globs: []
+
+test_path_globs:
+  - "tests/*"
+  - "*/tests/*"
+  - "test_*.py"
+  - "*/test_*.py"
+
+# Declared process entry points, taken from the entry_points this repository
+# already declares in 03_repository_map.yaml. Not added to make reachability
+# look healthy.
+runtime_entry_paths:
+  - rey_lib/artifacts/cli.py
+
+# A written specifier only resolves to a file the inventory already contains.
+module_extensions:
+  - ".py"
+
+module_index_files:
+  - __init__.py
