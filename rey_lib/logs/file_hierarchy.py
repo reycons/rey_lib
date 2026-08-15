@@ -8,7 +8,6 @@ filesystem, run-log, artifact discovery, or UI behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -575,11 +574,15 @@ def _rollback_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchySta
 
 
 def _profile_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStage:
+    # Imported here, not at module scope: rey_lib.encryption reaches back into
+    # rey_lib.logs through error_utils, so a top-level import closes a cycle.
+    from rey_lib.encryption import sha256_text
+
     record_id = _positive_int(record.get("record_id"), "ARTIFACT_REFERENCE.record_id")
     run_log = _nonblank(record.get("__run_log_file"), "ARTIFACT_REFERENCE.__run_log_file")
     path = _nonblank(record.get("path"), "ARTIFACT_REFERENCE.path")
     return FileHierarchyStage(
-        stage_identity=f"run-log:{sha256(run_log.encode('utf-8')).hexdigest()}:{record_id}",
+        stage_identity=f"run-log:{sha256_text(run_log)}:{record_id}",
         stage_type="profile",
         label="Structural Profile", record_id=record_id, file_id=file_id, path=path,
         original_path=None, status="created", is_current_primary=False,

@@ -6,14 +6,13 @@ import codecs
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
-import hashlib
 import json
 from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from rey_lib.encryption import sha256_file
+from rey_lib.encryption import sha256_bytes, sha256_file
 from rey_lib.files.file_routing import GovernedFileReference
 from rey_lib.files.log_run_rollback import (
     SourceFileMutationEvidenceError,
@@ -175,7 +174,7 @@ def compose_sanitization_policy(
         character_rules=ordered_characters,
         line_rules=tuple(lines),
         max_logical_line_characters=max_line,
-        digest=hashlib.sha256(encoded).hexdigest(),
+        digest=sha256_bytes(encoded),
     )
 
 
