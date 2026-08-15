@@ -364,3 +364,23 @@ def test_every_emitter_group_is_deterministically_ordered(repo: Path) -> None:
         assert [emitter.order_by(r) for r in ordered] == sorted(
             emitter.order_by(r) for r in acquired
         )
+
+
+def test_the_header_owns_repository_provenance(repo: Path, tmp_path: Path) -> None:
+    """The generated header is the one owner of branch, commit and tree state.
+
+    development_contracts/context/03_repository_map.yaml recorded
+    current_branch, current_commit and working_tree_status by hand until
+    2026-08-15. All ten values were stale and two repositories were missing
+    entirely, while these fields were correct in every generated map. The
+    hand-maintained copies were deleted and that document now records no facts.
+
+    This pins the half of that migration which lives in code: if the header
+    stopped carrying provenance, the semantic map would have been stripped of
+    fields nothing else answers.
+    """
+    generated = generate_repository_map(repo, tmp_path / "map.jsonl", repo / RULES_NAME)
+
+    assert generated.header["repository"] == repo.name
+    for field in ("branch", "head_commit", "working_tree_status"):
+        assert field in generated.header, f"header no longer carries {field}"
