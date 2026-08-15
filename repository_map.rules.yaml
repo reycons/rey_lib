@@ -36,9 +36,9 @@ test_path_globs:
   - "test_*.py"
   - "*/test_*.py"
 
-# Declared process entry points, taken from the entry_points this repository
-# already declares in 03_repository_map.yaml. Not added to make reachability
-# look healthy.
+# Declared process entry points. This file is their owner: they are a
+# repository-local declaration, not a copy of anything. Not added to make
+# reachability look healthy.
 runtime_entry_paths:
   - rey_lib/artifacts/cli.py
 
