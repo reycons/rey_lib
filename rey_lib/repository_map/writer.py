@@ -47,6 +47,7 @@ __all__ = [
     "MapDiff",
     "RepositoryMap",
     "compare_repository_maps",
+    "content_hash_of",
     "generate_repository_map",
     "write_repository_map",
 ]
@@ -245,7 +246,7 @@ def _header(repo_root: Path, rules_path: Path, records: list[dict[str, Any]]) ->
         "working_tree_status": working_tree_status,
         "generator_version": GENERATOR_VERSION,
         "rules_hash": sha256_text(read_text_file(rules_path)),
-        "content_hash": _content_hash(records),
+        "content_hash": content_hash_of(records),
         # rey_lib's only utc_now lives in messaging, which pulls markdown_it and
         # would drag a rendering dependency into a source scanner. Every neutral
         # rey_lib module timestamps inline the same way, so this follows suit.
@@ -278,7 +279,7 @@ def _git_state(repo_root: Path) -> tuple[str, str, str]:
     return branch or "unknown", commit or "unknown", "clean" if status.clean else "dirty"
 
 
-def _content_hash(records: list[dict[str, Any]]) -> str:
+def content_hash_of(records: list[dict[str, Any]]) -> str:
     """Return a hash of every fact record.
 
     Args:
