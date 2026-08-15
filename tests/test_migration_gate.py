@@ -463,3 +463,76 @@ def test_a_prefixed_reachability_target_is_recognised() -> None:
 
     assert report.verdict == VERDICT_STOP
     assert report.blockers_of(BLOCKER_STILL_REACHABLE)
+
+
+# LIMIT-001. The gate modelled file-level retirement only. Scoping a manifest to
+# a file that survives, when a symbol inside it is what retires, asked the wrong
+# question: the first attempt at the delimited-write migration reported 150
+# blockers for a file nobody was deleting.
+
+
+SYMBOL_MANIFEST = MigrationManifest(
+    migration_id="retire_a_symbol",
+    capability="writing a delimited file",
+    old_owner_path_globs=(),
+    new_owner_path_globs=("rey_lib/files/csv.py",),
+    old_symbol_globs=("*_csv_writer",),
+)
+
+
+def test_a_symbol_retirement_does_not_need_a_file_to_delete() -> None:
+    """The subject is the symbol; the file it lived in survives."""
+    assert not SYMBOL_MANIFEST.retires_a_file
+    assert MANIFEST.retires_a_file
+
+
+def test_a_caller_in_the_surviving_file_still_counts() -> None:
+    """The defect LIMIT-001 named.
+
+    Deleting a file deletes its internal references, so those are not callers.
+    Deleting a symbol from a file that survives does not, and excluding a caller
+    in the same file would prove a retirement that breaks the moment the symbol
+    goes.
+    """
+    report = verify_retirement_ready(
+        SYMBOL_MANIFEST,
+        [_edge("rey_lib/files/file_utils.py", "rey_lib.files.file_utils._csv_writer")],
+    )
+
+    assert report.verdict == VERDICT_STOP
+    assert report.blockers_of(BLOCKER_OLD_CALLER)
+
+
+def test_a_file_retirement_still_ignores_its_own_internal_references() -> None:
+    """The behaviour the change protects, pinned in the other direction."""
+    report = verify_retirement_ready(
+        MANIFEST,
+        _clean() + [_edge("static/js/legacy_panel.js", "static/js/legacy_panel.js")],
+    )
+
+    assert report.is_proven
+
+
+def test_a_symbol_retirement_is_proven_once_nothing_names_it() -> None:
+    """The state the delimited-write migration actually reached."""
+    report = verify_retirement_ready(
+        SYMBOL_MANIFEST,
+        [_edge("rey_lib/files/file_utils.py", "rey_lib.files.csv.write_delimited_rows")],
+    )
+
+    assert report.is_proven
+
+
+def test_a_manifest_retiring_nothing_is_refused(tmp_path: Path) -> None:
+    """Naming neither a path nor a symbol is not a migration."""
+    path = tmp_path / "m.yaml"
+    path.write_text(
+        "migration:\n"
+        "  migration_id: x\n"
+        "  capability: c\n"
+        "  new_owner_path_globs: ['new/*']\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="nothing it retires"):
+        load_migration_manifest(path)

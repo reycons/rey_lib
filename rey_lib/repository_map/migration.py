@@ -133,6 +133,19 @@ class MigrationManifest:
         """Return rows carrying no disposition and evidence."""
         return tuple(row for row in self.rows if not row.is_resolved)
 
+    @property
+    def retires_a_file(self) -> bool:
+        """Return whether the thing being deleted is a file rather than a symbol.
+
+        The distinction changes what counts as a caller. Deleting a file also
+        deletes every reference written inside it, so its internal references
+        are not callers. Deleting a symbol from a file that survives does not:
+        a reference from elsewhere in the same file is a real caller, and
+        excluding it would prove a retirement that breaks the moment the symbol
+        is gone.
+        """
+        return bool(self.old_owner_path_globs)
+
 
 @dataclass(frozen=True)
 class RetirementBlocker:
@@ -202,9 +215,14 @@ def load_migration_manifest(path: Path) -> MigrationManifest:
         raise ValueError(f"Migration manifest is not valid YAML: {path}") from exc
 
     data = (parsed or {}).get("migration", parsed) or {}
-    for required in ("migration_id", "capability", "old_owner_path_globs", "new_owner_path_globs"):
+    for required in ("migration_id", "capability", "new_owner_path_globs"):
         if not data.get(required):
             raise ValueError(f"Migration manifest {path} is missing '{required}'.")
+    if not data.get("old_owner_path_globs") and not data.get("old_symbol_globs"):
+        raise ValueError(
+            f"Migration manifest {path} names neither old_owner_path_globs nor "
+            "old_symbol_globs, so there is nothing it retires."
+        )
 
     return MigrationManifest(
         migration_id=data["migration_id"],
@@ -344,8 +362,12 @@ def verify_retirement_ready(
         if kind == "dependency_edge":
             target = str(record.get("to", ""))
             source = str(record.get("source_path", ""))
-            # A reference from inside the old owner to itself is not a caller.
-            if _names_old_owner(manifest, target) and not _is_old_owner(manifest, source):
+            # A reference from inside a retiring file is not a caller, because
+            # deleting the file deletes the reference too. When a symbol is
+            # retiring from a file that survives, that reasoning does not hold
+            # and every reference to it counts.
+            excluded = manifest.retires_a_file and _is_old_owner(manifest, source)
+            if _names_old_owner(manifest, target) and not excluded:
                 blockers.append(
                     RetirementBlocker(
                         kind=BLOCKER_OLD_CALLER,
