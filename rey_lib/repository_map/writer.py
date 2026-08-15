@@ -28,6 +28,8 @@ from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
 from rey_lib.git.errors import GitError
 from rey_lib.git.repo import get_head_commit, get_repo_status, run_git
 from rey_lib.logs.logging_setup import get_logger
+from rey_lib.repository_map.boundaries import check_architecture_boundaries
+from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
     LANGUAGE_EXTRACTORS,
@@ -186,6 +188,18 @@ def build_repository_map(
         rules,
     )
     reachability = compute_reachability(graph, files)
+    dispatchers = inventory_dispatchers_and_switches(repo_root, files, rules, references)
+    # Guards run as part of generation so the map carries the verdicts its own
+    # evidence supports. The authority is the same one every consumer calls;
+    # this only supplies it the facts it needs.
+    violations = check_architecture_boundaries(
+        rules,
+        references=references,
+        publications=list(global_report.publications),
+        files=files,
+        entry_points=entry_points,
+        dispatchers=dispatchers,
+    )
 
     # Emission order groups record types; each group is sorted by record_id so
     # the stream is stable regardless of discovery order.
@@ -199,6 +213,8 @@ def build_repository_map(
         [record.to_dict() for record in global_report.publications],
         [record.to_dict() for record in global_report.consumers],
         [record.to_dict() for record in reachability],
+        [record.to_dict() for record in dispatchers],
+        [record.to_dict() for record in violations],
     ):
         records.extend(sorted(group, key=lambda record: record["record_id"]))
 

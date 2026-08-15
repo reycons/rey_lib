@@ -25,6 +25,16 @@ RULES = """
 language_by_extension:
   ".py": Python
   ".js": JavaScript
+
+architecture_rules:
+  - rule_id: no_direct_host_mount
+    forbidden_target_globs: ["*ReyEmbeddedHost.mount"]
+    scope_path_globs: ["*"]
+
+dispatcher_rules:
+  - rule_id: no_dispatch_here
+    forbidden_vocabulary_globs: ["*"]
+    scope_path_globs: ["*"]
 """
 
 
@@ -35,7 +45,16 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "repository_map.rules.yaml").write_text(RULES, encoding="utf-8")
     (root / "app.py").write_text("import os\n\n\ndef run():\n    os.getcwd()\n", encoding="utf-8")
-    (root / "widget.js").write_text("function go() { run(); }\n", encoding="utf-8")
+    (root / "widget.js").write_text(
+        "function go() { run(); }\n"
+        "function bad() { window.ReyEmbeddedHost.mount(1); }\n"
+        "function route(k) {\n"
+        '  if (k === "a") { return 1; }\n'
+        '  else if (k === "b") { return 2; }\n'
+        "  return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -158,3 +177,53 @@ def test_a_missing_rules_file_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError):
         generate_repository_map(root, tmp_path / "map.jsonl")
+
+
+def test_the_map_carries_every_generated_record_type(repo: Path, tmp_path: Path) -> None:
+    """A map missing a record type is incomplete relative to the authority.
+
+    Dispatcher and architecture_violation records are produced during
+    generation, so the map states what its own evidence supports rather than
+    leaving a consumer to recompute it.
+    """
+    output = tmp_path / "map.jsonl"
+
+    generate_repository_map(repo, output)
+    kinds = {row.record["record_type"] for row in read_jsonl_file(output)}
+
+    assert {"repository_map", "file", "symbol", "dependency_edge"} <= kinds
+    assert "dispatcher" in kinds
+    assert "architecture_violation" in kinds
+
+
+def test_a_violation_in_the_map_names_its_rule_and_evidence(repo: Path, tmp_path: Path) -> None:
+    """A verdict in the stream is checkable against the facts beneath it."""
+    output = tmp_path / "map.jsonl"
+
+    generate_repository_map(repo, output)
+    violations = [
+        row.record
+        for row in read_jsonl_file(output)
+        if row.record["record_type"] == "architecture_violation"
+    ]
+
+    # The fixture breaks both declared rules, so both verdicts must appear.
+    assert {v["rule_id"] for v in violations} == {"no_direct_host_mount", "no_dispatch_here"}
+    mount = next(v for v in violations if v["rule_id"] == "no_direct_host_mount")
+    assert mount["callee"] == "window.ReyEmbeddedHost.mount"
+    assert all(v["evidence_record_ids"] for v in violations)
+
+
+def test_dispatcher_facts_reach_the_map_unreviewed(repo: Path, tmp_path: Path) -> None:
+    """The map records decision points without classifying them."""
+    output = tmp_path / "map.jsonl"
+
+    generate_repository_map(repo, output)
+    dispatchers = [
+        row.record
+        for row in read_jsonl_file(output)
+        if row.record["record_type"] == "dispatcher"
+    ]
+
+    assert dispatchers
+    assert {d["classification"] for d in dispatchers} == {"unreviewed"}
