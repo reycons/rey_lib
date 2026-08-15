@@ -32,6 +32,14 @@ from rey_lib.repository_map.graph import (
 )
 from rey_lib.repository_map.inventory import inventory_files, load_scan_rules
 from rey_lib.repository_map.registrations import extract_registrations
+from rey_lib.repository_map.writer import (
+    GENERATOR_VERSION,
+    MapDiff,
+    RepositoryMap,
+    compare_repository_maps,
+    generate_repository_map,
+    write_repository_map,
+)
 from rey_lib.repository_map.records import (
     EDGE_KIND_BACKEND_STRING_REFERENCE,
     EDGE_KIND_CALL,
@@ -91,7 +99,10 @@ __all__ = [
     "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
     "FileRecord",
+    "GENERATOR_VERSION",
     "GlobalReport",
+    "MapDiff",
+    "RepositoryMap",
     "RepositoryGraph",
     "LanguageExtractor",
     "ReferenceEdge",
@@ -99,13 +110,16 @@ __all__ = [
     "SymbolInventory",
     "SymbolRecord",
     "build_dependency_graph",
+    "compare_repository_maps",
     "compute_reachability",
     "extract_executable_references",
     "extract_global_publications_and_consumers",
     "extract_registrations",
     "extract_runtime_entry_points",
     "extract_symbols",
+    "generate_repository_map",
     "inventory_files",
     "load_scan_rules",
     "supported_languages",
+    "write_repository_map",
 ]

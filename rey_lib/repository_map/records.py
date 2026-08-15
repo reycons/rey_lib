@@ -57,6 +57,7 @@ LANGUAGE_UNKNOWN = "unknown"
 
 # JSONL record_type values. The generated factual map is a JSONL fact stream,
 # never a YAML document, and every record carries record_type and record_id.
+RECORD_TYPE_REPOSITORY_MAP = "repository_map"
 RECORD_TYPE_FILE = "file"
 RECORD_TYPE_SYMBOL = "symbol"
 RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
