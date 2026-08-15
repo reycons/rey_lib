@@ -159,13 +159,29 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
 
     assert record == {
         "record_type": "symbol",
-        "record_id": "symbol:pkg/sample.py:TopClass",
+        "record_id": "symbol:pkg/sample.py:TopClass:34:0",
         "source_path": "pkg/sample.py",
         "source_line": 34,
+        "source_column": 0,
         "name": "TopClass",
         "symbol_kind": SYMBOL_KIND_CLASS,
         "exported": True,
     }
+
+
+def test_duplicate_top_level_names_stay_two_facts(tmp_path: Path) -> None:
+    """A redefined name must not cost the fact store a record.
+
+    The generator scans facts; it does not enforce a unique-name convention.
+    """
+    path = tmp_path / "duplicate.py"
+    path.write_text("def handler():\n    return 1\n\n\ndef handler():\n    return 2\n", "utf-8")
+
+    inventory = extract_symbols(path, "Python", "duplicate.py")
+    records = inventory.to_records()
+
+    assert [record["name"] for record in records] == ["handler", "handler"]
+    assert len({record["record_id"] for record in records}) == 2
 
 
 def test_calls_come_only_from_executable_syntax(module_path: Path) -> None:

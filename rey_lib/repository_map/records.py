@@ -90,6 +90,7 @@ class SymbolRecord:
     Attributes:
         source_path: Path the declaration is written in.
         source_line: 1-indexed declaration line (REQ-023).
+        source_column: 0-indexed declaration column.
         name: Declared name as written in source.
         symbol_kind: One of the ``SYMBOL_KIND_*`` constants.
         exported: True when the module publishes the name.
@@ -97,14 +98,24 @@ class SymbolRecord:
 
     source_path: str
     source_line: int
+    source_column: int
     name: str
     symbol_kind: str
     exported: bool = False
 
     @property
     def record_id(self) -> str:
-        """Return the stable identity of this symbol fact."""
-        return f"{RECORD_TYPE_SYMBOL}:{self.source_path}:{self.name}"
+        """Return the stable identity of this symbol fact.
+
+        ``name`` stays the semantic symbol name; declaration position is part
+        of the identity only so that two top-level declarations sharing a name
+        in one file remain two facts. This scanner records what the source
+        says, so a duplicate declaration must never silently drop a record.
+        """
+        return (
+            f"{RECORD_TYPE_SYMBOL}:{self.source_path}:{self.name}"
+            f":{self.source_line}:{self.source_column}"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return this declaration as a JSONL 'symbol' record."""
@@ -113,6 +124,7 @@ class SymbolRecord:
             "record_id": self.record_id,
             "source_path": self.source_path,
             "source_line": self.source_line,
+            "source_column": self.source_column,
             "name": self.name,
             "symbol_kind": self.symbol_kind,
             "exported": self.exported,

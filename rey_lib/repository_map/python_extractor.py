@@ -113,31 +113,34 @@ def extract_python_symbols(
     declared_names: set[str] = set()
 
     for node in tree.body:
-        for name, line, kind in _declarations(node):
+        for name, line, column, kind in _declarations(node):
             declared_names.add(name)
             symbols.append(
                 SymbolRecord(
                     source_path=recorded_path,
                     source_line=line,
+                    source_column=column,
                     name=name,
                     symbol_kind=kind,
                     exported=name in exported_names,
                 )
             )
 
+    dunder_all_line, dunder_all_column = _dunder_all_location(tree)
     for name in sorted(exported_names - declared_names):
         imported = imported_names.get(name)
         symbols.append(
             SymbolRecord(
                 source_path=recorded_path,
-                source_line=imported.line if imported else _dunder_all_line(tree),
+                source_line=imported.line if imported else dunder_all_line,
+                source_column=imported.column if imported else dunder_all_column,
                 name=name,
                 symbol_kind=SYMBOL_KIND_RE_EXPORT if imported else SYMBOL_KIND_EXPORT,
                 exported=True,
             )
         )
 
-    symbols.sort(key=lambda symbol: (symbol.source_line, symbol.name))
+    symbols.sort(key=lambda symbol: (symbol.source_line, symbol.source_column, symbol.name))
     return SymbolInventory(path=recorded_path, language=language, symbols=tuple(symbols))
 
 
@@ -259,28 +262,36 @@ def _edge(
     )
 
 
-def _declarations(node: ast.stmt) -> list[tuple[str, int, str]]:
+def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str]]:
     """Return the top-level declarations one module-body statement makes.
 
     Args:
         node: A statement from ``module.body``.
 
     Returns:
-        Tuples of name, line and symbol kind. Empty for statements that
-        declare nothing.
+        Tuples of name, line, column and symbol kind. Empty for statements that
+        declare nothing. Assignment targets carry their own position, so two
+        names bound on one line stay distinguishable.
     """
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return [(node.name, node.lineno, SYMBOL_KIND_FUNCTION)]
+        return [(node.name, node.lineno, node.col_offset, SYMBOL_KIND_FUNCTION)]
     if isinstance(node, ast.ClassDef):
-        return [(node.name, node.lineno, SYMBOL_KIND_CLASS)]
+        return [(node.name, node.lineno, node.col_offset, SYMBOL_KIND_CLASS)]
     if isinstance(node, ast.Assign):
         return [
-            (target.id, node.lineno, SYMBOL_KIND_VARIABLE)
+            (target.id, target.lineno, target.col_offset, SYMBOL_KIND_VARIABLE)
             for target in node.targets
             if isinstance(target, ast.Name) and target.id != "__all__"
         ]
     if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-        return [(node.target.id, node.lineno, SYMBOL_KIND_VARIABLE)]
+        return [
+            (
+                node.target.id,
+                node.target.lineno,
+                node.target.col_offset,
+                SYMBOL_KIND_VARIABLE,
+            )
+        ]
     return []
 
 
@@ -320,17 +331,20 @@ def _dunder_all_node(tree: ast.Module) -> ast.Assign | None:
     return None
 
 
-def _dunder_all_line(tree: ast.Module) -> int:
-    """Return the line of the ``__all__`` assignment, or 1 when absent.
+def _dunder_all_location(tree: ast.Module) -> tuple[int, int]:
+    """Return the position of the ``__all__`` assignment.
 
     Args:
         tree: Parsed module.
 
     Returns:
-        The line number.
+        Line and column, defaulting to the start of file when ``__all__`` is
+        absent. Only names published without a declaration site use this.
     """
     node = _dunder_all_node(tree)
-    return node.lineno if node is not None else 1
+    if node is None:
+        return 1, 0
+    return node.lineno, node.col_offset
 
 
 def _collect_dunder_all(tree: ast.Module) -> frozenset[str]:
