@@ -13,6 +13,11 @@ line, every record carrying record_type and record_id.
 
 from __future__ import annotations
 
+from rey_lib.repository_map.architecture_policy import (
+    ArchitectureRuleSource,
+    CompiledArchitecturePolicy,
+    compile_architecture_policy,
+)
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
 from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
@@ -130,7 +135,10 @@ __all__ = [
     "SystemIndex",
     "build_dependency_graph",
     "build_system_index",
+    "ArchitectureRuleSource",
+    "CompiledArchitecturePolicy",
     "check_architecture_boundaries",
+    "compile_architecture_policy",
     "compare_repository_maps",
     "compute_reachability",
     "extract_executable_references",
