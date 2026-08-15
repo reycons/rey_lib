@@ -24,17 +24,20 @@ architecture that is genuinely unenforced.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.files.file_utils import read_text_file
+from rey_lib.repository_map.records import ScanRules
 from rey_lib.repository_map.rule_families import RULE_FAMILIES
 
 __all__ = [
     "ArchitectureRuleSource",
+    "EffectivePolicy",
     "CompiledArchitecturePolicy",
+    "build_effective_policy",
     "compile_architecture_policy",
 ]
 
@@ -206,3 +209,79 @@ def compile_architecture_policy(
         for config_key, entries in entries_by_key.items()
     }
     return CompiledArchitecturePolicy(rule_sets=rule_sets, provenance=provenance)
+
+
+@dataclass(frozen=True)
+class EffectivePolicy:
+    """One repository's policy: its own rules plus the architecture's, merged.
+
+    Two inputs answering different questions — how this repository is scanned,
+    and what its architecture means — become one policy for the evaluator. They
+    are merged per family in memory and never written out: a generated policy
+    file would be a second place to read ownership from.
+
+    Attributes:
+        rules: The merged scan rules, consumed through rules_for() exactly as
+            an unmerged ScanRules is.
+        provenance: rule_id to where the rule was declared. A local rule maps
+            to None, which reads as "the repository's own rules file".
+    """
+
+    rules: ScanRules
+    provenance: dict[str, ArchitectureRuleSource | None] = field(default_factory=dict)
+
+    def source_of(self, rule_id: str) -> str:
+        """Return a locator for the rule that produced a violation.
+
+        Args:
+            rule_id: The rule_id carried by a violation.
+
+        Returns:
+            Where the rule was declared, for a reviewer to find it again.
+        """
+        source = self.provenance.get(rule_id)
+        return source.describe() if source else "repository_map.rules.yaml"
+
+
+def build_effective_policy(
+    rules: ScanRules,
+    compiled: CompiledArchitecturePolicy,
+) -> EffectivePolicy:
+    """Merge repository-local rules with compiled architecture annotations.
+
+    The merge is per family and additive. Neither input overrides the other,
+    because they are not competing statements of one fact: a repository governs
+    how it is scanned, and the architecture governs what its ownership means.
+
+    Args:
+        rules: The repository's own scan rules.
+        compiled: Rules compiled from the architecture context.
+
+    Returns:
+        The effective policy.
+
+    Raises:
+        ValueError: If both inputs declare the same rule_id. One rule_id must
+            identify one rule, or a violation cannot be traced to a declaration.
+    """
+    merged: dict[str, tuple[Any, ...]] = dict(rules.rule_sets)
+    provenance: dict[str, ArchitectureRuleSource | None] = {
+        rule.rule_id: None
+        for declared in rules.rule_sets.values()
+        for rule in declared
+        if getattr(rule, "rule_id", None)
+    }
+
+    for config_key, compiled_rules in compiled.rule_sets.items():
+        for rule in compiled_rules:
+            rule_id = getattr(rule, "rule_id", None)
+            if rule_id and rule_id in provenance:
+                raise ValueError(
+                    f"Rule id {rule_id!r} is declared both in the repository's rules file and "
+                    f"in the architecture context. One rule id must identify one rule."
+                )
+            if rule_id:
+                provenance[rule_id] = compiled.provenance.get(rule_id)
+        merged[config_key] = tuple(merged.get(config_key, ())) + tuple(compiled_rules)
+
+    return EffectivePolicy(rules=replace(rules, rule_sets=merged), provenance=provenance)

@@ -139,17 +139,36 @@ def test_malformed_fields_fail_through_the_owning_family(tmp_path: Path) -> None
 
 
 def test_the_compiler_names_no_concrete_family(doc: Path) -> None:
-    """Extension stays a registration, so the registry decides what is valid."""
+    """Extension stays a registration, so the registry decides what is valid.
+
+    Narrowed after its first firing: the original assertion rejected the family
+    name anywhere in the source, which flagged a local variable that merely
+    shared the word. Naming a family in code means writing it as a literal, so
+    that is what this checks. A colliding identifier is not a second authority.
+    """
     import inspect
 
     from rey_lib.repository_map import architecture_policy
 
     source = inspect.getsource(architecture_policy)
     for family in RULE_FAMILIES:
-        assert family.config_key not in source, (
-            f"{family.config_key} is named in the compiler; families must be "
-            "resolved through the registry."
-        )
+        for literal in (f'"{family.config_key}"', f"'{family.config_key}'"):
+            assert literal not in source, (
+                f"{family.config_key} is named as a literal in the compiler; "
+                "families must be resolved through the registry."
+            )
+
+
+def test_the_compiler_resolves_families_only_through_the_registry(doc: Path) -> None:
+    """The behaviour the narrowing protects: an unregistered family is unusable.
+
+    Pinned in the other direction, so the guard above cannot be satisfied by a
+    compiler that hard-codes families some other way.
+    """
+    empty_registry: tuple = ()
+
+    with pytest.raises(ValueError, match="unknown rule family"):
+        compile_architecture_policy(doc, "shared_lib", rule_families=empty_registry)
 
 
 def test_a_missing_document_raises_rather_than_guessing(tmp_path: Path) -> None:

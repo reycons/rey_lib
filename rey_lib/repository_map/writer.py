@@ -28,6 +28,12 @@ from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
 from rey_lib.git.errors import GitError
 from rey_lib.git.repo import get_head_commit, get_repo_status, run_git
 from rey_lib.logs.logging_setup import get_logger
+from rey_lib.repository_map.architecture_policy import (
+    CompiledArchitecturePolicy,
+    EffectivePolicy,
+    build_effective_policy,
+    compile_architecture_policy,
+)
 from rey_lib.repository_map.emitters import RECORD_EMITTERS, ScanContext
 from rey_lib.repository_map.inventory import load_scan_rules
 from rey_lib.repository_map.records import RECORD_TYPE_REPOSITORY_MAP, ScanRules
@@ -120,6 +126,7 @@ def generate_repository_map(
     repo_root: Path,
     output_path: Path,
     rules_path: Path | None = None,
+    architecture_path: Path | None = None,
 ) -> RepositoryMap:
     """Run the complete scan and write the deterministic JSONL fact stream.
 
@@ -134,6 +141,9 @@ def generate_repository_map(
         rules_path: The repository's scan rules. None means the repository
             declares none, which is a supported state: it still produces a file
             inventory and reports architecture_policy_status not_configured.
+        architecture_path: The architecture context carrying enforcement
+            annotations. None means architecture policy does not participate,
+            so the effective policy is the repository's own rules alone.
 
     Returns:
         The generated map.
@@ -144,9 +154,36 @@ def generate_repository_map(
             not.
     """
     rules = load_scan_rules(rules_path) if rules_path is not None else ScanRules.unconfigured()
-    report = build_repository_map(repo_root, rules, rules_path)
+    policy = effective_policy_for(repo_root.name, rules, architecture_path)
+    report = build_repository_map(repo_root, policy.rules, rules_path)
     write_repository_map(report, output_path)
     return report
+
+
+def effective_policy_for(
+    repository: str,
+    rules: ScanRules,
+    architecture_path: Path | None,
+) -> EffectivePolicy:
+    """Return the policy actually evaluated for a repository.
+
+    The repository's own rules and the architecture context answer different
+    questions and are merged into one policy. Everything downstream — the
+    evaluator and the reported policy status — reads this, so neither source
+    can be enforced while the other is reported.
+
+    Args:
+        repository: Repository name, used to select architecture statements.
+        rules: The repository's own scan rules.
+        architecture_path: The architecture context, or None when it does not
+            participate.
+
+    Returns:
+        The effective policy.
+    """
+    if architecture_path is None:
+        return build_effective_policy(rules, CompiledArchitecturePolicy())
+    return build_effective_policy(rules, compile_architecture_policy(architecture_path, repository))
 
 
 def build_repository_map(
@@ -186,8 +223,13 @@ def _policy_status(rules: ScanRules) -> str:
     found nothing, or no policy exists. Reporting only a count would let the
     second read as the first.
 
+    Derived from the effective policy, not from the repository's own rules
+    file. A repository whose only policy comes from architecture annotations is
+    enforced, and a header saying not_configured would understate its coverage
+    (INC-004).
+
     Args:
-        rules: The repository's scan rules.
+        rules: The effective scan rules, after any architecture merge.
 
     Returns:
         POLICY_EVALUATED when any rule family is declared, otherwise
