@@ -14,7 +14,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from rey_lib.config.config_utils import parse_yaml
-from rey_lib.files.file_utils import read_text_file
+from rey_lib.files.file_utils import is_hidden_path, read_text_file
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
     ENTRY_POINT_LOAD_UNKNOWN,
@@ -88,10 +88,11 @@ def inventory_files(repo_root: Path, rules: ScanRules) -> list[FileRecord]:
         dir_names[:] = sorted(
             name
             for name in dir_names
-            if not _is_hidden(name) and name not in rules.ignored_directory_names
+            if not is_hidden_path(current_dir / name, repo_root)
+            and name not in rules.ignored_directory_names
         )
         for file_name in sorted(file_names):
-            if _is_hidden(file_name):
+            if is_hidden_path(current_dir / file_name, repo_root):
                 continue
             record = _build_file_record(current_dir / file_name, repo_root, rules)
             if record is not None:
@@ -159,15 +160,3 @@ def _matches_any(relative_path: str, globs: tuple[str, ...]) -> bool:
         True when at least one glob matches.
     """
     return any(fnmatchcase(relative_path, pattern) for pattern in globs)
-
-
-def _is_hidden(name: str) -> bool:
-    """Return True for a hidden filesystem entry name.
-
-    Args:
-        name: A single path component.
-
-    Returns:
-        True when the component starts with a dot.
-    """
-    return name.startswith(".")

@@ -17,15 +17,16 @@ stream is not a change and a moved fact is not an added one.
 
 from __future__ import annotations
 
-import hashlib
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from rey_lib.encryption import sha256_text
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
+from rey_lib.git.errors import GitError
+from rey_lib.git.repo import get_head_commit, get_repo_status, run_git
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
@@ -227,8 +228,11 @@ def _header(repo_root: Path, rules_path: Path, records: list[dict[str, Any]]) ->
         "head_commit": head_commit,
         "working_tree_status": working_tree_status,
         "generator_version": GENERATOR_VERSION,
-        "rules_hash": _hash_text(read_text_file(rules_path)),
+        "rules_hash": sha256_text(read_text_file(rules_path)),
         "content_hash": _content_hash(records),
+        # rey_lib's only utc_now lives in messaging, which pulls markdown_it and
+        # would drag a rendering dependency into a source scanner. Every neutral
+        # rey_lib module timestamps inline the same way, so this follows suit.
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -236,58 +240,26 @@ def _header(repo_root: Path, rules_path: Path, records: list[dict[str, Any]]) ->
 def _git_state(repo_root: Path) -> tuple[str, str, str]:
     """Return the repository's branch, HEAD commit and cleanliness.
 
+    Every git call goes through rey_lib.git, which centralizes execution and
+    error handling; this reads state and never mutates the repository.
+
     Args:
         repo_root: Repository to inspect.
 
     Returns:
-        Branch, head commit and 'clean' or 'dirty'. Unknown values are
-        reported as 'unknown' rather than guessed, so a map generated outside
-        a working tree does not claim a commit it cannot prove.
-    """
-    branch = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
-    commit = _git(repo_root, "rev-parse", "HEAD")
-    status = _git(repo_root, "status", "--porcelain")
-    if status is None:
-        return branch or "unknown", commit or "unknown", "unknown"
-    return branch or "unknown", commit or "unknown", "dirty" if status.strip() else "clean"
-
-
-def _git(repo_root: Path, *arguments: str) -> str | None:
-    """Run one git command in a repository.
-
-    Args:
-        repo_root: Working directory for the command.
-        arguments: Git arguments.
-
-    Returns:
-        Stripped stdout, or None when git is unavailable or the command fails.
+        Branch, head commit and 'clean' or 'dirty'. A repository git cannot
+        answer for reports 'unknown' rather than a guessed value, so a map
+        generated outside a working tree never claims a commit it cannot
+        prove.
     """
     try:
-        completed = subprocess.run(
-            ["git", *arguments],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        logger.warning("git is unavailable for %s: %s", repo_root, exc)
-        return None
-    if completed.returncode != 0:
-        return None
-    return completed.stdout.strip()
-
-
-def _hash_text(text: str) -> str:
-    """Return a stable hash of some text.
-
-    Args:
-        text: Text to hash.
-
-    Returns:
-        A hex digest.
-    """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        branch = run_git(repo_root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        commit = get_head_commit(repo_root)
+        status = get_repo_status(repo_root)
+    except GitError as exc:
+        logger.warning("git state unavailable for %s: %s", repo_root, exc)
+        return "unknown", "unknown", "unknown"
+    return branch or "unknown", commit or "unknown", "clean" if status.clean else "dirty"
 
 
 def _content_hash(records: list[dict[str, Any]]) -> str:
@@ -304,7 +276,7 @@ def _content_hash(records: list[dict[str, Any]]) -> str:
         written with, so the hash describes the bytes on disk rather than a
         second serialization that could drift from them.
     """
-    return _hash_text("\n".join(render_jsonl_line(record) for record in records))
+    return sha256_text("\n".join(render_jsonl_line(record) for record in records))
 
 
 def write_repository_map(report: RepositoryMap, output_path: Path) -> None:
