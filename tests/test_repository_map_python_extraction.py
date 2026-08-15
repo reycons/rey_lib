@@ -346,9 +346,13 @@ def test_recorded_path_can_be_overridden(module_path: Path) -> None:
 
 
 def test_unsupported_language_is_refused_not_emptied() -> None:
-    """An unregistered language raises rather than reporting 'no references'."""
+    """An unregistered language raises rather than reporting 'no references'.
+
+    HTML is in the contract's scope but has no extractor yet, so it stands in
+    for any language whose facts are not available.
+    """
     with pytest.raises(ValueError, match="No repository-map extractor"):
-        extract_executable_references(Path("widget.ts"), "TypeScript")
+        extract_executable_references(Path("template.html"), "HTML")
 
 
 def test_unparseable_python_names_the_file(tmp_path: Path) -> None:

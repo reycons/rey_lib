@@ -13,6 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from rey_lib.repository_map.js_extractor import (
+    extract_js_references,
+    extract_js_symbols,
+    supported_js_languages,
+)
 from rey_lib.repository_map.python_extractor import (
     extract_python_references,
     extract_python_symbols,
@@ -44,9 +49,7 @@ class LanguageExtractor:
 
 
 # The registry is data: language name to the object that owns that language.
-# JavaScript, TypeScript and TSX register here in INC-002B, once their parser
-# has been chosen deliberately; until then those languages are unsupported
-# rather than approximated.
+# Adding a language is one entry plus its extractor module, never a branch.
 LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
     "Python": LanguageExtractor(
         language="Python",
@@ -54,6 +57,19 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         references=extract_python_references,
     ),
 }
+
+# JavaScript, TypeScript and TSX share one Tree-sitter-backed extractor and
+# differ only by grammar, so they register from that extractor's own list.
+LANGUAGE_EXTRACTORS.update(
+    {
+        language: LanguageExtractor(
+            language=language,
+            symbols=extract_js_symbols,
+            references=extract_js_references,
+        )
+        for language in supported_js_languages()
+    }
+)
 
 
 def supported_languages() -> list[str]:
