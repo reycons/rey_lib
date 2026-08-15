@@ -25,7 +25,6 @@ move_file(src, dest_dir)
 
 from __future__ import annotations
 
-import csv
 from fnmatch import fnmatch
 import json
 import re
@@ -1132,7 +1131,11 @@ def write_file(
         if not content:
             raise ValueError("write_file called with empty rows list.")
         if fmt == "CSV":
-            _csv_writer(outfile, content, minimal_quoting=csv_minimal_quoting)
+            # Imported here, not at module scope: rey_lib.files.csv imports
+            # read_text_file from this module, so a top-level import closes a cycle.
+            from rey_lib.files.csv import write_delimited_rows
+
+            write_delimited_rows(outfile, content, minimal_quoting=csv_minimal_quoting)
         else:
             _xlsx_writer(outfile, content)
     elif fmt == "TEXT":
@@ -1867,34 +1870,6 @@ def _display_path(path: Path, environment_root: Path | None) -> str:
         except ValueError:
             pass
     return str(resolved)
-
-
-def _csv_writer(
-    outfile: Path,
-    rows: list[dict[str, Any]],
-    minimal_quoting: bool = False,
-) -> None:
-    """Write rows to a CSV file using the key order of the first row.
-
-    By default uses QUOTE_NONE so values are written exactly as-is — no extra
-    quoting or escaping is applied (values that already contain quote characters,
-    e.g. constants configured with quote: '"', are written verbatim). When
-    ``minimal_quoting`` is True, standard QUOTE_MINIMAL is used instead, so
-    free-text fields containing the delimiter or quotes are safely quoted.
-    """
-    outfile = Path(outfile)
-    outfile.parent.mkdir(parents=True, exist_ok=True)
-
-    writer_kwargs: dict[str, Any] = {"fieldnames": list(rows[0].keys())}
-    if not minimal_quoting:
-        writer_kwargs.update(quoting=csv.QUOTE_NONE, quotechar="\x00", escapechar="\\")
-
-    with outfile.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, **writer_kwargs)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    _logger.debug("Wrote %d row(s) to %s", len(rows), outfile.name)
 
 
 # ---------------------------------------------------------------------------

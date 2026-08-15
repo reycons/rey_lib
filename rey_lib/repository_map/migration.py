@@ -258,15 +258,51 @@ def validate_migration_manifest(manifest: MigrationManifest) -> list[str]:
     return problems
 
 
+def _dotted_forms(path_globs: "tuple[str, ...]") -> tuple[str, ...]:
+    """Return the dotted-module spellings of filesystem path globs.
+
+    A dependency edge names its target the way the source wrote it, which for
+    Python is a dotted module path — rey_lib.files.file_utils.read_text_file,
+    never rey_lib/files/file_utils.py. Comparing a path glob against those
+    matches nothing, so a manifest written in paths would prove retirement
+    while every caller was still there. Both spellings are checked.
+    """
+    forms: list[str] = []
+    for glob in path_globs:
+        stem = glob[:-3] if glob.endswith(".py") else glob
+        dotted = stem.replace("/", ".")
+        forms.append(dotted)
+        # Anything reached inside the module is also the module.
+        forms.append(f"{dotted}.*")
+    return tuple(forms)
+
+
+def _strip_record_prefix(target: str) -> str:
+    """Return a reachability target without its record-kind prefix.
+
+    Reachability names its subject as file:<path>, so a bare path glob never
+    matches one and a definitely_reachable verdict is skipped in silence.
+    """
+    _, separator, remainder = target.partition(":")
+    return remainder if separator else target
+
+
 def _is_old_owner(manifest: MigrationManifest, path: str) -> bool:
     """Return whether a path belongs to the retiring owner."""
-    return matches_any_glob(path, manifest.old_owner_path_globs)
+    return matches_any_glob(_strip_record_prefix(path), manifest.old_owner_path_globs)
 
 
 def _names_old_owner(manifest: MigrationManifest, target: str) -> bool:
-    """Return whether a written target names the retiring owner."""
-    return matches_any_glob(target, manifest.old_owner_path_globs) or matches_any_glob(
-        target, manifest.old_symbol_globs
+    """Return whether a written target names the retiring owner.
+
+    Checked in every spelling the fact layer uses: the filesystem path, the
+    dotted module path an edge actually carries, and any symbol the manifest
+    declares.
+    """
+    return (
+        matches_any_glob(target, manifest.old_owner_path_globs)
+        or matches_any_glob(target, _dotted_forms(manifest.old_owner_path_globs))
+        or matches_any_glob(target, manifest.old_symbol_globs)
     )
 
 

@@ -410,3 +410,56 @@ def test_a_missing_manifest_raises_rather_than_guessing(tmp_path: Path) -> None:
     """The path is configuration and is never substituted."""
     with pytest.raises(FileNotFoundError):
         load_migration_manifest(tmp_path / "absent.yaml")
+
+
+# Regression cases from INC-007. Both defects below produced a false PROVEN
+# against real facts while every fixture above passed, because the fixtures were
+# written in the shapes the gate assumed rather than the ones the map emits.
+
+
+def test_a_dotted_module_target_is_recognised_as_the_old_owner() -> None:
+    """A dependency edge names its target the way the source wrote it.
+
+    rey_lib had 147 edges naming file_utils and none matched a filesystem path
+    glob, so the gate proved a retirement whose every caller was still present.
+    """
+    manifest = MigrationManifest(
+        migration_id="m",
+        capability="c",
+        old_owner_path_globs=("rey_lib/files/file_utils.py",),
+        new_owner_path_globs=("rey_lib/files/csv.py",),
+    )
+
+    report = verify_retirement_ready(
+        manifest,
+        [_edge("rey_lib/files/loader.py", "rey_lib.files.file_utils.read_text_file")],
+    )
+
+    assert report.verdict == VERDICT_STOP
+    assert report.blockers_of(BLOCKER_OLD_CALLER)
+
+
+def test_a_prefixed_reachability_target_is_recognised() -> None:
+    """Reachability names its subject as file:<path>, not as a bare path."""
+    manifest = MigrationManifest(
+        migration_id="m",
+        capability="c",
+        old_owner_path_globs=("rey_lib/files/file_utils.py",),
+        new_owner_path_globs=("rey_lib/files/csv.py",),
+    )
+
+    report = verify_retirement_ready(
+        manifest,
+        [
+            {
+                "record_type": "reachability",
+                "record_id": "reach:1",
+                "target": "file:rey_lib/files/file_utils.py",
+                "status": "definitely_reachable",
+                "root": "rey_lib/cli.py",
+            }
+        ],
+    )
+
+    assert report.verdict == VERDICT_STOP
+    assert report.blockers_of(BLOCKER_STILL_REACHABLE)

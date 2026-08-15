@@ -38,6 +38,7 @@ from typing import Any, Iterator, Sequence
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import read_text_file
+from rey_lib.logs import get_logger
 
 __all__ = [
     "CsvRead",
@@ -54,6 +55,8 @@ __all__ = [
     "render_delimited_line",
     "sample_indices",
 ]
+
+_logger = get_logger(__name__)
 
 # Header discovery is bounded to the opening rows. Every line is already in
 # memory, so this bounds the comparison work rather than the read.
@@ -884,3 +887,42 @@ def _looks_like_header_name(value: str) -> bool:
     if re.fullmatch(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", token):
         return False
     return True
+
+
+def write_delimited_rows(
+    outfile: "Path",
+    rows: "list[dict[str, Any]]",
+    minimal_quoting: bool = False,
+) -> None:
+    """Write mapping rows to a delimited file, using the first row's key order.
+
+    Moved here from rey_lib.files.file_utils under migration
+    delimited_write_to_csv_owner: this module is the declared sole owner of
+    delimited format, and a second module writing CSV directly made that claim
+    false.
+
+    Behaviour is unchanged from the implementation this replaces. By default
+    QUOTE_NONE is used so values are written exactly as-is, because configured
+    constants may already carry their own quote characters and re-quoting them
+    would corrupt real feed files. When ``minimal_quoting`` is True, standard
+    QUOTE_MINIMAL applies so free-text fields containing the delimiter or
+    quotes are safely quoted.
+
+    Args:
+        outfile: Destination path. Parent directories are created.
+        rows: Rows to write. The first row's keys fix the header and order.
+        minimal_quoting: Whether to quote fields that need it.
+    """
+    outfile = Path(outfile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+
+    writer_kwargs: dict[str, Any] = {"fieldnames": list(rows[0].keys())}
+    if not minimal_quoting:
+        writer_kwargs.update(quoting=_csv.QUOTE_NONE, quotechar="\x00", escapechar="\\")
+
+    with outfile.open("w", newline="", encoding="utf-8") as fh:
+        writer = _csv.DictWriter(fh, **writer_kwargs)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    _logger.debug("Wrote %d row(s) to %s", len(rows), outfile.name)
