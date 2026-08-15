@@ -171,6 +171,7 @@ class ScanContext:
             files=self.files,
             entry_points=self.entry_points,
             dispatchers=self.dispatchers,
+            registrations=self.registrations,
         )
 
 

@@ -30,7 +30,9 @@ from rey_lib.repository_map.records import (
     EntryPointRecord,
     FileRecord,
     GlobalPublicationRecord,
+    OwnershipRule,
     PresenceRule,
+    RegistrationRecord,
     PublicationRule,
     ReferenceEdge,
     ViolationRecord,
@@ -50,6 +52,7 @@ class Evidence:
         files: The inventoried files.
         entry_points: Runtime entry points.
         dispatchers: Dispatcher facts.
+        registrations: Explicit id-to-object registrations.
     """
 
     references: Sequence[ReferenceEdge] = ()
@@ -57,6 +60,7 @@ class Evidence:
     files: Sequence[FileRecord] = ()
     entry_points: Sequence[EntryPointRecord] = ()
     dispatchers: Sequence[DispatcherRecord] = ()
+    registrations: Sequence[RegistrationRecord] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +298,96 @@ def _evaluate_dispatcher_rules(
     ]
 
 
+def _build_ownership_rules(entries: list[dict[str, Any]]) -> tuple[OwnershipRule, ...]:
+    """Build rules governing how many places may own one registered thing."""
+    section = "ownership_rules"
+    return tuple(
+        OwnershipRule(
+            rule_id=_required(entry, "rule_id", section),
+            registry_globs=tuple(_required(entry, "registry_globs", section)),
+            registered_id_globs=tuple(entry.get("registered_id_globs", ())),
+            maximum_owners=entry.get("maximum_owners", 1),
+            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
+            scope_path_globs=tuple(entry.get("scope_path_globs", ())),
+        )
+        for entry in entries
+    )
+
+
+def _governed_registrations(
+    rule: OwnershipRule,
+    evidence: Evidence,
+) -> list[RegistrationRecord]:
+    """Return the registrations one ownership rule governs.
+
+    An unresolved id is excluded rather than grouped. Two expressions that
+    cannot be read might name one id or two, and a duplicate reported from that
+    would be a guess rather than a fact.
+    """
+    return [
+        registration
+        for registration in evidence.registrations
+        if registration.registered_id_resolved
+        and matches_any_glob(registration.source_path, rule.scope_path_globs, when_unconfigured=True)
+        and matches_any_glob(registration.registry, rule.registry_globs)
+        and matches_any_glob(
+            registration.registered_id, rule.registered_id_globs, when_unconfigured=True
+        )
+    ]
+
+
+def _evaluate_ownership_rules(
+    rules: tuple[OwnershipRule, ...],
+    evidence: Evidence,
+) -> list[ViolationRecord]:
+    """Return violations of the rules governing ownership and cardinality.
+
+    Two distinct failures share this family. A registration outside the
+    declared owner is wrong wherever it appears, and is reported per site. Too
+    many owners of one id is wrong only in aggregate, so every participating
+    site is reported: naming one of them would imply the others are correct.
+    """
+    violations: list[ViolationRecord] = []
+    for rule in rules:
+        governed = _governed_registrations(rule, evidence)
+
+        if rule.allowed_path_globs:
+            for registration in governed:
+                if matches_any_glob(registration.source_path, rule.allowed_path_globs):
+                    continue
+                violations.append(_ownership_violation(rule, registration, "registered_by_non_owner"))
+
+        owners_by_id: dict[tuple[str, str], list[RegistrationRecord]] = {}
+        for registration in governed:
+            owners_by_id.setdefault(
+                (registration.registry, registration.registered_id), []
+            ).append(registration)
+        for sites in owners_by_id.values():
+            if len(sites) <= rule.maximum_owners:
+                continue
+            for registration in sites:
+                violations.append(_ownership_violation(rule, registration, "duplicate_owner"))
+    return violations
+
+
+def _ownership_violation(
+    rule: OwnershipRule,
+    registration: RegistrationRecord,
+    edge_kind: str,
+) -> ViolationRecord:
+    """Return one ownership violation against a registration fact."""
+    return ViolationRecord(
+        source_path=registration.source_path,
+        source_line=registration.source_line,
+        source_column=registration.source_column,
+        rule_id=rule.rule_id,
+        caller=registration.source_path,
+        callee=f"{registration.registry}:{registration.registered_id}",
+        edge_kind=edge_kind,
+        evidence_record_ids=(registration.record_id,),
+    )
+
+
 # The registry. Adding a family is one entry here plus its implementation
 # above; no central loader or evaluator changes.
 RULE_FAMILIES: tuple[RuleFamily, ...] = (
@@ -301,4 +395,5 @@ RULE_FAMILIES: tuple[RuleFamily, ...] = (
     RuleFamily("publication_rules", _build_publication_rules, _evaluate_publication_rules),
     RuleFamily("presence_rules", _build_presence_rules, _evaluate_presence_rules),
     RuleFamily("dispatcher_rules", _build_dispatcher_rules, _evaluate_dispatcher_rules),
+    RuleFamily("ownership_rules", _build_ownership_rules, _evaluate_ownership_rules),
 )

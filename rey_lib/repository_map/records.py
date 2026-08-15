@@ -457,6 +457,36 @@ class PublicationRule:
 
 
 @dataclass(frozen=True)
+class OwnershipRule:
+    """A rule about how many places may own one registered thing.
+
+    The other families ask who may reach what. This one asks how many owners a
+    thing has, which the reference families cannot express: two registrations
+    of one id are individually legal edges and only wrong together.
+
+    An id that could not be read as a literal is never counted. A syntax
+    scanner cannot follow a variable, so two unresolved ids might be the same
+    id or different ones, and reporting a duplicate from that would be a guess.
+
+    Attributes:
+        rule_id: Stable identity of this rule.
+        registry_globs: Registries this rule governs.
+        registered_id_globs: Ids within those registries. Empty governs all.
+        maximum_owners: How many registrations of one id are permitted.
+        allowed_path_globs: Paths permitted to register at all. Empty permits
+            any path, so cardinality alone is checked.
+        scope_path_globs: Registration sites this rule looks at.
+    """
+
+    rule_id: str
+    registry_globs: tuple[str, ...]
+    registered_id_globs: tuple[str, ...] = ()
+    maximum_owners: int = 1
+    allowed_path_globs: tuple[str, ...] = ()
+    scope_path_globs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DispatcherRule:
     """A guard on where a decision point over a vocabulary may live.
 

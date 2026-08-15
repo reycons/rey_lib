@@ -28,6 +28,7 @@ from rey_lib.repository_map.records import (
     FileRecord,
     GlobalPublicationRecord,
     ReferenceEdge,
+    RegistrationRecord,
     ScanRules,
     ViolationRecord,
 )
@@ -46,6 +47,7 @@ def check_architecture_boundaries(
     files: Sequence[FileRecord] = (),
     entry_points: Sequence[EntryPointRecord] = (),
     dispatchers: Sequence[DispatcherRecord] = (),
+    registrations: Sequence[RegistrationRecord] = (),
 ) -> list[ViolationRecord]:
     """Evaluate every declared architectural boundary against generated facts.
 
@@ -61,6 +63,7 @@ def check_architecture_boundaries(
         files: The inventoried files.
         entry_points: Runtime entry points from root discovery.
         dispatchers: Dispatcher facts from the dispatcher inventory.
+        registrations: Explicit id-to-object registrations from root discovery.
 
     Returns:
         Violations sorted by rule, path and line. Empty when every rule holds.
@@ -71,6 +74,7 @@ def check_architecture_boundaries(
         files=files,
         entry_points=entry_points,
         dispatchers=dispatchers,
+        registrations=registrations,
     )
 
     violations: list[ViolationRecord] = []
