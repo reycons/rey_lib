@@ -49,7 +49,11 @@ def system(tmp_path: Path):
     _repository(apps, "shared_lib", "def helper():\n    return 1\n")
     _repository(apps, "consumer", "import shared_lib.helpers\n\n\ndef run():\n    return 2\n")
     for name in ("shared_lib", "consumer"):
-        generate_repository_map(apps / name, context / f"03_repository_map.{name}.generated.jsonl")
+        generate_repository_map(
+            apps / name,
+            context / f"03_repository_map.{name}.generated.jsonl",
+            apps / name / "repository_map.rules.yaml",
+        )
     maps = load_repository_baselines(context, ["shared_lib", "consumer"])
     return context, maps
 

@@ -47,6 +47,7 @@ __all__ = [
     "MapDiff",
     "RepositoryMap",
     "POLICY_EVALUATED",
+    "RULES_NOT_CONFIGURED",
     "POLICY_NOT_CONFIGURED",
     "compare_repository_maps",
     "content_hash_of",
@@ -64,8 +65,9 @@ GENERATOR_VERSION = "1.0.0"
 # the same commit agree.
 _NON_DETERMINISTIC_HEADER_FIELDS = frozenset({"generated_at", "content_hash"})
 
-# The rules file each repository declares to say how it is scanned.
-_RULES_FILENAME = "repository_map.rules.yaml"
+# Recorded as the rules hash when a repository declares no rules. There is no
+# file to hash, and an empty hash would read as one that failed to compute.
+RULES_NOT_CONFIGURED = "not_configured"
 
 # Whether architectural policy was evaluated for a map. A repository that
 # declares no policy is not thereby architecturally clean, and the two states
@@ -131,21 +133,28 @@ def generate_repository_map(
 ) -> RepositoryMap:
     """Run the complete scan and write the deterministic JSONL fact stream.
 
+    Shared code names no repository's policy file. Where a repository keeps its
+    rules — or whether it has any — is the caller's to supply, so a repository
+    with a different layout needs no change here and no repository-name
+    conditional exists.
+
     Args:
         repo_root: Repository to scan.
         output_path: Where to write the generated map.
-        rules_path: The repository's scan rules. Defaults to the declared
-            rules filename at the repository root.
+        rules_path: The repository's scan rules. None means the repository
+            declares none, which is a supported state: it still produces a file
+            inventory and reports architecture_policy_status not_configured.
 
     Returns:
         The generated map.
 
     Raises:
-        FileNotFoundError: If the rules file does not exist.
+        FileNotFoundError: If a rules path is supplied and does not exist.
+            Declaring a path that is not there is an error; declaring none is
+            not.
     """
-    resolved_rules_path = rules_path or (repo_root / _RULES_FILENAME)
-    rules = load_scan_rules(resolved_rules_path)
-    report = build_repository_map(repo_root, rules, resolved_rules_path)
+    rules = load_scan_rules(rules_path) if rules_path is not None else ScanRules.unconfigured()
+    report = build_repository_map(repo_root, rules, rules_path)
     write_repository_map(report, output_path)
     return report
 
@@ -153,14 +162,15 @@ def generate_repository_map(
 def build_repository_map(
     repo_root: Path,
     rules: ScanRules,
-    rules_path: Path,
+    rules_path: Path | None,
 ) -> RepositoryMap:
     """Collect every generated fact for a repository.
 
     Args:
         repo_root: Repository to scan.
         rules: The repository's scan rules.
-        rules_path: Path the rules were loaded from, for the rules hash.
+        rules_path: Path the rules were loaded from, or None when the
+            repository declares none.
 
     Returns:
         The map, with records in emission order.
@@ -256,7 +266,7 @@ def _policy_status(rules: ScanRules) -> str:
 
 def _header(
     repo_root: Path,
-    rules_path: Path,
+    rules_path: Path | None,
     records: list[dict[str, Any]],
     policy_status: str,
 ) -> dict[str, Any]:
@@ -284,7 +294,11 @@ def _header(
         "head_commit": head_commit,
         "working_tree_status": working_tree_status,
         "generator_version": GENERATOR_VERSION,
-        "rules_hash": sha256_text(read_text_file(rules_path)),
+        "rules_hash": (
+            sha256_text(read_text_file(rules_path))
+            if rules_path is not None
+            else RULES_NOT_CONFIGURED
+        ),
         "architecture_policy_status": policy_status,
         "content_hash": content_hash_of(records),
         # rey_lib's only utc_now lives in messaging, which pulls markdown_it and

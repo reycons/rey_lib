@@ -22,6 +22,8 @@ from rey_lib.repository_map.writer import (
     write_repository_map,
 )
 
+RULES_NAME = "repository_map.rules.yaml"
+
 RULES = """
 language_by_extension:
   ".py": Python
@@ -44,7 +46,7 @@ def repo(tmp_path: Path) -> Path:
     """Build a tiny repository with its own scan rules."""
     root = tmp_path / "repo"
     root.mkdir()
-    (root / "repository_map.rules.yaml").write_text(RULES, encoding="utf-8")
+    (root / RULES_NAME).write_text(RULES, encoding="utf-8")
     (root / "app.py").write_text("import os\n\n\ndef run():\n    os.getcwd()\n", encoding="utf-8")
     (root / "widget.js").write_text(
         "function go() { run(); }\n"
@@ -74,7 +76,7 @@ def test_generated_map_is_strict_jsonl(repo: Path, tmp_path: Path) -> None:
     """Every line is one complete JSON object with identity fields (AC-011)."""
     output = tmp_path / "map.jsonl"
 
-    generate_repository_map(repo, output)
+    generate_repository_map(repo, output, repo / RULES_NAME)
     rows = read_jsonl_file(output)
 
     assert rows
@@ -89,8 +91,8 @@ def test_two_runs_are_byte_identical_except_the_timestamp(repo: Path, tmp_path: 
     first_path = tmp_path / "first.jsonl"
     second_path = tmp_path / "second.jsonl"
 
-    first = generate_repository_map(repo, first_path)
-    second = generate_repository_map(repo, second_path)
+    first = generate_repository_map(repo, first_path, repo / RULES_NAME)
+    second = generate_repository_map(repo, second_path, repo / RULES_NAME)
 
     assert first.records == second.records
     assert first.header["content_hash"] == second.header["content_hash"]
@@ -100,8 +102,8 @@ def test_two_runs_are_byte_identical_except_the_timestamp(repo: Path, tmp_path: 
 
 def test_generated_at_is_excluded_from_the_content_hash(repo: Path, tmp_path: Path) -> None:
     """A wall-clock field must not make the map look changed."""
-    first = generate_repository_map(repo, tmp_path / "first.jsonl")
-    second = generate_repository_map(repo, tmp_path / "second.jsonl")
+    first = generate_repository_map(repo, tmp_path / "first.jsonl", repo / RULES_NAME)
+    second = generate_repository_map(repo, tmp_path / "second.jsonl", repo / RULES_NAME)
 
     assert first.header["generated_at"] != second.header["generated_at"]
     assert first.header["content_hash"] == second.header["content_hash"]
@@ -109,7 +111,7 @@ def test_generated_at_is_excluded_from_the_content_hash(repo: Path, tmp_path: Pa
 
 def test_header_carries_provenance_and_fingerprints(repo: Path, tmp_path: Path) -> None:
     """A stale map is detectable from the header alone (REQ-114)."""
-    header = generate_repository_map(repo, tmp_path / "map.jsonl").header
+    header = generate_repository_map(repo, tmp_path / "map.jsonl", repo / RULES_NAME).header
 
     assert header["repository"] == "repo"
     assert header["generator_version"]
@@ -120,12 +122,14 @@ def test_header_carries_provenance_and_fingerprints(repo: Path, tmp_path: Path) 
 
 def test_changing_the_rules_changes_the_rules_hash(repo: Path, tmp_path: Path) -> None:
     """The rules a scan ran under are part of its provenance."""
-    before = generate_repository_map(repo, tmp_path / "before.jsonl").header["rules_hash"]
-    (repo / "repository_map.rules.yaml").write_text(
+    first = generate_repository_map(repo, tmp_path / "before.jsonl", repo / RULES_NAME)
+    before = first.header["rules_hash"]
+    (repo / RULES_NAME).write_text(
         RULES + 'test_path_globs:\n  - "tests/*"\n', encoding="utf-8"
     )
 
-    after = generate_repository_map(repo, tmp_path / "after.jsonl").header["rules_hash"]
+    second = generate_repository_map(repo, tmp_path / "after.jsonl", repo / RULES_NAME)
+    after = second.header["rules_hash"]
 
     assert before != after
 
@@ -171,13 +175,52 @@ def test_written_map_round_trips_through_the_canonical_reader(tmp_path: Path) ->
     assert [dict(row.record) for row in rows][1:] == original.records
 
 
-def test_a_missing_rules_file_is_refused(tmp_path: Path) -> None:
-    """A repository with no declared rules is an error, not an empty map."""
+def test_a_declared_rules_path_that_is_absent_is_refused(tmp_path: Path) -> None:
+    """Naming a rules file that is not there is an error, and stays one."""
     root = tmp_path / "bare"
     root.mkdir()
 
     with pytest.raises(FileNotFoundError):
-        generate_repository_map(root, tmp_path / "map.jsonl")
+        generate_repository_map(root, tmp_path / "map.jsonl", root / RULES_NAME)
+
+
+def test_a_repository_declaring_no_rules_still_produces_facts(tmp_path: Path) -> None:
+    """No rules is a supported state, not a failure.
+
+    This narrows the previous contract deliberately: refusal now means a path
+    was declared and is missing, not that a repository was silent.
+    """
+    root = tmp_path / "unruled"
+    root.mkdir()
+    (root / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    report = generate_repository_map(root, tmp_path / "map.jsonl")
+
+    assert report.header["rules_hash"] == "not_configured"
+    assert report.header["architecture_policy_status"] == "not_configured"
+    # A file inventory needs no language map.
+    assert any(r["record_type"] == "file" for r in report.records)
+
+
+def test_two_repositories_may_keep_rules_in_different_places(tmp_path: Path) -> None:
+    """Rules location is caller input, so layout differences need no code change."""
+    conventional = tmp_path / "conventional"
+    conventional.mkdir()
+    (conventional / RULES_NAME).write_text(RULES, encoding="utf-8")
+    (conventional / "app.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+
+    unconventional = tmp_path / "unconventional"
+    (unconventional / "config").mkdir(parents=True)
+    (unconventional / "config" / "scan.yaml").write_text(RULES, encoding="utf-8")
+    (unconventional / "app.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+
+    first = generate_repository_map(conventional, tmp_path / "a.jsonl", conventional / RULES_NAME)
+    second = generate_repository_map(
+        unconventional, tmp_path / "b.jsonl", unconventional / "config" / "scan.yaml"
+    )
+
+    assert first.header["rules_hash"] == second.header["rules_hash"]
+    assert all(r.header["architecture_policy_status"] == "evaluated" for r in (first, second))
 
 
 def test_the_map_carries_every_generated_record_type(repo: Path, tmp_path: Path) -> None:
@@ -189,7 +232,7 @@ def test_the_map_carries_every_generated_record_type(repo: Path, tmp_path: Path)
     """
     output = tmp_path / "map.jsonl"
 
-    generate_repository_map(repo, output)
+    generate_repository_map(repo, output, repo / RULES_NAME)
     kinds = {row.record["record_type"] for row in read_jsonl_file(output)}
 
     assert {"repository_map", "file", "symbol", "dependency_edge"} <= kinds
@@ -201,7 +244,7 @@ def test_a_violation_in_the_map_names_its_rule_and_evidence(repo: Path, tmp_path
     """A verdict in the stream is checkable against the facts beneath it."""
     output = tmp_path / "map.jsonl"
 
-    generate_repository_map(repo, output)
+    generate_repository_map(repo, output, repo / RULES_NAME)
     violations = [
         row.record
         for row in read_jsonl_file(output)
@@ -219,7 +262,7 @@ def test_dispatcher_facts_reach_the_map_unreviewed(repo: Path, tmp_path: Path) -
     """The map records decision points without classifying them."""
     output = tmp_path / "map.jsonl"
 
-    generate_repository_map(repo, output)
+    generate_repository_map(repo, output, repo / RULES_NAME)
     dispatchers = [
         row.record
         for row in read_jsonl_file(output)
@@ -238,7 +281,7 @@ language_by_extension:
 
 def test_a_repository_with_policy_reports_it_as_evaluated(repo: Path, tmp_path: Path) -> None:
     """Declared rules mean policy ran."""
-    header = generate_repository_map(repo, tmp_path / "map.jsonl").header
+    header = generate_repository_map(repo, tmp_path / "map.jsonl", repo / RULES_NAME).header
 
     assert header["architecture_policy_status"] == "evaluated"
 
@@ -247,11 +290,11 @@ def test_a_repository_without_policy_is_not_configured_not_clean(tmp_path: Path)
     """Zero violations without policy must not read as architecture accepted."""
     root = tmp_path / "bare"
     root.mkdir()
-    (root / "repository_map.rules.yaml").write_text(NO_POLICY_RULES, encoding="utf-8")
+    (root / RULES_NAME).write_text(NO_POLICY_RULES, encoding="utf-8")
     (root / "app.py").write_text("import os\n\n\ndef run():\n    os.getcwd()\n", encoding="utf-8")
     output = tmp_path / "map.jsonl"
 
-    report = generate_repository_map(root, output)
+    report = generate_repository_map(root, output, root / RULES_NAME)
     kinds = [r["record_type"] for r in report.records]
 
     assert report.header["architecture_policy_status"] == "not_configured"
@@ -262,6 +305,6 @@ def test_a_repository_without_policy_is_not_configured_not_clean(tmp_path: Path)
 
 def test_the_policy_status_does_not_enter_the_content_hash(repo: Path, tmp_path: Path) -> None:
     """A header field must not disturb a fact hash or an existing baseline."""
-    report = generate_repository_map(repo, tmp_path / "map.jsonl")
+    report = generate_repository_map(repo, tmp_path / "map.jsonl", repo / RULES_NAME)
 
     assert content_hash_of(report.records) == report.header["content_hash"]

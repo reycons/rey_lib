@@ -912,6 +912,27 @@ class ScanRules:
         return True
 
     @classmethod
+    def unconfigured(cls) -> "ScanRules":
+        """Return the rules of a repository that declares none.
+
+        A repository may legitimately have no rules file. It still yields a
+        file inventory; it simply maps no language, so no extractor claims any
+        file and no policy is evaluated. Named rather than constructed inline
+        so "this repository declares nothing" is a state a reader can see.
+
+        Returns:
+            Rules with every section empty.
+        """
+        return cls(
+            ignored_directory_names=frozenset(),
+            ignored_path_globs=(),
+            language_by_extension={},
+            generated_path_globs=(),
+            vendor_path_globs=(),
+            test_path_globs=(),
+        )
+
+    @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "ScanRules":
         """Build rules from a parsed rules mapping.
 
