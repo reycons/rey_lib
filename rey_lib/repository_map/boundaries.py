@@ -1,15 +1,16 @@
 """Deterministic architecture-boundary guards over generated evidence.
 
-Contract: rey_repository_map_generator.sgc.yaml (INC-005, REQ-090 to REQ-093).
+Contract: rey_repository_map_generator.sgc.yaml (INC-005, REQ-090 to REQ-093)
+and rey_system_repository_map_correction.sgc.yaml (COR-008).
 
-Ownership is split deliberately. This module owns no policy: it evaluates
-rules supplied as data by the repository being scanned, against reference
-facts the extractors already proved. The repository owns which boundaries
-exist; the generator owns whether they hold.
+The one public enforcement entry point. It owns no policy and knows no family:
+policy is data supplied by the repository being scanned, and the families that
+interpret it live in the registry. This iterates that registry, so a fifth kind
+of boundary changes nothing here.
 
-Guards run over parse-tree reference edges rather than file text, so a call
-written inside a comment or a string cannot be reported as an offender, and a
-call spread across lines cannot hide from a single-line pattern.
+Guards run over parse-tree facts rather than file text, so a call written in a
+comment or a string cannot be reported as an offender, and a call spread across
+lines cannot hide from a single-line pattern.
 
 Scope is explicit per rule, so a guard covers every surviving root a rule
 applies to rather than only the tree its test framework happens to reach
@@ -22,20 +23,15 @@ from collections.abc import Sequence
 
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
-    EDGE_KIND_GLOBAL_REFERENCE,
-    BoundaryRule,
     DispatcherRecord,
-    DispatcherRule,
     EntryPointRecord,
     FileRecord,
     GlobalPublicationRecord,
-    PresenceRule,
-    PublicationRule,
     ReferenceEdge,
     ScanRules,
     ViolationRecord,
-    matches_any_glob,
 )
+from rey_lib.repository_map.rule_families import RULE_FAMILIES, Evidence
 
 __all__ = ["check_architecture_boundaries"]
 
@@ -53,16 +49,10 @@ def check_architecture_boundaries(
 ) -> list[ViolationRecord]:
     """Evaluate every declared architectural boundary against generated facts.
 
-    The one entry point. Four rule families are evaluated here so a consumer
-    asks a single question and no subsystem interprets a boundary of its own:
-
-    - reference rules, over who may reach what
-    - publication rules, over what may reach a global surface
-    - presence rules, over what must not exist or be loaded at all
-    - dispatcher rules, over where a decision point may live
-
-    A boundary that cannot be expressed as one of these does not belong here.
-    Coding-style rules are not architectural boundaries and stay outside.
+    A consumer asks one question and no subsystem interprets a boundary of its
+    own. Which kinds of boundary exist is the registry's business; a boundary
+    that cannot be expressed as one of them does not belong here, and
+    coding-style rules are not architectural boundaries.
 
     Args:
         rules: The scanned repository's own scan rules, carrying its policy.
@@ -75,11 +65,17 @@ def check_architecture_boundaries(
     Returns:
         Violations sorted by rule, path and line. Empty when every rule holds.
     """
+    evidence = Evidence(
+        references=references,
+        publications=publications,
+        files=files,
+        entry_points=entry_points,
+        dispatchers=dispatchers,
+    )
+
     violations: list[ViolationRecord] = []
-    violations.extend(_reference_violations(rules.boundary_rules, references))
-    violations.extend(_publication_violations(rules.publication_rules, publications))
-    violations.extend(_presence_violations(rules.presence_rules, files, entry_points))
-    violations.extend(_dispatcher_violations(rules.dispatcher_rules, dispatchers))
+    for family in RULE_FAMILIES:
+        violations.extend(family.evaluate(rules.rules_for(family.config_key), evidence))
 
     violations.sort(
         key=lambda violation: (
@@ -92,180 +88,3 @@ def check_architecture_boundaries(
     if violations:
         logger.warning("Architecture guards found %d violation(s)", len(violations))
     return violations
-
-
-def _reference_violations(
-    rules: Sequence[BoundaryRule],
-    references: Sequence[ReferenceEdge],
-) -> list[ViolationRecord]:
-    """Return violations of the rules governing who may reach what.
-
-    Args:
-        rules: Reference boundary rules.
-        references: Executable reference edges.
-
-    Returns:
-        The violations found.
-    """
-    return [
-        ViolationRecord(
-            source_path=reference.source_path,
-            source_line=reference.source_line,
-            source_column=reference.source_column,
-            rule_id=rule.rule_id,
-            caller=reference.source_path,
-            callee=reference.to,
-            edge_kind=reference.edge_kind,
-            evidence_record_ids=(reference.record_id,),
-        )
-        for rule in rules
-        for reference in references
-        if _applies(rule, reference)
-    ]
-
-
-def _publication_violations(
-    rules: Sequence[PublicationRule],
-    publications: Sequence[GlobalPublicationRecord],
-) -> list[ViolationRecord]:
-    """Return violations of the rules governing global publication.
-
-    Args:
-        rules: Publication rules.
-        publications: Global publications from root discovery.
-
-    Returns:
-        The violations found.
-    """
-    return [
-        ViolationRecord(
-            source_path=publication.source_path,
-            source_line=publication.source_line,
-            source_column=publication.source_column,
-            rule_id=rule.rule_id,
-            caller=publication.source_path,
-            callee=publication.global_name,
-            edge_kind=EDGE_KIND_GLOBAL_REFERENCE,
-            evidence_record_ids=(publication.record_id,),
-        )
-        for rule in rules
-        for publication in publications
-        if matches_any_glob(publication.source_path, rule.scope_path_globs)
-        and matches_any_glob(publication.global_name, rule.forbidden_global_globs)
-        and not matches_any_glob(publication.source_path, rule.allowed_path_globs)
-    ]
-
-
-def _presence_violations(
-    rules: Sequence[PresenceRule],
-    files: Sequence[FileRecord],
-    entry_points: Sequence[EntryPointRecord],
-) -> list[ViolationRecord]:
-    """Return violations of the rules governing what must not exist.
-
-    A file-level violation has no meaningful source line, so it records line 0
-    rather than pointing at a line that proves nothing.
-
-    Args:
-        rules: Presence rules.
-        files: The inventoried files.
-        entry_points: Runtime entry points.
-
-    Returns:
-        The violations found.
-    """
-    violations: list[ViolationRecord] = []
-    for rule in rules:
-        for file_record in files:
-            if not matches_any_glob(file_record.path, rule.forbidden_path_globs):
-                continue
-            violations.append(
-                ViolationRecord(
-                    source_path=file_record.path,
-                    source_line=0,
-                    source_column=0,
-                    rule_id=rule.rule_id,
-                    caller=file_record.path,
-                    callee=file_record.path,
-                    edge_kind="file_present",
-                    evidence_record_ids=(f"file:{file_record.path}",),
-                )
-            )
-        for entry_point in entry_points:
-            if not matches_any_glob(entry_point.target, rule.forbidden_entry_point_globs):
-                continue
-            violations.append(
-                ViolationRecord(
-                    source_path=entry_point.source_path,
-                    source_line=entry_point.source_line,
-                    source_column=entry_point.source_column,
-                    rule_id=rule.rule_id,
-                    caller=entry_point.window_or_host,
-                    callee=entry_point.target,
-                    edge_kind=entry_point.entry_point_kind,
-                    evidence_record_ids=(entry_point.record_id,),
-                )
-            )
-    return violations
-
-
-def _dispatcher_violations(
-    rules: Sequence[DispatcherRule],
-    dispatchers: Sequence[DispatcherRecord],
-) -> list[ViolationRecord]:
-    """Return violations of the rules governing where a decision point may live.
-
-    The dispatcher facts say a decision point exists and what it branches on.
-    Whether that is permitted is decided here, from policy data — the scanner
-    never decides a vocabulary is objectionable on its own.
-
-    Args:
-        rules: Dispatcher rules.
-        dispatchers: Dispatcher facts from the inventory.
-
-    Returns:
-        The violations found.
-    """
-    return [
-        ViolationRecord(
-            source_path=dispatcher.source_path,
-            source_line=dispatcher.source_line,
-            source_column=dispatcher.source_column,
-            rule_id=rule.rule_id,
-            caller=f"{dispatcher.source_path}:{dispatcher.symbol}",
-            callee=dispatcher.vocabulary,
-            edge_kind="dispatch",
-            evidence_record_ids=(dispatcher.record_id,),
-        )
-        for rule in rules
-        for dispatcher in dispatchers
-        if dispatcher.branch_count >= rule.minimum_branch_count
-        and matches_any_glob(dispatcher.source_path, rule.scope_path_globs)
-        and matches_any_glob(dispatcher.vocabulary, rule.forbidden_vocabulary_globs)
-        and not matches_any_glob(dispatcher.source_path, rule.allowed_path_globs)
-    ]
-
-
-def _applies(rule: BoundaryRule, reference: ReferenceEdge) -> bool:
-    """Return True when a reference breaks a rule.
-
-    A reference breaks a rule when it is in the rule's scope, matches a
-    forbidden target, is of a kind the rule covers, and is not made by one of
-    the rule's declared owners. Ownership is the exception: an owner may reach
-    the mechanism it owns, which is what lets a sanctioned API stay callable
-    while the layer beneath it does not.
-
-    Args:
-        rule: The rule being evaluated.
-        reference: The reference being tested.
-
-    Returns:
-        True when the reference is a violation of this rule.
-    """
-    if rule.edge_kinds and reference.edge_kind not in rule.edge_kinds:
-        return False
-    if not matches_any_glob(reference.source_path, rule.scope_path_globs):
-        return False
-    if not matches_any_glob(reference.to, rule.forbidden_target_globs):
-        return False
-    return not matches_any_glob(reference.source_path, rule.allowed_path_globs)

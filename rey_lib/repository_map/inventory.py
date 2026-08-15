@@ -15,6 +15,7 @@ from pathlib import Path
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.files.file_utils import is_hidden_path, read_text_file
 from rey_lib.logs.logging_setup import get_logger
+from rey_lib.repository_map.rule_families import RULE_FAMILIES
 from rey_lib.repository_map.records import (
     ENTRY_POINT_LOAD_UNKNOWN,
     LANGUAGE_UNKNOWN,
@@ -52,7 +53,7 @@ def load_scan_rules(rules_path: Path) -> ScanRules:
         raise ValueError(f"Scan rules file is not valid YAML: {rules_path}") from exc
 
     try:
-        return ScanRules.from_mapping(parsed)
+        return ScanRules.from_mapping(parsed, RULE_FAMILIES)
     except ValueError as exc:
         raise ValueError(f"Invalid scan rules in {rules_path}: {exc}") from exc
 

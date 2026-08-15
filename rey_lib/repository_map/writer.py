@@ -255,13 +255,7 @@ def _policy_status(rules: ScanRules) -> str:
         POLICY_EVALUATED when any rule family is declared, otherwise
         POLICY_NOT_CONFIGURED.
     """
-    declared = (
-        rules.boundary_rules
-        or rules.publication_rules
-        or rules.presence_rules
-        or rules.dispatcher_rules
-    )
-    return POLICY_EVALUATED if declared else POLICY_NOT_CONFIGURED
+    return POLICY_EVALUATED if rules.declares_any_policy else POLICY_NOT_CONFIGURED
 
 
 def _header(

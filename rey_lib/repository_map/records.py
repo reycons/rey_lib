@@ -871,10 +871,10 @@ class ScanRules:
     extract_facts_from_vendor: bool = True
     # Root discovery (INC-003). Absent sections mean the repository declares no
     # registries or templates, never that detection is skipped silently.
-    boundary_rules: tuple["BoundaryRule", ...] = ()
-    publication_rules: tuple["PublicationRule", ...] = ()
-    presence_rules: tuple["PresenceRule", ...] = ()
-    dispatcher_rules: tuple["DispatcherRule", ...] = ()
+    # Rule families keyed by the configuration section they are declared
+    # under. One field rather than one per family, so a new family adds no
+    # attribute here and no branch anywhere that reads them.
+    rule_sets: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     registration_rules: tuple[RegistrationRule, ...] = ()
     declared_registration_rules: tuple[DeclaredRegistrationRule, ...] = ()
     backend_registration_rules: tuple[BackendRegistrationRule, ...] = ()
@@ -932,12 +932,38 @@ class ScanRules:
             test_path_globs=(),
         )
 
+    def rules_for(self, config_key: str) -> tuple[Any, ...]:
+        """Return the declared rules of one family.
+
+        Args:
+            config_key: The section the family is declared under.
+
+        Returns:
+            The typed rules, empty when the repository declares none.
+        """
+        return self.rule_sets.get(config_key, ())
+
+    @property
+    def declares_any_policy(self) -> bool:
+        """Return whether this repository declares architectural policy at all.
+
+        Asked without naming a family, so the answer stays correct when a
+        family is added.
+        """
+        return any(self.rule_sets.values())
+
     @classmethod
-    def from_mapping(cls, data: dict[str, Any]) -> "ScanRules":
+    def from_mapping(
+        cls,
+        data: dict[str, Any],
+        rule_families: "Sequence[Any]" = (),
+    ) -> "ScanRules":
         """Build rules from a parsed rules mapping.
 
         Args:
             data: Parsed contents of a repository's rules file.
+            rule_families: The rule-family registry. Supplied by the caller so
+                this module needs no knowledge of any concrete family.
 
         Returns:
             The typed rules.
@@ -962,10 +988,10 @@ class ScanRules:
             test_path_globs=tuple(_require_str_list(data, "test_path_globs")),
             extract_facts_from_generated=extraction.get("generated", True),
             extract_facts_from_vendor=extraction.get("vendor", True),
-            boundary_rules=_boundary_rules(data),
-            publication_rules=_publication_rules(data),
-            presence_rules=_presence_rules(data),
-            dispatcher_rules=_dispatcher_rules(data),
+            rule_sets={
+                family.config_key: family.build(_rule_entries(data, family.config_key))
+                for family in rule_families
+            },
             registration_rules=_registration_rules(data),
             declared_registration_rules=_declared_registration_rules(data),
             backend_registration_rules=_backend_registration_rules(data),
@@ -1091,105 +1117,12 @@ def _declared_registration_rules(data: dict[str, Any]) -> tuple[DeclaredRegistra
     )
 
 
-def _boundary_rules(data: dict[str, Any]) -> tuple[BoundaryRule, ...]:
-    """Build architecture boundary rules from the rules mapping.
-
-    Args:
-        data: Parsed rules mapping.
-
-    Returns:
-        The rules, in declaration order.
-
-    Raises:
-        ValueError: If a rule entry is malformed.
-    """
-    section = "architecture_rules"
-    return tuple(
-        BoundaryRule(
-            rule_id=_required(entry, "rule_id", section),
-            forbidden_target_globs=tuple(
-                _required(entry, "forbidden_target_globs", section)
-            ),
-            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
-            scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
-            edge_kinds=tuple(entry.get("edge_kinds", ())),
-        )
-        for entry in _rule_entries(data, section)
-    )
 
 
-def _publication_rules(data: dict[str, Any]) -> tuple[PublicationRule, ...]:
-    """Build global-publication guards from the rules mapping.
-
-    Args:
-        data: Parsed rules mapping.
-
-    Returns:
-        The rules, in declaration order.
-
-    Raises:
-        ValueError: If a rule entry is malformed.
-    """
-    section = "publication_rules"
-    return tuple(
-        PublicationRule(
-            rule_id=_required(entry, "rule_id", section),
-            forbidden_global_globs=tuple(_required(entry, "forbidden_global_globs", section)),
-            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
-            scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
-        )
-        for entry in _rule_entries(data, section)
-    )
 
 
-def _dispatcher_rules(data: dict[str, Any]) -> tuple[DispatcherRule, ...]:
-    """Build dispatcher guards from the rules mapping.
-
-    Args:
-        data: Parsed rules mapping.
-
-    Returns:
-        The rules, in declaration order.
-
-    Raises:
-        ValueError: If a rule entry is malformed.
-    """
-    section = "dispatcher_rules"
-    return tuple(
-        DispatcherRule(
-            rule_id=_required(entry, "rule_id", section),
-            forbidden_vocabulary_globs=tuple(
-                _required(entry, "forbidden_vocabulary_globs", section)
-            ),
-            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
-            scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
-            minimum_branch_count=entry.get("minimum_branch_count", 2),
-        )
-        for entry in _rule_entries(data, section)
-    )
 
 
-def _presence_rules(data: dict[str, Any]) -> tuple[PresenceRule, ...]:
-    """Build absence guards from the rules mapping.
-
-    Args:
-        data: Parsed rules mapping.
-
-    Returns:
-        The rules, in declaration order.
-
-    Raises:
-        ValueError: If a rule entry is malformed.
-    """
-    section = "presence_rules"
-    return tuple(
-        PresenceRule(
-            rule_id=_required(entry, "rule_id", section),
-            forbidden_path_globs=tuple(entry.get("forbidden_path_globs", ())),
-            forbidden_entry_point_globs=tuple(entry.get("forbidden_entry_point_globs", ())),
-        )
-        for entry in _rule_entries(data, section)
-    )
 
 
 def _backend_registration_rules(data: dict[str, Any]) -> tuple[BackendRegistrationRule, ...]:

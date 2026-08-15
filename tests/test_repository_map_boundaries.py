@@ -19,6 +19,7 @@ from rey_lib.repository_map.records import (
     PublicationRule,
     ReferenceEdge,
     ScanRules,
+    ViolationRecord,
 )
 
 
@@ -36,10 +37,21 @@ def _rules(**overrides) -> ScanRules:
     return ScanRules(**defaults)
 
 
+# Test keyword to the configuration section the family is declared under.
+_FAMILY_KEYS = {
+    "boundary_rules": "architecture_rules",
+    "publication_rules": "publication_rules",
+    "presence_rules": "presence_rules",
+    "dispatcher_rules": "dispatcher_rules",
+}
+
+
 def _check(**kwargs):
     """Evaluate policy through the one authority."""
-    rule_kinds = {k: kwargs.pop(k) for k in list(kwargs) if k.endswith("_rules")}
-    return check_architecture_boundaries(_rules(**rule_kinds), **kwargs)
+    rule_sets = {
+        _FAMILY_KEYS[key]: kwargs.pop(key) for key in list(kwargs) if key in _FAMILY_KEYS
+    }
+    return check_architecture_boundaries(_rules(rule_sets=rule_sets), **kwargs)
 
 
 ROUTING_RULE = BoundaryRule(
@@ -340,3 +352,59 @@ def test_policy_decides_the_vocabulary_not_the_scanner() -> None:
     dispatchers = [_dispatcher("frontend/src/panels/info_panel.ts", "node_type")]
 
     assert _check(dispatcher_rules=(), dispatchers=dispatchers) == []
+
+
+def test_a_fifth_family_needs_only_an_implementation_and_a_registration() -> None:
+    """The extension cost is the whole point of the registry.
+
+    Nothing central names a family: this adds one without touching the
+    evaluator, the loader, or ScanRules.
+    """
+    from rey_lib.repository_map.records import ScanRules
+    from rey_lib.repository_map.rule_families import RULE_FAMILIES, Evidence, RuleFamily
+
+    def build(entries):
+        """Read the new family's entries."""
+        return tuple(entry["rule_id"] for entry in entries)
+
+    def evaluate(rules, evidence: Evidence):
+        """Flag any inventoried file when the family is declared."""
+        return [
+            ViolationRecord(
+                source_path=record.path,
+                source_line=0,
+                source_column=0,
+                rule_id=rule_id,
+                caller=record.path,
+                callee=record.path,
+                edge_kind="fixture",
+            )
+            for rule_id in rules
+            for record in evidence.files
+        ]
+
+    family = RuleFamily("fixture_rules", build, evaluate)
+    parsed = {"fixture_rules": [{"rule_id": "fixture_rule"}]}
+
+    # Loading goes through the registry, so the new family loads unchanged.
+    loaded = ScanRules.from_mapping(parsed, (*RULE_FAMILIES, family))
+    assert loaded.rules_for("fixture_rules") == ("fixture_rule",)
+    assert loaded.declares_any_policy is True
+
+    # Evaluation goes through the registry too.
+    violations = evaluate(loaded.rules_for("fixture_rules"), Evidence(files=[_file("a.js")]))
+    assert [v.rule_id for v in violations] == ["fixture_rule"]
+
+
+def test_no_central_module_names_a_concrete_family() -> None:
+    """The evaluator and the loader iterate; they do not enumerate."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "rey_lib" / "repository_map"
+    evaluator = (root / "boundaries.py").read_text(encoding="utf-8")
+    loader = (root / "records.py").read_text(encoding="utf-8")
+
+    for name in ("architecture_rules", "publication_rules", "presence_rules", "dispatcher_rules"):
+        assert name not in evaluator, f"{name} is named in the central evaluator"
+        assert name not in loader, f"{name} is named in the central loader"
+    assert "violations.extend(family.evaluate(" in evaluator
