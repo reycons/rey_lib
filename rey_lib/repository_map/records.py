@@ -69,6 +69,12 @@ RECORD_TYPE_REACHABILITY = "reachability"
 RECORD_TYPE_ARCHITECTURE_VIOLATION = "architecture_violation"
 RECORD_TYPE_DISPATCHER = "dispatcher"
 
+# System index record types. The index binds repository baselines; it is a
+# different artifact from a repository map and never carries repository facts.
+RECORD_TYPE_SYSTEM_MAP = "system_repository_map"
+RECORD_TYPE_REPOSITORY_BASELINE = "repository_baseline"
+RECORD_TYPE_CROSS_REPOSITORY_EDGE = "cross_repository_edge"
+
 # The only classification this generator emits. Whether a dispatcher is
 # architecturally legitimate is review's decision, not the scanner's.
 DISPATCHER_UNREVIEWED = "unreviewed"

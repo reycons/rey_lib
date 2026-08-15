@@ -41,6 +41,13 @@ from rey_lib.repository_map.review import (
     validate_review,
     verify_generated_map_unedited,
 )
+from rey_lib.repository_map.system_index import (
+    SystemIndex,
+    build_system_index,
+    load_repository_baselines,
+    validate_system_index,
+    write_system_index,
+)
 from rey_lib.repository_map.writer import (
     GENERATOR_VERSION,
     MapDiff,
@@ -120,7 +127,9 @@ __all__ = [
     "ScanRules",
     "SymbolInventory",
     "SymbolRecord",
+    "SystemIndex",
     "build_dependency_graph",
+    "build_system_index",
     "check_architecture_boundaries",
     "compare_repository_maps",
     "compute_reachability",
@@ -132,10 +141,13 @@ __all__ = [
     "generate_repository_map",
     "inventory_dispatchers_and_switches",
     "inventory_files",
+    "load_repository_baselines",
     "load_review",
     "load_scan_rules",
     "supported_languages",
     "validate_review",
+    "validate_system_index",
     "verify_generated_map_unedited",
     "write_repository_map",
+    "write_system_index",
 ]
