@@ -47,10 +47,10 @@ procedure_no_return``, and ``return_variable`` normalize into the new shape:
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Optional
 
+from rey_lib.logs import get_logger
 from rey_lib.config.ctx import find_by_name
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError
@@ -68,7 +68,7 @@ __all__ = [
     "call_action",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 _db = DBAdapter()
 

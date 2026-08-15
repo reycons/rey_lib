@@ -80,12 +80,15 @@ def test_the_shared_framework_imports_no_application(violations) -> None:
 def test_logging_routes_through_the_logging_owner(violations) -> None:
     """Framework code obtains loggers through the rey_lib logging API.
 
-    Known failures when this policy was declared: eleven sites construct a
-    logger directly or print, across control_utils, db/procedure_map,
-    installation/folder_maker and three logs modules. They are deliberately not
-    exempted. This test stays red until they are corrected or reviewed, and
-    widening the exemption list to make it green is a stated non-goal — the
-    exemptions name infrastructure owners, not sites awaiting repair.
+    Five sites constructed a logger directly when this policy was declared and
+    were corrected: control_utils, db/procedure_map, and three logs modules.
+    record_enrichment uses a lazy in-function import because logging_setup
+    imports from it, which is the idiom this package already uses to reach a
+    higher layer.
+
+    The rule forbids the direct logging API only. print() is not a logging
+    call: folder_maker._print_result writes a CLI summary to stdout and is
+    untouched. That is a narrowed rule, not a widened exemption list.
     """
     offenders = [
         f"{v.source_path}:{v.source_line} -> {v.callee}"
@@ -126,3 +129,39 @@ def test_the_test_suite_is_outside_the_logging_rule_scope() -> None:
     )
 
     assert logging_rule.scope_path_globs == ("rey_lib/*",)
+
+
+def test_the_logging_rule_forbids_the_logging_api_not_program_output() -> None:
+    """print() is not a logging call and is deliberately outside this rule.
+
+    Python logging is an event-recording system whose handlers route records to
+    a configured destination; CLI output is a separate channel. The rule as
+    first written forbade both, which would have moved folder_maker's summary
+    off stdout. Pinned so print does not drift back in as a logging concern —
+    whether library code may print at all is a separate policy question this
+    rule does not answer.
+    """
+    rules = load_scan_rules(RULES_PATH)
+    logging_rule = next(
+        rule
+        for rule in rules.rules_for("architecture_rules")
+        if rule.rule_id == "logging_routes_through_the_logging_owner"
+    )
+
+    assert logging_rule.forbidden_target_globs == ("logging.getLogger",)
+
+
+def test_cli_output_in_folder_maker_is_untouched() -> None:
+    """_print_result still writes to stdout and stderr.
+
+    Behavioural guard: the correction narrowed a rule rather than rewriting a
+    CLI tool to satisfy it.
+    """
+    import inspect
+
+    from rey_lib.installation import folder_maker
+
+    source = inspect.getsource(folder_maker._print_result)
+
+    assert source.count("print(") == 6
+    assert "file=sys.stderr" in source

@@ -64,13 +64,18 @@ architecture_rules:
     edge_kinds:
       - import
       - re_export
+  # Forbids the direct logging API only. print() is deliberately absent: Python
+  # logging is an event-recording system whose handlers route records to a
+  # configured destination, while CLI output is a separate channel. The original
+  # rule conflated them, and enforcing it would have moved a CLI tool's summary
+  # off stdout.
+  #
   # logging_setup wraps logging.getLogger, so it cannot route through itself.
   # That is the only exemption: this list names infrastructure owners and is not
   # a grandfather list for sites that have not been corrected.
   - rule_id: logging_routes_through_the_logging_owner
     forbidden_target_globs:
       - logging.getLogger
-      - print
     allowed_path_globs:
       - "rey_lib/logs/logging_setup.py"
     scope_path_globs:

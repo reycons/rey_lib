@@ -39,9 +39,9 @@ ctx.control_available                       bool  (set False on failure)
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
+from rey_lib.logs import get_logger
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
@@ -69,7 +69,7 @@ __all__ = [
     "run_logged_sql",
 ]
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 _db = DBAdapter()
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -318,7 +317,12 @@ def log_run_record(
         record_parenting.commit_record(ctx, record_id, nest_level)
         return record_id
     except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
-        logging.getLogger(__name__).warning(
+        # Imported lazily because logging_setup imports resolve_run_identity from
+        # this module; a module-level import would close a cycle. The same idiom
+        # every other rey_lib.logs module uses to reach a higher layer.
+        from rey_lib.logs.logging_setup import get_logger
+
+        get_logger(__name__).warning(
             "run log: could not append %s record: %s", record_type, exc
         )
         return None

@@ -34,12 +34,12 @@ from __future__ import annotations
 
 import fcntl
 import json
-import logging
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from rey_lib.logs.logging_setup import get_logger
 __all__ = [
     "FileManifestError",
     "FileManifestSession",
@@ -81,7 +81,7 @@ _CANONICAL_ROOT_FIELDS: tuple[str, ...] = (
     "producer",
 )
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 class FileManifestError(Exception):
