@@ -308,3 +308,59 @@ def test_the_policy_status_does_not_enter_the_content_hash(repo: Path, tmp_path:
     report = generate_repository_map(repo, tmp_path / "map.jsonl", repo / RULES_NAME)
 
     assert content_hash_of(report.records) == report.header["content_hash"]
+
+
+def test_a_record_type_needs_only_an_emitter_and_a_registration(repo: Path) -> None:
+    """The extension cost is the whole point of the emitter registry.
+
+    Nothing central names a record type: this adds one and drives it through
+    the same iteration the writer uses, touching no writer code.
+    """
+    from rey_lib.repository_map.emitters import RECORD_EMITTERS, RecordEmitter, ScanContext
+    from rey_lib.repository_map.inventory import load_scan_rules
+
+    def acquire(context: ScanContext) -> list[dict]:
+        """Emit one fixture record per inventoried file."""
+        return [
+            {"record_type": "fixture", "record_id": f"fixture:{r.path}"} for r in context.files
+        ]
+
+    context = ScanContext(repo, load_scan_rules(repo / RULES_NAME))
+    extended = (*RECORD_EMITTERS, RecordEmitter("fixture", acquire))
+
+    records: list[dict] = []
+    for emitter in extended:
+        records.extend(sorted(emitter.acquire(context), key=emitter.order_by))
+
+    assert any(r["record_type"] == "fixture" for r in records)
+    # The pre-existing types are unaffected by the addition.
+    assert {r["record_type"] for r in records} > {"file", "symbol", "dependency_edge"}
+
+
+def test_the_writer_holds_no_per_record_type_sequence() -> None:
+    """writer.py owns the stream contract, not the record types in it."""
+    from pathlib import Path as _Path
+
+    source = (
+        _Path(__file__).resolve().parents[1] / "rey_lib" / "repository_map" / "writer.py"
+    ).read_text(encoding="utf-8")
+
+    for name in ("extract_symbols", "extract_registrations", "compute_reachability",
+                 "inventory_dispatchers_and_switches", "check_architecture_boundaries"):
+        assert name not in source, f"writer.py still acquires {name} itself"
+    assert "for emitter in RECORD_EMITTERS:" in source
+
+
+def test_every_emitter_group_is_deterministically_ordered(repo: Path) -> None:
+    """Each emitter owns its ordering key, and it is applied."""
+    from rey_lib.repository_map.emitters import RECORD_EMITTERS, ScanContext
+    from rey_lib.repository_map.inventory import load_scan_rules
+
+    context = ScanContext(repo, load_scan_rules(repo / RULES_NAME))
+
+    for emitter in RECORD_EMITTERS:
+        acquired = emitter.acquire(context)
+        ordered = sorted(acquired, key=emitter.order_by)
+        assert [emitter.order_by(r) for r in ordered] == sorted(
+            emitter.order_by(r) for r in acquired
+        )

@@ -28,19 +28,9 @@ from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
 from rey_lib.git.errors import GitError
 from rey_lib.git.repo import get_head_commit, get_repo_status, run_git
 from rey_lib.logs.logging_setup import get_logger
-from rey_lib.repository_map.boundaries import check_architecture_boundaries
-from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
-from rey_lib.repository_map.entry_points import extract_runtime_entry_points
-from rey_lib.repository_map.extractors import (
-    LANGUAGE_EXTRACTORS,
-    extract_executable_references,
-    extract_symbols,
-)
-from rey_lib.repository_map.globals_scan import extract_global_publications_and_consumers
-from rey_lib.repository_map.graph import build_dependency_graph, compute_reachability
-from rey_lib.repository_map.inventory import inventory_files, load_scan_rules
+from rey_lib.repository_map.emitters import RECORD_EMITTERS, ScanContext
+from rey_lib.repository_map.inventory import load_scan_rules
 from rey_lib.repository_map.records import RECORD_TYPE_REPOSITORY_MAP, ScanRules
-from rey_lib.repository_map.registrations import extract_registrations
 
 __all__ = [
     "GENERATOR_VERSION",
@@ -166,6 +156,10 @@ def build_repository_map(
 ) -> RepositoryMap:
     """Collect every generated fact for a repository.
 
+    This owns the stream contract — which emitters run, in what order, and that
+    each group is deterministically ordered — and nothing about any individual
+    record type. Acquisition belongs to the emitters.
+
     Args:
         repo_root: Repository to scan.
         rules: The repository's scan rules.
@@ -175,67 +169,11 @@ def build_repository_map(
     Returns:
         The map, with records in emission order.
     """
-    files = inventory_files(repo_root, rules)
+    context = ScanContext(repo_root, rules)
 
-    symbols: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    references = []
-    for file_record in files:
-        if file_record.language not in LANGUAGE_EXTRACTORS:
-            continue
-        if not rules.extracts_facts_from(file_record):
-            continue
-        path = repo_root / file_record.path
-        inventory = extract_symbols(path, file_record.language, file_record.path)
-        file_references = extract_executable_references(
-            path, file_record.language, file_record.path
-        )
-        references.extend(file_references)
-        symbols.extend(inventory.to_records())
-        edges.extend(edge.to_dict() for edge in file_references)
-
-    registrations = extract_registrations(repo_root, files, rules)
-    entry_points = extract_runtime_entry_points(repo_root, files, rules)
-    global_report = extract_global_publications_and_consumers(repo_root, files, rules)
-    graph = build_dependency_graph(
-        files,
-        references,
-        registrations,
-        entry_points,
-        list(global_report.publications),
-        list(global_report.consumers),
-        rules,
-    )
-    reachability = compute_reachability(graph, files)
-    dispatchers = inventory_dispatchers_and_switches(repo_root, files, rules, references)
-    # Guards run as part of generation so the map carries the verdicts its own
-    # evidence supports. The authority is the same one every consumer calls;
-    # this only supplies it the facts it needs.
-    violations = check_architecture_boundaries(
-        rules,
-        references=references,
-        publications=list(global_report.publications),
-        files=files,
-        entry_points=entry_points,
-        dispatchers=dispatchers,
-    )
-
-    # Emission order groups record types; each group is sorted by record_id so
-    # the stream is stable regardless of discovery order.
     records: list[dict[str, Any]] = []
-    for group in (
-        [record.to_dict() for record in files],
-        symbols,
-        edges,
-        [record.to_dict() for record in registrations],
-        [record.to_dict() for record in entry_points],
-        [record.to_dict() for record in global_report.publications],
-        [record.to_dict() for record in global_report.consumers],
-        [record.to_dict() for record in reachability],
-        [record.to_dict() for record in dispatchers],
-        [record.to_dict() for record in violations],
-    ):
-        records.extend(sorted(group, key=lambda record: record["record_id"]))
+    for emitter in RECORD_EMITTERS:
+        records.extend(sorted(emitter.acquire(context), key=emitter.order_by))
 
     header = _header(repo_root, rules_path, records, _policy_status(rules))
     return RepositoryMap(header=header, records=records)
