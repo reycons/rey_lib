@@ -10,7 +10,7 @@ commit. The generated factual map is JSONL, never a YAML document.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
@@ -64,6 +64,13 @@ RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
 RECORD_TYPE_GLOBAL_CONSUMER = "global_consumer"
+RECORD_TYPE_REACHABILITY = "reachability"
+
+# reachability status vocabulary. 'dead' is deliberately absent: a scanner that
+# has not checked every runtime mechanism cannot prove absence of use.
+REACHABILITY_DEFINITELY = "definitely_reachable"
+REACHABILITY_POTENTIALLY = "potentially_reachable"
+REACHABILITY_UNREFERENCED = "unreferenced_candidate"
 
 # registration_kind vocabulary.
 REGISTRATION_KIND_ACTION = "action"
@@ -294,6 +301,40 @@ class FileRecord:
                 "test": self.is_test,
             },
             "entry_point_load_state": self.entry_point_load_state,
+        }
+
+
+@dataclass(frozen=True)
+class ReachabilityRecord:
+    """Why one target is considered reachable, or why it is a candidate.
+
+    Attributes:
+        target: The node this verdict is about, as a record_id.
+        status: One of the ``REACHABILITY_*`` constants. Never 'dead'.
+        root: The runtime root the target was reached from, empty when none.
+        evidence_record_ids: The facts forming the path from root to target,
+            so a verdict can always be checked against source.
+    """
+
+    target: str
+    status: str
+    root: str
+    evidence_record_ids: tuple[str, ...] = ()
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this reachability verdict."""
+        return f"{RECORD_TYPE_REACHABILITY}:{self.target}"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this verdict as a JSONL 'reachability' record."""
+        return {
+            "record_type": RECORD_TYPE_REACHABILITY,
+            "record_id": self.record_id,
+            "target": self.target,
+            "status": self.status,
+            "root": self.root,
+            "evidence_record_ids": list(self.evidence_record_ids),
         }
 
 
@@ -589,6 +630,16 @@ class ScanRules:
     template_globs: tuple[str, ...] = ()
     bundle_globs: tuple[str, ...] = ()
     primary_template: str | None = None
+    # Process entry points that no template declares — the backend equivalent
+    # of a bootstrapping window. Without these the whole server side is
+    # unreachable by construction rather than by evidence.
+    runtime_entry_paths: tuple[str, ...] = ()
+    # Graph resolution (INC-004). A written specifier only resolves to a file
+    # that the inventory already contains; nothing is guessed into existence.
+    module_extensions: tuple[str, ...] = ()
+    module_index_files: tuple[str, ...] = ()
+    url_path_prefixes: dict[str, str] = field(default_factory=dict)
+    backend_path_prefixes: dict[str, str] = field(default_factory=dict)
 
     def extracts_facts_from(self, file_record: "FileRecord") -> bool:
         """Return whether a file should yield symbol and edge records.
@@ -645,6 +696,11 @@ class ScanRules:
             template_globs=tuple(_require_str_list(data, "template_globs")),
             bundle_globs=tuple(_require_str_list(data, "bundle_globs")),
             primary_template=data.get("primary_template"),
+            runtime_entry_paths=tuple(_require_str_list(data, "runtime_entry_paths")),
+            module_extensions=tuple(_require_str_list(data, "module_extensions")),
+            module_index_files=tuple(_require_str_list(data, "module_index_files")),
+            url_path_prefixes=_require_str_mapping(data, "url_path_prefixes"),
+            backend_path_prefixes=_require_str_mapping(data, "backend_path_prefixes"),
         )
 
 

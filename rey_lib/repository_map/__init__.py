@@ -25,6 +25,11 @@ from rey_lib.repository_map.globals_scan import (
     GlobalReport,
     extract_global_publications_and_consumers,
 )
+from rey_lib.repository_map.graph import (
+    RepositoryGraph,
+    build_dependency_graph,
+    compute_reachability,
+)
 from rey_lib.repository_map.inventory import inventory_files, load_scan_rules
 from rey_lib.repository_map.registrations import extract_registrations
 from rey_lib.repository_map.records import (
@@ -87,11 +92,14 @@ __all__ = [
     "SYMBOL_KIND_VARIABLE",
     "FileRecord",
     "GlobalReport",
+    "RepositoryGraph",
     "LanguageExtractor",
     "ReferenceEdge",
     "ScanRules",
     "SymbolInventory",
     "SymbolRecord",
+    "build_dependency_graph",
+    "compute_reachability",
     "extract_executable_references",
     "extract_global_publications_and_consumers",
     "extract_registrations",
