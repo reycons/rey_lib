@@ -48,7 +48,9 @@ from rey_lib.repository_map.records import (
 __all__ = [
     "extract_js_references",
     "extract_js_symbols",
+    "JS_GLOBAL_ROOT",
     "js_dotted_name",
+    "js_is_global_rooted",
     "js_text",
     "parse_js_root",
     "supported_js_languages",
@@ -72,8 +74,10 @@ _PARSERS: dict[str, Parser] = {}
 # Python extractor's self/cls rule.
 _SELF_ROOTS = frozenset({"this", "super"})
 
-# The global object whose publications and consumers are tracked.
-_GLOBAL_ROOT = "window"
+# The global object whose publications and consumers are tracked. Public
+# because every JavaScript fact producer must agree on what "global" means; a
+# second definition elsewhere is how two producers come to disagree.
+JS_GLOBAL_ROOT = "window"
 
 # Node types that declare a top-level name, mapped to their symbol kind.
 # Adding a declaration form is an entry here, not a new branch.
@@ -212,7 +216,7 @@ def extract_js_references(
             target = _dotted_name(callee) if callee is not None else None
             if target is None or _is_internal(target):
                 continue
-            kind = EDGE_KIND_GLOBAL_REFERENCE if _is_global(target) else EDGE_KIND_CALL
+            kind = EDGE_KIND_GLOBAL_REFERENCE if js_is_global_rooted(target) else EDGE_KIND_CALL
             edges.append(_edge(recorded_path, node, from_id, target, kind, node.type))
         elif node.type == "member_expression" and node.id not in callee_ids:
             if node.id in publication_ids:
@@ -224,7 +228,11 @@ def extract_js_references(
             # also its a.b prefix.
             if node.parent is not None and node.parent.type == "member_expression":
                 continue
-            kind = EDGE_KIND_GLOBAL_REFERENCE if _is_global(target) else EDGE_KIND_PROPERTY_ACCESS
+            kind = (
+                EDGE_KIND_GLOBAL_REFERENCE
+                if js_is_global_rooted(target)
+                else EDGE_KIND_PROPERTY_ACCESS
+            )
             edges.append(_edge(recorded_path, node, from_id, target, kind, node.type))
 
     edges.sort(
@@ -633,7 +641,7 @@ def _global_publications(root: Node) -> list[tuple[str, Node]]:
         if left is None or left.type != "member_expression":
             continue
         target = _dotted_name(left)
-        if target is not None and _is_global(target):
+        if target is not None and js_is_global_rooted(target):
             results.append((target, left))
     return results
 
@@ -676,13 +684,17 @@ def _is_internal(target: str) -> bool:
     return target.split(".", 1)[0] in _SELF_ROOTS
 
 
-def _is_global(target: str) -> bool:
-    """Return True when a reference target is rooted at the global object.
+def js_is_global_rooted(name: str) -> bool:
+    """Return whether a dotted JavaScript name is rooted at the global object.
+
+    The one definition of what "global" means for JavaScript facts. Both the
+    reference extractor and the globals scanner consume it, so a publication
+    and a consumer can never be judged by two different rules.
 
     Args:
-        target: Dotted reference target.
+        name: Dotted reference target or published name.
 
     Returns:
-        True when the target names window or one of its members.
+        True when the name is the global object or one of its members.
     """
-    return target.split(".", 1)[0] == _GLOBAL_ROOT
+    return name.split(".", 1)[0] == JS_GLOBAL_ROOT

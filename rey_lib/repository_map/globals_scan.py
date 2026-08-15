@@ -15,6 +15,7 @@ from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
     js_dotted_name,
+    js_is_global_rooted,
     js_text,
     parse_js_root,
     supported_js_languages,
@@ -33,9 +34,6 @@ from rey_lib.repository_map.records import (
 )
 
 __all__ = ["GlobalReport", "extract_global_publications_and_consumers"]
-
-# The global object whose publications and consumers are tracked.
-_GLOBAL_ROOT = "window"
 
 
 @dataclass(frozen=True)
@@ -138,7 +136,7 @@ def _scan_file(
         if left is None or left.type != "member_expression":
             continue
         name = js_dotted_name(left)
-        if name is None or not _is_global(name):
+        if name is None or not js_is_global_rooted(name):
             continue
         publication_ids.add(left.id)
         line, column = left.start_point
@@ -190,7 +188,7 @@ def _consumers(
     for node in nodes:
         if node.type == "subscript_expression":
             name = js_dotted_name(node.child_by_field_name("object"))
-            if name is not None and _is_global(name):
+            if name is not None and js_is_global_rooted(name):
                 consumers.append(
                     _consumer(source_path, node, name, ACCESS_KIND_BRACKET_ACCESS)
                 )
@@ -198,13 +196,13 @@ def _consumers(
         if node.type == "unary_expression" and js_text(node).startswith("typeof"):
             argument = node.child_by_field_name("argument")
             name = js_dotted_name(argument) if argument is not None else None
-            if name is not None and _is_global(name):
+            if name is not None and js_is_global_rooted(name):
                 consumers.append(_consumer(source_path, node, name, ACCESS_KIND_TYPEOF))
             continue
         if node.type != "member_expression" or node.id in publication_ids:
             continue
         name = js_dotted_name(node)
-        if name is None or not _is_global(name):
+        if name is None or not js_is_global_rooted(name):
             continue
         # Only the outermost chain is a consumer; window.A.b is one use.
         if node.parent is not None and node.parent.type == "member_expression":
@@ -263,15 +261,3 @@ def _matched_prefix(name: str, published: set[str]) -> str | None:
         if candidate in published:
             return candidate
     return None
-
-
-def _is_global(name: str) -> bool:
-    """Return True when a dotted name is rooted at the global object.
-
-    Args:
-        name: Dotted name to test.
-
-    Returns:
-        True when the name is window or one of its members.
-    """
-    return name.split(".", 1)[0] == _GLOBAL_ROOT
