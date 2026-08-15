@@ -19,6 +19,14 @@ from rey_lib.repository_map.architecture_policy import (
     compile_architecture_policy,
 )
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
+from rey_lib.repository_map.migration import (
+    MigrationManifest,
+    MigrationRow,
+    RetirementReport,
+    load_migration_manifest,
+    validate_migration_manifest,
+    verify_retirement_ready,
+)
 from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
@@ -137,7 +145,13 @@ __all__ = [
     "build_system_index",
     "ArchitectureRuleSource",
     "CompiledArchitecturePolicy",
+    "MigrationManifest",
+    "MigrationRow",
+    "RetirementReport",
     "check_architecture_boundaries",
+    "load_migration_manifest",
+    "validate_migration_manifest",
+    "verify_retirement_ready",
     "compile_architecture_policy",
     "compare_repository_maps",
     "compute_reachability",
