@@ -536,3 +536,45 @@ def test_a_manifest_retiring_nothing_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="nothing it retires"):
         load_migration_manifest(path)
+
+
+def test_the_gate_names_no_record_type() -> None:
+    """Registry, not branch.
+
+    The review of this repository's own dispatchers put
+    verify_retirement_ready in the migrate set: it branched on record_type, so
+    adding a kind of evidence meant editing the gate. New enforcement code is
+    held to the same standard as the rest of the estate.
+    """
+    import inspect
+
+    from rey_lib.repository_map import migration
+
+    source = inspect.getsource(migration.verify_retirement_ready)
+    for probe in migration.BLOCKER_PROBES:
+        assert f'"{probe.record_type}"' not in source, (
+            f"{probe.record_type} is named in the gate; record types belong to "
+            "the probe registry."
+        )
+
+
+def test_a_probe_is_one_implementation_plus_one_registration() -> None:
+    """The extension cost, pinned. Same shape as RULE_FAMILIES."""
+    from rey_lib.repository_map.migration import BLOCKER_PROBES
+
+    assert {p.record_type for p in BLOCKER_PROBES} == {
+        "dependency_edge",
+        "registration",
+        "global_publication",
+        "entry_point",
+        "reachability",
+    }
+    assert all(callable(p.probe) for p in BLOCKER_PROBES)
+
+
+def test_an_unregistered_record_type_is_ignored_not_examined() -> None:
+    """Examined counts come from the registry, so they stay truthful."""
+    report = verify_retirement_ready(MANIFEST, [{"record_type": "symbol", "record_id": "s"}])
+
+    assert report.is_proven
+    assert "symbol" not in report.examined

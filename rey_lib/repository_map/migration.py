@@ -27,6 +27,7 @@ is none.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ from rey_lib.files.file_utils import read_text_file
 from rey_lib.repository_map.records import matches_any_glob
 
 __all__ = [
+    "BLOCKER_PROBES",
+    "BlockerProbe",
     "DISPOSITIONS",
     "MigrationManifest",
     "MigrationRow",
@@ -324,6 +327,149 @@ def _names_old_owner(manifest: MigrationManifest, target: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class BlockerProbe:
+    """One record type, and what about it can block a retirement.
+
+    Adding a way an old owner stays reachable is one probe plus one entry in
+    ``BLOCKER_PROBES``. The gate itself names no record type, so a new kind of
+    evidence does not edit it.
+
+    Attributes:
+        record_type: The generated record type this probe reads.
+        probe: Returns the blockers one record contributes, if any.
+    """
+
+    record_type: str
+    probe: "Callable[[MigrationManifest, dict[str, Any]], list[RetirementBlocker]]"
+
+
+def _blocker(record: "dict[str, Any]", kind: str, detail: str, path: str = "") -> RetirementBlocker:
+    """Return one blocker built from a generated record."""
+    return RetirementBlocker(
+        kind=kind,
+        source_path=path or str(record.get("source_path", "")),
+        source_line=int(record.get("source_line", 0) or 0),
+        detail=detail,
+        evidence_record_id=str(record.get("record_id", "")),
+    )
+
+
+def _probe_dependency_edge(
+    manifest: MigrationManifest, record: "dict[str, Any]"
+) -> list[RetirementBlocker]:
+    """Return a blocker when something outside the old owner still references it."""
+    target = str(record.get("to", ""))
+    source = str(record.get("source_path", ""))
+    # A reference from inside a retiring file is not a caller, because deleting
+    # the file deletes the reference too. When a symbol is retiring from a file
+    # that survives, that reasoning does not hold and every reference counts.
+    excluded = manifest.retires_a_file and _is_old_owner(manifest, source)
+    if _names_old_owner(manifest, target) and not excluded:
+        return [
+            _blocker(
+                record,
+                BLOCKER_OLD_CALLER,
+                f"{record.get('edge_kind', 'reference')} -> {target}",
+            )
+        ]
+    return []
+
+
+def _probe_registration(
+    manifest: MigrationManifest, record: "dict[str, Any]"
+) -> list[RetirementBlocker]:
+    """Return a blocker for a registration that keeps the old owner reachable."""
+    if _is_old_owner(manifest, str(record.get("source_path", ""))) or _names_old_owner(
+        manifest, str(record.get("implementation", ""))
+    ):
+        return [
+            _blocker(
+                record,
+                BLOCKER_STALE_REGISTRATION,
+                f"{record.get('registry')}:{record.get('registered_id')}",
+            )
+        ]
+    if not record.get("registered_id_resolved", True) and not str(
+        record.get("implementation", "")
+    ).strip():
+        # An unreadable id is only unprovable when nothing else identifies the
+        # registration. Where the implementation is readable and names something
+        # other than the retiring owner, it is ruled out on evidence rather than
+        # assumed dangerous. Blocking on every dynamic id anywhere would make
+        # retirement permanently unprovable, and a gate that can never pass
+        # protects nothing.
+        return [
+            _blocker(
+                record,
+                BLOCKER_UNPROVABLE,
+                f"registration id {record.get('registered_id')!r} is not a literal and no "
+                "implementation identifies it, so it cannot be shown not to name the old owner",
+            )
+        ]
+    return []
+
+
+def _probe_global_publication(
+    manifest: MigrationManifest, record: "dict[str, Any]"
+) -> list[RetirementBlocker]:
+    """Return a blocker for a global surface that keeps the old owner callable."""
+    if _is_old_owner(manifest, str(record.get("source_path", ""))) or _names_old_owner(
+        manifest, str(record.get("implementation", ""))
+    ):
+        return [_blocker(record, BLOCKER_STALE_PUBLICATION, str(record.get("global", "")))]
+    return []
+
+
+def _probe_entry_point(
+    manifest: MigrationManifest, record: "dict[str, Any]"
+) -> list[RetirementBlocker]:
+    """Return a blocker for a runtime root that still loads the old owner."""
+    if _names_old_owner(manifest, str(record.get("target", ""))):
+        return [_blocker(record, BLOCKER_STALE_ENTRY_POINT, str(record.get("target", "")))]
+    return []
+
+
+def _probe_reachability(
+    manifest: MigrationManifest, record: "dict[str, Any]"
+) -> list[RetirementBlocker]:
+    """Return a blocker when the graph still reaches the old owner, or cannot say."""
+    target = str(record.get("target", ""))
+    if not _is_old_owner(manifest, target):
+        return []
+    status = str(record.get("status", ""))
+    if status == "definitely_reachable":
+        return [
+            _blocker(
+                record,
+                BLOCKER_STILL_REACHABLE,
+                f"reachable from {record.get('root')}",
+                path=target,
+            )
+        ]
+    if status != "unreferenced_candidate":
+        # potentially_reachable or reachability_unknown: not a proof.
+        return [
+            _blocker(
+                record,
+                BLOCKER_UNPROVABLE,
+                f"reachability is {status}, which does not prove retirement",
+                path=target,
+            )
+        ]
+    return []
+
+
+# The registry. Adding a way an old owner survives is one probe plus one entry.
+BLOCKER_PROBES: tuple[BlockerProbe, ...] = (
+    BlockerProbe("dependency_edge", _probe_dependency_edge),
+    BlockerProbe("registration", _probe_registration),
+    BlockerProbe("global_publication", _probe_global_publication),
+    BlockerProbe("entry_point", _probe_entry_point),
+    BlockerProbe("reachability", _probe_reachability),
+)
+
+
 def verify_retirement_ready(
     manifest: MigrationManifest,
     records: "list[dict[str, Any]]",
@@ -335,6 +481,9 @@ def verify_retirement_ready(
     publication or a template entry point. Deleting on the strength of the
     direct-call check alone is how a retirement passes and the system breaks.
 
+    Which kinds exist is the registry's business: this function names no record
+    type, so a new kind of evidence is one probe and one registration.
+
     Args:
         manifest: The declared migration.
         records: Generated fact records for the repository, as read from its
@@ -344,129 +493,16 @@ def verify_retirement_ready(
         The report. VERDICT_PROVEN only when nothing blocks and nothing is
         unprovable.
     """
+    probes = {probe.record_type: probe for probe in BLOCKER_PROBES}
     blockers: list[RetirementBlocker] = []
-    examined = {
-        "dependency_edge": 0,
-        "registration": 0,
-        "global_publication": 0,
-        "entry_point": 0,
-        "reachability": 0,
-    }
+    examined = {probe.record_type: 0 for probe in BLOCKER_PROBES}
 
     for record in records:
-        kind = record.get("record_type")
-        if kind not in examined:
+        probe = probes.get(record.get("record_type", ""))
+        if probe is None:
             continue
-        examined[kind] += 1
-
-        if kind == "dependency_edge":
-            target = str(record.get("to", ""))
-            source = str(record.get("source_path", ""))
-            # A reference from inside a retiring file is not a caller, because
-            # deleting the file deletes the reference too. When a symbol is
-            # retiring from a file that survives, that reasoning does not hold
-            # and every reference to it counts.
-            excluded = manifest.retires_a_file and _is_old_owner(manifest, source)
-            if _names_old_owner(manifest, target) and not excluded:
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_OLD_CALLER,
-                        source_path=source,
-                        source_line=int(record.get("source_line", 0)),
-                        detail=f"{record.get('edge_kind', 'reference')} -> {target}",
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
-
-        elif kind == "registration":
-            if _is_old_owner(manifest, str(record.get("source_path", ""))) or _names_old_owner(
-                manifest, str(record.get("implementation", ""))
-            ):
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_STALE_REGISTRATION,
-                        source_path=str(record.get("source_path", "")),
-                        source_line=int(record.get("source_line", 0)),
-                        detail=f"{record.get('registry')}:{record.get('registered_id')}",
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
-            elif not record.get("registered_id_resolved", True) and not str(
-                record.get("implementation", "")
-            ).strip():
-                # An unreadable id is only unprovable when nothing else identifies
-                # the registration. Where the implementation is readable and names
-                # something other than the retiring owner, the registration is
-                # ruled out on evidence rather than assumed dangerous. Blocking on
-                # every dynamic id anywhere would make retirement permanently
-                # unprovable in any repository that has one, and a gate that can
-                # never pass protects nothing.
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_UNPROVABLE,
-                        source_path=str(record.get("source_path", "")),
-                        source_line=int(record.get("source_line", 0)),
-                        detail=(
-                            f"registration id {record.get('registered_id')!r} is not a literal "
-                            "and no implementation identifies it, so it cannot be shown not to "
-                            "name the old owner"
-                        ),
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
-
-        elif kind == "global_publication":
-            if _is_old_owner(manifest, str(record.get("source_path", ""))) or _names_old_owner(
-                manifest, str(record.get("implementation", ""))
-            ):
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_STALE_PUBLICATION,
-                        source_path=str(record.get("source_path", "")),
-                        source_line=int(record.get("source_line", 0)),
-                        detail=str(record.get("global", "")),
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
-
-        elif kind == "entry_point":
-            if _names_old_owner(manifest, str(record.get("target", ""))):
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_STALE_ENTRY_POINT,
-                        source_path=str(record.get("source_path", "")),
-                        source_line=int(record.get("source_line", 0)),
-                        detail=str(record.get("target", "")),
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
-
-        elif kind == "reachability":
-            target = str(record.get("target", ""))
-            if not _is_old_owner(manifest, target):
-                continue
-            status = str(record.get("status", ""))
-            if status == "definitely_reachable":
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_STILL_REACHABLE,
-                        source_path=target,
-                        source_line=0,
-                        detail=f"reachable from {record.get('root')}",
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
-            elif status not in ("unreferenced_candidate",):
-                # potentially_reachable or reachability_unknown: not a proof.
-                blockers.append(
-                    RetirementBlocker(
-                        kind=BLOCKER_UNPROVABLE,
-                        source_path=target,
-                        source_line=0,
-                        detail=f"reachability is {status}, which does not prove retirement",
-                        evidence_record_id=str(record.get("record_id", "")),
-                    )
-                )
+        examined[probe.record_type] += 1
+        blockers.extend(probe.probe(manifest, record))
 
     verdict = VERDICT_PROVEN if not blockers else VERDICT_STOP
     return RetirementReport(
