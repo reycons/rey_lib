@@ -107,7 +107,8 @@ def load_review(path: Path) -> ReviewDocument:
     """Load a review document from its YAML artifact.
 
     Args:
-        path: Path to 03_repository_map.review.yaml.
+        path: Path to a repository's review artifact, named
+            03_repository_map.<repository>.review.yaml.
 
     Returns:
         The parsed review.

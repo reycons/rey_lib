@@ -40,7 +40,7 @@ def _map() -> RepositoryMap:
 
 def _write(path: Path, body: str) -> Path:
     """Write a review artifact and return its path."""
-    review_path = path / "03_repository_map.review.yaml"
+    review_path = path / "03_repository_map.rey_console.review.yaml"
     review_path.write_text(body, encoding="utf-8")
     return review_path
 
