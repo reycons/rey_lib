@@ -67,6 +67,11 @@ RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
 RECORD_TYPE_GLOBAL_CONSUMER = "global_consumer"
 RECORD_TYPE_REACHABILITY = "reachability"
 RECORD_TYPE_ARCHITECTURE_VIOLATION = "architecture_violation"
+RECORD_TYPE_DISPATCHER = "dispatcher"
+
+# The only classification this generator emits. Whether a dispatcher is
+# architecturally legitimate is review's decision, not the scanner's.
+DISPATCHER_UNREVIEWED = "unreviewed"
 
 # reachability status vocabulary. 'dead' is deliberately absent: a scanner that
 # has not checked every runtime mechanism cannot prove absence of use.
@@ -303,6 +308,66 @@ class FileRecord:
                 "test": self.is_test,
             },
             "entry_point_load_state": self.entry_point_load_state,
+        }
+
+
+@dataclass(frozen=True)
+class DispatcherRecord:
+    """One decision point that branches over a named behaviour vocabulary.
+
+    Recorded as a fact, never as a verdict. A dispatcher is legitimate when it
+    interprets a protocol or chooses between genuinely different mechanisms,
+    and questionable when adding a new named thing means adding a branch here.
+    Deciding which is architecture review's job, so ``classification`` is
+    always ``unreviewed`` and this module never sets anything else.
+
+    Attributes:
+        source_path: Path the dispatcher is written in.
+        source_line: 1-indexed line of the decision point.
+        source_column: 0-indexed column of the decision point.
+        symbol: Enclosing declaration, or '<module>' at module level.
+        vocabulary: The expression being branched on, as written.
+        branch_count: How many named branches the decision point has.
+        branch_values: The literal values compared, sorted.
+        callers: Paths whose executable references reach the enclosing symbol.
+        classification: Always ``unreviewed``.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    symbol: str
+    vocabulary: str
+    branch_count: int
+    branch_values: tuple[str, ...] = ()
+    callers: tuple[str, ...] = ()
+    classification: str = DISPATCHER_UNREVIEWED
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this dispatcher fact.
+
+        Position is part of the identity because one function may hold more
+        than one decision point.
+        """
+        return (
+            f"{RECORD_TYPE_DISPATCHER}:{self.source_path}:{self.symbol}"
+            f":{self.source_line}:{self.source_column}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this dispatcher as a JSONL 'dispatcher' record."""
+        return {
+            "record_type": RECORD_TYPE_DISPATCHER,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "symbol": self.symbol,
+            "vocabulary": self.vocabulary,
+            "branch_count": self.branch_count,
+            "branch_values": list(self.branch_values),
+            "callers": list(self.callers),
+            "classification": self.classification,
         }
 
 

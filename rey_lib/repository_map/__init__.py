@@ -14,6 +14,7 @@ line, every record carrying record_type and record_id.
 from __future__ import annotations
 
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
+from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
     LANGUAGE_EXTRACTORS,
@@ -120,6 +121,7 @@ __all__ = [
     "extract_runtime_entry_points",
     "extract_symbols",
     "generate_repository_map",
+    "inventory_dispatchers_and_switches",
     "inventory_files",
     "load_scan_rules",
     "supported_languages",
