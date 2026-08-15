@@ -13,6 +13,7 @@ line, every record carrying record_type and record_id.
 
 from __future__ import annotations
 
+from rey_lib.repository_map.boundaries import check_architecture_boundaries
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
     LANGUAGE_EXTRACTORS,
@@ -110,6 +111,7 @@ __all__ = [
     "SymbolInventory",
     "SymbolRecord",
     "build_dependency_graph",
+    "check_architecture_boundaries",
     "compare_repository_maps",
     "compute_reachability",
     "extract_executable_references",

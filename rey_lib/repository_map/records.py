@@ -66,6 +66,7 @@ RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
 RECORD_TYPE_GLOBAL_CONSUMER = "global_consumer"
 RECORD_TYPE_REACHABILITY = "reachability"
+RECORD_TYPE_ARCHITECTURE_VIOLATION = "architecture_violation"
 
 # reachability status vocabulary. 'dead' is deliberately absent: a scanner that
 # has not checked every runtime mechanism cannot prove absence of use.
@@ -302,6 +303,79 @@ class FileRecord:
                 "test": self.is_test,
             },
             "entry_point_load_state": self.entry_point_load_state,
+        }
+
+
+@dataclass(frozen=True)
+class BoundaryRule:
+    """One deterministic architecture guard, expressed as data.
+
+    A rule says: within this scope, a reference to something forbidden is a
+    violation unless the referring file is an allowed owner. Ownership is the
+    exception, not the subject — which is why the sanctioned API of an owner
+    can be called freely while the mechanism beneath it cannot.
+
+    Attributes:
+        rule_id: Stable identifier recorded on every violation.
+        forbidden_target_globs: Globs matched against a reference target.
+        allowed_path_globs: Files permitted to make the reference. Everything
+            else in scope is a violation.
+        scope_path_globs: Files the rule applies to. Both surviving frontend
+            roots must be listed for a guard to cover them (REQ-093).
+        edge_kinds: Reference kinds the rule applies to, empty for all.
+    """
+
+    rule_id: str
+    forbidden_target_globs: tuple[str, ...]
+    allowed_path_globs: tuple[str, ...] = ()
+    scope_path_globs: tuple[str, ...] = ()
+    edge_kinds: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ViolationRecord:
+    """One deterministic architecture-boundary violation.
+
+    Attributes:
+        source_path: Path the forbidden reference is written in.
+        source_line: 1-indexed line of the reference.
+        source_column: 0-indexed column of the reference.
+        rule_id: The guard that was broken.
+        caller: The file making the reference.
+        callee: The forbidden target, as written.
+        edge_kind: The kind of reference.
+        evidence_record_ids: The facts proving the violation.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    rule_id: str
+    caller: str
+    callee: str
+    edge_kind: str
+    evidence_record_ids: tuple[str, ...] = ()
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this violation."""
+        return (
+            f"violation:{self.rule_id}:{self.source_path}"
+            f":{self.source_line}:{self.source_column}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this violation as a JSONL 'architecture_violation' record."""
+        return {
+            "record_type": RECORD_TYPE_ARCHITECTURE_VIOLATION,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "rule_id": self.rule_id,
+            "caller": self.caller,
+            "callee": self.callee,
+            "edge_kind": self.edge_kind,
+            "evidence_record_ids": list(self.evidence_record_ids),
         }
 
 
@@ -625,6 +699,7 @@ class ScanRules:
     extract_facts_from_vendor: bool = True
     # Root discovery (INC-003). Absent sections mean the repository declares no
     # registries or templates, never that detection is skipped silently.
+    boundary_rules: tuple["BoundaryRule", ...] = ()
     registration_rules: tuple[RegistrationRule, ...] = ()
     declared_registration_rules: tuple[DeclaredRegistrationRule, ...] = ()
     backend_registration_rules: tuple[BackendRegistrationRule, ...] = ()
@@ -691,6 +766,7 @@ class ScanRules:
             test_path_globs=tuple(_require_str_list(data, "test_path_globs")),
             extract_facts_from_generated=extraction.get("generated", True),
             extract_facts_from_vendor=extraction.get("vendor", True),
+            boundary_rules=_boundary_rules(data),
             registration_rules=_registration_rules(data),
             declared_registration_rules=_declared_registration_rules(data),
             backend_registration_rules=_backend_registration_rules(data),
@@ -811,6 +887,33 @@ def _declared_registration_rules(data: dict[str, Any]) -> tuple[DeclaredRegistra
             registration_kind=_required(entry, "registration_kind", section),
             id_property=_required(entry, "id_property", section),
             path_globs=tuple(entry.get("path_globs", ())),
+        )
+        for entry in _rule_entries(data, section)
+    )
+
+
+def _boundary_rules(data: dict[str, Any]) -> tuple[BoundaryRule, ...]:
+    """Build architecture boundary rules from the rules mapping.
+
+    Args:
+        data: Parsed rules mapping.
+
+    Returns:
+        The rules, in declaration order.
+
+    Raises:
+        ValueError: If a rule entry is malformed.
+    """
+    section = "architecture_rules"
+    return tuple(
+        BoundaryRule(
+            rule_id=_required(entry, "rule_id", section),
+            forbidden_target_globs=tuple(
+                _required(entry, "forbidden_target_globs", section)
+            ),
+            allowed_path_globs=tuple(entry.get("allowed_path_globs", ())),
+            scope_path_globs=tuple(_required(entry, "scope_path_globs", section)),
+            edge_kinds=tuple(entry.get("edge_kinds", ())),
         )
         for entry in _rule_entries(data, section)
     )
