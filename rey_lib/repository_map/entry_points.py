@@ -16,7 +16,6 @@ and is exactly where a second registration list hides.
 
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from rey_lib.repository_map.records import (
     EntryPointRecord,
     FileRecord,
     ScanRules,
+    matches_any_glob,
 )
 
 __all__ = ["extract_runtime_entry_points"]
@@ -114,7 +114,7 @@ def extract_runtime_entry_points(
         Entry points sorted by host, line and target.
     """
     templates = [
-        record for record in files if _matches_any(record.path, rules.template_globs)
+        record for record in files if matches_any_glob(record.path, rules.template_globs)
     ]
     records: list[EntryPointRecord] = []
 
@@ -199,7 +199,7 @@ def _script_kind(target: str, script_type: str, rules: ScanRules) -> str:
     Returns:
         One of the ``ENTRY_POINT_KIND_*`` constants.
     """
-    if _matches_any(target, rules.bundle_globs) and rules.bundle_globs:
+    if matches_any_glob(target, rules.bundle_globs) and rules.bundle_globs:
         return ENTRY_POINT_KIND_BUNDLE
     if script_type.lower() == "module":
         return ENTRY_POINT_KIND_MODULE
@@ -217,18 +217,3 @@ def _normalize_target(source: str) -> str:
         appear as several targets.
     """
     return source.split("?", 1)[0]
-
-
-def _matches_any(value: str, globs: tuple[str, ...]) -> bool:
-    """Return True when a value matches any glob.
-
-    Args:
-        value: Text to match.
-        globs: Configured glob patterns.
-
-    Returns:
-        True when at least one glob matches. No globs means no match, so a
-        repository that declares no templates yields no entry points rather
-        than treating every file as one.
-    """
-    return any(fnmatchcase(value, pattern) for pattern in globs)

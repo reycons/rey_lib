@@ -19,7 +19,6 @@ applies to rather than only the tree its test framework happens to reach
 from __future__ import annotations
 
 from collections.abc import Sequence
-from fnmatch import fnmatchcase
 
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
@@ -35,6 +34,7 @@ from rey_lib.repository_map.records import (
     ReferenceEdge,
     ScanRules,
     ViolationRecord,
+    matches_any_glob,
 )
 
 __all__ = ["check_architecture_boundaries"]
@@ -150,9 +150,9 @@ def _publication_violations(
         )
         for rule in rules
         for publication in publications
-        if _matches_any(publication.source_path, rule.scope_path_globs)
-        and _matches_any(publication.global_name, rule.forbidden_global_globs)
-        and not _matches_any(publication.source_path, rule.allowed_path_globs)
+        if matches_any_glob(publication.source_path, rule.scope_path_globs)
+        and matches_any_glob(publication.global_name, rule.forbidden_global_globs)
+        and not matches_any_glob(publication.source_path, rule.allowed_path_globs)
     ]
 
 
@@ -177,7 +177,7 @@ def _presence_violations(
     violations: list[ViolationRecord] = []
     for rule in rules:
         for file_record in files:
-            if not _matches_any(file_record.path, rule.forbidden_path_globs):
+            if not matches_any_glob(file_record.path, rule.forbidden_path_globs):
                 continue
             violations.append(
                 ViolationRecord(
@@ -192,7 +192,7 @@ def _presence_violations(
                 )
             )
         for entry_point in entry_points:
-            if not _matches_any(entry_point.target, rule.forbidden_entry_point_globs):
+            if not matches_any_glob(entry_point.target, rule.forbidden_entry_point_globs):
                 continue
             violations.append(
                 ViolationRecord(
@@ -240,9 +240,9 @@ def _dispatcher_violations(
         for rule in rules
         for dispatcher in dispatchers
         if dispatcher.branch_count >= rule.minimum_branch_count
-        and _matches_any(dispatcher.source_path, rule.scope_path_globs)
-        and _matches_any(dispatcher.vocabulary, rule.forbidden_vocabulary_globs)
-        and not _matches_any(dispatcher.source_path, rule.allowed_path_globs)
+        and matches_any_glob(dispatcher.source_path, rule.scope_path_globs)
+        and matches_any_glob(dispatcher.vocabulary, rule.forbidden_vocabulary_globs)
+        and not matches_any_glob(dispatcher.source_path, rule.allowed_path_globs)
     ]
 
 
@@ -264,22 +264,8 @@ def _applies(rule: BoundaryRule, reference: ReferenceEdge) -> bool:
     """
     if rule.edge_kinds and reference.edge_kind not in rule.edge_kinds:
         return False
-    if not _matches_any(reference.source_path, rule.scope_path_globs):
+    if not matches_any_glob(reference.source_path, rule.scope_path_globs):
         return False
-    if not _matches_any(reference.to, rule.forbidden_target_globs):
+    if not matches_any_glob(reference.to, rule.forbidden_target_globs):
         return False
-    return not _matches_any(reference.source_path, rule.allowed_path_globs)
-
-
-def _matches_any(value: str, globs: tuple[str, ...]) -> bool:
-    """Return True when a value matches any glob.
-
-    Args:
-        value: Text to match.
-        globs: Configured glob patterns.
-
-    Returns:
-        True when at least one glob matches. No globs means no match, so a
-        rule that declares no scope guards nothing rather than everything.
-    """
-    return any(fnmatchcase(value, pattern) for pattern in globs)
+    return not matches_any_glob(reference.source_path, rule.allowed_path_globs)

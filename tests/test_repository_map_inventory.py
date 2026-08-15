@@ -17,6 +17,7 @@ from rey_lib.repository_map import (
     inventory_files,
     load_scan_rules,
 )
+from rey_lib.repository_map.records import matches_any_glob
 
 RULES_TEXT = """
 ignored_directory_names:
@@ -287,3 +288,25 @@ def test_absent_rules_sections_default_to_empty(tmp_path: Path) -> None:
 
     assert loaded.ignored_directory_names == frozenset()
     assert loaded.test_path_globs == ()
+
+
+def test_the_shared_matcher_owns_glob_semantics() -> None:
+    """One implementation, so the documented behaviour is what consumers get."""
+    assert matches_any_glob("static/js/react/bundle.js", ("static/*",))
+    # '*' crosses separators; there is no '**'.
+    assert matches_any_glob("a/b/c.ts", ("a/*",))
+    # Case-sensitive on every platform.
+    assert not matches_any_glob("bundle.js", ("*.JS",))
+    # Anchored at the repository root.
+    assert not matches_any_glob("pkg/tests/x.py", ("tests/*",))
+
+
+def test_an_empty_pattern_list_means_what_the_caller_declares() -> None:
+    """The four consumers did not agree, so the difference is now explicit.
+
+    Three treat no configuration as matching nothing. Registration rules treat
+    an unscoped rule as applying everywhere. Consolidating without saying which
+    is which would silently change one of them.
+    """
+    assert matches_any_glob("anything", ()) is False
+    assert matches_any_glob("anything", (), when_unconfigured=True) is True

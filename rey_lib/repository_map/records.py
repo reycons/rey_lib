@@ -10,7 +10,9 @@ commit. The generated factual map is JSONL, never a YAML document.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from typing import Any
 
 __all__ = [
@@ -38,6 +40,7 @@ __all__ = [
     "SYMBOL_KIND_RE_EXPORT",
     "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
+    "matches_any_glob",
     "FileRecord",
     "ReferenceEdge",
     "ScanRules",
@@ -133,6 +136,36 @@ EDGE_KIND_GLOBAL_REFERENCE = "global_reference"
 EDGE_KIND_REGISTRATION = "registration"
 EDGE_KIND_TEMPLATE_LOAD = "template_load"
 EDGE_KIND_BACKEND_STRING_REFERENCE = "backend_string_reference"
+
+
+def matches_any_glob(
+    value: str,
+    globs: Sequence[str],
+    *,
+    when_unconfigured: bool = False,
+) -> bool:
+    """Return whether a value matches any configured glob.
+
+    The one implementation of ScanRules glob semantics, so the behaviour
+    documented on ScanRules is the behaviour every consumer gets. Matching is
+    case-sensitive fnmatch against a repository-relative POSIX path, which is
+    why ``*`` crosses separators and there is no ``**``.
+
+    Args:
+        value: Text to match, normally a repository-relative POSIX path.
+        globs: Configured patterns.
+        when_unconfigured: What an empty pattern list means. False is the
+            common case — nothing configured matches nothing. True is for a
+            rule whose scope is optional, where declaring no scope means the
+            rule applies everywhere rather than nowhere.
+
+    Returns:
+        True when at least one glob matches, or ``when_unconfigured`` when no
+        globs are configured.
+    """
+    if not globs:
+        return when_unconfigured
+    return any(fnmatchcase(value, pattern) for pattern in globs)
 
 
 @dataclass(frozen=True)

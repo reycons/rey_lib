@@ -10,7 +10,6 @@ produce identical records.
 from __future__ import annotations
 
 import os
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 from rey_lib.config.config_utils import parse_yaml
@@ -21,6 +20,7 @@ from rey_lib.repository_map.records import (
     LANGUAGE_UNKNOWN,
     FileRecord,
     ScanRules,
+    matches_any_glob,
 )
 
 __all__ = ["inventory_files", "load_scan_rules"]
@@ -123,7 +123,7 @@ def _build_file_record(
         return None
 
     relative_path = file_path.relative_to(repo_root).as_posix()
-    if _matches_any(relative_path, rules.ignored_path_globs):
+    if matches_any_glob(relative_path, rules.ignored_path_globs):
         return None
 
     try:
@@ -138,25 +138,9 @@ def _build_file_record(
         path=relative_path,
         language=rules.language_by_extension.get(file_path.suffix.lower(), LANGUAGE_UNKNOWN),
         size_bytes=size_bytes,
-        is_generated=_matches_any(relative_path, rules.generated_path_globs),
-        is_vendor=_matches_any(relative_path, rules.vendor_path_globs),
-        is_test=_matches_any(relative_path, rules.test_path_globs),
+        is_generated=matches_any_glob(relative_path, rules.generated_path_globs),
+        is_vendor=matches_any_glob(relative_path, rules.vendor_path_globs),
+        is_test=matches_any_glob(relative_path, rules.test_path_globs),
         # Resolved by entry-point discovery in INC-003.
         entry_point_load_state=ENTRY_POINT_LOAD_UNKNOWN,
     )
-
-
-def _matches_any(relative_path: str, globs: tuple[str, ...]) -> bool:
-    """Return True when a repository-relative path matches any glob.
-
-    Matching is case-sensitive fnmatch against the POSIX relative path, so a
-    ``*`` crosses directory separators.
-
-    Args:
-        relative_path: Repository-relative POSIX path.
-        globs: Configured glob patterns.
-
-    Returns:
-        True when at least one glob matches.
-    """
-    return any(fnmatchcase(relative_path, pattern) for pattern in globs)

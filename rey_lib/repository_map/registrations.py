@@ -21,7 +21,6 @@ than recording that a registration site exists.
 from __future__ import annotations
 
 import ast
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 from rey_lib.files.file_utils import read_text_file
@@ -39,6 +38,7 @@ from rey_lib.repository_map.records import (
     RegistrationRecord,
     RegistrationRule,
     ScanRules,
+    matches_any_glob,
 )
 
 __all__ = ["extract_registrations"]
@@ -106,7 +106,7 @@ def _js_registrations(
     applicable_literals = tuple(
         rule
         for rule in rules.declared_registration_rules
-        if _matches_any(file_record.path, rule.path_globs)
+        if matches_any_glob(file_record.path, rule.path_globs, when_unconfigured=True)
     )
     if not applicable_calls and not applicable_literals:
         return []
@@ -153,7 +153,10 @@ def _call_registrations(
 
     records = []
     for rule in call_rules:
-        if rule.method != method or not _matches_any(receiver, rule.receiver_globs):
+        if rule.method != method:
+            continue
+        # An unscoped registration rule applies to any receiver.
+        if not matches_any_glob(receiver, rule.receiver_globs, when_unconfigured=True):
             continue
         if rule.id_argument >= len(argument_nodes):
             continue
@@ -276,7 +279,7 @@ def _python_registrations(
     applicable = [
         rule
         for rule in rules.backend_registration_rules
-        if _matches_any(file_record.path, rule.path_globs)
+        if matches_any_glob(file_record.path, rule.path_globs, when_unconfigured=True)
     ]
     if not applicable:
         return []
@@ -375,19 +378,3 @@ def _dict_string_values(entry: ast.Dict) -> dict[str, str]:
         if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
             values[key_node.value] = value_node.value
     return values
-
-
-def _matches_any(value: str, globs: tuple[str, ...]) -> bool:
-    """Return True when a value matches any glob.
-
-    Args:
-        value: Text to match.
-        globs: Configured glob patterns.
-
-    Returns:
-        True when at least one glob matches, or when no globs are configured
-        and the rule therefore applies everywhere.
-    """
-    if not globs:
-        return True
-    return any(fnmatchcase(value, pattern) for pattern in globs)
