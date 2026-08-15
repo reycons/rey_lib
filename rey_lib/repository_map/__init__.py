@@ -19,6 +19,12 @@ from rey_lib.repository_map.architecture_policy import (
     compile_architecture_policy,
 )
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
+from rey_lib.repository_map.increment_gate import (
+    AgentHandoff,
+    ArchitectureDiff,
+    build_agent_handoff,
+    diff_architecture_violations,
+)
 from rey_lib.repository_map.migration import (
     MigrationManifest,
     MigrationRow,
@@ -145,10 +151,14 @@ __all__ = [
     "build_system_index",
     "ArchitectureRuleSource",
     "CompiledArchitecturePolicy",
+    "AgentHandoff",
+    "ArchitectureDiff",
     "MigrationManifest",
     "MigrationRow",
     "RetirementReport",
+    "build_agent_handoff",
     "check_architecture_boundaries",
+    "diff_architecture_violations",
     "load_migration_manifest",
     "validate_migration_manifest",
     "verify_retirement_ready",
