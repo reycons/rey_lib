@@ -30,10 +30,13 @@ __all__ = [
     "RECORD_TYPE_FILE",
     "RECORD_TYPE_SYMBOL",
     "SYMBOL_KIND_CLASS",
+    "SYMBOL_KIND_ENUM",
     "SYMBOL_KIND_EXPORT",
     "SYMBOL_KIND_FUNCTION",
     "SYMBOL_KIND_GLOBAL_PUBLICATION",
+    "SYMBOL_KIND_INTERFACE",
     "SYMBOL_KIND_RE_EXPORT",
+    "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
     "FileRecord",
     "ReferenceEdge",
@@ -59,9 +62,14 @@ RECORD_TYPE_SYMBOL = "symbol"
 RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
 
 # symbol_kind vocabulary. Only syntax-confirmed top-level declarations are
-# emitted; a local never becomes a symbol record.
+# emitted; a local never becomes a symbol record. A TypeScript interface, enum
+# and type alias each carry their own kind rather than being squeezed into
+# class or variable; an abstract class stays class.
 SYMBOL_KIND_FUNCTION = "function"
 SYMBOL_KIND_CLASS = "class"
+SYMBOL_KIND_INTERFACE = "interface"
+SYMBOL_KIND_ENUM = "enum"
+SYMBOL_KIND_TYPE_ALIAS = "type_alias"
 SYMBOL_KIND_VARIABLE = "variable"
 SYMBOL_KIND_EXPORT = "export"
 SYMBOL_KIND_RE_EXPORT = "re_export"
@@ -293,6 +301,10 @@ class ScanRules:
         generated_path_globs: Globs marking build output.
         vendor_path_globs: Globs marking third-party code.
         test_path_globs: Globs marking test code.
+        extract_facts_from_generated: Whether generated files yield symbol and
+            dependency_edge records. Their file records are emitted either way.
+        extract_facts_from_vendor: Whether vendored files yield symbol and
+            dependency_edge records. Their file records are emitted either way.
     """
 
     ignored_directory_names: frozenset[str]
@@ -301,6 +313,29 @@ class ScanRules:
     generated_path_globs: tuple[str, ...]
     vendor_path_globs: tuple[str, ...]
     test_path_globs: tuple[str, ...]
+    # Extraction defaults to on, so omitting the section never silently drops
+    # facts. Suppression is always an explicit choice in the rules file.
+    extract_facts_from_generated: bool = True
+    extract_facts_from_vendor: bool = True
+
+    def extracts_facts_from(self, file_record: "FileRecord") -> bool:
+        """Return whether a file should yield symbol and edge records.
+
+        A suppressed file still appears in the map: only fact extraction is
+        skipped, never the file record itself, so the map continues to state
+        that the file exists and how it is classified (REQ-013).
+
+        Args:
+            file_record: The inventoried file.
+
+        Returns:
+            True when facts should be extracted from the file.
+        """
+        if file_record.is_generated and not self.extract_facts_from_generated:
+            return False
+        if file_record.is_vendor and not self.extract_facts_from_vendor:
+            return False
+        return True
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "ScanRules":
@@ -320,6 +355,7 @@ class ScanRules:
             raise ValueError(f"Scan rules must be a mapping, got {type(data).__name__}.")
 
         extensions = _require_str_mapping(data, "language_by_extension")
+        extraction = _require_bool_mapping(data, "fact_extraction")
         return cls(
             ignored_directory_names=frozenset(_require_str_list(data, "ignored_directory_names")),
             ignored_path_globs=tuple(_require_str_list(data, "ignored_path_globs")),
@@ -329,6 +365,8 @@ class ScanRules:
             generated_path_globs=tuple(_require_str_list(data, "generated_path_globs")),
             vendor_path_globs=tuple(_require_str_list(data, "vendor_path_globs")),
             test_path_globs=tuple(_require_str_list(data, "test_path_globs")),
+            extract_facts_from_generated=extraction.get("generated", True),
+            extract_facts_from_vendor=extraction.get("vendor", True),
         )
 
 
@@ -350,6 +388,31 @@ def _require_str_list(data: dict[str, Any], key: str) -> list[str]:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"Scan rules section '{key}' must be a list of strings.")
+    return value
+
+
+def _require_bool_mapping(data: dict[str, Any], key: str) -> dict[str, bool]:
+    """Return a string-to-boolean section, defaulting to empty when absent.
+
+    Args:
+        data: Parsed rules mapping.
+        key: Section name to read.
+
+    Returns:
+        The section mapping.
+
+    Raises:
+        ValueError: If the section is present but is not a boolean mapping. A
+            near-miss such as the string "false" is rejected rather than
+            silently treated as true.
+    """
+    value = data.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(
+        isinstance(name, str) and isinstance(flag, bool) for name, flag in value.items()
+    ):
+        raise ValueError(f"Scan rules section '{key}' must map strings to booleans.")
     return value
 
 

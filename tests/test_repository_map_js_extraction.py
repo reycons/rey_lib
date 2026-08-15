@@ -21,9 +21,12 @@ from rey_lib.repository_map import (
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
     SYMBOL_KIND_CLASS,
+    SYMBOL_KIND_ENUM,
     SYMBOL_KIND_FUNCTION,
     SYMBOL_KIND_GLOBAL_PUBLICATION,
+    SYMBOL_KIND_INTERFACE,
     SYMBOL_KIND_RE_EXPORT,
+    SYMBOL_KIND_TYPE_ALIAS,
     SYMBOL_KIND_VARIABLE,
     extract_executable_references,
     extract_symbols,
@@ -78,6 +81,11 @@ interface PanelProps {
 }
 
 type PanelKind = "wide" | "narrow";
+
+enum PanelState {
+  Open,
+  Closed,
+}
 
 export function Panel(props: PanelProps) {
   return <div className="panel">{render(props.title)}</div>;
@@ -281,13 +289,22 @@ def test_property_access_is_recorded_for_plain_chains(js_path: Path) -> None:
     assert "namespace.CONSTANT" in targets
 
 
-def test_typescript_type_declarations_are_recorded(tsx_path: Path) -> None:
-    """Interfaces and type aliases are top-level declarations in TSX."""
+def test_typescript_type_declarations_carry_their_own_kind(tsx_path: Path) -> None:
+    """Interface, enum and type alias are not squeezed into class/variable."""
     symbols = _symbols(tsx_path, "TSX")
 
     assert symbols["Panel"] == SYMBOL_KIND_FUNCTION
-    assert symbols["PanelProps"] == SYMBOL_KIND_CLASS
-    assert symbols["PanelKind"] == SYMBOL_KIND_VARIABLE
+    assert symbols["PanelProps"] == SYMBOL_KIND_INTERFACE
+    assert symbols["PanelKind"] == SYMBOL_KIND_TYPE_ALIAS
+    assert symbols["PanelState"] == SYMBOL_KIND_ENUM
+
+
+def test_an_abstract_class_is_still_a_class(tmp_path: Path) -> None:
+    """Abstract classes keep the class kind rather than gaining their own."""
+    path = tmp_path / "abstract.ts"
+    path.write_text("export abstract class Base {}\n", encoding="utf-8")
+
+    assert _symbols(path, "TypeScript")["Base"] == SYMBOL_KIND_CLASS
 
 
 def test_tsx_calls_inside_jsx_are_executable(tsx_path: Path) -> None:

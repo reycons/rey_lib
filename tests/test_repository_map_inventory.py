@@ -218,6 +218,45 @@ def test_file_record_is_one_json_line(repo: Path, rules: ScanRules) -> None:
         assert json.loads(line)["record_id"] == f"file:{record.path}"
 
 
+def test_fact_extraction_defaults_to_on(rules: ScanRules) -> None:
+    """Omitting the policy never silently drops facts."""
+    assert rules.extract_facts_from_generated is True
+    assert rules.extract_facts_from_vendor is True
+
+
+def test_suppressed_classifications_keep_their_file_records(tmp_path: Path) -> None:
+    """A suppressed file still exists in the map; only its facts are skipped."""
+    rules_path = tmp_path / "repository_map.rules.yaml"
+    rules_path.write_text(
+        'generated_path_globs:\n  - "build/*"\n'
+        'vendor_path_globs:\n  - "vendors/*"\n'
+        "fact_extraction:\n  generated: false\n  vendor: false\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "repo"
+    for relative in ("app.py", "build/bundle.js", "vendors/lib.js"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    loaded = load_scan_rules(rules_path)
+
+    records = inventory_files(root, loaded)
+    extracted = {record.path: loaded.extracts_facts_from(record) for record in records}
+
+    # Every file is still inventoried.
+    assert set(extracted) == {"app.py", "build/bundle.js", "vendors/lib.js"}
+    assert extracted == {"app.py": True, "build/bundle.js": False, "vendors/lib.js": False}
+
+
+def test_fact_extraction_section_must_be_booleans(tmp_path: Path) -> None:
+    """A near-miss like the string 'false' is rejected, not read as true."""
+    rules_path = tmp_path / "repository_map.rules.yaml"
+    rules_path.write_text('fact_extraction:\n  vendor: "false"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fact_extraction"):
+        load_scan_rules(rules_path)
+
+
 def test_missing_repository_root_is_rejected(tmp_path: Path, rules: ScanRules) -> None:
     """A non-directory root fails loudly rather than returning an empty map."""
     with pytest.raises(NotADirectoryError):

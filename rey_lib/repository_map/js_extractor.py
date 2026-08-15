@@ -33,9 +33,12 @@ from rey_lib.repository_map.records import (
     EDGE_KIND_RE_EXPORT,
     RECORD_TYPE_FILE,
     SYMBOL_KIND_CLASS,
+    SYMBOL_KIND_ENUM,
     SYMBOL_KIND_FUNCTION,
     SYMBOL_KIND_GLOBAL_PUBLICATION,
+    SYMBOL_KIND_INTERFACE,
     SYMBOL_KIND_RE_EXPORT,
+    SYMBOL_KIND_TYPE_ALIAS,
     SYMBOL_KIND_VARIABLE,
     ReferenceEdge,
     SymbolInventory,
@@ -71,13 +74,13 @@ _DECLARATION_KINDS: dict[str, str] = {
     "generator_function_declaration": SYMBOL_KIND_FUNCTION,
     "function_signature": SYMBOL_KIND_FUNCTION,
     "class_declaration": SYMBOL_KIND_CLASS,
+    # An abstract class is still a class.
     "abstract_class_declaration": SYMBOL_KIND_CLASS,
-    # TypeScript type-shaped declarations. The record contract's symbol_kind
-    # vocabulary has no dedicated type kind, so a named shape is recorded as a
-    # class and a type alias as a variable. See the module note in the SGC.
-    "interface_declaration": SYMBOL_KIND_CLASS,
-    "enum_declaration": SYMBOL_KIND_CLASS,
-    "type_alias_declaration": SYMBOL_KIND_VARIABLE,
+    # TypeScript type-shaped declarations each carry their own kind rather
+    # than being squeezed into class or variable.
+    "interface_declaration": SYMBOL_KIND_INTERFACE,
+    "enum_declaration": SYMBOL_KIND_ENUM,
+    "type_alias_declaration": SYMBOL_KIND_TYPE_ALIAS,
 }
 
 # Node types holding one or more variable_declarator children.
