@@ -16,6 +16,7 @@ import pytest
 from rey_lib.files.jsonl import read_jsonl_file
 from rey_lib.repository_map.writer import (
     RepositoryMap,
+    content_hash_of,
     compare_repository_maps,
     generate_repository_map,
     write_repository_map,
@@ -227,3 +228,40 @@ def test_dispatcher_facts_reach_the_map_unreviewed(repo: Path, tmp_path: Path) -
 
     assert dispatchers
     assert {d["classification"] for d in dispatchers} == {"unreviewed"}
+
+
+NO_POLICY_RULES = """
+language_by_extension:
+  ".py": Python
+"""
+
+
+def test_a_repository_with_policy_reports_it_as_evaluated(repo: Path, tmp_path: Path) -> None:
+    """Declared rules mean policy ran."""
+    header = generate_repository_map(repo, tmp_path / "map.jsonl").header
+
+    assert header["architecture_policy_status"] == "evaluated"
+
+
+def test_a_repository_without_policy_is_not_configured_not_clean(tmp_path: Path) -> None:
+    """Zero violations without policy must not read as architecture accepted."""
+    root = tmp_path / "bare"
+    root.mkdir()
+    (root / "repository_map.rules.yaml").write_text(NO_POLICY_RULES, encoding="utf-8")
+    (root / "app.py").write_text("import os\n\n\ndef run():\n    os.getcwd()\n", encoding="utf-8")
+    output = tmp_path / "map.jsonl"
+
+    report = generate_repository_map(root, output)
+    kinds = [r["record_type"] for r in report.records]
+
+    assert report.header["architecture_policy_status"] == "not_configured"
+    assert "architecture_violation" not in kinds
+    # Facts are still produced; only policy is absent.
+    assert "symbol" in kinds and "file" in kinds
+
+
+def test_the_policy_status_does_not_enter_the_content_hash(repo: Path, tmp_path: Path) -> None:
+    """A header field must not disturb a fact hash or an existing baseline."""
+    report = generate_repository_map(repo, tmp_path / "map.jsonl")
+
+    assert content_hash_of(report.records) == report.header["content_hash"]

@@ -46,6 +46,8 @@ __all__ = [
     "GENERATOR_VERSION",
     "MapDiff",
     "RepositoryMap",
+    "POLICY_EVALUATED",
+    "POLICY_NOT_CONFIGURED",
     "compare_repository_maps",
     "content_hash_of",
     "generate_repository_map",
@@ -64,6 +66,12 @@ _NON_DETERMINISTIC_HEADER_FIELDS = frozenset({"generated_at", "content_hash"})
 
 # The rules file each repository declares to say how it is scanned.
 _RULES_FILENAME = "repository_map.rules.yaml"
+
+# Whether architectural policy was evaluated for a map. A repository that
+# declares no policy is not thereby architecturally clean, and the two states
+# must never read alike.
+POLICY_EVALUATED = "evaluated"
+POLICY_NOT_CONFIGURED = "not_configured"
 
 
 @dataclass
@@ -219,20 +227,51 @@ def build_repository_map(
     ):
         records.extend(sorted(group, key=lambda record: record["record_id"]))
 
-    header = _header(repo_root, rules_path, records)
+    header = _header(repo_root, rules_path, records, _policy_status(rules))
     return RepositoryMap(header=header, records=records)
 
 
-def _header(repo_root: Path, rules_path: Path, records: list[dict[str, Any]]) -> dict[str, Any]:
+def _policy_status(rules: ScanRules) -> str:
+    """Return whether architectural policy was evaluated for this map.
+
+    Zero violations means one of two very different things: policy ran and
+    found nothing, or no policy exists. Reporting only a count would let the
+    second read as the first.
+
+    Args:
+        rules: The repository's scan rules.
+
+    Returns:
+        POLICY_EVALUATED when any rule family is declared, otherwise
+        POLICY_NOT_CONFIGURED.
+    """
+    declared = (
+        rules.boundary_rules
+        or rules.publication_rules
+        or rules.presence_rules
+        or rules.dispatcher_rules
+    )
+    return POLICY_EVALUATED if declared else POLICY_NOT_CONFIGURED
+
+
+def _header(
+    repo_root: Path,
+    rules_path: Path,
+    records: list[dict[str, Any]],
+    policy_status: str,
+) -> dict[str, Any]:
     """Build the repository_map header record.
 
     Args:
         repo_root: Repository that was scanned.
         rules_path: Path the rules were loaded from.
         records: Every fact record, for the content hash.
+        policy_status: Whether architectural policy was evaluated.
 
     Returns:
-        The header record.
+        The header record. Header fields are excluded from content_hash by
+        construction, so adding one changes no fact and no existing baseline
+        body.
     """
     branch, head_commit, working_tree_status = _git_state(repo_root)
     return {
@@ -246,6 +285,7 @@ def _header(repo_root: Path, rules_path: Path, records: list[dict[str, Any]]) ->
         "working_tree_status": working_tree_status,
         "generator_version": GENERATOR_VERSION,
         "rules_hash": sha256_text(read_text_file(rules_path)),
+        "architecture_policy_status": policy_status,
         "content_hash": content_hash_of(records),
         # rey_lib's only utc_now lives in messaging, which pulls markdown_it and
         # would drag a rendering dependency into a source scanner. Every neutral
