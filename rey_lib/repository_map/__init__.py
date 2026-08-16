@@ -25,6 +25,7 @@ from rey_lib.repository_map.increment_gate import (
     build_agent_handoff,
     diff_architecture_violations,
 )
+from rey_lib.repository_map.writer import validate_map_provenance  # noqa: F401
 from rey_lib.repository_map.migration import (
     MigrationManifest,
     MigrationRow,
@@ -160,6 +161,7 @@ __all__ = [
     "check_architecture_boundaries",
     "diff_architecture_violations",
     "load_migration_manifest",
+    "validate_map_provenance",
     "validate_migration_manifest",
     "verify_retirement_ready",
     "compile_architecture_policy",

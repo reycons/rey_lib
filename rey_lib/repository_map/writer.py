@@ -368,3 +368,56 @@ def compare_repository_maps(old: RepositoryMap, new: RepositoryMap) -> MapDiff:
         changed=tuple(changed),
         unchanged_count=len(old_ids & new_ids) - len(changed),
     )
+
+
+# A detached worktree is the right way to read facts at a known commit and the
+# wrong thing to write a canonical artifact from: the header records where
+# generation ran, not what was scanned. content_hash cannot catch that, because
+# it deliberately covers fact records only and excludes the header.
+DETACHED_BRANCH = "HEAD"
+
+
+def validate_map_provenance(
+    report: RepositoryMap,
+    repository: str,
+    repository_root: Path,
+) -> list[str]:
+    """Return why a generated map does not describe the repository it claims.
+
+    Content integrity and provenance integrity are separate guarantees.
+    verify_generated_map_unedited proves the facts are the ones generated;
+    this proves they were generated from the canonical checkout rather than a
+    scratch copy of it. A map can pass the first and fail this one.
+
+    Args:
+        report: The generated map.
+        repository: The canonical repository name it must describe.
+        repository_root: The canonical checkout it must have been generated from.
+
+    Returns:
+        Problems, empty when the header describes the canonical repository.
+    """
+    problems: list[str] = []
+    header = report.header
+
+    recorded_name = str(header.get("repository", ""))
+    if recorded_name != repository:
+        problems.append(
+            f"Header names repository {recorded_name!r}, expected {repository!r}. A worktree "
+            "generates under its own directory name."
+        )
+
+    recorded_root = str(header.get("repository_root", ""))
+    expected_root = str(repository_root.resolve())
+    if recorded_root != expected_root:
+        problems.append(
+            f"Header records repository_root {recorded_root!r}, expected {expected_root!r}."
+        )
+
+    if str(header.get("branch", "")) == DETACHED_BRANCH:
+        problems.append(
+            "Header records branch 'HEAD', so the map was generated from a detached checkout. "
+            "A canonical artifact must name the branch it describes."
+        )
+
+    return problems
