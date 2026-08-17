@@ -610,7 +610,18 @@ def _add_declarations(raw: dict[str, Any], declared: dict[str, str]) -> None:
 
 
 def _print_namespace(ns: Namespace, indent: int) -> None:
-    """Recursively log a Namespace at DEBUG level, masking secrets."""
+    """Recursively log a Namespace at DEBUG level.
+
+    Every field is printed as it stands. A field that names an environment
+    variable prints that name -- ``password: env.REY_APPS_PASSWORD`` -- which
+    is what the context holds and is safe to read.
+
+    There is no masking here, and none is needed. Masking guessed from a field
+    name was protecting resolved values that the context no longer carries, and
+    a guess is the wrong shape for the job: it hid an ordinary ``key`` while a
+    secret in a field it did not recognise printed in full. What makes this
+    safe now is that there is nothing resolved to print.
+    """
     prefix = "  " * indent
     for key, value in ns.items():
         if isinstance(value, Namespace):
@@ -619,7 +630,4 @@ def _print_namespace(ns: Namespace, indent: int) -> None:
         elif isinstance(value, list):
             _logger.debug("%s%s: [%d item(s)]", prefix, key, len(value))
         else:
-            display = "***" if any(
-                s in key.lower() for s in ("password", "key", "token", "secret")
-            ) else value
-            _logger.debug("%s%s: %s", prefix, key, display)
+            _logger.debug("%s%s: %s", prefix, key, value)

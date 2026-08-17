@@ -15,6 +15,7 @@ __all__ = [
     "InstallationInventory",
     "build_installation_inventory",
     "resolve_workflow_run_action",
+    "to_plain_data",
 ]
 
 
@@ -59,8 +60,8 @@ def build_installation_inventory(ctx: Any) -> InstallationInventory:
     }
     tools = _named_entries(getattr(ctx, "tools", None))
     paths = _path_entries(ctx)
-    logging = _to_plain(getattr(ctx, "logging", None))
-    artifact_settings = _to_plain(getattr(ctx, "artifact_processing", None))
+    logging = to_plain_data(getattr(ctx, "logging", None))
+    artifact_settings = to_plain_data(getattr(ctx, "artifact_processing", None))
     run_actions = _workflow_run_actions(ctx, apps, workflows)
     workflows_by_app = _workflows_by_app(workflows)
 
@@ -136,8 +137,8 @@ def resolve_workflow_run_action(
 def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
     """Return normalized workflow rows from ctx.workflows."""
     rows: list[dict[str, Any]] = []
-    workflows = _to_plain(getattr(ctx, "workflows", None))
-    root_app = _to_plain(getattr(ctx, "app", None))
+    workflows = to_plain_data(getattr(ctx, "workflows", None))
+    root_app = to_plain_data(getattr(ctx, "app", None))
     root_app = root_app if isinstance(root_app, str) else ""
     source_config = str(getattr(ctx, "config_path", "") or "")
 
@@ -183,7 +184,7 @@ def _pipeline_entries(ctx: Any) -> list[dict[str, Any]]:
     Consumes only the canonical list schema (``pipelines: [{name: ...}]``).
     """
     rows: list[dict[str, Any]] = []
-    pipelines = _to_plain(getattr(ctx, "pipelines", None))
+    pipelines = to_plain_data(getattr(ctx, "pipelines", None))
     if pipelines is None:
         return rows
     if not isinstance(pipelines, list):
@@ -358,15 +359,15 @@ def _contract_entries(ctx: Any) -> list[dict[str, Any]]:
     """Find explicit contract_file references already present on the ctx."""
     rows: list[dict[str, Any]] = []
     source_config = str(getattr(ctx, "config_path", "") or "")
-    _collect_contracts(_to_plain(getattr(ctx, "workflows", None)), "workflows", rows, source_config)
+    _collect_contracts(to_plain_data(getattr(ctx, "workflows", None)), "workflows", rows, source_config)
     _collect_contracts(
-        _to_plain(getattr(ctx, "analysis_configs", None)),
+        to_plain_data(getattr(ctx, "analysis_configs", None)),
         "analysis_configs",
         rows,
         source_config,
     )
     _collect_contracts(
-        _to_plain(getattr(ctx, "data_sources", None)),
+        to_plain_data(getattr(ctx, "data_sources", None)),
         "data_sources",
         rows,
         source_config,
@@ -399,7 +400,7 @@ def _collect_contracts(
 
 def _named_entries(value: Any) -> list[dict[str, Any]]:
     """Return normalized named entries from list or mapping config sections."""
-    raw = _to_plain(value)
+    raw = to_plain_data(value)
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, dict)]
     if isinstance(raw, dict):
@@ -619,15 +620,41 @@ def _error(
     }
 
 
-def _to_plain(value: Any) -> Any:
+def to_plain_data(value: Any) -> Any:
+    """Return configuration as plain JSON-safe data.
+
+    The one answer to "serialize this config object", for every surface that
+    hands configuration to something outside the process -- an API response, a
+    Tree payload, an inventory dump. A second normalizer would be a second
+    answer, and the two would drift.
+
+    The conversion is structural and nothing more. It reads no environment and
+    resolves nothing, so a value naming an environment variable comes out as
+    the name it went in as. That is what makes these surfaces safe by
+    construction rather than by a redaction rule applied afterwards: there is
+    no resolved value in a context to leak.
+
+    Parameters
+    ----------
+    value : Any
+        Namespace, mapping, sequence, Path, an object exposing ``to_dict()``,
+        or a scalar.
+
+    Returns
+    -------
+    Any
+        Dicts, lists, strings and scalars only. Sequences become lists so the
+        result is JSON-safe; callers wanting immutability freeze it themselves.
+    """
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return to_plain_data(to_dict())
     if isinstance(value, Namespace):
-        return {k: _to_plain(v) for k, v in value.items()}
-    if isinstance(value, dict):
-        return {k: _to_plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_to_plain(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_to_plain(item) for item in value)
+        return {k: to_plain_data(v) for k, v in value.items()}
+    if isinstance(value, (dict, MappingProxyType)):
+        return {k: to_plain_data(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_plain_data(item) for item in value]
     if isinstance(value, Path):
         return str(value)
     return value
