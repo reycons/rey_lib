@@ -16,6 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+#: How a configuration value names an environment variable rather than holding
+#: its value. Uniform for every field: nothing here decides by name whether a
+#: value is a secret.
+ENV_REFERENCE_PREFIX = "env."
+
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_loader import (
     _ENV_FILE_NAME,
@@ -55,37 +60,6 @@ _LAYER_ROLE = {
     "workflow": "Workflow",
     "runtime": "Runtime",
 }
-
-def inject_secrets(ctx: Namespace, secret_map: dict[str, str]) -> None:
-    """
-    Read secrets from os.environ and inject them into ctx at their target paths.
-
-    Target paths are dot-separated strings that walk Namespace attributes.
-    For dynamic injection (e.g. per-connection FTP passwords) inject directly
-    into the connection Namespace using object.__setattr__ after build_ctx().
-
-    Parameters
-    ----------
-    ctx : Namespace
-        The fully built context object. Modified in-place.
-    secret_map : dict[str, str]
-        Mapping of env var name → dot-separated ctx path.
-        Example: {"ANTHROPIC_API_KEY": "llm.claude.api_key"}
-    """
-    for env_var, dotted_path in secret_map.items():
-        secret_value = os.getenv(env_var, "")
-        if not secret_value:
-            continue
-        parts  = dotted_path.split(".")
-        target = ctx
-        for part in parts[:-1]:
-            try:
-                target = object.__getattribute__(target, part)
-            except AttributeError:
-                target = None
-                break
-        if target is not None:
-            object.__setattr__(target, parts[-1], secret_value)
 
 def build_ctx_from_path(
     config_path: Path,
@@ -219,7 +193,6 @@ def build_ctx_from_path(
     raw = _apply_compatibility_aliases(raw)
     raw = _assemble_ctx_data(raw, config_dir)
     ctx = Namespace(raw)
-    _inject_env_blocks(ctx)
 
     raw_paths = getattr(ctx, "paths", None)
     if isinstance(raw_paths, list):
@@ -493,90 +466,37 @@ def _env_directory(prelim_resolver: Any, config_dir: Path) -> Path:
     return root
 
 
-def _inject_env_blocks(ns: Namespace) -> None:
-    """
-    Recursively scan a Namespace for 'env:' child blocks and inject
-    os.environ values into the parent Namespace.
-
-    Any Namespace with an 'env' attribute is treated as a secret
-    injection map. Each key under 'env' is the target attribute name,
-    each value is the os.environ variable name to read.
-
-    Example YAML:
-        env:
-          password: SQLSERVER_NAVICONTROL_PASSWORD
-
-    Result: parent.password = os.getenv("SQLSERVER_NAVICONTROL_PASSWORD")
-    """
-    for key, value in ns.items():
-        if key == "env" and isinstance(value, Namespace):
-            # value is the env block — parent is the target Namespace.
-            # Walk up handled by caller passing the parent.
-            continue
-        if isinstance(value, Namespace):
-            env_block = getattr(value, "env", None)
-            if isinstance(env_block, Namespace):
-                for attr, env_var in env_block.items():
-                    secret = os.getenv(str(env_var), "")
-                    if secret:
-                        object.__setattr__(value, attr, secret)
-                    else:
-                        _logger.warning(
-                            "Secret not found for '%s' — expected env var '%s' in .env.",
-                            attr, env_var,
-                        )
-            _inject_env_blocks(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, Namespace):
-                    env_block = getattr(item, "env", None)
-                    if isinstance(env_block, Namespace):
-                        for attr, env_var in env_block.items():
-                            secret = os.getenv(str(env_var), "")
-                            if secret:
-                                object.__setattr__(item, attr, secret)
-                            else:
-                                _logger.warning(
-                                    "Secret not found for '%s' — expected env var '%s' in .env.",
-                                    attr, env_var,
-                                )
-                    _inject_env_blocks(item)
-
 def _assemble_ctx_data(raw: dict[str, Any], config_dir: Path) -> dict[str, Any]:
     """Apply the non-file transformations needed before Namespace wrapping."""
-    raw = _resolve_env_references(raw)
+    # Checked first, against what the author wrote: the nested form names its
+    # variable directly and has nothing to declare, so validating after the
+    # rewrite would demand a declaration for it.
+    raw = _check_env_references(raw)
+    raw = _declare_env_references(raw)
     raw = _resolve_paths(raw, config_dir, parent_key="")
     return raw
 
-def _resolve_env_references(raw: dict[str, Any]) -> dict[str, Any]:
-    """Resolve values like 'env.key_name' using top-level env declarations.
+def _check_env_references(raw: dict[str, Any]) -> dict[str, Any]:
+    """Check that every ``env.<name>`` reference names a declared entry.
 
-    Expected top-level format in main config:
+    The reference itself is left exactly as written. Nothing here reads the
+    environment: a value backed by an environment variable is resolved by the
+    subsystem that uses it, at the moment it is used, so the finalized context
+    holds the reference and never the value.
 
-        env:
-          - name: account_encryption_key
-            env_var: ACCOUNT_ENCRYPTION_KEY
-            generate: true
+    That is what makes the context safe to serialize, log or hand to a caller:
+    there is nothing resolved in it to expose. It also means a variable changed
+    after startup is seen by the next consumer that asks for it.
 
-    Any string value exactly matching `env.<name>` is replaced with the
-    corresponding environment variable value.
+    An undeclared reference is still a configuration error, exactly as before --
+    that is a mistake in the configuration and has nothing to do with whether
+    the variable is set.
     """
     env_map = _build_env_reference_map(raw)
     if not env_map:
         return raw
-
-    env_values: dict[str, str] = {}
-    for key_name, env_var in env_map.items():
-        value = os.getenv(env_var, "")
-        if not value:
-            _logger.warning(
-                "Secret not found for '%s' — expected env var '%s' in .env.",
-                key_name,
-                env_var,
-            )
-        env_values[key_name] = value
-
-    return _replace_env_refs(raw, env_values, is_root=True)
+    _assert_env_references_declared(raw, env_map, is_root=True)
+    return raw
 
 def _build_env_reference_map(raw: dict[str, Any]) -> dict[str, str]:
     """Build key_name -> env_var map from top-level env config entries."""
@@ -594,35 +514,112 @@ def _build_env_reference_map(raw: dict[str, Any]) -> dict[str, str]:
             env_map[key_name] = env_var
     return env_map
 
-def _replace_env_refs(
+def _assert_env_references_declared(
     value: Any,
-    env_values: dict[str, str],
+    env_map: dict[str, str],
     *,
     is_root: bool = False,
-) -> Any:
-    """Recursively replace strings matching env.<key_name> with secret values."""
+) -> None:
+    """Walk the raw configuration and refuse a reference nobody declared."""
     if isinstance(value, dict):
-        result: dict[str, Any] = {}
         for key, child in value.items():
-            # Preserve the top-level env declaration block as-is.
+            # The declaration block names the references; it is not one.
             if is_root and key == "env":
-                result[key] = child
-            else:
-                result[key] = _replace_env_refs(child, env_values, is_root=False)
-        return result
+                continue
+            _assert_env_references_declared(child, env_map, is_root=False)
+        return
 
     if isinstance(value, list):
-        return [_replace_env_refs(item, env_values, is_root=False) for item in value]
+        for item in value:
+            _assert_env_references_declared(item, env_map, is_root=False)
+        return
 
-    if isinstance(value, str) and value.startswith("env."):
-        key_name = value[4:]
-        if key_name not in env_values:
+    if isinstance(value, str) and value.startswith(ENV_REFERENCE_PREFIX):
+        name = value[len(ENV_REFERENCE_PREFIX):]
+        if name not in env_map:
             raise ConfigError(
                 f"Unknown env reference '{value}' — no matching key name in top-level env block."
             )
-        return env_values[key_name]
 
-    return value
+
+def _declare_env_references(raw: dict[str, Any]) -> dict[str, Any]:
+    """Turn the nested ``env:`` mapping form into ordinary symbolic references.
+
+    Two spellings exist in configuration. A value may be written directly::
+
+        password: env.REY_APPS_PASSWORD
+
+    or the containing block may carry a map of target attribute to variable::
+
+        env:
+          password: REY_APPS_PASSWORD
+
+    Both mean the same thing, so both end up as the same symbolic string in the
+    finalized context. Rewriting the second form here, before the context is
+    built, is what keeps them uniform -- and what stops the context being
+    modified after construction.
+
+    The two forms name their variable differently, though. The direct form names
+    a *declared entry*, which the top-level ``env`` block maps to a variable::
+
+        env:
+          - name: openai_api_key
+            env_var: FIXTURE_OPENAI_API_KEY
+
+    while the nested form names the variable itself. So the nested form's
+    variable is declared here as well, under its own name. That leaves one rule
+    for whoever resolves these later: every ``env.<name>`` is looked up in the
+    declaration block, and there is no second way a reference can be read.
+    """
+    declared: dict[str, str] = {}
+    result = _rewrite_env_blocks(raw, declared)
+    if declared:
+        _add_declarations(result, declared)
+    return result
+
+
+def _rewrite_env_blocks(raw: Any, declared: dict[str, str]) -> Any:
+    """Rewrite nested ``env:`` maps, recording the variables they name."""
+    if isinstance(raw, dict):
+        block = raw.get("env")
+        result = {key: _rewrite_env_blocks(child, declared) for key, child in raw.items()}
+        # A list under `env` is the declaration block, which names references
+        # rather than assigning them.
+        if isinstance(block, dict):
+            for attr, env_var in block.items():
+                name = str(env_var).strip()
+                if name:
+                    result[attr] = f"{ENV_REFERENCE_PREFIX}{name}"
+                    declared[name] = name
+        return result
+
+    if isinstance(raw, list):
+        return [_rewrite_env_blocks(item, declared) for item in raw]
+
+    return raw
+
+
+def _add_declarations(raw: dict[str, Any], declared: dict[str, str]) -> None:
+    """Add declarations for nested-form variables that have none yet."""
+    entries = raw.get("env")
+    if not isinstance(entries, list):
+        # No declaration block, or the root itself uses the nested form. Either
+        # way there is nothing written here to preserve.
+        entries = []
+    known = {
+        str(entry.get("name", "")).strip()
+        for entry in entries
+        if isinstance(entry, dict)
+    }
+    raw["env"] = [
+        *entries,
+        *(
+            {"name": name, "env_var": env_var, "generate": False}
+            for name, env_var in declared.items()
+            if name not in known
+        ),
+    ]
+
 
 def _print_namespace(ns: Namespace, indent: int) -> None:
     """Recursively log a Namespace at DEBUG level, masking secrets."""

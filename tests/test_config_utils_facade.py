@@ -21,7 +21,6 @@ _PUBLIC_SURFACE = {
     "Namespace": config_namespace,
     "PathResolver": config_paths,
     "build_ctx_from_path": config_context,
-    "inject_secrets": config_context,
     "print_ctx": config_context,
     "record_config_file_references": config_context,
     "parse_yaml": config_loader,

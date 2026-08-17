@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from rey_lib.config.config_context import (
     build_ctx_from_path,
-    inject_secrets,
     print_ctx,
     record_config_file_references,
 )
@@ -47,7 +46,6 @@ from rey_lib.config.provenance import (
 
 __all__ = [
     "build_ctx_from_path",
-    "inject_secrets",
     "print_ctx",
     "record_config_file_references",
     "validate_yaml_file",

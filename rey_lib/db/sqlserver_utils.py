@@ -11,7 +11,7 @@ connection from ctx and passing it here.
 
 Windows Authentication is used when db_cfg.user is absent or empty.
 SQL Server Authentication is used otherwise. Passwords must be injected
-from .env via inject_secrets() before get_connection() is called —
+from the environment by this module before get_connection() connects —
 they are never read from YAML.
 
 Bulk inserts use fast_executemany=True on the pyodbc cursor, which

@@ -1,13 +1,19 @@
-"""Secret resolution through top-level env declarations.
+"""Environment references through top-level env declarations.
 
-Configuration resolution is the single owner of secrets: a profile declares the
-name it wants and receives the value, and no provider reads the environment for
-itself. These use dummy values supplied by the test process, so nothing here
-depends on a .env file or on any real credential.
+A profile declares the name it wants and keeps that name: configuration says
+which variable holds a value, and the subsystem that uses the value reads it at
+the moment it is used. So the finalized context holds references and never
+values, and there is nothing resolved in it to expose.
+
+Loading the installation's .env is separate from that, and still happens during
+the build: it populates the process environment so a consumer has something to
+read later. These use dummy values supplied by the test process, so nothing here
+depends on any real credential.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -61,29 +67,33 @@ def _write(tmp_path: Path, text: str) -> Path:
     return path
 
 
-def test_declared_secrets_reach_the_profile_that_names_them(
+def test_a_profile_keeps_the_reference_it_declared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A profile declares env.<name> and receives that variable's value."""
+    """A profile declares env.<name> and keeps it, set variable or not."""
     monkeypatch.setenv("FIXTURE_OPENAI_API_KEY", "dummy-openai")
     monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
 
     ctx = build_ctx_from_path(_write(tmp_path, _INSTALLATION), app_name="fixture_app")
     profiles = {profile.name: profile for profile in ctx.llm}
 
-    assert profiles["hosted"].api_key == "dummy-openai"
-    assert profiles["gemini"].api_key == "dummy-gemini"
+    assert profiles["hosted"].api_key == "env.openai_api_key"
+    assert profiles["gemini"].api_key == "env.gemini_api_key"
     # A keyless provider keeps its empty key rather than acquiring one.
     assert profiles["local"].api_key == ""
+    # The value was there to be taken, and was not taken.
+    assert "dummy-openai" not in {profile.api_key for profile in ctx.llm}
 
 
-def test_a_missing_variable_resolves_empty_rather_than_leaking_the_reference(
+def test_a_missing_variable_neither_fails_the_build_nor_empties_the_reference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unset variable yields an empty key, never the literal 'env.<name>'.
+    """Nothing is read during the build, so nothing can be missing yet.
 
-    The provider then reports its own missing-credential failure, which is a
-    clearer error than a request carrying 'env.openai_api_key' as the key.
+    The reference stays whole, to be resolved when the provider asks for it --
+    and the provider reports its own missing-credential failure then. An empty
+    key stored here would lose the name and turn a clear failure into a request
+    sent with no credential at all.
     """
     monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
@@ -91,8 +101,7 @@ def test_a_missing_variable_resolves_empty_rather_than_leaking_the_reference(
     ctx = build_ctx_from_path(_write(tmp_path, _INSTALLATION), app_name="fixture_app")
     profiles = {profile.name: profile for profile in ctx.llm}
 
-    assert profiles["hosted"].api_key == ""
-    assert "env." not in profiles["hosted"].api_key
+    assert profiles["hosted"].api_key == "env.openai_api_key"
 
 
 def test_an_undeclared_reference_fails_loudly(
@@ -143,11 +152,12 @@ def test_the_env_file_is_read_from_the_declared_installation_root(
         encoding="utf-8",
     )
 
-    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
-    profiles = {profile.name: profile for profile in ctx.llm}
+    build_ctx_from_path(config_path, app_name="fixture_app")
 
-    assert profiles["hosted"].api_key == "from-installation-root"
-    assert profiles["gemini"].api_key == "gemini-from-root"
+    # Into the process environment, for a consumer to read later; the context
+    # itself holds the reference.
+    assert os.environ["FIXTURE_OPENAI_API_KEY"] == "from-installation-root"
+    assert os.environ["FIXTURE_GEMINI_API_KEY"] == "gemini-from-root"
 
 
 def test_without_a_declared_root_the_config_directory_is_still_used(
@@ -162,10 +172,9 @@ def test_without_a_declared_root_the_config_directory_is_still_used(
         "FIXTURE_OPENAI_API_KEY=beside-the-config\n", encoding="utf-8"
     )
 
-    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
-    profiles = {profile.name: profile for profile in ctx.llm}
+    build_ctx_from_path(config_path, app_name="fixture_app")
 
-    assert profiles["hosted"].api_key == "beside-the-config"
+    assert os.environ["FIXTURE_OPENAI_API_KEY"] == "beside-the-config"
 
 
 def test_a_root_env_file_is_not_read_when_no_root_is_declared(
@@ -180,10 +189,9 @@ def test_a_root_env_file_is_not_read_when_no_root_is_declared(
         "FIXTURE_OPENAI_API_KEY=should-not-be-read\n", encoding="utf-8"
     )
 
-    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
-    profiles = {profile.name: profile for profile in ctx.llm}
+    build_ctx_from_path(config_path, app_name="fixture_app")
 
-    assert profiles["hosted"].api_key == ""
+    assert "FIXTURE_OPENAI_API_KEY" not in os.environ
 
 
 def test_a_real_environment_value_still_wins_over_the_file(
@@ -198,10 +206,9 @@ def test_a_real_environment_value_still_wins_over_the_file(
         "FIXTURE_OPENAI_API_KEY=from-the-file\n", encoding="utf-8"
     )
 
-    ctx = build_ctx_from_path(config_path, app_name="fixture_app")
-    profiles = {profile.name: profile for profile in ctx.llm}
+    build_ctx_from_path(config_path, app_name="fixture_app")
 
-    assert profiles["hosted"].api_key == "from-the-process"
+    assert os.environ["FIXTURE_OPENAI_API_KEY"] == "from-the-process"
 
 
 def test_the_declaration_block_is_not_rewritten_by_resolution(
@@ -216,3 +223,29 @@ def test_the_declaration_block_is_not_rewritten_by_resolution(
 
     assert declared["openai_api_key"] == "FIXTURE_OPENAI_API_KEY"
     assert "dummy-openai" not in declared.values()
+
+
+def test_the_nested_form_declares_the_variable_it_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """So one lookup rule serves both spellings.
+
+    The direct form names a declared entry; the nested form names the variable.
+    Declaring the latter under its own name means whoever resolves a reference
+    later always finds it in the same block, with no second way to read one.
+    """
+    monkeypatch.setenv("FIXTURE_MESSAGING_PASSWORD", "dummy-messaging")
+    nested = _INSTALLATION + """
+messaging:
+  user: someone
+  env:
+    password: FIXTURE_MESSAGING_PASSWORD
+"""
+
+    ctx = build_ctx_from_path(_write(tmp_path, nested), app_name="fixture_app")
+    declared = {entry.name: entry.env_var for entry in ctx.env}
+
+    assert ctx.messaging.password == "env.FIXTURE_MESSAGING_PASSWORD"
+    assert declared["FIXTURE_MESSAGING_PASSWORD"] == "FIXTURE_MESSAGING_PASSWORD"
+    # The declarations written by hand are still there, unchanged.
+    assert declared["openai_api_key"] == "FIXTURE_OPENAI_API_KEY"
