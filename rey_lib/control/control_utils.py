@@ -838,7 +838,7 @@ def _open_connection(ctx: Any) -> Optional[Any]:
         _mark_unavailable(ctx, "control connection config not found")
         return None
     try:
-        return _db.get_connection(conn_cfg)
+        return _db.get_connection(conn_cfg, ctx=ctx)
     except Exception as exc:  # noqa: BLE001
         _mark_unavailable(ctx, str(exc))
         return None

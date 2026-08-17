@@ -10,16 +10,10 @@ order, merge precedence, token resolution, and ctx shape are unchanged.
 
 from __future__ import annotations
 
-import os
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-#: How a configuration value names an environment variable rather than holding
-#: its value. Uniform for every field: nothing here decides by name whether a
-#: value is a secret.
-ENV_REFERENCE_PREFIX = "env."
 
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_loader import (
@@ -38,6 +32,7 @@ from rey_lib.config.config_paths import (
     _build_path_resolver,
     _resolve_paths,
 )
+from rey_lib.config.env_reference import ENV_REFERENCE_PREFIX, declaration_map
 from rey_lib.config.provenance import (
     ConfigMetadata,
     get_config_file_references,
@@ -499,20 +494,13 @@ def _check_env_references(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 def _build_env_reference_map(raw: dict[str, Any]) -> dict[str, str]:
-    """Build key_name -> env_var map from top-level env config entries."""
-    entries = raw.get("env", [])
-    if not isinstance(entries, list):
-        return {}
+    """Build key_name -> env_var map from top-level env config entries.
 
-    env_map: dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        key_name = str(entry.get("name", "")).strip()
-        env_var = str(entry.get("env_var", "")).strip()
-        if key_name and env_var:
-            env_map[key_name] = env_var
-    return env_map
+    Through the same reader the resolver uses, so a reference that validates
+    here is one that resolves later, and a declaration cannot be understood two
+    ways on either side of the build.
+    """
+    return declaration_map(raw.get("env", []))
 
 def _assert_env_references_declared(
     value: Any,

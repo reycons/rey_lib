@@ -57,6 +57,7 @@ from typing import Any, Optional
 
 import pyodbc
 
+from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.logs import get_logger
 
@@ -170,7 +171,7 @@ def init_db(sql_dir: Path) -> None:
     )
 
 
-def get_connection(db_cfg: Any) -> pyodbc.Connection:
+def get_connection(db_cfg: Any, *, ctx: Any = None) -> pyodbc.Connection:
     """
     Return an open pyodbc connection built from a db_cfg Namespace.
 
@@ -192,7 +193,10 @@ def get_connection(db_cfg: Any) -> pyodbc.Connection:
             port      int   — SQL Server port (default 1433)
             timeout   int   — login timeout in seconds (default 30)
             user      str   — optional; omit for Windows Authentication
-            password  str   — optional; injected from .env at startup
+            password  str   — optional; may name an environment variable
+    ctx : Any
+        Application context, needed only to read a credential that names an
+        environment variable. Windows Authentication needs none.
 
     Returns
     -------
@@ -204,7 +208,7 @@ def get_connection(db_cfg: Any) -> pyodbc.Connection:
     DatabaseError
         If all connection attempts are exhausted.
     """
-    conn_str = _build_connection_string(db_cfg)
+    conn_str = _build_connection_string(db_cfg, ctx=ctx)
     timeout  = int(getattr(db_cfg, "timeout", 30))
     return _connect_with_retry(conn_str, timeout)
 
@@ -812,7 +816,7 @@ def _build_odbc_call(proc_name: str, param_count: int) -> str:
     return f"{{CALL {proc_name} ({placeholders})}}"
 
 
-def _build_connection_string(db_cfg: Any) -> str:
+def _build_connection_string(db_cfg: Any, *, ctx: Any = None) -> str:
     """
     Build a pyodbc connection string from a db_cfg Namespace.
 
@@ -821,22 +825,28 @@ def _build_connection_string(db_cfg: Any) -> str:
 
     Supported authentication types:
         trusted_connection  — Windows Authentication (Trusted_Connection=yes)
-        sql_server          — SQL Server Authentication (UID/PWD from .env)
+        sql_server          — SQL Server Authentication (UID/PWD from the
+                              environment, read as the string is built)
 
     Parameters
     ----------
     db_cfg : Any
         Single connection Namespace from ctx.db.connections.
+    ctx : Any
+        Application context, for reading credentials that name environment
+        variables.
 
     Returns
     -------
     str
-        Fully-formed pyodbc connection string.
+        Fully-formed pyodbc connection string. Holds the credential, so it
+        goes straight to the driver and is never logged or stored.
 
     Raises
     ------
     ConfigError
-        If authentication.type is missing or not a recognised value.
+        If authentication.type is missing or not a recognised value, or a
+        credential names an environment variable that cannot be read now.
     """
     host      = str(db_cfg.host)
     port      = int(getattr(db_cfg, "port", 1433))
@@ -858,9 +868,10 @@ def _build_connection_string(db_cfg: Any) -> str:
         return base + "Trusted_Connection=yes;"
 
     if auth_type == "sql_server":
-        # Credentials injected from .env via env: block in YAML — never hardcoded.
-        user     = str(getattr(db_cfg, "user",     "")).strip()
-        password = str(getattr(db_cfg, "password", "")).strip()
+        # Credentials name environment variables in YAML — never hardcoded.
+        # Read here, into the string that opens the connection and nowhere else.
+        user     = str(resolve_env_reference(ctx, getattr(db_cfg, "user",     ""))).strip()
+        password = str(resolve_env_reference(ctx, getattr(db_cfg, "password", ""))).strip()
         return base + f"UID={user};PWD={password};"
 
     raise ConfigError(

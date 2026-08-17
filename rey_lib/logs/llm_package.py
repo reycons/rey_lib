@@ -242,6 +242,7 @@ def _execute_analysis_package(
     import json
 
     from rey_lib.config.ctx import find_in_ctx
+    from rey_lib.config.env_reference import resolve_env_reference
     from rey_lib.llm.envelope import build_envelope_instruction, extract_artifact_envelope
     from rey_lib.llm.exceptions import ConfigurationFailure
     from rey_lib.llm.llm_utils import direct_ask
@@ -265,7 +266,8 @@ def _execute_analysis_package(
         prompt,
         model=profile.model,
         provider=profile.provider,
-        api_key=getattr(profile, "api_key", ""),
+        # Read as the request is built, and carried no further than it.
+        api_key=resolve_env_reference(ctx, getattr(profile, "api_key", "")),
         eval_payload_log_path=Path(_payload_log) if _payload_log else None,
         eval_run_log_path=Path(_run_log) if _run_log else None,
         payload_id=payload_id,
@@ -397,6 +399,7 @@ def run_uncontracted_record_analysis(
     import json
 
     from rey_lib.config.ctx import find_in_ctx
+    from rey_lib.config.env_reference import resolve_env_reference
     from rey_lib.llm.exceptions import ConfigurationFailure
     from rey_lib.llm.llm_utils import direct_ask
 
@@ -425,7 +428,8 @@ def run_uncontracted_record_analysis(
         prompt,
         model=profile.model,
         provider=profile.provider,
-        api_key=getattr(profile, "api_key", ""),
+        # Read as the request is built, and carried no further than it.
+        api_key=resolve_env_reference(ctx, getattr(profile, "api_key", "")),
         eval_payload_log_path=Path(_payload_log) if _payload_log else None,
         eval_run_log_path=Path(_run_log) if _run_log else None,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
@@ -449,7 +453,8 @@ def run_workbench_input_stream(
     The Workbench supplies only the selected execution profile, the instruction
     mode, an instruction value, and the operator's input text. Provider and
     credential resolution stay internal: the profile is resolved from
-    ``ctx.llm_profiles`` (its ``api_key`` already resolved by config) and
+    ``ctx.llm_profiles``, its ``api_key`` read from the environment as this
+    request is built, and
     execution goes through ``runner.run``, so recording and evaluation logging are
     unchanged. When ``on_chunk`` is supplied and the provider supports streaming,
     each response delta is delivered to it as it arrives.
@@ -484,6 +489,7 @@ def run_workbench_input_stream(
     import json
 
     from rey_lib.config.ctx import find_in_ctx
+    from rey_lib.config.env_reference import resolve_env_reference
     from rey_lib.llm.api import RunRequest
     from rey_lib.llm.envelope import build_envelope_instruction
     from rey_lib.llm.exceptions import ConfigurationFailure
@@ -502,7 +508,7 @@ def run_workbench_input_stream(
         "stage_id": "run",
         "provider": str(getattr(profile, "provider", "") or ""),
         "model": str(getattr(profile, "model", "") or ""),
-        "api_key": str(getattr(profile, "api_key", "") or ""),
+        "api_key": str(resolve_env_reference(ctx, getattr(profile, "api_key", "")) or ""),
         "eval_payload_log_path": Path(payload_log) if payload_log else None,
         "eval_run_log_path": Path(run_log) if run_log else None,
         "payload_id": payload_id or None,

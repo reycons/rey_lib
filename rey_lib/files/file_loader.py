@@ -685,7 +685,7 @@ def load_one(ctx: Any, data_source: Any, load_cfg: Any, file_path: Path) -> int:
     transform_cfg = _find_transform(data_source.transforms, load_cfg.name, load_cfg.version)
     schema, table = _parse_destination(load_cfg.load.destination_table)
 
-    conn = _db_adapter.get_connection(db_cfg)
+    conn = _db_adapter.get_connection(db_cfg, ctx=ctx)
     try:
         return _load_one_file(ctx, conn, file_path, transform_cfg, load_cfg,
                               data_source.paths, schema, table)
@@ -786,7 +786,7 @@ def run_load(
                             f"Connection '{conn_name}' not found in ctx.db.connections. "
                             "Check config/db/*.yaml for the connection definition."
                         )
-                    open_conns[conn_name] = _db_adapter.get_connection(db_cfg)
+                    open_conns[conn_name] = _db_adapter.get_connection(db_cfg, ctx=ctx)
                     _logger.debug("Opened connection '%s'", conn_name)
 
                 conn = open_conns[conn_name]
@@ -1122,7 +1122,7 @@ def _execute_one_hook(
                 f"Connection '{conn_name}' not found in ctx.db.connections "
                 f"(referenced by sql_config '{sql_cfg.name}')."
             )
-        open_conns[conn_name] = _db_adapter.get_connection(db_cfg)
+        open_conns[conn_name] = _db_adapter.get_connection(db_cfg, ctx=ctx)
         _logger.debug("Opened connection '%s' for hook '%s'", conn_name, sql_cfg.name)
 
     conn = open_conns[conn_name]
@@ -1601,7 +1601,7 @@ def _write_rejections(
 
 	columns = [col for col, _ in _REJECTION_COLUMN_DEFS]
 	try:
-		with _db_adapter.get_connection(conn_cfg) as conn:
+		with _db_adapter.get_connection(conn_cfg, ctx=ctx) as conn:
 			_db_adapter.create_staging_table_if_not_exists(
 				conn, schema, table, _REJECTION_COLUMN_DEFS
 			)

@@ -91,7 +91,7 @@ def run_sync(ctx: Any, conn: Any, resync: bool = True) -> int:
     all_failed: list[str]     = []
     all_abandoned: list[str]  = []
 
-    with ftp_session(conn.ftp) as session:
+    with ftp_session(conn.ftp, ctx=ctx) as session:
         # ── Pass 1: retry previously failed files regardless of stamp ──────
         if retry_queue:
             remaining = None if max_files is None else max(0, max_files - len(all_downloaded))

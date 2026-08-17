@@ -37,9 +37,10 @@ reaches this module::
         temperature: 0.0
         endpoint: http://localhost:11434
 
-The ``env:`` sub-block is the config_utils secret injection convention.
-By the time ctx reaches this adapter, ctx.llm.claude.api_key is already
-the resolved secret value — no extra injection step is needed.
+The ``env:`` sub-block names the variable holding the key. It reaches this
+adapter as the reference it was written as -- ``ctx.llm.claude.api_key`` is
+``env.ANTHROPIC_API_KEY``, not the key -- and is read here, as the provider is
+constructed, through the one resolver in rey_lib.config.
 
 Public API
 ----------
@@ -51,6 +52,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.llm.exceptions import ConfigurationFailure
 from rey_lib.llm.providers.base import Message
 from rey_lib.llm.providers.registry import resolve as resolve_provider
@@ -67,8 +69,10 @@ def ask_with_ctx(
 ) -> str:
     """Dispatch a prompt using LLM config from a rey_lib application context.
 
-    Reads provider, model, and API key from ctx.llm[llm].  All SDK calls
-    are delegated to the provider abstraction layer — no SDK is imported here.
+    Reads provider, model, and the API key's reference from ctx.llm[llm],
+    resolving the key against the environment as the provider is constructed.
+    All SDK calls are delegated to the provider abstraction layer — no SDK is
+    imported here.
 
     Parameters
     ----------
@@ -92,6 +96,8 @@ def ask_with_ctx(
     ------
     ConfigurationFailure
         If the LLM instance is not found in ctx or the provider is unknown.
+    ConfigError
+        If the API key names an environment variable that cannot be read now.
     ProviderFailure
         If the provider API call fails.
     """
@@ -115,7 +121,7 @@ def ask_with_ctx(
     model = getattr(llm_cfg, "model", None) or (
         llm_cfg.get("model") if hasattr(llm_cfg, "get") else None
     )
-    api_key = getattr(llm_cfg, "api_key", "") or (
+    configured_key = getattr(llm_cfg, "api_key", "") or (
         llm_cfg.get("api_key", "") if hasattr(llm_cfg, "get") else ""
     )
 
@@ -123,16 +129,20 @@ def ask_with_ctx(
         raise ConfigurationFailure(
             f"ctx.llm['{llm}'].provider is not set."
         )
-    if not api_key:
+    if not configured_key:
         raise ConfigurationFailure(
-            f"API key not set for LLM instance '{llm}'. "
-            "Check your .env file."
+            f"API key not configured for LLM instance '{llm}'. "
+            "The profile must name the environment variable holding it."
         )
 
     messages: list[Message] = []
     if system_prompt:
         messages.append(Message(role="system", content=system_prompt))
     messages.append(Message(role="user", content=prompt))
+
+    # Read as the provider is built, so a key rotated since startup is the one
+    # used, and nothing holds it between calls.
+    api_key = resolve_env_reference(ctx, configured_key)
 
     llm_provider = resolve_provider(provider.lower(), api_key=api_key)
     response     = llm_provider.run(

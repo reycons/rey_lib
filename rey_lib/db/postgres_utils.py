@@ -7,8 +7,10 @@ and DDL fallbacks.
 
 Connection details are passed as a Namespace object resolved from ctx at
 call time — this module has no knowledge of ctx structure or application
-config layout. Passwords must be injected from .env before get_connection()
-is called — they are never read from YAML.
+config layout. A password naming an environment variable is read here, as the
+connection is opened, through the one resolver in rey_lib.config; ctx is
+carried for that and is otherwise untouched. Passwords are never read from
+YAML.
 
 psycopg2 is an optional dependency. Install with:
     pip install psycopg2-binary
@@ -18,7 +20,7 @@ match the PostgreSQL distinction between functions and procedures.
 
 Public API
 ----------
-get_connection(db_cfg)
+get_connection(db_cfg, ctx=None)
     Return an internal-compatible Rey connection handle.
 execute_function(conn, routine, named_params)
     Call a PostgreSQL function via SELECT and return the scalar result.
@@ -33,6 +35,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
@@ -70,7 +73,7 @@ def _psycopg2() -> Any:
 # ---------------------------------------------------------------------------
 
 
-def get_connection(db_cfg: Any) -> Any:
+def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
     """
     Open a SQLAlchemy-backed connection from a connection config Namespace.
 
@@ -79,6 +82,10 @@ def get_connection(db_cfg: Any) -> Any:
     db_cfg : Any
         Connection config Namespace. Required fields: host, database, username.
         Optional fields: port (default 5432), password.
+    ctx : Any
+        Application context, needed only to read a password that names an
+        environment variable. A configuration holding its password literally
+        connects without one.
 
     Returns
     -------
@@ -88,7 +95,8 @@ def get_connection(db_cfg: Any) -> Any:
     Raises
     ------
     ConfigError
-        If psycopg2 is not installed or required fields are missing.
+        If psycopg2 is not installed, required fields are missing, or a
+        password names an environment variable that cannot be read now.
     DatabaseError
         If the connection attempt fails.
     """
@@ -117,7 +125,9 @@ def get_connection(db_cfg: Any) -> Any:
             port=int(port),
             database=str(database),
             username=str(username),
-            password=str(password),
+            # Resolved as the connection is opened, and held no longer than
+            # the call that uses it.
+            password=str(resolve_env_reference(ctx, password)),
         )
     except Exception as exc:
         raise DatabaseError(

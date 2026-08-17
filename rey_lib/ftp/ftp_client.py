@@ -11,7 +11,7 @@ paramiko directly.
 
 Public API
 ----------
-ftp_session(ftp_cfg)                    Context manager → Session
+ftp_session(ftp_cfg, ctx=None)          Context manager → Session
 list_remote_files(session, path)        List files with timestamps
 list_remote_dirs(session, path)         List subdirectory names (for glob expansion)
 download_file(session, path, name, dir) Download one file
@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Generator
 
+from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import FtpConnectionError, FtpDownloadError
 from rey_lib.logs import get_logger
 
@@ -56,7 +57,7 @@ class Session:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 @contextmanager
-def ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+def ftp_session(ftp_cfg: Any, *, ctx: Any = None) -> Generator[Session, None, None]:
     """Context manager that yields an authenticated Session.
 
     Dispatches to the correct protocol handler based on ftp_cfg.protocol.
@@ -64,7 +65,10 @@ def ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
 
     Args:
         ftp_cfg: Namespace with host, port, user, password, protocol.
-                 protocol must be 'ftp', 'ftps', or 'sftp'.
+                 protocol must be 'ftp', 'ftps', or 'sftp'. A credential may
+                 name an environment variable rather than hold a value.
+        ctx: Application context, needed only to read such a credential. It is
+             read at login and not kept.
 
     Yields:
         Session wrapping the live connection.
@@ -81,13 +85,13 @@ def ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
     log.debug("→ ftp_session [%s] → %s:%s", protocol, ftp_cfg.host, ftp_cfg.port)
 
     if protocol == "sftp":
-        with _sftp_session(ftp_cfg) as session:
+        with _sftp_session(ftp_cfg, ctx=ctx) as session:
             yield session
     elif protocol == "ftps":
-        with _ftps_session(ftp_cfg) as session:
+        with _ftps_session(ftp_cfg, ctx=ctx) as session:
             yield session
     else:
-        with _ftp_session(ftp_cfg) as session:
+        with _ftp_session(ftp_cfg, ctx=ctx) as session:
             yield session
 
 
@@ -210,13 +214,18 @@ def download_file(
 # ── FTP session ───────────────────────────────────────────────────────────────
 
 @contextmanager
-def _ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+def _ftp_session(ftp_cfg: Any, *, ctx: Any = None) -> Generator[Session, None, None]:
     """Open a plain FTP connection."""
     ftp: ftplib.FTP | None = None
     try:
         ftp = ftplib.FTP()
         ftp.connect(host=ftp_cfg.host, port=int(ftp_cfg.port), timeout=_FTP_TIMEOUT_SECONDS)
-        ftp.login(user=ftp_cfg.user, passwd=ftp_cfg.password)
+        # Read at the login call, straight into it.
+        ftp.login(
+            user=resolve_env_reference(ctx, ftp_cfg.user),
+            passwd=resolve_env_reference(ctx, ftp_cfg.password),
+        )
+        # Logged as configured, so a log carries the reference and not the user.
         log.info("FTP connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
         yield Session(protocol="ftp", conn=ftp)
     except ftplib.all_errors as exc:
@@ -232,13 +241,16 @@ def _ftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
 # ── FTPS session ──────────────────────────────────────────────────────────────
 
 @contextmanager
-def _ftps_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+def _ftps_session(ftp_cfg: Any, *, ctx: Any = None) -> Generator[Session, None, None]:
     """Open an FTP-over-TLS (FTPS) connection."""
     ftp: ftplib.FTP_TLS | None = None
     try:
         ftp = ftplib.FTP_TLS()
         ftp.connect(host=ftp_cfg.host, port=int(ftp_cfg.port), timeout=_FTP_TIMEOUT_SECONDS)
-        ftp.login(user=ftp_cfg.user, passwd=ftp_cfg.password)
+        ftp.login(
+            user=resolve_env_reference(ctx, ftp_cfg.user),
+            passwd=resolve_env_reference(ctx, ftp_cfg.password),
+        )
         # Switch data channel to TLS as well.
         ftp.prot_p()
         log.info("FTPS connected: %s@%s", ftp_cfg.user, ftp_cfg.host)
@@ -256,7 +268,7 @@ def _ftps_session(ftp_cfg: Any) -> Generator[Session, None, None]:
 # ── SFTP session ──────────────────────────────────────────────────────────────
 
 @contextmanager
-def _sftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
+def _sftp_session(ftp_cfg: Any, *, ctx: Any = None) -> Generator[Session, None, None]:
     """Open an SSH/SFTP connection using paramiko."""
     try:
         import paramiko  # noqa: PLC0415 — optional dependency, imported on demand
@@ -274,8 +286,8 @@ def _sftp_session(ftp_cfg: Any) -> Generator[Session, None, None]:
         ssh.connect(
             hostname=ftp_cfg.host,
             port=int(ftp_cfg.port),
-            username=ftp_cfg.user,
-            password=ftp_cfg.password,
+            username=resolve_env_reference(ctx, ftp_cfg.user),
+            password=resolve_env_reference(ctx, ftp_cfg.password),
             timeout=_FTP_TIMEOUT_SECONDS,
             look_for_keys=False,   # skip local SSH key search — use password only
             allow_agent=False,     # skip SSH agent — use password only

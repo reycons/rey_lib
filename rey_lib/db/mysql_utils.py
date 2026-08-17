@@ -16,6 +16,7 @@ from typing import Any, Optional
 import mysql.connector
 from mysql.connector import Error as MySQLError
 
+from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.logs import get_logger
 
@@ -75,9 +76,9 @@ def init_db(sql_dir: Path) -> None:
 	)
 
 
-def get_connection(db_cfg: Any) -> Any:
+def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
 	timeout = int(getattr(db_cfg, "timeout", 30))
-	return _connect_with_retry(db_cfg, timeout)
+	return _connect_with_retry(db_cfg, timeout, ctx=ctx)
 
 
 def fetch_dicts(
@@ -259,7 +260,7 @@ def _require_init() -> None:
 		raise RuntimeError("mysql_utils.init_db() must be called before using the database.")
 
 
-def _connect_with_retry(db_cfg: Any, timeout: int) -> Any:
+def _connect_with_retry(db_cfg: Any, timeout: int, *, ctx: Any = None) -> Any:
 	last_exc: Exception | None = None
 
 	for attempt in range(1, _MAX_CONNECT_ATTEMPTS + 1):
@@ -273,7 +274,9 @@ def _connect_with_retry(db_cfg: Any, timeout: int) -> Any:
 				port=int(getattr(db_cfg, "port", 3306)),
 				database=str(db_cfg.database),
 				username=str(getattr(db_cfg, "user", "")),
-				password=str(getattr(db_cfg, "password", "")),
+				# Resolved as the connection is opened; a retry reads the
+				# environment again rather than reusing what it read.
+				password=str(resolve_env_reference(ctx, getattr(db_cfg, "password", ""))),
 				connect_args={
 					"connection_timeout": timeout,
 					"autocommit": False,

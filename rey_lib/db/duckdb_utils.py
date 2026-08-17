@@ -169,7 +169,7 @@ def init_db(db_path: Path, sql_dir: Path) -> None:
     )
 
 
-def get_connection(db_cfg: Any = None) -> duckdb.DuckDBPyConnection:
+def get_connection(db_cfg: Any = None, *, ctx: Any = None) -> duckdb.DuckDBPyConnection:
     """
     Return an open DuckDB connection for ``db_cfg``.
 
@@ -190,6 +190,10 @@ def get_connection(db_cfg: Any = None) -> duckdb.DuckDBPyConnection:
     ----------
     db_cfg : Any
         A connection config exposing ``database`` and/or ``path``. Optional.
+    ctx : Any
+        Accepted so every backend answers the adapter's call the same way.
+        DuckDB opens a file and takes no credential, so there is nothing here
+        to read from the environment.
 
     Returns
     -------

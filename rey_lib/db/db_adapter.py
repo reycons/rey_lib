@@ -167,7 +167,7 @@ class DBAdapter:
     # Connection
     # ------------------------------------------------------------------
 
-    def get_connection(self, db_cfg: Any) -> Any:
+    def get_connection(self, db_cfg: Any, *, ctx: Any = None) -> Any:
         """
         Open a backend-appropriate connection for ``db_cfg``.
 
@@ -177,6 +177,10 @@ class DBAdapter:
             Connection config Namespace. Must expose a ``provider`` field.
             Falls back to inferring from ``driver`` for backwards compatibility
             with older SQL Server configs that pre-date the provider field.
+        ctx : Any
+            Application context, carried through to the backend so a credential
+            naming an environment variable can be read as the connection opens.
+            Backends needing no credential ignore it.
 
         Returns
         -------
@@ -186,10 +190,11 @@ class DBAdapter:
         Raises
         ------
         ConfigError
-            If the provider is missing, unknown, or cannot be inferred.
+            If the provider is missing, unknown, or cannot be inferred, or a
+            credential names an environment variable that cannot be read now.
         """
         provider = self._provider_for_cfg(db_cfg)
-        conn = _backend(provider).get_connection(db_cfg)
+        conn = _backend(provider).get_connection(db_cfg, ctx=ctx)
         try:
             setattr(conn, "provider", provider)
         except (AttributeError, TypeError):
