@@ -85,7 +85,8 @@ class EvidenceIndex:
 
         wanted = re.compile(
             r"(?:it|test|describe)\s*\(\s*[\"'`]" + re.escape(name)
-            + r"|\b(?:function|const|class|def)\s+" + re.escape(name) + r"\b",
+            + r"|\b(?:function|const|class|def|interface|type|enum)\s+"
+            + re.escape(name) + r"\b",
         )
         for path in candidates:
             if wanted.search(self._files[path]):
