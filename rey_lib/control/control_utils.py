@@ -178,9 +178,12 @@ def start_batch(
     function -- see :func:`_call`.
 
     A batch is a grouping identity: it contains runs and is not one of them.
-    ``pipeline_name`` was a parameter here until the declared map stopped
-    binding it -- a pipeline is one kind of thing a batch may group, and naming
-    it on the batch made the grouping pipeline-shaped.
+    Neither ``run_id`` nor ``pipeline_name`` is supplied. A batch carrying one
+    execution's identity was the encoded assumption that a batch *is* a run;
+    execution identity now lives on the step and event rows, which is where a
+    batch containing several runs can still say which run produced what. A
+    pipeline, likewise, is one kind of thing a batch may group rather than a
+    property of grouping itself.
 
     Parameters
     ----------
@@ -199,7 +202,6 @@ def start_batch(
         batch_id from the database, or None if control is unavailable.
     """
     return _call(ctx, "start_batch", {
-        "run_id":          getattr(ctx, "run_id", None),
         "batch_name":      batch_name,
         "owner_app_name":  owner_app_name or getattr(ctx, "app_name", None),
         "context_jsonb":   context_jsonb,
@@ -281,6 +283,7 @@ def start_step(
     """
     return _call(ctx, "start_step", {
         "batch_id":             getattr(ctx, "batch_id", None),
+        "run_id":               getattr(ctx, "run_id", None),
         "step_sequence":        step_sequence,
         "step_name":            step_name,
         "step_type":            step_type,
@@ -354,6 +357,7 @@ def log_event(
     _call(ctx, "log_event", {
         "batch_id":      getattr(ctx, "batch_id", None),
         "batch_step_id": getattr(ctx, "batch_step_id", None),
+        "run_id":        getattr(ctx, "run_id", None),
         "severity":      severity,
         "event_name":    event_name,
         "message":       message,
