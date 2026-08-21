@@ -128,7 +128,7 @@ class TestBatchStateLivesOnControl:
             return {"outputs": {"batch_id": 7}}
 
         with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
-             patch.object(Control, "_open_connection",
+             patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             control.start_batch(batch_name="nightly")
 
@@ -148,7 +148,7 @@ class TestBatchStateLivesOnControl:
             return {"outputs": {}}
 
         with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
-             patch.object(Control, "_open_connection",
+             patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             control.start_batch(batch_name="nightly")
 

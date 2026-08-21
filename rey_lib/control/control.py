@@ -34,7 +34,6 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import execute_mapped_routine, get_procedure_map
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
@@ -42,7 +41,6 @@ from rey_lib.logs import get_logger
 __all__ = ["Control"]
 
 _logger = get_logger(__name__)
-_db = DBAdapter()
 
 
 def _name_of(record: Any) -> str:
@@ -76,6 +74,8 @@ class Control:
         # object, never back onto the context.
         self.batch_id: Optional[int] = getattr(ctx, "batch_id", None)
         self.batch_step_id: Optional[int] = None
+        # A reference to the shared object, not a config or a raw handle.
+        self.connection = self._resolve_connection()
 
         control_cfg = getattr(ctx, "control", None)
         map_name = getattr(control_cfg, "procedure_map", None)
@@ -155,36 +155,37 @@ class Control:
             name = logging_cfg.get("db_connection")
         return str(name) if name else None
 
-    def _connection_config(self) -> Optional[Any]:
-        """Resolve the control connection config, or None when misconfigured."""
-        from rey_lib.db.procedure_map import resolve_connection_config
+    def _resolve_connection(self) -> Optional[Any]:
+        """Take the shared Connection this control database is reached through.
 
-        connection_name = self._connection_name()
-        if not connection_name:
-            return None
-        try:
-            return resolve_connection_config(self._ctx, connection_name)
-        except ConfigError:
-            return None
-
-    def _open_connection(self, required: bool = False) -> Optional[Any]:
-        """Acquire a connection for one control call.
-
-        Acquisition is unchanged from the procedural implementation this object
-        replaces: obtained per call and closed after it. Control does not own
-        the lifecycle and does not cache, clone or reuse a connection.
+        Looked up by name in the objects built at context composition, so
+        Control references the same instance every other consumer of that name
+        holds. It resolves the object, never a config: opening, reuse and
+        closing belong to Connection.
         """
-        conn_cfg = self._connection_config()
-        if conn_cfg is None:
+        name = self._connection_name()
+        if not name:
+            return None
+        shared = getattr(self._ctx, "shared_connections", None) or {}
+        return shared.get(name)
+
+    def _handle(self, required: bool = False) -> Optional[Any]:
+        """Return the shared connection's live handle, or None when unusable.
+
+        The handle is opened by Connection on first use and reused after.
+        Control never closes it: the object is shared, and a consumer closing
+        it would take the handle from every other holder.
+        """
+        if self.connection is None:
             if required:
                 raise ConfigError(
-                    "control: no connection config for run-log persistence. "
+                    "control: no connection for run-log persistence. "
                     "logging.db_connection must name a connection in connections."
                 )
-            self._mark_unavailable("control connection config not found")
+            self._mark_unavailable("control connection not found")
             return None
         try:
-            return _db.get_connection(conn_cfg, ctx=self._ctx)
+            return self.connection.handle()
         except Exception as exc:  # noqa: BLE001
             if required:
                 raise DatabaseError(
@@ -225,8 +226,7 @@ class Control:
         """Return the configured control DB provider name, or None if disabled."""
         if not self._is_enabled():
             return None
-        conn_cfg = self._connection_config()
-        return getattr(conn_cfg, "provider", None) if conn_cfg else None
+        return self.connection.provider if self.connection else None
 
     # -- identity (read, never minted) --------------------------------------
 
@@ -277,7 +277,7 @@ class Control:
         if not required and not self._is_available():
             return None
 
-        conn = self._open_connection(required=required)
+        conn = self._handle(required=required)
         if conn is None:
             return None
 
@@ -303,11 +303,8 @@ class Control:
                 ) from exc
             self._mark_unavailable(f"unexpected error in '{action_name}': {exc}")
             return None
-        finally:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+        # No close: the Connection is shared and outlives this call. Its
+        # lifetime belongs to runtime shutdown, not to one control routine.
 
     # -- batch --------------------------------------------------------------
 
