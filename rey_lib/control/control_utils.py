@@ -34,8 +34,10 @@ ctx.logging.db_connection                   str   (which connection the run stor
                                                    is written to)
 ctx.db_connections                          list  (named connection records)
 ctx.run_id                                  str   (set by ensure_run_id)
-ctx.batch_id                                int | None  (set by start_batch)
-ctx.batch_step_id                           int | None  (set by start_step)
+ctx.batch_id                                int | None  (bound by the map's
+                                                   output.load_to_ctx during start_batch)
+ctx.batch_step_id                           int | None  (bound by the map's
+                                                   output.load_to_ctx during start_step)
 ctx.control_available                       bool  (set False on failure)
 """
 
@@ -170,7 +172,10 @@ def start_batch(
     context_jsonb: Optional[dict[str, Any]] = None,
 ) -> Optional[int]:
     """
-    Register a new batch and store the returned batch_id on ctx.
+    Register a new batch; the map binds the returned batch_id onto ctx.
+
+    Placement is declared by the binding's ``output.load_to_ctx``, not by this
+    function -- see :func:`_call`.
 
     A batch is a grouping identity: it contains runs and is not one of them.
     ``pipeline_name`` was a parameter here until the declared map stopped
@@ -198,7 +203,7 @@ def start_batch(
         "batch_name":      batch_name,
         "owner_app_name":  owner_app_name or getattr(ctx, "app_name", None),
         "context_jsonb":   context_jsonb,
-    }, set_ctx="batch_id")
+    })
 
 
 def end_batch(
@@ -245,7 +250,10 @@ def start_step(
     context_jsonb: Optional[dict[str, Any]] = None,
 ) -> Optional[int]:
     """
-    Register a new batch step and store the returned batch_step_id on ctx.
+    Register a new batch step; the map binds the returned batch_step_id onto ctx.
+
+    Placement is declared by the binding's ``output.load_to_ctx``, not by this
+    function -- see :func:`_call`.
 
     Parameters
     ----------
@@ -280,7 +288,7 @@ def start_step(
         "git_commit_hash":      git_commit_hash,
         "parent_batch_step_id": parent_batch_step_id,
         "context_jsonb":        context_jsonb,
-    }, set_ctx="batch_step_id")
+    })
 
 
 def end_step(
@@ -893,13 +901,20 @@ def _call(
     ctx: Any,
     action_name: str,
     variables: dict[str, Any],
-    set_ctx: Optional[str] = None,
 ) -> Optional[Any]:
     """
     Core dispatcher — check availability, open connection, call action.
 
     Catches all control failures, marks control unavailable, and returns
     None so the calling app can continue without the control database.
+
+    Result placement belongs to the procedure map, not here. A binding's
+    ``output.load_to_ctx`` declares which Rey field a routine's result lands
+    in, which is the half of the installation adapter that translates an
+    external return value back into Rey's vocabulary -- an installation whose
+    routine returns ``job_group_key`` still binds it to ``batch_id`` in YAML,
+    with no Python change. This dispatcher writing the same field a second
+    time added a Python-side owner for a decision the map already declares.
 
     Parameters
     ----------
@@ -909,8 +924,6 @@ def _call(
         Control action name.
     variables : dict[str, Any]
         Rey internal variable name → value for this call.
-    set_ctx : str, optional
-        When provided, stores the return value on ctx under this name.
 
     Returns
     -------
@@ -935,10 +948,7 @@ def _call(
             routine_name=action_name, values=variables, run_ctx=ctx,
         )
         outputs = result.get("outputs") or {}
-        scalar = next(iter(outputs.values()), None)
-        if set_ctx is not None and scalar is not None:
-            setattr(ctx, set_ctx, scalar)
-        return scalar
+        return next(iter(outputs.values()), None)
 
     except (ConfigError, DatabaseError) as exc:
         _mark_unavailable(ctx, str(exc))
