@@ -30,6 +30,7 @@ from rey_lib.logs.evidence_projection import (
     render_run_view,
     render_summary_view,
     run_summary,
+    runs_in_run_log,
 )
 from rey_lib.logs.summary import create_results_summary, finalize_run_log
 from rey_lib.logs.nest_level import (
@@ -110,6 +111,7 @@ __all__ = [
     "project_run_log",
     "discover_runs",
     "run_summary",
+    "runs_in_run_log",
     "get_run_section",
     "get_run_file_reference",
     "read_jsonl_records",

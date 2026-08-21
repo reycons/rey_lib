@@ -858,12 +858,28 @@ _RUN_SECTION_NAMES = (
 _RUN_FILE_SUBGROUPS = ("input_files", "config_files", "file_operations", "artifacts")
 
 
-def run_summary(path: Path | str) -> dict[str, Any]:
-    """Return one run's discovery summary — identity and counts, no raw records.
+class RunLogIdentityError(Exception):
+    """A run log cannot be identified because a record carries no run identity.
 
-    This is the per-run row for run discovery (SGC_Rey_Run_Backend_Helper_API): the
-    run identity, started/completed timestamps, status, warning/error counts, and
-    the run-log path. It never returns raw log data.
+    Every durable run record carries a ``run_id``. One that does not is
+    malformed, and is reported rather than tolerated: reading it as history from
+    before identity was stamped would let a broken writer pass silently for as
+    long as nobody noticed the runs were missing from the tree.
+    """
+
+
+def run_summary(path: Path | str) -> dict[str, Any]:
+    """Return one top-level execution's discovery summary — identity and counts.
+
+    This is the per-artifact row for run discovery (SGC_Rey_Run_Backend_Helper_API):
+    the top-level run identity, started/completed timestamps, status,
+    warning/error counts, and the run-log path. It never returns raw log data.
+
+    One row per log, not one per run. A pipeline and its steps share a log, so
+    ``run_id`` is the top-level run and the counts are tree-wide -- every warning
+    and error written to the artifact, by any run in it. The runs inside a log
+    are enumerated by :func:`runs_in_run_log`, which is the reader for the
+    execution tree; this one stays a summary of the artifact.
     """
     payload = read_run_log_sections(path)
     identity = _run_log_identity(Path(payload["path"]), payload["records"], payload["sections"])
@@ -880,6 +896,87 @@ def run_summary(path: Path | str) -> dict[str, Any]:
         "pipeline": identity["pipeline"],
         "run_log_path": identity["log_path"],
     }
+
+
+def runs_in_run_log(path: Path | str) -> list[dict[str, Any]]:
+    """Return every run inside one run log, in the order each first appears.
+
+    The reader for the execution tree. A pipeline and every step it spawns share
+    one log, each run minting its own ``run_id`` and naming its ``parent_run_id``,
+    so the tree is rebuilt by walking parents:
+
+        R100  pipeline
+        |-- R101  workflow
+        |   +-- R102  app
+        +-- R104  app
+
+    A run with no ``parent_run_id`` is a root -- normally one per log, the
+    execution the log is the artifact of.
+
+    Raises :class:`RunLogIdentityError` on a record with no ``run_id``. Every
+    durable run record carries one, so a record without it is malformed and is
+    reported rather than passed over.
+
+    Counts here are each run's own, unlike :func:`run_summary`, whose counts are
+    tree-wide for the whole artifact. Both are correct answers to different
+    questions, which is why this does not replace it.
+
+    Parameters
+    ----------
+    path : Path | str
+        The run log to read.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One row per run: ``run_id``, ``parent_run_id``, subject identity,
+        status, first and last timestamps, and that run's own warning and error
+        counts. Empty when the log holds no identified run.
+    """
+    payload = read_run_log_sections(path)
+    runs: dict[str, dict[str, Any]] = {}
+    for record in payload["records"]:
+        run_id = str(record.get("run_id") or "")
+        if not run_id:
+            # Not skipped. A record with no identity cannot be placed in a tree
+            # keyed on identity, and passing over it would hide a malformed
+            # writer behind a tree that merely looks smaller than it is.
+            raise RunLogIdentityError(
+                f"Run log record carries no run_id: {path}. Every durable run "
+                "record carries one."
+            )
+        run = runs.get(run_id)
+        if run is None:
+            run = {
+                "run_id": run_id,
+                "parent_run_id": str(record.get("parent_run_id") or ""),
+                "subject_type": str(record.get("subject_type") or ""),
+                "subject_id": str(record.get("subject_id") or ""),
+                "subject_name": str(record.get("subject_name") or ""),
+                "app": str(record.get("app") or ""),
+                "workflow": str(record.get("workflow_name") or ""),
+                "pipeline": str(record.get("pipeline_name") or ""),
+                "started_at": str(record.get("timestamp") or ""),
+                "completed_at": "",
+                "status": "",
+                "warning_count": 0,
+                "error_count": 0,
+            }
+            runs[run_id] = run
+        record_type = str(record.get("record_type") or "").upper()
+        if record_type == "WARNING":
+            run["warning_count"] += 1
+        elif record_type == "ERROR":
+            run["error_count"] += 1
+        elif record_type == "RUN_COMPLETE":
+            run["completed_at"] = str(record.get("timestamp") or "")
+            run["status"] = str(record.get("status") or "")
+        # Lineage and subject arrive on every record, but a run's first record is
+        # not guaranteed to carry them all -- fill any still unknown.
+        for field in ("parent_run_id", "subject_type", "subject_id", "subject_name"):
+            if not run[field] and record.get(field):
+                run[field] = str(record[field])
+    return list(runs.values())
 
 
 def discover_runs(log_dir: Path | str, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -1294,11 +1391,43 @@ def _dedupe_file_entries(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[str, Any]) -> dict[str, Any]:
-    first = records[0] if records else {}
+    """Return the identity of the **top-level execution** this log is the artifact of.
+
+    One run log is one top-level execution artifact, not one run. A pipeline and
+    every step it spawns share a log: the child inherits ``run_log_path`` and
+    mints its own ``run_id``, so several runs appear in one file, linked by
+    ``parent_run_id``.
+
+    So ``run_id`` here is the top-level run -- the one the parent opened the log
+    with, taken from the first record -- and never "the only run in this file".
+    To enumerate the runs inside a log and rebuild the execution tree, use
+    :func:`runs_in_run_log`; this function deliberately answers one row per
+    artifact and must not be overloaded to answer per run.
+
+    ``warning_count`` and ``error_count`` are **tree-wide aggregates**: every
+    warning and error written to this log, by the top-level run and by every
+    child beneath it. That is the count for the execution as a whole, which is
+    what a reader of a run artifact is asking for, and it is not the top-level
+    run's own count.
+    """
+    if not records:
+        raise RunLogIdentityError(f"Run log holds no records: {path}")
+    first = records[0]
+    top_level_run_id = str(first.get("run_id") or "")
+    if not top_level_run_id:
+        raise RunLogIdentityError(
+            f"Run log's first record carries no run_id: {path}. Every durable run "
+            "record carries one; a record without it is malformed, not legacy."
+        )
+    # The completion belonging to the top-level run, matched by id rather than
+    # taken as the last one written. Children write their own RUN_COMPLETE, and
+    # relying on the parent finishing last made the reported status depend on
+    # completion ordering rather than on identity.
     complete = next(
         (
             record for record in reversed(records)
             if str(record.get("record_type") or "").upper() == "RUN_COMPLETE"
+            and str(record.get("run_id") or "") == top_level_run_id
         ),
         {},
     )
@@ -1311,7 +1440,8 @@ def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[
         if str(record.get("record_type") or "").upper() == "ERROR"
     )
     return {
-        "run_id": str(first.get("run_id") or ""),
+        # The top-level run this artifact belongs to. See the docstring above.
+        "run_id": top_level_run_id,
         "run_timestamp": str(first.get("run_timestamp") or _timestamp_from_run_log_name(path)),
         "run_started_at": str(first.get("run_started_at") or first.get("timestamp") or ""),
         "run_completed_at": str(complete.get("timestamp") or ""),

@@ -76,6 +76,7 @@ from rey_lib.logs.log_utils import (
     render_summary_view,
     resolve_run_identity,
     run_summary,
+    runs_in_run_log,
     setup_logging,
 )
 from rey_lib.logs.log_utils import (
@@ -177,6 +178,7 @@ __all__ = [
     "project_run_log",
     "discover_runs",
     "run_summary",
+    "runs_in_run_log",
     "get_run_section",
     "get_run_file_reference",
     "read_jsonl_records",

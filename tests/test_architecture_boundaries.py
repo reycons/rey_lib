@@ -99,6 +99,36 @@ def test_logging_routes_through_the_logging_owner(violations) -> None:
     assert offenders == []
 
 
+def test_run_identity_has_one_owner(violations) -> None:
+    """The logging layer consumes a run identity and never mints one.
+
+    One execution, one run_id, minted once in rey_lib.run.identity. A second
+    minting site is how a process handle and a durable record end up describing
+    one execution under two names, leaving a reader to correlate them by name
+    and start time -- which is what the Console did before this.
+
+    record_enrichment minted the run id when this policy was declared and was
+    corrected: it now delegates to rey_lib.run.identity and no longer imports
+    uuid at all.
+
+    Scoped to the logging layer rather than to rey_lib, because uuid4
+    legitimately produces error_id, message_id, operation_id, profile_id and
+    approval_id elsewhere. A rule wide enough to catch those would need seven
+    exemptions, which is the grandfather list this policy refuses to be.
+
+    execution_records is exempt because it mints failure_record_id -- the
+    identity of an error record, not of a run. A different owner, not an
+    uncorrected site.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == "run_identity_has_one_owner"
+    ]
+
+    assert offenders == []
+
+
 def test_the_exemption_list_names_only_the_implementation_layer() -> None:
     """One exemption, and it is the module that cannot route through itself.
 

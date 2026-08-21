@@ -83,6 +83,29 @@ architecture_rules:
     edge_kinds:
       - call
 
+  # One execution, one run_id, minted once. rey_lib.run.identity is that site;
+  # the logging layer consumes a run identity and does not decide one. A second
+  # minting site is how a process handle and a durable record end up describing
+  # one execution under two names, leaving a reader to correlate them by name
+  # and start time.
+  #
+  # Scoped to the logging layer rather than to rey_lib, because uuid4 legitimately
+  # produces error_id, message_id, operation_id, profile_id and approval_id
+  # elsewhere. A rule wide enough to catch those would need seven exemptions,
+  # which is the grandfather list the rule above refuses to be.
+  #
+  # execution_records mints failure_record_id — the identity of an error record,
+  # not of a run. A different owner, not an uncorrected site.
+  - rule_id: run_identity_has_one_owner
+    forbidden_target_globs:
+      - uuid.uuid4
+    allowed_path_globs:
+      - "rey_lib/logs/execution_records.py"
+    scope_path_globs:
+      - "rey_lib/logs/*"
+    edge_kinds:
+      - call
+
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
   - ".py"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,21 +41,17 @@ FILES_RECORD_SUBGROUP = {
 
 def resolve_run_identity(ctx: Any) -> None:
     """
-    Ensure the runtime context carries the standard run identity fields
-    (SGC_Rey_Run_ID_Standard), created once, before logging starts.
+    Ensure the runtime context carries the standard run identity before logging
+    starts (SGC_Rey_Run_ID_Standard).
 
-    Sets three fields on ``ctx`` when absent and leaves existing values untouched so
-    the identity is stable for the whole execution:
+    Logging consumes a run identity; it does not decide one. Minting lives in
+    :func:`rey_lib.run.identity.establish_run_identity`, which is the single site
+    a ``run_id`` is created -- a second one is how a process handle and a durable
+    record end up describing one execution under two names.
 
-    - ``run_id``         : UUID string — the authoritative execution identity.
-    - ``run_timestamp``  : ``YYYYMMDD_HHMMSS`` — human-readable, filename-safe,
-      time-sortable; used for artifact filenames and operator display.
-    - ``run_started_at`` : ISO-8601 start time with timezone offset — the full
-      timestamp preserved separately from the filename-safe id.
-
-    The timestamp is taken from local system time made timezone-aware, so the offset
-    is recorded even when no runtime timezone is configured. Identity (``run_id``)
-    and display (``run_timestamp``) are intentionally separate.
+    Kept as the name every caller here already uses, so the move is a change of
+    owner rather than a change of call site. Imported inside the function because
+    ``rey_lib.run`` reads run logs through this package.
 
     Parameters
     ----------
@@ -67,12 +62,9 @@ def resolve_run_identity(ctx: Any) -> None:
     -------
     None
     """
-    if not getattr(ctx, "run_id", None):
-        ctx.run_id = str(uuid.uuid4())
-    if not getattr(ctx, "run_timestamp", None):
-        started = datetime.now().astimezone()
-        ctx.run_timestamp = started.strftime("%Y%m%d_%H%M%S")
-        ctx.run_started_at = started.isoformat()
+    from rey_lib.run.identity import establish_run_identity  # noqa: PLC0415
+
+    establish_run_identity(ctx)
 
 
 def _execution_name(ctx: Any) -> str:
@@ -193,6 +185,66 @@ def sanitize_command_arguments(arguments: list[Any] | tuple[Any, ...]) -> list[s
     return sanitized
 
 
+#: The canonical run lineage every durable record carries, so the execution tree
+#: is readable from the log itself rather than reconstructed from runtime state.
+#:
+#: Deliberately generic. Lineage is ``run_id -> parent_run_id -> parent_run_id``
+#: and nothing else, so from any leaf the root is reached by walking parents:
+#:
+#:     R100  pipeline
+#:     |-- R101  workflow
+#:     |   |-- R102  app
+#:     |   +-- R103  app
+#:     +-- R104  app
+#:
+#: What a run is *of* lives in its subject, not in the lineage. That is what lets
+#: FTP, SQL, AI, external apps and kinds not yet imagined nest without the
+#: contract growing a ``<kind>_run_id`` every time a new nesting type appears.
+#:
+#: ``parent_run_id`` is explicit rather than derived. "Nearest enclosing run" is
+#: semantic, not structural: with parallel children, or a kind that nests two
+#: levels, inferring parentage from a set of enclosing identities is ambiguous.
+RUN_LINEAGE_FIELDS: tuple[str, ...] = (
+    "parent_run_id",
+    "subject_type",
+    "subject_id",
+    "subject_name",
+)
+
+#: Domain identities that are **not** canonical lineage.
+#:
+#: Kept because existing log readers depend on them, and because
+#: ``pipeline_run_id`` is the one enclosing run identity the estate already
+#: computes -- recording it distinguishes two runs of the same pipeline for those
+#: readers. New work reads lineage above; this is legacy domain metadata and
+#: nothing should be added to it.
+RUN_DOMAIN_FIELDS: tuple[str, ...] = (
+    "pipeline_run_id",
+    "workflow_run_id",
+    "pipeline_id",
+    "workflow_id",
+)
+
+
+def _lineage_value(ctx: Any, field: str) -> str:
+    """Return one lineage value from the context, or empty when it has none.
+
+    ``pipeline_run_id`` is read from ``ctx.runtime`` as well as from the context
+    itself: pipeline_coordinator stamps it there, and it is the one enclosing
+    run identity the estate already computes.
+    """
+    value = getattr(ctx, field, None)
+    if value:
+        return str(value)
+    runtime = getattr(ctx, "runtime", None)
+    if runtime is None:
+        return ""
+    found = getattr(runtime, field, None)
+    if found is None and isinstance(runtime, dict):
+        found = runtime.get(field)
+    return str(found) if found else ""
+
+
 def _base_record(ctx: Any, record_type: str, message: str) -> dict[str, Any]:
     """Build the shared typed-record envelope before event fields are merged."""
     record: dict[str, Any] = {
@@ -214,6 +266,13 @@ def _base_record(ctx: Any, record_type: str, message: str) -> dict[str, Any]:
         value = getattr(ctx, key, None)
         if value:
             record[key] = str(value)
+    # Lineage and domain metadata, stamped rather than supplied: no caller adds
+    # these, so a record cannot be written without the tree it belongs to.
+    # Absent values are left off exactly as an absent attribute already is.
+    for key in (*RUN_LINEAGE_FIELDS, *RUN_DOMAIN_FIELDS):
+        found = _lineage_value(ctx, key)
+        if found:
+            record[key] = found
     if message:
         record["message"] = message
     return record
@@ -352,14 +411,22 @@ def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
     """
     identity: dict[str, str] = {
         key: "" for key in
-        ("owner_app_name", "app_name", "name", "workflow_name", "pipeline_name")
+        ("owner_app_name", "app_name", "name", "workflow_name", "pipeline_name",
+         *RUN_LINEAGE_FIELDS, *RUN_DOMAIN_FIELDS)
     }
     if ctx is not None:
         run_log_path = str(getattr(ctx, "run_log_path", "") or run_log_path)
         run_id = str(getattr(ctx, "run_id", "") or run_id)
         run_timestamp = str(getattr(ctx, "run_timestamp", "") or run_timestamp)
         for key in identity:
-            identity[key] = str(getattr(ctx, key, "") or "")
+            # Lineage is resolved rather than read: the enclosing pipeline run
+            # is stamped on ctx.runtime, so a plain attribute read would bind a
+            # run whose ambient records lack the tree its own records carry.
+            identity[key] = (
+                _lineage_value(ctx, key)
+                if key in RUN_LINEAGE_FIELDS or key in RUN_DOMAIN_FIELDS
+                else str(getattr(ctx, key, "") or "")
+            )
     if not run_log_path:
         return
     _CURRENT_RUN["run"] = SimpleNamespace(
