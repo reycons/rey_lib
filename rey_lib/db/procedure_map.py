@@ -393,6 +393,7 @@ def execute_mapped_routine(
     routine_name: str,
     values: dict[str, Any],
     run_ctx: Any = None,
+    map_cfg: Any = None,
 ) -> dict[str, Any]:
     """Execute one mapped routine (function/procedure) and capture its output.
 
@@ -400,9 +401,20 @@ def execute_mapped_routine(
     ``result_mode`` (``scalar_result`` -> function/SELECT; ``no_return`` ->
     procedure/CALL), and stores a captured scalar via ``output``.
     ``dataset_result`` for a routine is not supported — use a mapped_sql binding.
+
+    ``map_cfg`` lets a caller that already holds the resolved map supply it
+    rather than have it looked up on ``ctx`` again. That is not a shortcut: an
+    owner which has taken a map off the context is the only place it still
+    exists, so the lookup would fail. ``ctx`` is still used for logging
+    evidence, which is why the two are separate parameters.
+
+    ``run_ctx`` is the binding target -- the object ``input`` reads unsupplied
+    values from and ``output.load_to_ctx`` writes results onto. It is not
+    required to be the application context.
     """
-    binding = resolve_routine_binding(get_procedure_map(ctx, procedure_map),
-                                      procedure_map, routine_name)
+    binding = resolve_routine_binding(
+        map_cfg if map_cfg is not None else get_procedure_map(ctx, procedure_map),
+        procedure_map, routine_name)
     named_params = _bind_inputs(binding["inputs"], values, run_ctx,
                                 procedure_map, routine_name)
     result_mode = binding["result_mode"]

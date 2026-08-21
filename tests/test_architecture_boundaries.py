@@ -157,27 +157,25 @@ def test_logging_does_not_reach_up_into_run(violations) -> None:
     assert offenders == []
 
 
-def test_control_logging_is_reached_only_through_logs(violations) -> None:
-    """The run/batch/step/event control routines are entered from rey_lib.logs.
+def test_control_is_reached_only_through_logs(violations) -> None:
+    """Control is the control database, and holding it is how control is reached.
 
     logs owns persistence orchestration; control owns the database operations
     behind it. The hop between them is the architecture, not overhead: it is
     what keeps a change of run store localized, and what stops an application
     recording a run straight into the control database.
 
-    Named routine by routine rather than as the whole of rey_lib.control. That
-    package also owns artifacts, contracts, config snapshots and run_logged_sql,
-    which are unrelated capabilities with their own legitimate callers -- a rule
-    wide enough to cover them would forbid uses this boundary has no opinion
-    about. The first version of this rule was that wide and was narrowed before
-    it ever guarded anything.
+    The boundary moved to construction when the procedural surface became one
+    object. The earlier version of this rule named the five run/batch/step/event
+    functions; as methods they can no longer be matched that way, because a
+    call on a local variable is matched by that variable's name rather than by
+    the owner. Taking the object is the single point every use passes through.
 
-    This rule currently corrects nothing, and that is worth stating plainly
-    rather than reading as a clean result. control_utils has no production
-    consumer at all -- the layering described in its own header is intended and
-    unwired, so the seam it guards is one still to be built. The guard is
-    declared now so the first caller written is the sanctioned one, instead of
-    the shortcut being discovered later with callers already depending on it.
+    That widens it, and the widening is real rather than incidental: Control
+    also carries artifacts, contracts and config snapshots, which this boundary
+    has no opinion about. None has a production caller today, so the rule costs
+    nothing now and will fire on the first one -- the review this policy asks
+    for, not a failure.
 
     Scoped to rey_lib because this policy governs this repository. The same
     prohibition on applications, the Runner, workflow and pipeline code is not
@@ -186,7 +184,7 @@ def test_control_logging_is_reached_only_through_logs(violations) -> None:
     offenders = [
         f"{v.source_path}:{v.source_line} -> {v.callee}"
         for v in violations
-        if v.rule_id == "control_logging_is_reached_only_through_logs"
+        if v.rule_id == "control_is_reached_only_through_logs"
     ]
 
     assert offenders == []

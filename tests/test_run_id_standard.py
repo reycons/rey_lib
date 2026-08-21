@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.control.control_utils import ensure_run_id, ensure_run_timestamp
 from rey_lib.files.file_utils import run_artifact_path
 from rey_lib.logs import log_run_record, require_run_id
 from rey_lib.logs.logging_setup import setup_logging
@@ -77,15 +76,21 @@ def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:
 
 
 def test_ensure_helpers_share_one_identity() -> None:
-    """ensure_run_id and ensure_run_timestamp return the shared ctx fields.
+    """Control reads the identity the launch boundary established.
 
-    Control reads the identity the launch boundary established; it does not
-    reach upward to have one minted.
+    It does not reach upward to have one minted, and it does not hold one of
+    its own: both values are read from the context every time.
     """
-    ctx = SimpleNamespace()
+    from rey_lib.control import Control
+
+    ctx = SimpleNamespace(
+        control=SimpleNamespace(procedure_map="control"),
+        procedure_maps=[SimpleNamespace(name="control", routine_bindings=[])],
+    )
     establish_run_identity(ctx)
-    run_id = ensure_run_id(ctx)
-    run_timestamp = ensure_run_timestamp(ctx)
+    control = Control(ctx)
+    run_id = control.run_id()
+    run_timestamp = control.run_timestamp()
     assert run_id == ctx.run_id
     assert run_timestamp == ctx.run_timestamp
     uuid.UUID(run_id)

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from rey_lib.control import control_utils
+from rey_lib.control import Control
 from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
 from rey_lib.logs import log_run_complete, log_run_start, log_step_end, log_step_start
 from rey_lib.run.identity import establish_run_identity
@@ -31,20 +31,34 @@ def control_calls(monkeypatch) -> list[tuple[str, dict, bool]]:
     """Record every control routine invocation, standing in for the database."""
     calls: list[tuple[str, dict, bool]] = []
 
-    def _fake(ctx: Any, action_name: str, variables: dict,
+    def _fake(self, action_name: str, variables: dict,
               required: bool = False) -> Any:
         calls.append((action_name, variables, required))
-        # The map's load_to_ctx binds ids; emulate that one effect.
+        # The map's load_to_ctx binds ids onto Control; emulate that one effect.
         if action_name == "start_batch":
-            ctx.batch_id = 7
+            self.batch_id = 7
             return 7
         if action_name == "start_step":
-            ctx.batch_step_id = 70
+            self.batch_step_id = 70
             return 70
         return None
 
-    monkeypatch.setattr(control_utils, "_call", _fake)
+    monkeypatch.setattr(Control, "_call", _fake)
     return calls
+
+
+def _control_map() -> SimpleNamespace:
+    """A routine-only control map, as both installations declare it."""
+    return SimpleNamespace(
+        name="control",
+        routine_bindings=[SimpleNamespace(
+            name="start_batch", routine="control.f_start_batch",
+            result_mode="scalar_result",
+            inputs={"p_batch_name": "batch_name"},
+            output={"variable": "batch_id", "load_to_ctx": "batch_id"},
+        )],
+        sql_bindings=None,
+    )
 
 
 def _ctx(tmp_path: Path, run_store: str, **extra: Any) -> SimpleNamespace:
@@ -55,6 +69,7 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any) -> SimpleNamespace:
         app_name="rey_loader",
         logging=SimpleNamespace(run_store=run_store, db_connection="control"),
         control=SimpleNamespace(procedure_map="control", enabled=False),
+        procedure_maps=[_control_map(), SimpleNamespace(name="rey_loader")],
         **extra,
     )
     establish_run_identity(ctx)
@@ -153,10 +168,10 @@ class TestBothMode:
         assert [r["record_type"] for r in _records(ctx)] == ["RUN_START"]
 
     def test_a_db_failure_under_both_is_surfaced(self, tmp_path, monkeypatch) -> None:
-        def _boom(ctx, action_name, variables, required=False):
+        def _boom(self, action_name, variables, required=False):
             raise DatabaseError("control unreachable")
 
-        monkeypatch.setattr(control_utils, "_call", _boom)
+        monkeypatch.setattr(Control, "_call", _boom)
         ctx = _ctx(tmp_path, "both")
 
         with pytest.raises(DatabaseError):
@@ -196,7 +211,7 @@ class TestBatchIntent:
         log_run_start(ctx, operation="scan")
 
         assert "start_batch" in _actions(control_calls)
-        assert ctx.batch_id == 7
+        assert ctx.control_api.batch_id == 7
 
     def test_explicit_new_batch_creates_a_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db", new_batch=True)
@@ -211,7 +226,7 @@ class TestBatchIntent:
         log_run_start(ctx, operation="scan")
 
         assert "start_batch" not in _actions(control_calls)
-        assert ctx.batch_id == 99
+        assert ctx.control_api.batch_id == 99
 
     def test_new_batch_false_without_a_batch_is_rejected(self, tmp_path,
                                                          control_calls) -> None:
@@ -241,7 +256,8 @@ class TestOneBatchManyRuns:
         log_run_start(first, operation="scan")
         log_step_start(first, "extract", 1)
 
-        second = _ctx(tmp_path, "db", new_batch=False, batch_id=first.batch_id)
+        second = _ctx(tmp_path, "db", new_batch=False,
+                      batch_id=first.control_api.batch_id)
         log_run_start(second, operation="scan")
         log_step_start(second, "extract", 1)
 
@@ -274,16 +290,16 @@ class TestOneBatchManyRuns:
 class TestIdsArriveThroughTheMap:
     """Result placement is the procedure map's, not Python's."""
 
-    def test_batch_and_step_ids_are_not_written_by_control_utils(self, tmp_path,
+    def test_batch_and_step_ids_are_not_written_by_control(self, tmp_path,
                                                                  monkeypatch) -> None:
         """With load_to_ctx not emulated, nothing else writes the ids."""
         seen: list[str] = []
 
-        def _fake(ctx, action_name, variables, required=False):
+        def _fake(self, action_name, variables, required=False):
             seen.append(action_name)
-            return 7  # a scalar returned, but no ctx placement
+            return 7  # a scalar returned, but no placement onto Control
 
-        monkeypatch.setattr(control_utils, "_call", _fake)
+        monkeypatch.setattr(Control, "_call", _fake)
         ctx = _ctx(tmp_path, "db")
 
         # start_batch returning a scalar without the map binding it is a run

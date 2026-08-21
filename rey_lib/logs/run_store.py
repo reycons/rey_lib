@@ -26,7 +26,7 @@ failing under ``jsonl`` behaves exactly as it always has.
 Layering
 --------
 This module is the logs layer's persistence orchestration. It calls
-``control_utils`` and nothing beneath it -- never a procedure map, never a DB
+``Control`` and nothing beneath it -- never a procedure map, never a DB
 adapter -- and it never reaches up into ``rey_lib.run``. Run identity arrives on
 the context, already established at the launch boundary.
 """
@@ -195,11 +195,25 @@ def require_jsonl_record(ctx: Any, record_id: Optional[int], record_type: str) -
 # ---------------------------------------------------------------------------
 
 
-def _control() -> Any:
-    """Return the control module, imported late to avoid an import cycle."""
-    from rey_lib.control import control_utils
+def _control(ctx: Any) -> Any:
+    """Return this run's Control, constructing it once.
 
-    return control_utils
+    Control takes the ``control`` procedure map off the context when it is
+    built, so a second construction would find nothing to take. It is therefore
+    made once and kept for the run, which is also what lets ``batch_id`` and
+    ``batch_step_id`` persist across the lifecycle calls that follow.
+
+    Imported late: rey_lib.control imports rey_lib.logs for its logger, so a
+    module-level import here would close a cycle.
+    """
+    existing = getattr(ctx, "control_api", None)
+    if existing is not None:
+        return existing
+
+    from rey_lib.control import Control
+
+    ctx.control_api = Control(ctx)
+    return ctx.control_api
 
 
 def persist_run_start(ctx: Any, **fields: Any) -> None:
@@ -217,21 +231,20 @@ def persist_run_start(ctx: Any, **fields: Any) -> None:
     if not writes_db(ctx):
         return
 
-    control = _control()
+    control = _control(ctx)
     if new_batch_intent(ctx):
         control.start_batch(
-            ctx,
             batch_name=str(fields.get("operation") or getattr(ctx, "app_name", "") or "run"),
             required=True,
         )
-        if not getattr(ctx, "batch_id", None):
+        if not control.batch_id:
             raise _errors().StateError(
                 "control start_batch returned no batch_id. The run store cannot "
                 "record steps or events without the batch that groups them."
             )
         ctx.batch_owned_by_run = True
     else:
-        if not getattr(ctx, "batch_id", None):
+        if not control.batch_id:
             raise _errors().ConfigError(
                 "newBatch is false but no batch_id is bound to reuse. A batch is "
                 "never manufactured to satisfy a reuse request."
@@ -239,7 +252,6 @@ def persist_run_start(ctx: Any, **fields: Any) -> None:
         ctx.batch_owned_by_run = False
 
     control.log_event(
-        ctx,
         severity="INFO",
         event_name="RUN_START",
         message=str(fields.get("message") or "run started"),
@@ -252,8 +264,7 @@ def persist_step_start(ctx: Any, step_name: str, step_sequence: int,
     """Open a control step for this run; the map binds ctx.batch_step_id."""
     if not writes_db(ctx):
         return
-    _control().start_step(
-        ctx,
+    _control(ctx).start_step(
         step_name=step_name,
         step_sequence=step_sequence,
         step_type=step_type or None,
@@ -266,9 +277,10 @@ def persist_step_end(ctx: Any, step_name: str, status: str,
     """Close the open control step."""
     if not writes_db(ctx):
         return
-    _control().end_step(ctx, status=status, message=message or None, required=True)
+    control = _control(ctx)
+    control.end_step(status=status, message=message or None, required=True)
     # The step is closed; later events belong to the run, not to it.
-    ctx.batch_step_id = None
+    control.batch_step_id = None
 
 
 def persist_run_complete(ctx: Any, status: str, message: str = "", **fields: Any) -> None:
@@ -281,16 +293,15 @@ def persist_run_complete(ctx: Any, status: str, message: str = "", **fields: Any
     if not writes_db(ctx):
         return
 
-    control = _control()
+    control = _control(ctx)
     control.log_event(
-        ctx,
         severity="INFO" if status == "success" else "ERROR",
         event_name="RUN_COMPLETE",
         message=message or status,
         required=True,
     )
     if getattr(ctx, "batch_owned_by_run", False):
-        control.end_batch(ctx, status=status,
+        control.end_batch(status=status,
                           error_message=None if status == "success" else (message or status),
                           required=True)
 
@@ -304,6 +315,6 @@ def persist_event(ctx: Any, severity: str, event_name: str, message: str,
     """
     if not writes_db(ctx):
         return
-    _control().log_event(
-        ctx, severity=severity, event_name=event_name, message=message, required=True,
+    _control(ctx).log_event(
+        severity=severity, event_name=event_name, message=message, required=True,
     )

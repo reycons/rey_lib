@@ -123,35 +123,44 @@ architecture_rules:
       - import
       - re_export
 
-  # The run/batch/step/event control routines are the DB half of run logging, so
-  # rey_lib.logs is their only sanctioned caller: logs owns persistence
+  # Control is the control database, and holding it is how control is reached.
+  # The run/batch/step/event routines it exposes are the DB half of run logging,
+  # so rey_lib.logs is their only sanctioned caller: logs owns persistence
   # orchestration, control owns the database operations. The extra hop is the
-  # architecture -- it is what localizes a future change of run store, and what
+  # architecture -- it is what keeps a change of run store localized, and what
   # stops an app recording a run straight into the control database.
   #
-  # Named routine by routine rather than as the whole of rey_lib.control, which
-  # also owns artifacts, contracts, config snapshots and run_logged_sql. Those
-  # are unrelated capabilities with their own legitimate callers, and a rule wide
-  # enough to cover them would forbid uses this boundary has no opinion about.
+  # The boundary moved to construction when the procedural surface was replaced
+  # by one object. Naming the five routines no longer works: they are methods
+  # now, and a call on a local variable is matched by that variable's name
+  # rather than by the owner. Taking the object is the one point every use
+  # passes through, so that is what is guarded.
+  #
+  # Consequence worth knowing: Control also carries artifacts, contracts and
+  # config snapshots, which this boundary has no opinion about. They have no
+  # production caller today, so the rule costs nothing now and will fire on the
+  # first one -- which is the review this policy asks for, not a failure.
+  #
+  # The package is allowed to reference itself: __init__ re-exporting its own
+  # submodule is not a boundary crossing, and excluding it would make the rule
+  # about file layout rather than about who reaches control.
   #
   # Scoped to rey_lib because this policy governs this repository. The same
   # prohibition on applications, the Runner, workflow and pipeline code is not
   # enforceable from here; it belongs in each repository's own rules.
-  - rule_id: control_logging_is_reached_only_through_logs
+  - rule_id: control_is_reached_only_through_logs
     forbidden_target_globs:
-      - "*control_utils.start_batch"
-      - "*control_utils.end_batch"
-      - "*control_utils.start_step"
-      - "*control_utils.end_step"
-      - "*control_utils.log_event"
+      - "rey_lib.control"
+      - "rey_lib.control.*"
+      - "rey_lib/control/*"
     allowed_path_globs:
       - "rey_lib/logs/*"
+      - "rey_lib/control/*"
     scope_path_globs:
       - "rey_lib/*"
     edge_kinds:
       - import
       - re_export
-      - call
 
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
