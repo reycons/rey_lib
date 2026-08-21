@@ -162,6 +162,40 @@ architecture_rules:
       - import
       - re_export
 
+  # One Connection per configured connection, shared by every consumer that
+  # names it. Opening is how that is undone: a caller reaching DBAdapter
+  # directly gets a second handle to the same database, and neither holder
+  # knows about the other. Connection is the one place a handle is created.
+  #
+  # DBAdapter.get_connection is kept, not deleted -- Connection is built on it.
+  # The rule names its single legitimate caller rather than removing the
+  # mechanism, which is why this is a boundary and not a deletion.
+  #
+  # Scoped to rey_lib because this policy governs this repository. The same
+  # prohibition on applications and the Console is not enforceable from here;
+  # it belongs in each repository's own rules, and each has a guard test.
+  - rule_id: connections_are_opened_only_by_connection
+    forbidden_target_globs:
+      # Every shape, not a list of the spellings in use today. A named
+      # instance, a module-level adapter and DBAdapter().get_connection are
+      # the same act, and a rule enumerating receivers misses the next one.
+      - "*get_connection"
+    allowed_path_globs:
+      - "rey_lib/db/connection.py"
+      # The adapter dispatching to its own provider backend is the mechanism
+      # Connection is built on, not a second way in.
+      - "rey_lib/db/db_adapter.py"
+      # Deferred, not an owner. file_loader's rejection writer resolves its
+      # connection from sql_configs rather than from any connection registry,
+      # so repointing it would change which record it uses -- a behaviour
+      # change, not a migration. It is the single remaining direct caller and
+      # this entry is expected to be removed, not to accumulate company.
+      - "rey_lib/files/file_loader.py"
+    scope_path_globs:
+      - "rey_lib/*"
+    edge_kinds:
+      - call
+
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
   - ".py"

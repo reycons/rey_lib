@@ -831,7 +831,7 @@ def _build_connection_string(db_cfg: Any, *, ctx: Any = None) -> str:
     Parameters
     ----------
     db_cfg : Any
-        Single connection Namespace from ctx.db.connections.
+        Single connection Namespace from the configured connections.
     ctx : Any
         Application context, for reading credentials that name environment
         variables.

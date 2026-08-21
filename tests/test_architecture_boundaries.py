@@ -190,6 +190,39 @@ def test_control_is_reached_only_through_logs(violations) -> None:
     assert offenders == []
 
 
+def test_connections_are_opened_only_by_connection(violations) -> None:
+    """A database handle is created in one place.
+
+    One Connection per configured connection, shared by every consumer that
+    names it. Opening directly is how that is undone: the caller gets a second
+    handle to the same database and neither holder knows about the other, which
+    is the state this objectification removed.
+
+    DBAdapter.get_connection is deliberately kept. Connection is built on it,
+    so the rule names its single legitimate caller instead of deleting the
+    mechanism -- a boundary, not a removal.
+
+    Eleven production sites called it directly when this policy was declared
+    and were migrated: file_loader, control, rey_loader, rey_db_admin,
+    rey_console and console_next. The four outside this repository are guarded
+    by their own tests, since this policy only reaches rey_lib.
+
+    One exemption, and it is a deferred migration rather than an owner.
+    file_loader's rejection writer resolves its connection from sql_configs
+    rather than from any connection registry, so repointing it would change
+    which record it uses -- a behaviour change, not a migration. It is the
+    single remaining direct caller, it is expected to be removed rather than
+    joined, and it is not evidence of the target architecture.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == "connections_are_opened_only_by_connection"
+    ]
+
+    assert offenders == []
+
+
 def test_the_exemption_list_names_only_the_implementation_layer() -> None:
     """One exemption, and it is the module that cannot route through itself.
 

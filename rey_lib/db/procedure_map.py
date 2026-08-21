@@ -57,7 +57,6 @@ from rey_lib.logs import log_sql_execution
 
 __all__ = [
     "get_procedure_map",
-    "resolve_connection_config",
     "resolve_routine_binding",
     "resolve_sql_binding",
     "execute_mapped_routine",
@@ -88,8 +87,9 @@ def get_procedure_map(ctx: Any, map_name: str) -> Any:
     """Return the named operation-map record from ``ctx.procedure_maps``.
 
     A map is a routine contract and nothing else. It declares which routines
-    exist and how they are called; **which database they run on is the caller's**,
-    resolved through :func:`resolve_connection_config`.
+    exist and how they are called; **which database they run on is the
+    caller's**, taken as a shared ``Connection`` through
+    ``rey_lib.db.connection.shared_connection``.
 
     Raises
     ------
@@ -119,55 +119,6 @@ def get_procedure_map(ctx: Any, map_name: str) -> Any:
             "and name the connection where the routine is called."
         )
     return found
-
-
-def resolve_connection_config(ctx: Any, connection_name: str) -> Any:
-    """Resolve one named ``db_connections`` record.
-
-    A procedure map is a routine contract and says nothing about which database
-    those routines run on. The caller chooses the connection and names it here,
-    so one map can be run against a second control database -- a test instance,
-    another installation -- without duplicating its bindings under a different
-    binding.
-
-    Replaces ``get_connection_config(ctx, map_name)``, which answered the same
-    question through the map. Renamed rather than repurposed: a caller still
-    passing a map name would otherwise resolve a connection that happens to share
-    the map's name, which is silent and exactly what this separation removes.
-
-    Parameters
-    ----------
-    ctx : Any
-        Application context carrying ``db_connections``.
-    connection_name : str
-        The connection to resolve, as ``connections[].name``.
-
-    Returns
-    -------
-    Any
-        The connection record.
-
-    Raises
-    ------
-    ConfigError
-        If no connection name was given, ``ctx.db_connections`` is absent, or the
-        named connection is not found.
-    """
-    if not connection_name:
-        raise ConfigError("procedure_map: no connection name was given to resolve.")
-    conns = getattr(ctx, "db_connections", None)
-    if not conns:
-        raise ConfigError(
-            "procedure_map: ctx.db_connections is not configured. "
-            "Add db_settings.yaml to the config include path."
-        )
-    conn_cfg = find_by_name(list(conns), str(connection_name))
-    if conn_cfg is None:
-        raise ConfigError(
-            f"procedure_map: connection '{connection_name}' not found in "
-            "ctx.db_connections."
-        )
-    return conn_cfg
 
 
 # ---------------------------------------------------------------------------
