@@ -31,6 +31,9 @@ Public API
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from typing import Iterator
+
 from pathlib import Path
 from typing import Optional
 
@@ -39,8 +42,9 @@ from rey_lib.errors.error_utils import ConfigError, install_process_error_bounda
 from rey_lib.logs import setup_logging
 from rey_lib.db.connection import build_connections
 from rey_lib.run import establish_run_identity
+from rey_lib.runtime import collect_runtime, register_runtime_object
 
-__all__ = ["build_ctx_for_app"]
+__all__ = ["build_ctx_for_app", "app_runtime"]
 
 
 def build_ctx_for_app(
@@ -100,8 +104,12 @@ def build_ctx_for_app(
 
     # One Connection per configured connection, built once here so every
     # consumer that later names one receives the same instance rather than
-    # opening its own.
+    # opening its own. Each is registered for final collection: no consumer
+    # may close a shared object, so the boundary that created them owns the
+    # last close.
     ctx.shared_connections = build_connections(ctx)
+    for connection in ctx.shared_connections.values():
+        register_runtime_object(ctx, connection)
 
     setup_logging(ctx, operation=operation)
     install_process_error_boundary(ctx)
@@ -128,3 +136,36 @@ def _resolve_ctx(
             )
 
     return build_ctx_from_path(config_path, app_name=app_name, project_root=project_root)
+
+
+@contextmanager
+def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
+    """Compose the launch context and collect its shared objects when done.
+
+    The standard entry point for an application process:
+
+        with app_runtime(config_path, app_name, operation) as ctx:
+            ...application work...
+
+    Takes the same arguments as :func:`build_ctx_for_app` and yields the same
+    context. What it adds is the other end: the shared objects composition
+    created are closed when the block exits, however it exits.
+
+    Collection lives here rather than in ``run_app_operation`` because that
+    helper also wraps nested sub-app operations, and collecting there would
+    close connections the surrounding run is still using. A process has one
+    end; this is it.
+
+    A cleanup failure is raised only when the application block succeeded. If
+    the block is already failing, the failure is reported and the original
+    exception continues -- cleanup never replaces the error that ended the run.
+    """
+    ctx = build_ctx_for_app(*args, **kwargs)
+    failed = False
+    try:
+        yield ctx
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        collect_runtime(ctx, suppress=failed)
