@@ -41,6 +41,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from rey_lib.db.connection import shared_connection
 from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
 from rey_lib.logs.log_utils import (
     get_logger,
@@ -676,24 +677,14 @@ def load_one(ctx: Any, data_source: Any, load_cfg: Any, file_path: Path) -> int:
             f"load.connection is not set for load '{getattr(load_cfg, 'name', '?')}' "
             f"in data source '{getattr(data_source, 'name', '?')}'."
         )
-    db_cfg = find_by_name(getattr(getattr(ctx, "db", None), "connections", []), conn_name)
-    if db_cfg is None:
-        raise ConfigError(
-            f"Connection '{conn_name}' not found in ctx.db.connections."
-        )
-
     transform_cfg = _find_transform(data_source.transforms, load_cfg.name, load_cfg.version)
     schema, table = _parse_destination(load_cfg.load.destination_table)
 
-    conn = _db_adapter.get_connection(db_cfg, ctx=ctx)
-    try:
-        return _load_one_file(ctx, conn, file_path, transform_cfg, load_cfg,
-                              data_source.paths, schema, table)
-    finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001 — close must never raise
-            pass
+    # The shared Connection is not closed here: it outlives this load and is
+    # held by every other consumer of the same name.
+    conn = shared_connection(ctx, str(conn_name)).handle()
+    return _load_one_file(ctx, conn, file_path, transform_cfg, load_cfg,
+                          data_source.paths, schema, table)
 
 
 def run_load(
@@ -705,7 +696,7 @@ def run_load(
 
     Iterates ``ctx.data_sources`` and each ``loads`` entry. For each load
     config the connection named by ``load_cfg.load.connection`` is resolved
-    from ``ctx.db.connections`` and opened automatically — no connection
+    from the shared connections and reused — no connection
     management in the caller. Connections are reused when multiple load
     configs within the same data source share the same connection name,
     and are all closed after that data source's ``post_load_sql`` files
@@ -735,7 +726,7 @@ def run_load(
     ctx : Any
         Application context. Must have:
         - ``ctx.data_sources`` — iterable of data source Namespaces
-        - ``ctx.db.connections`` — list of named connection Namespaces
+        - ``ctx.shared_connections`` — one Connection per configured name
 
     sql_dir : Optional[Path]
         Base directory for resolving ``post_load_sql`` file names and
@@ -777,17 +768,8 @@ def run_load(
                     )
 
                 if conn_name not in open_conns:
-                    db_cfg = find_by_name(
-                        getattr(getattr(ctx, "db", None), "connections", []),
-                        conn_name,
-                    )
-                    if db_cfg is None:
-                        raise ConfigError(
-                            f"Connection '{conn_name}' not found in ctx.db.connections. "
-                            "Check config/db/*.yaml for the connection definition."
-                        )
-                    open_conns[conn_name] = _db_adapter.get_connection(db_cfg, ctx=ctx)
-                    _logger.debug("Opened connection '%s'", conn_name)
+                    open_conns[conn_name] = shared_connection(ctx, conn_name).handle()
+                    _logger.debug("Using shared connection '%s'", conn_name)
 
                 conn = open_conns[conn_name]
                 last_conn = conn
@@ -800,13 +782,11 @@ def run_load(
                 _execute_post_load_sql(ctx, last_conn, data_source, sql_dir)
 
         finally:
-            # Always close every connection opened for this data source.
-            for conn_name, conn in open_conns.items():
-                try:
-                    conn.close()
-                    _logger.debug("Closed connection '%s'", conn_name)
-                except Exception:  # noqa: BLE001 — close must never raise
-                    pass
+            # Nothing is closed here. These are shared Connections held by every
+            # other consumer of the same name; closing one at the end of a data
+            # source would take the handle from all of them. Their lifetime
+            # belongs to runtime shutdown.
+            open_conns.clear()
 
     return total
 
@@ -1113,17 +1093,9 @@ def _execute_one_hook(
 
     # Resolve and cache the connection.
     if conn_name not in open_conns:
-        db_cfg = find_by_name(
-            getattr(getattr(ctx, "db", None), "connections", []),
-            conn_name,
-        )
-        if db_cfg is None:
-            raise ConfigError(
-                f"Connection '{conn_name}' not found in ctx.db.connections "
-                f"(referenced by sql_config '{sql_cfg.name}')."
-            )
-        open_conns[conn_name] = _db_adapter.get_connection(db_cfg, ctx=ctx)
-        _logger.debug("Opened connection '%s' for hook '%s'", conn_name, sql_cfg.name)
+        open_conns[conn_name] = shared_connection(ctx, conn_name).handle()
+        _logger.debug("Using shared connection '%s' for hook '%s'",
+                      conn_name, sql_cfg.name)
 
     conn = open_conns[conn_name]
     hook_type = getattr(sql_cfg, "type", "procedure")
@@ -1482,12 +1454,14 @@ note:: this function must call a configure stored procedure or sql file. no DDL 
             )
             expanded_any = True
     finally:
+        # Committed but not closed: the commit is this work's transaction, the
+        # connection is shared and outlives it.
         for conn in open_conns.values():
             try:
                 conn.commit()
-                conn.close()
-            except Exception:  # noqa: BLE001 — close must never raise
+            except Exception:  # noqa: BLE001 — commit must never mask the error above
                 pass
+        open_conns.clear()
 
     return expanded_any
 

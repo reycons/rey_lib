@@ -39,7 +39,7 @@ from typing import Any, Optional
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError
 
-__all__ = ["Connection", "build_connections"]
+__all__ = ["Connection", "build_connections", "shared_connection"]
 
 _db = DBAdapter()
 
@@ -163,3 +163,33 @@ def build_connections(ctx: Any) -> dict[str, Connection]:
             )
         built[connection.name] = connection
     return built
+
+
+def shared_connection(ctx: Any, name: str) -> Connection:
+    """Return the shared Connection named ``name``.
+
+    The one lookup surface for consumers. Nothing resolves a connection config
+    or opens a handle itself: naming a connection yields the object every other
+    consumer of that name already holds.
+
+    Raises
+    ------
+    ConfigError
+        When no connection is configured under that name, or the shared
+        connections were never built for this context.
+    """
+    if not name:
+        raise ConfigError("connection: no connection name was given.")
+
+    shared = getattr(ctx, "shared_connections", None)
+    if not shared:
+        raise ConfigError(
+            "connection: shared connections are not built on this context. They "
+            "are created once at composition by build_ctx_for_app."
+        )
+    if name not in shared:
+        raise ConfigError(
+            f"connection: '{name}' is not configured. Known connections: "
+            f"{', '.join(sorted(shared)) or 'none'}."
+        )
+    return shared[name]
