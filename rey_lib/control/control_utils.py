@@ -49,7 +49,11 @@ from rey_lib.logs import get_logger
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
-from rey_lib.db.procedure_map import execute_mapped_routine, resolve_connection_config
+from rey_lib.db.procedure_map import (
+    execute_mapped_routine,
+    get_procedure_map,
+    resolve_connection_config,
+)
 
 __all__ = [
     "ensure_run_id",
@@ -835,6 +839,45 @@ def _map_name(ctx: Any) -> Optional[str]:
     return getattr(control_cfg, "procedure_map", None) or None
 
 
+def _refuse_sql_bindings(ctx: Any, map_name: str) -> None:
+    """Refuse a control map that declares SQL bindings.
+
+    The control database is written through stored routines and nothing else.
+    A map's ``sql_bindings`` carry SQL text that the generic executor runs
+    directly, which is a legitimate mechanism for application databases and
+    never for this one: it would put an INSERT into a control table in a
+    configuration file, outside the routines that own those tables.
+
+    Checked here rather than in ``procedure_map`` because the rule is a control
+    rule. A map is a routine contract and does not know which database its
+    routines run on, so it cannot know that this one is special.
+
+    Raises
+    ------
+    ConfigError
+        When the named control map declares any SQL binding.
+    """
+    try:
+        map_cfg = get_procedure_map(ctx, map_name)
+    except ConfigError:
+        return  # Resolution failures are reported by the caller's own path.
+
+    bindings = getattr(map_cfg, "sql_bindings", None)
+    if bindings is None and isinstance(map_cfg, dict):
+        bindings = map_cfg.get("sql_bindings")
+    if bindings:
+        names = [
+            str(getattr(b, "name", None) or (b.get("name") if isinstance(b, dict) else b))
+            for b in bindings
+        ]
+        raise ConfigError(
+            f"control: procedure map '{map_name}' declares sql_bindings "
+            f"({', '.join(names)}). The control database is written through "
+            "stored routines only; move the statement into a routine and "
+            "declare it under routine_bindings."
+        )
+
+
 def _connection_name(ctx: Any) -> Optional[str]:
     """Return the connection logging writes its run store to, or None.
 
@@ -941,6 +984,11 @@ def _call(
     if not map_name:
         _mark_unavailable(ctx, "ctx.control.procedure_map is not set")
         return None
+
+    # A control map carrying SQL text is a configuration error, not a control
+    # outage: it is raised rather than routed through _mark_unavailable, which
+    # would degrade to "control unavailable" and hide the misconfiguration.
+    _refuse_sql_bindings(ctx, map_name)
 
     conn = _open_connection(ctx)
     if conn is None:

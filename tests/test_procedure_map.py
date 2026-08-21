@@ -72,7 +72,7 @@ def _map(*routine_bindings, sql_bindings=None):
     return m
 
 
-def _sb(name="start_batch", sql="INSERT INTO control.batch VALUES (:run_id) RETURNING batch_id",
+def _sb(name="load_staging", sql="INSERT INTO staging VALUES (:row_key) RETURNING staging_id",
         result_mode="scalar_result", output=None, inp=None):
     binding = {"name": name, "execution_target": "mapped_sql", "sql": sql,
                "result_mode": result_mode}
@@ -177,12 +177,12 @@ def test_legacy_actions_normalize_inside_db_utils():
 # ---------------------------------------------------------------------------
 
 def test_sql_binding_lookup():
-    m = {"name": "control", "sql_bindings": [
-        _sb(name="start_batch", sql="INSERT ... RETURNING batch_id",
-            result_mode="scalar_result", output={"variable": "batch_id"})]}
-    b = resolve_sql_binding(m, "control", "start_batch")
+    m = {"name": "rey_loader", "sql_bindings": [
+        _sb(name="load_staging", sql="INSERT ... RETURNING staging_id",
+            result_mode="scalar_result", output={"variable": "staging_id"})]}
+    b = resolve_sql_binding(m, "rey_loader", "load_staging")
     assert b["execution_target"] == "mapped_sql"
-    assert b["sql"] == "INSERT ... RETURNING batch_id"
+    assert b["sql"] == "INSERT ... RETURNING staging_id"
     assert b["result_mode"] == "scalar_result"
 
 
@@ -306,22 +306,22 @@ def test_operation_routine_delegates():
 
 def test_operation_mapped_sql_scalar():
     conn = object()
-    m = {"name": "control", "sql_bindings": [
-        _sb(name="start_batch", sql="INSERT INTO b VALUES (:run_id) RETURNING batch_id",
+    m = {"name": "rey_loader", "sql_bindings": [
+        _sb(name="load_staging", sql="INSERT INTO staging VALUES (:row_key) RETURNING staging_id",
             result_mode="scalar_result",
-            output={"variable": "batch_id", "load_to_ctx": "batch_id"},
-            inp={"run_id": "run_id"})]}
+            output={"variable": "staging_id", "load_to_ctx": "staging_id"},
+            inp={"row_key": "row_key"})]}
     run_ctx = SimpleNamespace()
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = 99
-        result = execute_operation(object(), conn, "control",
-                                   {"execution_target": "mapped_sql", "binding": "start_batch"},
-                                   {"run_id": "R"}, run_ctx)
+        result = execute_operation(object(), conn, "rey_loader",
+                                   {"execution_target": "mapped_sql", "binding": "load_staging"},
+                                   {"row_key": "K"}, run_ctx)
     db.execute_sql.assert_called_once_with(
-        conn, "INSERT INTO b VALUES (:run_id) RETURNING batch_id", {"run_id": "R"},
+        conn, "INSERT INTO staging VALUES (:row_key) RETURNING staging_id", {"row_key": "K"},
         "scalar_result")
-    assert result["outputs"] == {"batch_id": 99} and run_ctx.batch_id == 99
+    assert result["outputs"] == {"staging_id": 99} and run_ctx.staging_id == 99
 
 
 def test_operation_adhoc_no_return():
@@ -351,19 +351,19 @@ def test_operation_adhoc_dataset_returns_rows():
 def test_mapped_sql_logs_dataset_row_count_without_raw_sql(tmp_path: Path):
     ctx = _log_ctx(tmp_path)
     conn = object()
-    m = {"name": "control", "sql_bindings": [
-        _sb(name="find_batch", sql="SELECT secret_value FROM t WHERE id = :batch_id",
-            result_mode="dataset_result", inp={"batch_id": "batch_id"})]}
+    m = {"name": "rey_loader", "sql_bindings": [
+        _sb(name="find_rows", sql="SELECT secret_value FROM t WHERE id = :row_key",
+            result_mode="dataset_result", inp={"row_key": "row_key"})]}
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = [{"id": 1}, {"id": 2}]
-        execute_operation(ctx, conn, "control",
-                          {"execution_target": "mapped_sql", "binding": "find_batch"},
-                          {"batch_id": 5})
+        execute_operation(ctx, conn, "rey_loader",
+                          {"execution_target": "mapped_sql", "binding": "find_rows"},
+                          {"row_key": 5})
 
     record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "mapped_sql"
-    assert record["sql_label"] == "find_batch"
+    assert record["sql_label"] == "find_rows"
     assert record["row_count"] == 2
     text = json.dumps(record)
     assert "secret_value" not in text
