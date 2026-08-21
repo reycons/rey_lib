@@ -39,32 +39,43 @@ FILES_RECORD_SUBGROUP = {
 }
 
 
-def resolve_run_identity(ctx: Any) -> None:
+def require_run_id(ctx: Any) -> str:
     """
-    Ensure the runtime context carries the standard run identity before logging
-    starts (SGC_Rey_Run_ID_Standard).
+    Return the run identity this context already carries, or refuse.
 
-    Logging consumes a run identity; it does not decide one. Minting lives in
-    :func:`rey_lib.run.identity.establish_run_identity`, which is the single site
-    a ``run_id`` is created -- a second one is how a process handle and a durable
-    record end up describing one execution under two names.
+    Logging consumes a run identity; it does not create one. Whoever launches an
+    execution establishes it through :mod:`rey_lib.run` and the context arrives
+    carrying it -- so this reads, and fails when it cannot.
 
-    Kept as the name every caller here already uses, so the move is a change of
-    owner rather than a change of call site. Imported inside the function because
-    ``rey_lib.run`` reads run logs through this package.
+    It replaces ``resolve_run_identity``, whose name promised "find or create"
+    and whose implementation reached upward into ``rey_lib.run`` to mint. That
+    was an ownership leak in the direction the layer chain forbids: identity is
+    established at a launch boundary and travels down, never fetched back up
+    from the layer that records it.
 
     Parameters
     ----------
     ctx : Any
-        Application context, mutated in place.
+        Application context expected to carry ``run_id``.
 
     Returns
     -------
-    None
-    """
-    from rey_lib.run.identity import establish_run_identity  # noqa: PLC0415
+    str
+        The bound run id.
 
-    establish_run_identity(ctx)
+    Raises
+    ------
+    ValueError
+        If no run identity has been established.
+    """
+    run_id = getattr(ctx, "run_id", None)
+    if not run_id:
+        raise ValueError(
+            "No run identity has been established. A run is identified by its "
+            "launch boundary through rey_lib.run before anything is logged; "
+            "logging reads that identity and never mints one."
+        )
+    return str(run_id)
 
 
 def _execution_name(ctx: Any) -> str:
@@ -96,10 +107,11 @@ def open_run_log(ctx: Any) -> Path:
 
     The run log is a run-created artifact named
     ``{execution_name}.<run_timestamp>.jsonl`` beside the configured log directory.
-    The path is resolved once and cached on ``ctx.run_log_path``; run identity is
-    established first so ``run_id``/``run_timestamp`` exist before the first
-    record. The logging layer names and writes its own run log (it cannot depend
-    on files/file_utils).
+    The path is resolved once and cached on ``ctx.run_log_path``. Run identity is
+    read, never created: the launch boundary establishes it through
+    ``rey_lib.run`` and ``setup_logging`` requires it, so ``run_timestamp``
+    already exists by the time the first record is written. The logging layer
+    names and writes its own run log (it cannot depend on files/file_utils).
 
     Parameters
     ----------
@@ -122,7 +134,11 @@ def open_run_log(ctx: Any) -> Path:
     if existing:
         return Path(existing)
 
-    resolve_run_identity(ctx)
+    # Consumed, never minted. Identity is established at the launch boundary
+    # through rey_lib.run and required by setup_logging; this is the write path,
+    # which must not raise on its own account -- logging must not mask
+    # execution, so an unidentified context fails here exactly as any other
+    # write fault does, warned rather than thrown.
     run_log_dir = getattr(ctx, "run_log_dir", None)
     log_file = getattr(ctx, "log_file", None)
     if run_log_dir:

@@ -28,6 +28,7 @@ from rey_lib.logs import (
     render_run_view,
     render_summary_view,
 )
+from rey_lib.run.identity import establish_run_identity
 
 
 def _run_log(tmp_path: Path) -> str:
@@ -37,6 +38,7 @@ def _run_log(tmp_path: Path) -> str:
         owner_app_name="rey_db_admin",
         workflow_name="postgres_lint",
     )
+    establish_run_identity(ctx)
     log_run_start(ctx)
     log_step_start(ctx, "export", 1)
     log_config_file_reference(ctx, str(tmp_path / "workflow.yaml"),
@@ -107,6 +109,7 @@ def test_render_error_warning_view_filters(tmp_path: Path) -> None:
 def test_error_warning_view_empty_when_clean(tmp_path: Path) -> None:
     """A clean run renders an explicit no-warnings message."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "clean.run.jsonl"), owner_app_name="x")
+    establish_run_identity(ctx)
     log_run_start(ctx)
     log_run_complete(ctx, "success")
     assert render_error_warning_view(ctx.run_log_path) == "(no warnings or errors)"

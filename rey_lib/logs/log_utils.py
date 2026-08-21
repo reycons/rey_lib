@@ -90,7 +90,7 @@ from rey_lib.logs.record_enrichment import (
     current_step,
     log_run_record,
     open_run_log,
-    resolve_run_identity,
+    require_run_id,
     sanitize_command_arguments,
     sanitize_log_value,
 )
@@ -123,7 +123,7 @@ __all__ = [
     "render_results_view",
     "render_summary_view",
     "render_error_warning_view",
-    "resolve_run_identity",
+    "require_run_id",
     "open_run_log",
     "sanitize_log_value",
     "sanitize_command_arguments",

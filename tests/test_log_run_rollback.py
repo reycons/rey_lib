@@ -22,11 +22,11 @@ from rey_lib.files import (
     serialize_source_file_rollback,
     unregister_file_compensation,
 )
+from rey_lib.run import establish_run_identity
 from rey_lib.logs import (
     append_profile_record,
     log_file_manifest_record,
     read_profile_records,
-    resolve_run_identity,
 )
 from rey_lib.logs.file_manifest import FileManifestError, FileManifestSession
 
@@ -130,7 +130,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    resolve_run_identity(ctx)
+    establish_run_identity(ctx)
     classification = {
         "type": "file_name_regex",
         "values": {"Unfamiliar": "Kept"},
@@ -338,7 +338,7 @@ def test_mutation_evidence_phase_owns_commit_state() -> None:
 def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None:
     """Every field the canonical layout groups is gone from the record root."""
     ctx = _ctx(tmp_path)
-    resolve_run_identity(ctx)
+    establish_run_identity(ctx)
 
     log_source_file_mutation(
         ctx,
@@ -385,7 +385,7 @@ def test_caller_cannot_inject_a_canonical_root_field(
 def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
     """Run-log enrichment is evidence, not a way into the governed record."""
     ctx = _ctx(tmp_path)
-    resolve_run_identity(ctx)
+    establish_run_identity(ctx)
 
     log_source_file_mutation(
         ctx,

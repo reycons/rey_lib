@@ -26,16 +26,19 @@ from rey_lib.logs import (
 
     open_run_log,
 )
+from rey_lib.run.identity import establish_run_identity
 from rey_lib.run_lifecycle import run_app_operation
 from rey_lib.workflow import run_workflow
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         log_file=str(tmp_path / "app.run-workflow.jsonl"),
         owner_app_name="file_operator",
         workflow_name="convert_excel_to_csv",
     )
+    establish_run_identity(ctx)
+    return ctx
 
 
 def _records(path: str | Path) -> list[dict[str, Any]]:

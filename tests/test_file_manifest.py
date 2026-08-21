@@ -18,6 +18,7 @@ from rey_lib.logs import (
     manifest_state_path,
     resolve_file_manifest_path,
 )
+from rey_lib.run.identity import establish_run_identity
 
 
 # ---------------------------------------------------------------------------
@@ -262,12 +263,14 @@ def _run_ctx(tmp_path: Path) -> SimpleNamespace:
     """Return a context with a durable run-log directory."""
     run_dir = tmp_path / "logs"
     run_dir.mkdir(parents=True, exist_ok=True)
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         run_log_dir=str(run_dir),
         app_name="rey_lib",
         name="rey_lib",
         log_depth=0,
     )
+    establish_run_identity(ctx)
+    return ctx
 
 
 def test_log_run_record_returns_the_committed_record_id(tmp_path: Path) -> None:

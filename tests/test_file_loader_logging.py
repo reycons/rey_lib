@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rey_lib.files import file_loader
+from rey_lib.run.identity import establish_run_identity
 
 
 class Config(SimpleNamespace):
@@ -15,11 +16,13 @@ class Config(SimpleNamespace):
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         log_file=str(tmp_path / "loader.run.jsonl"),
         owner_app_name="rey_loader",
         log_depth=0,
     )
+    establish_run_identity(ctx)
+    return ctx
 
 
 def _records(ctx: SimpleNamespace) -> list[dict]:

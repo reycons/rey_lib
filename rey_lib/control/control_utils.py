@@ -48,7 +48,6 @@ from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
 from rey_lib.db.procedure_map import execute_mapped_routine, resolve_connection_config
-from rey_lib.logs import resolve_run_identity
 
 __all__ = [
     "ensure_run_id",
@@ -85,11 +84,11 @@ def ensure_run_id(ctx: Any) -> str:
     Ensure ctx.run_id exists (UUID), generating the standard run identity if absent.
 
     The run_id is the authoritative execution identity and is a UUID
-    (SGC_Rey_Run_ID_Standard). This delegates to the runner/logging layer's
-    resolve_run_identity, which also establishes ctx.run_timestamp and
-    ctx.run_started_at, so a single run identity is shared across logging and
-    control-database records. Must be called before any logging or control DB
-    interaction.
+    (SGC_Rey_Run_ID_Standard). It is established at the execution's launch
+    boundary through rey_lib.run and travels down on the context, so a single
+    run identity is shared across logging and control-database records. This
+    reads it and refuses when it is absent -- control does not reach upward to
+    have one minted.
 
     Parameters
     ----------
@@ -101,8 +100,13 @@ def ensure_run_id(ctx: Any) -> str:
     str
         The run_id (existing or newly generated).
     """
-    resolve_run_identity(ctx)
-    return ctx.run_id
+    run_id = getattr(ctx, "run_id", None)
+    if not run_id:
+        raise ConfigError(
+            "control: no run identity on the context. A run is identified at its "
+            "launch boundary through rey_lib.run before any control DB interaction."
+        )
+    return str(run_id)
 
 
 def ensure_run_timestamp(ctx: Any) -> str:
@@ -111,9 +115,9 @@ def ensure_run_timestamp(ctx: Any) -> str:
 
     The run_timestamp is the human-readable, filename-safe ``YYYYMMDD_HHMMSS`` used
     for artifact filenames and operator display; it is separate from the UUID
-    run_id. Delegates to the runner/logging layer's resolve_run_identity so run_id,
-    run_timestamp, and run_started_at are established together and stay stable for
-    the execution.
+    run_id. Established together with run_id at the launch boundary through
+    rey_lib.run and stable for the execution; this reads it and refuses when it
+    is absent.
 
     Parameters
     ----------
@@ -125,8 +129,13 @@ def ensure_run_timestamp(ctx: Any) -> str:
     str
         The run_timestamp (existing or newly generated).
     """
-    resolve_run_identity(ctx)
-    return ctx.run_timestamp
+    run_timestamp = getattr(ctx, "run_timestamp", None)
+    if not run_timestamp:
+        raise ConfigError(
+            "control: no run_timestamp on the context. Run identity is established "
+            "at the launch boundary through rey_lib.run."
+        )
+    return str(run_timestamp)
 
 
 def get_provider(ctx: Any) -> Optional[str]:

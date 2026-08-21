@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.logs.jsonl_handler import JsonlHandler
-from rey_lib.logs.record_enrichment import resolve_run_identity
+from rey_lib.logs.record_enrichment import require_run_id
 
 
 _INDENT = "  "
@@ -155,11 +155,12 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     console_handler.addFilter(_ProviderWarningFilter())
     root.addHandler(console_handler)
 
-    # Establish the run identity before any handler so run_id exists before the
-    # first log record, and the log filename uses the stable run_timestamp
+    # The run identity is already established by the launch boundary; this
+    # requires it so run_id exists before the first log record, and the log
+    # filename uses the stable run_timestamp
     # (SGC_Rey_Run_ID_Standard). The run log is a run-created artifact and follows
     # the same <name>.<run_timestamp>.<ext> convention as every other artifact.
-    resolve_run_identity(ctx)
+    require_run_id(ctx)
     timestamp = ctx.run_timestamp
     log_file  = None
 

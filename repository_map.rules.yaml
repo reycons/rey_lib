@@ -106,6 +106,41 @@ architecture_rules:
     edge_kinds:
       - call
 
+  # The layer chain runs Runner → rey_lib.run → rey_lib.logs → control_utils →
+  # procedure map → DB adapter → database, and each layer expresses only its own
+  # concern. rey_lib.run sits above rey_lib.logs, so logs reaching up into run
+  # inverts the chain. The direction matters more than the call: identity is
+  # established at the launch boundary and arrives on the context, rather than
+  # being fetched from below at write time.
+  - rule_id: logging_does_not_reach_up_into_run
+    forbidden_target_globs:
+      - "rey_lib.run"
+      - "rey_lib.run.*"
+      - "rey_lib/run/*"
+    scope_path_globs:
+      - "rey_lib/logs/*"
+    edge_kinds:
+      - import
+      - re_export
+
+  # control_utils is the only sanctioned entry to the control database, and
+  # rey_lib.logs is the only sanctioned caller of it: logs owns persistence
+  # orchestration, control owns the database operations. Forbidding the shortcut
+  # keeps that true rather than merely stated -- the extra hop is the
+  # architecture, and it is what localizes a future change of store.
+  - rule_id: control_is_reached_only_through_logging
+    forbidden_target_globs:
+      - "rey_lib.control"
+      - "rey_lib.control.*"
+      - "rey_lib/control/*"
+    allowed_path_globs:
+      - "rey_lib/logs/*"
+    scope_path_globs:
+      - "rey_lib/*"
+    edge_kinds:
+      - import
+      - re_export
+
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
   - ".py"

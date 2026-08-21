@@ -356,9 +356,13 @@ def _run_log_records(tmp_path: Any) -> list[dict[str, Any]]:
 def _log_ctx(tmp_path: Any) -> Any:
     from types import SimpleNamespace
 
-    return SimpleNamespace(
+    from rey_lib.run.identity import establish_run_identity
+
+    ctx = SimpleNamespace(
         log_file=str(tmp_path / "app.jsonl"), owner_app_name="file_operator"
     )
+    establish_run_identity(ctx)
+    return ctx
 
 
 def test_missing_handler_writes_failure_evidence_before_raising(

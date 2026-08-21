@@ -29,13 +29,16 @@ from rey_lib.db.procedure_map import (
     resolve_sql_binding,
 )
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.run.identity import establish_run_identity
 
 
 def _log_ctx(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         log_file=str(tmp_path / "procedure_map.run.jsonl"),
         owner_app_name="test_app",
     )
+    establish_run_identity(ctx)
+    return ctx
 
 
 def _run_records(ctx: SimpleNamespace) -> list[dict]:

@@ -18,6 +18,7 @@ from rey_lib.files.file_utils import (
     move_file,
 )
 from rey_lib.logs import read_run_log_sections
+from rey_lib.run.identity import establish_run_identity
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -28,12 +29,14 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         "state":                state.resolve(),
         "file_operations_state": (state / "v01" / "file_operations.jsonl").resolve(),
     })
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         paths=paths,
         run_log_dir=root / "logs",
         app_name="file_operator",
         pipeline_name="daily",
     )
+    establish_run_identity(ctx)
+    return ctx
 
 
 def test_configured_log_path_resolves_under_state_file_operations(tmp_path: Path) -> None:

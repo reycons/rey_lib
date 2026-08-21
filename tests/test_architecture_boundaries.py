@@ -108,8 +108,8 @@ def test_run_identity_has_one_owner(violations) -> None:
     and start time -- which is what the Console did before this.
 
     record_enrichment minted the run id when this policy was declared and was
-    corrected: it now delegates to rey_lib.run.identity and no longer imports
-    uuid at all.
+    corrected: it now requires an identity the launch boundary already
+    established, and no longer imports uuid at all.
 
     Scoped to the logging layer rather than to rey_lib, because uuid4
     legitimately produces error_id, message_id, operation_id, profile_id and
@@ -124,6 +124,58 @@ def test_run_identity_has_one_owner(violations) -> None:
         f"{v.source_path}:{v.source_line} -> {v.callee}"
         for v in violations
         if v.rule_id == "run_identity_has_one_owner"
+    ]
+
+    assert offenders == []
+
+
+def test_logging_does_not_reach_up_into_run(violations) -> None:
+    """The layer chain runs downward, and the logging layer is below run.
+
+    Runner -> rey_lib.run -> rey_lib.logs -> control_utils -> procedure map ->
+    DB adapter -> database. rey_lib.run sits above rey_lib.logs, so logs
+    importing run inverts the chain.
+
+    One site did exactly that when this policy was declared and was corrected.
+    Moving the minting out of record_enrichment left behind a resolve function
+    that reached back up into rey_lib.run through a lazy import -- the smallest
+    change that moved the owner, and an upward call all the same. It is now
+    require_run_id: identity is established at the launch boundary and arrives
+    on the context, rather than being fetched from below at write time.
+
+    The inversion is not only a rule: importing rey_lib.run from a logs module
+    raises ImportError, because rey_lib.run.state imports rey_lib.logs. The
+    guard names the direction that the cycle would otherwise report as an
+    accident.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == "logging_does_not_reach_up_into_run"
+    ]
+
+    assert offenders == []
+
+
+def test_control_is_reached_only_through_logging(violations) -> None:
+    """control_utils is entered from rey_lib.logs and from nowhere else.
+
+    logs owns persistence orchestration; control owns the database operations
+    behind it. The hop between them is the architecture, not overhead: it is
+    what keeps a change of run store localized, and what stops an application
+    reaching control routines directly.
+
+    This rule currently corrects nothing, and that is worth stating plainly
+    rather than reading as a clean result. control_utils has no production
+    consumer at all -- the layering described in its own header is intended and
+    unwired, so the seam it guards is one still to be built. The guard is
+    declared now so the first caller written is the sanctioned one, instead of
+    the shortcut being discovered later with callers already depending on it.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == "control_is_reached_only_through_logging"
     ]
 
     assert offenders == []
