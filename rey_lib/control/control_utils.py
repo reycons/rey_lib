@@ -28,8 +28,10 @@ ctx.control.enabled                         bool
 ctx.control.procedure_map                   str   (procedure_maps[].name, e.g. "control")
 ctx.control.behavior.fail_app_on_control_error  bool
 ctx.control.behavior.fallback_to_local_log      bool
-ctx.procedure_maps                          list  (named maps; the control map
-                                                   carries connection_name)
+ctx.procedure_maps                          list  (named maps; routine contracts
+                                                   only, no connection)
+ctx.logging.db_connection                   str   (which connection the run store
+                                                   is written to)
 ctx.db_connections                          list  (named connection records)
 ctx.run_id                                  str   (set by ensure_run_id)
 ctx.batch_id                                int | None  (set by start_batch)
@@ -45,7 +47,7 @@ from rey_lib.logs import get_logger
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
-from rey_lib.db.procedure_map import execute_mapped_routine, get_connection_config
+from rey_lib.db.procedure_map import execute_mapped_routine, resolve_connection_config
 from rey_lib.logs import resolve_run_identity
 
 __all__ = [
@@ -811,18 +813,34 @@ def _map_name(ctx: Any) -> Optional[str]:
     return getattr(control_cfg, "procedure_map", None) or None
 
 
+def _connection_name(ctx: Any) -> Optional[str]:
+    """Return the connection logging writes its run store to, or None.
+
+    ``logging.db_connection`` names it directly, resolved against
+    ``connections``. It is not read from the procedure map: a map is a routine
+    contract and says nothing about which database those routines run on, so
+    connection ownership is stated where the destination is chosen.
+    """
+    logging_cfg = getattr(ctx, "logging", None)
+    if logging_cfg is None:
+        return None
+    name = getattr(logging_cfg, "db_connection", None)
+    if name is None and isinstance(logging_cfg, dict):
+        name = logging_cfg.get("db_connection")
+    return str(name) if name else None
+
+
 def _get_conn_cfg(ctx: Any) -> Optional[Any]:
     """Resolve the control DB connection config from ctx.
 
-    The connection is bound through the control procedure map's
-    ``connection_name`` field, resolved against ``ctx.db_connections``.
-    Returns None when control is misconfigured.
+    Named by ``logging.db_connection`` and resolved against
+    ``ctx.db_connections``. Returns None when control is misconfigured.
     """
-    map_name = _map_name(ctx)
-    if not map_name:
+    connection_name = _connection_name(ctx)
+    if not connection_name:
         return None
     try:
-        return get_connection_config(ctx, map_name)
+        return resolve_connection_config(ctx, connection_name)
     except ConfigError:
         return None
 
