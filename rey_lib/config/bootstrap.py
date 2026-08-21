@@ -164,6 +164,13 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     failed = False
     try:
         yield ctx
+    except SystemExit as exc:
+        # Entry points end with sys.exit(code). A zero exit is a successful run
+        # that happens to unwind through an exception, so a cleanup failure is
+        # still worth raising; a non-zero one is the failure itself and must
+        # not be replaced.
+        failed = bool(exc.code)
+        raise
     except BaseException:
         failed = True
         raise

@@ -242,3 +242,39 @@ class TestAppsDoNotTearDownConnections:
                         offenders.append(f"{path.name}: {line.strip()}")
 
         assert offenders == []
+
+
+class TestExitCodesAreNotFailures:
+    """Entry points end with sys.exit(code), which unwinds as an exception."""
+
+    def _broken(self, monkeypatch) -> Any:
+        from rey_lib.config import bootstrap
+
+        monkeypatch.setattr(bootstrap, "build_ctx_for_app",
+                            lambda *a, **k: _ctx(_Closeable("broken", fails=True)))
+        return bootstrap.app_runtime
+
+    def test_a_zero_exit_is_a_success_so_cleanup_failure_surfaces(
+            self, monkeypatch) -> None:
+        app_runtime = self._broken(monkeypatch)
+
+        with pytest.raises(StateError, match="runtime cleanup failed"):
+            with app_runtime("cfg", "app", "run"):
+                raise SystemExit(0)
+
+    def test_a_nonzero_exit_is_the_failure_and_is_not_replaced(
+            self, monkeypatch) -> None:
+        app_runtime = self._broken(monkeypatch)
+
+        with pytest.raises(SystemExit) as exc:
+            with app_runtime("cfg", "app", "run"):
+                raise SystemExit(2)
+
+        assert exc.value.code == 2
+
+    def test_a_bare_exit_is_treated_as_success(self, monkeypatch) -> None:
+        app_runtime = self._broken(monkeypatch)
+
+        with pytest.raises(StateError):
+            with app_runtime("cfg", "app", "run"):
+                raise SystemExit()
