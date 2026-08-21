@@ -157,13 +157,20 @@ def test_logging_does_not_reach_up_into_run(violations) -> None:
     assert offenders == []
 
 
-def test_control_is_reached_only_through_logging(violations) -> None:
-    """control_utils is entered from rey_lib.logs and from nowhere else.
+def test_control_logging_is_reached_only_through_logs(violations) -> None:
+    """The run/batch/step/event control routines are entered from rey_lib.logs.
 
     logs owns persistence orchestration; control owns the database operations
     behind it. The hop between them is the architecture, not overhead: it is
     what keeps a change of run store localized, and what stops an application
-    reaching control routines directly.
+    recording a run straight into the control database.
+
+    Named routine by routine rather than as the whole of rey_lib.control. That
+    package also owns artifacts, contracts, config snapshots and run_logged_sql,
+    which are unrelated capabilities with their own legitimate callers -- a rule
+    wide enough to cover them would forbid uses this boundary has no opinion
+    about. The first version of this rule was that wide and was narrowed before
+    it ever guarded anything.
 
     This rule currently corrects nothing, and that is worth stating plainly
     rather than reading as a clean result. control_utils has no production
@@ -171,11 +178,15 @@ def test_control_is_reached_only_through_logging(violations) -> None:
     unwired, so the seam it guards is one still to be built. The guard is
     declared now so the first caller written is the sanctioned one, instead of
     the shortcut being discovered later with callers already depending on it.
+
+    Scoped to rey_lib because this policy governs this repository. The same
+    prohibition on applications, the Runner, workflow and pipeline code is not
+    enforceable from here and belongs in each repository's own rules.
     """
     offenders = [
         f"{v.source_path}:{v.source_line} -> {v.callee}"
         for v in violations
-        if v.rule_id == "control_is_reached_only_through_logging"
+        if v.rule_id == "control_logging_is_reached_only_through_logs"
     ]
 
     assert offenders == []

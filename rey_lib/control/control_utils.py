@@ -166,12 +166,16 @@ def get_provider(ctx: Any) -> Optional[str]:
 def start_batch(
     ctx: Any,
     batch_name: str,
-    pipeline_name: Optional[str] = None,
     owner_app_name: Optional[str] = None,
     context_jsonb: Optional[dict[str, Any]] = None,
 ) -> Optional[int]:
     """
     Register a new batch and store the returned batch_id on ctx.
+
+    A batch is a grouping identity: it contains runs and is not one of them.
+    ``pipeline_name`` was a parameter here until the declared map stopped
+    binding it -- a pipeline is one kind of thing a batch may group, and naming
+    it on the batch made the grouping pipeline-shaped.
 
     Parameters
     ----------
@@ -179,8 +183,6 @@ def start_batch(
         Application context.
     batch_name : str
         Human-readable batch label.
-    pipeline_name : str, optional
-        Pipeline name when running inside a pipeline.
     owner_app_name : str, optional
         App that owns this batch; defaults to ctx.app_name.
     context_jsonb : dict, optional
@@ -194,7 +196,6 @@ def start_batch(
     return _call(ctx, "start_batch", {
         "run_id":          getattr(ctx, "run_id", None),
         "batch_name":      batch_name,
-        "pipeline_name":   pipeline_name,
         "owner_app_name":  owner_app_name or getattr(ctx, "app_name", None),
         "context_jsonb":   context_jsonb,
     }, set_ctx="batch_id")

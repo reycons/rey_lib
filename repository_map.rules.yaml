@@ -123,16 +123,27 @@ architecture_rules:
       - import
       - re_export
 
-  # control_utils is the only sanctioned entry to the control database, and
-  # rey_lib.logs is the only sanctioned caller of it: logs owns persistence
-  # orchestration, control owns the database operations. Forbidding the shortcut
-  # keeps that true rather than merely stated -- the extra hop is the
-  # architecture, and it is what localizes a future change of store.
-  - rule_id: control_is_reached_only_through_logging
+  # The run/batch/step/event control routines are the DB half of run logging, so
+  # rey_lib.logs is their only sanctioned caller: logs owns persistence
+  # orchestration, control owns the database operations. The extra hop is the
+  # architecture -- it is what localizes a future change of run store, and what
+  # stops an app recording a run straight into the control database.
+  #
+  # Named routine by routine rather than as the whole of rey_lib.control, which
+  # also owns artifacts, contracts, config snapshots and run_logged_sql. Those
+  # are unrelated capabilities with their own legitimate callers, and a rule wide
+  # enough to cover them would forbid uses this boundary has no opinion about.
+  #
+  # Scoped to rey_lib because this policy governs this repository. The same
+  # prohibition on applications, the Runner, workflow and pipeline code is not
+  # enforceable from here; it belongs in each repository's own rules.
+  - rule_id: control_logging_is_reached_only_through_logs
     forbidden_target_globs:
-      - "rey_lib.control"
-      - "rey_lib.control.*"
-      - "rey_lib/control/*"
+      - "*control_utils.start_batch"
+      - "*control_utils.end_batch"
+      - "*control_utils.start_step"
+      - "*control_utils.end_step"
+      - "*control_utils.log_event"
     allowed_path_globs:
       - "rey_lib/logs/*"
     scope_path_globs:
@@ -140,6 +151,7 @@ architecture_rules:
     edge_kinds:
       - import
       - re_export
+      - call
 
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
