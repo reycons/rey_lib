@@ -174,6 +174,7 @@ def start_batch(
     batch_name: str,
     owner_app_name: Optional[str] = None,
     context_jsonb: Optional[dict[str, Any]] = None,
+    required: bool = False,
 ) -> Optional[int]:
     """
     Register a new batch; the map binds the returned batch_id onto ctx.
@@ -209,7 +210,7 @@ def start_batch(
         "batch_name":      batch_name,
         "owner_app_name":  owner_app_name or getattr(ctx, "app_name", None),
         "context_jsonb":   context_jsonb,
-    })
+    }, required=required)
 
 
 def end_batch(
@@ -217,6 +218,7 @@ def end_batch(
     status: str,
     error_message: Optional[str] = None,
     context_jsonb: Optional[dict[str, Any]] = None,
+    required: bool = False,
 ) -> None:
     """
     Mark the current batch as complete.
@@ -237,7 +239,7 @@ def end_batch(
         "status":        status,
         "error_message": error_message,
         "context_jsonb": context_jsonb,
-    })
+    }, required=required)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +256,7 @@ def start_step(
     git_commit_hash: Optional[str] = None,
     parent_batch_step_id: Optional[int] = None,
     context_jsonb: Optional[dict[str, Any]] = None,
+    required: bool = False,
 ) -> Optional[int]:
     """
     Register a new batch step; the map binds the returned batch_step_id onto ctx.
@@ -295,7 +298,7 @@ def start_step(
         "git_commit_hash":      git_commit_hash,
         "parent_batch_step_id": parent_batch_step_id,
         "context_jsonb":        context_jsonb,
-    })
+    }, required=required)
 
 
 def end_step(
@@ -304,6 +307,7 @@ def end_step(
     message: Optional[str] = None,
     metrics_jsonb: Optional[dict[str, Any]] = None,
     context_jsonb: Optional[dict[str, Any]] = None,
+    required: bool = False,
 ) -> None:
     """
     Mark the current step as complete.
@@ -327,7 +331,7 @@ def end_step(
         "message":       message,
         "metrics_jsonb": metrics_jsonb,
         "context_jsonb": context_jsonb,
-    })
+    }, required=required)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +345,7 @@ def log_event(
     event_name: str,
     message: str,
     event_jsonb: Optional[dict[str, Any]] = None,
+    required: bool = False,
 ) -> None:
     """
     Write a log event to the control database.
@@ -366,7 +371,7 @@ def log_event(
         "event_name":    event_name,
         "message":       message,
         "event_jsonb":   event_jsonb,
-    })
+    }, required=required)
 
 
 # ---------------------------------------------------------------------------
@@ -910,19 +915,30 @@ def _get_conn_cfg(ctx: Any) -> Optional[Any]:
         return None
 
 
-def _open_connection(ctx: Any) -> Optional[Any]:
+def _open_connection(ctx: Any, required: bool = False) -> Optional[Any]:
     """
     Open a connection to the control database.
 
-    Returns None and marks control unavailable on any failure.
+    Returns None and marks control unavailable on any failure, unless the
+    caller declared the call required -- a run store that cannot be reached is
+    an error, not a quiet degradation.
     """
     conn_cfg = _get_conn_cfg(ctx)
     if conn_cfg is None:
+        if required:
+            raise ConfigError(
+                "control: no connection config for run-log persistence. "
+                "logging.db_connection must name a connection in connections."
+            )
         _mark_unavailable(ctx, "control connection config not found")
         return None
     try:
         return _db.get_connection(conn_cfg, ctx=ctx)
     except Exception as exc:  # noqa: BLE001
+        if required:
+            raise DatabaseError(
+                f"control: could not open the run-store connection — {exc}"
+            ) from exc
         _mark_unavailable(ctx, str(exc))
         return None
 
@@ -948,12 +964,23 @@ def _call(
     ctx: Any,
     action_name: str,
     variables: dict[str, Any],
+    required: bool = False,
 ) -> Optional[Any]:
     """
     Core dispatcher — check availability, open connection, call action.
 
-    Catches all control failures, marks control unavailable, and returns
-    None so the calling app can continue without the control database.
+    Two failure contracts, chosen by the caller.
+
+    ``required=False`` is the historical one, for the optional control
+    capabilities: catch everything, mark control unavailable, return None, and
+    let the application continue without the control database.
+
+    ``required=True`` is for run-log persistence. When an operator sets
+    ``logging.run_store`` to ``db`` or ``both`` they have said this run must be
+    recorded there, so a missing configuration, an unopenable connection or a
+    failing routine is an error rather than a quiet None. It also ignores
+    ``control.enabled``: that flag governs the optional capabilities and must
+    not veto a destination logging was explicitly configured to use.
 
     Result placement belongs to the procedure map, not here. A binding's
     ``output.load_to_ctx`` declares which Rey field a routine's result lands
@@ -972,16 +999,30 @@ def _call(
     variables : dict[str, Any]
         Rey internal variable name → value for this call.
 
+    required : bool
+        When True, failures raise instead of collapsing to None.
+
     Returns
     -------
     Any | None
-        Return value from the action, or None if control is unavailable.
+        Return value from the action, or None when control is unavailable and
+        the call was not required.
+
+    Raises
+    ------
+    ConfigError, DatabaseError
+        Only when ``required`` is True.
     """
-    if not _is_available(ctx):
+    if not required and not _is_available(ctx):
         return None
 
     map_name = _map_name(ctx)
     if not map_name:
+        if required:
+            raise ConfigError(
+                f"control: '{action_name}' is required for run-log persistence "
+                "but ctx.control.procedure_map is not set."
+            )
         _mark_unavailable(ctx, "ctx.control.procedure_map is not set")
         return None
 
@@ -990,7 +1031,7 @@ def _call(
     # would degrade to "control unavailable" and hide the misconfiguration.
     _refuse_sql_bindings(ctx, map_name)
 
-    conn = _open_connection(ctx)
+    conn = _open_connection(ctx, required=required)
     if conn is None:
         return None
 
@@ -1003,9 +1044,17 @@ def _call(
         return next(iter(outputs.values()), None)
 
     except (ConfigError, DatabaseError) as exc:
+        # The existing error type already carries the cause, so a required call
+        # re-raises it rather than wrapping; no second hierarchy appears.
+        if required:
+            raise
         _mark_unavailable(ctx, str(exc))
         return None
     except Exception as exc:  # noqa: BLE001
+        if required:
+            raise DatabaseError(
+                f"control: required routine '{action_name}' failed — {exc}"
+            ) from exc
         _mark_unavailable(ctx, f"unexpected error in '{action_name}': {exc}")
         return None
     finally:

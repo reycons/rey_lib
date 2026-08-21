@@ -35,7 +35,8 @@ def sent() -> Any:
     """Capture the values dict each control call would send."""
     calls: list[tuple[str, dict]] = []
 
-    def _fake(ctx: Any, action_name: str, variables: dict) -> None:
+    def _fake(ctx: Any, action_name: str, variables: dict,
+              required: bool = False) -> None:
         calls.append((action_name, variables))
         return None
 

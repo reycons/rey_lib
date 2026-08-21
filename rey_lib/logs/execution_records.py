@@ -6,11 +6,21 @@ import uuid
 from typing import Any
 
 from rey_lib.logs.record_enrichment import log_run_record
+from rey_lib.logs import run_store
 
 
 def log_run_start(ctx: Any, **fields: Any) -> None:
-    """Append a RUN_START execution record marking the start of the run."""
-    log_run_record(ctx, "RUN_START", **fields)
+    """Append a RUN_START execution record marking the start of the run.
+
+    The first lifecycle operation, so it is where the run store's batch intent
+    is honoured: with ``db`` or ``both`` selected, a run start establishes the
+    batch this execution belongs to before anything else is recorded, because
+    steps and events are persisted against it.
+    """
+    if run_store.writes_jsonl(ctx):
+        run_store.require_jsonl_record(
+            ctx, log_run_record(ctx, "RUN_START", **fields), "RUN_START")
+    run_store.persist_run_start(ctx, **fields)
 
 
 def log_execution_plan(ctx: Any, *, total_steps: int,
@@ -31,26 +41,34 @@ def log_execution_plan(ctx: Any, *, total_steps: int,
 def log_step_start(ctx: Any, step_name: str, step_sequence: int,
                    step_type: str = "", step_id: str = "", **fields: Any) -> None:
     """Append a STEP_START execution record for one step."""
-    log_run_record(
-        ctx, "STEP_START",
-        step_name=step_name, step_sequence=step_sequence, step_type=step_type,
-        step_id=step_id or fields.pop("step_id", ""),
-        **fields,
-    )
+    if run_store.writes_jsonl(ctx):
+        run_store.require_jsonl_record(ctx, log_run_record(
+            ctx, "STEP_START",
+            step_name=step_name, step_sequence=step_sequence, step_type=step_type,
+            step_id=step_id or fields.pop("step_id", ""),
+            **fields,
+        ), "STEP_START")
+    run_store.persist_step_start(ctx, step_name, step_sequence, step_type)
 
 
 def log_step_end(ctx: Any, step_name: str, status: str, *,
                  message: str = "", **fields: Any) -> None:
     """Append a STEP_END execution record with the step status (success/failure/skipped)."""
-    log_run_record(
-        ctx, "STEP_END",
-        step_name=step_name, status=status, message=message, **fields,
-    )
+    if run_store.writes_jsonl(ctx):
+        run_store.require_jsonl_record(ctx, log_run_record(
+            ctx, "STEP_END",
+            step_name=step_name, status=status, message=message, **fields,
+        ), "STEP_END")
+    run_store.persist_step_end(ctx, step_name, status, message)
 
 
 def log_run_complete(ctx: Any, status: str, *, message: str = "", **fields: Any) -> None:
     """Append a RUN_COMPLETE execution record with the final run status."""
-    log_run_record(ctx, "RUN_COMPLETE", status=status, message=message, **fields)
+    if run_store.writes_jsonl(ctx):
+        run_store.require_jsonl_record(ctx, log_run_record(
+            ctx, "RUN_COMPLETE", status=status, message=message, **fields),
+            "RUN_COMPLETE")
+    run_store.persist_run_complete(ctx, status, message)
 
 
 def log_run_summary(ctx: Any, summary: dict[str, Any]) -> None:

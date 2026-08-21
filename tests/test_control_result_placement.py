@@ -81,7 +81,8 @@ class TestControlDoesNotPlaceResults:
         parameters = inspect.signature(control_utils._call).parameters
 
         assert "set_ctx" not in parameters
-        assert list(parameters) == ["ctx", "action_name", "variables"]
+        # required chooses a failure contract, not where a result lands.
+        assert list(parameters) == ["ctx", "action_name", "variables", "required"]
 
     def test_no_control_routine_asks_the_dispatcher_to_place_a_result(self) -> None:
         # Reading the module's own source: a placement argument reintroduced at

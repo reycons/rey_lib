@@ -161,6 +161,14 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     # (SGC_Rey_Run_ID_Standard). The run log is a run-created artifact and follows
     # the same <name>.<run_timestamp>.<ext> convention as every other artifact.
     require_run_id(ctx)
+
+    # The run store is validated here, before any application work: a run that
+    # cannot reach a required destination should fail at launch rather than
+    # part-way through, having already done work it cannot record.
+    from rey_lib.logs.run_store import validate_run_store
+
+    validate_run_store(ctx)
+
     timestamp = ctx.run_timestamp
     log_file  = None
 
