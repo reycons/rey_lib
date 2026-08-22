@@ -524,7 +524,7 @@ def preview_log_run_rollback(
 
 
 def rollback_log_run(
-    ctx: Any, run_log,
+    ctx: Any,
     run_log_file: Path | str,
     *,
     reason: str = "",
@@ -578,6 +578,7 @@ def rollback_log_run(
                     attempt_id = _append_rollback_evidence(
                         session,
                         audit_ctx,
+                        audit_run_log,
                         original=original,
                         compensation=compensation,
                         phase="attempt",
@@ -588,6 +589,7 @@ def rollback_log_run(
                     final_id = _append_rollback_evidence(
                         session,
                         audit_ctx,
+                        audit_run_log,
                         original=original,
                         compensation=compensation,
                         phase="final",
@@ -607,6 +609,7 @@ def rollback_log_run(
                     attempt_id = _append_rollback_evidence(
                         session,
                         audit_ctx,
+                        audit_run_log,
                         original=original,
                         compensation=compensation,
                         phase="attempt",
@@ -627,6 +630,7 @@ def rollback_log_run(
                         final_id = _append_rollback_evidence(
                             session,
                             audit_ctx,
+                            audit_run_log,
                             original=original,
                             compensation=compensation,
                             phase="final",
@@ -650,6 +654,7 @@ def rollback_log_run(
                     final_id = _append_rollback_evidence(
                         session,
                         audit_ctx,
+                        audit_run_log,
                         original=original,
                         compensation=compensation,
                         phase="final",
@@ -723,7 +728,7 @@ def rollback_log_run(
     rollback_run_log_file = Path(str(audit_ctx.run_log_path)).name
     run_rollback_record_id = _write_run_rollback_summary(
         ctx,
-        run_log, status=status,
+        audit_run_log, status=status,
         rollback_run_id=str(getattr(audit_ctx, "run_id", "") or rollback_run_log_file),
         original_run_id=selected_file,
         records_removed=records_removed,
@@ -1238,6 +1243,7 @@ def _validate_rollback_record(record: Mapping[str, Any]) -> None:
 def _append_rollback_evidence(
     session: Any,
     audit_ctx: Any,
+    audit_run_log: Any,
     *,
     original: Mapping[str, Any],
     compensation: Compensation,

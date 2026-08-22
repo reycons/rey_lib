@@ -621,7 +621,7 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(run_log
         destination_path=str(created),
     )
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert result["succeeded_count"] == 2
@@ -678,7 +678,7 @@ def test_rollback_removes_only_the_profiles_its_own_run_log_produced(run_log,
     append_profile_record(ctx, _profile_record(rolled_back_id, "run.jsonl"))
     append_profile_record(ctx, _profile_record(retained_id, "other.jsonl"))
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert not rolled_back_file.exists()
@@ -731,7 +731,7 @@ def test_delete_and_replace_restore_only_recorded_versions(run_log,
         previous_version_path=str(previous),
     )
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert replacement.read_text(encoding="utf-8") == "old content"
@@ -758,7 +758,7 @@ def test_failure_is_recorded_and_remaining_compensations_continue(run_log,
         destination_path=str(created),
     )
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "partial_success"
     assert result["succeeded_count"] == 1
@@ -854,7 +854,7 @@ def test_future_operation_uses_registered_compensation_without_engine_change(run
     )
     try:
         mutation_id = _append_mutation(ctx, action="future_action")
-        result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+        result = rollback_log_run(ctx, _run_log(tmp_path))
     finally:
         unregister_file_compensation("future_action")
 
@@ -873,7 +873,7 @@ def test_unknown_action_is_reported_without_filesystem_inference(run_log,
     assert plan["candidate_count"] == 0
     assert plan["unsupported"][0]["original_manifest_record_id"] == mutation_id
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "failure"
     assert result["appended_rollback_evidence_count"] == 2
@@ -962,7 +962,7 @@ def test_attempt_append_failure_prevents_filesystem_compensation(run_log,
         ),
     )
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert created.exists()
     assert result["status"] == "failure"
@@ -993,7 +993,7 @@ def test_a_reversal_stands_even_when_its_evidence_cannot_be_written(run_log,
 
     monkeypatch.setattr(FileManifestSession, "append", fail_second_append)
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     # The file was deleted, so the record describing it must go too. Losing
     # the note about the deletion cannot resurrect the file, and keeping the
@@ -1029,7 +1029,7 @@ def test_preview_is_read_only_and_execution_rereads_manifest(run_log,
     second.write_text("second", encoding="utf-8")
     _append_mutation(ctx, action="create", destination_path=str(second))
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["succeeded_count"] == 2
     assert not first.exists()
@@ -1056,7 +1056,7 @@ def test_rollback_records_are_written_only_through_the_serializer(run_log,
     # Evidence is cleaned up when the rollback finishes, so removal is held
     # off here to inspect exactly what the engine appended.
     with patch.object(FileManifestSession, "remove_records", return_value=0):
-        rollback_log_run(ctx, run_log, _run_log(tmp_path))
+        rollback_log_run(ctx, _run_log(tmp_path))
 
     rollback_rows = [
         row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
@@ -1249,7 +1249,7 @@ def test_records_without_an_action_are_rolled_back(run_log, tmp_path: Path) -> N
         "remove_record",
     ]
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert result["succeeded_count"] == 2
@@ -1290,7 +1290,7 @@ def test_a_failed_mutation_is_removed_without_touching_the_filesystem(run_log,
         "remove_record"
     ]
 
-    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    result = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert result["filesystem_operations_reversed"] == 0
@@ -1323,13 +1323,13 @@ def test_rolling_back_twice_finishes_the_job_and_adds_no_junk(run_log,
         source_path=str(origin), destination_path=str(moved),
     )
 
-    first = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    first = rollback_log_run(ctx, _run_log(tmp_path))
     assert first["status"] == "success"
     assert first["filesystem_operations_reversed"] == 2
     after_first = len(_rows(ctx))
 
     # Everything is already reversed; the second pass must not fail on that.
-    second = rollback_log_run(ctx, run_log, _run_log(tmp_path))
+    second = rollback_log_run(ctx, _run_log(tmp_path))
 
     assert second["status"] == "success"
     assert second["failed_count"] == 0
