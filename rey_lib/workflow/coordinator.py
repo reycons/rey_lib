@@ -92,8 +92,13 @@ def _finalize_run(ctx: Any, run_log: Any) -> None:
     """
     if _get(getattr(ctx, "runtime", None), "pipeline_run_id"):
         return
-    if getattr(ctx, "run_log_path", None):
-        finalize_run_log(run_log)
+    # Whether there is a durable log to finalize is the run log's own fact; the
+    # context used to answer it, which is the ownership this migration removed.
+    try:
+        run_log.path()
+    except Exception:  # noqa: BLE001 — nothing durable to finalize.
+        return
+    finalize_run_log(run_log)
 
 
 def _refused_disabled_workflow(

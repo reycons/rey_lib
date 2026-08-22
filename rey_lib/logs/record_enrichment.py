@@ -78,18 +78,8 @@ def require_run_id(ctx: Any) -> str:
     return str(run_id)
 
 
-def _execution_name(ctx: Any) -> str:
-    """Return the execution-owned name for the durable run log filename."""
-    for key in ("pipeline_name", "workflow_name", "owner_app_name", "app_name", "name"):
-        value = str(getattr(ctx, key, "") or "").strip()
-        if value:
-            return value
-    return "app"
 
 
-def _execution_log_filename(ctx: Any) -> str:
-    """Return the standardized execution log filename for one run."""
-    return f"{_execution_name(ctx)}.{ctx.run_timestamp}.jsonl"
 
 
 def _record_group(record_type: str) -> str:
@@ -101,58 +91,6 @@ def _record_group(record_type: str) -> str:
     return "execution"
 
 
-def open_run_log(ctx: Any) -> Path:
-    """
-    Establish and return the append-only run-log path for this execution.
-
-    The run log is a run-created artifact named
-    ``{execution_name}.<run_timestamp>.jsonl`` beside the configured log directory.
-    The path is resolved once and cached on ``ctx.run_log_path``. Run identity is
-    read, never created: the launch boundary establishes it through
-    ``rey_lib.run`` and ``setup_logging`` requires it, so ``run_timestamp``
-    already exists by the time the first record is written. The logging layer
-    names and writes its own run log (it cannot depend on files/file_utils).
-
-    Parameters
-    ----------
-    ctx : Any
-        Application context. Must have either ``run_log_dir`` set explicitly or
-        ``log_file`` set (by setup_logging) so the run-log directory is known;
-        execution should not proceed without a durable log path.
-
-    Returns
-    -------
-    Path
-        The append-only run-log path.
-
-    Raises
-    ------
-    ValueError
-        If no durable log directory is available (fail closed).
-    """
-    existing = getattr(ctx, "run_log_path", None)
-    if existing:
-        return Path(existing)
-
-    # Consumed, never minted. Identity is established at the launch boundary
-    # through rey_lib.run and required by setup_logging; this is the write path,
-    # which must not raise on its own account -- logging must not mask
-    # execution, so an unidentified context fails here exactly as any other
-    # write fault does, warned rather than thrown.
-    run_log_dir = getattr(ctx, "run_log_dir", None)
-    log_file = getattr(ctx, "log_file", None)
-    if run_log_dir:
-        directory = Path(run_log_dir)
-    elif log_file:
-        directory = Path(log_file).parent
-    else:
-        raise ValueError(
-            "Cannot open run log: no durable log path (ctx.run_log_dir or "
-            "ctx.log_file). Configure logging before starting a run."
-        )
-    path = directory / _execution_log_filename(ctx)
-    ctx.run_log_path = str(path)
-    return path
 
 
 _SECRET_WRITE_KEY_RE = re.compile(
@@ -261,37 +199,6 @@ def _lineage_value(ctx: Any, field: str) -> str:
     return str(found) if found else ""
 
 
-def _base_record(ctx: Any, record_type: str, message: str) -> dict[str, Any]:
-    """Build the shared typed-record envelope before event fields are merged."""
-    record: dict[str, Any] = {
-        "record_type": record_type,
-        "record_group": _record_group(record_type),
-        "run_id": ctx.run_id,
-        "run_timestamp": ctx.run_timestamp,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
-    }
-    subgroup = FILES_RECORD_SUBGROUP.get(record_type)
-    if subgroup:
-        record["record_subgroup"] = subgroup
-    app = (getattr(ctx, "owner_app_name", None) or getattr(ctx, "app_name", None)
-           or getattr(ctx, "name", None))
-    if app:
-        record["app"] = str(app)
-    for key in ("workflow_name", "pipeline_name"):
-        value = getattr(ctx, key, None)
-        if value:
-            record[key] = str(value)
-    # Lineage and domain metadata, stamped rather than supplied: no caller adds
-    # these, so a record cannot be written without the tree it belongs to.
-    # Absent values are left off exactly as an absent attribute already is.
-    for key in (*RUN_LINEAGE_FIELDS, *RUN_DOMAIN_FIELDS):
-        found = _lineage_value(ctx, key)
-        if found:
-            record[key] = found
-    if message:
-        record["message"] = message
-    return record
 
 
 def _context_fields() -> dict[str, Any]:
@@ -306,29 +213,8 @@ def _context_fields() -> dict[str, Any]:
     return merged
 
 
-def _enrich_run_record(
-    ctx: Any,
-    record_type: str,
-    *,
-    message: str = "",
-    fields: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Merge context, sanitize values, and validate one typed run-log record."""
-    record = _base_record(ctx, record_type, message)
-    record.update(_context_fields())
-    record.update(fields or {})
-    record = sanitize_log_value(record)
-    _validate_run_record(record)
-    return record
 
 
-def _has_durable_run_path(ctx: Any) -> bool:
-    """Return True when ctx appears able to write an append-only run log."""
-    return bool(
-        getattr(ctx, "run_log_path", None)
-        or getattr(ctx, "run_log_dir", None)
-        or getattr(ctx, "log_file", None)
-    )
 
 
 def log_run_record(

@@ -25,11 +25,35 @@ import pytest
 from rey_lib.logs.record_enrichment import (
     RUN_DOMAIN_FIELDS,
     RUN_LINEAGE_FIELDS,
-    _base_record,
+    _lineage_value,
     bind_run,
     clear_run,
     current_run,
 )
+from rey_lib.logs.run_log import RunLog
+
+
+def _base_record(ctx, record_type: str, message: str) -> dict:
+    """The enriched record the run log for this execution would write.
+
+    The lineage lives on the owner, so the owner is built from the launch facts
+    the context carries and asked what it stamps. There is no second builder.
+    """
+    lineage = {}
+    for field in (*RUN_LINEAGE_FIELDS, *RUN_DOMAIN_FIELDS):
+        found = _lineage_value(ctx, field)
+        if found:
+            lineage[field] = found
+    run_log = RunLog(
+        app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
+                or getattr(ctx, "name", "") or ""),
+        run_id=str(getattr(ctx, "run_id", "")),
+        run_timestamp=str(getattr(ctx, "run_timestamp", "")),
+        workflow=getattr(ctx, "workflow_name", None),
+        pipeline=getattr(ctx, "pipeline_name", None),
+        lineage=lineage,
+    )
+    return run_log._record(record_type, message, {})
 
 
 def _ctx(**fields: object) -> SimpleNamespace:

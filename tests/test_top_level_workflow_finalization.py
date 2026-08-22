@@ -23,8 +23,6 @@ from rey_lib.logs import (
     create_results_summary,
     finalize_run_log,
     log_artifact_reference,
-
-    open_run_log,
 )
 from rey_lib.run.identity import establish_run_identity
 from rey_lib.run_lifecycle import run_app_operation
@@ -59,9 +57,10 @@ def _count(records: list[dict[str, Any]], record_type: str) -> int:
 
 def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> None:
     """Drive the exact nesting a standalone `run-workflow` invocation produces."""
-    open_run_log(ctx)
-    # The workflow, the app and finalization all write one run log.
-    run_log._path = str(ctx.run_log_path)
+    # The workflow, the app and finalization all write one run log: the owner
+    # resolves the path, and the context names the same file for the code that
+    # still reads it as a fact about the execution.
+    ctx.run_log_path = str(run_log.path())
 
     def handler(_ctx: Any, _run_log: Any, _config: dict[str, Any], _run: Any) -> None:
         log_artifact_reference(run_log,

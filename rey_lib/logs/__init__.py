@@ -117,7 +117,6 @@ from rey_lib.logs.log_utils import (
     log_step_end,
     log_step_start,
     log_validation_result,
-    open_run_log,
     validate_run_log_completeness,
 )
 
@@ -185,7 +184,6 @@ __all__ = [
     "render_error_warning_view",
     "require_run_id",
     "setup_logging",
-    "open_run_log",
     "sanitize_log_value",
     "sanitize_command_arguments",
     "log_run_record",
