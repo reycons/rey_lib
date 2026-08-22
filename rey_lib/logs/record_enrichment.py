@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -229,17 +230,40 @@ def log_run_record(
     return run_log.append(record_type, message=message, **fields)
 
 
+# The ambient run binding.
+#
 # A stack, not a slot. Nesting is real -- run_app_operation binds, and a
 # workflow inside it binds and clears -- so a single slot let the inner clear
 # unbind the run that was still executing, and every ambient file operation
 # after that workflow returned was silently dropped.
 #
-# Process-global on purpose, not thread-local: pipeline_coordinator runs a
-# parallel step group in a ThreadPoolExecutor sharing one run, and those threads
-# must record against the run that owns them. The cost is that the binding is
-# shared with any unrelated thread, which is why the runtime clears it at
-# teardown rather than leaving a collected run log bound.
-_CURRENT_RUN: dict[str, Any] = {"run": None, "stack": []}
+# The bound *value* is process-global on purpose, not thread-local:
+# pipeline_coordinator runs a parallel step group in a ThreadPoolExecutor
+# sharing one run, and those threads must record against the run that owns them.
+#
+# The *frames* are per-thread, because nesting is a per-thread property. A
+# global frame list would be correct only for properly nested pushes and pops,
+# and threads do not nest: A.bind, B.bind, A.clear, B.clear is possible, and a
+# global list would restore the wrong owner.
+#
+# THE INVARIANT, enforced below rather than assumed:
+#
+#   While an ambient scope is active, every concurrent bind in this process
+#   must bind the same RunLog. Distinct RunLog ambient scopes may not overlap
+#   in one process.
+#
+# Today the runtime satisfies this because every concurrent unit of execution
+# is a subprocess -- pipeline steps, Console app runs -- and a subprocess binds
+# in its own interpreter. Nothing in the language enforces that, so a bind that
+# breaks it is detected and reported instead of silently corrupting the
+# binding. It is reported, not raised: logging must not mask execution.
+_BINDING_GUARD = threading.Lock()
+
+_CURRENT_RUN: dict[str, Any] = {
+    "run": None,       # the bound RunLog, shared across threads
+    "owner": None,     # thread that established the current distinct binding
+    "frames": {},      # thread ident -> [value to restore on that thread's clears]
+}
 
 
 _CURRENT_STEP: dict[str, Any] = {"step": None}
@@ -256,8 +280,10 @@ def bind_run(run_log: Any) -> None:
     the one owner of the write, not a description of it. Rebuilding an owner
     from a description is how a single run ends up with two of them.
 
-    Binding a run log with no durable path is a no-op -- there is nothing for
-    an ambient record to be appended to.
+    Binding a run log with no durable path keeps whatever was already bound --
+    there is nothing for an ambient record to be appended to -- but it still
+    opens a scope, so the matching ``clear_run`` closes its own scope and not
+    an enclosing one.
     """
     if run_log is not None:
         try:
@@ -265,32 +291,63 @@ def bind_run(run_log: Any) -> None:
                 run_log = None
         except Exception:  # noqa: BLE001 — an unopened run log binds nothing.
             run_log = None
-    # A bind that cannot resolve a log keeps whatever was already bound, but it
-    # still pushes: bind and clear have to stay paired or a no-op bind would
-    # make the next clear pop somebody else's frame.
-    _CURRENT_RUN["stack"].append(_CURRENT_RUN["run"])
-    if run_log is not None:
-        _CURRENT_RUN["run"] = run_log
+
+    ident = threading.get_ident()
+    with _BINDING_GUARD:
+        active = _CURRENT_RUN["run"]
+        owner = _CURRENT_RUN["owner"]
+        violation = (
+            run_log is not None
+            and active is not None
+            and active is not run_log
+            and owner is not None
+            and owner != ident
+        )
+        _CURRENT_RUN["frames"].setdefault(ident, []).append(active)
+        if run_log is not None:
+            _CURRENT_RUN["run"] = run_log
+            _CURRENT_RUN["owner"] = ident
+
+    if violation:
+        from rey_lib.logs.logging_setup import get_logger
+
+        get_logger(__name__).warning(
+            "run log: thread %s bound run %s while thread %s held an ambient "
+            "scope for run %s. Distinct ambient run scopes must not overlap in "
+            "one process; ambient file operations may be recorded against the "
+            "wrong run.",
+            ident, getattr(run_log, "run_id", "?"), owner,
+            getattr(active, "run_id", "?"),
+        )
 
 
 def clear_run() -> None:
-    """Restore the run bound before the matching ``bind_run``.
+    """Close this thread's innermost ambient scope, restoring what it replaced.
 
-    Unbinding entirely only happens when the outermost bind is cleared, so a
-    nested scope ending does not silently stop the enclosing run from recording.
+    Unbinding entirely only happens when the outermost scope on this thread is
+    closed, so a nested scope ending does not silently stop the enclosing run
+    from recording.
     """
-    stack = _CURRENT_RUN["stack"]
-    _CURRENT_RUN["run"] = stack.pop() if stack else None
+    ident = threading.get_ident()
+    with _BINDING_GUARD:
+        frames = _CURRENT_RUN["frames"].get(ident)
+        restored = frames.pop() if frames else None
+        if frames is not None and not frames:
+            del _CURRENT_RUN["frames"][ident]
+        _CURRENT_RUN["run"] = restored
+        _CURRENT_RUN["owner"] = ident if restored is not None else None
 
 
 def reset_run_binding() -> None:
-    """Drop the binding and the whole stack. The runtime's teardown, not a scope's.
+    """Drop the binding and every scope. The runtime's teardown, not a scope's.
 
     A collected run log must not stay bound: the next thing to record ambiently
     in this process would append to a log whose owner is closed.
     """
-    _CURRENT_RUN["run"] = None
-    _CURRENT_RUN["stack"].clear()
+    with _BINDING_GUARD:
+        _CURRENT_RUN["run"] = None
+        _CURRENT_RUN["owner"] = None
+        _CURRENT_RUN["frames"].clear()
 
 
 def current_run() -> dict[str, str] | None:

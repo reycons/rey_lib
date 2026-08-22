@@ -343,3 +343,76 @@ class TestOneRunIsOneLog:
         run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
         run_log.bind_path(tmp_path / "b.jsonl")
         assert Path(run_log.path()).name == "b.jsonl"
+
+    def test_concurrent_scopes_for_one_run_are_supported(self, tmp_path) -> None:
+        """Threads sharing one run is the intended case and must stay silent.
+
+        pipeline_coordinator runs a parallel step group sharing one run, which
+        is why the bound value is process-global rather than thread-local.
+        """
+        import threading
+
+        from rey_lib.logs.record_enrichment import (
+            bind_run, clear_run, current_run, reset_run_binding,
+        )
+        from tests.conftest import make_run_log
+
+        reset_run_binding()
+        run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"), run_id="A")
+        bind_run(run_log)
+        worker = threading.Thread(target=lambda: (bind_run(run_log), clear_run()))
+        worker.start()
+        worker.join()
+
+        assert current_run()["run_id"] == "A", (
+            "a thread sharing the bound run must leave it bound on exit"
+        )
+        clear_run()
+        assert current_run() is None
+        reset_run_binding()
+
+    def test_overlapping_scopes_for_different_runs_are_reported(
+            self, tmp_path, caplog) -> None:
+        """The invariant is enforced, not assumed.
+
+        Every concurrent unit of execution in the estate today is a subprocess,
+        so distinct ambient scopes never overlap in one interpreter. Nothing in
+        the language guarantees that, so a bind that breaks it says so instead
+        of silently recording file operations against the wrong run.
+        """
+        import logging
+        import threading
+
+        from rey_lib.logs.record_enrichment import (
+            bind_run, clear_run, reset_run_binding,
+        )
+        from tests.conftest import make_run_log
+
+        reset_run_binding()
+        first = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"), run_id="A")
+        second = make_run_log(tmp_path, path=str(tmp_path / "b.jsonl"), run_id="B")
+
+        with caplog.at_level(logging.WARNING):
+            bind_run(first)
+            worker = threading.Thread(target=lambda: (bind_run(second), clear_run()))
+            worker.start()
+            worker.join()
+            clear_run()
+
+        assert any("must not overlap" in record.message for record in caplog.records), (
+            "binding a different run while another thread holds a scope was not "
+            "reported; the invariant is unenforced again"
+        )
+        reset_run_binding()
+
+    def test_pairing_frames_are_per_thread(self) -> None:
+        """Nesting is a per-thread property, so the frames must be too.
+
+        A single global frame list is correct only for properly nested pushes
+        and pops. Threads do not nest -- A.bind, B.bind, A.clear, B.clear is
+        reachable -- so a global list would restore the wrong owner.
+        """
+        source = (LOGS / "record_enrichment.py").read_text(encoding="utf-8")
+        assert '"frames"' in source and "threading.get_ident()" in source, (
+            "the ambient frames are no longer keyed by thread"
+        )
