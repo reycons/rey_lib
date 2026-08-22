@@ -136,16 +136,55 @@ def test_no_run_bound_records_nothing(tmp_path: Path) -> None:
 
 def test_bind_clear_current_run(tmp_path: Path) -> None:
     """bind_run/current_run/clear_run manage the ambient run."""
-    clear_run()
+    from rey_lib.logs.record_enrichment import reset_run_binding
+
+    reset_run_binding()
     assert current_run() is None
     bind_run(make_run_log(tmp_path, path=str(tmp_path / "run_log.x.jsonl"), run_id="r9"))
     assert current_run() == {"run_log_path": str(tmp_path / "run_log.x.jsonl"), "run_id": "r9"}
-    # Binding without a durable path is a no-op (keeps the prior binding).
+    # Binding without a durable path keeps the prior binding, and still pushes,
+    # so the matching clear pops its own frame rather than someone else's.
     from rey_lib.logs.run_log import RunLog
 
     bind_run(RunLog(app="", run_id="r0", run_timestamp="20260707_000000"))
     assert current_run()["run_id"] == "r9"
     clear_run()
+    assert current_run()["run_id"] == "r9"
+    clear_run()
+    assert current_run() is None
+
+
+def test_a_nested_scope_ending_does_not_unbind_the_enclosing_run(tmp_path: Path) -> None:
+    """The defect the stack exists to remove.
+
+    run_app_operation binds, and a workflow inside it binds and clears. With a
+    single slot the workflow's clear unbound the app run that was still
+    executing, and every ambient file operation after it was silently dropped.
+    """
+    from rey_lib.logs.record_enrichment import reset_run_binding
+
+    reset_run_binding()
+    outer = make_run_log(tmp_path, path=str(tmp_path / "app.jsonl"), run_id="outer")
+    inner = make_run_log(tmp_path, path=str(tmp_path / "wf.jsonl"), run_id="inner")
+
+    bind_run(outer)
+    bind_run(inner)
+    assert current_run()["run_id"] == "inner"
+    clear_run()
+
+    assert current_run()["run_id"] == "outer"
+    record_file_operation("read", source_path=str(tmp_path / "x"))
+    assert _ops(outer), "the enclosing run must still record"
+
+
+def test_teardown_drops_a_collected_run_log(tmp_path: Path) -> None:
+    """A closed run log must not stay bound for whatever runs next."""
+    from rey_lib.logs.record_enrichment import reset_run_binding
+
+    reset_run_binding()
+    bind_run(make_run_log(tmp_path, path=str(tmp_path / "app.jsonl"), run_id="r1"))
+    assert current_run() is not None
+    reset_run_binding()
     assert current_run() is None
 
 

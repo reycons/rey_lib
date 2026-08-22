@@ -205,6 +205,34 @@ class RunLog:
         """Drop the bound lineage."""
         self._lineage.clear()
 
+    def bind_path(self, path: Any) -> None:
+        """Name the log this run writes to, before anything is written.
+
+        The launch boundary resolves a path for the process, but a pipeline
+        only learns its own log directory once the pipeline is resolved -- after
+        launch. Without this the pipeline's typed records and the pipeline's
+        logger events end up in two different files, which is the single-file
+        authority this owner exists to hold.
+
+        Raises
+        ------
+        StateError
+            When records have already been written. The path is the identity of
+            the log; moving it mid-run splits one run across two files.
+        """
+        resolved = str(path)
+        if self._path and str(self._path) != resolved:
+            state, _ = self._load_state()
+            if int(state[LAST_RECORD_ID]) > 0:
+                from rey_lib.errors.error_utils import StateError
+
+                raise StateError(
+                    f"Cannot rebind the run log to {resolved!r}: "
+                    f"{state[LAST_RECORD_ID]} record(s) are already written to "
+                    f"{self._path!r}. One run is one log."
+                )
+        self._path = resolved
+
     def set_nest_level(self, semantic: str) -> int:
         """Establish a semantic base, or take a relative step.
 

@@ -266,3 +266,80 @@ class TestWritersTakeTheOwner:
             "these log_* writers take ctx as their logging owner: "
             f"{', '.join(sorted(set(offenders) - expected))}"
         )
+
+
+# ---------------------------------------------------------------------------
+# The ambient binding
+# ---------------------------------------------------------------------------
+
+class TestTheAmbientBindingIsScoped:
+    """The one sanctioned ambient adapter, and the rules that keep it one."""
+
+    def test_the_runtime_clears_the_binding_at_teardown(self) -> None:
+        source = (PACKAGE / "config" / "bootstrap.py").read_text(encoding="utf-8")
+        assert "reset_run_binding()" in source, (
+            "app_runtime does not reset the ambient binding, so a collected run "
+            "log stays bound for whatever runs next in this process."
+        )
+
+    def test_bind_and_clear_are_paired_in_production(self) -> None:
+        """Every production bind_run has a clear_run in the same module.
+
+        The binding is a stack now, so an unmatched bind leaks a frame and an
+        unmatched clear pops a scope that is still executing.
+        """
+        offenders = []
+        for path in _production_files():
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            binds = len(re.findall(r"(?<!def )\bbind_run\s*\(", source))
+            clears = len(re.findall(r"(?<!def )\b(?:clear_run|reset_run_binding)\s*\(", source))
+            if binds and not clears:
+                offenders.append(str(path.relative_to(REPO)))
+        assert offenders == [], (
+            f"bind_run with no matching clear in: {', '.join(offenders)}"
+        )
+
+    def test_only_file_operation_recording_reads_the_binding(self) -> None:
+        """The ambient path is an adapter for one caller, not a general locator.
+
+        Ordinary writers take the run log explicitly. If a second subsystem
+        starts resolving its owner ambiently, bind_run has become the locator
+        this migration removed.
+        """
+        allowed = {
+            "rey_lib/logs/record_enrichment.py",  # defines it
+            "rey_lib/logs/file_records.py",       # the one sanctioned consumer
+            "rey_lib/files/file_utils.py",        # reads it to report the bound run
+        }
+        offenders = [
+            str(path.relative_to(REPO))
+            for path in _production_files()
+            if re.search(r"\bcurrent_run\s*\(|_CURRENT_RUN\b",
+                         path.read_text(encoding="utf-8", errors="ignore"))
+            and str(path.relative_to(REPO)) not in allowed
+        ]
+        assert offenders == [], (
+            f"the ambient binding is read outside file-operation recording by: "
+            f"{', '.join(offenders)}"
+        )
+
+
+class TestOneRunIsOneLog:
+    """The run log's path is its identity."""
+
+    def test_rebinding_after_records_are_written_is_refused(self, tmp_path) -> None:
+        from rey_lib.errors.error_utils import StateError
+        from tests.conftest import make_run_log
+
+        run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
+        run_log.append("ROW_COUNT", count_name="c", count=1)
+        with pytest.raises(StateError, match="One run is one log"):
+            run_log.bind_path(tmp_path / "b.jsonl")
+
+    def test_rebinding_before_any_record_is_allowed(self, tmp_path) -> None:
+        """A pipeline learns its log directory after launch, so it may still name it."""
+        from tests.conftest import make_run_log
+
+        run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
+        run_log.bind_path(tmp_path / "b.jsonl")
+        assert Path(run_log.path()).name == "b.jsonl"

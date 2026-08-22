@@ -139,16 +139,23 @@ def _resolve_ctx(
 
 
 def open_run_log(ctx: Namespace) -> Any:
-    """Construct the one run log this process writes through.
+    """Construct the one run log this process writes through, and what it needs.
+
+    Named for the run log because that is what it returns and what the caller
+    wants. It also builds Control when -- and only when -- a database
+    destination is selected, because Control exists in production for exactly
+    one reason: it is how the run log reaches the control database. Building it
+    anywhere else would either construct it for runs that never persist to a
+    database, or split the destination decision from the dependency that
+    decision creates.
+
+    Control is registered for runtime collection in its own right. The run log
+    holds a reference and does not close it.
 
     The composition root builds it, because this is where the finished context
     exists and where the objects a run owns are already assembled. Everything
     the run log needs is read once, here; the run log itself holds no context
     and reads none afterwards.
-
-    Control is constructed here too when a database destination is selected.
-    The run log references it for persistence but does not own its lifetime --
-    the runtime that made it collects it.
 
     Parameters
     ----------
@@ -235,4 +242,9 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         failed = True
         raise
     finally:
+        # The ambient run binding is process state, not a registered object:
+        # a collected run log must not stay bound for whatever runs next.
+        from rey_lib.logs.record_enrichment import reset_run_binding
+
+        reset_run_binding()
         collect_runtime(ctx, suppress=failed)
