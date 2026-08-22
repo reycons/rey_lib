@@ -106,7 +106,9 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
         control=_Control(),
     )
     for key, value in extra.items():
-        setattr(run_log, key, value)
+        # batch state is Control's; everything else is the run log's
+        target = run_log.control if key in ("batch_id", "batch_step_id") else run_log
+        setattr(target, key, value)
     return run_log
 
 
@@ -211,12 +213,17 @@ class TestBothMode:
         assert _actions(control_calls) == ["start_batch", "log_event"]
         assert [r["record_type"] for r in _records(run_log)] == ["RUN_START"]
 
-    def test_a_db_failure_under_both_is_surfaced(self, tmp_path, monkeypatch) -> None:
-        def _boom(self, action_name, variables, required=False):
-            raise DatabaseError("control unreachable")
+    def test_a_db_failure_under_both_is_surfaced(self, tmp_path) -> None:
+        """The run log holds its Control, so the failure comes from there."""
+        class _Broken:
+            owns_batch = False
+            batch_id = None
 
-        monkeypatch.setattr(Control, "_call", _boom)
+            def start_batch(self, **kw):
+                raise DatabaseError("control unreachable")
+
         run_log = _ctx(tmp_path, "both")
+        run_log.control = _Broken()
 
         with pytest.raises(DatabaseError):
             log_run_start(run_log, operation="scan")
@@ -225,10 +232,9 @@ class TestBothMode:
                                                    monkeypatch) -> None:
         # The record writer warns and returns None on its own terms; the run
         # store's durability contract is the separate boundary on top of it.
-        from rey_lib.logs import execution_records
+        from rey_lib.logs.run_log import RunLog
 
-        monkeypatch.setattr(execution_records, "log_run_record",
-                            lambda *a, **k: None)
+        monkeypatch.setattr(RunLog, "append", lambda self, *a, **k: None)
         run_log = _ctx(tmp_path, "both")
 
         with pytest.raises(StateError, match="one place and not the other"):
@@ -237,10 +243,9 @@ class TestBothMode:
     def test_a_jsonl_failure_under_jsonl_alone_still_does_not_raise(
             self, tmp_path, control_calls, monkeypatch) -> None:
         """Logging must not mask execution -- unchanged where nothing else was chosen."""
-        from rey_lib.logs import execution_records
+        from rey_lib.logs.run_log import RunLog
 
-        monkeypatch.setattr(execution_records, "log_run_record",
-                            lambda *a, **k: None)
+        monkeypatch.setattr(RunLog, "append", lambda self, *a, **k: None)
         run_log = _ctx(tmp_path, "jsonl")
 
         log_run_start(run_log, operation="scan")  # must not raise
@@ -294,16 +299,17 @@ class TestBatchIntent:
 class TestOneBatchManyRuns:
     """batch_id groups; run_id identifies the execution."""
 
-    def test_two_runs_share_a_batch_and_stay_distinguishable(self, run_log, tmp_path,
+    def test_two_runs_share_a_batch_and_stay_distinguishable(self, tmp_path,
                                                              control_calls) -> None:
-        run_log = _ctx(tmp_path, "db")
-        log_run_start(run_log, operation="scan")
-        log_step_start(run_log, "extract", 1)
+        first = _ctx(tmp_path, "db")
+        log_run_start(first, operation="scan")
+        log_step_start(first, "extract", 1)
 
-        run_log = _ctx(tmp_path, "db", new_batch=False,
-                      batch_id=first.control_api.batch_id)
-        log_run_start(run_log, operation="scan")
-        log_step_start(run_log, "extract", 1)
+        second = _ctx(tmp_path, "db", new_batch=False,
+                      batch_id=first.control.batch_id,
+                      run_id="00000000-0000-4000-8000-000000000002")
+        log_run_start(second, operation="scan")
+        log_step_start(second, "extract", 1)
 
         steps = [v for name, v, _ in control_calls if name == "start_step"]
         assert {s["batch_id"] for s in steps} == {7}
@@ -339,12 +345,18 @@ class TestIdsArriveThroughTheMap:
         """With load_to_ctx not emulated, nothing else writes the ids."""
         seen: list[str] = []
 
-        def _fake(self, action_name, variables, required=False):
-            seen.append(action_name)
-            return 7  # a scalar returned, but no placement onto Control
+        class _NoPlacement:
+            """Returns a scalar but never binds it, as an unmapped output would."""
 
-        monkeypatch.setattr(Control, "_call", _fake)
+            owns_batch = False
+            batch_id = None
+
+            def start_batch(self, **kw):
+                seen.append("start_batch")
+                return 7
+
         run_log = _ctx(tmp_path, "db")
+        run_log.control = _NoPlacement()
 
         # start_batch returning a scalar without the map binding it is a run
         # store that cannot record steps, and it says so rather than continuing.
