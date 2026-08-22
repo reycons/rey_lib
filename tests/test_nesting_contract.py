@@ -71,33 +71,33 @@ def test_set_establishes_parent_level_and_relative_nesting_starts_below_it(run_l
     """set_nest_level establishes the parent level; next descends to parent + 1."""
     ctx = Namespace({})
     assert set_nest_level(run_log, "pipeline") == 1      # parent_level = 1
-    assert get_nest_level(ctx) == 1                  # records may be written at 1
-    assert next_nest_level(ctx) == 2                 # minimum_nest_level = 2
-    assert next_nest_level(ctx) == 3                 # descends further
-    assert next_nest_level(ctx) == 4
+    assert get_nest_level(run_log) == 1                  # records may be written at 1
+    assert next_nest_level(run_log) == 2                 # minimum_nest_level = 2
+    assert next_nest_level(run_log) == 3                 # descends further
+    assert next_nest_level(run_log) == 4
 
 
 def test_previous_returns_upward_but_never_below_the_relative_floor(run_log) -> None:
     """previous_nest_level clamps at minimum_nest_level, not at zero."""
     ctx = Namespace({})
     set_nest_level(run_log, "pipeline")                  # parent 1, minimum 2
-    next_nest_level(ctx)                             # 2
-    next_nest_level(ctx)                             # 3
-    assert previous_nest_level(ctx) == 2
+    next_nest_level(run_log)                             # 2
+    next_nest_level(run_log)                             # 3
+    assert previous_nest_level(run_log) == 2
     # The floor holds: further returns cannot escape the relative context.
-    assert previous_nest_level(ctx) == 2
-    assert previous_nest_level(ctx) == 2
+    assert previous_nest_level(run_log) == 2
+    assert previous_nest_level(run_log) == 2
 
 
 def test_relative_floor_is_relative_to_the_established_base(run_log) -> None:
     """A deeper base raises the floor with it; the floor is always parent + 1."""
     ctx = Namespace({})
     set_nest_level(run_log, "pipeline_step")             # parent 2, minimum 3
-    assert next_nest_level(ctx) == 3
-    assert previous_nest_level(ctx) == 3             # cannot return to the base itself
+    assert next_nest_level(run_log) == 3
+    assert previous_nest_level(run_log) == 3             # cannot return to the base itself
     set_nest_level(run_log, "app")                       # parent 3, minimum 4
-    assert next_nest_level(ctx) == 4
-    assert previous_nest_level(ctx) == 4
+    assert next_nest_level(run_log) == 4
+    assert previous_nest_level(run_log) == 4
 
 
 def test_previous_at_the_base_does_not_descend(run_log) -> None:
@@ -105,7 +105,7 @@ def test_previous_at_the_base_does_not_descend(run_log) -> None:
     ctx = Namespace({})
     set_nest_level(run_log, "pipeline")                  # current 1, minimum 2
     # The floor is below the current level here; a return must not push down to it.
-    assert previous_nest_level(ctx) == 1
+    assert previous_nest_level(run_log) == 1
 
 
 # -- writes never redefine the context -----------------------------------------
@@ -119,8 +119,8 @@ def test_record_writes_do_not_change_the_base_or_the_floor(tmp_path: Path) -> No
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
     log_run_record(run_log, "EXECUTION_PLAN")
     # The base is unmoved by the writes, so relative nesting still starts at 2.
-    assert get_nest_level(ctx) == 1
-    assert next_nest_level(ctx) == 2
+    assert get_nest_level(run_log) == 1
+    assert next_nest_level(run_log) == 2
 
 
 def test_relative_child_anchors_to_the_scope_owner_not_the_last_write(
@@ -133,7 +133,7 @@ def test_relative_child_anchors_to_the_scope_owner_not_the_last_write(
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
     log_run_record(run_log, "EXECUTION_PLAN")
-    next_nest_level(ctx)
+    next_nest_level(run_log)
     log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
 
     run_start, config, plan, step = _records(tmp_path)
@@ -151,13 +151,13 @@ def test_subsequent_set_resets_the_relative_context_and_rebases(run_log) -> None
     """A new set_nest_level ends the prior relative context and rebases the floor."""
     ctx = Namespace({})
     set_nest_level(run_log, "pipeline")                  # parent 1, minimum 2
-    next_nest_level(ctx)                             # 2
-    next_nest_level(ctx)                             # 3 — left deep
+    next_nest_level(run_log)                             # 2
+    next_nest_level(run_log)                             # 3 — left deep
     # The next base is authoritative regardless of the abandoned relative context.
     assert set_nest_level(run_log, "pipeline_step") == 2  # parent 2, minimum 3
-    assert get_nest_level(ctx) == 2
-    assert next_nest_level(ctx) == 3
-    assert previous_nest_level(ctx) == 3             # the new floor, not the old one
+    assert get_nest_level(run_log) == 2
+    assert next_nest_level(run_log) == 3
+    assert previous_nest_level(run_log) == 3             # the new floor, not the old one
 
 
 def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
@@ -195,13 +195,13 @@ def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: 
     assert set_nest_level(run_log, "next") == 4
     assert set_nest_level(run_log, "sibling") == 4
     log_run_record(run_log, "INPUT_FILE_REFERENCE", display_name="v01.json")
-    next_nest_level(ctx)
+    next_nest_level(run_log)
     log_run_record(run_log, "LLM_CONTRACT", contract_path="v01.md")
-    assert previous_nest_level(ctx) == 4
+    assert previous_nest_level(run_log) == 4
 
     assert set_nest_level(run_log, "sibling") == 4
     log_run_record(run_log, "INPUT_FILE_REFERENCE", display_name="v02.json")
-    next_nest_level(ctx)
+    next_nest_level(run_log)
     log_run_record(run_log, "LLM_CONTRACT", contract_path="v02.md")
 
     app, first_input, first_child, second_input, second_child = _records(tmp_path)

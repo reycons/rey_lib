@@ -39,6 +39,7 @@ from typing import Any, Optional
 __all__ = ["RunLog"]
 
 _SYNTHETIC_ROOT = 0
+_MIN_LEVEL = 0
 
 LAST_RECORD_ID = "last_record_id"
 CURRENT_NEST_LEVEL = "current_nest_level"
@@ -202,17 +203,36 @@ class RunLog:
         self._lineage.clear()
 
     def set_nest_level(self, semantic: str) -> int:
-        """Establish the semantic base level for the scope now executing."""
-        level = SEMANTIC_BASES.get(str(semantic))
-        if level is None:
+        """Establish a semantic base, or take a relative step.
+
+        Ported unchanged from ``nest_level.set_nest_level``: a set always starts
+        a new named scope, clearing the anchor at that level and below, so the
+        first record written afterwards anchors it.
+        """
+        if semantic == "next":
+            state, path = self._load_state()
+            level = max(int(state[MINIMUM_NEST_LEVEL]), _MIN_LEVEL)
+            self._on_level_next(state, level)
+            state[CURRENT_NEST_LEVEL] = level
+            self._save_state(state, path)
+            return level
+        if semantic == "sibling":
+            state, path = self._load_state()
+            level = max(int(state[CURRENT_NEST_LEVEL]), _MIN_LEVEL)
+            self._on_level_next(state, level)
+            state[CURRENT_NEST_LEVEL] = level
+            self._save_state(state, path)
+            return level
+        if semantic not in SEMANTIC_BASES:
             raise ValueError(
-                f"unknown semantic nesting base '{semantic}'. Known: "
-                f"{', '.join(sorted(SEMANTIC_BASES))}."
+                f"Unknown semantic nest level: {semantic!r}. "
+                f"Known bases: {sorted(SEMANTIC_BASES)}; relative operations: "
+                "'next', 'sibling'."
             )
+        level = SEMANTIC_BASES[semantic]
         state, path = self._load_state()
+        self._on_level_set(state, level)
         state[CURRENT_NEST_LEVEL] = level
-        state[MINIMUM_NEST_LEVEL] = min(int(state[MINIMUM_NEST_LEVEL]), level)
-        state[CURRENT_PARENT_RECORD_ID] = self._anchor_for(state, level)
         self._save_state(state, path)
         return level
 
@@ -222,34 +242,75 @@ class RunLog:
         return int(state[CURRENT_NEST_LEVEL])
 
     def enter(self) -> int:
-        """Descend one relative level within the current semantic scope."""
+        """Descend the relative child hierarchy beneath the established base.
+
+        The first descent lands on ``minimum_nest_level`` (base + 1), so a
+        descent from the base cannot land on the base itself.
+        """
         state, path = self._load_state()
-        level = int(state[CURRENT_NEST_LEVEL]) + 1
+        current = int(state[CURRENT_NEST_LEVEL])
+        level = max(current + 1, int(state[MINIMUM_NEST_LEVEL]))
+        self._on_level_next(state, level)
         state[CURRENT_NEST_LEVEL] = level
-        state[CURRENT_PARENT_RECORD_ID] = self._anchor_for(state, level)
         self._save_state(state, path)
         return level
 
     def exit(self) -> int:
-        """Ascend one relative level, never above the established minimum."""
+        """Return upward within the relative hierarchy owned by the current base.
+
+        Never rises above ``minimum_nest_level`` and never moves deeper, so
+        calling it on the base leaves the level unchanged.
+        """
         state, path = self._load_state()
-        level = max(int(state[CURRENT_NEST_LEVEL]) - 1,
-                    int(state[MINIMUM_NEST_LEVEL]))
+        current = int(state[CURRENT_NEST_LEVEL])
+        floor = max(int(state[MINIMUM_NEST_LEVEL]), _MIN_LEVEL)
+        level = min(current, max(current - 1, floor))
+        self._on_level_previous(state, level)
         state[CURRENT_NEST_LEVEL] = level
-        state[CURRENT_PARENT_RECORD_ID] = self._anchor_for(state, level)
         self._save_state(state, path)
         return level
 
+    # -- anchors: ported from record_parenting ------------------------------
+
     @staticmethod
-    def _anchor_for(state: dict[str, Any], level: int) -> int:
-        """The stable parent for ``level``: its anchor, or the nearest above."""
+    def _largest_anchor_below(anchors: dict, target: int) -> int:
+        """The anchor at the largest anchored level strictly below ``target``."""
+        lower = [level for level in anchors if int(level) < target]
+        if not lower:
+            return _SYNTHETIC_ROOT
+        return int(anchors[max(lower, key=int)])
+
+    @staticmethod
+    def _clear_from(anchors: dict, level: int) -> None:
+        """Remove the anchor at ``level`` and every deeper one, in place."""
+        for key in [k for k in list(anchors) if int(k) >= level]:
+            del anchors[key]
+
+    @staticmethod
+    def _clear_deeper_than(anchors: dict, level: int) -> None:
+        """Remove every anchor deeper than ``level``, keeping ``level`` itself."""
+        for key in [k for k in list(anchors) if int(k) > level]:
+            del anchors[key]
+
+    def _on_level_set(self, state: dict, new_level: int) -> None:
+        """A semantic base set starts a new named scope at ``new_level``."""
         anchors = state[LEVEL_ANCHORS]
-        for candidate in range(int(level) - 1, -1, -1):
-            if candidate in anchors:
-                return int(anchors[candidate])
-            if str(candidate) in anchors:
-                return int(anchors[str(candidate)])
-        return _SYNTHETIC_ROOT
+        self._clear_from(anchors, new_level)
+        state[PARENT_LEVEL] = new_level
+        state[MINIMUM_NEST_LEVEL] = new_level + 1
+        state[CURRENT_PARENT_RECORD_ID] = self._largest_anchor_below(anchors, new_level)
+
+    def _on_level_next(self, state: dict, new_level: int) -> None:
+        """A descent enters an unnamed relative child level fresh."""
+        anchors = state[LEVEL_ANCHORS]
+        self._clear_from(anchors, new_level)
+        state[CURRENT_PARENT_RECORD_ID] = self._largest_anchor_below(anchors, new_level)
+
+    def _on_level_previous(self, state: dict, new_level: int) -> None:
+        """A return keeps the anchor at ``new_level`` and clears deeper ones."""
+        anchors = state[LEVEL_ANCHORS]
+        self._clear_deeper_than(anchors, new_level)
+        state[CURRENT_PARENT_RECORD_ID] = self._largest_anchor_below(anchors, new_level)
 
     # -- the log itself ------------------------------------------------------
 

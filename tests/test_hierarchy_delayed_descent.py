@@ -117,7 +117,7 @@ def test_app_delayed_descent_anchors_to_the_app_owner(tmp_path: Path) -> None:
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
     log_run_record(run_log, "INPUT_DISCOVERED", path="b.csv")
-    next_nest_level(ctx)
+    next_nest_level(run_log)
     log_run_record(run_log, "INPUT_FILE_REFERENCE", source_name="a.csv")
 
     records = _records(tmp_path)

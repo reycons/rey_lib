@@ -373,7 +373,7 @@ def run_workflow(
             )
             # STEP_START anchors the workflow-step scope. Handler, lifecycle, file,
             # and result evidence belongs one level beneath that durable record.
-            next_nest_level(ctx)
+            next_nest_level(run_log)
 
             if not apply and bool(effective.get("apply_only")):
                 log_step_end(run_log, step_name, "skipped", message="dry-run")

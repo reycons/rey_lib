@@ -163,7 +163,7 @@ def test_two_sibling_analysis_branches(tmp_path: Path) -> None:
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
-    next_nest_level(ctx)
+    next_nest_level(run_log)
     log_run_record(run_log, "INPUT_FILE_REFERENCE", app="rey_analyzer", source_name="a.csv")
     log_run_record(run_log, "LLM_INTERPRETATION", app="rey_analyzer")
     log_run_record(run_log, "INPUT_FILE_REFERENCE", app="rey_analyzer", source_name="b.csv")
