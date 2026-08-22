@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from rey_lib.logs.evidence_projection import _run_log_identity, read_run_log_sections
+from rey_lib.logs.evidence_projection import read_run_log_sections
 
 __all__ = [
     "create_llm_package",
@@ -81,16 +81,6 @@ def create_llm_package(
     ):
         return package
 
-    identity = _run_log_identity(path, records, run["sections"])
-    ctx.run_log_path = str(path)
-    ctx.run_id = identity["run_id"]
-    ctx.run_timestamp = identity["run_timestamp"]
-    if identity["app"]:
-        ctx.owner_app_name = identity["app"]
-    if identity["pipeline"]:
-        ctx.pipeline_name = identity["pipeline"]
-    if identity["workflow"]:
-        ctx.workflow_name = identity["workflow"]
 
     run_log.append(package_record_type, record_group="results", **package)
     return package
@@ -639,19 +629,6 @@ def run_configured_log_analysis(
         result["skipped"].append("disabled")
         return result
 
-    # Stamp run identity (run metadata, not configuration) before the failure boundary
-    # so any failure below — including malformed configuration — is recorded against
-    # this run.
-    identity = _run_log_identity(path, records, run["sections"])
-    ctx.run_log_path = str(path)
-    ctx.run_id = identity["run_id"]
-    ctx.run_timestamp = identity["run_timestamp"]
-    if identity["app"]:
-        ctx.owner_app_name = identity["app"]
-    if identity["pipeline"]:
-        ctx.pipeline_name = identity["pipeline"]
-    if identity["workflow"]:
-        ctx.workflow_name = identity["workflow"]
 
     # Safe record identity for the failure record, resolved without dereferencing a
     # possibly malformed output block. When the configured output type cannot be read,
