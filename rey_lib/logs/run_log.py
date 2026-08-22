@@ -123,7 +123,8 @@ class RunLog:
         lineage : dict, optional
             Starting lineage and domain values, changed through ``bind_lineage``.
         """
-        self.app = str(app or "app")
+        # No manufactured default: a run log with no app stamps no app field.
+        self.app = str(app or "")
         self.run_id = str(run_id)
         self.run_timestamp = str(run_timestamp)
         self.destination = str(destination or "jsonl").strip().lower()
@@ -386,8 +387,8 @@ class RunLog:
                 fields: dict[str, Any]) -> dict[str, Any]:
         """Build the enriched record from owned state and the supplied fields."""
         from rey_lib.logs.record_enrichment import (
-            FILES_RECORD_SUBGROUP, _record_group, _RUN_RECORD_SCHEMA_VERSION,
-            sanitize_log_value,
+            FILES_RECORD_SUBGROUP, _context_fields, _record_group,
+            _RUN_RECORD_SCHEMA_VERSION, sanitize_log_value,
         )
         from rey_lib.logs.record_validation import _validate_run_record
 
@@ -414,6 +415,10 @@ class RunLog:
                 record[key] = value
         if message:
             record["message"] = message
+        # Step and correlation are bound ambiently around a block of work rather
+        # than passed per record, so they are stamped here and can still be
+        # overridden by an explicit field on the call.
+        record.update(_context_fields())
         record.update(fields or {})
         record = sanitize_log_value(record)
         _validate_run_record(record)

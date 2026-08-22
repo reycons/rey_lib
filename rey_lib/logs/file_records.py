@@ -163,14 +163,23 @@ def record_file_operation(operation: str, *, source_path: str = "",
     if run is None:
         return
     try:
-        from rey_lib.logs.run_log import RunLog
+        from rey_lib.logs.run_log import DOMAIN_FIELDS, LINEAGE_FIELDS, RunLog
 
         # The run bound for ambient recording, as the run log that owns writing.
+        # The binding carries the identity the ambient records must match, so it
+        # is transferred whole rather than rebuilt from defaults.
         bound_log = RunLog(
-            app=str(getattr(run, "app", "") or ""),
+            app=str(getattr(run, "owner_app_name", "")
+                    or getattr(run, "app_name", "")
+                    or getattr(run, "app", "") or ""),
             run_id=str(run.run_id),
             run_timestamp=str(getattr(run, "run_timestamp", "") or ""),
             path=str(run.run_log_path),
+            workflow=getattr(run, "workflow_name", "") or None,
+            pipeline=getattr(run, "pipeline_name", "") or None,
+            lineage={k: str(getattr(run, k, "") or "")
+                     for k in (*LINEAGE_FIELDS, *DOMAIN_FIELDS)
+                     if getattr(run, k, "")},
         )
         log_file_operation(
             bound_log, operation, source_path=source_path, target_path=target_path,

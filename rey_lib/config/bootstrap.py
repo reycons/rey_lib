@@ -138,18 +138,76 @@ def _resolve_ctx(
     return build_ctx_from_path(config_path, app_name=app_name, project_root=project_root)
 
 
+def open_run_log(ctx: Namespace) -> Any:
+    """Construct the one run log this process writes through.
+
+    The composition root builds it, because this is where the finished context
+    exists and where the objects a run owns are already assembled. Everything
+    the run log needs is read once, here; the run log itself holds no context
+    and reads none afterwards.
+
+    Control is constructed here too when a database destination is selected.
+    The run log references it for persistence but does not own its lifetime --
+    the runtime that made it collects it.
+
+    Parameters
+    ----------
+    ctx : Namespace
+        The launch context, with run identity established and logging set up.
+
+    Returns
+    -------
+    Any
+        The process's ``RunLog``.
+    """
+    from rey_lib.logs.record_enrichment import _lineage_value
+    from rey_lib.logs.run_log import DOMAIN_FIELDS, LINEAGE_FIELDS, RunLog
+    from rey_lib.logs.run_store import run_store_mode
+
+    destination = run_store_mode(ctx)
+    control = None
+    if destination in ("db", "both"):
+        from rey_lib.control import Control
+
+        control = Control(ctx)
+        register_runtime_object(ctx, control)
+
+    lineage = {}
+    for field in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):
+        found = _lineage_value(ctx, field)
+        if found:
+            lineage[field] = found
+
+    return RunLog(
+        app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
+                or getattr(ctx, "name", "") or ""),
+        run_id=ctx.run_id,
+        run_timestamp=ctx.run_timestamp,
+        log_dir=getattr(ctx, "run_log_dir", None),
+        path=getattr(ctx, "log_file", None),
+        destination=destination,
+        control=control,
+        workflow=getattr(ctx, "workflow_name", None),
+        pipeline=getattr(ctx, "pipeline_name", None),
+        lineage=lineage,
+    )
+
+
 @contextmanager
 def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     """Compose the launch context and collect its shared objects when done.
 
     The standard entry point for an application process:
 
-        with app_runtime(config_path, app_name, operation) as ctx:
+        with app_runtime(config_path, app_name, operation) as (ctx, run_log):
             ...application work...
 
-    Takes the same arguments as :func:`build_ctx_for_app` and yields the same
-    context. What it adds is the other end: the shared objects composition
-    created are closed when the block exits, however it exits.
+    Takes the same arguments as :func:`build_ctx_for_app` and yields that
+    context together with the one run log this process writes through. Both
+    are yielded rather than one carrying the other: the context describes the
+    execution, the run log owns run logging, and neither is reachable through
+    the other. What this adds beyond composition is the other end -- the shared
+    objects it created are closed when the block exits, however it exits.
 
     Collection lives here rather than in ``run_app_operation`` because that
     helper also wraps nested sub-app operations, and collecting there would
@@ -161,9 +219,11 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     exception continues -- cleanup never replaces the error that ended the run.
     """
     ctx = build_ctx_for_app(*args, **kwargs)
+    run_log = open_run_log(ctx)
+    register_runtime_object(ctx, run_log)
     failed = False
     try:
-        yield ctx
+        yield ctx, run_log
     except SystemExit as exc:
         # Entry points end with sys.exit(code). A zero exit is a successful run
         # that happens to unwind through an exception, so a cleanup failure is

@@ -109,6 +109,7 @@ def _pipeline_step_app(run_log, ctx: Namespace) -> None:
 def test_pipeline_step_app_chain(tmp_path: Path) -> None:
     """Pipeline -> Pipeline Step -> App descends one owner per semantic base."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     _pipeline_step_app(run_log, ctx)
 
     pipeline, step, app = _records(tmp_path)

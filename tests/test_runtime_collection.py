@@ -48,8 +48,13 @@ class _Closeable:
 
 
 def _ctx(*objects: Any) -> SimpleNamespace:
-    """A context with the given objects registered for collection."""
-    ctx = SimpleNamespace()
+    """A context with the given objects registered for collection.
+
+    Run identity is present because app_runtime opens the process run log from
+    the finished context; a context without it is not one a launch produces.
+    """
+    ctx = SimpleNamespace(run_id="00000000-0000-4000-8000-000000000001",
+                          run_timestamp="20260822_000000")
     for obj in objects:
         register_runtime_object(ctx, obj)
     return ctx
@@ -153,6 +158,8 @@ class TestTheBootstrapLifecycle:
 
         def _build(*_a: Any, **_k: Any) -> SimpleNamespace:
             ctx = SimpleNamespace(
+                run_id="00000000-0000-4000-8000-000000000001",
+                run_timestamp="20260822_000000",
                 connections=[SimpleNamespace(name=n, provider="postgres") for n in names])
             ctx.shared_connections = build_connections(ctx)
             for connection in ctx.shared_connections.values():
@@ -167,7 +174,7 @@ class TestTheBootstrapLifecycle:
 
         with patch.object(connection_module, "_db") as backend:
             backend.get_connection.return_value = SimpleNamespace(close=lambda: None)
-            with app_runtime("cfg", "rey_loader", "run") as ctx:
+            with app_runtime("cfg", "rey_loader", "run") as (ctx, _run_log):
                 ctx.shared_connections["control"].handle()
                 assert ctx.shared_connections["control"].is_open is True
 
@@ -180,7 +187,7 @@ class TestTheBootstrapLifecycle:
         with patch.object(connection_module, "_db") as backend:
             backend.get_connection.side_effect = (
                 lambda cfg, ctx=None: SimpleNamespace(close=lambda: None))
-            with app_runtime("cfg", "rey_loader", "run") as ctx:
+            with app_runtime("cfg", "rey_loader", "run") as (ctx, _run_log):
                 for connection in ctx.shared_connections.values():
                     connection.handle()
 
@@ -192,7 +199,7 @@ class TestTheBootstrapLifecycle:
         with patch.object(connection_module, "_db") as backend:
             backend.get_connection.side_effect = (
                 lambda cfg, ctx=None: SimpleNamespace(close=lambda: None))
-            with app_runtime("cfg", "rey_loader", "run") as ctx:
+            with app_runtime("cfg", "rey_loader", "run") as (ctx, _run_log):
                 ctx.shared_connections["control"].handle()
 
         assert not any(c.is_open for c in ctx.shared_connections.values())

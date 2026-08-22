@@ -74,7 +74,7 @@ def test_move_file_writes_run_log_not_state_file(tmp_path: Path) -> None:
         reason="processed",
     )
 
-    record = read_run_log_sections(run_log.path())["records"][0]
+    record = read_run_log_sections(ctx.run_log_path)["records"][0]
     assert record["record_type"] == "FILE_OPERATION"
     assert record["app"] == "file_operator"
     assert record["operation_id"]
