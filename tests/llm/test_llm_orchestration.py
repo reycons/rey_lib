@@ -441,13 +441,11 @@ class TestLocalArtifactStore:
 
     def test_write_emits_artifact_reference_with_run_ctx(self, tmp_path: Path) -> None:
         """With a run context, a written stage result emits a files/artifacts record."""
-        ctx = SimpleNamespace(
-            log_file=str(tmp_path / "rey_analyzer.jsonl"),
-            owner_app_name="rey_analyzer",
-            run_id="run-pipe-1",
+        run_log = make_run_log(
+            tmp_path, app="rey_analyzer", run_id="run-pipe-1",
             run_timestamp="20260706_130000",
         )
-        store = LocalArtifactStore(tmp_path / "artifacts", run_ctx=ctx)
+        store = LocalArtifactStore(tmp_path / "artifacts", run_log=run_log)
         uri = store.write(
             run_id="llm-uuid", run_timestamp="20260706_091845",
             stage_id="extract", data={"key": "value"},
@@ -455,7 +453,7 @@ class TestLocalArtifactStore:
 
         records = [
             json.loads(line)
-            for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+            for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
         ]
         artifact = next(r for r in records if r["record_type"] == "ARTIFACT_REFERENCE")
         assert artifact["record_group"] == "files"
@@ -741,7 +739,7 @@ class TestRunnerEvaluationPersistence:
                 "properties": {"result": {"type": "string"}},
             },
             eval_payload_log_path=payload_log,
-            eval_run_log_path=run_log,
+            eval_run_log_path=log_path,
         )
 
         with patch(
@@ -787,7 +785,7 @@ class TestRunnerEvaluationPersistence:
             contract_text=contract_text,
             input_data="test input",
             raw_output=True,
-            eval_run_log_path=run_log,
+            eval_run_log_path=log_path,
         )
 
         with patch(
@@ -820,7 +818,7 @@ class TestRunnerEvaluationPersistence:
             contract_text=contract_text,
             input_data="test input",
             raw_output=True,
-            eval_run_log_path=run_log,
+            eval_run_log_path=log_path,
         )
 
         with patch(
@@ -850,7 +848,7 @@ class TestRunnerEvaluationPersistence:
             input_data="existing payload",
             payload_id="existing-payload-id",
             eval_payload_log_path=payload_log,
-            eval_run_log_path=run_log,
+            eval_run_log_path=log_path,
         )
 
         with patch(
@@ -891,7 +889,7 @@ class TestRunnerEvaluationPersistence:
             contract_path=contract,
             input_data="test input",
             retry_policy=RetryPolicy(max_attempts=1),
-            eval_run_log_path=run_log,
+            eval_run_log_path=log_path,
         )
 
         with patch(

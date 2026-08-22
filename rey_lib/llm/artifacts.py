@@ -79,7 +79,7 @@ class LocalArtifactStore(ArtifactStore):
     ----------
     base_dir : Path
         Directory where artifact files are written. Created on first write.
-    run_ctx : Any
+    run_log : Any
         Optional run context (with run identity and a durable log path). When
         provided, each written stage-result JSON is recorded as a files/artifacts
         ``ARTIFACT_REFERENCE`` on the append-only run log
@@ -89,11 +89,11 @@ class LocalArtifactStore(ArtifactStore):
         Role stamped on the emitted artifact record. Defaults to ``"llm_result"``.
     """
 
-    def __init__(self, base_dir: Path, *, run_ctx: Any = None,
+    def __init__(self, base_dir: Path, *, run_log: Any = None,
                  artifact_role: str = "llm_result") -> None:
         """Initialise with the target directory and optional run-log sink."""
         self._base_dir = Path(base_dir)
-        self._run_ctx = run_ctx
+        self._run_log = run_log
         self._artifact_role = artifact_role
 
     def write(
@@ -132,9 +132,9 @@ class LocalArtifactStore(ArtifactStore):
         # The stage-result JSON is a produced, operator-inspectable output, so record
         # it as a files/artifacts entry on the run log when a run context is present.
         # Emission is fail-safe and never blocks artifact storage.
-        if self._run_ctx is not None:
+        if self._run_log is not None:
             log_artifact_reference(
-                self._run_ctx, str(path), role=self._artifact_role,
+                self._run_log, str(path), role=self._artifact_role,
                 event="written", created_by_step=stage_id,
                 artifact_group="analysis_results", producing_step=stage_id,
             )
