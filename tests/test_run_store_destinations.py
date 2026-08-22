@@ -20,12 +20,11 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.control import Control
 from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
 from rey_lib.logs import log_run_complete, log_run_start, log_step_end, log_step_start
-from rey_lib.run.identity import establish_run_identity
 
 
 @pytest.fixture()

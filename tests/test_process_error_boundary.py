@@ -20,6 +20,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import recorded_run  # noqa: F401  (fixture)
+
+
+@pytest.fixture(autouse=True)
+def _recorded_run(recorded_run) -> None:  # noqa: F811
+    """Every test here crosses the launch boundary, which records a run."""
+
 from rey_lib.errors import error_utils
 from rey_lib.errors.error_utils import install_process_error_boundary
 

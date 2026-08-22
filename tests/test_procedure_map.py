@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.db._sqlalchemy import ReyConnection
 from rey_lib.db.postgres_utils import execute_named_sql
@@ -31,7 +31,6 @@ from rey_lib.db.procedure_map import (
     resolve_sql_binding,
 )
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
-from rey_lib.run.identity import establish_run_identity
 
 
 def _log_ctx(tmp_path: Path) -> SimpleNamespace:
@@ -39,7 +38,7 @@ def _log_ctx(tmp_path: Path) -> SimpleNamespace:
         log_file=str(tmp_path / "procedure_map.run.jsonl"),
         owner_app_name="test_app",
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 

@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 from types import SimpleNamespace
 
 from rey_lib.files import file_loader
-from rey_lib.run.identity import establish_run_identity
 
 
 class Config(SimpleNamespace):
@@ -23,7 +22,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         owner_app_name="rey_loader",
         log_depth=0,
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 

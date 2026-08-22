@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.logs import (
     bind_correlation,
@@ -45,7 +45,6 @@ from rey_lib.logs import (
     sanitize_log_value,
 )
 from rey_lib.errors.error_utils import build_process_failure_payload
-from rey_lib.run.identity import establish_run_identity
 from rey_lib.run_lifecycle import run_app_operation as lifecycle_run_app_operation
 
 
@@ -65,7 +64,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         owner_app_name="rey_loader",
         workflow_name="transform_load",
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 
@@ -78,7 +77,7 @@ def _log(ctx: SimpleNamespace, tmp_path: Path):
     return make_run_log(
         tmp_path,
         app=str(getattr(ctx, "owner_app_name", "") or "rey_loader"),
-        run_id=str(ctx.run_id),
+        run_id=ctx.run_id,
         run_timestamp=str(ctx.run_timestamp),
         path=str(getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None)),
     )
@@ -153,7 +152,7 @@ def test_append_only_accumulates(tmp_path: Path) -> None:
 def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     """The shared app-run helper owns public command lifecycle records."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     result = lifecycle_run_app_operation(ctx, run_log, "transform", lambda: 0)
 
@@ -199,7 +198,7 @@ def test_process_failure_payload_reports_missing_diagnostics() -> None:
 def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) -> None:
     """Failures produce canonical ERROR evidence and preserve exception behavior."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
 
     def fail() -> None:
@@ -226,7 +225,7 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
 def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
     """A nonzero integer return is failed evidence but still returned unchanged."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
 
     result = lifecycle_run_app_operation(ctx, run_log, "redact", lambda: 1)
@@ -379,7 +378,7 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     workflow = {
         "name": "wf",
@@ -447,7 +446,7 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     workflow = {
         "name": "wf",
@@ -477,7 +476,7 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
     from rey_lib.workflow import run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     workflow = {
         "name": "wf",
@@ -513,7 +512,7 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     workflow = {
         "name": "wf",
@@ -564,7 +563,7 @@ def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> 
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     workflow = {
         "name": "wf",
@@ -592,7 +591,7 @@ def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     workflow = {
         "name": "wf",
@@ -776,7 +775,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     from rey_lib.workflow import run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     report = tmp_path / "report.json"
 
@@ -967,7 +966,7 @@ def test_config_reference_normalized_fields(tmp_path: Path) -> None:
 def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> None:
     """A nested app operation never writes a RUN_RESTORE_POLICY (run owner only)."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
     lifecycle_run_app_operation(ctx, run_log, "transform", lambda: 0)
     records = _read(Path(run_log.path()))

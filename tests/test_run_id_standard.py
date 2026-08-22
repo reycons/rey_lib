@@ -20,12 +20,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
+
+from rey_lib.run import establish_run_identity
 
 from rey_lib.files.file_utils import run_artifact_path
 from rey_lib.logs import log_run_record, require_run_id
 from rey_lib.logs.logging_setup import setup_logging
-from rey_lib.run import establish_run_identity
 
 # Filename-safe run timestamp pattern: YYYYMMDD_HHMMSS.
 _TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
@@ -66,7 +67,7 @@ def test_logging_requires_an_identity_it_did_not_create() -> None:
         require_run_id(SimpleNamespace())
 
     ctx = SimpleNamespace(run_id=42)
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     assert require_run_id(ctx) == 42
 
 
@@ -112,7 +113,7 @@ def test_ensure_helpers_share_one_identity() -> None:
         control=SimpleNamespace(procedure_map="control"),
         procedure_maps=[SimpleNamespace(name="control", routine_bindings=[])],
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     control = Control(ctx)
     assert control.run_id() == ctx.run_id
     assert control.run_timestamp() == ctx.run_timestamp

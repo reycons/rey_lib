@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.workflow import RunContext, StepResult, WorkflowError, run_workflow
 
@@ -357,12 +357,11 @@ def _run_log_records(tmp_path: Any) -> list[dict[str, Any]]:
 def _log_ctx(tmp_path: Any) -> Any:
     from types import SimpleNamespace
 
-    from rey_lib.run.identity import establish_run_identity
-
+    
     ctx = SimpleNamespace(
         log_file=str(tmp_path / "app.jsonl"), owner_app_name="file_operator"
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 

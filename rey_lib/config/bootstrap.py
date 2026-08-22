@@ -134,9 +134,9 @@ def build_ctx_for_app(
     # carries that value as run_id. A child process arrives with the parent's
     # run_id already set and does not start a second run.
     if not getattr(ctx, "run_id", None):
-        ctx.control = _open_control(ctx)
+        ctx.shared_control = _open_control(ctx)
         ctx.run = Run.start(
-            ctx.control,
+            ctx.shared_control,
             subject_type=subject_type or "app",
             subject_id=subject_id or app_name or str(getattr(ctx, "app_name", "") or ""),
             subject_name=subject_name or operation,
@@ -226,11 +226,16 @@ def open_run_log(ctx: Namespace) -> Any:
     from rey_lib.logs.run_store import run_store_mode
 
     destination = run_store_mode(ctx)
-
-    # Control already exists: the run was created through it before logging
-    # opened. Building a second one here would open a second connection to the
-    # same database and give the run log a different one from the run's own.
-    control = getattr(ctx, "control", None) or _open_control(ctx)
+    control = None
+    if destination in ("db", "both"):
+        # Reused, not rebuilt: the run was created through this Control before
+        # logging opened. A second one would open a second connection to the
+        # same database and the two would disagree about which batch is open.
+        #
+        # Still gated on the destination. The run log needs Control only when
+        # it writes records to the database; the run needed it to exist at all,
+        # which is a different requirement and is met at the launch boundary.
+        control = getattr(ctx, "shared_control", None) or _open_control(ctx)
 
     lineage = {}
     for field in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):

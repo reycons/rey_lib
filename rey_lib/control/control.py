@@ -262,21 +262,24 @@ class Control:
 
     # -- identity (read, never minted) --------------------------------------
 
-    def run_id(self) -> str:
+    def run_id(self) -> Any:
         """Return the execution's run identity, refusing when absent.
 
-        Read from the context, never created here. Identity is established at
-        the launch boundary through ``rey_lib.run``; control does not reach
-        upward to have one minted.
+        Read from the context, never created here. Identity is the manifest's
+        ``run_manifest_id``, established at the launch boundary when the run was
+        recorded; control does not reach upward to have one made.
+
+        Returned as it is held, not stringified. It is an integer key, and a
+        string copy of it would not match the column it is written to.
         """
         run_id = getattr(self._ctx, "run_id", None)
         if not run_id:
             raise ConfigError(
                 "control: no run identity on the context. A run is identified at "
-                "its launch boundary through rey_lib.run before any control DB "
-                "interaction."
+                "its launch boundary by recording it, before any other control "
+                "DB interaction."
             )
-        return str(run_id)
+        return run_id
 
     def run_timestamp(self) -> str:
         """Return the filename-safe run timestamp, refusing when absent."""

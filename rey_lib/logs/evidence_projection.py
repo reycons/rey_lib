@@ -1413,8 +1413,12 @@ def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[
     if not records:
         raise RunLogIdentityError(f"Run log holds no records: {path}")
     first = records[0]
-    top_level_run_id = str(first.get("run_id") or "")
-    if not top_level_run_id:
+    # Kept as the record holds it -- the identity is the manifest's integer key
+    # and the projection reports it, so a string copy here would be a second
+    # representation reaching every reader of a run artifact. Matching below
+    # still compares as text, which costs nothing and tolerates either.
+    top_level_run_id = first.get("run_id")
+    if top_level_run_id in (None, ""):
         raise RunLogIdentityError(
             f"Run log's first record carries no run_id: {path}. Every durable run "
             "record carries one; a record without it is malformed, not legacy."
@@ -1427,7 +1431,7 @@ def _run_log_identity(path: Path, records: list[dict[str, Any]], sections: dict[
         (
             record for record in reversed(records)
             if str(record.get("record_type") or "").upper() == "RUN_COMPLETE"
-            and str(record.get("run_id") or "") == top_level_run_id
+            and str(record.get("run_id") or "") == str(top_level_run_id)
         ),
         {},
     )

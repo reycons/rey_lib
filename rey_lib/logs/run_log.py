@@ -129,7 +129,10 @@ class RunLog:
         """
         # No manufactured default: a run log with no app stamps no app field.
         self.app = str(app or "")
-        self.run_id = str(run_id)
+        # Held as given. It is the manifest's integer key, and a string copy
+        # of it would be a second representation of the one value -- the
+        # records would then disagree with the context they came from.
+        self.run_id = run_id
         self.run_timestamp = str(run_timestamp)
         self.destination = str(destination or "jsonl").strip().lower()
         # Launch states whether this execution starts a batch or continues one.

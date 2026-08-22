@@ -220,7 +220,8 @@ class TestTheRuntimeOwnsTheRunLog:
         if not path.exists():
             pytest.skip(f"{entry_point} is not checked out beside rey_lib")
         source = path.read_text(encoding="utf-8")
-        assert re.search(r"with app_runtime\(.*\) as \(ctx, run_log\)", source), (
+        assert re.search(r"with app_runtime\(.*\) as \(ctx, run_log\)", source,
+                             re.DOTALL), (
             f"{entry_point} does not take the run log from app_runtime. An entry "
             "point that builds its own has a second owner for one process."
         )

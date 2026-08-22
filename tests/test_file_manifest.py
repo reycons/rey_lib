@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.logs import (
     FileManifestError,
@@ -20,7 +20,6 @@ from rey_lib.logs import (
     manifest_state_path,
     resolve_file_manifest_path,
 )
-from rey_lib.run.identity import establish_run_identity
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +278,7 @@ def _run_ctx(tmp_path: Path) -> SimpleNamespace:
         name="rey_lib",
         log_depth=0,
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 

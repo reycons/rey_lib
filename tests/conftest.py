@@ -14,6 +14,32 @@ from typing import Any
 import pytest
 
 from rey_lib.logs.run_log import RunLog
+from rey_lib.run import establish_run_identity
+
+_NEXT_TEST_RUN_ID = [1]
+
+
+def start_test_run(ctx: Any, run_id: int | None = None) -> Any:
+    """Give ``ctx`` the identity a launched run would carry.
+
+    In production identity comes from the manifest: ``Run.start`` inserts the
+    row, the database generates ``run_manifest_id``, and the application carries
+    it as ``run_id``. ``establish_run_identity`` only adds the display and
+    filing timestamps.
+
+    A test that needs a launched-looking context wants both halves without a
+    database, so this supplies the id the manifest would have generated and then
+    calls the real timestamp step. Ids are distinct across calls for the same
+    reason real ones are: two runs are two runs.
+    """
+    if run_id is None:
+        run_id = getattr(ctx, "run_id", None)
+    if run_id is None:
+        run_id = _NEXT_TEST_RUN_ID[0]
+        _NEXT_TEST_RUN_ID[0] += 1
+    ctx.run_id = run_id
+    establish_run_identity(ctx)
+    return ctx
 
 
 def make_run_log(
@@ -50,3 +76,29 @@ def make_run_log(
 def run_log(tmp_path: Path) -> RunLog:
     """A JSONL run log writing into the test's tmp_path."""
     return make_run_log(tmp_path)
+
+
+@pytest.fixture
+def recorded_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the launch boundary start a run without a control database.
+
+    Recording the run is what creates its identity, so ``build_ctx_for_app``
+    reaches the control database on every launch. A test about what the
+    bootstrap does *around* that -- starting logging, installing the error
+    boundary, collecting shared objects -- should not need a database standing
+    up to say so.
+
+    Patches the creation only. Everything after it, including the ordering that
+    puts the run before logging, runs exactly as it does in production.
+    """
+    from rey_lib.config import bootstrap
+    from rey_lib.run import Run
+
+    def _start(control: Any, **kwargs: Any) -> Run:
+        run_id = _NEXT_TEST_RUN_ID[0]
+        _NEXT_TEST_RUN_ID[0] += 1
+        return Run(run_id=run_id, control=control, **{
+            k: v for k, v in kwargs.items() if k != "control"})
+
+    monkeypatch.setattr(bootstrap, "_open_control", lambda ctx: object())
+    monkeypatch.setattr(bootstrap.Run, "start", staticmethod(_start))

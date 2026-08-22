@@ -6,13 +6,14 @@ import json
 import logging
 from types import SimpleNamespace
 
+from tests.conftest import start_test_run
+
 from rey_lib.logs.log_utils import (
     log_file_metadata,
     read_jsonl_file_record_page,
     read_jsonl_records,
     setup_logging,
 )
-from rey_lib.run.identity import establish_run_identity
 
 
 def test_log_utils_public_api_includes_package_facade_exports() -> None:
@@ -80,7 +81,7 @@ def test_httpx_429_records_are_promoted_to_warning(run_log, tmp_path) -> None:
         # Opt in to the legacy readable log so the text handler is exercised too.
         readable_enabled=True,
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="run")
 
     logger = logging.getLogger("httpx")
@@ -112,7 +113,7 @@ def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(run_log, 
         jsonl_ctx_fields=(),
     )
 
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="run")
     logging.getLogger("sample").info("hello")
 
@@ -137,7 +138,7 @@ def test_setup_logging_can_disable_jsonl_with_yaml_flag(run_log, tmp_path) -> No
         logging=SimpleNamespace(jsonl_enabled=False, readable_enabled=True),
     )
 
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="run")
     logging.getLogger("sample").info("hello")
 
@@ -268,7 +269,7 @@ def test_setup_logging_works_without_env_attribute(run_log, tmp_path) -> None:
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_ctx_fields=(),
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="run")
     logging.getLogger("sample").info("no-env ctx")
 
@@ -284,7 +285,7 @@ def test_setup_logging_defaults_to_info_without_env(run_log, tmp_path) -> None:
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_ctx_fields=(),
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="run")
     assert ctx.log_level == "INFO"
 
@@ -299,7 +300,7 @@ def test_setup_logging_accepts_path_object_for_log_path(run_log, tmp_path) -> No
         log_path=log_template,
         jsonl_ctx_fields=(),
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="run")
     logging.getLogger("path_test").info("path object ctx")
 
@@ -322,7 +323,7 @@ def test_setup_logging_substitutes_operation_and_timestamp(run_log, tmp_path) ->
         jsonl_path=str(tmp_path / "app.{operation}.{timestamp}.jsonl"),
         jsonl_ctx_fields=(),
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     setup_logging(ctx, operation="ingest")
     logging.getLogger("sub").info("check placeholders")
 

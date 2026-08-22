@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,7 +24,6 @@ from rey_lib.files import (
     serialize_source_file_rollback,
     unregister_file_compensation,
 )
-from rey_lib.run import establish_run_identity
 from rey_lib.logs import (
     append_profile_record,
     log_file_manifest_record,
@@ -133,7 +132,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
 ) -> None:
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=ctx.run_log_path)
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     classification = {
         "type": "file_name_regex",
         "values": {"Unfamiliar": "Kept"},
@@ -351,7 +350,7 @@ def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None
     """Every field the canonical layout groups is gone from the record root."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=ctx.run_log_path)
-    establish_run_identity(ctx)
+    start_test_run(ctx)
 
     log_source_file_mutation(
 ctx, run_log,
@@ -399,7 +398,7 @@ def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
     """Run-log enrichment is evidence, not a way into the governed record."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=ctx.run_log_path)
-    establish_run_identity(ctx)
+    start_test_run(ctx)
 
     log_source_file_mutation(
 ctx, run_log,

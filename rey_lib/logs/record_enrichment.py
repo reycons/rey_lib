@@ -40,7 +40,7 @@ FILES_RECORD_SUBGROUP = {
 }
 
 
-def require_run_id(ctx: Any) -> str:
+def require_run_id(ctx: Any) -> Any:
     """
     Return the run identity this context already carries, or refuse.
 
@@ -61,8 +61,9 @@ def require_run_id(ctx: Any) -> str:
 
     Returns
     -------
-    str
-        The bound run id.
+    Any
+        The bound run id, as it is held. It is the manifest's integer key, and
+        a string copy of it would be a second representation of the one value.
 
     Raises
     ------
@@ -72,11 +73,11 @@ def require_run_id(ctx: Any) -> str:
     run_id = getattr(ctx, "run_id", None)
     if not run_id:
         raise ValueError(
-            "No run identity has been established. A run is identified by its "
-            "launch boundary through rey_lib.run before anything is logged; "
-            "logging reads that identity and never mints one."
+            "No run identity has been established. A run is identified by "
+            "recording it at its launch boundary, before anything is logged; "
+            "logging reads that identity and never makes one."
         )
-    return str(run_id)
+    return run_id
 
 
 

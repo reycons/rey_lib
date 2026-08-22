@@ -1401,7 +1401,11 @@ def _audit_context(
         installation=getattr(ctx, "installation", ""),
         config_root=getattr(ctx, "config_root", ""),
     )
-    # A rollback audit is its own execution, so this is its launch boundary.
+    # The audit belongs to the run that asked for the rollback. It used to mint
+    # an identity of its own here, which is no longer possible and was never
+    # right: identity comes from recording a run, and a rollback performed
+    # during a run is part of that run rather than a second one.
+    audit_ctx.run_id = getattr(ctx, "run_id", None)
     establish_run_identity(audit_ctx)
     audit_ctx.run_log_path = str(
         run_artifact_path(

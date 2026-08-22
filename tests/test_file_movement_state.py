@@ -17,10 +17,9 @@ from rey_lib.files.file_utils import (
     iter_file_movements,
     move_file,
 )
-from tests.conftest import make_run_log
+from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.logs import read_run_log_sections
-from rey_lib.run.identity import establish_run_identity
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -37,7 +36,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         app_name="file_operator",
         pipeline_name="daily",
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 

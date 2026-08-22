@@ -47,7 +47,7 @@ def _base_record(ctx, record_type: str, message: str) -> dict:
     run_log = RunLog(
         app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
                 or getattr(ctx, "name", "") or ""),
-        run_id=str(getattr(ctx, "run_id", "")),
+        run_id=getattr(ctx, "run_id", ""),
         run_timestamp=str(getattr(ctx, "run_timestamp", "")),
         workflow=getattr(ctx, "workflow_name", None),
         pipeline=getattr(ctx, "pipeline_name", None),

@@ -19,12 +19,13 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import start_test_run
+
 from rey_lib.logs import (
     create_results_summary,
     finalize_run_log,
     log_artifact_reference,
 )
-from rey_lib.run.identity import establish_run_identity
 from rey_lib.run_lifecycle import run_app_operation
 from rey_lib.workflow import run_workflow
 
@@ -35,7 +36,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         owner_app_name="file_operator",
         workflow_name="convert_excel_to_csv",
     )
-    establish_run_identity(ctx)
+    start_test_run(ctx)
     return ctx
 
 
