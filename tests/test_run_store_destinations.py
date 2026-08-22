@@ -129,6 +129,8 @@ class TestDbMode:
 
         log_run_start(ctx, operation="scan")
 
+        # The batch is opened first, then the record itself is persisted as an
+        # event: every record reaches the database, not only the lifecycle ones.
         assert _actions(control_calls) == ["start_batch", "log_event"]
         assert _records(ctx) == []
 
@@ -141,8 +143,10 @@ class TestDbMode:
         log_run_complete(ctx, "success")
 
         assert _actions(control_calls) == [
-            "start_batch", "log_event", "start_step", "end_step",
-            "log_event", "end_batch",
+            "start_batch", "log_event",     # RUN_START record
+            "log_event", "start_step",      # STEP_START record, then the step
+            "log_event", "end_step",        # STEP_END record, then step close
+            "log_event", "end_batch",       # RUN_COMPLETE record, then close
         ]
 
     def test_every_run_log_control_call_is_required(self, tmp_path, control_calls) -> None:
@@ -187,7 +191,7 @@ class TestBothMode:
                             lambda *a, **k: None)
         ctx = _ctx(tmp_path, "both")
 
-        with pytest.raises(StateError, match="recorded in one place"):
+        with pytest.raises(StateError, match="one place and not the other"):
             log_run_start(ctx, operation="scan")
 
     def test_a_jsonl_failure_under_jsonl_alone_still_does_not_raise(
@@ -308,3 +312,90 @@ class TestIdsArriveThroughTheMap:
             log_run_start(ctx, operation="scan")
 
         assert seen == ["start_batch"]
+
+
+class TestEveryRecordHonoursTheDestination:
+    """The defect this class exists for.
+
+    Only the four lifecycle writers used to consult run_store. Every other
+    record writer -- errors, row counts, validation results, SQL execution,
+    file operations -- called log_run_record directly and wrote JSONL
+    unconditionally. So `db` produced a JSONL file missing its lifecycle
+    records and a database holding only lifecycle records, and neither was a
+    complete run log.
+
+    The destination now belongs to log_run_record, which every record already
+    passes through. These assert it on a record that is not a lifecycle event,
+    because that is exactly what the earlier coverage missed.
+    """
+
+    def test_an_error_record_reaches_the_database(self, tmp_path, control_calls) -> None:
+        from rey_lib.logs import log_error
+
+        ctx = _ctx(tmp_path, "db")
+        log_run_start(ctx, operation="scan")
+        control_calls.clear()
+
+        log_error(ctx, message="something failed", error_type="AppError")
+
+        events = [v for name, v, _ in control_calls if name == "log_event"]
+        assert [e["event_name"] for e in events] == ["ERROR"]
+        assert e_sev(events[0]) == "ERROR"
+
+    def test_an_error_record_writes_no_jsonl_under_db(self, tmp_path,
+                                                      control_calls) -> None:
+        from rey_lib.logs import log_error
+
+        ctx = _ctx(tmp_path, "db")
+        log_run_start(ctx, operation="scan")
+
+        log_error(ctx, message="something failed", error_type="AppError")
+
+        assert _records(ctx) == []
+
+    def test_a_row_count_reaches_both_destinations(self, tmp_path,
+                                                   control_calls) -> None:
+        from rey_lib.logs import log_row_count
+
+        ctx = _ctx(tmp_path, "both")
+        log_run_start(ctx, operation="scan")
+        control_calls.clear()
+
+        log_row_count(ctx, count_name="loaded", count=42)
+
+        events = [v for name, v, _ in control_calls if name == "log_event"]
+        assert [e["event_name"] for e in events] == ["ROW_COUNT"]
+        assert [r["record_type"] for r in _records(ctx)][-1] == "ROW_COUNT"
+
+    def test_the_whole_record_is_carried_as_the_event_payload(self, tmp_path,
+                                                              control_calls) -> None:
+        from rey_lib.logs import log_row_count
+
+        ctx = _ctx(tmp_path, "db")
+        log_run_start(ctx, operation="scan")
+        control_calls.clear()
+
+        log_row_count(ctx, count_name="loaded", count=42)
+
+        payload = [v for name, v, _ in control_calls if name == "log_event"][0]
+        assert payload["event_jsonb"]["record_type"] == "ROW_COUNT"
+        assert payload["event_jsonb"]["run_id"] == ctx.run_id
+
+    def test_severity_is_derived_from_the_record_type(self, tmp_path,
+                                                      control_calls) -> None:
+        from rey_lib.logs import log_run_record
+
+        ctx = _ctx(tmp_path, "db")
+        log_run_start(ctx, operation="scan")
+        control_calls.clear()
+
+        for record_type in ("ERROR", "WARNING", "ROW_COUNT"):
+            log_run_record(ctx, record_type, message="m")
+
+        events = [v for name, v, _ in control_calls if name == "log_event"]
+        assert [e_sev(e) for e in events] == ["ERROR", "WARNING", "INFO"]
+
+
+def e_sev(event: dict) -> str:
+    """The severity a persisted record was recorded under."""
+    return event["severity"]

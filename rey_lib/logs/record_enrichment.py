@@ -355,40 +355,61 @@ def log_run_record(
     **fields : Any
         Additional typed fields merged into the record.
 
+    Destination is decided here, for every record, because every record passes
+    through here. ``logging.run_store`` selects the JSONL run log, the control
+    database, or both, and a record is committed when every selected
+    destination accepted it.
+
     Returns
     -------
     int | None
-        The committed ``record_id`` — the record's one-based row number in the
-        run log — or ``None`` when the record could not be committed. The
-        return is additive: callers that do not need durable record identity
-        may continue to ignore it. A caller that must not act unless its
-        evidence is durable (for example the governed file manifest) treats
-        ``None`` as the failure signal, because this function never raises.
+        The committed ``record_id`` — the record's logical sequence number
+        within the run — or ``None`` when the record could not be committed to
+        every selected destination. The return is additive: callers that do not
+        need durable record identity may continue to ignore it. A caller that
+        must not act unless its evidence is durable (for example the governed
+        file manifest) treats ``None`` as the failure signal, because this
+        function never raises.
     """
     if _has_durable_run_path(ctx):
         _validate_run_record_fields(record_type, fields)
     try:
-        path = open_run_log(ctx)
+        from rey_lib.logs import run_store
+
+        to_jsonl = run_store.writes_jsonl(ctx)
+        to_db = run_store.writes_db(ctx)
+
+        # open_run_log is only reached when JSONL is a destination: it fails
+        # closed without a durable log path, which is correct for a JSONL run
+        # and irrelevant to a database-only one.
+        path = open_run_log(ctx) if to_jsonl else None
         record = _enrich_run_record(ctx, record_type, message=message, fields=fields)
 
         # Logical record identity and parent, derived from the nest-level state
-        # (SGC_Rey_Log_Record_Parenting_Phase_2). Stamped before the append; the
-        # sequence advances only after a successful write, so a failed append does
-        # not skip an id.
+        # (SGC_Rey_Log_Record_Parenting_Phase_2). The sequence belongs to the run
+        # rather than to a file: it is stamped before the write and advances only
+        # after a successful one, so a failed write does not skip an id, and the
+        # hierarchy is the same whichever destination is selected.
         from rey_lib.logs import record_parenting
         from rey_lib.logs.nest_level import get_nest_level
 
         nest_level = get_nest_level(ctx)
         record_id = record_parenting.stamp_record(ctx, record, nest_level)
 
-        # Route the durable append through the primitive I/O layer so the run-log
-        # writer shares one low-level append with file_utils without either
-        # foundational module importing the other (SGC_Rey_Lib_Primitive_File_IO_Layer).
-        # Imported lazily because the rey_lib.files package eagerly loads file_utils,
-        # which imports this logging layer — a module-level import would form a cycle.
-        from rey_lib.files import primitive_file_io
+        if to_jsonl:
+            # Route the durable append through the primitive I/O layer so the run-log
+            # writer shares one low-level append with file_utils without either
+            # foundational module importing the other
+            # (SGC_Rey_Lib_Primitive_File_IO_Layer). Imported lazily because the
+            # rey_lib.files package eagerly loads file_utils, which imports this
+            # logging layer — a module-level import would form a cycle.
+            from rey_lib.files import primitive_file_io
 
-        primitive_file_io.append_jsonl(path, record)
+            primitive_file_io.append_jsonl(path, record)
+
+        if to_db:
+            run_store.persist_record(ctx, record_type, message, record)
+
         record_parenting.commit_record(ctx, record_id, nest_level)
         return record_id
     except Exception as exc:  # noqa: BLE001 — logging must never mask execution.

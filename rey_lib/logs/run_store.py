@@ -46,8 +46,8 @@ __all__ = [
     "persist_step_start",
     "persist_step_end",
     "persist_run_complete",
-    "persist_event",
-    "require_jsonl_record",
+    "persist_record",
+    "require_structural_record",
 ]
 
 RUN_STORE_MODES = ("jsonl", "db", "both")
@@ -169,12 +169,19 @@ def validate_run_store(ctx: Any) -> None:
         )
 
 
-def require_jsonl_record(ctx: Any, record_id: Optional[int], record_type: str) -> None:
-    """Escalate a failed JSONL write when JSONL is a required destination.
+def require_structural_record(ctx: Any, record_id: Optional[int],
+                              record_type: str) -> None:
+    """Escalate a lost structural record when more than one destination is required.
 
     Under ``both`` a missing record means the run log is half written. The
     record writer has already warned and returned None on its own terms; this
     is the run store's separate durability contract on top of that.
+
+    It applies to the structural records only -- run start, step start, step
+    end, run complete. Losing one of those leaves a run log that does not
+    describe a run. Evidence records degrade as they always have, warned and
+    returning None, because logging must not mask execution and an errored row
+    count is not worth failing a run over.
 
     Under ``jsonl`` nothing is raised -- that is the historical behaviour, kept
     exactly.
@@ -184,9 +191,9 @@ def require_jsonl_record(ctx: Any, record_id: Optional[int], record_type: str) -
     if run_store_mode(ctx) != "both":
         return
     raise _errors().StateError(
-        f"run_store is 'both' but the JSONL {record_type} record was not written. "
-        "Both destinations are required; the run log is now recorded in one place "
-        "and not the other."
+        f"run_store is 'both' but the {record_type} record was not committed to "
+        "every destination. Both are required; the run log now describes this "
+        "run in one place and not the other."
     )
 
 
@@ -227,6 +234,11 @@ def persist_run_start(ctx: Any, **fields: Any) -> None:
 
     ``ctx.batch_owned_by_run`` records whether this execution created the batch,
     so completion knows whether ending it is its business.
+
+    Only the batch is established here. The RUN_START event itself arrives
+    through the ordinary record path, like every other record -- which is why
+    this runs first: an event carries ``batch_id``, and the column is NOT NULL,
+    so the batch has to exist before any record is persisted.
     """
     if not writes_db(ctx):
         return
@@ -250,13 +262,6 @@ def persist_run_start(ctx: Any, **fields: Any) -> None:
                 "never manufactured to satisfy a reuse request."
             )
         ctx.batch_owned_by_run = False
-
-    control.log_event(
-        severity="INFO",
-        event_name="RUN_START",
-        message=str(fields.get("message") or "run started"),
-        required=True,
-    )
 
 
 def persist_step_start(ctx: Any, step_name: str, step_sequence: int,
@@ -289,32 +294,58 @@ def persist_run_complete(ctx: Any, status: str, message: str = "", **fields: Any
     A batch may contain several runs. Ending it because one of them finished
     would close it under the others, so completion ends only a batch this
     execution created.
+
+    Only the batch is closed here. The RUN_COMPLETE event arrives through the
+    ordinary record path, which is why this runs last: the event must land
+    before the batch it belongs to is closed.
     """
     if not writes_db(ctx):
         return
 
     control = _control(ctx)
-    control.log_event(
-        severity="INFO" if status == "success" else "ERROR",
-        event_name="RUN_COMPLETE",
-        message=message or status,
-        required=True,
-    )
     if getattr(ctx, "batch_owned_by_run", False):
         control.end_batch(status=status,
                           error_message=None if status == "success" else (message or status),
                           required=True)
 
 
-def persist_event(ctx: Any, severity: str, event_name: str, message: str,
-                  **fields: Any) -> None:
-    """Record one durable event against this run.
+_SEVERITY_BY_PREFIX = (("ERROR", "ERROR"), ("FAILURE", "ERROR"),
+                       ("WARNING", "WARNING"))
 
-    Carries ``run_id`` whether or not a step is open, so events from different
-    runs sharing a batch stay distinguishable when ``batch_step_id`` is null.
+
+def _severity_of(record_type: str) -> str:
+    """Map a record type to a control-event severity.
+
+    The record type is the event name, so severity is the one thing that has to
+    be derived. Anything that is not an error or a warning is informational.
+    """
+    upper = str(record_type).upper()
+    for token, severity in _SEVERITY_BY_PREFIX:
+        if token in upper:
+            return severity
+    return "INFO"
+
+
+def persist_record(ctx: Any, record_type: str, message: str,
+                   record: dict[str, Any]) -> None:
+    """Persist one run-log record to the control database.
+
+    Every record reaches the database the same way: as a control log event
+    named for its record type, carrying the whole enriched record as its
+    payload. The lifecycle records additionally open and close batches and
+    steps, which is structure rather than evidence and is handled by the
+    lifecycle writers.
+
+    The event carries ``run_id`` whether or not a step is open, so records from
+    different runs sharing a batch stay distinguishable when ``batch_step_id``
+    is null.
     """
     if not writes_db(ctx):
         return
     _control(ctx).log_event(
-        severity=severity, event_name=event_name, message=message, required=True,
+        severity=_severity_of(record_type),
+        event_name=str(record_type),
+        message=str(message or record.get("message") or record_type),
+        event_jsonb=record,
+        required=True,
     )
