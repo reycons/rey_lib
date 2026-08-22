@@ -17,7 +17,6 @@ import pytest
 from tests.conftest import make_run_log
 
 from rey_lib.config.config_utils import Namespace
-from rey_lib.logs import set_nest_level
 from rey_lib.run_lifecycle import run_app_operation
 
 
@@ -44,8 +43,8 @@ def test_success_completion_returns_to_app_level(tmp_path: Path) -> None:
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     def func() -> int:
-        set_nest_level(run_log, "workflow")       # 4
-        set_nest_level(run_log, "workflow_step")  # 5 — left deep, no return
+        run_log.set_nest_level("workflow")       # 4
+        run_log.set_nest_level("workflow_step")  # 5 — left deep, no return
         return 0
 
     run_app_operation(ctx, run_log, "op", func)
@@ -59,8 +58,8 @@ def test_failed_completion_returns_to_app_level(tmp_path: Path) -> None:
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     def func() -> int:
-        set_nest_level(run_log, "workflow")
-        set_nest_level(run_log, "workflow_step")
+        run_log.set_nest_level("workflow")
+        run_log.set_nest_level("workflow_step")
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom"):

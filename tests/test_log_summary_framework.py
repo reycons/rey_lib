@@ -20,7 +20,6 @@ from rey_lib.logs import (
     log_step_end,
     log_step_failure,
     log_step_start,
-    set_nest_level,
 )
 from rey_lib.logs.record_enrichment import log_run_record
 
@@ -43,7 +42,7 @@ def _completed_run(
     complete: bool = True,
 ) -> tuple[SimpleNamespace, Path]:
     run_log = _ctx(tmp_path)
-    set_nest_level(run_log, semantic_level)
+    run_log.set_nest_level(semantic_level)
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     log_step_start(run_log, "one", 1, step_id="one")
     if status == "failed":
@@ -150,10 +149,10 @@ def test_results_summary_uses_active_scope(
 
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     run_log = _ctx(tmp_path)
-    set_nest_level(run_log, "app")
+    run_log.set_nest_level("app")
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     app_record_id = _records(Path(run_log.path()))[0]["record_id"]
-    set_nest_level(run_log, "workflow")
+    run_log.set_nest_level("workflow")
     log_step_start(run_log, "one", 1, step_id="one")
     log_step_end(run_log, "one", "success", step_id="one")
     log_run_complete(run_log, "success")

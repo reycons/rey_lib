@@ -153,7 +153,7 @@ def create_results_summary(
         )
 
         from rey_lib.logs.record_enrichment import log_run_record
-        from rey_lib.logs.run_state import companion_path
+        from rey_lib.logs.run_log import companion_path
 
         state_path = companion_path(str(payload["path"]))
         if not state_path.is_file():

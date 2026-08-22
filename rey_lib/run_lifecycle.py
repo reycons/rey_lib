@@ -90,12 +90,11 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
         log_run_complete,
         log_run_start,
         log_step_failure,
-        set_nest_level,
     )
 
     # App semantic base (SGC_Rey_Log_Nest_Level_Phase_1). The shared app boundary,
     # so every app establishes level 3 here regardless of how it was invoked.
-    set_nest_level(run_log, "app")
+    run_log.set_nest_level("app")
     log_run_start(run_log, operation=operation)
     bind_run(run_log)
     record_config_file_references(ctx, run_log)
@@ -115,7 +114,7 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
         # may have descended into workflow/analysis/other deeper scopes that left the
         # shared hierarchy deeper than the app base. Reassert app ownership before
         # RUN_COMPLETE so completion is emitted at the app level.
-        set_nest_level(run_log, "app")
+        run_log.set_nest_level("app")
         log_run_complete(run_log,
             "failed",
             message=failure_message,
@@ -148,7 +147,7 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
                 error_id=failure_record_id,
             )
             # Ownership-return: reassert app ownership before RUN_COMPLETE.
-            set_nest_level(run_log, "app")
+            run_log.set_nest_level("app")
             log_run_complete(run_log,
                 "failed",
                 message=failure_message,
@@ -159,7 +158,7 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
             )
             return result
         # Ownership-return: reassert app ownership before RUN_COMPLETE.
-        set_nest_level(run_log, "app")
+        run_log.set_nest_level("app")
         log_run_complete(run_log, "success")
         return result
     finally:

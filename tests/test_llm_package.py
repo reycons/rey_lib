@@ -18,7 +18,6 @@ from rey_lib.logs import (
     run_configured_log_analysis,
     run_configured_record_analysis,
     run_workbench_input_stream,
-    set_nest_level,
 )
 from rey_lib.logs.record_enrichment import log_run_record
 
@@ -41,7 +40,7 @@ def _write_completed_run(path: Path, records: list[dict]) -> None:
         run_timestamp=first["run_timestamp"],
         pipeline=first.get("pipeline_name", ""),
     )
-    set_nest_level(run_log, "pipeline")
+    run_log.set_nest_level("pipeline")
     for source in records:
         fields = dict(source)
         record_type = fields.pop("record_type")

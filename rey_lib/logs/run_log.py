@@ -32,6 +32,8 @@ would be a behaviour change hidden in a refactor. The recorded xfail in
 
 from __future__ import annotations
 
+import json
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -346,8 +348,6 @@ class RunLog:
 
     def _state_path(self) -> Optional[Path]:
         """The companion state file, or None when there is no durable log."""
-        from rey_lib.logs.run_state import companion_path
-
         try:
             return companion_path(str(self.path()))
         except Exception:  # noqa: BLE001 — no durable log; use the in-memory store.
@@ -359,8 +359,6 @@ class RunLog:
         Read per operation rather than cached, deliberately: this is what lets a
         separate process continue the sequence rather than restart it.
         """
-        from rey_lib.logs.run_state import _read, _write
-
         path = self._state_path()
         if path is None:
             if self._memory_state is None:
@@ -374,8 +372,6 @@ class RunLog:
 
     def _save_state(self, state: dict[str, Any], path: Optional[Path]) -> None:
         """Persist the hierarchy state to its backing store."""
-        from rey_lib.logs.run_state import _write
-
         if path is None:
             self._memory_state = state
         else:
@@ -484,3 +480,80 @@ class RunLog:
             event_jsonb=record,
             required=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# The companion state file
+# ---------------------------------------------------------------------------
+#
+# The record sequence, parent linkage and nest level for one physical run log
+# live in one JSON file derived deterministically from that log's path. Every
+# process writing the same run log resolves the same companion path, which is
+# what keeps sequencing continuous across the subprocess boundary a
+# process-local attribute could not cross. Concurrency is out of scope: the
+# model assumes sequential writers to one physical log.
+#
+# Naming: ``<run_log_path>.hstate.json``.
+
+_STATE_SUFFIX = ".hstate.json"
+
+
+def companion_path(run_log_path: str) -> Path:
+    """Return the deterministic companion hierarchy-state path for a run log."""
+    return Path(str(run_log_path) + _STATE_SUFFIX)
+
+def _read(path: Path) -> dict[str, Any]:
+    """Read and normalize the state file, tolerating a malformed/partial file."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _initial_state()
+    if not isinstance(raw, dict):
+        return _initial_state()
+    return _normalize(raw)
+
+def _write(path: Path, state: dict[str, Any]) -> None:
+    """Atomically persist state through the shared primitive file layer."""
+    from rey_lib.files.json import write_json_file
+
+    write_json_file(path, _serializable(state), mode="compact", newline=False)
+
+def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce a loaded state dict to the in-memory shape (int level_anchors keys)."""
+    anchors_raw = raw.get(LEVEL_ANCHORS) or {}
+    try:
+        anchors = {int(k): int(v) for k, v in anchors_raw.items()}
+    except (TypeError, ValueError):
+        anchors = {}
+    if not anchors:
+        anchors = {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT}
+    parent_level = _as_int(raw.get(PARENT_LEVEL), 0)
+    return {
+        LAST_RECORD_ID: _as_int(raw.get(LAST_RECORD_ID), 0),
+        CURRENT_NEST_LEVEL: _as_int(raw.get(CURRENT_NEST_LEVEL), 0),
+        PARENT_LEVEL: parent_level,
+        # The floor is derived, so a state file predating it still normalizes correctly.
+        MINIMUM_NEST_LEVEL: _as_int(raw.get(MINIMUM_NEST_LEVEL), parent_level + 1),
+        CURRENT_PARENT_RECORD_ID: _as_int(raw.get(CURRENT_PARENT_RECORD_ID), _SYNTHETIC_ROOT),
+        LEVEL_ANCHORS: anchors,
+    }
+
+def _serializable(state: dict[str, Any]) -> dict[str, Any]:
+    """Render state for JSON: level_anchors keys become strings."""
+    anchors = state.get(LEVEL_ANCHORS) or {}
+    parent_level = _as_int(state.get(PARENT_LEVEL), 0)
+    return {
+        LAST_RECORD_ID: _as_int(state.get(LAST_RECORD_ID), 0),
+        CURRENT_NEST_LEVEL: _as_int(state.get(CURRENT_NEST_LEVEL), 0),
+        PARENT_LEVEL: parent_level,
+        MINIMUM_NEST_LEVEL: _as_int(state.get(MINIMUM_NEST_LEVEL), parent_level + 1),
+        CURRENT_PARENT_RECORD_ID: _as_int(state.get(CURRENT_PARENT_RECORD_ID), _SYNTHETIC_ROOT),
+        LEVEL_ANCHORS: {str(int(k)): int(v) for k, v in anchors.items()},
+    }
+
+def _as_int(value: Any, default: int) -> int:
+    """Best-effort int coercion with a default (state must never raise on read)."""
+    try:
+        return int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
