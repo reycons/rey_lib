@@ -162,18 +162,21 @@ def create_results_summary(
             )
             return result
 
-        # Limit the writer context to fields already present in the canonical Summary.
-        # Optional app/workflow enrichment would otherwise alter the builder payload.
-        # The shared hierarchy writer resolves state solely from run_log_path.
-        write_ctx = SimpleNamespace(
-            run_log_path=str(payload["path"]),
+        # A run log limited to the fields already present in the canonical
+        # Summary. Optional app/workflow enrichment would otherwise alter the
+        # builder payload, and the sequence resolves from the log's own path.
+        from rey_lib.logs.run_log import RunLog
+
+        write_log = RunLog(
+            app="",
             run_id=str(summary["run_id"]),
             run_timestamp=str(summary["run_timestamp"]),
+            path=str(payload["path"]),
         )
         records_before = read_run_log_sections(payload["path"])["records"]
         summary_fields = dict(summary)
         summary_fields.pop("record_type", None)
-        log_run_record(write_ctx, _RESULTS_SUMMARY, **summary_fields)
+        log_run_record(write_log, _RESULTS_SUMMARY, **summary_fields)
         records_after = read_run_log_sections(payload["path"])["records"]
         appended = records_after[len(records_before):]
         if len(appended) != 1 or not _is_record_type(appended[0], _RESULTS_SUMMARY):
