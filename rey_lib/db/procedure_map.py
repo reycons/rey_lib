@@ -389,8 +389,7 @@ def execute_mapped_routine(
                 "requests 'dataset_result'; use a mapped_sql binding for datasets."
             )
     except Exception as exc:
-        log_sql_execution(
-            ctx,
+        log_sql_execution(run_log,
             sql_label=routine_name,
             operation="routine",
             status="failed",
@@ -404,8 +403,7 @@ def execute_mapped_routine(
         )
         raise
 
-    log_sql_execution(
-        ctx,
+    log_sql_execution(run_log,
         sql_label=routine_name,
         operation="routine",
         status="success",
@@ -445,8 +443,7 @@ def execute_sql_text(
     try:
         result = _db.run_sql(conn, sql_text)
     except Exception as exc:
-        log_sql_execution(
-            ctx,
+        log_sql_execution(run_log,
             sql_path=sql_path,
             sql_label=sql_label,
             operation=operation,
@@ -458,8 +455,7 @@ def execute_sql_text(
         )
         raise
 
-    log_sql_execution(
-        ctx,
+    log_sql_execution(run_log,
         sql_path=sql_path,
         sql_label=sql_label,
         operation=operation,
@@ -494,8 +490,7 @@ def execute_procedure_call(
             _db.call_proc(conn, proc_name, [v for _n, v in named_inputs])
             output_values = {}
     except Exception as exc:
-        log_sql_execution(
-            ctx,
+        log_sql_execution(run_log,
             sql_label=sql_label,
             operation=operation,
             status="failed",
@@ -507,8 +502,7 @@ def execute_procedure_call(
         )
         raise
 
-    log_sql_execution(
-        ctx,
+    log_sql_execution(run_log,
         sql_label=sql_label,
         operation=operation,
         status="success",
@@ -553,8 +547,7 @@ def _execute_sql(
         elif result_mode == "dataset_result":
             rows = data
     except Exception as exc:
-        log_sql_execution(
-            ctx,
+        log_sql_execution(run_log,
             sql_label=name,
             operation=execution_target,
             status="failed",
@@ -566,8 +559,7 @@ def _execute_sql(
         )
         raise
 
-    log_sql_execution(
-        ctx,
+    log_sql_execution(run_log,
         sql_label=name,
         operation=execution_target,
         status="success",

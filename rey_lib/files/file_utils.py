@@ -1465,8 +1465,7 @@ def file_movement_log_path(ctx: Any) -> Path:
     return file_operation_log_path(ctx)
 
 
-def log_file_operation(
-    ctx: Any,
+def log_file_operation(run_log: Any,
     *,
     source: Path | str,
     destination: Path | str,
@@ -1505,7 +1504,7 @@ def log_file_operation(
     if metadata:
         record["metadata"] = metadata
 
-    log_run_record(ctx, "FILE_OPERATION", **record)
+    log_run_record(run_log, "FILE_OPERATION", **record)
     return record
 
 
@@ -1523,8 +1522,7 @@ def log_file_move(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compatibility alias for ``log_file_operation``."""
-    return log_file_operation(
-        ctx,
+    return log_file_operation(run_log,
         source=source,
         destination=destination,
         app=app,

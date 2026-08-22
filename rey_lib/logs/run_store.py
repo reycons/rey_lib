@@ -124,7 +124,7 @@ def new_batch_intent(ctx: Any) -> bool:
     which is the safe reading -- continuing someone else's is the case that has
     to be asked for.
     """
-    declared = getattr(ctx, "new_batch", None)
+    declared = getattr(run_log, "new_batch", None)
     if declared is None:
         return True
     return bool(declared)
@@ -161,7 +161,7 @@ def validate_run_store(ctx: Any) -> None:
 
     # An invalid reuse request is a launch error, not something to repair by
     # creating the batch the caller explicitly said not to create.
-    if not new_batch_intent(ctx) and not getattr(ctx, "batch_id", None):
+    if not new_batch_intent(run_log) and not getattr(ctx, "batch_id", None):
         raise _errors().ConfigError(
             "newBatch is false but no batch_id is bound to reuse. Reuse is an "
             "explicit continuation of a batch that already exists; a launch that "
@@ -169,7 +169,7 @@ def validate_run_store(ctx: Any) -> None:
         )
 
 
-def require_structural_record(ctx: Any, record_id: Optional[int],
+def require_structural_record(run_log: 'RunLog', record_id: Optional[int],
                               record_type: str) -> None:
     """Escalate a lost structural record when more than one destination is required.
 
@@ -188,7 +188,7 @@ def require_structural_record(ctx: Any, record_id: Optional[int],
     """
     if record_id is not None:
         return
-    if run_store_mode(ctx) != "both":
+    if run_log.destination != "both":
         return
     raise _errors().StateError(
         f"run_store is 'both' but the {record_type} record was not committed to "
@@ -223,7 +223,7 @@ def _control(ctx: Any) -> Any:
     return ctx.control_api
 
 
-def persist_run_start(ctx: Any, **fields: Any) -> None:
+def persist_run_start(run_log: 'RunLog', **fields: Any) -> None:
     """Establish the batch this run belongs to, then record the run starting.
 
     Honours the declared intent and nothing else:
@@ -240,13 +240,13 @@ def persist_run_start(ctx: Any, **fields: Any) -> None:
     this runs first: an event carries ``batch_id``, and the column is NOT NULL,
     so the batch has to exist before any record is persisted.
     """
-    if not writes_db(ctx):
+    if not run_log.writes_db:
         return
 
-    control = _control(ctx)
-    if new_batch_intent(ctx):
+    control = run_log.control
+    if new_batch_intent(run_log):
         control.start_batch(
-            batch_name=str(fields.get("operation") or getattr(ctx, "app_name", "") or "run"),
+            batch_name=str(fields.get("operation") or run_log.app or "run"),
             required=True,
         )
         if not control.batch_id:
@@ -254,22 +254,22 @@ def persist_run_start(ctx: Any, **fields: Any) -> None:
                 "control start_batch returned no batch_id. The run store cannot "
                 "record steps or events without the batch that groups them."
             )
-        ctx.batch_owned_by_run = True
+        control.owns_batch = True
     else:
         if not control.batch_id:
             raise _errors().ConfigError(
                 "newBatch is false but no batch_id is bound to reuse. A batch is "
                 "never manufactured to satisfy a reuse request."
             )
-        ctx.batch_owned_by_run = False
+        control.owns_batch = False
 
 
-def persist_step_start(ctx: Any, step_name: str, step_sequence: int,
+def persist_step_start(run_log: 'RunLog', step_name: str, step_sequence: int,
                        step_type: str = "", **fields: Any) -> None:
     """Open a control step for this run; the map binds ctx.batch_step_id."""
-    if not writes_db(ctx):
+    if not run_log.writes_db:
         return
-    _control(ctx).start_step(
+    run_log.control.start_step(
         step_name=step_name,
         step_sequence=step_sequence,
         step_type=step_type or None,
@@ -277,18 +277,18 @@ def persist_step_start(ctx: Any, step_name: str, step_sequence: int,
     )
 
 
-def persist_step_end(ctx: Any, step_name: str, status: str,
+def persist_step_end(run_log: 'RunLog', step_name: str, status: str,
                      message: str = "", **fields: Any) -> None:
     """Close the open control step."""
-    if not writes_db(ctx):
+    if not run_log.writes_db:
         return
-    control = _control(ctx)
+    control = run_log.control
     control.end_step(status=status, message=message or None, required=True)
     # The step is closed; later events belong to the run, not to it.
     control.batch_step_id = None
 
 
-def persist_run_complete(ctx: Any, status: str, message: str = "", **fields: Any) -> None:
+def persist_run_complete(run_log: 'RunLog', status: str, message: str = "", **fields: Any) -> None:
     """Record the run finishing, and end the batch only if this run began it.
 
     A batch may contain several runs. Ending it because one of them finished
@@ -299,11 +299,11 @@ def persist_run_complete(ctx: Any, status: str, message: str = "", **fields: Any
     ordinary record path, which is why this runs last: the event must land
     before the batch it belongs to is closed.
     """
-    if not writes_db(ctx):
+    if not run_log.writes_db:
         return
 
-    control = _control(ctx)
-    if getattr(ctx, "batch_owned_by_run", False):
+    control = run_log.control
+    if control.owns_batch:
         control.end_batch(status=status,
                           error_message=None if status == "success" else (message or status),
                           required=True)
@@ -340,9 +340,9 @@ def persist_record(ctx: Any, record_type: str, message: str,
     different runs sharing a batch stay distinguishable when ``batch_step_id``
     is null.
     """
-    if not writes_db(ctx):
+    if not run_log.writes_db:
         return
-    _control(ctx).log_event(
+    run_log.control.log_event(
         severity=_severity_of(record_type),
         event_name=str(record_type),
         message=str(message or record.get("message") or record_type),

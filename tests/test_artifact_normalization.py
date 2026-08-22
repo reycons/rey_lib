@@ -185,8 +185,7 @@ def test_log_artifact_reference_tags_producer_fields(tmp_path: Path) -> None:
     run_log = tmp_path / "run_log.20260708_000000.jsonl"
     ctx = SimpleNamespace(run_log_path=str(run_log), run_id="r1",
                           run_timestamp="20260708_000000", owner_app_name="file_operator")
-    log_artifact_reference(
-        ctx, "/artifacts/customers.redacted.csv", role="output",
+    log_artifact_reference(run_log, "/artifacts/customers.redacted.csv", role="output",
         producer="redactor", artifact_type="redacted_file",
         source_path="/processing/customers.csv", safe_to_preview=True,
     )
@@ -213,7 +212,7 @@ def test_log_artifact_reference_records_direct_file_metadata(tmp_path: Path) -> 
     ctx = SimpleNamespace(run_log_path=str(run_log), run_id="r1",
                           run_timestamp="20260708_000000")
 
-    log_artifact_reference(ctx, str(artifact_path), role="report", event="generated")
+    log_artifact_reference(run_log, str(artifact_path), role="report", event="generated")
 
     record = next(json.loads(line) for line in run_log.read_text().splitlines()
                   if '"ARTIFACT_REFERENCE"' in line)

@@ -397,8 +397,7 @@ def record_config_file_references(ctx: Namespace) -> None:
         layer = str(reference.get("configuration_layer") or "")
         role = _role_for_layer(layer)
         path = str(reference["path"])
-        log_config_file_reference(
-            ctx,
+        log_config_file_reference(run_log,
             path,
             file_role=role,
             config_name=Path(path).name,

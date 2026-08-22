@@ -10,7 +10,7 @@ from rey_lib.logs.logging_setup import get_logger
 from rey_lib.logs.record_enrichment import _CURRENT_RUN, log_run_record
 
 
-def log_input_discovered(ctx: Any, *, input_name: str = "", path: str = "",
+def log_input_discovered(run_log: 'RunLog', *, input_name: str = "", path: str = "",
                          pattern: str = "", source_config: str = "",
                          exists: bool | None = None,
                          safe_to_preview: bool | None = None,
@@ -27,10 +27,10 @@ def log_input_discovered(ctx: Any, *, input_name: str = "", path: str = "",
         payload["exists"] = bool(exists)
     if safe_to_preview is not None:
         payload["safe_to_preview"] = bool(safe_to_preview)
-    log_run_record(ctx, "INPUT_DISCOVERED", **payload)
+    run_log.append("INPUT_DISCOVERED", **payload)
 
 
-def log_input_file_reference(ctx: Any, path: str, *, file_role: str = "",
+def log_input_file_reference(run_log: 'RunLog', path: str, *, file_role: str = "",
                              display_name: str = "", consumed_by_step: str = "",
                              producing_app: str = "", status: str = "",
                              actions: Iterable[str] | None = None,
@@ -42,20 +42,18 @@ def log_input_file_reference(ctx: Any, path: str, *, file_role: str = "",
     reference declares an operator-visible input in the run-level file inventory;
     it does not claim that the run created the input.
     """
-    declaration = _file_declaration_metadata(
-        ctx, path, artifact_group="input_files",
+    declaration = _file_declaration_metadata(run_log, path, artifact_group="input_files",
         producing_app=producing_app, producing_step=consumed_by_step,
         status=status, actions=actions, safe_to_preview=safe_to_preview,
     )
-    log_run_record(
-        ctx, "INPUT_FILE_REFERENCE",
+    run_log.append("INPUT_FILE_REFERENCE",
         path=str(path), display_name=display_name or Path(str(path)).name,
         file_role=file_role, source="runtime", consumed_by_step=consumed_by_step,
         **declaration, **fields,
     )
 
 
-def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
+def log_config_file_reference(run_log: 'RunLog', path: str, *, file_role: str = "",
                               display_name: str = "", consumed_by_step: str = "",
                               config_name: str = "", config_type: str = "",
                               producing_app: str = "", status: str = "",
@@ -73,8 +71,7 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
     role = file_role or str(fields.get("config_role") or "")
     cfg_type = config_type or str(fields.get("configuration_layer") or role or "config")
     cfg_name = config_name or display_name or config_path.name
-    declaration = _file_declaration_metadata(
-        ctx, path, artifact_group="config_files",
+    declaration = _file_declaration_metadata(run_log, path, artifact_group="config_files",
         producing_app=producing_app, producing_step=consumed_by_step,
         status=status, actions=actions, exists=exists,
         safe_to_preview=safe_to_preview,
@@ -98,13 +95,12 @@ def log_config_file_reference(ctx: Any, path: str, *, file_role: str = "",
     payload["safe_to_preview"] = bool(safe_to_preview)
     if "config_hash" in payload and "hash" not in payload:
         payload["hash"] = payload["config_hash"]
-    log_run_record(
-        ctx, "CONFIG_FILE_REFERENCE",
+    run_log.append("CONFIG_FILE_REFERENCE",
         **payload,
     )
 
 
-def log_config_file_manifest(ctx: Any, files: list[dict[str, Any]]) -> None:
+def log_config_file_manifest(run_log: 'RunLog', files: list[dict[str, Any]]) -> None:
     """Append the consolidated CONFIG_FILE_MANIFEST record (files/config_files)."""
     declared: list[dict[str, Any]] = []
     for item in files:
@@ -115,8 +111,7 @@ def log_config_file_manifest(ctx: Any, files: list[dict[str, Any]]) -> None:
             continue
         declared.append({
             **item,
-            **_file_declaration_metadata(
-                ctx, path, artifact_group="config_files",
+            **_file_declaration_metadata(run_log, path, artifact_group="config_files",
                 producing_app=str(item.get("producing_app") or ""),
                 producing_step=str(item.get("producing_step") or ""),
                 status=str(item.get("status") or ""),
@@ -125,10 +120,10 @@ def log_config_file_manifest(ctx: Any, files: list[dict[str, Any]]) -> None:
                 safe_to_preview=item.get("safe_to_preview"),
             ),
         })
-    log_run_record(ctx, "CONFIG_FILE_MANIFEST", files=declared)
+    run_log.append("CONFIG_FILE_MANIFEST", files=declared)
 
 
-def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
+def log_file_operation(run_log: 'RunLog', operation: str, *, source_path: str = "",
                        target_path: str = "", status: str = "success",
                        step_id: str = "", **fields: Any) -> None:
     """Append a FILE_OPERATION execution record for a file movement/operation.
@@ -153,7 +148,7 @@ def log_file_operation(ctx: Any, operation: str, *, source_path: str = "",
     }
     if step_id:
         payload["step_id"] = step_id
-    log_run_record(ctx, "FILE_OPERATION", **payload)
+    run_log.append("FILE_OPERATION", **payload)
 
 
 def record_file_operation(operation: str, *, source_path: str = "",
@@ -201,7 +196,7 @@ def _file_evidence_metadata(path: str) -> dict[str, Any]:
 
 
 def _file_declaration_metadata(
-    ctx: Any,
+    run_log: 'RunLog',
     path: str,
     *,
     artifact_group: str,
@@ -225,15 +220,13 @@ def _file_declaration_metadata(
     safe = True if safe_to_preview is None else bool(safe_to_preview)
     app = str(
         producing_app
-        or getattr(ctx, "owner_app_name", "")
-        or getattr(ctx, "app_name", "")
-        or getattr(ctx, "name", "")
+        or getattr(run_log, "app", "")
         or "unknown"
     )
     step = str(
         producing_step
-        or getattr(ctx, "pipeline_step_name", "")
-        or getattr(ctx, "step_name", "")
+        or getattr(run_log, "_pipeline_step_name", "") or ""
+        or getattr(run_log, "_step_name", "") or ""
         or ""
     )
     if actions is None:

@@ -218,8 +218,7 @@ def transform_files(
                 key = str(file_path)
                 if key not in pending_map:
                     pending_map[key] = file_path
-                    log_input_discovered(
-                        ctx,
+                    log_input_discovered(run_log,
                         input_name=file_path.name,
                         path=str(file_path),
                         pattern=glob_pattern,
@@ -295,11 +294,10 @@ def _log_loader_step_failure(
         failed_step_name=failed_step_name,
         related_path=related_path,
     )
-    error_record = log_error(ctx, **error_payload)
+    error_record = log_error(run_log, **error_payload)
     error_id = str(error_record.get("error_id") or "")
     error_message = str(error_record.get("error_message") or str(exc))
-    return log_step_failure(
-        ctx,
+    return log_step_failure(run_log,
         failed_step_id=failed_step_id,
         failed_step_name=failed_step_name,
         message=error_message,
@@ -414,8 +412,7 @@ def load_files(
         pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version, ctx=ctx)
         pending       = input_files(source_dir, pattern)
         for file_path in pending:
-            log_input_discovered(
-                ctx,
+            log_input_discovered(run_log,
                 input_name=file_path.name,
                 path=str(file_path),
                 pattern=pattern,
@@ -647,8 +644,7 @@ def transform_one(ctx: Any, data_source: Any, file_path: Path) -> bool:
             "No header match across %d transform(s) — file rejected: %s",
             len(transforms), file_path.name,
         )
-        log_validation_result(
-            ctx,
+        log_validation_result(run_log,
             validation_name="transform_header",
             status="failed",
             message=f"No header match across {len(transforms)} transform(s)",
@@ -1609,8 +1605,7 @@ def _transform_one_file(
     try:
         if header_line is None and not _validate_header(file_path, transform_cfg):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
-            log_validation_result(
-                ctx,
+            log_validation_result(run_log,
                 validation_name="transform_header",
                 status="failed",
                 message="Header mismatch",
@@ -1654,8 +1649,7 @@ def _transform_one_file(
                 reason="prepared",
             )
             object.__setattr__(ctx, "step_record_count", 0)
-            log_row_count(
-                ctx,
+            log_row_count(run_log,
                 count_name="transformed_rows",
                 count=0,
                 subject=file_path.name,
@@ -1664,8 +1658,7 @@ def _transform_one_file(
             _logger.info(
                 "Prepared (byte copy): %s → %s", file_path.name, output_path.name
             )
-            log_artifact_reference(
-                ctx, str(output_path), role="prepared",
+            log_artifact_reference(run_log, str(output_path), role="prepared",
                 artifact_group="output_files",
                 artifact_type="prepared_file", source_path=str(file_path),
                 viewer_type="file", safe_to_preview=True,
@@ -1684,8 +1677,7 @@ def _transform_one_file(
         )
 
         if errors:
-            log_validation_result(
-                ctx,
+            log_validation_result(run_log,
                 validation_name="transform_rows",
                 status="failed",
                 message=f"{len(errors)} transform error(s)",
@@ -1715,8 +1707,7 @@ def _transform_one_file(
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
-            log_validation_result(
-                ctx,
+            log_validation_result(run_log,
                 validation_name="transform_rows",
                 status="failed",
                 message="No rows produced",
@@ -1746,8 +1737,7 @@ def _transform_one_file(
         # Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
         # can stamp RecordCount on the BatchStep row.
         object.__setattr__(ctx, "step_record_count", len(rows))
-        log_row_count(
-            ctx,
+        log_row_count(run_log,
             count_name="transformed_rows",
             count=len(rows),
             subject=file_path.name,
@@ -1758,8 +1748,7 @@ def _transform_one_file(
             "Transformed: %s → %s  rows=%d",
             file_path.name, output_path.name, len(rows),
         )
-        log_artifact_reference(
-            ctx, str(output_path), role="transformed",
+        log_artifact_reference(run_log, str(output_path), role="transformed",
             artifact_group="output_files",
             artifact_type="transformed_file", source_path=str(file_path),
             viewer_type="file", safe_to_preview=True,
@@ -1912,8 +1901,7 @@ def _load_one_file(
 
         if not _validate_load_header(file_path, expected_columns, encoding):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
-            log_validation_result(
-                ctx,
+            log_validation_result(run_log,
                 validation_name="load_header",
                 status="failed",
                 message="Header mismatch",
@@ -1935,8 +1923,7 @@ def _load_one_file(
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
-            log_validation_result(
-                ctx,
+            log_validation_result(run_log,
                 validation_name="load_rows",
                 status="failed",
                 message="No rows produced",
@@ -1979,8 +1966,7 @@ def _load_one_file(
             "Loaded: %s → %s.%s  rows=%d",
             file_path.name, schema, table, len(rows),
         )
-        log_row_count(
-            ctx,
+        log_row_count(run_log,
             count_name="loaded_rows",
             count=len(rows),
             subject=file_path.name,

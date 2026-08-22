@@ -78,7 +78,7 @@ class TestTheShimDelegates:
         ctx = _ctx(tmp_path)
 
         with patch.object(RunLog, "append", return_value=7) as append:
-            result = log_run_record(ctx, "ROW_COUNT", count_name="loaded", count=1)
+            result = log_run_record(run_log, "ROW_COUNT", count_name="loaded", count=1)
 
         assert result == 7
         assert append.call_args.args[0] == "ROW_COUNT"

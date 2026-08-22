@@ -9,7 +9,7 @@ from rey_lib.logs.record_enrichment import log_run_record
 from rey_lib.logs import run_store
 
 
-def log_run_start(ctx: Any, **fields: Any) -> None:
+def log_run_start(run_log: 'RunLog', **fields: Any) -> None:
     """Append a RUN_START execution record marking the start of the run.
 
     The first lifecycle operation, so it is where the run store's batch intent
@@ -20,12 +20,11 @@ def log_run_start(ctx: Any, **fields: Any) -> None:
     # Batch first: every persisted record carries batch_id, and the column is
     # NOT NULL, so the batch this run belongs to must exist before the first
     # record is written.
-    run_store.persist_run_start(ctx, **fields)
-    run_store.require_structural_record(
-        ctx, log_run_record(ctx, "RUN_START", **fields), "RUN_START")
+    run_store.persist_run_start(run_log, **fields)
+    run_store.require_structural_record(run_log, run_log.append("RUN_START", **fields), "RUN_START")
 
 
-def log_execution_plan(ctx: Any, *, total_steps: int,
+def log_execution_plan(run_log: 'RunLog', *, total_steps: int,
                        steps: list[dict[str, Any]], **fields: Any) -> None:
     """Append one EXECUTION_PLAN execution record describing the ordered plan.
 
@@ -34,51 +33,47 @@ def log_execution_plan(ctx: Any, *, total_steps: int,
     (SGC_Pipeline_Coordinator_Execution_Plan_Record). ``run_id``, ``run_timestamp``,
     and ``pipeline_name`` are enriched by the shared logging layer.
     """
-    log_run_record(
-        ctx, "EXECUTION_PLAN",
+    run_log.append("EXECUTION_PLAN",
         total_steps=total_steps, steps=list(steps), **fields,
     )
 
 
-def log_step_start(ctx: Any, step_name: str, step_sequence: int,
+def log_step_start(run_log: 'RunLog', step_name: str, step_sequence: int,
                    step_type: str = "", step_id: str = "", **fields: Any) -> None:
     """Append a STEP_START execution record for one step."""
-    run_store.require_structural_record(ctx, log_run_record(
-        ctx, "STEP_START",
+    run_store.require_structural_record(run_log, run_log.append("STEP_START",
         step_name=step_name, step_sequence=step_sequence, step_type=step_type,
         step_id=step_id or fields.pop("step_id", ""),
         **fields,
     ), "STEP_START")
-    run_store.persist_step_start(ctx, step_name, step_sequence, step_type)
+    run_store.persist_step_start(run_log, step_name, step_sequence, step_type)
 
 
-def log_step_end(ctx: Any, step_name: str, status: str, *,
+def log_step_end(run_log: 'RunLog', step_name: str, status: str, *,
                  message: str = "", **fields: Any) -> None:
     """Append a STEP_END execution record with the step status (success/failure/skipped)."""
-    run_store.require_structural_record(ctx, log_run_record(
-        ctx, "STEP_END",
+    run_store.require_structural_record(run_log, run_log.append("STEP_END",
         step_name=step_name, status=status, message=message, **fields,
     ), "STEP_END")
-    run_store.persist_step_end(ctx, step_name, status, message)
+    run_store.persist_step_end(run_log, step_name, status, message)
 
 
-def log_run_complete(ctx: Any, status: str, *, message: str = "", **fields: Any) -> None:
+def log_run_complete(run_log: 'RunLog', status: str, *, message: str = "", **fields: Any) -> None:
     """Append a RUN_COMPLETE execution record with the final run status."""
     # Record first, then close the batch: the completion record must land
     # before the batch it belongs to is ended.
-    run_store.require_structural_record(ctx, log_run_record(
-        ctx, "RUN_COMPLETE", status=status, message=message, **fields),
+    run_store.require_structural_record(run_log, run_log.append("RUN_COMPLETE", status=status, message=message, **fields),
         "RUN_COMPLETE")
-    run_store.persist_run_complete(ctx, status, message)
+    run_store.persist_run_complete(run_log, status, message)
 
 
-def log_run_summary(ctx: Any, summary: dict[str, Any]) -> None:
+def log_run_summary(run_log: 'RunLog', summary: dict[str, Any]) -> None:
     """Append a deterministic RUN_SUMMARY run-result record (no LLM required)."""
-    log_run_record(ctx, "RUN_SUMMARY", summary=summary)
+    run_log.append("RUN_SUMMARY", summary=summary)
 
 
 def log_step_failure(
-    ctx: Any,
+    run_log: 'RunLog',
     *,
     failed_step_id: str,
     failed_step_name: str,
@@ -112,11 +107,11 @@ def log_step_failure(
     }
     if exit_code is not None:
         payload["exit_code"] = exit_code
-    log_run_record(ctx, "STEP_FAILURE", **payload)
+    run_log.append("STEP_FAILURE", **payload)
     return failure_record_id
 
 
-def log_error(ctx: Any, *, message: str, error_type: str = "",
+def log_error(run_log: 'RunLog', *, message: str, error_type: str = "",
               sanitized_exception: str = "", **fields: Any) -> dict[str, Any]:
     """Append a structured ERROR record from an error_utils canonical payload."""
     from rey_lib.errors.error_utils import build_error_record_payload
@@ -128,12 +123,12 @@ def log_error(ctx: Any, *, message: str, error_type: str = "",
     )
     record_fields = dict(payload)
     record_message = str(record_fields.pop("message", "") or message)
-    log_run_record(ctx, "ERROR", message=record_message, **record_fields)
+    run_log.append("ERROR", message=record_message, **record_fields)
     return payload
 
 
 def log_app_execution(
-    ctx: Any,
+    run_log: 'RunLog',
     *,
     app: str,
     entrypoint: str = "",
@@ -161,22 +156,20 @@ def log_app_execution(
         payload["exit_code"] = exit_code
     if duration_ms is not None:
         payload["duration_ms"] = duration_ms
-    log_run_record(ctx, "APP_EXECUTION", **payload)
+    run_log.append("APP_EXECUTION", **payload)
 
 
-def log_row_count(ctx: Any, *, count_name: str, count: int,
+def log_row_count(run_log: 'RunLog', *, count_name: str, count: int,
                   subject: str = "", **fields: Any) -> None:
     """Append a ROW_COUNT record for run evidence."""
-    log_run_record(
-        ctx, "ROW_COUNT", count_name=count_name, count=count,
+    run_log.append("ROW_COUNT", count_name=count_name, count=count,
         subject=subject, **fields,
     )
 
 
-def log_validation_result(ctx: Any, *, validation_name: str, status: str,
+def log_validation_result(run_log: 'RunLog', *, validation_name: str, status: str,
                           message: str = "", **fields: Any) -> None:
     """Append a VALIDATION_RESULT record for run evidence."""
-    log_run_record(
-        ctx, "VALIDATION_RESULT", validation_name=validation_name,
+    run_log.append("VALIDATION_RESULT", validation_name=validation_name,
         status=status, message=message, **fields,
     )

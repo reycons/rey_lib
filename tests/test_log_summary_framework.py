@@ -43,18 +43,16 @@ def _completed_run(
 ) -> tuple[SimpleNamespace, Path]:
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, semantic_level)
-    log_run_start(ctx, run_started_at="2026-07-11T12:00:00+00:00")
-    log_step_start(ctx, "one", 1, step_id="one")
+    log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
+    log_step_start(run_log, "one", 1, step_id="one")
     if status == "failed":
-        log_error(
-            ctx, message="boom", error_type="RuntimeError", error_id="error-1",
+        log_error(run_log, message="boom", error_type="RuntimeError", error_id="error-1",
         )
-        log_step_failure(
-            ctx, failed_step_id="one", failed_step_name="one", message="boom",
+        log_step_failure(run_log, failed_step_id="one", failed_step_name="one", message="boom",
             error_type="RuntimeError", error_message="boom",
             failure_record_id="error-1",
         )
-    log_step_end(ctx, "one", status, step_id="one", duration_ms=1200)
+    log_step_end(run_log, "one", status, step_id="one", duration_ms=1200)
     if complete:
         complete_fields = {}
         if status == "failed":
@@ -62,7 +60,7 @@ def _completed_run(
                 "failure_record_id": "error-1", "failed_step_id": "one",
                 "failed_step_name": "one", "failure_message": "boom",
             }
-        log_run_complete(ctx, status, **complete_fields)
+        log_run_complete(run_log, status, **complete_fields)
     return ctx, Path(ctx.run_log_path)
 
 
@@ -143,12 +141,12 @@ def test_results_summary_uses_active_scope(
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, "app")
-    log_run_start(ctx, run_started_at="2026-07-11T12:00:00+00:00")
+    log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     app_record_id = _records(Path(ctx.run_log_path))[0]["record_id"]
     set_nest_level(ctx, "workflow")
-    log_step_start(ctx, "one", 1, step_id="one")
-    log_step_end(ctx, "one", "success", step_id="one")
-    log_run_complete(ctx, "success")
+    log_step_start(run_log, "one", 1, step_id="one")
+    log_step_end(run_log, "one", "success", step_id="one")
+    log_run_complete(run_log, "success")
 
     summary = create_results_summary(ctx)["summary"]
     assert summary["nest_level"] == 4
@@ -168,8 +166,8 @@ def test_durable_result_record_matrix_preserves_hierarchy_invariant(
         "LLM_ANALYSIS_RESULT", "MANUAL_REVIEW", "POST_MORTEM",
     )
     for record_type in result_types:
-        log_run_record(ctx, record_type, record_group="results", value=record_type)
-    log_file_operation(ctx, "read", source_path=str(log))
+        log_run_record(run_log, record_type, record_group="results", value=record_type)
+    log_file_operation(run_log, "read", source_path=str(log))
 
     records = _records(log)
     ids = [record["record_id"] for record in records]

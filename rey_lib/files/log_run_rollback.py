@@ -446,8 +446,7 @@ def log_source_file_mutation(
     extra_run_log_fields = dict(run_log_fields or {})
     normalized_action = _non_empty(action, "action")
     normalized_status = _non_empty(status, "status")
-    run_log_record_id = log_run_record(
-        ctx,
+    run_log_record_id = log_run_record(run_log,
         "SOURCE_FILE_MUTATION",
         message=message,
         application_name=str(application_name or ""),
@@ -487,7 +486,7 @@ def log_source_file_mutation(
             reason_code=reason_code,
             reason=reason,
         )
-        manifest_record_id = log_file_manifest_record(ctx, record)
+        manifest_record_id = log_file_manifest_record(run_log, record)
         return SourceFileMutationEvidenceResult(
             manifest_record_id,
             run_log_record_id=run_log_record_id,
@@ -1120,7 +1119,7 @@ def _write_run_rollback_summary(
         application_name="rey_lib",
     )
     try:
-        return log_file_manifest_record(ctx, record)
+        return log_file_manifest_record(run_log, record)
     except FileManifestError:
         return None
 

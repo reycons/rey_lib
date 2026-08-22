@@ -112,9 +112,9 @@ def test_record_writes_do_not_change_the_base_or_the_floor(tmp_path: Path) -> No
     """Informational writes leave parent_level and minimum_nest_level intact."""
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, "pipeline")
-    log_run_record(ctx, "RUN_START", pipeline_name="demo_pipeline")
-    log_run_record(ctx, "CONFIG_FILE_REFERENCE", path="installation.yaml")
-    log_run_record(ctx, "EXECUTION_PLAN")
+    log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
+    log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
+    log_run_record(run_log, "EXECUTION_PLAN")
     # The base is unmoved by the writes, so relative nesting still starts at 2.
     assert get_nest_level(ctx) == 1
     assert next_nest_level(ctx) == 2
@@ -126,11 +126,11 @@ def test_relative_child_anchors_to_the_scope_owner_not_the_last_write(
     """Records written at the base do not become the parent of the relative child."""
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, "pipeline")
-    log_run_record(ctx, "RUN_START", pipeline_name="demo_pipeline")
-    log_run_record(ctx, "CONFIG_FILE_REFERENCE", path="installation.yaml")
-    log_run_record(ctx, "EXECUTION_PLAN")
+    log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
+    log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
+    log_run_record(run_log, "EXECUTION_PLAN")
     next_nest_level(ctx)
-    log_run_record(ctx, "STEP_START", step_name="prepare_trade_files")
+    log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
 
     run_start, config, plan, step = _records(tmp_path)
     # Base-level records are siblings sharing the enclosing parent.
@@ -160,16 +160,16 @@ def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
     """A set at the current level clears that level's anchor for a new sibling scope."""
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, "pipeline")
-    log_run_record(ctx, "RUN_START", pipeline_name="demo_pipeline")
+    log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Sibling scope one.
     set_nest_level(ctx, "pipeline_step")
-    log_run_record(ctx, "STEP_START", step_name="step_one")
-    log_run_record(ctx, "FILE_OPERATION", path="one.ctx.json")
+    log_run_record(run_log, "STEP_START", step_name="step_one")
+    log_run_record(run_log, "FILE_OPERATION", path="one.ctx.json")
     # Sibling scope two at the same level replaces the level-2 anchor.
     set_nest_level(ctx, "pipeline_step")
-    log_run_record(ctx, "STEP_START", step_name="step_two")
+    log_run_record(run_log, "STEP_START", step_name="step_two")
     set_nest_level(ctx, "app")
-    log_run_record(ctx, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="rey_loader")
 
     pipeline, first_step, _file_op, second_step, app = _records(tmp_path)
     # Both steps are siblings anchored on the pipeline.
@@ -184,19 +184,19 @@ def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: 
     """Next enters once; sibling replaces peer anchors without changing level."""
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, "app")
-    log_run_record(ctx, "RUN_START", app="demo")
+    log_run_record(run_log, "RUN_START", app="demo")
 
     assert set_nest_level(ctx, "next") == 4
     assert set_nest_level(ctx, "sibling") == 4
-    log_run_record(ctx, "INPUT_FILE_REFERENCE", display_name="v01.json")
+    log_run_record(run_log, "INPUT_FILE_REFERENCE", display_name="v01.json")
     next_nest_level(ctx)
-    log_run_record(ctx, "LLM_CONTRACT", contract_path="v01.md")
+    log_run_record(run_log, "LLM_CONTRACT", contract_path="v01.md")
     assert previous_nest_level(ctx) == 4
 
     assert set_nest_level(ctx, "sibling") == 4
-    log_run_record(ctx, "INPUT_FILE_REFERENCE", display_name="v02.json")
+    log_run_record(run_log, "INPUT_FILE_REFERENCE", display_name="v02.json")
     next_nest_level(ctx)
-    log_run_record(ctx, "LLM_CONTRACT", contract_path="v02.md")
+    log_run_record(run_log, "LLM_CONTRACT", contract_path="v02.md")
 
     app, first_input, first_child, second_input, second_child = _records(tmp_path)
     assert _identity(app) == (1, _ROOT, 3)
@@ -212,14 +212,14 @@ def test_set_then_write_orders_the_scope_spine(tmp_path: Path) -> None:
     """Each base's first record anchors the next base's records."""
     ctx = _ctx(tmp_path)
     set_nest_level(ctx, "pipeline")
-    log_run_record(ctx, "RUN_START", pipeline_name="demo_pipeline")
-    log_run_record(ctx, "CONFIG_FILE_REFERENCE", path="installation.yaml")
+    log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
+    log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
     set_nest_level(ctx, "pipeline_step")
-    log_run_record(ctx, "STEP_START", step_name="prepare_trade_files")
-    log_run_record(ctx, "FILE_OPERATION", path="prepare.ctx.json")
-    log_run_record(ctx, "APP_EXECUTION", app="rey_loader")
+    log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
+    log_run_record(run_log, "FILE_OPERATION", path="prepare.ctx.json")
+    log_run_record(run_log, "APP_EXECUTION", app="rey_loader")
     set_nest_level(ctx, "app")
-    log_run_record(ctx, "RUN_START", app="rey_loader")
+    log_run_record(run_log, "RUN_START", app="rey_loader")
 
     records = _records(tmp_path)
     pipeline, _config, step, _file_op, _app_exec, app = records

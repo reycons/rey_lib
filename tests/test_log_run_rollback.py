@@ -69,8 +69,7 @@ def _append_mutation(
     previous_version_path: str = "",
     status: str = "success",
 ) -> int:
-    return log_file_manifest_record(
-        ctx,
+    return log_file_manifest_record(run_log,
         serialize_source_file_mutation(
             action=action,
             status=status,
@@ -808,8 +807,7 @@ def test_unfinished_attempt_is_indeterminate_and_not_reapplied(
         action="create",
         destination_path=str(tmp_path / "created.csv"),
     )
-    log_file_manifest_record(
-        ctx,
+    log_file_manifest_record(run_log,
         serialize_source_file_rollback(
             original_record_id=mutation_id,
             phase="attempt",
@@ -893,8 +891,7 @@ def test_malformed_mutation_schema_fails_before_compensation(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    log_file_manifest_record(
-        ctx,
+    log_file_manifest_record(run_log,
         {
             "record_type": "source_file_mutation",
             "action": "create",
@@ -914,8 +911,7 @@ def test_malformed_mutation_location_fails_before_compensation(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    log_file_manifest_record(
-        ctx,
+    log_file_manifest_record(run_log,
         {
             "record_type": "source_file_mutation",
             "action": "create",
@@ -1086,7 +1082,7 @@ def test_canonical_rollback_records_pass_validation(tmp_path: Path) -> None:
             attempt_record_id=2,
         ),
     ):
-        log_file_manifest_record(ctx, record)
+        log_file_manifest_record(run_log, record)
 
     plan = preview_log_run_rollback(ctx, "run.jsonl")
     assert plan["already_compensated"] == [mutation_id]
@@ -1202,8 +1198,7 @@ def _append_state_record(
     run_log_file: str = "run.jsonl",
 ) -> int:
     """Append one inventory or classification record, which carries no action."""
-    return log_file_manifest_record(
-        ctx,
+    return log_file_manifest_record(run_log,
         {
             "recorded_at": "2026-08-05T00:00:00.000+00:00",
             "record_type": record_type,
@@ -1388,8 +1383,7 @@ def test_an_indeterminate_record_keeps_the_run_log(
     mutation_id = _append_mutation(
         ctx, action="create", destination_path=str(created)
     )
-    log_file_manifest_record(
-        ctx,
+    log_file_manifest_record(run_log,
         serialize_source_file_rollback(
             original_record_id=mutation_id,
             phase="attempt",

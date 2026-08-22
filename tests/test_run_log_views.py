@@ -39,18 +39,18 @@ def _run_log(tmp_path: Path) -> str:
         workflow_name="postgres_lint",
     )
     establish_run_identity(ctx)
-    log_run_start(ctx)
-    log_step_start(ctx, "export", 1)
-    log_config_file_reference(ctx, str(tmp_path / "workflow.yaml"),
+    log_run_start(run_log)
+    log_step_start(run_log, "export", 1)
+    log_config_file_reference(run_log, str(tmp_path / "workflow.yaml"),
                               file_role="workflow_definition")
-    log_artifact_reference(ctx, str(tmp_path / "lint_report.json"), role="lint_report",
+    log_artifact_reference(run_log, str(tmp_path / "lint_report.json"), role="lint_report",
                            event="written")
-    log_file_operation(ctx, "move", source_path=str(tmp_path / "in.sql"),
+    log_file_operation(run_log, "move", source_path=str(tmp_path / "in.sql"),
                        target_path=str(tmp_path / "out.sql"))
-    log_run_record(ctx, "WARNING", message="deprecated option used")
-    log_step_end(ctx, "export", "success")
-    log_run_summary(ctx, {"steps": 1, "status": "success"})
-    log_run_complete(ctx, "success")
+    log_run_record(run_log, "WARNING", message="deprecated option used")
+    log_step_end(run_log, "export", "success")
+    log_run_summary(run_log, {"steps": 1, "status": "success"})
+    log_run_complete(run_log, "success")
     return ctx.run_log_path
 
 
@@ -110,6 +110,6 @@ def test_error_warning_view_empty_when_clean(tmp_path: Path) -> None:
     """A clean run renders an explicit no-warnings message."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "clean.run.jsonl"), owner_app_name="x")
     establish_run_identity(ctx)
-    log_run_start(ctx)
-    log_run_complete(ctx, "success")
+    log_run_start(run_log)
+    log_run_complete(run_log, "success")
     assert render_error_warning_view(ctx.run_log_path) == "(no warnings or errors)"

@@ -44,7 +44,7 @@ def _write_completed_run(path: Path, records: list[dict]) -> None:
             "record_group", "run_id", "run_timestamp", "app", "pipeline_name",
         ):
             fields.pop(envelope_field, None)
-        log_run_record(ctx, record_type, **fields)
+        log_run_record(run_log, record_type, **fields)
 
 
 def _records(path: Path) -> list[dict]:

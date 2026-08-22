@@ -91,7 +91,7 @@ def create_llm_package(
     if identity["workflow"]:
         ctx.workflow_name = identity["workflow"]
 
-    log_run_record(ctx, package_record_type, record_group="results", **package)
+    run_log.append(package_record_type, record_group="results", **package)
     return package
 
 
@@ -695,8 +695,7 @@ def run_configured_log_analysis(
         # (type, message, exception, traceback) is captured, keyed by the configured
         # analysis name and stamped run metadata. fail_on_error then decides whether to
         # re-raise or return nonfatally.
-        log_run_record(
-            ctx, failure_record_type, record_group=failure_record_group,
+        run_log.append(failure_record_type, record_group=failure_record_group,
             analysis_name=analysis_name, **build_safe_error_payload(exc),
         )
         result["failures"].append(str(exc))
@@ -709,7 +708,7 @@ def run_configured_log_analysis(
         write_file(Path(str(output_path)), parsed_result, file_type=output_format)
         result["action"] = "written_file"
     else:
-        log_run_record(ctx, record_type, record_group=record_group, **parsed_result)
+        run_log.append(record_type, record_group=record_group, **parsed_result)
         result["action"] = "written_stdout"
 
     result["result"] = parsed_result

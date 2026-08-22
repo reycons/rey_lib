@@ -81,12 +81,12 @@ def test_run_log_named_with_run_timestamp(tmp_path: Path) -> None:
 def test_log_execution_plan_writes_execution_grouped_record(tmp_path: Path) -> None:
     """log_execution_plan emits one EXECUTION_PLAN record grouped as execution."""
     ctx = _ctx(tmp_path)
-    log_run_start(ctx)
+    log_run_start(run_log)
     steps = [
         {"sequence": 1, "step_id": "a", "step_name": "a", "app": "tool"},
         {"sequence": 2, "step_id": "b", "step_name": "b", "app": "tool"},
     ]
-    log_execution_plan(ctx, total_steps=2, steps=steps)
+    log_execution_plan(run_log, total_steps=2, steps=steps)
 
     records = _read(Path(ctx.run_log_path))
     plans = [r for r in records if r["record_type"] == "EXECUTION_PLAN"]
@@ -101,11 +101,11 @@ def test_log_execution_plan_writes_execution_grouped_record(tmp_path: Path) -> N
 def test_records_carry_run_id_and_group(tmp_path: Path) -> None:
     """Every record includes run_id; types are grouped execution vs run-result."""
     ctx = _ctx(tmp_path)
-    log_run_start(ctx)
-    log_step_start(ctx, "load_data", 1, step_type="loader")
-    log_step_end(ctx, "load_data", "success")
-    log_run_summary(ctx, {"steps": 1, "status": "success"})
-    log_run_complete(ctx, "success")
+    log_run_start(run_log)
+    log_step_start(run_log, "load_data", 1, step_type="loader")
+    log_step_end(run_log, "load_data", "success")
+    log_run_summary(run_log, {"steps": 1, "status": "success"})
+    log_run_complete(run_log, "success")
 
     records = _read(Path(ctx.run_log_path))
     assert all(r["run_id"] == ctx.run_id for r in records)
@@ -119,9 +119,9 @@ def test_records_carry_run_id_and_group(tmp_path: Path) -> None:
 def test_append_only_accumulates(tmp_path: Path) -> None:
     """Records accumulate; the log is never rewritten."""
     ctx = _ctx(tmp_path)
-    log_run_start(ctx)
-    log_artifact_reference(ctx, str(tmp_path / "out.csv"), role="output")
-    log_run_complete(ctx, "success")
+    log_run_start(run_log)
+    log_artifact_reference(run_log, str(tmp_path / "out.csv"), role="output")
+    log_run_complete(run_log, "success")
     assert len(_read(Path(ctx.run_log_path))) == 3
 
 
@@ -231,7 +231,7 @@ def test_open_run_log_fails_closed_without_log_path() -> None:
 def test_record_append_is_fail_safe(tmp_path: Path) -> None:
     """A record whose value is not JSON-serialisable is still written (default=str)."""
     ctx = _ctx(tmp_path)
-    log_run_start(ctx, weird=object())
+    log_run_start(run_log, weird=object())
     records = _read(Path(ctx.run_log_path))
     assert records[0]["record_type"] == "RUN_START"
 
@@ -243,8 +243,7 @@ def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> N
               app="rey_loader", workflow_name="transform_load")
     bind_correlation("corr-1")
     try:
-        log_input_discovered(
-            ctx, input_name="trades", path=str(tmp_path / "trades.csv"),
+        log_input_discovered(run_log, input_name="trades", path=str(tmp_path / "trades.csv"),
             pattern="*.csv", source_config="source.trades", exists=True,
             safe_to_preview=True,
         )
@@ -266,8 +265,7 @@ def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> N
 def test_write_side_sanitizer_masks_secret_like_keys(tmp_path: Path) -> None:
     """Secret-like helper fields are sanitized before JSONL persistence."""
     ctx = _ctx(tmp_path)
-    log_app_execution(
-        ctx,
+    log_app_execution(run_log,
         app="rey_loader",
         entrypoint="python -m rey_loader",
         arguments_redacted=["--config-path", "safe.yaml"],
@@ -300,14 +298,13 @@ def test_failed_run_complete_requires_failure_evidence(tmp_path: Path) -> None:
     """A failed RUN_COMPLETE without evidence is a programming error."""
     ctx = _ctx(tmp_path)
     with pytest.raises(ValueError, match="requires structured failure evidence"):
-        log_run_complete(ctx, "failed")
+        log_run_complete(run_log, "failed")
 
 
 def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) -> None:
     """The coordinator can create failure evidence, then reference it at completion."""
     ctx = _ctx(tmp_path)
-    failure_id = log_step_failure(
-        ctx,
+    failure_id = log_step_failure(run_log,
         failed_step_id="load",
         failed_step_name="Load",
         message="loader failed",
@@ -315,8 +312,7 @@ def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) 
         sanitized_exception="RuntimeError: loader failed",
         exit_code=1,
     )
-    log_run_complete(
-        ctx,
+    log_run_complete(run_log,
         "failed",
         failure_record_id=failure_id,
         failed_step_id="load",
@@ -334,12 +330,12 @@ def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) 
 def test_new_event_helpers_emit_approved_record_types(tmp_path: Path) -> None:
     """Phase 2 helpers emit narrow event semantics through log_run_record."""
     ctx = _ctx(tmp_path)
-    log_error(ctx, message="bad", error_type="RuntimeError")
-    log_sql_execution(ctx, connection_name="local", database="db",
+    log_error(run_log, message="bad", error_type="RuntimeError")
+    log_sql_execution(run_log, connection_name="local", database="db",
                       sql_path=str(tmp_path / "apply.sql"), operation="apply",
                       status="success", duration_ms=12)
-    log_row_count(ctx, count_name="loaded", count=10, subject="trades")
-    log_validation_result(ctx, validation_name="headers", status="success")
+    log_row_count(run_log, count_name="loaded", count=10, subject="trades")
+    log_validation_result(run_log, validation_name="headers", status="success")
 
     types = [record["record_type"] for record in _read(Path(ctx.run_log_path))]
     assert types == ["ERROR", "SQL_EXECUTION", "ROW_COUNT", "VALIDATION_RESULT"]
@@ -706,13 +702,13 @@ def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
 
     ctx = _ctx(tmp_path)
     report = tmp_path / "report.json"
-    log_run_start(ctx)
-    log_config_file_reference(ctx, str(tmp_path / "workflow.yaml"),
+    log_run_start(run_log)
+    log_config_file_reference(run_log, str(tmp_path / "workflow.yaml"),
                               file_role="workflow_definition")
-    log_artifact_reference(ctx, str(report), role="report", event="written")
-    log_file_operation(ctx, "move", source_path=str(tmp_path / "a.csv"),
+    log_artifact_reference(run_log, str(report), role="report", event="written")
+    log_file_operation(run_log, "move", source_path=str(tmp_path / "a.csv"),
                        target_path=str(tmp_path / "b.csv"))
-    log_run_complete(ctx, "success")
+    log_run_complete(run_log, "success")
     path = ctx.run_log_path
 
     artifacts = get_run_section(path, "artifacts")
@@ -744,12 +740,11 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
 
     def handler(_ctx: object, _config: dict, _run: object) -> None:
         # A created artifact and an unrelated file move within the same step.
-        log_artifact_reference(
-            ctx, str(report), role="report", event="written",
+        log_artifact_reference(run_log, str(report), role="report", event="written",
             artifact_group="output_files", producing_app="test_workflow",
             producing_step="s1",
         )
-        log_file_operation(ctx, "move", source_path=str(tmp_path / "in.csv"),
+        log_file_operation(run_log, "move", source_path=str(tmp_path / "in.csv"),
                            target_path=str(tmp_path / "done.csv"))
         return None
 
@@ -848,18 +843,18 @@ def test_run_log_projection_ignores_moved_or_read_artifact_references(tmp_path: 
 def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
     """Writer helpers stamp the SGC groups/subgroups and carry run identity."""
     ctx = _ctx(tmp_path)
-    log_run_start(ctx)
-    log_input_file_reference(ctx, str(tmp_path / "incoming" / "file.csv"),
+    log_run_start(run_log)
+    log_input_file_reference(run_log, str(tmp_path / "incoming" / "file.csv"),
                              file_role="source_data", consumed_by_step="validate_header")
-    log_config_file_reference(ctx, str(tmp_path / "workflow.yaml"),
+    log_config_file_reference(run_log, str(tmp_path / "workflow.yaml"),
                               file_role="workflow_definition")
-    log_file_operation(ctx, "move", source_path=str(tmp_path / "inbox" / "file.csv"),
+    log_file_operation(run_log, "move", source_path=str(tmp_path / "inbox" / "file.csv"),
                        target_path=str(tmp_path / "processing" / "file.csv"),
                        step_id="move_file_to_processing")
-    log_artifact_reference(ctx, str(tmp_path / "report.json"), role="report",
+    log_artifact_reference(run_log, str(tmp_path / "report.json"), role="report",
                            event="generated", created_by_step="lint_sql")
-    log_run_summary(ctx, {"status": "success"})
-    log_run_complete(ctx, "success")
+    log_run_summary(run_log, {"status": "success"})
+    log_run_complete(run_log, "success")
 
     records = _read(Path(ctx.run_log_path))
     by_type = {r["record_type"]: r for r in records}
@@ -904,8 +899,7 @@ def test_config_reference_normalized_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "workflow.yaml"
     config_path.write_text("name: wf\n", encoding="utf-8")
 
-    log_config_file_reference(
-        ctx,
+    log_config_file_reference(run_log,
         str(config_path),
         config_name="workflow.yaml",
         config_type="workflow",

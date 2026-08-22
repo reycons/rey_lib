@@ -71,7 +71,7 @@ def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:
     """
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.run.jsonl"))
 
-    assert log_run_record(ctx, "RUN_START") is None
+    assert log_run_record(run_log, "RUN_START") is None
     assert getattr(ctx, "run_id", None) is None
 
 

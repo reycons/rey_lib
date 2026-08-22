@@ -35,10 +35,10 @@ def test_transform_outputs_group_under_loader(tmp_path: Path) -> None:
                           run_timestamp="20260708_000000", app_name="rey_loader")
     source = tmp_path / "trades.raw.csv"
     # Emit exactly what file_loader now logs at its two output points.
-    log_artifact_reference(ctx, str(tmp_path / "trades.canonical.csv"), role="prepared",
+    log_artifact_reference(run_log, str(tmp_path / "trades.canonical.csv"), role="prepared",
                            artifact_type="prepared_file", source_path=str(source),
                            viewer_type="file", safe_to_preview=True)
-    log_artifact_reference(ctx, str(tmp_path / "trades.transformed.csv"), role="transformed",
+    log_artifact_reference(run_log, str(tmp_path / "trades.transformed.csv"), role="transformed",
                            artifact_type="transformed_file", source_path=str(source),
                            viewer_type="file", safe_to_preview=True)
 

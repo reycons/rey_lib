@@ -95,17 +95,17 @@ class TestJsonlMode:
     def test_jsonl_never_invokes_control_logging(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "jsonl")
 
-        log_run_start(ctx, operation="scan")
-        log_step_start(ctx, "extract", 1)
-        log_step_end(ctx, "extract", "success")
-        log_run_complete(ctx, "success")
+        log_run_start(run_log, operation="scan")
+        log_step_start(run_log, "extract", 1)
+        log_step_end(run_log, "extract", "success")
+        log_run_complete(run_log, "success")
 
         assert control_calls == []
 
     def test_jsonl_writes_the_run_log(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "jsonl")
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert [r["record_type"] for r in _records(ctx)] == ["RUN_START"]
 
@@ -115,7 +115,7 @@ class TestJsonlMode:
         ctx = _ctx(tmp_path, "jsonl")
         ctx.logging = SimpleNamespace(db_connection="control")
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert control_calls == []
         assert _records(ctx)
@@ -127,7 +127,7 @@ class TestDbMode:
     def test_db_writes_control_and_not_jsonl(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         # The batch is opened first, then the record itself is persisted as an
         # event: every record reaches the database, not only the lifecycle ones.
@@ -137,10 +137,10 @@ class TestDbMode:
     def test_the_full_lifecycle_reaches_control(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
 
-        log_run_start(ctx, operation="scan")
-        log_step_start(ctx, "extract", 1)
-        log_step_end(ctx, "extract", "success")
-        log_run_complete(ctx, "success")
+        log_run_start(run_log, operation="scan")
+        log_step_start(run_log, "extract", 1)
+        log_step_end(run_log, "extract", "success")
+        log_run_complete(run_log, "success")
 
         assert _actions(control_calls) == [
             "start_batch", "log_event",     # RUN_START record
@@ -154,8 +154,8 @@ class TestDbMode:
         # degraded success.
         ctx = _ctx(tmp_path, "db")
 
-        log_run_start(ctx, operation="scan")
-        log_step_start(ctx, "extract", 1)
+        log_run_start(run_log, operation="scan")
+        log_step_start(run_log, "extract", 1)
 
         assert all(required for _, _, required in control_calls)
 
@@ -166,7 +166,7 @@ class TestBothMode:
     def test_both_writes_both(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "both")
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert _actions(control_calls) == ["start_batch", "log_event"]
         assert [r["record_type"] for r in _records(ctx)] == ["RUN_START"]
@@ -179,7 +179,7 @@ class TestBothMode:
         ctx = _ctx(tmp_path, "both")
 
         with pytest.raises(DatabaseError):
-            log_run_start(ctx, operation="scan")
+            log_run_start(run_log, operation="scan")
 
     def test_a_jsonl_failure_under_both_is_surfaced(self, tmp_path, control_calls,
                                                    monkeypatch) -> None:
@@ -192,7 +192,7 @@ class TestBothMode:
         ctx = _ctx(tmp_path, "both")
 
         with pytest.raises(StateError, match="one place and not the other"):
-            log_run_start(ctx, operation="scan")
+            log_run_start(run_log, operation="scan")
 
     def test_a_jsonl_failure_under_jsonl_alone_still_does_not_raise(
             self, tmp_path, control_calls, monkeypatch) -> None:
@@ -203,7 +203,7 @@ class TestBothMode:
                             lambda *a, **k: None)
         ctx = _ctx(tmp_path, "jsonl")
 
-        log_run_start(ctx, operation="scan")  # must not raise
+        log_run_start(run_log, operation="scan")  # must not raise
 
 
 class TestBatchIntent:
@@ -212,7 +212,7 @@ class TestBatchIntent:
     def test_default_launch_creates_a_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert "start_batch" in _actions(control_calls)
         assert ctx.control_api.batch_id == 7
@@ -220,14 +220,14 @@ class TestBatchIntent:
     def test_explicit_new_batch_creates_a_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db", new_batch=True)
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert "start_batch" in _actions(control_calls)
 
     def test_new_batch_false_reuses_the_bound_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db", new_batch=False, batch_id=99)
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert "start_batch" not in _actions(control_calls)
         assert ctx.control_api.batch_id == 99
@@ -237,7 +237,7 @@ class TestBatchIntent:
         ctx = _ctx(tmp_path, "db", new_batch=False)
 
         with pytest.raises(ConfigError, match="never manufactured"):
-            log_run_start(ctx, operation="scan")
+            log_run_start(run_log, operation="scan")
 
         assert control_calls == []
 
@@ -246,7 +246,7 @@ class TestBatchIntent:
         """Intent is declared, never inferred from batch_id being set."""
         ctx = _ctx(tmp_path, "db", batch_id=1234)
 
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
         assert "start_batch" in _actions(control_calls)
 
@@ -275,16 +275,16 @@ class TestOneBatchManyRuns:
         # Ending it would close the batch under the runs still using it.
         ctx = _ctx(tmp_path, "db", new_batch=False, batch_id=7)
 
-        log_run_start(ctx, operation="scan")
-        log_run_complete(ctx, "success")
+        log_run_start(run_log, operation="scan")
+        log_run_complete(run_log, "success")
 
         assert "end_batch" not in _actions(control_calls)
 
     def test_step_and_event_carry_run_id(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
 
-        log_run_start(ctx, operation="scan")
-        log_step_start(ctx, "extract", 1)
+        log_run_start(run_log, operation="scan")
+        log_step_start(run_log, "extract", 1)
 
         for name, values, _ in control_calls:
             if name in ("start_step", "log_event"):
@@ -309,7 +309,7 @@ class TestIdsArriveThroughTheMap:
         # start_batch returning a scalar without the map binding it is a run
         # store that cannot record steps, and it says so rather than continuing.
         with pytest.raises(StateError, match="no batch_id"):
-            log_run_start(ctx, operation="scan")
+            log_run_start(run_log, operation="scan")
 
         assert seen == ["start_batch"]
 
@@ -333,10 +333,10 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_error
 
         ctx = _ctx(tmp_path, "db")
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
         control_calls.clear()
 
-        log_error(ctx, message="something failed", error_type="AppError")
+        log_error(run_log, message="something failed", error_type="AppError")
 
         events = [v for name, v, _ in control_calls if name == "log_event"]
         assert [e["event_name"] for e in events] == ["ERROR"]
@@ -347,9 +347,9 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_error
 
         ctx = _ctx(tmp_path, "db")
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
 
-        log_error(ctx, message="something failed", error_type="AppError")
+        log_error(run_log, message="something failed", error_type="AppError")
 
         assert _records(ctx) == []
 
@@ -358,10 +358,10 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_row_count
 
         ctx = _ctx(tmp_path, "both")
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
         control_calls.clear()
 
-        log_row_count(ctx, count_name="loaded", count=42)
+        log_row_count(run_log, count_name="loaded", count=42)
 
         events = [v for name, v, _ in control_calls if name == "log_event"]
         assert [e["event_name"] for e in events] == ["ROW_COUNT"]
@@ -372,10 +372,10 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_row_count
 
         ctx = _ctx(tmp_path, "db")
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
         control_calls.clear()
 
-        log_row_count(ctx, count_name="loaded", count=42)
+        log_row_count(run_log, count_name="loaded", count=42)
 
         payload = [v for name, v, _ in control_calls if name == "log_event"][0]
         assert payload["event_jsonb"]["record_type"] == "ROW_COUNT"
@@ -386,11 +386,11 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_run_record
 
         ctx = _ctx(tmp_path, "db")
-        log_run_start(ctx, operation="scan")
+        log_run_start(run_log, operation="scan")
         control_calls.clear()
 
         for record_type in ("ERROR", "WARNING", "ROW_COUNT"):
-            log_run_record(ctx, record_type, message="m")
+            log_run_record(run_log, record_type, message="m")
 
         events = [v for name, v, _ in control_calls if name == "log_event"]
         assert [e_sev(e) for e in events] == ["ERROR", "WARNING", "INFO"]

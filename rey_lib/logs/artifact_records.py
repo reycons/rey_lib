@@ -9,7 +9,7 @@ from rey_lib.logs.file_records import _file_declaration_metadata
 from rey_lib.logs.record_enrichment import log_run_record
 
 
-def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
+def log_artifact_reference(run_log: 'RunLog', path: str, *, role: str = "",
                            event: str = "created", created_by_step: str = "",
                            display_name: str = "", producer: str = "",
                            artifact_type: str = "", source_path: str = "",
@@ -38,15 +38,13 @@ def log_artifact_reference(ctx: Any, path: str, *, role: str = "",
         extra["source_path"] = str(source_path)
     if viewer_type:
         extra["viewer_type"] = viewer_type
-    declaration = _file_declaration_metadata(
-        ctx, path, artifact_group=artifact_group,
+    declaration = _file_declaration_metadata(run_log, path, artifact_group=artifact_group,
         producing_app=producing_app or producer,
         producing_step=producing_step or created_by_step,
         status=status, actions=actions, viewer_type=viewer_type,
         safe_to_preview=safe_to_preview,
     )
-    log_run_record(
-        ctx, "ARTIFACT_REFERENCE",
+    run_log.append("ARTIFACT_REFERENCE",
         path=str(path), display_name=display_name or Path(str(path)).name,
         artifact_role=role, event=event, created_by_step=created_by_step,
         **declaration, **extra, **fields,

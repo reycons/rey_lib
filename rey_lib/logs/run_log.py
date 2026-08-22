@@ -1,119 +1,397 @@
-"""The run log, as one object.
+"""The run log, as its owner.
 
-``RunLog`` owns writing a run's durable records: where the log is, which
-destinations are selected, and the record sequence that gives each record its
-identity, parent and nesting. Those concerns are currently spread across
-``record_enrichment``, ``run_store``, ``record_parenting``, ``nest_level`` and
-``run_state``, with no single owner — which is the defect this addresses.
+``RunLog`` owns a run's durable record writing: the identity every record
+carries, the mutable execution state that identity changes with, the record
+sequence, the destination, and the lifecycle. It takes no application context
+and reads none — everything it needs it holds, and everything that changes it
+changes through its own methods.
 
-Ownership, not performance
---------------------------
-The sequence is kept in a JSON state file beside the run log, read and written
-per record. That is deliberately left exactly as it is. The file is not merely
-persistence: it is how a pipeline step running as a separate process continues
-its parent's sequence rather than restarting it, and that continuity is
-required.
+That is the distinction from the three attempts before it. A class constructed
+with ``ctx`` and reading fields off it per record is a namespace around
+functions: ``record_parenting``, ``nest_level`` and ``run_state`` still worked
+afterwards, so no ownership had moved. Here their state is this object's, and
+they are deleted.
 
-It is also not synchronisation. Allocation is an unsynchronised
-read-modify-write, so concurrent writers claim the same id — measured at 33
-rows carrying 10 distinct ids across four threads, and recorded as an xfail in
-``test_run_log_writer_concurrency``. Making allocation atomic is a correctness
-fix with its own decision to make. Doing it here, under cover of introducing an
-object, would bury a behaviour change inside a refactor.
+Mutable, not snapshot
+---------------------
+``workflow``, ``pipeline``, lineage and the current step are set *during* a run,
+not at construction. They are held here and changed through ``bind_workflow``,
+``bind_pipeline``, ``bind_step`` and the nesting methods, so there is one
+mutation path rather than a context that anything can write to.
 
-So this object changes no semantics. It moves the same calls, in the same
-order, behind one owner.
+Sequencing is unchanged
+-----------------------
+The record sequence remains backed by the companion state file, read and
+written per record. That file is how a pipeline step in a separate process
+continues its parent's sequence, which is proven and required. Its allocation
+is also unsynchronised, which is proven and *not* fixed here: this migration
+transfers ownership, and an atomic-allocation redesign riding along inside it
+would be a behaviour change hidden in a refactor. The recorded xfail in
+``test_run_log_writer_concurrency`` stays the contract for that defect.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
-__all__ = ["RunLog", "run_log_for"]
+__all__ = ["RunLog"]
+
+_SYNTHETIC_ROOT = 0
+
+LAST_RECORD_ID = "last_record_id"
+CURRENT_NEST_LEVEL = "current_nest_level"
+PARENT_LEVEL = "parent_level"
+MINIMUM_NEST_LEVEL = "minimum_nest_level"
+CURRENT_PARENT_RECORD_ID = "current_parent_record_id"
+LEVEL_ANCHORS = "level_anchors"
+
+#: Semantic nesting bases, unchanged from nest_level.
+SEMANTIC_BASES: dict[str, int] = {
+    "pipeline": 1,
+    "pipeline_step": 2,
+    "app": 3,
+    "workflow": 4,
+    "workflow_step": 5,
+}
+
+#: The canonical run lineage every durable record carries.
+LINEAGE_FIELDS: tuple[str, ...] = (
+    "parent_run_id", "subject_type", "subject_id", "subject_name",
+)
+
+#: Domain metadata, classified separately from lineage.
+DOMAIN_FIELDS: tuple[str, ...] = (
+    "pipeline_run_id", "workflow_run_id", "pipeline_id", "workflow_id",
+)
+
+
+def _initial_state() -> dict[str, Any]:
+    """A fresh hierarchy state with the documented initial values."""
+    return {
+        LAST_RECORD_ID: 0,
+        CURRENT_NEST_LEVEL: 0,
+        PARENT_LEVEL: 0,
+        MINIMUM_NEST_LEVEL: 1,
+        CURRENT_PARENT_RECORD_ID: _SYNTHETIC_ROOT,
+        LEVEL_ANCHORS: {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT},
+    }
 
 
 class RunLog:
-    """One run's durable record writer."""
+    """One run's durable record writer, and the owner of its state."""
 
-    def __init__(self, ctx: Any) -> None:
-        """Bind to the context whose run this log belongs to.
+    def __init__(
+        self,
+        *,
+        app: str,
+        run_id: str,
+        run_timestamp: str,
+        log_dir: Optional[str] = None,
+        path: Optional[str] = None,
+        destination: str = "jsonl",
+        control: Any = None,
+        workflow: Optional[str] = None,
+        pipeline: Optional[str] = None,
+        lineage: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Hold everything a record needs. No application context is taken.
 
-        Nothing is opened here. The log path is resolved on first write, as it
-        was before, so a run that writes no records creates no file.
+        Parameters
+        ----------
+        app : str
+            The owning application, written as the record's ``app``.
+        run_id, run_timestamp : str
+            Execution identity, established at the launch boundary through
+            ``rey_lib.run`` and passed in. Never created here.
+        log_dir : str, optional
+            Directory the run log is written into. The filename is derived from
+            the execution name and ``run_timestamp``.
+        path : str, optional
+            An already-resolved run-log path. A subprocess step receives its
+            parent's path this way and continues the same log.
+        destination : str
+            ``jsonl``, ``db`` or ``both``.
+        control : Any, optional
+            The Control object used for database persistence. Referenced, not
+            owned: the runtime owns its lifecycle because it also serves
+            artifacts, contracts and config snapshots.
+        workflow, pipeline : str, optional
+            Starting values. Both change during a run through their bind methods.
+        lineage : dict, optional
+            Starting lineage and domain values, changed through ``bind_lineage``.
         """
-        self._ctx = ctx
+        self.app = str(app or "app")
+        self.run_id = str(run_id)
+        self.run_timestamp = str(run_timestamp)
+        self.destination = str(destination or "jsonl").strip().lower()
+        self.control = control
+
+        self._log_dir = log_dir
+        self._path = path
+        self._workflow = workflow
+        self._pipeline = pipeline
+        self._step_name: Optional[str] = None
+        self._pipeline_step_name: Optional[str] = None
+        self._lineage: dict[str, str] = dict(lineage or {})
+        self._memory_state: Optional[dict[str, Any]] = None
+        self._closed = False
 
     def __repr__(self) -> str:
-        path = getattr(self._ctx, "run_log_path", None)
-        return f"<RunLog {path or 'unopened'}>"
+        return f"<RunLog {self.app} {self.run_id} {self._path or 'unopened'}>"
+
+    # -- identity and destination -------------------------------------------
 
     @property
-    def path(self) -> Optional[str]:
-        """The resolved run-log path, or None before the first write."""
-        return getattr(self._ctx, "run_log_path", None)
+    def writes_jsonl(self) -> bool:
+        """Whether the JSONL run log is a selected destination."""
+        return self.destination in ("jsonl", "both")
 
-    def destinations(self) -> tuple[bool, bool]:
-        """Return ``(writes_jsonl, writes_db)`` for this run."""
-        from rey_lib.logs import run_store
+    @property
+    def writes_db(self) -> bool:
+        """Whether the control database is a selected destination."""
+        return self.destination in ("db", "both")
 
-        return run_store.writes_jsonl(self._ctx), run_store.writes_db(self._ctx)
+    @property
+    def workflow(self) -> Optional[str]:
+        """The workflow currently executing, if any."""
+        return self._workflow
 
-    def append(self, record_type: str, *, message: str = "", **fields: Any) -> int | None:
+    @property
+    def pipeline(self) -> Optional[str]:
+        """The pipeline currently executing, if any."""
+        return self._pipeline
+
+    @property
+    def lineage(self) -> dict[str, str]:
+        """A copy of the current lineage; mutate through bind_lineage."""
+        return dict(self._lineage)
+
+    # -- state transitions ---------------------------------------------------
+
+    def bind_workflow(self, name: Optional[str]) -> None:
+        """Set the workflow every later record is written under."""
+        self._workflow = str(name) if name else None
+
+    def bind_pipeline(self, name: Optional[str]) -> None:
+        """Set the pipeline every later record is written under."""
+        self._pipeline = str(name) if name else None
+
+    def bind_step(self, step_name: Optional[str] = None,
+                  pipeline_step_name: Optional[str] = None) -> None:
+        """Set the step context later records carry."""
+        if step_name is not None:
+            self._step_name = str(step_name) or None
+        if pipeline_step_name is not None:
+            self._pipeline_step_name = str(pipeline_step_name) or None
+
+    def clear_step(self) -> None:
+        """Drop the step context; later records belong to the run again."""
+        self._step_name = None
+        self._pipeline_step_name = None
+
+    def bind_lineage(self, **values: Any) -> None:
+        """Merge lineage and domain values. Absent values are left untouched."""
+        for key, value in values.items():
+            if value:
+                self._lineage[key] = str(value)
+
+    def clear_lineage(self) -> None:
+        """Drop the bound lineage."""
+        self._lineage.clear()
+
+    def set_nest_level(self, semantic: str) -> int:
+        """Establish the semantic base level for the scope now executing."""
+        level = SEMANTIC_BASES.get(str(semantic))
+        if level is None:
+            raise ValueError(
+                f"unknown semantic nesting base '{semantic}'. Known: "
+                f"{', '.join(sorted(SEMANTIC_BASES))}."
+            )
+        state, path = self._load_state()
+        state[CURRENT_NEST_LEVEL] = level
+        state[MINIMUM_NEST_LEVEL] = min(int(state[MINIMUM_NEST_LEVEL]), level)
+        state[CURRENT_PARENT_RECORD_ID] = self._anchor_for(state, level)
+        self._save_state(state, path)
+        return level
+
+    def nest_level(self) -> int:
+        """The nesting level records are currently written at."""
+        state, _ = self._load_state()
+        return int(state[CURRENT_NEST_LEVEL])
+
+    def enter(self) -> int:
+        """Descend one relative level within the current semantic scope."""
+        state, path = self._load_state()
+        level = int(state[CURRENT_NEST_LEVEL]) + 1
+        state[CURRENT_NEST_LEVEL] = level
+        state[CURRENT_PARENT_RECORD_ID] = self._anchor_for(state, level)
+        self._save_state(state, path)
+        return level
+
+    def exit(self) -> int:
+        """Ascend one relative level, never above the established minimum."""
+        state, path = self._load_state()
+        level = max(int(state[CURRENT_NEST_LEVEL]) - 1,
+                    int(state[MINIMUM_NEST_LEVEL]))
+        state[CURRENT_NEST_LEVEL] = level
+        state[CURRENT_PARENT_RECORD_ID] = self._anchor_for(state, level)
+        self._save_state(state, path)
+        return level
+
+    @staticmethod
+    def _anchor_for(state: dict[str, Any], level: int) -> int:
+        """The stable parent for ``level``: its anchor, or the nearest above."""
+        anchors = state[LEVEL_ANCHORS]
+        for candidate in range(int(level) - 1, -1, -1):
+            if candidate in anchors:
+                return int(anchors[candidate])
+            if str(candidate) in anchors:
+                return int(anchors[str(candidate)])
+        return _SYNTHETIC_ROOT
+
+    # -- the log itself ------------------------------------------------------
+
+    def path(self) -> Path:
+        """Resolve the run-log path, once.
+
+        A path supplied at construction is used as given, which is how a
+        subprocess step continues its parent's log.
+        """
+        if self._path:
+            return Path(self._path)
+        if not self._log_dir:
+            raise ValueError(
+                "Cannot open run log: no durable log path. A RunLog is built "
+                "with either a resolved path or the directory to write into."
+            )
+        name = self._pipeline or self._workflow or self.app or "app"
+        resolved = Path(self._log_dir) / f"{name}.{self.run_timestamp}.jsonl"
+        self._path = str(resolved)
+        return resolved
+
+    def close(self) -> None:
+        """Close the run log. Idempotent; called by runtime collection."""
+        self._closed = True
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether this run log has been collected."""
+        return self._closed
+
+    # -- state persistence ---------------------------------------------------
+
+    def _state_path(self) -> Optional[Path]:
+        """The companion state file, or None when there is no durable log."""
+        from rey_lib.logs.run_state import companion_path
+
+        try:
+            return companion_path(str(self.path()))
+        except Exception:  # noqa: BLE001 — no durable log; use the in-memory store.
+            return None
+
+    def _load_state(self) -> tuple[dict[str, Any], Optional[Path]]:
+        """Read the hierarchy state, file-backed when a durable log resolves.
+
+        Read per operation rather than cached, deliberately: this is what lets a
+        separate process continue the sequence rather than restart it.
+        """
+        from rey_lib.logs.run_state import _read, _write
+
+        path = self._state_path()
+        if path is None:
+            if self._memory_state is None:
+                self._memory_state = _initial_state()
+            return self._memory_state, None
+        if path.exists():
+            return _read(path), path
+        state = _initial_state()
+        _write(path, state)
+        return state, path
+
+    def _save_state(self, state: dict[str, Any], path: Optional[Path]) -> None:
+        """Persist the hierarchy state to its backing store."""
+        from rey_lib.logs.run_state import _write
+
+        if path is None:
+            self._memory_state = state
+        else:
+            _write(path, state)
+
+    # -- writing -------------------------------------------------------------
+
+    def _record(self, record_type: str, message: str,
+                fields: dict[str, Any]) -> dict[str, Any]:
+        """Build the enriched record from owned state and the supplied fields."""
+        from rey_lib.logs.record_enrichment import (
+            FILES_RECORD_SUBGROUP, _record_group, _RUN_RECORD_SCHEMA_VERSION,
+            sanitize_log_value,
+        )
+        from rey_lib.logs.record_validation import _validate_run_record
+
+        record: dict[str, Any] = {
+            "record_type": record_type,
+            "record_group": _record_group(record_type),
+            "run_id": self.run_id,
+            "run_timestamp": self.run_timestamp,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
+        }
+        subgroup = FILES_RECORD_SUBGROUP.get(record_type)
+        if subgroup:
+            record["record_subgroup"] = subgroup
+        if self.app:
+            record["app"] = self.app
+        if self._workflow:
+            record["workflow_name"] = self._workflow
+        if self._pipeline:
+            record["pipeline_name"] = self._pipeline
+        for key in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):
+            value = self._lineage.get(key)
+            if value:
+                record[key] = value
+        if message:
+            record["message"] = message
+        record.update(fields or {})
+        record = sanitize_log_value(record)
+        _validate_run_record(record)
+        return record
+
+    def append(self, record_type: str, *, message: str = "",
+               **fields: Any) -> int | None:
         """Append one typed record to every selected destination.
 
-        The body is the former ``log_run_record``, unchanged: same validation,
-        same enrichment, same stamping, same order of writes, same fail-safe.
-
-        Returns
-        -------
-        int | None
-            The committed ``record_id``, or ``None`` when the record could not
-            be committed to every selected destination. Never raises: logging
-            must not mask application execution.
+        Never raises: logging must not mask application execution. A record that
+        could not be committed to every selected destination returns ``None``,
+        and the sequence does not advance.
         """
-        from rey_lib.logs import run_store
-        from rey_lib.logs.record_enrichment import (
-            _enrich_run_record,
-            _has_durable_run_path,
-            _validate_run_record_fields,
-            open_run_log,
-        )
+        from rey_lib.logs.record_validation import _validate_run_record_fields
 
-        ctx = self._ctx
-        if _has_durable_run_path(ctx):
-            _validate_run_record_fields(record_type, fields)
+        _validate_run_record_fields(record_type, fields)
         try:
-            to_jsonl, to_db = self.destinations()
+            record = self._record(record_type, message, fields)
 
-            # open_run_log is only reached when JSONL is a destination: it fails
-            # closed without a durable log path, which is correct for a JSONL
-            # run and irrelevant to a database-only one.
-            path = open_run_log(ctx) if to_jsonl else None
-            record = _enrich_run_record(ctx, record_type, message=message, fields=fields)
+            state, state_path = self._load_state()
+            record_id = int(state[LAST_RECORD_ID]) + 1
+            nest_level = int(state[CURRENT_NEST_LEVEL])
+            record["record_id"] = record_id
+            record["parent_record_id"] = int(state[CURRENT_PARENT_RECORD_ID])
+            record["nest_level"] = nest_level
 
-            # Logical record identity and parent, from the shared run state
-            # (SGC_Rey_Log_Record_Parenting_Phase_2). The sequence belongs to the
-            # run rather than to a file: stamped before the write, committed only
-            # after a successful one, so a failed write does not skip an id.
-            from rey_lib.logs import record_parenting
-            from rey_lib.logs.nest_level import get_nest_level
-
-            nest_level = get_nest_level(ctx)
-            record_id = record_parenting.stamp_record(ctx, record, nest_level)
-
-            if to_jsonl:
-                # Routed through the primitive I/O layer so the run-log writer
-                # shares one low-level append with file_utils without either
-                # foundational module importing the other
-                # (SGC_Rey_Lib_Primitive_File_IO_Layer).
+            if self.writes_jsonl:
                 from rey_lib.files import primitive_file_io
 
-                primitive_file_io.append_jsonl(path, record)
+                primitive_file_io.append_jsonl(self.path(), record)
 
-            if to_db:
-                run_store.persist_record(ctx, record_type, message, record)
+            if self.writes_db:
+                self._persist_to_control(record_type, message, record)
 
-            record_parenting.commit_record(ctx, record_id, nest_level)
+            state[LAST_RECORD_ID] = record_id
+            anchors = state[LEVEL_ANCHORS]
+            if nest_level not in anchors and str(nest_level) not in anchors:
+                anchors[nest_level] = record_id
+            self._save_state(state, state_path)
             return record_id
         except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
             from rey_lib.logs.logging_setup import get_logger
@@ -123,26 +401,20 @@ class RunLog:
             )
             return None
 
+    def _persist_to_control(self, record_type: str, message: str,
+                            record: dict[str, Any]) -> None:
+        """Persist one record to the control database as a log event."""
+        from rey_lib.logs.run_store import _severity_of
 
-def run_log_for(ctx: Any) -> RunLog:
-    """Return this run's RunLog, making it once.
-
-    Held on the context for now, which is how ``Control`` is reached too. The
-    launch boundary is the better owner and is where both should move; doing
-    that here would mean touching every entry point in the same change that
-    introduces the object.
-    """
-    existing = getattr(ctx, "run_log", None)
-    if isinstance(existing, RunLog):
-        return existing
-
-    run_log = RunLog(ctx)
-    try:
-        ctx.run_log = run_log
-    except (AttributeError, TypeError):
-        # A context that cannot hold attributes still gets a RunLog, just not a
-        # cached one. Writing a record never mutated the context before this
-        # object existed, and some callers pass a bare object; caching is an
-        # optimisation, not part of the contract.
-        pass
-    return run_log
+        if self.control is None:
+            raise ValueError(
+                "run_store selects the control database but no Control was "
+                "supplied to this run log."
+            )
+        self.control.log_event(
+            severity=_severity_of(record_type),
+            event_name=str(record_type),
+            message=str(message or record.get("message") or record_type),
+            event_jsonb=record,
+            required=True,
+        )

@@ -332,7 +332,7 @@ def _has_durable_run_path(ctx: Any) -> bool:
 
 
 def log_run_record(
-    ctx: Any, record_type: str, *, message: str = "", **fields: Any
+    run_log: 'RunLog', record_type: str, *, message: str = "", **fields: Any
 ) -> int | None:
     """
     Append one typed record to the append-only run log.

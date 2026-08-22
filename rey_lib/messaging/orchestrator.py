@@ -83,8 +83,7 @@ def execute_message_set(
     path = Path(context_file).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Context file not found: {path}")
-    log_input_discovered(
-        ctx,
+    log_input_discovered(run_log,
         input_name="messaging_context",
         path=str(path),
         source_config=message_set_name,
@@ -92,8 +91,7 @@ def execute_message_set(
         safe_to_preview=True,
         context_type=context_type,
     )
-    log_input_file_reference(
-        ctx,
+    log_input_file_reference(run_log,
         str(path),
         file_role="messaging_context",
         display_name=path.name,
@@ -115,8 +113,7 @@ def execute_message_set(
 
     raw_text, records = _load_context_file(path, context_type)
     if context_type == "jsonl_log":
-        log_row_count(
-            ctx,
+        log_row_count(run_log,
             count_name="messaging_context_records",
             count=len(records),
             subject=message_set_name,
@@ -124,8 +121,7 @@ def execute_message_set(
             source_path=str(path),
         )
     message_names = resolve_message_set(ctx, message_set_name)
-    log_row_count(
-        ctx,
+    log_row_count(run_log,
         count_name="messages_selected",
         count=len(message_names),
         subject=message_set_name,
@@ -148,11 +144,10 @@ def execute_message_set(
     sent = sum(1 for result in results if result.get("status") == "sent")
     skipped = sum(1 for result in results if result.get("status") == "skipped")
     failed = len(results) - sent - skipped
-    log_row_count(ctx, count_name="messages_sent", count=sent, subject=message_set_name)
-    log_row_count(ctx, count_name="messages_skipped", count=skipped, subject=message_set_name)
-    log_row_count(ctx, count_name="messages_failed", count=failed, subject=message_set_name)
-    log_validation_result(
-        ctx,
+    log_row_count(run_log, count_name="messages_sent", count=sent, subject=message_set_name)
+    log_row_count(run_log, count_name="messages_skipped", count=skipped, subject=message_set_name)
+    log_row_count(run_log, count_name="messages_failed", count=failed, subject=message_set_name)
+    log_validation_result(run_log,
         validation_name="message_set_execution",
         status="success" if failed == 0 else "failed",
         message=f"message_set={message_set_name} sent={sent} skipped={skipped} failed={failed}",
@@ -168,8 +163,7 @@ def execute_message_set(
     # fail-safe and never affects delivery.
     archive = message_archive_path(ctx)
     if archive and Path(archive).exists():
-        log_artifact_reference(
-            ctx, str(archive), role="message_archive", event="written",
+        log_artifact_reference(run_log, str(archive), role="message_archive", event="written",
             artifact_group="output_files", producing_app="rey_messaging",
             producer="messaging", artifact_type="message_archive",
             source_path=str(path), viewer_type="file", safe_to_preview=True,

@@ -125,10 +125,10 @@ def _refused_disabled_workflow(
     except (AttributeError, TypeError):
         pass
     set_nest_level(ctx, "workflow")
-    log_run_start(ctx, workflow=name, apply=apply)
+    log_run_start(run_log, workflow=name, apply=apply)
     bind_run(ctx)
     _logger.warning("%s", message)
-    log_run_complete(ctx, "refused", message=message)
+    log_run_complete(run_log, "refused", message=message)
     _finalize_run(ctx)
     clear_run()
     return run
@@ -151,8 +151,7 @@ def _pre_execution_failure(
     same records an in-step failure uses, the run is finalized and unbound, and
     the caller raises the returned error so the existing contract is unchanged.
     """
-    failure_id = log_step_failure(
-        ctx,
+    failure_id = log_step_failure(run_log,
         failed_step_id=step_id,
         failed_step_name=label or step_id,
         message=message,
@@ -167,8 +166,7 @@ def _pre_execution_failure(
     )
     run.status = "failed"
     _logger.error("%s", message)
-    log_run_complete(
-        ctx,
+    log_run_complete(run_log,
         "failed",
         message=message,
         failure_record_id=failure_id,
@@ -311,7 +309,7 @@ def run_workflow(
     # Workflow semantic base -> level 4: a workflow executes inside an app, so it
     # sits below the app base (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
     set_nest_level(ctx, "workflow")
-    log_run_start(ctx, workflow=name, apply=apply)
+    log_run_start(run_log, workflow=name, apply=apply)
     # Bind the current run so file_utils records file operations to this run log
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
     bind_run(ctx)
@@ -371,15 +369,14 @@ def run_workflow(
             # step dispatch (SGC_Rey_Log_Nest_Level_Hierarchy_Correction). The descent
             # from workflow (4) parents each step under the workflow record.
             set_nest_level(ctx, "workflow_step")
-            log_step_start(
-                ctx, step_name, sequence, step_type=process, step_id=step_id
+            log_step_start(run_log, step_name, sequence, step_type=process, step_id=step_id
             )
             # STEP_START anchors the workflow-step scope. Handler, lifecycle, file,
             # and result evidence belongs one level beneath that durable record.
             next_nest_level(ctx)
 
             if not apply and bool(effective.get("apply_only")):
-                log_step_end(ctx, step_name, "skipped", message="dry-run")
+                log_step_end(run_log, step_name, "skipped", message="dry-run")
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "skipped", "dry-run")
                 )
@@ -396,11 +393,10 @@ def run_workflow(
                     failed_step_name=step_name,
                     failed_step_sequence=sequence,
                 )
-                error_record = log_error(ctx, **error_payload)
+                error_record = log_error(run_log, **error_payload)
                 failure_message = str(error_record.get("error_message") or "")
                 failure_id = str(error_record.get("error_id") or "")
-                failure_id = log_step_failure(
-                    ctx,
+                failure_id = log_step_failure(run_log,
                     failed_step_id=step_id,
                     failed_step_name=step_name,
                     message=failure_message,
@@ -408,15 +404,14 @@ def run_workflow(
                     error_id=failure_id,
                     failed_step_sequence=sequence,
                 )
-                log_step_end(ctx, step_name, "failed", message=failure_message)
+                log_step_end(run_log, step_name, "failed", message=failure_message)
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "failed", error=failure_message)
                 )
                 run.status = "failed"
                 _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
                 set_nest_level(ctx, "workflow")
-                log_run_complete(
-                    ctx,
+                log_run_complete(run_log,
                     "failed",
                     message=failure_message,
                     failure_record_id=failure_id,
@@ -431,13 +426,12 @@ def run_workflow(
             status = str(getattr(result, "status", "ok")) if result is not None else "ok"
             detail = str(getattr(result, "detail", "")) if result is not None else ""
             artifacts = list(getattr(result, "artifacts", []) or []) if result is not None else []
-            log_step_end(ctx, step_name, status, message=detail)
+            log_step_end(run_log, step_name, status, message=detail)
             run.outcomes.append(StepOutcome(step_id, label, process, status, detail, artifacts))
             if status == "failed":
                 run.status = "failed"
                 failure_message = detail or f"workflow step '{step_id}' failed."
-                failure_id = log_step_failure(
-                    ctx,
+                failure_id = log_step_failure(run_log,
                     failed_step_id=step_id,
                     failed_step_name=step_name,
                     message=failure_message,
@@ -447,8 +441,7 @@ def run_workflow(
                     failed_step_sequence=sequence,
                 )
                 set_nest_level(ctx, "workflow")
-                log_run_complete(
-                    ctx,
+                log_run_complete(run_log,
                     "failed",
                     message=failure_message,
                     failure_record_id=failure_id,
@@ -463,7 +456,7 @@ def run_workflow(
             clear_step()
 
     set_nest_level(ctx, "workflow")
-    log_run_complete(ctx, "success")
+    log_run_complete(run_log, "success")
     _finalize_run(ctx)
     clear_run()
     return run

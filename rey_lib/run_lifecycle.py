@@ -96,7 +96,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
     # App semantic base (SGC_Rey_Log_Nest_Level_Phase_1). The shared app boundary,
     # so every app establishes level 3 here regardless of how it was invoked.
     set_nest_level(ctx, "app")
-    log_run_start(ctx, operation=operation)
+    log_run_start(run_log, operation=operation)
     bind_run(ctx)
     record_config_file_references(ctx)
     try:
@@ -108,7 +108,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             failed_step_id=operation,
             failed_step_name=operation,
         )
-        error_record = log_error(ctx, **error_payload)
+        error_record = log_error(run_log, **error_payload)
         failure_id = str(error_record.get("error_id") or "")
         failure_message = str(error_record.get("error_message") or str(exc))
         # Ownership-return (SGC_Rey_Log_Hierarchy_Shared_Run_State_Correction): the app
@@ -116,8 +116,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
         # shared hierarchy deeper than the app base. Reassert app ownership before
         # RUN_COMPLETE so completion is emitted at the app level.
         set_nest_level(ctx, "app")
-        log_run_complete(
-            ctx,
+        log_run_complete(run_log,
             "failed",
             message=failure_message,
             failure_record_id=failure_id,
@@ -131,8 +130,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             failure_message = (
                 f"app operation '{operation}' returned nonzero result {result}."
             )
-            error_record = log_error(
-                ctx,
+            error_record = log_error(run_log,
                 **build_error_record_payload(
                     message=failure_message,
                     error_type="AppOperationFailed",
@@ -142,8 +140,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
                 ),
             )
             failure_record_id = str(error_record.get("error_id") or "")
-            failure_id = log_step_failure(
-                ctx,
+            failure_id = log_step_failure(run_log,
                 failed_step_id=operation,
                 failed_step_name=operation,
                 message=failure_message,
@@ -152,8 +149,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             )
             # Ownership-return: reassert app ownership before RUN_COMPLETE.
             set_nest_level(ctx, "app")
-            log_run_complete(
-                ctx,
+            log_run_complete(run_log,
                 "failed",
                 message=failure_message,
                 failure_record_id=failure_record_id or failure_id,
@@ -164,7 +160,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
             return result
         # Ownership-return: reassert app ownership before RUN_COMPLETE.
         set_nest_level(ctx, "app")
-        log_run_complete(ctx, "success")
+        log_run_complete(run_log, "success")
         return result
     finally:
         # RESULTS_SUMMARY creation is NOT done here: a generic app operation may be a

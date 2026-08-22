@@ -110,15 +110,14 @@ class TestConcurrentAllocation:
     )
     def test_concurrent_writers_get_distinct_record_ids(self, tmp_path: Path) -> None:
         ctx = _ctx(tmp_path)
-        log_run_start(ctx, operation="parallel")
+        log_run_start(run_log, operation="parallel")
 
         claimed: list[int | None] = []
         guard = threading.Lock()
 
         def write(worker: int) -> None:
             for i in range(8):
-                record_id = log_run_record(
-                    ctx, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
+                record_id = log_run_record(run_log, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
                 with guard:
                     claimed.append(record_id)
 
@@ -141,11 +140,11 @@ class TestConcurrentAllocation:
         log. Losing rows would be a different and worse defect than reusing ids.
         """
         ctx = _ctx(tmp_path)
-        log_run_start(ctx, operation="parallel")
+        log_run_start(run_log, operation="parallel")
 
         def write(worker: int) -> None:
             for i in range(8):
-                log_run_record(ctx, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
+                log_run_record(run_log, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
 
         threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
         for thread in threads:

@@ -7,7 +7,7 @@ from typing import Any
 from rey_lib.logs.record_enrichment import log_run_record
 
 
-def log_sql_execution(ctx: Any, *, connection_name: str = "", database: str = "",
+def log_sql_execution(run_log: 'RunLog', *, connection_name: str = "", database: str = "",
                       schema: str = "", sql_path: str = "", sql_label: str = "",
                       operation: str = "", status: str = "",
                       duration_ms: int | None = None,
@@ -35,4 +35,4 @@ def log_sql_execution(ctx: Any, *, connection_name: str = "", database: str = ""
         payload["duration_ms"] = duration_ms
     if safe_to_preview is not None:
         payload["safe_to_preview"] = bool(safe_to_preview)
-    log_run_record(ctx, "SQL_EXECUTION", **payload)
+    run_log.append("SQL_EXECUTION", **payload)
