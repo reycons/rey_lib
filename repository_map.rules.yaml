@@ -112,11 +112,18 @@ architecture_rules:
   # inverts the chain. The direction matters more than the call: identity is
   # established at the launch boundary and arrives on the context, rather than
   # being fetched from below at write time.
+  # run_lifecycle is named explicitly. It is a top-level module rather than
+  # part of rey_lib.run, so the globs above did not reach it, and logs
+  # re-exported run_app_operation from it -- the same inversion, surviving on a
+  # naming accident. Nothing imported it from logs; the re-export was removed.
   - rule_id: logging_does_not_reach_up_into_run
     forbidden_target_globs:
       - "rey_lib.run"
       - "rey_lib.run.*"
       - "rey_lib/run/*"
+      - "rey_lib.run_lifecycle"
+      - "rey_lib.run_lifecycle.*"
+      - "rey_lib/run_lifecycle.py"
     scope_path_globs:
       - "rey_lib/logs/*"
     edge_kinds:
