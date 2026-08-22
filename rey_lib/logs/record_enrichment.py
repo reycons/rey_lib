@@ -355,10 +355,15 @@ def log_run_record(
     **fields : Any
         Additional typed fields merged into the record.
 
-    Destination is decided here, for every record, because every record passes
+    Destination is decided for every record, because every record passes
     through here. ``logging.run_store`` selects the JSONL run log, the control
     database, or both, and a record is committed when every selected
     destination accepted it.
+
+    A compatibility shim. The writing belongs to
+    :class:`~rey_lib.logs.run_log.RunLog`, which owns the path, the
+    destinations and the record sequence. This keeps the name every caller
+    already uses, so introducing that owner changes no call site.
 
     Returns
     -------
@@ -371,57 +376,9 @@ def log_run_record(
         file manifest) treats ``None`` as the failure signal, because this
         function never raises.
     """
-    if _has_durable_run_path(ctx):
-        _validate_run_record_fields(record_type, fields)
-    try:
-        from rey_lib.logs import run_store
+    from rey_lib.logs.run_log import run_log_for
 
-        to_jsonl = run_store.writes_jsonl(ctx)
-        to_db = run_store.writes_db(ctx)
-
-        # open_run_log is only reached when JSONL is a destination: it fails
-        # closed without a durable log path, which is correct for a JSONL run
-        # and irrelevant to a database-only one.
-        path = open_run_log(ctx) if to_jsonl else None
-        record = _enrich_run_record(ctx, record_type, message=message, fields=fields)
-
-        # Logical record identity and parent, derived from the nest-level state
-        # (SGC_Rey_Log_Record_Parenting_Phase_2). The sequence belongs to the run
-        # rather than to a file: it is stamped before the write and advances only
-        # after a successful one, so a failed write does not skip an id, and the
-        # hierarchy is the same whichever destination is selected.
-        from rey_lib.logs import record_parenting
-        from rey_lib.logs.nest_level import get_nest_level
-
-        nest_level = get_nest_level(ctx)
-        record_id = record_parenting.stamp_record(ctx, record, nest_level)
-
-        if to_jsonl:
-            # Route the durable append through the primitive I/O layer so the run-log
-            # writer shares one low-level append with file_utils without either
-            # foundational module importing the other
-            # (SGC_Rey_Lib_Primitive_File_IO_Layer). Imported lazily because the
-            # rey_lib.files package eagerly loads file_utils, which imports this
-            # logging layer — a module-level import would form a cycle.
-            from rey_lib.files import primitive_file_io
-
-            primitive_file_io.append_jsonl(path, record)
-
-        if to_db:
-            run_store.persist_record(ctx, record_type, message, record)
-
-        record_parenting.commit_record(ctx, record_id, nest_level)
-        return record_id
-    except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
-        # Imported lazily because logging_setup imports resolve_run_identity from
-        # this module; a module-level import would close a cycle. The same idiom
-        # every other rey_lib.logs module uses to reach a higher layer.
-        from rey_lib.logs.logging_setup import get_logger
-
-        get_logger(__name__).warning(
-            "run log: could not append %s record: %s", record_type, exc
-        )
-        return None
+    return run_log_for(ctx).append(record_type, message=message, **fields)
 
 
 _CURRENT_RUN: dict[str, Any] = {"run": None}
