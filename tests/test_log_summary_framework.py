@@ -44,7 +44,7 @@ def _completed_run(
     complete: bool = True,
 ) -> tuple[SimpleNamespace, Path]:
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     set_nest_level(run_log, semantic_level)
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     log_step_start(run_log, "one", 1, step_id="one")
@@ -64,7 +64,7 @@ def _completed_run(
                 "failed_step_name": "one", "failure_message": "boom",
             }
         log_run_complete(run_log, status, **complete_fields)
-    return ctx, Path(ctx.run_log_path)
+    return ctx, Path(run_log.path())
 
 
 def test_results_summary_is_appended_to_completed_run_log(tmp_path: Path) -> None:
@@ -143,10 +143,10 @@ def test_results_summary_uses_active_scope(
 
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     set_nest_level(run_log, "app")
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
-    app_record_id = _records(Path(ctx.run_log_path))[0]["record_id"]
+    app_record_id = _records(Path(run_log.path()))[0]["record_id"]
     set_nest_level(run_log, "workflow")
     log_step_start(run_log, "one", 1, step_id="one")
     log_step_end(run_log, "one", "success", step_id="one")

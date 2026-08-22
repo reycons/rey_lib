@@ -92,7 +92,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     run_app_operation(ctx, run_log, "run-workflow", operation_body)
 
     # The run-owning application finalizes again because it is not a pipeline step.
-    finalize_run_log(run_log, ctx.run_log_path)
+    finalize_run_log(run_log, run_log.path())
 
 
 def test_top_level_run_workflow_summarizes_exactly_once(tmp_path: Path) -> None:
@@ -101,7 +101,7 @@ def test_top_level_run_workflow_summarizes_exactly_once(tmp_path: Path) -> None:
 
     _run_top_level_workflow(tmp_path, ctx)
 
-    records = _records(ctx.run_log_path)
+    records = _records(run_log.path())
     assert _count(records, "RESULTS_SUMMARY") == 1
     assert _count(records, "ARTIFACT_MANIFEST") == 0
 
@@ -111,10 +111,10 @@ def test_repeated_finalization_appends_no_further_summary(tmp_path: Path) -> Non
     ctx = _ctx(tmp_path)
     _run_top_level_workflow(tmp_path, ctx)
 
-    before = _records(ctx.run_log_path)
-    finalize_run_log(run_log, ctx.run_log_path)
+    before = _records(run_log.path())
+    finalize_run_log(run_log, run_log.path())
 
-    after = _records(ctx.run_log_path)
+    after = _records(run_log.path())
     assert _count(after, "RESULTS_SUMMARY") == 1
     assert _count(after, "ARTIFACT_MANIFEST") == 0
     assert len(after) == len(before)
@@ -126,11 +126,11 @@ def test_create_results_summary_returns_the_existing_summary(tmp_path: Path) -> 
     _run_top_level_workflow(tmp_path, ctx)
     existing = next(
         record
-        for record in _records(ctx.run_log_path)
+        for record in _records(run_log.path())
         if str(record.get("record_type") or "").upper() == "RESULTS_SUMMARY"
     )
 
-    result = create_results_summary(log_path=ctx.run_log_path)
+    result = create_results_summary(log_path=run_log.path())
 
     assert result["action"] is None
     assert "already_summarized" in result["skipped"]
@@ -150,7 +150,7 @@ def test_top_level_run_workflow_completes_exactly_once(tmp_path: Path) -> None:
 
     _run_top_level_workflow(tmp_path, ctx)
 
-    assert _count(_records(ctx.run_log_path), "RUN_COMPLETE") == 1
+    assert _count(_records(run_log.path()), "RUN_COMPLETE") == 1
 
 
 def test_top_level_run_workflow_does_not_generate_artifact_manifest(tmp_path: Path) -> None:
@@ -159,7 +159,7 @@ def test_top_level_run_workflow_does_not_generate_artifact_manifest(tmp_path: Pa
 
     _run_top_level_workflow(tmp_path, ctx)
 
-    records = _records(ctx.run_log_path)
+    records = _records(run_log.path())
     assert _count(records, "ARTIFACT_REFERENCE") == 1
     assert _count(records, "ARTIFACT_MANIFEST") == 0
 
@@ -171,7 +171,7 @@ def test_terminal_records_are_the_last_records_in_the_log(tmp_path: Path) -> Non
     _run_top_level_workflow(tmp_path, ctx)
 
     types = [
-        str(record.get("record_type") or "").upper() for record in _records(ctx.run_log_path)
+        str(record.get("record_type") or "").upper() for record in _records(run_log.path())
     ]
     assert types.index("RUN_COMPLETE") < types.index("RESULTS_SUMMARY")
     assert types[-1] == "RUN_COMPLETE"

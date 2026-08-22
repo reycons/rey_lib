@@ -35,13 +35,7 @@ from rey_lib.run.identity import establish_run_identity
 
 def _run_log(tmp_path: Path) -> str:
     """Produce a small but representative run log and return its path."""
-    ctx = SimpleNamespace(
-        log_file=str(tmp_path / "app.run.jsonl"),
-        owner_app_name="rey_db_admin",
-        workflow_name="postgres_lint",
-    )
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    establish_run_identity(ctx)
+    run_log = make_run_log(tmp_path, app="rey_db_admin", workflow="postgres_lint")
     log_run_start(run_log)
     log_step_start(run_log, "export", 1)
     log_config_file_reference(run_log, str(tmp_path / "workflow.yaml"),
@@ -54,7 +48,7 @@ def _run_log(tmp_path: Path) -> str:
     log_step_end(run_log, "export", "success")
     log_run_summary(run_log, {"steps": 1, "status": "success"})
     log_run_complete(run_log, "success")
-    return ctx.run_log_path
+    return run_log.path()
 
 
 def test_render_run_view_includes_all_groups(tmp_path: Path) -> None:
@@ -112,8 +106,8 @@ def test_render_error_warning_view_filters(tmp_path: Path) -> None:
 def test_error_warning_view_empty_when_clean(tmp_path: Path) -> None:
     """A clean run renders an explicit no-warnings message."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "clean.run.jsonl"), owner_app_name="x")
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     establish_run_identity(ctx)
     log_run_start(run_log)
     log_run_complete(run_log, "success")
-    assert render_error_warning_view(ctx.run_log_path) == "(no warnings or errors)"
+    assert render_error_warning_view(run_log.path()) == "(no warnings or errors)"
