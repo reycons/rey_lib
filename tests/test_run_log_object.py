@@ -87,11 +87,16 @@ class TestItOwnsTheTransitions:
         assert run_log.nest_level() == 3
 
     def test_enter_and_exit_move_within_the_scope(self, tmp_path: Path) -> None:
+        """A base sets the floor at base + 1, so a return holds there.
+
+        Relative nesting cannot escape into or below its own base; only
+        set_nest_level establishes a new one.
+        """
         run_log = make_run_log(tmp_path)
-        run_log.set_nest_level("workflow")
+        run_log.set_nest_level("workflow")   # 4, floor 5
 
         assert run_log.enter() == 5
-        assert run_log.exit() == 4
+        assert run_log.exit() == 5
 
     def test_exit_never_rises_above_the_established_minimum(self, tmp_path: Path) -> None:
         run_log = make_run_log(tmp_path)

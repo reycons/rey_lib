@@ -43,7 +43,6 @@ import pytest
 from tests.conftest import make_run_log
 
 from rey_lib.logs import log_run_record, log_run_start
-from rey_lib.run.identity import establish_run_identity
 
 
 def _ctx(tmp_path: Path, run_id: str | None = None) -> SimpleNamespace:
@@ -52,48 +51,44 @@ def _ctx(tmp_path: Path, run_id: str | None = None) -> SimpleNamespace:
     Passing ``run_id`` makes a second writer join the same run, which is what a
     pipeline subprocess does when it receives the parent's context.
     """
-    ctx = SimpleNamespace(
-        log_file=str(tmp_path / "app.run.jsonl"),
-        owner_app_name="probe",
-        app_name="probe",
+    return make_run_log(
+        tmp_path,
+        app="probe",
+        run_id=run_id or "00000000-0000-4000-8000-000000000009",
+        run_timestamp="20260822_000000",
     )
-    establish_run_identity(ctx)
-    ctx.run_timestamp = "20260822_000000"
-    if run_id:
-        ctx.run_id = run_id
-    return ctx
 
 
 def _rows(ctx: Any) -> list[dict]:
     """Every record on disk for this run."""
     return [json.loads(line)
-            for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+            for line in Path(ctx.path()).read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 
 class TestContinuityAcrossWriters:
     """Holds today, and the owner must keep it."""
 
-    def test_a_second_writer_continues_the_sequence(self, run_log, tmp_path: Path) -> None:
+    def test_a_second_writer_continues_the_sequence(self, tmp_path: Path) -> None:
         first = _ctx(tmp_path)
-        log_run_start(run_log, operation="first")
+        log_run_start(first, operation="first")
         for i in range(3):
-            log_run_record(run_log, "ROW_COUNT", count_name=f"a{i}", count=i)
+            log_run_record(first, "ROW_COUNT", count_name=f"a{i}", count=i)
 
         second = _ctx(tmp_path, run_id=first.run_id)
-        continued = [log_run_record(run_log, "ROW_COUNT", count_name=f"b{i}", count=i)
+        continued = [log_run_record(second, "ROW_COUNT", count_name=f"b{i}", count=i)
                      for i in range(3)]
 
         # Continues from where the first writer stopped rather than restarting.
         assert continued == [5, 6, 7]
 
-    def test_the_sequence_is_unbroken_on_disk(self, run_log, tmp_path: Path) -> None:
+    def test_the_sequence_is_unbroken_on_disk(self, tmp_path: Path) -> None:
         first = _ctx(tmp_path)
-        log_run_start(run_log, operation="first")
-        log_run_record(run_log, "ROW_COUNT", count_name="a", count=1)
+        log_run_start(first, operation="first")
+        log_run_record(first, "ROW_COUNT", count_name="a", count=1)
 
         second = _ctx(tmp_path, run_id=first.run_id)
-        log_run_record(run_log, "ROW_COUNT", count_name="b", count=2)
+        log_run_record(second, "ROW_COUNT", count_name="b", count=2)
 
         assert [r["record_id"] for r in _rows(first)] == [1, 2, 3]
 
@@ -112,15 +107,14 @@ class TestConcurrentAllocation:
     )
     def test_concurrent_writers_get_distinct_record_ids(self, tmp_path: Path) -> None:
         ctx = _ctx(tmp_path)
-        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-        log_run_start(run_log, operation="parallel")
+        log_run_start(ctx, operation="parallel")
 
         claimed: list[int | None] = []
         guard = threading.Lock()
 
-        def write(run_log, worker: int) -> None:
+        def write(worker: int) -> None:
             for i in range(8):
-                record_id = log_run_record(run_log, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
+                record_id = log_run_record(ctx, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
                 with guard:
                     claimed.append(record_id)
 
@@ -143,12 +137,11 @@ class TestConcurrentAllocation:
         log. Losing rows would be a different and worse defect than reusing ids.
         """
         ctx = _ctx(tmp_path)
-        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-        log_run_start(run_log, operation="parallel")
+        log_run_start(ctx, operation="parallel")
 
-        def write(run_log, worker: int) -> None:
+        def write(worker: int) -> None:
             for i in range(8):
-                log_run_record(run_log, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
+                log_run_record(ctx, "ROW_COUNT", count_name=f"t{worker}-{i}", count=i)
 
         threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
         for thread in threads:
