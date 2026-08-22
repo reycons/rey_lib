@@ -130,7 +130,7 @@ def new_batch_intent(run_log: Any) -> bool:
     return bool(declared)
 
 
-def validate_run_store(ctx: Any, run_log) -> None:
+def validate_run_store(ctx: Any) -> None:
     """Refuse an impossible destination before any application work starts.
 
     A run that cannot reach its required run store should fail at launch rather
@@ -159,14 +159,6 @@ def validate_run_store(ctx: Any, run_log) -> None:
             "The routine contract for control database calls must be named."
         )
 
-    # An invalid reuse request is a launch error, not something to repair by
-    # creating the batch the caller explicitly said not to create.
-    if not new_batch_intent(run_log) and not getattr(ctx, "batch_id", None):
-        raise _errors().ConfigError(
-            "newBatch is false but no batch_id is bound to reuse. Reuse is an "
-            "explicit continuation of a batch that already exists; a launch that "
-            "needs its own batch must ask for one."
-        )
 
 
 def require_structural_record(run_log: 'RunLog', record_id: Optional[int],

@@ -81,7 +81,7 @@ def test_httpx_429_records_are_promoted_to_warning(run_log, tmp_path) -> None:
         readable_enabled=True,
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="run")
+    setup_logging(ctx, operation="run")
 
     logger = logging.getLogger("httpx")
     logger.info(
@@ -113,7 +113,7 @@ def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(run_log, 
     )
 
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="run")
+    setup_logging(ctx, operation="run")
     logging.getLogger("sample").info("hello")
 
     for handler in logging.getLogger().handlers:
@@ -138,7 +138,7 @@ def test_setup_logging_can_disable_jsonl_with_yaml_flag(run_log, tmp_path) -> No
     )
 
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="run")
+    setup_logging(ctx, operation="run")
     logging.getLogger("sample").info("hello")
 
     for handler in logging.getLogger().handlers:
@@ -269,7 +269,7 @@ def test_setup_logging_works_without_env_attribute(run_log, tmp_path) -> None:
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="run")
+    setup_logging(ctx, operation="run")
     logging.getLogger("sample").info("no-env ctx")
 
     for handler in logging.getLogger().handlers:
@@ -285,7 +285,7 @@ def test_setup_logging_defaults_to_info_without_env(run_log, tmp_path) -> None:
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="run")
+    setup_logging(ctx, operation="run")
     assert ctx.log_level == "INFO"
 
 
@@ -300,7 +300,7 @@ def test_setup_logging_accepts_path_object_for_log_path(run_log, tmp_path) -> No
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="run")
+    setup_logging(ctx, operation="run")
     logging.getLogger("path_test").info("path object ctx")
 
     for handler in logging.getLogger().handlers:
@@ -323,7 +323,7 @@ def test_setup_logging_substitutes_operation_and_timestamp(run_log, tmp_path) ->
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, run_log, operation="ingest")
+    setup_logging(ctx, operation="ingest")
     logging.getLogger("sub").info("check placeholders")
 
     for handler in logging.getLogger().handlers:

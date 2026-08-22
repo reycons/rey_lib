@@ -109,7 +109,7 @@ def _pipeline_step_app(run_log, ctx: Namespace) -> None:
 def test_pipeline_step_app_chain(tmp_path: Path) -> None:
     """Pipeline -> Pipeline Step -> App descends one owner per semantic base."""
     ctx = _ctx(tmp_path)
-    _pipeline_step_app(ctx)
+    _pipeline_step_app(run_log, ctx)
 
     pipeline, step, app = _records(tmp_path)
     assert _identity(pipeline) == (1, _ROOT, 1)
@@ -239,7 +239,7 @@ def test_return_from_app_to_pipeline_step(tmp_path: Path) -> None:
     """Re-asserting the step base after a deep app returns ownership to the step."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    _pipeline_step_app(ctx)
+    _pipeline_step_app(run_log, ctx)
     # The app descends and never returns, as a real app body may leave it.
     set_nest_level(run_log, "workflow")
     log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
@@ -279,7 +279,7 @@ def test_failure_return_follows_ownership_reset(tmp_path: Path) -> None:
     """A failing step resets ownership exactly as the success path does."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    _pipeline_step_app(ctx)
+    _pipeline_step_app(run_log, ctx)
     set_nest_level(run_log, "workflow")
     log_run_record(run_log, "ERROR", app="rey_loader", message="boom")
     # Failure return re-asserts the same base the success path re-asserts.
@@ -299,7 +299,7 @@ def test_record_sequence_is_continuous_and_parents_precede_children(tmp_path: Pa
     """record_id is gapless from 1 and every nonzero parent references an earlier record."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    _pipeline_step_app(ctx)
+    _pipeline_step_app(run_log, ctx)
     set_nest_level(run_log, "workflow")
     log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
     set_nest_level(run_log, "workflow_step")

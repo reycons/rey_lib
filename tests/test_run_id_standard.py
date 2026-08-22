@@ -60,7 +60,7 @@ def test_setup_logging_refuses_an_unidentified_context(run_log, tmp_path: Path) 
     ctx = SimpleNamespace(log_path=str(tmp_path / "app.{operation}.{timestamp}.log"))
 
     with pytest.raises(ValueError, match="No run identity has been established"):
-        setup_logging(ctx, run_log, operation="run")
+        setup_logging(ctx, operation="run")
 
 
 def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:
