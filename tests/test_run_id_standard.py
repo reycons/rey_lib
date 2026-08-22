@@ -55,12 +55,12 @@ def test_logging_requires_an_identity_it_did_not_create() -> None:
     assert require_run_id(ctx) == ctx.run_id
 
 
-def test_setup_logging_refuses_an_unidentified_context(tmp_path: Path) -> None:
+def test_setup_logging_refuses_an_unidentified_context(run_log, tmp_path: Path) -> None:
     """The launch boundary fails loudly rather than inventing an identity."""
     ctx = SimpleNamespace(log_path=str(tmp_path / "app.{operation}.{timestamp}.log"))
 
     with pytest.raises(ValueError, match="No run identity has been established"):
-        setup_logging(ctx, operation="run")
+        setup_logging(ctx, run_log, operation="run")
 
 
 def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:

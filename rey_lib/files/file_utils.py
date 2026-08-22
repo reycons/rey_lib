@@ -1073,7 +1073,7 @@ def get_reader(
         raise ValueError(f"Unsupported file_type '{file_type}'.")
 
 
-def write_file(
+def write_file(run_log, 
     outfile: Path,
     content: Any,
     file_type: str = "CSV",
@@ -1151,7 +1151,7 @@ def write_file(
     if state_ctx is not None:
         try:
             log_file_operation(
-                state_ctx,
+run_log,
                 app=app,
                 pipeline=pipeline,
                 source=outfile,
@@ -1304,7 +1304,7 @@ def cleanup_stale_files(
 
     return removed
 
-def move_file(
+def move_file(run_log, 
     src: Path,
     dest_dir: Path,
     dest_name: Optional[str] = None,
@@ -1359,7 +1359,7 @@ def move_file(
     if state_ctx is not None:
         try:
             log_file_operation(
-                state_ctx,
+run_log,
                 app=app,
                 pipeline=pipeline,
                 source=src,
@@ -1375,7 +1375,7 @@ def move_file(
     return dest
 
 
-def copy_file(
+def copy_file(run_log, 
     src: Path,
     dest_dir: Path,
     dest_name: Optional[str] = None,
@@ -1434,7 +1434,7 @@ def copy_file(
     if state_ctx is not None:
         try:
             log_file_operation(
-                state_ctx,
+run_log,
                 app=app,
                 pipeline=pipeline,
                 source=src,

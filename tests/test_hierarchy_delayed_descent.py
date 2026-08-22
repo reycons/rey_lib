@@ -70,12 +70,12 @@ def test_pipeline_delayed_descent_anchors_to_the_pipeline_owner(tmp_path: Path) 
     """Pipeline-level records written before the descent must not own the step."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="pipeline.yaml")
     log_run_record(run_log, "EXECUTION_PLAN")
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
 
     records = _records(tmp_path)
@@ -91,13 +91,13 @@ def test_step_delayed_descent_anchors_to_the_step_owner(tmp_path: Path) -> None:
     """Step-level records written before the descent must not own the app."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
     log_run_record(run_log, "FILE_OPERATION", path="prepare.ctx.json")
     log_run_record(run_log, "APP_EXECUTION", app="rey_loader")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
 
     records = _records(tmp_path)
@@ -113,7 +113,7 @@ def test_app_delayed_descent_anchors_to_the_app_owner(tmp_path: Path) -> None:
     """App-level records written before the descent must not own the nested scope."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
     log_run_record(run_log, "INPUT_DISCOVERED", path="b.csv")
@@ -133,17 +133,17 @@ def test_sibling_pipeline_steps_share_the_pipeline_owner(tmp_path: Path) -> None
     """Both steps parent to the pipeline despite intervening pipeline/step records."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="pipeline.yaml")
     log_run_record(run_log, "EXECUTION_PLAN")
     # Step one, as the coordinator opens each sequential step.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
     log_run_record(run_log, "FILE_OPERATION", path="prepare.ctx.json")
     log_run_record(run_log, "STEP_END", step_name="prepare_trade_files", status="success")
     # Step two.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="redact_trade_inbox")
 
     records = _records(tmp_path)
@@ -165,19 +165,19 @@ def test_each_app_execution_has_its_own_pipeline_step(tmp_path: Path) -> None:
     """
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Step one invokes rey_analyzer.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="generate_trade_staging_tables")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
-    set_nest_level(ctx, "pipeline_step")          # app returned
+    set_nest_level(run_log, "pipeline_step")          # app returned
     log_run_record(run_log, "APP_EXECUTION", app="rey_analyzer")
     # Step two invokes rey_analyzer again, as a separate App execution.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="generate_trade_final_ddl")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
 
     records = _records(tmp_path)
@@ -202,19 +202,19 @@ def test_workflow_nests_inside_its_app_under_the_step(tmp_path: Path) -> None:
     """
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "EXECUTION_PLAN")
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="prepare_trade_files")
     log_run_record(run_log, "APP_EXECUTION", app="rey_loader")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="workflow.yaml")
-    set_nest_level(ctx, "workflow_step")
+    set_nest_level(run_log, "workflow_step")
     log_run_record(run_log, "STEP_START", app="rey_loader", step_name="extract")
 
     records = _records(tmp_path)
@@ -236,19 +236,19 @@ def test_successful_return_then_descent_anchors_to_the_new_step(tmp_path: Path) 
     """After a step completes, the next step's app parents to the next step."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Step one runs an app and completes.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="step_one")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
-    set_nest_level(ctx, "pipeline_step")          # app returned
+    set_nest_level(run_log, "pipeline_step")          # app returned
     log_run_record(run_log, "STEP_END", step_name="step_one", status="success")
     # Step two opens and runs its own app.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="step_two")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
 
     records = _records(tmp_path)
@@ -264,20 +264,20 @@ def test_failed_return_then_descent_anchors_to_the_new_step(tmp_path: Path) -> N
     """A failed step resets ownership exactly as the success path does."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Step one fails inside its app.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="step_one")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
     log_run_record(run_log, "ERROR", app="rey_loader", message="boom")
-    set_nest_level(ctx, "pipeline_step")          # app returned by exception
+    set_nest_level(run_log, "pipeline_step")          # app returned by exception
     log_run_record(run_log, "STEP_FAILURE", step_name="step_one", status="failed")
     # Step two opens and runs its own app.
-    set_nest_level(ctx, "pipeline_step")
+    set_nest_level(run_log, "pipeline_step")
     log_run_record(run_log, "STEP_START", step_name="step_two")
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
 
     records = _records(tmp_path)
@@ -296,11 +296,11 @@ def test_direct_app_with_intervening_records(tmp_path: Path) -> None:
     """A directly invoked app owns its nested scope despite intervening records."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
     log_run_record(run_log, "ROW_COUNT", rows=10)
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")
 
     records = _records(tmp_path)
@@ -313,11 +313,11 @@ def test_direct_workflow_with_intervening_records(tmp_path: Path) -> None:
     """A directly invoked workflow owns its steps despite intervening records."""
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_run_record(run_log, "RUN_START", workflow="daily_load")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
     log_run_record(run_log, "ROW_COUNT", rows=10)
-    set_nest_level(ctx, "workflow_step")
+    set_nest_level(run_log, "workflow_step")
     log_run_record(run_log, "STEP_START", step_name="extract")
 
     records = _records(tmp_path)

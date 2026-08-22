@@ -21,7 +21,7 @@ def _file_ops(log: Path) -> list[dict]:
     return [r for r in rows if r.get("record_type") == "FILE_OPERATION"]
 
 
-def test_ambient_file_operation_receives_app_and_context(tmp_path: Path) -> None:
+def test_ambient_file_operation_receives_app_and_context(run_log, tmp_path: Path) -> None:
     log = tmp_path / "app.ts.jsonl"
     ctx = Namespace(
         {
@@ -46,7 +46,7 @@ def test_ambient_file_operation_receives_app_and_context(tmp_path: Path) -> None
     assert ops[-1]["pipeline_name"] == "trade_analyzer_generate_apply_ddl"
 
 
-def test_ambient_file_operation_omits_absent_identity(tmp_path: Path) -> None:
+def test_ambient_file_operation_omits_absent_identity(run_log, tmp_path: Path) -> None:
     # No app identity on the ctx -> app is simply absent, exactly as before.
     log = tmp_path / "app.ts.jsonl"
     ctx = Namespace({"run_log_path": str(log), "run_id": "r", "run_timestamp": "ts"})

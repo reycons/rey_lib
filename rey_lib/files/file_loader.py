@@ -562,7 +562,7 @@ def load_files_to_callback(
     return total_rows
 
 
-def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
+def run_transform(ctx: Any, run_log, sql_dir: Optional[Path] = None) -> int:
     """
     Run the transform stage for every data source declared in ctx.
 
@@ -658,7 +658,7 @@ def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
                                header_line=header_line)
 
 
-def load_one(ctx: Any, data_source: Any, load_cfg: Any, file_path: Path) -> int:
+def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path) -> int:
     """Load exactly one file into its destination table. No discovery, no hooks.
 
     Resolves the load connection, destination schema/table, and matching
@@ -684,7 +684,7 @@ def load_one(ctx: Any, data_source: Any, load_cfg: Any, file_path: Path) -> int:
 
 
 def run_load(
-    ctx: Any,
+    ctx: Any, run_log,
     sql_dir: Optional[Path] = None,
 ) -> int:
     """
@@ -775,7 +775,7 @@ def run_load(
             # post_load_sql runs on the last connection used for this source
             # (backward-compat with existing post_load_sql YAML key).
             if last_conn is not None:
-                _execute_post_load_sql(ctx, last_conn, data_source, sql_dir)
+                _execute_post_load_sql(ctx, run_log, last_conn, data_source, sql_dir)
 
         finally:
             # Nothing is closed here. These are shared Connections held by every
@@ -787,7 +787,7 @@ def run_load(
     return total
 
 
-def _execute_post_load_sql(ctx: Any, conn: Any, data_source: Any, sql_dir: Optional[Path]) -> None:
+def _execute_post_load_sql(ctx: Any, run_log, conn: Any, data_source: Any, sql_dir: Optional[Path]) -> None:
     """Execute each SQL file listed in data_source.post_load_sql.
 
     Skips silently when ``post_load_sql`` is absent, empty, or ``sql_dir``
@@ -1098,17 +1098,17 @@ def _execute_one_hook(
     row_columns: dict[str, Any] = {}
 
     if hook_type == "sql_file":
-        _execute_one_hook_sql_file(ctx, conn, sql_cfg, sql_dir)
+        _execute_one_hook_sql_file(ctx, run_log, conn, sql_cfg, sql_dir)
 
     else:
         # Default: type == "procedure"
-        row_columns = _execute_one_hook_procedure(ctx, data_source, conn, sql_cfg)
+        row_columns = _execute_one_hook_procedure(ctx, run_log, data_source, conn, sql_cfg)
 
     return row_columns
 
 
 def _execute_one_hook_sql_file(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     sql_cfg: Any,
     sql_dir: Optional[Path],
@@ -1159,7 +1159,7 @@ def _execute_one_hook_sql_file(
 
 
 def _execute_one_hook_procedure(
-    ctx: Any,
+    ctx: Any, run_log,
     data_source: Any,
     conn: Any,
     sql_cfg: Any,

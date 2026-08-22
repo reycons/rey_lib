@@ -39,7 +39,7 @@ def _write_completed_run(path: Path, records: list[dict]) -> None:
         pipeline_name=first.get("pipeline_name", ""),
     )
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "pipeline")
+    set_nest_level(run_log, "pipeline")
     for source in records:
         fields = dict(source)
         record_type = fields.pop("record_type")

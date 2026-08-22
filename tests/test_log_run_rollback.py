@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -130,6 +132,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     establish_run_identity(ctx)
     classification = {
         "type": "file_name_regex",
@@ -137,7 +140,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     }
 
     manifest_record_id = log_source_file_mutation(
-        ctx,
+ctx, run_log,
         action="create",
         status="success",
         destination_path=tmp_path / "created.csv",
@@ -178,13 +181,15 @@ def test_mutation_evidence_failure_before_run_log_commit_is_structured(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=None
     ), patch(
         "rey_lib.files.log_run_rollback.log_file_manifest_record"
     ) as manifest_append:
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(
+ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.phase is SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED
@@ -205,12 +210,14 @@ def test_mutation_evidence_filename_failure_preserves_committed_record_id(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     del ctx.run_log_path
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=17
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(
+ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.phase is (
@@ -235,6 +242,7 @@ def test_mutation_serialization_failure_after_run_log_commit_is_structured(
     failure: Exception,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=19
     ), patch(
@@ -242,7 +250,8 @@ def test_mutation_serialization_failure_after_run_log_commit_is_structured(
         side_effect=failure,
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(
+ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.run_log_committed is True
@@ -255,6 +264,7 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=23
     ), patch(
@@ -262,7 +272,8 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
         side_effect=OSError("append blocked"),
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(
+ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.phase is (
@@ -280,6 +291,7 @@ def test_sequencing_state_failure_preserves_appended_manifest_row(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=29
     ), patch(
@@ -288,7 +300,7 @@ def test_sequencing_state_failure_preserves_appended_manifest_row(
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
             log_source_file_mutation(
-                ctx,
+ctx, run_log,
                 action="move",
                 status="success",
                 source_path=tmp_path / "inbox" / "source.csv",
@@ -338,10 +350,11 @@ def test_mutation_evidence_phase_owns_commit_state() -> None:
 def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None:
     """Every field the canonical layout groups is gone from the record root."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     establish_run_identity(ctx)
 
     log_source_file_mutation(
-        ctx,
+ctx, run_log,
         action="move",
         status="success",
         source_path=tmp_path / "in" / "a.xlsx",
@@ -385,10 +398,11 @@ def test_caller_cannot_inject_a_canonical_root_field(
 def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
     """Run-log enrichment is evidence, not a way into the governed record."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
     establish_run_identity(ctx)
 
     log_source_file_mutation(
-        ctx,
+ctx, run_log,
         action="create",
         status="success",
         destination_path=tmp_path / "created.csv",
@@ -585,7 +599,7 @@ def test_execution_surface_fields_cannot_reach_the_manifest(
         log_file_manifest_record(_ctx(tmp_path), record)
 
 
-def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
+def test_move_and_create_are_compensated_with_attempt_and_final_evidence(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
@@ -607,7 +621,7 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
         destination_path=str(created),
     )
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert result["succeeded_count"] == 2
@@ -637,7 +651,7 @@ def test_move_and_create_are_compensated_with_attempt_and_final_evidence(
     assert summary["record_id"] > max(create_id, move_id)
 
 
-def test_rollback_removes_only_the_profiles_its_own_run_log_produced(
+def test_rollback_removes_only_the_profiles_its_own_run_log_produced(run_log, 
     tmp_path: Path,
 ) -> None:
     """Profiles are selected by evidence.run_log_file, as manifest rows are.
@@ -664,7 +678,7 @@ def test_rollback_removes_only_the_profiles_its_own_run_log_produced(
     append_profile_record(ctx, _profile_record(rolled_back_id, "run.jsonl"))
     append_profile_record(ctx, _profile_record(retained_id, "other.jsonl"))
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert not rolled_back_file.exists()
@@ -691,7 +705,7 @@ def test_delete_and_replace_require_recorded_recovery_paths(
     assert plan["non_recoverable_count"] == 2
 
 
-def test_delete_and_replace_restore_only_recorded_versions(
+def test_delete_and_replace_restore_only_recorded_versions(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
@@ -717,14 +731,14 @@ def test_delete_and_replace_restore_only_recorded_versions(
         previous_version_path=str(previous),
     )
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert replacement.read_text(encoding="utf-8") == "old content"
     assert deleted_original.read_text(encoding="utf-8") == "deleted content"
 
 
-def test_failure_is_recorded_and_remaining_compensations_continue(
+def test_failure_is_recorded_and_remaining_compensations_continue(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
@@ -744,7 +758,7 @@ def test_failure_is_recorded_and_remaining_compensations_continue(
         destination_path=str(created),
     )
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "partial_success"
     assert result["succeeded_count"] == 1
@@ -826,7 +840,7 @@ def test_unfinished_attempt_is_indeterminate_and_not_reapplied(
     assert plan["indeterminate"] == [mutation_id]
 
 
-def test_future_operation_uses_registered_compensation_without_engine_change(
+def test_future_operation_uses_registered_compensation_without_engine_change(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
@@ -840,7 +854,7 @@ def test_future_operation_uses_registered_compensation_without_engine_change(
     )
     try:
         mutation_id = _append_mutation(ctx, action="future_action")
-        result = rollback_log_run(ctx, _run_log(tmp_path))
+        result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
     finally:
         unregister_file_compensation("future_action")
 
@@ -848,7 +862,7 @@ def test_future_operation_uses_registered_compensation_without_engine_change(
     assert result["status"] == "success"
 
 
-def test_unknown_action_is_reported_without_filesystem_inference(
+def test_unknown_action_is_reported_without_filesystem_inference(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
@@ -859,7 +873,7 @@ def test_unknown_action_is_reported_without_filesystem_inference(
     assert plan["candidate_count"] == 0
     assert plan["unsupported"][0]["original_manifest_record_id"] == mutation_id
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "failure"
     assert result["appended_rollback_evidence_count"] == 2
@@ -932,7 +946,7 @@ def test_malformed_mutation_location_fails_before_compensation(
         preview_log_run_rollback(ctx, "run.jsonl")
 
 
-def test_attempt_append_failure_prevents_filesystem_compensation(
+def test_attempt_append_failure_prevents_filesystem_compensation(run_log, 
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -948,14 +962,14 @@ def test_attempt_append_failure_prevents_filesystem_compensation(
         ),
     )
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert created.exists()
     assert result["status"] == "failure"
     assert result["appended_rollback_evidence_count"] == 0
 
 
-def test_a_reversal_stands_even_when_its_evidence_cannot_be_written(
+def test_a_reversal_stands_even_when_its_evidence_cannot_be_written(run_log, 
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -979,7 +993,7 @@ def test_a_reversal_stands_even_when_its_evidence_cannot_be_written(
 
     monkeypatch.setattr(FileManifestSession, "append", fail_second_append)
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     # The file was deleted, so the record describing it must go too. Losing
     # the note about the deletion cannot resurrect the file, and keeping the
@@ -996,7 +1010,7 @@ def test_a_reversal_stands_even_when_its_evidence_cannot_be_written(
     assert mutation_id
 
 
-def test_preview_is_read_only_and_execution_rereads_manifest(
+def test_preview_is_read_only_and_execution_rereads_manifest(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
@@ -1015,7 +1029,7 @@ def test_preview_is_read_only_and_execution_rereads_manifest(
     second.write_text("second", encoding="utf-8")
     _append_mutation(ctx, action="create", destination_path=str(second))
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["succeeded_count"] == 2
     assert not first.exists()
@@ -1028,7 +1042,7 @@ def test_run_log_file_is_required(tmp_path: Path, value: object) -> None:
         preview_log_run_rollback(_ctx(tmp_path), value)  # type: ignore[arg-type]
 
 
-def test_rollback_records_are_written_only_through_the_serializer(
+def test_rollback_records_are_written_only_through_the_serializer(run_log, 
     tmp_path: Path,
 ) -> None:
     """Every appended rollback row matches the serializer's canonical shape."""
@@ -1042,7 +1056,7 @@ def test_rollback_records_are_written_only_through_the_serializer(
     # Evidence is cleaned up when the rollback finishes, so removal is held
     # off here to inspect exactly what the engine appended.
     with patch.object(FileManifestSession, "remove_records", return_value=0):
-        rollback_log_run(ctx, _run_log(tmp_path))
+        rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     rollback_rows = [
         row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
@@ -1216,7 +1230,7 @@ def _append_state_record(
     )
 
 
-def test_records_without_an_action_are_rolled_back(tmp_path: Path) -> None:
+def test_records_without_an_action_are_rolled_back(run_log, tmp_path: Path) -> None:
     """Inventory and classification carry no action and must still reverse.
 
     Their inverse is the removal of the record and nothing else, so anything
@@ -1235,7 +1249,7 @@ def test_records_without_an_action_are_rolled_back(tmp_path: Path) -> None:
         "remove_record",
     ]
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert result["succeeded_count"] == 2
@@ -1253,7 +1267,7 @@ def test_records_without_an_action_are_rolled_back(tmp_path: Path) -> None:
     assert inventory_id and classification_id
 
 
-def test_a_failed_mutation_is_removed_without_touching_the_filesystem(
+def test_a_failed_mutation_is_removed_without_touching_the_filesystem(run_log, 
     tmp_path: Path,
 ) -> None:
     """A mutation that never happened leaves a record, and the record goes.
@@ -1276,7 +1290,7 @@ def test_a_failed_mutation_is_removed_without_touching_the_filesystem(
         "remove_record"
     ]
 
-    result = rollback_log_run(ctx, _run_log(tmp_path))
+    result = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert result["status"] == "success"
     assert result["filesystem_operations_reversed"] == 0
@@ -1287,7 +1301,7 @@ def test_a_failed_mutation_is_removed_without_touching_the_filesystem(
     ] == []
 
 
-def test_rolling_back_twice_finishes_the_job_and_adds_no_junk(
+def test_rolling_back_twice_finishes_the_job_and_adds_no_junk(run_log, 
     tmp_path: Path,
 ) -> None:
     """A second rollback completes the first one instead of failing on it.
@@ -1309,13 +1323,13 @@ def test_rolling_back_twice_finishes_the_job_and_adds_no_junk(
         source_path=str(origin), destination_path=str(moved),
     )
 
-    first = rollback_log_run(ctx, _run_log(tmp_path))
+    first = rollback_log_run(ctx, run_log, _run_log(tmp_path))
     assert first["status"] == "success"
     assert first["filesystem_operations_reversed"] == 2
     after_first = len(_rows(ctx))
 
     # Everything is already reversed; the second pass must not fail on that.
-    second = rollback_log_run(ctx, _run_log(tmp_path))
+    second = rollback_log_run(ctx, run_log, _run_log(tmp_path))
 
     assert second["status"] == "success"
     assert second["failed_count"] == 0

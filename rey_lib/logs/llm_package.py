@@ -18,7 +18,7 @@ __all__ = [
 ]
 
 
-def create_llm_package(
+def create_llm_package(run_log, 
     log_path: str | Path,
     analysis_name: str,
     source_record_type: str,
@@ -578,7 +578,7 @@ def run_workbench_input_stream(
     return _run(request, on_chunk=on_chunk, cancelled=cancelled)
 
 
-def run_configured_log_analysis(
+def run_configured_log_analysis(run_log, 
     log_path: str | Path,
     analysis_name: str,
     package_record_type: str,

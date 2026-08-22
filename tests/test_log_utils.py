@@ -69,7 +69,7 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
         assert hasattr(log_utils, name), name
 
 
-def test_httpx_429_records_are_promoted_to_warning(tmp_path) -> None:
+def test_httpx_429_records_are_promoted_to_warning(run_log, tmp_path) -> None:
     """OpenAI/HTTPX 429 messages are warning-level in text and JSONL logs."""
     ctx = SimpleNamespace(
         env="test",
@@ -81,7 +81,7 @@ def test_httpx_429_records_are_promoted_to_warning(tmp_path) -> None:
         readable_enabled=True,
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="run")
+    setup_logging(ctx, run_log, operation="run")
 
     logger = logging.getLogger("httpx")
     logger.info(
@@ -102,7 +102,7 @@ def test_httpx_429_records_are_promoted_to_warning(tmp_path) -> None:
     assert "429 Too Many Requests" in record["message"]
 
 
-def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(tmp_path) -> None:
+def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(run_log, tmp_path) -> None:
     """JSONL is written beside the configured log_path; no readable log is produced."""
     ctx = SimpleNamespace(
         env="test",
@@ -113,7 +113,7 @@ def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(tmp_path)
     )
 
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="run")
+    setup_logging(ctx, run_log, operation="run")
     logging.getLogger("sample").info("hello")
 
     for handler in logging.getLogger().handlers:
@@ -127,7 +127,7 @@ def test_setup_logging_writes_jsonl_only_when_only_text_log_configured(tmp_path)
     assert ctx.log_file == str(jsonl_log.resolve())
 
 
-def test_setup_logging_can_disable_jsonl_with_yaml_flag(tmp_path) -> None:
+def test_setup_logging_can_disable_jsonl_with_yaml_flag(run_log, tmp_path) -> None:
     """A YAML logging flag can opt out of JSONL for the rare readable-only case."""
     ctx = SimpleNamespace(
         env="test",
@@ -138,7 +138,7 @@ def test_setup_logging_can_disable_jsonl_with_yaml_flag(tmp_path) -> None:
     )
 
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="run")
+    setup_logging(ctx, run_log, operation="run")
     logging.getLogger("sample").info("hello")
 
     for handler in logging.getLogger().handlers:
@@ -261,7 +261,7 @@ def test_read_jsonl_records_rejects_text_logs(tmp_path) -> None:
 # New-contract ctx shapes (no .env, log_path as Path from PathResolver)
 # ---------------------------------------------------------------------------
 
-def test_setup_logging_works_without_env_attribute(tmp_path) -> None:
+def test_setup_logging_works_without_env_attribute(run_log, tmp_path) -> None:
     """ctx built via build_ctx_from_path has no .env — must not raise."""
     ctx = SimpleNamespace(
         log_level="INFO",
@@ -269,7 +269,7 @@ def test_setup_logging_works_without_env_attribute(tmp_path) -> None:
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="run")
+    setup_logging(ctx, run_log, operation="run")
     logging.getLogger("sample").info("no-env ctx")
 
     for handler in logging.getLogger().handlers:
@@ -278,18 +278,18 @@ def test_setup_logging_works_without_env_attribute(tmp_path) -> None:
     assert next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8")
 
 
-def test_setup_logging_defaults_to_info_without_env(tmp_path) -> None:
+def test_setup_logging_defaults_to_info_without_env(run_log, tmp_path) -> None:
     """When neither .env nor .log_level is set, INFO is the fallback."""
     ctx = SimpleNamespace(
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="run")
+    setup_logging(ctx, run_log, operation="run")
     assert ctx.log_level == "INFO"
 
 
-def test_setup_logging_accepts_path_object_for_log_path(tmp_path) -> None:
+def test_setup_logging_accepts_path_object_for_log_path(run_log, tmp_path) -> None:
     """PathResolver sets log_path as a Path; setup_logging must handle it."""
     from pathlib import Path
 
@@ -300,7 +300,7 @@ def test_setup_logging_accepts_path_object_for_log_path(tmp_path) -> None:
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="run")
+    setup_logging(ctx, run_log, operation="run")
     logging.getLogger("path_test").info("path object ctx")
 
     for handler in logging.getLogger().handlers:
@@ -314,7 +314,7 @@ def test_setup_logging_accepts_path_object_for_log_path(tmp_path) -> None:
     assert list(tmp_path.glob("*.log")) == []
 
 
-def test_setup_logging_substitutes_operation_and_timestamp(tmp_path) -> None:
+def test_setup_logging_substitutes_operation_and_timestamp(run_log, tmp_path) -> None:
     """{operation} and {timestamp} in the resolved log path are filled at runtime."""
     ctx = SimpleNamespace(
         log_level="INFO",
@@ -323,7 +323,7 @@ def test_setup_logging_substitutes_operation_and_timestamp(tmp_path) -> None:
         jsonl_ctx_fields=(),
     )
     establish_run_identity(ctx)
-    setup_logging(ctx, operation="ingest")
+    setup_logging(ctx, run_log, operation="ingest")
     logging.getLogger("sub").info("check placeholders")
 
     for handler in logging.getLogger().handlers:

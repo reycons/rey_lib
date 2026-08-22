@@ -93,7 +93,7 @@ def _is_too_many_requests_record(logger_name: str, message: str) -> bool:
 _current_depth: int = 0
 
 
-def setup_logging(ctx: Any, operation: str = "app") -> None:
+def setup_logging(ctx: Any, run_log, operation: str = "app") -> None:
     """
     Initialise logging for the application.
 

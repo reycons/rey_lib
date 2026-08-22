@@ -271,16 +271,16 @@ class TestBatchIntent:
 class TestOneBatchManyRuns:
     """batch_id groups; run_id identifies the execution."""
 
-    def test_two_runs_share_a_batch_and_stay_distinguishable(self, tmp_path,
+    def test_two_runs_share_a_batch_and_stay_distinguishable(run_log, self, tmp_path,
                                                              control_calls) -> None:
         first = _ctx(tmp_path, "db")
-        log_run_start(first, operation="scan")
-        log_step_start(first, "extract", 1)
+        log_run_start(run_log, operation="scan")
+        log_step_start(run_log, "extract", 1)
 
         second = _ctx(tmp_path, "db", new_batch=False,
                       batch_id=first.control_api.batch_id)
-        log_run_start(second, operation="scan")
-        log_step_start(second, "extract", 1)
+        log_run_start(run_log, operation="scan")
+        log_step_start(run_log, "extract", 1)
 
         steps = [v for name, v, _ in control_calls if name == "start_step"]
         assert {s["batch_id"] for s in steps} == {7}

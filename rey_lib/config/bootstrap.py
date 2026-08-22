@@ -111,7 +111,7 @@ def build_ctx_for_app(
     for connection in ctx.shared_connections.values():
         register_runtime_object(ctx, connection)
 
-    setup_logging(ctx, operation=operation)
+    setup_logging(ctx, run_log, operation=operation)
     install_process_error_boundary(ctx)
     return ctx
 

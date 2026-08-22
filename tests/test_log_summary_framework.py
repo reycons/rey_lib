@@ -45,7 +45,7 @@ def _completed_run(
 ) -> tuple[SimpleNamespace, Path]:
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, semantic_level)
+    set_nest_level(run_log, semantic_level)
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     log_step_start(run_log, "one", 1, step_id="one")
     if status == "failed":
@@ -144,10 +144,10 @@ def test_results_summary_uses_active_scope(
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    set_nest_level(ctx, "app")
+    set_nest_level(run_log, "app")
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     app_record_id = _records(Path(ctx.run_log_path))[0]["record_id"]
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_step_start(run_log, "one", 1, step_id="one")
     log_step_end(run_log, "one", "success", step_id="one")
     log_run_complete(run_log, "success")
@@ -157,7 +157,7 @@ def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     assert summary["parent_record_id"] == app_record_id
 
 
-def test_durable_result_record_matrix_preserves_hierarchy_invariant(
+def test_durable_result_record_matrix_preserves_hierarchy_invariant(run_log, 
     tmp_path: Path,
 ) -> None:
     ctx, log = _completed_run(tmp_path, semantic_level="pipeline")

@@ -57,11 +57,11 @@ def _count(records: list[dict[str, Any]], record_type: str) -> int:
     )
 
 
-def _run_top_level_workflow(tmp_path: Path, ctx: SimpleNamespace) -> None:
+def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> None:
     """Drive the exact nesting a standalone `run-workflow` invocation produces."""
     open_run_log(ctx)
 
-    def handler(_ctx: Any, _config: dict[str, Any], _run: Any) -> None:
+    def handler(run_log, _ctx: Any, _config: dict[str, Any], _run: Any) -> None:
         log_artifact_reference(run_log,
             str(tmp_path / "out" / "converted.csv"),
             role="converted_csv",
@@ -83,7 +83,7 @@ def _run_top_level_workflow(tmp_path: Path, ctx: SimpleNamespace) -> None:
         ],
     }
 
-    def operation_body() -> int:
+    def operation_body(run_log) -> int:
         # The coordinator completes and finalizes the standalone workflow run.
         run_workflow(ctx, run_log, workflow, {"excel_conversion": handler})
         return 0

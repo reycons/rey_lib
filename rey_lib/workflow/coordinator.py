@@ -124,7 +124,7 @@ def _refused_disabled_workflow(
         ctx.workflow_name = name
     except (AttributeError, TypeError):
         pass
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_run_start(run_log, workflow=name, apply=apply)
     bind_run(ctx)
     _logger.warning("%s", message)
@@ -308,7 +308,7 @@ def run_workflow(
         pass
     # Workflow semantic base -> level 4: a workflow executes inside an app, so it
     # sits below the app base (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_run_start(run_log, workflow=name, apply=apply)
     # Bind the current run so file_utils records file operations to this run log
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
@@ -368,7 +368,7 @@ def run_workflow(
             # Workflow-step semantic boundary -> level 5, one per sequential in-process
             # step dispatch (SGC_Rey_Log_Nest_Level_Hierarchy_Correction). The descent
             # from workflow (4) parents each step under the workflow record.
-            set_nest_level(ctx, "workflow_step")
+            set_nest_level(run_log, "workflow_step")
             log_step_start(run_log, step_name, sequence, step_type=process, step_id=step_id
             )
             # STEP_START anchors the workflow-step scope. Handler, lifecycle, file,
@@ -410,7 +410,7 @@ def run_workflow(
                 )
                 run.status = "failed"
                 _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
-                set_nest_level(ctx, "workflow")
+                set_nest_level(run_log, "workflow")
                 log_run_complete(run_log,
                     "failed",
                     message=failure_message,
@@ -440,7 +440,7 @@ def run_workflow(
                     sanitized_exception=failure_message,
                     failed_step_sequence=sequence,
                 )
-                set_nest_level(ctx, "workflow")
+                set_nest_level(run_log, "workflow")
                 log_run_complete(run_log,
                     "failed",
                     message=failure_message,
@@ -455,7 +455,7 @@ def run_workflow(
         finally:
             clear_step()
 
-    set_nest_level(ctx, "workflow")
+    set_nest_level(run_log, "workflow")
     log_run_complete(run_log, "success")
     _finalize_run(ctx)
     clear_run()

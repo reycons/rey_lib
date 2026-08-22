@@ -351,7 +351,7 @@ def test_operation_adhoc_dataset_returns_rows():
     assert result["rows"] == [{"id": 1}, {"id": 2}]
 
 
-def test_mapped_sql_logs_dataset_row_count_without_raw_sql(tmp_path: Path):
+def test_mapped_sql_logs_dataset_row_count_without_raw_sql(run_log, tmp_path: Path):
     ctx = _log_ctx(tmp_path)
     conn = object()
     m = {"name": "rey_loader", "sql_bindings": [
@@ -360,7 +360,7 @@ def test_mapped_sql_logs_dataset_row_count_without_raw_sql(tmp_path: Path):
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = [{"id": 1}, {"id": 2}]
-        execute_operation(ctx, conn, "rey_loader",
+        execute_operation(ctx, run_log, conn, "rey_loader",
                           {"execution_target": "mapped_sql", "binding": "find_rows"},
                           {"row_key": 5})
 
@@ -373,7 +373,7 @@ def test_mapped_sql_logs_dataset_row_count_without_raw_sql(tmp_path: Path):
     assert "batch_id" not in text
 
 
-def test_sql_failure_logs_sanitized_failure_evidence(tmp_path: Path):
+def test_sql_failure_logs_sanitized_failure_evidence(run_log, tmp_path: Path):
     ctx = _log_ctx(tmp_path)
     conn = object()
     config = {"execution_target": "adhoc_sql", "result_mode": "no_return",
@@ -382,7 +382,7 @@ def test_sql_failure_logs_sanitized_failure_evidence(tmp_path: Path):
     with patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.side_effect = RuntimeError("connection failed")
         with pytest.raises(RuntimeError, match="connection failed"):
-            execute_operation(ctx, conn, "control", config, {"api_key": "SECRET"})
+            execute_operation(ctx, run_log, conn, "control", config, {"api_key": "SECRET"})
 
     record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "adhoc_sql"

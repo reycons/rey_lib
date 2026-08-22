@@ -524,7 +524,7 @@ def preview_log_run_rollback(
 
 
 def rollback_log_run(
-    ctx: Any,
+    ctx: Any, run_log,
     run_log_file: Path | str,
     *,
     reason: str = "",
@@ -533,9 +533,9 @@ def rollback_log_run(
     """Compensate one run's manifest mutations in reverse execution order."""
     source_path = Path(run_log_file).expanduser().resolve()
     selected_file = _run_log_name(source_path)
-    audit_ctx = _audit_context(ctx, source_path, audit_log_dir)
+    audit_ctx, audit_run_log = _audit_context(ctx, source_path, audit_log_dir)
     log_run_start(
-        audit_ctx,
+        audit_run_log,
         operation="log_run_rollback",
         original_run_log_file=selected_file,
         reason=str(reason or ""),
@@ -550,7 +550,7 @@ def rollback_log_run(
     records_removed = 0
     run_is_clear = False
     started_at = _timestamp()
-    bind_run(audit_ctx)
+    bind_run(audit_run_log)
     try:
         with file_manifest_session(ctx) as session:
             records = _read_required_manifest(session)
@@ -665,7 +665,7 @@ def rollback_log_run(
                     # that are no longer there. The reversal stands and the
                     # bookkeeping failure is reported.
                     log_run_record(
-                        audit_ctx,
+                        audit_run_log,
                         "ERROR",
                         message=(
                             "Compensation succeeded but its evidence could not "
@@ -760,9 +760,9 @@ def rollback_log_run(
         ),
         "failures": failed,
     }
-    log_run_summary(audit_ctx, summary)
+    log_run_summary(audit_run_log, summary)
     log_run_complete(
-        audit_ctx,
+        audit_run_log,
         status,
         **{key: value for key, value in summary.items() if key != "status"},
     )
@@ -1268,7 +1268,7 @@ def _append_rollback_evidence(
         "failure_reason": failure_reason,
     }
     run_record_id = log_run_record(
-        audit_ctx,
+        audit_run_log,
         "SOURCE_FILE_ROLLBACK",
         **fields,
     )
@@ -1384,7 +1384,7 @@ def _audit_context(
     ctx: Any,
     source_run_log: Path,
     audit_log_dir: Path | str | None,
-) -> SimpleNamespace:
+) -> tuple[SimpleNamespace, Any]:
     directory = Path(
         audit_log_dir or source_run_log.parent
     ).expanduser().resolve()
@@ -1405,7 +1405,15 @@ def _audit_context(
             "jsonl",
         )
     )
-    return audit_ctx
+    from rey_lib.logs.run_log import RunLog
+
+    audit_run_log = RunLog(
+        app="log_run_rollback",
+        run_id=audit_ctx.run_id,
+        run_timestamp=audit_ctx.run_timestamp,
+        path=audit_ctx.run_log_path,
+    )
+    return audit_ctx, audit_run_log
 
 
 def _failed_result(

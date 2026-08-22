@@ -286,7 +286,7 @@ def _normalize_legacy_actions(actions: Any, map_name: str) -> Optional[list[dict
 # ---------------------------------------------------------------------------
 
 def execute_operation(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     operation_map: str,
     config: Any,
@@ -639,7 +639,7 @@ def _guard_no_interpolation(sql_text: str, named_params: dict[str, Any],
 
 
 def call_action(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     map_name: str,
     action_name: str,
