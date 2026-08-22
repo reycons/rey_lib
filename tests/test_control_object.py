@@ -226,3 +226,43 @@ class TestNoProceduralSurfaceRemains:
             assert callable(getattr(Control, name)), name
             # ctx is not a parameter: the object already holds it.
             assert "ctx" not in inspect.signature(getattr(Control, name)).parameters
+
+
+class TestControlEnabledDoesNotVetoRunLogging:
+    """One switch decides where run logs go, and it is not this one.
+
+    control.enabled governs the optional capabilities -- artifacts, contracts,
+    config snapshots, run_logged_sql. logging.run_store is authoritative for
+    run-log persistence. Two switches able to disagree about whether the
+    database is written is the split this separation removes, so a required
+    call proceeds regardless of the flag.
+    """
+
+    def test_a_required_call_proceeds_with_control_disabled(self) -> None:
+        ctx = _ctx()
+        ctx.control = SimpleNamespace(procedure_map="control", enabled=False)
+        control = Control(ctx)
+        reached: list[str] = []
+
+        with patch("rey_lib.control.control.execute_mapped_routine",
+                   side_effect=lambda **kw: reached.append(kw["routine_name"])
+                   or {"outputs": {"batch_id": 1}}), \
+             patch.object(Control, "_handle",
+                          return_value=SimpleNamespace(close=lambda: None)):
+            control.start_batch(batch_name="nightly", required=True)
+
+        assert reached == ["start_batch"]
+
+    def test_an_optional_call_still_respects_control_disabled(self) -> None:
+        """The flag keeps its meaning for everything it does govern."""
+        ctx = _ctx()
+        ctx.control = SimpleNamespace(procedure_map="control", enabled=False)
+        control = Control(ctx)
+        reached: list[str] = []
+
+        with patch("rey_lib.control.control.execute_mapped_routine",
+                   side_effect=lambda **kw: reached.append(kw["routine_name"])):
+            control.get_or_create_artifact(artifact_type="report",
+                                           artifact_name="summary")
+
+        assert reached == []

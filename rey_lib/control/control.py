@@ -197,7 +197,15 @@ class Control:
     # -- availability -------------------------------------------------------
 
     def _is_enabled(self) -> bool:
-        """Return True if control.enabled is set."""
+        """Return True if control.enabled is set.
+
+        The flag governs the optional control capabilities -- artifacts,
+        contracts, config snapshots, run_logged_sql -- and never run-log
+        persistence. ``logging.run_store`` is authoritative for that, so a
+        required call ignores this: an operator who selected the database as a
+        run-log destination has already said it must be written, and a second
+        switch able to veto that is the disagreement this separation removes.
+        """
         control_cfg = getattr(self._ctx, "control", None)
         if control_cfg is None:
             return False
