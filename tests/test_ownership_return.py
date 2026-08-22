@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.config.config_utils import Namespace
 from rey_lib.logs import set_nest_level
 from rey_lib.run_lifecycle import run_app_operation
@@ -39,6 +41,7 @@ def _run_complete_records(tmp_path: Path) -> list[dict]:
 # Deeper app scope -> app RUN_COMPLETE returns to app level (success path).
 def test_success_completion_returns_to_app_level(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     def func() -> int:
         set_nest_level(ctx, "workflow")       # 4
@@ -53,6 +56,7 @@ def test_success_completion_returns_to_app_level(tmp_path: Path) -> None:
 # Deeper app scope + raising body -> failed RUN_COMPLETE still returns to app level.
 def test_failed_completion_returns_to_app_level(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     def func() -> int:
         set_nest_level(ctx, "workflow")

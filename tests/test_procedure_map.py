@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.db._sqlalchemy import ReyConnection
 from rey_lib.db.postgres_utils import execute_named_sql
 from rey_lib.db.procedure_map import (
@@ -223,6 +225,7 @@ def test_routine_scalar_executes_and_loads_output():
 
 def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
@@ -394,6 +397,7 @@ def test_execute_sql_text_delegates_to_adapter_run_sql(tmp_path: Path):
     # execute_sql_text is provider-neutral: it must route ad hoc SQL through the
     # DBAdapter (which owns provider dispatch), never call conn.execute() itself.
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     conn = object()  # no .execute() — a raw connection API access would AttributeError
     with patch("rey_lib.db.procedure_map._db") as db:
         db.run_sql.return_value = 1
@@ -420,6 +424,7 @@ def test_execute_sql_text_runs_through_postgres_core_connection(tmp_path: Path):
     # End-to-end through the real DBAdapter + postgres_utils: SQLAlchemy remains
     # behind the Rey connection handle and the application sees no execute API.
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     class FakeResult:
         rowcount = 3
@@ -464,6 +469,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
     # A provider failure must propagate and leave exactly one failed, sanitized
     # SQL_EXECUTION record — no second commit/rollback added by the shared layer.
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     conn = object()
     with patch("rey_lib.db.procedure_map._db") as db:
         db.run_sql.side_effect = DatabaseError("postgres_utils: run_sql failed: boom")
@@ -489,6 +495,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
 
 def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     conn = object()
     with patch("rey_lib.db.procedure_map._db") as db:
         db.call_proc_with_output.return_value = {"out_id": 7}

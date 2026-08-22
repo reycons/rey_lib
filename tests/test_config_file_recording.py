@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.config.config_utils import record_config_file_references
 from rey_lib.config.provenance import ConfigMetadata
 from rey_lib.logs import read_run_log_sections
@@ -61,6 +63,7 @@ def _two_layer_metadata() -> ConfigMetadata:
 def test_effective_context_emits_config_records(tmp_path: Path) -> None:
     """Each contributing config file emits one CONFIG_FILE_REFERENCE record."""
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     refs = _config_refs(Path(ctx.run_log_path))
     paths = {record["path"] for record in refs}
@@ -86,6 +89,7 @@ def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
         layer="installation",
     )
     ctx = _ctx_with_metadata(tmp_path, metadata)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     refs = _config_refs(Path(ctx.run_log_path))
     assert [record["path"] for record in refs] == ["/cfg/config.yaml"]
@@ -101,6 +105,7 @@ def test_role_comes_from_provenance_not_filename(tmp_path: Path) -> None:
         layer="workflow",
     )
     ctx = _ctx_with_metadata(tmp_path, metadata)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     record = _config_refs(Path(ctx.run_log_path))[0]
     assert record["file_role"] == "Workflow"
@@ -110,6 +115,7 @@ def test_role_comes_from_provenance_not_filename(tmp_path: Path) -> None:
 def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) -> None:
     """Contributed sections and overrides stay with their originating file."""
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     refs = {record["path"]: record for record in _config_refs(Path(ctx.run_log_path))}
     workflow_ref = refs["/cfg/workflows/wf.yaml"]
@@ -124,6 +130,7 @@ def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) 
 def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
     """The projected Config Files section is populated from the records."""
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     sections = read_run_log_sections(Path(ctx.run_log_path))["sections"]
     config_files = sections["files"]["config_files"]
@@ -154,6 +161,7 @@ def test_recording_is_fail_safe(tmp_path: Path) -> None:
         run_id="r1", run_timestamp="20260707_000000",
         _config_metadata=_two_layer_metadata(),
     )
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     # Must not raise even though the run log path cannot be written.
     record_config_file_references(ctx, run_log)
 

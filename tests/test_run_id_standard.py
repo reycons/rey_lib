@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.files.file_utils import run_artifact_path
 from rey_lib.logs import log_run_record, require_run_id
 from rey_lib.logs.logging_setup import setup_logging
@@ -70,6 +72,7 @@ def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:
     and nothing on this path invents the identity it is missing.
     """
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.run.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     assert log_run_record(run_log, "RUN_START") is None
     assert getattr(ctx, "run_id", None) is None

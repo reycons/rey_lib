@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from typing import Any
 
 from rey_lib.config.config_utils import Namespace
@@ -111,6 +113,7 @@ def test_previous_at_the_base_does_not_descend() -> None:
 def test_record_writes_do_not_change_the_base_or_the_floor(tmp_path: Path) -> None:
     """Informational writes leave parent_level and minimum_nest_level intact."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
@@ -125,6 +128,7 @@ def test_relative_child_anchors_to_the_scope_owner_not_the_last_write(
 ) -> None:
     """Records written at the base do not become the parent of the relative child."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
@@ -159,6 +163,7 @@ def test_subsequent_set_resets_the_relative_context_and_rebases() -> None:
 def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
     """A set at the current level clears that level's anchor for a new sibling scope."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Sibling scope one.
@@ -183,6 +188,7 @@ def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
 def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: Path) -> None:
     """Next enters once; sibling replaces peer anchors without changing level."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_record(run_log, "RUN_START", app="demo")
 
@@ -211,6 +217,7 @@ def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: 
 def test_set_then_write_orders_the_scope_spine(tmp_path: Path) -> None:
     """Each base's first record anchors the next base's records."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")

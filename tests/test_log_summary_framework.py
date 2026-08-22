@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.logs import (
     create_results_summary,
     log_error,
@@ -42,6 +44,7 @@ def _completed_run(
     complete: bool = True,
 ) -> tuple[SimpleNamespace, Path]:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, semantic_level)
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     log_step_start(run_log, "one", 1, step_id="one")
@@ -140,6 +143,7 @@ def test_results_summary_uses_active_scope(
 
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     app_record_id = _records(Path(ctx.run_log_path))[0]["record_id"]

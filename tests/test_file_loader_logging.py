@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from types import SimpleNamespace
 
 from rey_lib.files import file_loader
@@ -34,6 +36,7 @@ def _records(ctx: SimpleNamespace) -> list[dict]:
 
 def test_transform_unmatched_header_logs_validation_result(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     inbox_file = tmp_path / "incoming.csv"
     inbox_file.write_text("bad,header\n1,2\n", encoding="utf-8")
     data_source = SimpleNamespace(
@@ -62,6 +65,7 @@ def test_transform_unmatched_header_logs_validation_result(tmp_path: Path) -> No
 
 def test_transform_unmatched_header_does_not_log_sql_execution(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     inbox_file = tmp_path / "incoming.csv"
     inbox_file.write_text("bad,header\n1,2\n", encoding="utf-8")
     data_source = SimpleNamespace(
@@ -89,6 +93,7 @@ def test_transform_failure_logs_error_and_referencing_step_failure(
 ) -> None:
     """Loader failures create canonical ERROR evidence before STEP_FAILURE."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     inbox_file = tmp_path / "incoming.csv"
     inbox_file.write_text("expected,header\n1,2\n", encoding="utf-8")
     data_source = SimpleNamespace(

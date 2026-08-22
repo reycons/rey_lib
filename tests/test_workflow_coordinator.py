@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.workflow import RunContext, StepResult, WorkflowError, run_workflow
 
 
@@ -372,6 +374,7 @@ def test_missing_handler_writes_failure_evidence_before_raising(
     import json
 
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     workflow = {
         "name": "reduce_source_files",
         "processes": {"prepare_rule_set_inputs": {}},
@@ -411,6 +414,7 @@ def test_undefined_process_writes_failure_evidence_before_raising(
     tmp_path: Any,
 ) -> None:
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     workflow = {"name": "w", "processes": {}, "steps": [{"id": "s", "process": "nope"}]}
 
     with pytest.raises(WorkflowError, match="undefined process"):
@@ -427,6 +431,7 @@ def test_disabled_workflow_is_recorded_through_the_normal_run_path(
 ) -> None:
     """The attempt is evidence: a run starts, completes, and is finalized."""
     ctx = _log_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     run = run_workflow(
         ctx,

@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.logs import (
     bind_correlation,
     bind_step,
@@ -81,6 +83,7 @@ def test_run_log_named_with_run_timestamp(tmp_path: Path) -> None:
 def test_log_execution_plan_writes_execution_grouped_record(tmp_path: Path) -> None:
     """log_execution_plan emits one EXECUTION_PLAN record grouped as execution."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_start(run_log)
     steps = [
         {"sequence": 1, "step_id": "a", "step_name": "a", "app": "tool"},
@@ -101,6 +104,7 @@ def test_log_execution_plan_writes_execution_grouped_record(tmp_path: Path) -> N
 def test_records_carry_run_id_and_group(tmp_path: Path) -> None:
     """Every record includes run_id; types are grouped execution vs run-result."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_start(run_log)
     log_step_start(run_log, "load_data", 1, step_type="loader")
     log_step_end(run_log, "load_data", "success")
@@ -119,6 +123,7 @@ def test_records_carry_run_id_and_group(tmp_path: Path) -> None:
 def test_append_only_accumulates(tmp_path: Path) -> None:
     """Records accumulate; the log is never rewritten."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_start(run_log)
     log_artifact_reference(run_log, str(tmp_path / "out.csv"), role="output")
     log_run_complete(run_log, "success")
@@ -128,6 +133,7 @@ def test_append_only_accumulates(tmp_path: Path) -> None:
 def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     """The shared app-run helper owns public command lifecycle records."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
 
     assert lifecycle_run_app_operation is run_app_operation
@@ -175,6 +181,7 @@ def test_process_failure_payload_reports_missing_diagnostics() -> None:
 def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) -> None:
     """Failures produce canonical ERROR evidence and preserve exception behavior."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
 
     def fail() -> None:
@@ -201,6 +208,7 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
 def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
     """A nonzero integer return is failed evidence but still returned unchanged."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
 
     result = run_app_operation(ctx, run_log, "redact", lambda: 1)
@@ -231,6 +239,7 @@ def test_open_run_log_fails_closed_without_log_path() -> None:
 def test_record_append_is_fail_safe(tmp_path: Path) -> None:
     """A record whose value is not JSON-serialisable is still written (default=str)."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_start(run_log, weird=object())
     records = _read(Path(ctx.run_log_path))
     assert records[0]["record_type"] == "RUN_START"
@@ -239,6 +248,7 @@ def test_record_append_is_fail_safe(tmp_path: Path) -> None:
 def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> None:
     """All typed helpers flow through the shared enrichment path."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     bind_step(step_id="prepare", step_name="Prepare", step_sequence=2,
               app="rey_loader", workflow_name="transform_load")
     bind_correlation("corr-1")
@@ -265,6 +275,7 @@ def test_typed_records_inherit_step_and_correlation_context(tmp_path: Path) -> N
 def test_write_side_sanitizer_masks_secret_like_keys(tmp_path: Path) -> None:
     """Secret-like helper fields are sanitized before JSONL persistence."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_app_execution(run_log,
         app="rey_loader",
         entrypoint="python -m rey_loader",
@@ -297,6 +308,7 @@ def test_command_argument_sanitizer_redacts_secret_like_flags() -> None:
 def test_failed_run_complete_requires_failure_evidence(tmp_path: Path) -> None:
     """A failed RUN_COMPLETE without evidence is a programming error."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     with pytest.raises(ValueError, match="requires structured failure evidence"):
         log_run_complete(run_log, "failed")
 
@@ -304,6 +316,7 @@ def test_failed_run_complete_requires_failure_evidence(tmp_path: Path) -> None:
 def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) -> None:
     """The coordinator can create failure evidence, then reference it at completion."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     failure_id = log_step_failure(run_log,
         failed_step_id="load",
         failed_step_name="Load",
@@ -330,6 +343,7 @@ def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) 
 def test_new_event_helpers_emit_approved_record_types(tmp_path: Path) -> None:
     """Phase 2 helpers emit narrow event semantics through log_run_record."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_error(run_log, message="bad", error_type="RuntimeError")
     log_sql_execution(run_log, connection_name="local", database="db",
                       sql_path=str(tmp_path / "apply.sql"), operation="apply",
@@ -346,6 +360,7 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     workflow = {
         "name": "wf",
@@ -413,6 +428,7 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     workflow = {
         "name": "wf",
@@ -442,6 +458,7 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
     from rey_lib.workflow import run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     workflow = {
         "name": "wf",
@@ -476,6 +493,7 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     workflow = {
         "name": "wf",
@@ -526,6 +544,7 @@ def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> 
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     workflow = {
         "name": "wf",
@@ -553,6 +572,7 @@ def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -
     from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     workflow = {
         "name": "wf",
@@ -701,6 +721,7 @@ def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
     from rey_lib.logs import get_run_file_reference, get_run_section
 
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     report = tmp_path / "report.json"
     log_run_start(run_log)
     log_config_file_reference(run_log, str(tmp_path / "workflow.yaml"),
@@ -735,6 +756,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     from rey_lib.workflow import run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     report = tmp_path / "report.json"
 
@@ -843,6 +865,7 @@ def test_run_log_projection_ignores_moved_or_read_artifact_references(tmp_path: 
 def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
     """Writer helpers stamp the SGC groups/subgroups and carry run identity."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_start(run_log)
     log_input_file_reference(run_log, str(tmp_path / "incoming" / "file.csv"),
                              file_role="source_data", consumed_by_step="validate_header")
@@ -896,6 +919,7 @@ def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
 def test_config_reference_normalized_fields(tmp_path: Path) -> None:
     """CONFIG_FILE_REFERENCE exposes CONFIG_REFERENCE semantics for consumers."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     config_path = tmp_path / "workflow.yaml"
     config_path.write_text("name: wf\n", encoding="utf-8")
 
@@ -923,6 +947,7 @@ def test_config_reference_normalized_fields(tmp_path: Path) -> None:
 def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> None:
     """A nested app operation never writes a RUN_RESTORE_POLICY (run owner only)."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     run_app_operation(ctx, run_log, "transform", lambda: 0)
     records = _read(Path(ctx.run_log_path))

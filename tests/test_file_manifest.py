@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.logs import (
     FileManifestError,
     file_manifest_session,
@@ -95,6 +97,7 @@ def test_manifest_is_created_when_absent(tmp_path: Path) -> None:
 def test_append_preserves_existing_records(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     log_file_manifest_record(run_log, _record(file={"path": "/first"}))
     log_file_manifest_record(run_log, _record(file={"path": "/second"}))
@@ -108,6 +111,7 @@ def test_lock_aware_session_reads_and_appends_without_reacquiring(
 ) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log, _record(file={"path": "/first"}))
 
     with file_manifest_session(ctx) as session:
@@ -121,6 +125,7 @@ def test_lock_aware_session_reads_and_appends_without_reacquiring(
 def test_one_object_per_line(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     for index in range(3):
         log_file_manifest_record(run_log, _record(file={"path": f"/f{index}"}))
 
@@ -137,6 +142,7 @@ def test_one_object_per_line(tmp_path: Path) -> None:
 def test_record_id_is_the_physical_row_number(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     returned = [log_file_manifest_record(run_log, _record(file={"path": f"/f{i}"})) for i in range(5)]
 
     assert returned == [1, 2, 3, 4, 5]
@@ -153,6 +159,7 @@ def test_record_id_is_written_into_the_record(tmp_path: Path) -> None:
 def test_state_tracks_last_record_id_and_size(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log, _record())
     log_file_manifest_record(run_log, _record())
 
@@ -165,6 +172,7 @@ def test_state_is_repaired_after_an_interrupted_append(tmp_path: Path) -> None:
     """A writer that appended but died before committing state must not corrupt ids."""
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log, _record())
 
     # Simulate the interruption: the row is on disk, the state never advanced.
@@ -178,6 +186,7 @@ def test_state_is_repaired_after_an_interrupted_append(tmp_path: Path) -> None:
 def test_missing_state_file_is_recovered_from_the_manifest(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log, _record())
     log_file_manifest_record(run_log, _record())
     manifest_state_path(manifest).unlink()
@@ -188,6 +197,7 @@ def test_missing_state_file_is_recovered_from_the_manifest(tmp_path: Path) -> No
 def test_malformed_state_file_is_recovered(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path)
     ctx = _ctx(manifest)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log, _record())
     manifest_state_path(manifest).write_text("not json", encoding="utf-8")
 
@@ -275,6 +285,7 @@ def _run_ctx(tmp_path: Path) -> SimpleNamespace:
 
 def test_log_run_record_returns_the_committed_record_id(tmp_path: Path) -> None:
     ctx = _run_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     first = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
     second = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/b")
 
@@ -283,6 +294,7 @@ def test_log_run_record_returns_the_committed_record_id(tmp_path: Path) -> None:
 
 def test_returned_record_id_matches_the_run_log_row(tmp_path: Path) -> None:
     ctx = _run_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_id = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
 
     rows = [
@@ -297,11 +309,13 @@ def test_returned_record_id_matches_the_run_log_row(tmp_path: Path) -> None:
 def test_log_run_record_returns_none_when_it_cannot_append(tmp_path: Path) -> None:
     """The never-raise contract holds: an unusable run log returns None, not an error."""
     ctx = SimpleNamespace(app_name="rey_lib", log_depth=0)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     assert log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a") is None
 
 
 def test_source_file_inventory_is_grouped_with_file_records(tmp_path: Path) -> None:
     ctx = _run_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
 
     record = json.loads(
@@ -314,6 +328,7 @@ def test_source_file_inventory_is_grouped_with_file_records(tmp_path: Path) -> N
 def test_normal_run_log_writing_is_unaffected(tmp_path: Path) -> None:
     """Existing record types keep their group and still append normally."""
     ctx = _run_ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_record(run_log, "STEP_START", step_name="one")
     log_run_record(run_log, "STEP_END", step_name="one", status="ok")
 
@@ -329,6 +344,7 @@ def test_normal_run_log_writing_is_unaffected(tmp_path: Path) -> None:
 def test_root_fields_are_written_in_canonical_order(tmp_path: Path) -> None:
     """The writer owns persisted order; a serializer's order does not survive."""
     ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log,
         {
             "producer": {"application": "file_operator"},
@@ -357,6 +373,7 @@ def test_root_fields_are_written_in_canonical_order(tmp_path: Path) -> None:
 
 def test_a_record_type_omits_the_fields_it_does_not_carry(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log,
         {
             "record_type": "source_file_rollback",
@@ -395,6 +412,7 @@ def test_a_governed_rewrite_preserves_retained_rows_byte_for_byte(
     from rey_lib.files.jsonl import read_jsonl_file, render_jsonl_line
 
     ctx = _ctx(tmp_path / "file_manifest.jsonl")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     manifest = ctx.paths.resolve("file_manifest")
     for index in range(3):
         log_file_manifest_record(run_log,

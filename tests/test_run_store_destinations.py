@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.control import Control
 from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
 from rey_lib.logs import log_run_complete, log_run_start, log_step_end, log_step_start
@@ -94,6 +96,7 @@ class TestJsonlMode:
 
     def test_jsonl_never_invokes_control_logging(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "jsonl")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
         log_step_start(run_log, "extract", 1)
@@ -104,6 +107,7 @@ class TestJsonlMode:
 
     def test_jsonl_writes_the_run_log(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "jsonl")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -113,6 +117,7 @@ class TestJsonlMode:
         # An installation that says nothing keeps what it already had. The
         # database is a migration someone performs, never a default.
         ctx = _ctx(tmp_path, "jsonl")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         ctx.logging = SimpleNamespace(db_connection="control")
 
         log_run_start(run_log, operation="scan")
@@ -126,6 +131,7 @@ class TestDbMode:
 
     def test_db_writes_control_and_not_jsonl(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -136,6 +142,7 @@ class TestDbMode:
 
     def test_the_full_lifecycle_reaches_control(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
         log_step_start(run_log, "extract", 1)
@@ -153,6 +160,7 @@ class TestDbMode:
         # Run-log persistence chose this destination; a silent None is not a
         # degraded success.
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
         log_step_start(run_log, "extract", 1)
@@ -165,6 +173,7 @@ class TestBothMode:
 
     def test_both_writes_both(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "both")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -177,6 +186,7 @@ class TestBothMode:
 
         monkeypatch.setattr(Control, "_call", _boom)
         ctx = _ctx(tmp_path, "both")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         with pytest.raises(DatabaseError):
             log_run_start(run_log, operation="scan")
@@ -190,6 +200,7 @@ class TestBothMode:
         monkeypatch.setattr(execution_records, "log_run_record",
                             lambda *a, **k: None)
         ctx = _ctx(tmp_path, "both")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         with pytest.raises(StateError, match="one place and not the other"):
             log_run_start(run_log, operation="scan")
@@ -202,6 +213,7 @@ class TestBothMode:
         monkeypatch.setattr(execution_records, "log_run_record",
                             lambda *a, **k: None)
         ctx = _ctx(tmp_path, "jsonl")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")  # must not raise
 
@@ -211,6 +223,7 @@ class TestBatchIntent:
 
     def test_default_launch_creates_a_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -219,6 +232,7 @@ class TestBatchIntent:
 
     def test_explicit_new_batch_creates_a_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db", new_batch=True)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -226,6 +240,7 @@ class TestBatchIntent:
 
     def test_new_batch_false_reuses_the_bound_batch(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db", new_batch=False, batch_id=99)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -235,6 +250,7 @@ class TestBatchIntent:
     def test_new_batch_false_without_a_batch_is_rejected(self, tmp_path,
                                                          control_calls) -> None:
         ctx = _ctx(tmp_path, "db", new_batch=False)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         with pytest.raises(ConfigError, match="never manufactured"):
             log_run_start(run_log, operation="scan")
@@ -245,6 +261,7 @@ class TestBatchIntent:
                                                       control_calls) -> None:
         """Intent is declared, never inferred from batch_id being set."""
         ctx = _ctx(tmp_path, "db", batch_id=1234)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
 
@@ -274,6 +291,7 @@ class TestOneBatchManyRuns:
                                                          control_calls) -> None:
         # Ending it would close the batch under the runs still using it.
         ctx = _ctx(tmp_path, "db", new_batch=False, batch_id=7)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
         log_run_complete(run_log, "success")
@@ -282,6 +300,7 @@ class TestOneBatchManyRuns:
 
     def test_step_and_event_carry_run_id(self, tmp_path, control_calls) -> None:
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         log_run_start(run_log, operation="scan")
         log_step_start(run_log, "extract", 1)
@@ -305,6 +324,7 @@ class TestIdsArriveThroughTheMap:
 
         monkeypatch.setattr(Control, "_call", _fake)
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
         # start_batch returning a scalar without the map binding it is a run
         # store that cannot record steps, and it says so rather than continuing.
@@ -333,6 +353,7 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_error
 
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="scan")
         control_calls.clear()
 
@@ -347,6 +368,7 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_error
 
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="scan")
 
         log_error(run_log, message="something failed", error_type="AppError")
@@ -358,6 +380,7 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_row_count
 
         ctx = _ctx(tmp_path, "both")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="scan")
         control_calls.clear()
 
@@ -372,6 +395,7 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_row_count
 
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="scan")
         control_calls.clear()
 
@@ -386,6 +410,7 @@ class TestEveryRecordHonoursTheDestination:
         from rey_lib.logs import log_run_record
 
         ctx = _ctx(tmp_path, "db")
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="scan")
         control_calls.clear()
 

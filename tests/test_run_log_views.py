@@ -9,6 +9,8 @@ log, produced on demand by log_utils — never a second durable execution log.
 from __future__ import annotations
 
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from types import SimpleNamespace
 
 from rey_lib.logs import (
@@ -38,6 +40,7 @@ def _run_log(tmp_path: Path) -> str:
         owner_app_name="rey_db_admin",
         workflow_name="postgres_lint",
     )
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     log_run_start(run_log)
     log_step_start(run_log, "export", 1)
@@ -109,6 +112,7 @@ def test_render_error_warning_view_filters(tmp_path: Path) -> None:
 def test_error_warning_view_empty_when_clean(tmp_path: Path) -> None:
     """A clean run renders an explicit no-warnings message."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "clean.run.jsonl"), owner_app_name="x")
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     log_run_start(run_log)
     log_run_complete(run_log, "success")

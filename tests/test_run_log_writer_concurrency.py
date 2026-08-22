@@ -40,6 +40,8 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.logs import log_run_record, log_run_start
 from rey_lib.run.identity import establish_run_identity
 
@@ -110,6 +112,7 @@ class TestConcurrentAllocation:
     )
     def test_concurrent_writers_get_distinct_record_ids(self, tmp_path: Path) -> None:
         ctx = _ctx(tmp_path)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="parallel")
 
         claimed: list[int | None] = []
@@ -140,6 +143,7 @@ class TestConcurrentAllocation:
         log. Losing rows would be a different and worse defect than reusing ids.
         """
         ctx = _ctx(tmp_path)
+        run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
         log_run_start(run_log, operation="parallel")
 
         def write(worker: int) -> None:

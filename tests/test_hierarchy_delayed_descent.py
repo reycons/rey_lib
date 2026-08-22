@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from typing import Any
 
 from rey_lib.config.config_utils import Namespace
@@ -67,6 +69,7 @@ def _identity(record: dict[str, Any]) -> tuple[int, int, int]:
 def test_pipeline_delayed_descent_anchors_to_the_pipeline_owner(tmp_path: Path) -> None:
     """Pipeline-level records written before the descent must not own the step."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
@@ -87,6 +90,7 @@ def test_pipeline_delayed_descent_anchors_to_the_pipeline_owner(tmp_path: Path) 
 def test_step_delayed_descent_anchors_to_the_step_owner(tmp_path: Path) -> None:
     """Step-level records written before the descent must not own the app."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     set_nest_level(ctx, "pipeline_step")
@@ -108,6 +112,7 @@ def test_step_delayed_descent_anchors_to_the_step_owner(tmp_path: Path) -> None:
 def test_app_delayed_descent_anchors_to_the_app_owner(tmp_path: Path) -> None:
     """App-level records written before the descent must not own the nested scope."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
@@ -127,6 +132,7 @@ def test_app_delayed_descent_anchors_to_the_app_owner(tmp_path: Path) -> None:
 def test_sibling_pipeline_steps_share_the_pipeline_owner(tmp_path: Path) -> None:
     """Both steps parent to the pipeline despite intervening pipeline/step records."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="pipeline.yaml")
@@ -158,6 +164,7 @@ def test_each_app_execution_has_its_own_pipeline_step(tmp_path: Path) -> None:
     base is re-asserted in the inner finally the instant each app returns.
     """
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Step one invokes rey_analyzer.
@@ -194,6 +201,7 @@ def test_workflow_nests_inside_its_app_under_the_step(tmp_path: Path) -> None:
     before the descent must not re-anchor the level below.
     """
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "EXECUTION_PLAN")
@@ -227,6 +235,7 @@ def test_workflow_nests_inside_its_app_under_the_step(tmp_path: Path) -> None:
 def test_successful_return_then_descent_anchors_to_the_new_step(tmp_path: Path) -> None:
     """After a step completes, the next step's app parents to the next step."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Step one runs an app and completes.
@@ -254,6 +263,7 @@ def test_successful_return_then_descent_anchors_to_the_new_step(tmp_path: Path) 
 def test_failed_return_then_descent_anchors_to_the_new_step(tmp_path: Path) -> None:
     """A failed step resets ownership exactly as the success path does."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Step one fails inside its app.
@@ -285,6 +295,7 @@ def test_failed_return_then_descent_anchors_to_the_new_step(tmp_path: Path) -> N
 def test_direct_app_with_intervening_records(tmp_path: Path) -> None:
     """A directly invoked app owns its nested scope despite intervening records."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")
@@ -301,6 +312,7 @@ def test_direct_app_with_intervening_records(tmp_path: Path) -> None:
 def test_direct_workflow_with_intervening_records(tmp_path: Path) -> None:
     """A directly invoked workflow owns its steps despite intervening records."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "workflow")
     log_run_record(run_log, "RUN_START", workflow="daily_load")
     log_run_record(run_log, "INPUT_DISCOVERED", path="a.csv")

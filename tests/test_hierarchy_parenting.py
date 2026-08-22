@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from typing import Any
 
 from rey_lib.config.config_utils import Namespace
@@ -125,6 +127,7 @@ def test_pipeline_step_app_chain(tmp_path: Path) -> None:
 def test_two_sibling_pipeline_steps(tmp_path: Path) -> None:
     """Re-setting the pipeline_step base returns to the pipeline as the shared parent."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     set_nest_level(ctx, "pipeline_step")
@@ -157,6 +160,7 @@ def test_two_sibling_analysis_branches(tmp_path: Path) -> None:
     app rather than on the previous analysis.
     """
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_record(run_log, "RUN_START", app="rey_analyzer")
     next_nest_level(ctx)
@@ -179,6 +183,7 @@ def test_two_sibling_analysis_branches(tmp_path: Path) -> None:
 def test_app_workflow_workflow_step(tmp_path: Path) -> None:
     """A workflow nests inside its app, and a workflow step inside that workflow."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
     set_nest_level(ctx, "workflow")
@@ -202,6 +207,7 @@ def test_app_workflow_workflow_step(tmp_path: Path) -> None:
 def test_direct_app_execution(tmp_path: Path) -> None:
     """An app invoked directly keeps its fixed base 3 and parents to the root."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "app")
     log_run_record(run_log, "RUN_START", app="rey_loader")
 
@@ -216,6 +222,7 @@ def test_direct_app_execution(tmp_path: Path) -> None:
 def test_direct_workflow_execution(tmp_path: Path) -> None:
     """A workflow with no active lower level parents to the root at its fixed base 4."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "workflow")
     log_run_record(run_log, "RUN_START", workflow="daily_load")
     set_nest_level(ctx, "workflow_step")
@@ -231,6 +238,7 @@ def test_direct_workflow_execution(tmp_path: Path) -> None:
 def test_return_from_app_to_pipeline_step(tmp_path: Path) -> None:
     """Re-asserting the step base after a deep app returns ownership to the step."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     _pipeline_step_app(ctx)
     # The app descends and never returns, as a real app body may leave it.
     set_nest_level(ctx, "workflow")
@@ -251,6 +259,7 @@ def test_return_from_app_to_pipeline_step(tmp_path: Path) -> None:
 def test_return_from_pipeline_step_to_pipeline(tmp_path: Path) -> None:
     """Re-asserting the pipeline base returns ownership to the run root."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     set_nest_level(ctx, "pipeline_step")
@@ -269,6 +278,7 @@ def test_return_from_pipeline_step_to_pipeline(tmp_path: Path) -> None:
 def test_failure_return_follows_ownership_reset(tmp_path: Path) -> None:
     """A failing step resets ownership exactly as the success path does."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     _pipeline_step_app(ctx)
     set_nest_level(ctx, "workflow")
     log_run_record(run_log, "ERROR", app="rey_loader", message="boom")
@@ -288,6 +298,7 @@ def test_failure_return_follows_ownership_reset(tmp_path: Path) -> None:
 def test_record_sequence_is_continuous_and_parents_precede_children(tmp_path: Path) -> None:
     """record_id is gapless from 1 and every nonzero parent references an earlier record."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     _pipeline_step_app(ctx)
     set_nest_level(ctx, "workflow")
     log_run_record(run_log, "RUN_START", app="rey_loader", workflow="daily_load")

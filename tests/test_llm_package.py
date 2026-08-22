@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.llm.exceptions import ProviderFailure
 from rey_lib.logs import (
     create_llm_package,
@@ -36,6 +38,7 @@ def _write_completed_run(path: Path, records: list[dict]) -> None:
         run_timestamp=first["run_timestamp"], owner_app_name=first.get("app", ""),
         pipeline_name=first.get("pipeline_name", ""),
     )
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     set_nest_level(ctx, "pipeline")
     for source in records:
         fields = dict(source)

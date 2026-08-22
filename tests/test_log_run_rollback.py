@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.files import (
     LogRunRollbackError,
     SourceFileMutationEvidenceError,
@@ -129,6 +131,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
     classification = {
         "type": "file_name_regex",
@@ -177,6 +180,7 @@ def test_mutation_evidence_failure_before_run_log_commit_is_structured(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=None
     ), patch(
@@ -204,6 +208,7 @@ def test_mutation_evidence_filename_failure_preserves_committed_record_id(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     del ctx.run_log_path
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=17
@@ -234,6 +239,7 @@ def test_mutation_serialization_failure_after_run_log_commit_is_structured(
     failure: Exception,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=19
     ), patch(
@@ -254,6 +260,7 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=23
     ), patch(
@@ -279,6 +286,7 @@ def test_sequencing_state_failure_preserves_appended_manifest_row(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     with patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=29
     ), patch(
@@ -337,6 +345,7 @@ def test_mutation_evidence_phase_owns_commit_state() -> None:
 def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None:
     """Every field the canonical layout groups is gone from the record root."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
 
     log_source_file_mutation(
@@ -384,6 +393,7 @@ def test_caller_cannot_inject_a_canonical_root_field(
 def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
     """Run-log enrichment is evidence, not a way into the governed record."""
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     establish_run_identity(ctx)
 
     log_source_file_mutation(
@@ -802,6 +812,7 @@ def test_unfinished_attempt_is_indeterminate_and_not_reapplied(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     mutation_id = _append_mutation(
         ctx,
         action="create",
@@ -891,6 +902,7 @@ def test_malformed_mutation_schema_fails_before_compensation(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log,
         {
             "record_type": "source_file_mutation",
@@ -911,6 +923,7 @@ def test_malformed_mutation_location_fails_before_compensation(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_file_manifest_record(run_log,
         {
             "record_type": "source_file_mutation",
@@ -1062,6 +1075,7 @@ def test_rollback_records_are_written_only_through_the_serializer(
 
 def test_canonical_rollback_records_pass_validation(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
+    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     mutation_id = _append_mutation(
         ctx, action="create", destination_path=str(tmp_path / "created.csv")
     )
