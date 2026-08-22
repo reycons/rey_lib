@@ -1073,7 +1073,7 @@ def get_reader(
         raise ValueError(f"Unsupported file_type '{file_type}'.")
 
 
-def write_file(run_log, 
+def write_file(
     outfile: Path,
     content: Any,
     file_type: str = "CSV",
@@ -1151,7 +1151,7 @@ def write_file(run_log,
     if state_ctx is not None:
         try:
             log_file_operation(
-run_log,
+                _bound_run_log(),
                 app=app,
                 pipeline=pipeline,
                 source=outfile,
@@ -1304,7 +1304,7 @@ def cleanup_stale_files(
 
     return removed
 
-def move_file(run_log, 
+def move_file(
     src: Path,
     dest_dir: Path,
     dest_name: Optional[str] = None,
@@ -1359,7 +1359,7 @@ def move_file(run_log,
     if state_ctx is not None:
         try:
             log_file_operation(
-run_log,
+                _bound_run_log(),
                 app=app,
                 pipeline=pipeline,
                 source=src,
@@ -1375,7 +1375,7 @@ run_log,
     return dest
 
 
-def copy_file(run_log, 
+def copy_file(
     src: Path,
     dest_dir: Path,
     dest_name: Optional[str] = None,
@@ -1434,7 +1434,7 @@ def copy_file(run_log,
     if state_ctx is not None:
         try:
             log_file_operation(
-run_log,
+                _bound_run_log(),
                 app=app,
                 pipeline=pipeline,
                 source=src,
@@ -1463,6 +1463,27 @@ def file_operation_log_path(ctx: Any) -> Path:
 def file_movement_log_path(ctx: Any) -> Path:
     """Compatibility alias for the configured file-operation JSONL path."""
     return file_operation_log_path(ctx)
+
+
+def _bound_run_log() -> Any:
+    """Return a RunLog for the run bound by ``bind_run``, or None when unbound.
+
+    File operations are recorded against whichever run is currently bound --
+    the mechanism ``bind_run`` already exists for. This reads that binding; it
+    does not create or locate an owner of its own.
+    """
+    from rey_lib.logs.record_enrichment import current_run
+    from rey_lib.logs.run_log import RunLog
+
+    bound = current_run()
+    if not bound:
+        return None
+    return RunLog(
+        app="",
+        run_id=bound["run_id"],
+        run_timestamp="",
+        path=bound["run_log_path"],
+    )
 
 
 def log_file_operation(run_log: Any,

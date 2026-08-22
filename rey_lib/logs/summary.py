@@ -33,7 +33,7 @@ _RUN_COMPLETE = "RUN_COMPLETE"
 _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
 
-def finalize_run_log(log_path: str | Path) -> dict[str, Any]:
+def finalize_run_log(run_log, log_path: str | Path) -> dict[str, Any]:
     """Run the canonical post-run log processing sequence.
 
     Order: RESULTS_SUMMARY, then the log_interpreter stage
@@ -52,6 +52,7 @@ def finalize_run_log(log_path: str | Path) -> dict[str, Any]:
         return {**result, "package": None, "analysis": None}
     try:
         package = create_llm_package(
+            run_log,
             log_path,
             analysis_name="log_interpreter",
             source_record_type="RESULTS_SUMMARY",
@@ -61,6 +62,7 @@ def finalize_run_log(log_path: str | Path) -> dict[str, Any]:
         return {**result, "package": None, "package_failures": [str(exc)],
                 "analysis": None}
     analysis = run_configured_log_analysis(
+        run_log,
         log_path, analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
     )
 

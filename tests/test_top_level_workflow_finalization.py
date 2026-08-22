@@ -92,7 +92,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     run_app_operation(ctx, run_log, "run-workflow", operation_body)
 
     # The run-owning application finalizes again because it is not a pipeline step.
-    finalize_run_log(ctx.run_log_path)
+    finalize_run_log(run_log, ctx.run_log_path)
 
 
 def test_top_level_run_workflow_summarizes_exactly_once(tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_repeated_finalization_appends_no_further_summary(tmp_path: Path) -> Non
     _run_top_level_workflow(tmp_path, ctx)
 
     before = _records(ctx.run_log_path)
-    finalize_run_log(ctx.run_log_path)
+    finalize_run_log(run_log, ctx.run_log_path)
 
     after = _records(ctx.run_log_path)
     assert _count(after, "RESULTS_SUMMARY") == 1
