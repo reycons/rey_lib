@@ -70,7 +70,7 @@ def finalize_run_log(run_log, log_path: str | Path) -> dict[str, Any]:
 
 
 def create_results_summary(
-    ctx: Any = None,
+    run_log: Any = None,
     *,
     log_path: str | Path | None = None,
     execution_details: dict[str, Any] | None = None,
@@ -113,7 +113,12 @@ def create_results_summary(
         "failures": [],
     }
 
-    resolved = log_path or getattr(ctx, "run_log_path", None)
+    resolved = log_path
+    if not resolved and run_log is not None:
+        try:
+            resolved = str(run_log.path())
+        except Exception:  # noqa: BLE001 — an unopened run log resolves nothing.
+            resolved = None
     if not resolved:
         result["skipped"].append("no_run_log_path")
         return result

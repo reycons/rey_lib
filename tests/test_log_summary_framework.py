@@ -29,11 +29,10 @@ def _records(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
-def _ctx(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        log_file=str(tmp_path / "demo.log"),
-        run_id="r1", run_timestamp="20260711_120000", owner_app_name="demo_app",
-    )
+def _ctx(tmp_path: Path):
+    """The run log these fixtures write through."""
+    return make_run_log(tmp_path, app="demo_app", run_id="r1",
+                        run_timestamp="20260711_120000")
 
 
 def _completed_run(
@@ -43,8 +42,7 @@ def _completed_run(
     semantic_level: str = "app",
     complete: bool = True,
 ) -> tuple[SimpleNamespace, Path]:
-    ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path)
+    run_log = _ctx(tmp_path)
     set_nest_level(run_log, semantic_level)
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     log_step_start(run_log, "one", 1, step_id="one")
@@ -64,12 +62,12 @@ def _completed_run(
                 "failed_step_name": "one", "failure_message": "boom",
             }
         log_run_complete(run_log, status, **complete_fields)
-    return ctx, Path(run_log.path())
+    return run_log, Path(run_log.path())
 
 
 def test_results_summary_is_appended_to_completed_run_log(tmp_path: Path) -> None:
-    ctx, log = _completed_run(tmp_path)
-    result = create_results_summary(ctx)
+    run_log, log = _completed_run(tmp_path)
+    result = create_results_summary(run_log)
 
     records = _records(log)
     assert result["action"] == "created"
@@ -82,16 +80,16 @@ def test_results_summary_is_appended_to_completed_run_log(tmp_path: Path) -> Non
 
 
 def test_results_summary_requires_terminal_run(tmp_path: Path) -> None:
-    ctx, log = _completed_run(tmp_path, complete=False)
-    result = create_results_summary(ctx)
+    run_log, log = _completed_run(tmp_path, complete=False)
+    result = create_results_summary(run_log)
     assert result["action"] is None
     assert result["skipped"] == ["no_terminal_record"]
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in _records(log))
 
 
 def test_failed_summary_preserves_failure_evidence(tmp_path: Path) -> None:
-    ctx, log = _completed_run(tmp_path, "failed")
-    create_results_summary(ctx)
+    run_log, log = _completed_run(tmp_path, "failed")
+    create_results_summary(run_log)
     summary = _records(log)[-1]
     assert summary["record_type"] == "RESULTS_SUMMARY"
     assert summary["status"] == "failed"
@@ -108,7 +106,7 @@ def test_explicit_log_path_uses_authoritative_companion_state(tmp_path: Path) ->
 def test_results_summary_payload_is_unchanged_apart_from_hierarchy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx, log = _completed_run(tmp_path)
+    run_log, log = _completed_run(tmp_path)
     captured: dict[str, dict] = {}
     from rey_lib.logs import summary as summary_module
 
@@ -120,7 +118,7 @@ def test_results_summary_payload_is_unchanged_apart_from_hierarchy(
         return built
 
     monkeypatch.setattr(summary_module, "build_results_summary", capture)
-    result = create_results_summary(ctx)
+    result = create_results_summary(run_log)
     emitted = dict(result["summary"])
     for field in ("record_id", "parent_record_id", "nest_level"):
         emitted.pop(field)
@@ -136,14 +134,13 @@ def test_results_summary_uses_active_scope(
     tmp_path: Path, semantic_level: str, expected_nest: int,
 ) -> None:
     ctx, _ = _completed_run(tmp_path, semantic_level=semantic_level)
-    summary = create_results_summary(ctx)["summary"]
+    summary = create_results_summary(run_log)["summary"]
     assert summary["nest_level"] == expected_nest
     assert summary["parent_record_id"] == 0
 
 
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path)
+    run_log = _ctx(tmp_path)
     set_nest_level(run_log, "app")
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     app_record_id = _records(Path(run_log.path()))[0]["record_id"]
@@ -152,7 +149,7 @@ def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     log_step_end(run_log, "one", "success", step_id="one")
     log_run_complete(run_log, "success")
 
-    summary = create_results_summary(ctx)["summary"]
+    summary = create_results_summary(run_log)["summary"]
     assert summary["nest_level"] == 4
     assert summary["parent_record_id"] == app_record_id
 
@@ -160,8 +157,8 @@ def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
 def test_durable_result_record_matrix_preserves_hierarchy_invariant(run_log, 
     tmp_path: Path,
 ) -> None:
-    ctx, log = _completed_run(tmp_path, semantic_level="pipeline")
-    assert create_results_summary(ctx)["action"] == "created"
+    run_log, log = _completed_run(tmp_path, semantic_level="pipeline")
+    assert create_results_summary(run_log)["action"] == "created"
 
     result_types = (
         "LLM_PACKAGE", "LLM_INTERPRETATION", "LLM_ANALYSIS_FAILURE",
