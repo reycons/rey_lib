@@ -194,27 +194,6 @@ def require_structural_record(run_log: 'RunLog', record_id: Optional[int],
 # ---------------------------------------------------------------------------
 
 
-def _control(ctx: Any) -> Any:
-    """Return this run's Control, constructing it once.
-
-    Control takes the ``control`` procedure map off the context when it is
-    built, so a second construction would find nothing to take. It is therefore
-    made once and kept for the run, which is also what lets ``batch_id`` and
-    ``batch_step_id`` persist across the lifecycle calls that follow.
-
-    Imported late: rey_lib.control imports rey_lib.logs for its logger, so a
-    module-level import here would close a cycle.
-    """
-    existing = getattr(ctx, "control_api", None)
-    if existing is not None:
-        return existing
-
-    from rey_lib.control import Control
-
-    ctx.control_api = Control(ctx)
-    return ctx.control_api
-
-
 def persist_run_start(run_log: 'RunLog', **fields: Any) -> None:
     """Establish the batch this run belongs to, then record the run starting.
 
@@ -224,7 +203,7 @@ def persist_run_start(run_log: 'RunLog', **fields: Any) -> None:
       ``load_to_ctx`` binds the returned id to ``ctx.batch_id``.
     - ``newBatch`` false -- require an existing ``ctx.batch_id`` and start none.
 
-    ``ctx.batch_owned_by_run`` records whether this execution created the batch,
+    ``Control.owns_batch`` records whether this execution created the batch,
     so completion knows whether ending it is its business.
 
     Only the batch is established here. The RUN_START event itself arrives

@@ -74,6 +74,10 @@ class Control:
         # object, never back onto the context.
         self.batch_id: Optional[int] = getattr(ctx, "batch_id", None)
         self.batch_step_id: Optional[int] = None
+        # Whether this execution started the batch, so completion knows whether
+        # ending it is its business. A batch may hold several runs; closing one
+        # because a single run finished would close it under the others.
+        self.owns_batch: bool = False
         # A reference to the shared object, not a config or a raw handle.
         self.connection = self._resolve_connection()
 
