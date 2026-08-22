@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from types import SimpleNamespace
 
 import rey_lib
@@ -24,14 +26,15 @@ from rey_lib.logs import (
 
 
 def _records(run_log: Path) -> list[dict]:
-    return [json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 
 def test_transform_outputs_group_under_loader(tmp_path: Path) -> None:
     """Transform outputs emitted under a rey_loader run normalize to producer 'loader'."""
-    run_log = tmp_path / "run_log.20260708_000000.jsonl"
-    ctx = SimpleNamespace(run_log_path=str(run_log), run_id="r1",
+    log_path = tmp_path / "run_log.20260708_000000.jsonl"
+    run_log = make_run_log(tmp_path, path=str(log_path))
+    ctx = SimpleNamespace(run_log_path=str(log_path), run_id="r1",
                           run_timestamp="20260708_000000", app_name="rey_loader")
     source = tmp_path / "trades.raw.csv"
     # Emit exactly what file_loader now logs at its two output points.

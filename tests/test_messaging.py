@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tests.conftest import make_run_log
+
 import pytest
 
 from rey_lib.config.config_utils import Namespace
@@ -226,7 +228,8 @@ def test_execute_message_set_logs_archive_as_messaging_artifact(tmp_path: Path) 
     log_file.write_text(json.dumps({"level": "INFO", "message": "done"}), encoding="utf-8")
 
     ctx = _ctx(tmp_path)
-    run_log = tmp_path / "run_log.20260708_000000.jsonl"
+    log_path = tmp_path / "run_log.20260708_000000.jsonl"
+    run_log = make_run_log(tmp_path, path=str(log_path))
     object.__setattr__(ctx, "run_log_path", str(run_log))
     object.__setattr__(ctx, "run_id", "rm1")
     object.__setattr__(ctx, "run_timestamp", "20260708_000000")
@@ -236,7 +239,7 @@ def test_execute_message_set_logs_archive_as_messaging_artifact(tmp_path: Path) 
         context_file=log_file, context_type="jsonl_log",
     )
 
-    records = [json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
                if line.strip()]
     input_discovered = next(r for r in records if r["record_type"] == "INPUT_DISCOVERED")
     input_reference = next(r for r in records if r["record_type"] == "INPUT_FILE_REFERENCE")

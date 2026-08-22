@@ -26,7 +26,7 @@ def _config_refs(run_log: Path) -> list[dict]:
     """Return CONFIG_FILE_REFERENCE records from a run log."""
     return [
         record
-        for line in run_log.read_text(encoding="utf-8").splitlines() if line.strip()
+        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines() if line.strip()
         for record in [json.loads(line)]
         if record.get("record_type") == "CONFIG_FILE_REFERENCE"
     ]
@@ -34,9 +34,10 @@ def _config_refs(run_log: Path) -> list[dict]:
 
 def _ctx_with_metadata(tmp_path: Path, metadata: ConfigMetadata) -> SimpleNamespace:
     """Return a minimal run-bound ctx carrying provenance metadata."""
-    run_log = tmp_path / "run_log.20260707_000000.jsonl"
+    log_path = tmp_path / "run_log.20260707_000000.jsonl"
+    run_log = make_run_log(tmp_path, path=str(log_path))
     return SimpleNamespace(
-        run_log_path=str(run_log),
+        run_log_path=str(log_path),
         run_id="r1",
         run_timestamp="20260707_000000",
         workflow_name="demo_workflow",
@@ -144,12 +145,13 @@ def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
 
 def test_no_metadata_records_nothing(tmp_path: Path) -> None:
     """A ctx without provenance metadata emits no config records."""
-    run_log = tmp_path / "run_log.20260707_000000.jsonl"
+    log_path = tmp_path / "run_log.20260707_000000.jsonl"
+    run_log = make_run_log(tmp_path, path=str(log_path))
     ctx = SimpleNamespace(
-        run_log_path=str(run_log), run_id="r1", run_timestamp="20260707_000000",
+        run_log_path=str(log_path), run_id="r1", run_timestamp="20260707_000000",
     )
     record_config_file_references(ctx, run_log)
-    assert not run_log.exists()
+    assert not log_path.exists()
 
 
 def test_recording_is_fail_safe(tmp_path: Path) -> None:

@@ -18,6 +18,8 @@ import os
 import re
 import tempfile
 from pathlib import Path
+
+from tests.conftest import make_run_log
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
@@ -726,7 +728,8 @@ class TestRunnerEvaluationPersistence:
         contract_body = "Use this exact contract body."
         contract = _write_contract(tmp_path, body=contract_body)
         payload_log = tmp_path / "payloads.jsonl"
-        run_log = tmp_path / "runs.jsonl"
+        log_path = tmp_path / "runs.jsonl"
+        run_log = make_run_log(tmp_path, path=str(log_path))
         provider = _make_mock_provider('{"result": "exact"}')
         request = RunRequest(
             pipeline_id="test-pipe",
@@ -750,7 +753,7 @@ class TestRunnerEvaluationPersistence:
             response = run(request)
 
         payload_record = json.loads(payload_log.read_text(encoding="utf-8"))
-        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        run_record = json.loads(Path(run_log.path()).read_text(encoding="utf-8"))
         assert run_record["contract"] == contract_body
         assert run_record["result"] == response.parsed_response == {"result": "exact"}
         assert run_record["payload_id"] == payload_record["payload_id"]
@@ -774,7 +777,8 @@ class TestRunnerEvaluationPersistence:
         self, tmp_path: Path, provider_result: str
     ) -> None:
         contract_text = "Return JSON exactly."
-        run_log = tmp_path / "runs.jsonl"
+        log_path = tmp_path / "runs.jsonl"
+        run_log = make_run_log(tmp_path, path=str(log_path))
         provider = _make_mock_provider(provider_result)
         request = RunRequest(
             pipeline_id="direct_ask",
@@ -794,7 +798,7 @@ class TestRunnerEvaluationPersistence:
         ):
             response = run(request)
 
-        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        run_record = json.loads(Path(run_log.path()).read_text(encoding="utf-8"))
         assert run_record["contract"] == contract_text
         assert run_record["result"] == {
             "result": {"answer": 42},
@@ -806,7 +810,8 @@ class TestRunnerEvaluationPersistence:
         self, tmp_path: Path
     ) -> None:
         contract_text = "Return Markdown exactly."
-        run_log = tmp_path / "runs.jsonl"
+        log_path = tmp_path / "runs.jsonl"
+        run_log = make_run_log(tmp_path, path=str(log_path))
         provider = _make_mock_provider("# Exact result")
         request = RunRequest(
             pipeline_id="direct_ask",
@@ -826,7 +831,7 @@ class TestRunnerEvaluationPersistence:
         ):
             response = run(request)
 
-        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        run_record = json.loads(Path(run_log.path()).read_text(encoding="utf-8"))
         assert run_record["contract"] == contract_text
         assert run_record["result"] == response.raw_text == "# Exact result"
 
@@ -835,7 +840,8 @@ class TestRunnerEvaluationPersistence:
     ) -> None:
         contract = _write_contract(tmp_path)
         payload_log = tmp_path / "payloads.jsonl"
-        run_log = tmp_path / "runs.jsonl"
+        log_path = tmp_path / "runs.jsonl"
+        run_log = make_run_log(tmp_path, path=str(log_path))
         provider = _make_mock_provider('{"result": "exact"}')
         request = RunRequest(
             pipeline_id="test-pipe",
@@ -857,7 +863,7 @@ class TestRunnerEvaluationPersistence:
             second = run(request)
 
         run_records = [
-            json.loads(line) for line in run_log.read_text(encoding="utf-8").splitlines()
+            json.loads(line) for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
         ]
         assert not payload_log.exists()
         assert [record["payload_id"] for record in run_records] == [
@@ -875,7 +881,8 @@ class TestRunnerEvaluationPersistence:
     ) -> None:
         contract_body = "Use this contract even on failure."
         contract = _write_contract(tmp_path, body=contract_body)
-        run_log = tmp_path / "runs.jsonl"
+        log_path = tmp_path / "runs.jsonl"
+        run_log = make_run_log(tmp_path, path=str(log_path))
         provider = _make_mock_provider()
         provider.run.side_effect = TimeoutFailure("provider timed out")
         request = RunRequest(
@@ -895,7 +902,7 @@ class TestRunnerEvaluationPersistence:
         ):
             response = run(request)
 
-        run_record = json.loads(run_log.read_text(encoding="utf-8"))
+        run_record = json.loads(Path(run_log.path()).read_text(encoding="utf-8"))
         assert response.status == STATUS_FAILED
         assert run_record["status"] == STATUS_FAILED
         assert run_record["contract"] == contract_body

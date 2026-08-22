@@ -1359,7 +1359,7 @@ def test_a_fully_rolled_back_run_log_is_deleted(tmp_path: Path) -> None:
     result = rollback_log_run(ctx, run_log)
 
     assert result["status"] == "success"
-    assert not run_log.exists()
+    assert not Path(run_log.path()).exists()
     # Its companions describe a log that is no longer there.
     assert not sidecar.exists()
     assert not results.exists()
@@ -1382,7 +1382,7 @@ def test_a_run_log_survives_a_rollback_that_did_not_finish(tmp_path: Path) -> No
     result = rollback_log_run(ctx, run_log)
 
     assert result["status"] == "failure"
-    assert run_log.exists()
+    assert Path(run_log.path()).exists()
     assert result["deleted_run_log_files"] == []
 
 
@@ -1419,5 +1419,5 @@ def test_an_indeterminate_record_keeps_the_run_log(
     assert result["status"] == "success"
     assert result["indeterminate_count"] == 1
     # Nothing was reversed, so the run still owns a record and keeps its log.
-    assert run_log.exists()
+    assert Path(run_log.path()).exists()
     assert result["deleted_run_log_files"] == []

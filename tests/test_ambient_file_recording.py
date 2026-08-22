@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tests.conftest import make_run_log
+
 import pytest
 
 from rey_lib.files.file_utils import (
@@ -37,7 +39,7 @@ def _ops(run_log: Path) -> list[dict]:
     """Return FILE_OPERATION records from a run log."""
     return [
         record
-        for line in run_log.read_text(encoding="utf-8").splitlines() if line.strip()
+        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines() if line.strip()
         for record in [json.loads(line)]
         if record.get("record_type") == "FILE_OPERATION"
     ]
@@ -46,8 +48,9 @@ def _ops(run_log: Path) -> list[dict]:
 @pytest.fixture()
 def bound_run(tmp_path: Path):
     """Bind a run log for the test and clear it afterwards."""
-    run_log = tmp_path / "run_log.20260707_000000.jsonl"
-    bind_run(run_log_path=str(run_log), run_id="r1", run_timestamp="20260707_000000")
+    log_path = tmp_path / "run_log.20260707_000000.jsonl"
+    run_log = make_run_log(tmp_path, path=str(log_path))
+    bind_run(run_log_path=str(log_path), run_id="r1", run_timestamp="20260707_000000")
     try:
         yield run_log
     finally:
