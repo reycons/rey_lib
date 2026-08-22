@@ -39,12 +39,14 @@ from typing import Optional
 
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
 from rey_lib.errors.error_utils import ConfigError, install_process_error_boundary
-from rey_lib.logs import setup_logging
+from rey_lib.logs import get_logger, setup_logging
 from rey_lib.db.connection import build_connections
-from rey_lib.run import establish_run_identity
+from rey_lib.run import Run, establish_run_identity
 from rey_lib.runtime import collect_runtime, register_runtime_object
 
 __all__ = ["build_ctx_for_app", "app_runtime"]
+
+_logger = get_logger(__name__)
 
 
 def build_ctx_for_app(
@@ -54,6 +56,11 @@ def build_ctx_for_app(
     *,
     ctx: Optional[Namespace] = None,
     operation: str = "app",
+    subject_type: str = "",
+    subject_id: str = "",
+    subject_name: str = "",
+    parent_run_id: Optional[int] = None,
+    settings: Optional[dict] = None,
 ) -> Namespace:
     """Start a Rey process: acquire the context, then start logging from it.
 
@@ -78,6 +85,19 @@ def build_ctx_for_app(
         callers that hold one; one process never hands a context to another.
     operation : str
         The operation name this process is starting, which names its run log.
+    subject_type : str
+        What kind of thing is running: ``workflow``, ``pipeline``, ``app``.
+        Creation facts, supplied by the launch site because that is where they
+        are known; they are never recovered later from the run log.
+    subject_id : str
+        The subject's identifier, stable across runs of the same subject.
+    subject_name : str
+        Display name; falls back to ``subject_id``.
+    parent_run_id : int, optional
+        The run this one belongs to. A child process supplies the parent's
+        ``run_id`` and does not start a second run.
+    settings : dict, optional
+        The launch request, recorded once when the run is created.
 
     Returns
     -------
@@ -97,19 +117,38 @@ def build_ctx_for_app(
             )
         ctx = _resolve_ctx(installation_config_path, app_name, project_root)
 
-    # The app's launch boundary. Identity is established here, through the
-    # subsystem that owns it, so logging receives a context already carrying
-    # a run_id rather than reaching up to have one minted.
-    establish_run_identity(ctx)
-
     # One Connection per configured connection, built once here so every
     # consumer that later names one receives the same instance rather than
     # opening its own. Each is registered for final collection: no consumer
     # may close a shared object, so the boundary that created them owns the
     # last close.
+    #
+    # Built before the run exists, because the run is created in the database
+    # and cannot be created without a connection to create it in.
     ctx.shared_connections = build_connections(ctx)
     for connection in ctx.shared_connections.values():
         register_runtime_object(ctx, connection)
+
+    # The app's launch boundary. Recording the run is what creates its
+    # identity: the manifest row generates run_manifest_id and the application
+    # carries that value as run_id. A child process arrives with the parent's
+    # run_id already set and does not start a second run.
+    if not getattr(ctx, "run_id", None):
+        ctx.control = _open_control(ctx)
+        ctx.run = Run.start(
+            ctx.control,
+            subject_type=subject_type or "app",
+            subject_id=subject_id or app_name or str(getattr(ctx, "app_name", "") or ""),
+            subject_name=subject_name or operation,
+            app_name=str(getattr(ctx, "owner_app_name", "")
+                         or getattr(ctx, "app_name", "") or app_name or ""),
+            parent_run_id=parent_run_id,
+            settings=settings,
+        )
+        ctx.run_id = ctx.run.run_id
+
+    # Display and filing only; the identity above is already settled.
+    establish_run_identity(ctx)
 
     setup_logging(ctx, operation=operation)
     install_process_error_boundary(ctx)
@@ -136,6 +175,21 @@ def _resolve_ctx(
             )
 
     return build_ctx_from_path(config_path, app_name=app_name, project_root=project_root)
+
+
+def _open_control(ctx: Namespace) -> Any:
+    """Build this process's one Control and register it for collection.
+
+    One per process. The run is created through it before logging opens, and
+    the run log reaches the control database through the same object, so a
+    second Control would mean a second connection and two objects disagreeing
+    about which batch is open.
+    """
+    from rey_lib.control import Control
+
+    control = Control(ctx)
+    register_runtime_object(ctx, control)
+    return control
 
 
 def open_run_log(ctx: Namespace) -> Any:
@@ -172,12 +226,11 @@ def open_run_log(ctx: Namespace) -> Any:
     from rey_lib.logs.run_store import run_store_mode
 
     destination = run_store_mode(ctx)
-    control = None
-    if destination in ("db", "both"):
-        from rey_lib.control import Control
 
-        control = Control(ctx)
-        register_runtime_object(ctx, control)
+    # Control already exists: the run was created through it before logging
+    # opened. Building a second one here would open a second connection to the
+    # same database and give the run log a different one from the run's own.
+    control = getattr(ctx, "control", None) or _open_control(ctx)
 
     lineage = {}
     for field in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):
@@ -288,6 +341,22 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         failed = True
         raise
     finally:
+        # Terminal status first, before anything this run owns is collected.
+        # A poll that arrives after the process is gone is answered from the
+        # manifest, so the row has to say how the run ended before the run
+        # stops being able to say it. A child process, which inherited its
+        # run_id, does not finish a run it did not start.
+        run = getattr(ctx, "run", None)
+        if run is not None:
+            try:
+                run.finish("FAILED" if failed else "SUCCEEDED")
+            except Exception as exc:  # noqa: BLE001
+                # Never replace the error that ended the run, and never turn a
+                # successful run into a failed one because its record could not
+                # be closed. The run still happened.
+                _logger.error("Could not record terminal status for run %s: %s",
+                              getattr(run, "run_id", "?"), exc)
+
         # The ambient run binding is process state, not a registered object:
         # a collected run log must not stay bound for whatever runs next.
         from rey_lib.logs.record_enrichment import reset_run_binding

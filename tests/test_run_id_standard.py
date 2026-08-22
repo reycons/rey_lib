@@ -1,16 +1,20 @@
 """
 Tests for the run identity standard (SGC_Rey_Run_ID_Standard).
 
-Cover the separated identity/display model: run_id is a UUID, run_timestamp is a
-filename-safe YYYYMMDD_HHMMSS value, both are stable for the execution, and the
-centralized artifact-naming helper embeds run_timestamp and never overwrites a
-previous run.
+The identity/display split still holds, but identity moved: ``run_id`` is
+``control.run_manifest.run_manifest_id``, generated when the run is recorded, so
+``establish_run_identity`` no longer creates one. What it still owns is display
+and filing -- ``run_timestamp`` as a filename-safe YYYYMMDD_HHMMSS value stable
+for the execution, and the artifact-naming helper that embeds it and never
+overwrites a previous run.
+
+The identity half is covered where it now lives: ``Run.start`` records the run
+and carries back the id, and logging refuses a context that has not started one.
 """
 
 from __future__ import annotations
 
 import re
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,22 +31,33 @@ from rey_lib.run import establish_run_identity
 _TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
 
 
-def test_establish_run_identity_sets_uuid_and_timestamp() -> None:
-    """run_id is a UUID, run_timestamp is YYYYMMDD_HHMMSS, run_started_at present."""
+def test_establish_run_identity_sets_timestamps_only() -> None:
+    """run_timestamp is YYYYMMDD_HHMMSS and run_started_at is present."""
     ctx = SimpleNamespace()
     establish_run_identity(ctx)
-    uuid.UUID(ctx.run_id)  # raises ValueError if run_id is not a valid UUID.
     assert _TIMESTAMP_RE.match(ctx.run_timestamp) is not None
     assert ctx.run_started_at
 
 
-def test_establish_run_identity_is_stable() -> None:
-    """A second call leaves an already-established identity unchanged."""
+def test_establish_run_identity_does_not_mint_a_run_id() -> None:
+    """Identity comes from the manifest, so nothing here invents one.
+
+    A second minting site is how a process handle and a durable record end up
+    describing one execution under two names. There is now exactly one place a
+    run_id comes from, and it is the row that records the run.
+    """
     ctx = SimpleNamespace()
     establish_run_identity(ctx)
-    identity = (ctx.run_id, ctx.run_timestamp, ctx.run_started_at)
+    assert not hasattr(ctx, "run_id")
+
+
+def test_establish_run_identity_is_stable() -> None:
+    """A second call leaves already-established timestamps unchanged."""
+    ctx = SimpleNamespace()
     establish_run_identity(ctx)
-    assert (ctx.run_id, ctx.run_timestamp, ctx.run_started_at) == identity
+    stamps = (ctx.run_timestamp, ctx.run_started_at)
+    establish_run_identity(ctx)
+    assert (ctx.run_timestamp, ctx.run_started_at) == stamps
 
 
 def test_logging_requires_an_identity_it_did_not_create() -> None:
@@ -50,9 +65,9 @@ def test_logging_requires_an_identity_it_did_not_create() -> None:
     with pytest.raises(ValueError, match="No run identity has been established"):
         require_run_id(SimpleNamespace())
 
-    ctx = SimpleNamespace()
+    ctx = SimpleNamespace(run_id=42)
     establish_run_identity(ctx)
-    assert require_run_id(ctx) == ctx.run_id
+    assert require_run_id(ctx) == 42
 
 
 def test_setup_logging_refuses_an_unidentified_context(run_log, tmp_path: Path) -> None:
@@ -93,16 +108,14 @@ def test_ensure_helpers_share_one_identity() -> None:
     from rey_lib.control import Control
 
     ctx = SimpleNamespace(
+        run_id=42,
         control=SimpleNamespace(procedure_map="control"),
         procedure_maps=[SimpleNamespace(name="control", routine_bindings=[])],
     )
     establish_run_identity(ctx)
     control = Control(ctx)
-    run_id = control.run_id()
-    run_timestamp = control.run_timestamp()
-    assert run_id == ctx.run_id
-    assert run_timestamp == ctx.run_timestamp
-    uuid.UUID(run_id)
+    assert control.run_id() == ctx.run_id
+    assert control.run_timestamp() == ctx.run_timestamp
 
 
 def test_run_artifact_path_embeds_run_timestamp(tmp_path: Path) -> None:

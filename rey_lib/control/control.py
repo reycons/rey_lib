@@ -338,6 +338,46 @@ class Control:
         # No close: the Connection is shared and outlives this call. Its
         # lifetime belongs to runtime shutdown, not to one control routine.
 
+    def _call_rows(self, action_name: str, variables: dict[str, Any],
+                   required: bool = False) -> list[dict[str, Any]]:
+        """Execute one mapped routine that returns rows, and return them.
+
+        The same call as :meth:`_call` with a different result to carry. A
+        routine bound ``dataset_result`` puts its rows under ``rows`` and leaves
+        ``outputs`` empty, so a scalar-shaped reader would silently return None
+        for every row it fetched.
+
+        Kept separate rather than widening ``_call``'s return: every existing
+        caller of ``_call`` expects one value or None, and a union return would
+        push the discrimination into each of them.
+        """
+        if not required and not self._is_available():
+            return []
+
+        conn = self._handle(required=required)
+        if conn is None:
+            return []
+
+        try:
+            result = execute_mapped_routine(
+                ctx=self._ctx, run_log=self.run_log, conn=conn,
+                procedure_map=self._map_name, routine_name=action_name,
+                values=variables, run_ctx=self, map_cfg=self._map,
+            )
+            return list(result.get("rows") or [])
+        except (ConfigError, DatabaseError):
+            if required:
+                raise
+            self._mark_unavailable(f"routine '{action_name}' failed")
+            return []
+        except Exception as exc:  # noqa: BLE001
+            if required:
+                raise DatabaseError(
+                    f"control: required routine '{action_name}' failed — {exc}"
+                ) from exc
+            self._mark_unavailable(f"unexpected error in '{action_name}': {exc}")
+            return []
+
     # -- batch --------------------------------------------------------------
 
     def start_batch(self, batch_name: str, owner_app_name: Optional[str] = None,
@@ -598,3 +638,64 @@ class Control:
             "sql_name":      sql_name,
             "context_jsonb": context_jsonb,
         }, required=required)
+
+    # -- run manifest -------------------------------------------------------
+
+    def create_run_manifest(self, subject_type: Optional[str] = None,
+                            subject_id: Optional[str] = None,
+                            subject_name: Optional[str] = None,
+                            app_name: Optional[str] = None,
+                            parent_run_id: Optional[int] = None,
+                            settings: Optional[dict[str, Any]] = None,
+                            started_at: Optional[str] = None,
+                            status: str = "RUNNING",
+                            required: bool = True) -> Optional[int]:
+        """Record a starting run and return the id it now has.
+
+        That id **is** the Run identity. Nothing supplies it: the manifest row
+        generates it, and the value returned here is what the application
+        carries as ``run_id`` for the rest of the execution.
+
+        ``required`` defaults True, unlike the optional capabilities. A run that
+        cannot be recorded has no identity, so there is nothing to continue as.
+
+        Not idempotent. Calling this twice creates two runs, which is why a
+        pipeline's step subprocesses inherit ``run_id`` instead of calling it.
+        """
+        return self._call("create_run_manifest", {
+            "started_at":    started_at,
+            "status":        status,
+            "subject_type":  subject_type,
+            "subject_id":    subject_id,
+            "subject_name":  subject_name,
+            "app_name":      app_name or getattr(self._ctx, "app_name", None),
+            "parent_run_id": parent_run_id,
+            "settings":      settings,
+        }, required=required)
+
+    def finish_run_manifest(self, run_id: int, status: str,
+                            finished_at: Optional[str] = None,
+                            required: bool = True) -> None:
+        """Close a run: terminal status and when it ended, and nothing else.
+
+        Settings were written at create and are not restated. Silent when the
+        run is unknown -- finishing is teardown, and a raising teardown would
+        mask whatever ended the run.
+        """
+        self._call("finish_run_manifest", {
+            "run_id":      run_id,
+            "status":      status,
+            "finished_at": finished_at,
+        }, required=required)
+
+    def get_run_manifest(self, run_id: int,
+                         required: bool = False) -> Optional[dict[str, Any]]:
+        """Return one run's durable record, or None when it was never recorded.
+
+        This is what answers a poll once the live run is gone. It reads the row
+        and nothing else -- no log file, no evidence projection -- because
+        telling a caller the run is finished needs only the row.
+        """
+        rows = self._call_rows("get_run_manifest", {"run_id": run_id},
+                               required=required)
+        return rows[0] if rows else None
