@@ -799,10 +799,10 @@ def test_successful_compensation_is_idempotently_excluded(
         action="create",
         destination_path=str(created),
     )
-    run_log = _run_log(tmp_path)
+    log_file = _run_log(tmp_path)
 
-    rollback_log_run(ctx, run_log)
-    plan = preview_log_run_rollback(ctx, run_log)
+    rollback_log_run(ctx, log_file)
+    plan = preview_log_run_rollback(ctx, log_file)
 
     # The reversed record has left the manifest, so it is simply not selected
     # a second time; nothing has to remember that it was compensated.
@@ -1350,21 +1350,21 @@ def test_a_fully_rolled_back_run_log_is_deleted(tmp_path: Path) -> None:
     created = tmp_path / "created.csv"
     created.write_text("created", encoding="utf-8")
     _append_mutation(ctx, action="create", destination_path=str(created))
-    run_log = _run_log(tmp_path)
-    sidecar = run_log.parent / f"{run_log.name}.hstate.json"
+    log_file = _run_log(tmp_path)
+    sidecar = log_file.parent / f"{log_file.name}.hstate.json"
     sidecar.write_text("{}", encoding="utf-8")
-    results = run_log.parent / f"{run_log.name.split('.jsonl')[0]}.results.json"
+    results = log_file.parent / f"{log_file.name.split('.jsonl')[0]}.results.json"
     results.write_text("{}", encoding="utf-8")
 
-    result = rollback_log_run(ctx, run_log)
+    result = rollback_log_run(ctx, log_file)
 
     assert result["status"] == "success"
-    assert not Path(run_log.path()).exists()
+    assert not log_file.exists()
     # Its companions describe a log that is no longer there.
     assert not sidecar.exists()
     assert not results.exists()
     assert set(result["deleted_run_log_files"]) == {
-        run_log.name, sidecar.name, results.name
+        log_file.name, sidecar.name, results.name
     }
 
 
@@ -1377,12 +1377,12 @@ def test_a_run_log_survives_a_rollback_that_did_not_finish(tmp_path: Path) -> No
         source_path=str(tmp_path / "missing-original"),
         destination_path=str(tmp_path / "missing-current"),
     )
-    run_log = _run_log(tmp_path)
+    log_file = _run_log(tmp_path)
 
-    result = rollback_log_run(ctx, run_log)
+    result = rollback_log_run(ctx, log_file)
 
     assert result["status"] == "failure"
-    assert Path(run_log.path()).exists()
+    assert log_file.exists()
     assert result["deleted_run_log_files"] == []
 
 
@@ -1412,12 +1412,12 @@ def test_an_indeterminate_record_keeps_the_run_log(
             run_log_record_id=1,
         ),
     )
-    run_log = _run_log(tmp_path)
+    log_file = _run_log(tmp_path)
 
-    result = rollback_log_run(ctx, run_log)
+    result = rollback_log_run(ctx, log_file)
 
     assert result["status"] == "success"
     assert result["indeterminate_count"] == 1
     # Nothing was reversed, so the run still owns a record and keeps its log.
-    assert Path(run_log.path()).exists()
+    assert log_file.exists()
     assert result["deleted_run_log_files"] == []

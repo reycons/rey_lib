@@ -43,10 +43,10 @@ def _log_ctx(tmp_path: Path) -> SimpleNamespace:
     return ctx
 
 
-def _run_records(ctx: SimpleNamespace) -> list[dict]:
+def _run_records(run_log) -> list[dict]:
     return [
         json.loads(line)
-        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
     ]
 
 
@@ -225,7 +225,7 @@ def test_routine_scalar_executes_and_loads_output(run_log):
 
 def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
     ctx = _log_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
@@ -237,7 +237,7 @@ def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
         execute_mapped_routine(ctx, run_log, conn, "control", "start_batch",
                                {"run_id": "R1"}, run_ctx=run_ctx)
 
-    record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
+    record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "routine"
     assert record["sql_label"] == "start_batch"
     assert record["routine"] == "control.f_start_batch"
@@ -364,7 +364,7 @@ def test_mapped_sql_logs_dataset_row_count_without_raw_sql(run_log, tmp_path: Pa
                           {"execution_target": "mapped_sql", "binding": "find_rows"},
                           {"row_key": 5})
 
-    record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
+    record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "mapped_sql"
     assert record["sql_label"] == "find_rows"
     assert record["row_count"] == 2
@@ -384,7 +384,7 @@ def test_sql_failure_logs_sanitized_failure_evidence(run_log, tmp_path: Path):
         with pytest.raises(RuntimeError, match="connection failed"):
             execute_operation(ctx, run_log, conn, "control", config, {"api_key": "SECRET"})
 
-    record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
+    record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "adhoc_sql"
     assert record["status"] == "failed"
     assert record["error_message"] == "connection failed"
@@ -397,7 +397,7 @@ def test_execute_sql_text_delegates_to_adapter_run_sql(tmp_path: Path):
     # execute_sql_text is provider-neutral: it must route ad hoc SQL through the
     # DBAdapter (which owns provider dispatch), never call conn.execute() itself.
     ctx = _log_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     conn = object()  # no .execute() — a raw connection API access would AttributeError
     with patch("rey_lib.db.procedure_map._db") as db:
         db.run_sql.return_value = 1
@@ -412,7 +412,7 @@ def test_execute_sql_text_delegates_to_adapter_run_sql(tmp_path: Path):
         )
 
     db.run_sql.assert_called_once_with(conn, "select secret_value from source")
-    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
     assert len(records) == 1
     assert records[0]["operation"] == "hook_sql_file"
     assert records[0]["sql_label"] == "hook_file"
@@ -424,7 +424,7 @@ def test_execute_sql_text_runs_through_postgres_core_connection(tmp_path: Path):
     # End-to-end through the real DBAdapter + postgres_utils: SQLAlchemy remains
     # behind the Rey connection handle and the application sees no execute API.
     ctx = _log_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
 
     class FakeResult:
         rowcount = 3
@@ -459,7 +459,7 @@ def test_execute_sql_text_runs_through_postgres_core_connection(tmp_path: Path):
 
     assert core.executed == ["select secret_value from source"]
     assert core.commits == 1
-    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
     assert len(records) == 1
     assert records[0]["status"] == "success"
     assert "secret_value" not in json.dumps(records[0])
@@ -469,7 +469,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
     # A provider failure must propagate and leave exactly one failed, sanitized
     # SQL_EXECUTION record — no second commit/rollback added by the shared layer.
     ctx = _log_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     conn = object()
     with patch("rey_lib.db.procedure_map._db") as db:
         db.run_sql.side_effect = DatabaseError("postgres_utils: run_sql failed: boom")
@@ -484,7 +484,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
                 safe_to_preview=False,
             )
 
-    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
     assert len(records) == 1
     assert records[0]["status"] == "failed"
     assert "run_sql failed" in records[0]["error_message"]
@@ -495,7 +495,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
 
 def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
     ctx = _log_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_run_log(tmp_path)
     conn = object()
     with patch("rey_lib.db.procedure_map._db") as db:
         db.call_proc_with_output.return_value = {"out_id": 7}
@@ -509,7 +509,7 @@ def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
             operation="hook_procedure",
         )
 
-    records = [r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION"]
+    records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
     assert result == {"out_id": 7}
     assert len(records) == 1
     assert records[0]["operation"] == "hook_procedure"
