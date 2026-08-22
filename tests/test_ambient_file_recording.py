@@ -49,8 +49,9 @@ def _ops(run_log: Path) -> list[dict]:
 def bound_run(tmp_path: Path):
     """Bind a run log for the test and clear it afterwards."""
     log_path = tmp_path / "run_log.20260707_000000.jsonl"
-    run_log = make_run_log(tmp_path, path=str(log_path))
-    bind_run(run_log_path=str(log_path), run_id="r1", run_timestamp="20260707_000000")
+    run_log = make_run_log(tmp_path, path=str(log_path), app="",
+                           run_id="r1", run_timestamp="20260707_000000")
+    bind_run(run_log)
     try:
         yield run_log
     finally:
@@ -137,10 +138,12 @@ def test_bind_clear_current_run(tmp_path: Path) -> None:
     """bind_run/current_run/clear_run manage the ambient run."""
     clear_run()
     assert current_run() is None
-    bind_run(run_log_path=str(tmp_path / "run_log.x.jsonl"), run_id="r9")
+    bind_run(make_run_log(tmp_path, path=str(tmp_path / "run_log.x.jsonl"), run_id="r9"))
     assert current_run() == {"run_log_path": str(tmp_path / "run_log.x.jsonl"), "run_id": "r9"}
     # Binding without a durable path is a no-op (keeps the prior binding).
-    bind_run(run_log_path="")
+    from rey_lib.logs.run_log import RunLog
+
+    bind_run(RunLog(app="", run_id="r0", run_timestamp="20260707_000000"))
     assert current_run()["run_id"] == "r9"
     clear_run()
     assert current_run() is None
@@ -151,7 +154,8 @@ def test_recording_is_fail_safe(tmp_path: Path, monkeypatch) -> None:
     # Bind a run whose log dir cannot be created (a file blocks the path).
     blocker = tmp_path / "blocker"
     blocker.write_text("x", encoding="utf-8")
-    bind_run(run_log_path=str(blocker / "nested" / "run_log.jsonl"), run_id="r1")
+    bind_run(make_run_log(tmp_path, path=str(blocker / "nested" / "run_log.jsonl"),
+                          run_id="r1"))
     try:
         # The write itself must still succeed even though recording cannot.
         result = write_file(tmp_path / "safe.json", {"ok": True}, "JSON")

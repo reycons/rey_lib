@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.db import connection as connection_module
 from rey_lib.db.connection import build_connections, shared_connection
 from rey_lib.db.procedure_map import execute_mapped_routine, get_procedure_map
@@ -137,7 +139,8 @@ class TestTheCallerTakesTheConnection:
 class TestOneMapRunsAgainstTwoConnections:
     """The point of the separation, stated as execution rather than lookup."""
 
-    def test_the_same_map_executes_against_two_different_connections(self) -> None:
+    def test_the_same_map_executes_against_two_different_connections(
+            self, tmp_path) -> None:
         ctx = _ctx(
             maps=[_routine_map()],
             connections=[_connection("control"), _connection("control_test")],
@@ -161,7 +164,8 @@ class TestOneMapRunsAgainstTwoConnections:
 
             for connection in (live, test):
                 execute_mapped_routine(
-                    ctx=ctx, conn=connection.handle(), procedure_map="control",
+                    ctx=ctx, run_log=make_run_log(tmp_path),
+                    conn=connection.handle(), procedure_map="control",
                     routine_name="start_batch", values={"batch_name": "B"},
                     run_ctx=SimpleNamespace(), map_cfg=ctx.procedure_maps[0],
                 )

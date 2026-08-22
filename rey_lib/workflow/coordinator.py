@@ -126,7 +126,7 @@ def _refused_disabled_workflow(
         pass
     set_nest_level(run_log, "workflow")
     log_run_start(run_log, workflow=name, apply=apply)
-    bind_run(ctx)
+    bind_run(run_log)
     _logger.warning("%s", message)
     log_run_complete(run_log, "refused", message=message)
     _finalize_run(ctx, run_log)
@@ -310,9 +310,9 @@ def run_workflow(
     # sits below the app base (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
     set_nest_level(run_log, "workflow")
     log_run_start(run_log, workflow=name, apply=apply)
-    # Bind the current run so file_utils records file operations to this run log
+    # Bind this run log so file_utils records file operations through it
     # (SGC_Rey_File_Utils_Ambient_Run_Log_File_Recording); cleared at every exit.
-    bind_run(ctx)
+    bind_run(run_log)
     # Record the config files that fed the effective ctx from provenance
     # (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
     record_config_file_references(ctx, run_log)

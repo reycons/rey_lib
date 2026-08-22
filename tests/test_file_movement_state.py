@@ -17,6 +17,8 @@ from rey_lib.files.file_utils import (
     iter_file_movements,
     move_file,
 )
+from tests.conftest import make_run_log
+
 from rey_lib.logs import read_run_log_sections
 from rey_lib.run.identity import establish_run_identity
 
@@ -65,16 +67,18 @@ def test_move_file_writes_run_log_not_state_file(tmp_path: Path) -> None:
     src.parent.mkdir(parents=True)
     src.write_text("a,b\n", encoding="utf-8")
 
+    run_log = make_run_log(tmp_path, app="file_operator")
     move_file(
         src,
         dest_dir,
         state_ctx=ctx,
+        run_log=run_log,
         app="file_operator",
         pipeline="daily",
         reason="processed",
     )
 
-    record = read_run_log_sections(ctx.run_log_path)["records"][0]
+    record = read_run_log_sections(run_log.path())["records"][0]
     assert record["record_type"] == "FILE_OPERATION"
     assert record["app"] == "file_operator"
     assert record["operation_id"]

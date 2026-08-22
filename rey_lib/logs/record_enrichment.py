@@ -352,43 +352,27 @@ _CURRENT_STEP: dict[str, Any] = {"step": None}
 _CURRENT_CORRELATION: dict[str, Any] = {"correlation": None}
 
 
-def bind_run(ctx: Any = None, *, run_log_path: str = "", run_id: str = "",
-             run_timestamp: str = "") -> None:
-    """Bind the current run so file_utils records file operations against it.
+def bind_run(run_log: Any) -> None:
+    """Bind the run log that ambient file operations are recorded through.
 
-    Reads run_log_path / run_id / run_timestamp from ``ctx`` when given, else from
-    the keyword arguments. Binding without a durable run_log_path is a no-op.
+    File operations happen deep in utility code that holds no run log, so the
+    run in progress is bound around them. What is bound is the run log itself:
+    the one owner of the write, not a description of it. Rebuilding an owner
+    from a description is how a single run ends up with two of them.
 
-    The execution-identity fields ``_base_record`` reads (app identity, workflow_name,
-    pipeline_name) are captured onto the bound run so ambient FILE_OPERATION records
-    written through it receive the same standard enrichment as any other log write,
-    rather than lacking ``app`` and context. Empty values are left off by
-    ``_base_record`` exactly as an absent attribute would be.
+    Binding a run log with no durable path is a no-op -- there is nothing for
+    an ambient record to be appended to.
     """
-    identity: dict[str, str] = {
-        key: "" for key in
-        ("owner_app_name", "app_name", "name", "workflow_name", "pipeline_name",
-         *RUN_LINEAGE_FIELDS, *RUN_DOMAIN_FIELDS)
-    }
-    if ctx is not None:
-        run_log_path = str(getattr(ctx, "run_log_path", "") or run_log_path)
-        run_id = str(getattr(ctx, "run_id", "") or run_id)
-        run_timestamp = str(getattr(ctx, "run_timestamp", "") or run_timestamp)
-        for key in identity:
-            # Lineage is resolved rather than read: the enclosing pipeline run
-            # is stamped on ctx.runtime, so a plain attribute read would bind a
-            # run whose ambient records lack the tree its own records carry.
-            identity[key] = (
-                _lineage_value(ctx, key)
-                if key in RUN_LINEAGE_FIELDS or key in RUN_DOMAIN_FIELDS
-                else str(getattr(ctx, key, "") or "")
-            )
-    if not run_log_path:
+    if run_log is None:
+        _CURRENT_RUN["run"] = None
         return
-    _CURRENT_RUN["run"] = SimpleNamespace(
-        run_id=run_id, run_timestamp=run_timestamp, run_log_path=str(run_log_path),
-        **identity,
-    )
+    try:
+        path = run_log.path()
+    except Exception:  # noqa: BLE001 — an unopened run log binds nothing.
+        path = None
+    if not path:
+        return
+    _CURRENT_RUN["run"] = run_log
 
 
 def clear_run() -> None:
@@ -401,7 +385,7 @@ def current_run() -> dict[str, str] | None:
     run = _CURRENT_RUN["run"]
     if run is None:
         return None
-    return {"run_log_path": run.run_log_path, "run_id": run.run_id}
+    return {"run_log_path": str(run.path()), "run_id": run.run_id}
 
 
 def bind_step(

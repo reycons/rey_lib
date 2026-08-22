@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+
+from tests.conftest import make_run_log
 from unittest.mock import patch
 
 import pytest
@@ -30,7 +32,8 @@ def _context(
     destination_name: str | None = None,
 ) -> FileRoutingContext:
     return FileRoutingContext(
-        state_ctx=SimpleNamespace(run_log_path=str(root / "run.jsonl")),
+        state_ctx=SimpleNamespace(),
+        run_log=make_run_log(root, path=str(root / "run.jsonl")),
         application_name="test_app",
         routes=(
             routes
@@ -80,11 +83,10 @@ def test_public_wrappers_only_dispatch_their_fixed_role(
 ) -> None:
     governed, _ = _file(tmp_path)
     expected = object()
+    context = _context(tmp_path)
     with patch.object(file_routing, "_move_to_role", return_value=expected) as engine:
-        assert wrapper(_context(tmp_path), governed) is expected
-    engine.assert_called_once_with(
-        _context(tmp_path), governed, destination_role=role
-    )
+        assert wrapper(context, governed) is expected
+    engine.assert_called_once_with(context, governed, destination_role=role)
 
 
 def test_private_engine_is_not_exported() -> None:
@@ -123,6 +125,7 @@ def test_each_role_uses_shared_move_and_evidence_contract(
         tmp_path / role.value,
         None,
         state_ctx=ctx.state_ctx,
+        run_log=ctx.run_log,
         app="test_app",
         pipeline="pipeline-a",
         reason=role.value,

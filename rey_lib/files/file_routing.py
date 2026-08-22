@@ -92,6 +92,7 @@ class FileRoutingContext:
     """Operation-scoped routes, run state, and evidence inputs."""
 
     state_ctx: Any
+    run_log: Any
     application_name: str
     routes: Mapping[FileRoutingRole, str | Path | None]
     governed_roots: tuple[Path, ...]
@@ -325,6 +326,7 @@ def _move_to_role(
             destination_dir,
             ctx.destination_name,
             state_ctx=ctx.state_ctx,
+            run_log=ctx.run_log,
             app=ctx.application_name,
             pipeline=ctx.pipeline_name,
             reason=destination_role.value,

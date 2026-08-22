@@ -181,6 +181,7 @@ def compose_sanitization_policy(
 @dataclass(frozen=True)
 class FileSanitizationContext:
     state_ctx: Any
+    run_log: Any
     application_name: str
     destination_path: Path
     governed_roots: tuple[Path, ...]

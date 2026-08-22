@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import make_run_log
+
 from rey_lib.encryption import sha256_file
 from rey_lib.files import (
     FileSanitizationCollisionPolicy,
@@ -64,6 +66,7 @@ def _ctx(
     )
     return FileSanitizationContext(
         state_ctx=object(),
+        run_log=make_run_log(tmp_path),
         application_name="test_app",
         destination_path=tmp_path / "out" / "positions.clean.csv",
         governed_roots=(tmp_path,),

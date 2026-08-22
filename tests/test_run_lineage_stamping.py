@@ -196,21 +196,27 @@ class TestAmbientRecordsCarryTheSameLineage:
     def test_bind_run_captures_lineage_for_ambient_records(self, tmp_path: Path) -> None:
         log = tmp_path / "amalgamate.20260821_101500.jsonl"
         log.write_text("", encoding="utf-8")
-        bind_run(_ctx(
-            run_log_path=str(log),
-            parent_run_id="R101",
-            subject_type="app",
-            runtime=SimpleNamespace(pipeline_run_id="R100"),
-        ))
+        import json
+
+        from tests.conftest import make_run_log
+
+        from rey_lib.logs.file_records import record_file_operation
+
+        ambient = make_run_log(tmp_path, path=str(log), app="rey_loader",
+                               run_id="R102", run_timestamp="20260821_101500")
+        ambient.bind_lineage(parent_run_id="R101", subject_type="app",
+                             pipeline_run_id="R100")
+        bind_run(ambient)
         try:
             bound = current_run()
             assert bound is not None and bound["run_id"] == "R102"
 
-            # The bound run is read as a context by _base_record, which is how an
-            # ambient FILE_OPERATION gets the same enrichment as any other write.
-            from rey_lib.logs.record_enrichment import _CURRENT_RUN
-
-            record = _base_record(_CURRENT_RUN["run"], "FILE_OPERATION", "")
+            # The bound run log writes the ambient record, so it carries the same
+            # lineage as anything else that run log writes.
+            record_file_operation("read", source_path=str(tmp_path / "x"))
+            record = [json.loads(line) for line in
+                      log.read_text(encoding="utf-8").splitlines() if line.strip()][-1]
+            assert record["record_type"] == "FILE_OPERATION"
             assert record["parent_run_id"] == "R101"
             assert record["subject_type"] == "app"
             assert record["pipeline_run_id"] == "R100"

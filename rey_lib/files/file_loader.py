@@ -460,6 +460,7 @@ def load_files(
 
 def load_files_to_callback(
     ctx: Any,
+    run_log: Any,
     data_source: Any,
     load_cfg: Any,
     on_load_file: Callable[[Any, Any, Path, list[dict[str, str]]], int],
@@ -537,7 +538,8 @@ def load_files_to_callback(
                         rows_loaded,
                     )
                 total_rows += rows_loaded
-                _execute_movements(load_cfg.movements.success, file_path, data_source.paths, ctx=ctx)
+                _execute_movements(load_cfg.movements.success, file_path, data_source.paths,
+                                   ctx=ctx, run_log=run_log)
                 _logger.info(
                     "Loaded via callback: %s rows=%d",
                     file_path.name,
@@ -550,7 +552,8 @@ def load_files_to_callback(
                     exc,
                     exc_info=True,
                 )
-                _execute_movements(load_cfg.movements.failure, file_path, data_source.paths, ctx=ctx)
+                _execute_movements(load_cfg.movements.failure, file_path, data_source.paths,
+                                   ctx=ctx, run_log=run_log)
 
     finally:
         log_exit(
@@ -1614,7 +1617,8 @@ def _transform_one_file(
                 transform_version=getattr(transform_cfg, "version", ""),
             )
             _execute_movements(
-                transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+                transform_cfg.movements.failure, file_path, data_source.paths,
+                ctx=ctx, run_log=run_log,
             )
             log_exit(
                 ctx,
@@ -1644,6 +1648,7 @@ def _transform_one_file(
                 output_path.parent,
                 dest_name=output_path.name,
                 state_ctx=ctx,
+                run_log=run_log,
                 app=getattr(ctx, "app_name", "") if ctx is not None else "",
                 pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
                 reason="prepared",
@@ -1665,7 +1670,8 @@ def _transform_one_file(
             )
             movements = getattr(transform_cfg, "movements", None)
             if movements is not None and getattr(movements, "success", None):
-                _execute_movements(movements.success, file_path, data_source.paths, ctx=ctx)
+                _execute_movements(movements.success, file_path, data_source.paths,
+                                   ctx=ctx, run_log=run_log)
             log_exit(ctx, f"_transform_one_file prepared: {file_path.name}", _logger)
             return True
 
@@ -1696,7 +1702,8 @@ def _transform_one_file(
 
             _write_rejections(ctx, file_path, errors)
             _execute_movements(
-                transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+                transform_cfg.movements.failure, file_path, data_source.paths,
+                ctx=ctx, run_log=run_log,
             )
             log_exit(
                 ctx,
@@ -1714,7 +1721,8 @@ def _transform_one_file(
                 path=str(file_path),
             )
             _execute_movements(
-                transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+                transform_cfg.movements.failure, file_path, data_source.paths,
+                ctx=ctx, run_log=run_log,
             )
             log_exit(
                 ctx,
@@ -1729,6 +1737,7 @@ def _transform_one_file(
             rows,
             file_type="CSV",
             state_ctx=ctx,
+            run_log=run_log,
             app=getattr(ctx, "app_name", "") if ctx is not None else "",
             pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
             reason="transformed",
@@ -1755,7 +1764,8 @@ def _transform_one_file(
         )
 
         _execute_movements(
-            transform_cfg.movements.success, file_path, data_source.paths, ctx=ctx
+            transform_cfg.movements.success, file_path, data_source.paths,
+                ctx=ctx, run_log=run_log,
         )
         log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
         return True
@@ -1773,7 +1783,8 @@ def _transform_one_file(
             related_path=str(file_path),
         )
         _execute_movements(
-            transform_cfg.movements.failure, file_path, data_source.paths, ctx=ctx
+            transform_cfg.movements.failure, file_path, data_source.paths,
+                ctx=ctx, run_log=run_log,
         )
         log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
         return False
@@ -1909,7 +1920,8 @@ def _load_one_file(
                 schema=schema,
                 table=table,
             )
-            _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
+            _execute_movements(load_cfg.movements.failure, file_path, paths,
+                               ctx=ctx, run_log=run_log)
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
@@ -1931,7 +1943,8 @@ def _load_one_file(
                 schema=schema,
                 table=table,
             )
-            _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
+            _execute_movements(load_cfg.movements.failure, file_path, paths,
+                               ctx=ctx, run_log=run_log)
             log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
             return 0
 
@@ -1975,7 +1988,8 @@ def _load_one_file(
             table=table,
         )
 
-        _execute_movements(load_cfg.movements.success, file_path, paths, ctx=ctx)
+        _execute_movements(load_cfg.movements.success, file_path, paths,
+                           ctx=ctx, run_log=run_log)
         log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
         return len(rows)
 
@@ -1992,7 +2006,8 @@ def _load_one_file(
             failed_step_name=getattr(load_cfg, "name", "load"),
             related_path=str(file_path),
         )
-        _execute_movements(load_cfg.movements.failure, file_path, paths, ctx=ctx)
+        _execute_movements(load_cfg.movements.failure, file_path, paths,
+                               ctx=ctx, run_log=run_log)
         log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
         return 0
 
@@ -2254,6 +2269,7 @@ def _execute_movements(
     file_path: Path,
     paths: Any,
     ctx: Any = None,
+    run_log: Any = None,
 ) -> None:
     """
     Execute a list of file movement instructions from the YAML config.
@@ -2296,6 +2312,7 @@ def _execute_movements(
                     src_path,
                     dest_dir,
                     state_ctx=ctx,
+                    run_log=run_log,
                     app=getattr(ctx, "app_name", "") if ctx is not None else "",
                     pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
                     reason=str(move.to),

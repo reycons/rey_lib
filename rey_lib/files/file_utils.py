@@ -630,11 +630,12 @@ def move_to_processing(
     source_cfg: Any,
     *,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
 ) -> Path:
     """Move ``file_path`` to ``source_cfg.paths.processing_path``."""
-    return move_to_stage(file_path, source_cfg, "processing", state_ctx=state_ctx, app=app, pipeline=pipeline)
+    return move_to_stage(file_path, source_cfg, "processing", state_ctx=state_ctx, run_log=run_log, app=app, pipeline=pipeline)
 
 
 def move_to_success(
@@ -642,11 +643,12 @@ def move_to_success(
     source_cfg: Any,
     *,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
 ) -> Path:
     """Move ``file_path`` to ``source_cfg.paths.success_path``."""
-    return move_to_stage(file_path, source_cfg, "success", state_ctx=state_ctx, app=app, pipeline=pipeline)
+    return move_to_stage(file_path, source_cfg, "success", state_ctx=state_ctx, run_log=run_log, app=app, pipeline=pipeline)
 
 
 def move_to_failed(
@@ -654,11 +656,12 @@ def move_to_failed(
     source_cfg: Any,
     *,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
 ) -> Path:
     """Move ``file_path`` to ``source_cfg.paths.failed_path``."""
-    return move_to_stage(file_path, source_cfg, "failed", state_ctx=state_ctx, app=app, pipeline=pipeline)
+    return move_to_stage(file_path, source_cfg, "failed", state_ctx=state_ctx, run_log=run_log, app=app, pipeline=pipeline)
 
 
 def move_to_stage(
@@ -667,13 +670,14 @@ def move_to_stage(
     stage: str,
     *,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
 ) -> Path:
     """Move ``file_path`` to a configured stage path on ``source_cfg.paths``."""
     dest_dir = Path(getattr(source_cfg.paths, f"{stage}_path")).expanduser().resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    return move_file(file_path, dest_dir, state_ctx=state_ctx, app=app, pipeline=pipeline, reason=stage)
+    return move_file(file_path, dest_dir, state_ctx=state_ctx, run_log=run_log, app=app, pipeline=pipeline, reason=stage)
 
 
 def _coerce_glob_patterns(pattern: str | Iterable[str]) -> list[str]:
@@ -1081,6 +1085,7 @@ def write_file(
     sort_keys: bool = False,
     csv_minimal_quoting: bool = False,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: "str | None" = None,
     reason: str = "",
@@ -1104,6 +1109,9 @@ def write_file(
         For CSV output, use standard QUOTE_MINIMAL quoting (safely quotes fields
         that contain the delimiter or quotes) instead of the default verbatim
         QUOTE_NONE. Ignored for other formats.
+    run_log : Any
+        The run log the file-operation record is written through. When absent
+        the operation is recorded against the ambient bound run instead.
     state_ctx : Any
         Optional context with ``config_root``. When provided, a creation
         record is appended to the file-operation state log after the file is written.
@@ -1148,10 +1156,11 @@ def write_file(
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
 
-    if state_ctx is not None:
+    if run_log is not None:
         try:
             log_file_operation(
-                _bound_run_log(),
+                state_ctx,
+                run_log,
                 app=app,
                 pipeline=pipeline,
                 source=outfile,
@@ -1164,7 +1173,7 @@ def write_file(
             _logger.warning("Could not write file creation record for '%s': %s", outfile.name, exc)
 
     # Record against the ambient run only when no explicit run context handled it.
-    if state_ctx is None:
+    if run_log is None:
         record_file_operation("write", target_path=str(outfile))
     return outfile.resolve()
 
@@ -1310,6 +1319,7 @@ def move_file(
     dest_name: Optional[str] = None,
     *,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: str | None = None,
     reason: str = "",
@@ -1330,6 +1340,9 @@ def move_file(
         Destination directory. Created if it does not exist.
     dest_name : Optional[str]
         Destination filename. If None, keeps src.name.
+    run_log : Any
+        The run log the file-operation record is written through. When absent
+        the operation is recorded against the ambient bound run instead.
     state_ctx : Any
         Optional context with ``config_root``. When provided, a file-operation
         record is appended after the move succeeds.
@@ -1356,10 +1369,11 @@ def move_file(
     dest = dest_dir / (dest_name if dest_name else src.name)
     src.replace(dest)
     _logger.debug("Moved: %s → %s", src, dest)
-    if state_ctx is not None:
+    if run_log is not None:
         try:
             log_file_operation(
-                _bound_run_log(),
+                state_ctx,
+                run_log,
                 app=app,
                 pipeline=pipeline,
                 source=src,
@@ -1381,6 +1395,7 @@ def copy_file(
     dest_name: Optional[str] = None,
     *,
     state_ctx: Any = None,
+    run_log: Any = None,
     app: str = "",
     pipeline: str | None = None,
     reason: str = "",
@@ -1395,7 +1410,7 @@ def copy_file(
     content, delimiter, quoting, encoding, blank lines, line endings, and
     whitespace are all preserved; no parsing or re-serialisation occurs.
 
-    Parameters mirror :func:`move_file`. When ``state_ctx`` is provided a
+    Parameters mirror :func:`move_file`. When ``run_log`` is provided a
     file-operation record is appended after the copy succeeds.
 
     Parameters
@@ -1406,6 +1421,9 @@ def copy_file(
         Destination directory. Created if it does not exist.
     dest_name : Optional[str]
         Destination filename. If None, keeps src.name.
+    run_log : Any
+        The run log the file-operation record is written through. When absent
+        the operation is recorded against the ambient bound run instead.
     state_ctx : Any
         Optional context for the file-operation record.
 
@@ -1431,10 +1449,11 @@ def copy_file(
     dest = dest_dir / (dest_name if dest_name else src.name)
     shutil.copyfile(src, dest)
     _logger.debug("Copied: %s → %s", src, dest)
-    if state_ctx is not None:
+    if run_log is not None:
         try:
             log_file_operation(
-                _bound_run_log(),
+                state_ctx,
+                run_log,
                 app=app,
                 pipeline=pipeline,
                 source=src,
@@ -1465,28 +1484,9 @@ def file_movement_log_path(ctx: Any) -> Path:
     return file_operation_log_path(ctx)
 
 
-def _bound_run_log() -> Any:
-    """Return a RunLog for the run bound by ``bind_run``, or None when unbound.
-
-    File operations are recorded against whichever run is currently bound --
-    the mechanism ``bind_run`` already exists for. This reads that binding; it
-    does not create or locate an owner of its own.
-    """
-    from rey_lib.logs.record_enrichment import current_run
-    from rey_lib.logs.run_log import RunLog
-
-    bound = current_run()
-    if not bound:
-        return None
-    return RunLog(
-        app="",
-        run_id=bound["run_id"],
-        run_timestamp="",
-        path=bound["run_log_path"],
-    )
-
-
-def log_file_operation(run_log: Any,
+def log_file_operation(
+    ctx: Any,
+    run_log: Any,
     *,
     source: Path | str,
     destination: Path | str,
@@ -1530,7 +1530,8 @@ def log_file_operation(run_log: Any,
 
 
 def log_file_move(
-    ctx: Any, run_log,
+    ctx: Any,
+    run_log: Any,
     *,
     source: Path | str,
     destination: Path | str,
@@ -1543,7 +1544,9 @@ def log_file_move(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compatibility alias for ``log_file_operation``."""
-    return log_file_operation(run_log,
+    return log_file_operation(
+        ctx,
+        run_log,
         source=source,
         destination=destination,
         app=app,

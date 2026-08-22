@@ -97,7 +97,7 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
     # so every app establishes level 3 here regardless of how it was invoked.
     set_nest_level(run_log, "app")
     log_run_start(run_log, operation=operation)
-    bind_run(ctx)
+    bind_run(run_log)
     record_config_file_references(ctx, run_log)
     try:
         result = func()
