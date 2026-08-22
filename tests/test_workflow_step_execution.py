@@ -39,10 +39,10 @@ def _workflow() -> dict[str, Any]:
     }
 
 
-def _run(**kwargs: Any) -> tuple[Any, list[str]]:
+def _run(run_log, **kwargs: Any) -> tuple[Any, list[str]]:
     calls: list[str] = []
     registry = _registry(["p1", "p2", "p3", "p4"], calls)
-    run = run_workflow(object(), _workflow(), registry, **kwargs)
+    run = run_workflow(object(), run_log, _workflow(), registry, **kwargs)
     return run, calls
 
 
@@ -52,15 +52,15 @@ def _ids(run: Any) -> list[str]:
 
 # --- Unchanged behaviour ----------------------------------------------------
 
-def test_full_workflow_runs_all_steps() -> None:
-    run, calls = _run()
+def test_full_workflow_runs_all_steps(run_log) -> None:
+    run, calls = _run(run_log)
     assert run.status == "success"
     assert _ids(run) == ["s1", "s2", "s3", "s4"]
     assert calls == ["p1", "p2", "p3", "p4"]
 
 
-def test_full_dry_run_skips_apply_only_step() -> None:
-    run, calls = _run(apply=False)
+def test_full_dry_run_skips_apply_only_step(run_log) -> None:
+    run, calls = _run(run_log, apply=False)
     assert _ids(run) == ["s1", "s2", "s3", "s4"]
     statuses = {o.id: o.status for o in run.outcomes}
     assert statuses["s2"] == "skipped"          # apply_only skipped in dry-run
@@ -69,46 +69,46 @@ def test_full_dry_run_skips_apply_only_step() -> None:
 
 # --- Single step ------------------------------------------------------------
 
-def test_single_step_by_id() -> None:
-    run, calls = _run(step="s3")
+def test_single_step_by_id(run_log) -> None:
+    run, calls = _run(run_log, step="s3")
     assert _ids(run) == ["s3"]
     assert calls == ["p3"]
 
 
-def test_single_step_by_label() -> None:
-    run, _ = _run(step="Two")
+def test_single_step_by_label(run_log) -> None:
+    run, _ = _run(run_log, step="Two")
     assert _ids(run) == ["s2"]
 
 
-def test_single_step_by_process() -> None:
-    run, _ = _run(step="p4")
+def test_single_step_by_process(run_log) -> None:
+    run, _ = _run(run_log, step="p4")
     assert _ids(run) == ["s4"]
 
 
-def test_legacy_only_still_selects_single_step() -> None:
-    run, _ = _run(only="s2")
+def test_legacy_only_still_selects_single_step(run_log) -> None:
+    run, _ = _run(run_log, only="s2")
     assert _ids(run) == ["s2"]
 
 
 # --- Ranges -----------------------------------------------------------------
 
-def test_from_step_runs_to_end() -> None:
-    run, _ = _run(from_step="s3")
+def test_from_step_runs_to_end(run_log) -> None:
+    run, _ = _run(run_log, from_step="s3")
     assert _ids(run) == ["s3", "s4"]
 
 
-def test_to_step_runs_from_start() -> None:
-    run, _ = _run(to_step="s2")
+def test_to_step_runs_from_start(run_log) -> None:
+    run, _ = _run(run_log, to_step="s2")
     assert _ids(run) == ["s1", "s2"]
 
 
-def test_from_and_to_step_inclusive_range() -> None:
-    run, _ = _run(from_step="s2", to_step="s3")
+def test_from_and_to_step_inclusive_range(run_log) -> None:
+    run, _ = _run(run_log, from_step="s2", to_step="s3")
     assert _ids(run) == ["s2", "s3"]
 
 
-def test_dry_run_applies_to_selected_range_only() -> None:
-    run, calls = _run(from_step="s2", to_step="s3", apply=False)
+def test_dry_run_applies_to_selected_range_only(run_log) -> None:
+    run, calls = _run(run_log, from_step="s2", to_step="s3", apply=False)
     assert _ids(run) == ["s2", "s3"]            # only the selected range
     statuses = {o.id: o.status for o in run.outcomes}
     assert statuses["s2"] == "skipped"          # apply_only skipped in dry-run
@@ -117,12 +117,12 @@ def test_dry_run_applies_to_selected_range_only() -> None:
 
 # --- Fail-closed ------------------------------------------------------------
 
-def test_unknown_step_fails_closed() -> None:
+def test_unknown_step_fails_closed(run_log) -> None:
     with pytest.raises(WorkflowError):
-        _run(step="nope")
+        _run(run_log, step="nope")
 
 
-def test_ambiguous_identifier_fails_closed() -> None:
+def test_ambiguous_identifier_fails_closed(run_log) -> None:
     calls: list[str] = []
     registry = _registry(["p_a", "shared"], calls)
     workflow = {
@@ -135,14 +135,14 @@ def test_ambiguous_identifier_fails_closed() -> None:
         ],
     }
     with pytest.raises(WorkflowError):
-        run_workflow(object(), workflow, registry, step="shared")  # matches b and c
+        run_workflow(object(), run_log, workflow, registry, step="shared")  # matches b and c
 
 
-def test_step_combined_with_range_fails_closed() -> None:
+def test_step_combined_with_range_fails_closed(run_log) -> None:
     with pytest.raises(WorkflowError):
-        _run(step="s1", from_step="s2")
+        _run(run_log, step="s1", from_step="s2")
 
 
-def test_reversed_range_fails_closed() -> None:
+def test_reversed_range_fails_closed(run_log) -> None:
     with pytest.raises(WorkflowError):
-        _run(from_step="s3", to_step="s1")
+        _run(run_log, from_step="s3", to_step="s1")

@@ -334,51 +334,13 @@ def _has_durable_run_path(ctx: Any) -> bool:
 def log_run_record(
     run_log: 'RunLog', record_type: str, *, message: str = "", **fields: Any
 ) -> int | None:
+    """Append one typed record through the run log that owns the write.
+
+    The run log is passed, never located. It owns the record sequence, the
+    parenting, the destination and the state every record is stamped with, so
+    there is nothing left for this to do but hand the call over.
     """
-    Append one typed record to the append-only run log.
-
-    Every record carries ``run_id`` (SGC_Rey_Run_ID_Standard) plus the record type,
-    its logical group (execution vs run-result), a UTC timestamp, the owning app,
-    and the workflow/pipeline name when known. This is the single, centralized entry
-    point for run-log records — runners and the logging layer emit through here
-    rather than writing the run log directly. Append failures are recorded to the
-    standard logger and never mask execution.
-
-    Parameters
-    ----------
-    ctx : Any
-        Application context.
-    record_type : str
-        A record type (e.g. ``"RUN_START"``, ``"STEP_END"``, ``"RUN_SUMMARY"``).
-    message : str
-        Optional human-readable message.
-    **fields : Any
-        Additional typed fields merged into the record.
-
-    Destination is decided for every record, because every record passes
-    through here. ``logging.run_store`` selects the JSONL run log, the control
-    database, or both, and a record is committed when every selected
-    destination accepted it.
-
-    A compatibility shim. The writing belongs to
-    :class:`~rey_lib.logs.run_log.RunLog`, which owns the path, the
-    destinations and the record sequence. This keeps the name every caller
-    already uses, so introducing that owner changes no call site.
-
-    Returns
-    -------
-    int | None
-        The committed ``record_id`` — the record's logical sequence number
-        within the run — or ``None`` when the record could not be committed to
-        every selected destination. The return is additive: callers that do not
-        need durable record identity may continue to ignore it. A caller that
-        must not act unless its evidence is durable (for example the governed
-        file manifest) treats ``None`` as the failure signal, because this
-        function never raises.
-    """
-    from rey_lib.logs.run_log import run_log_for
-
-    return run_log_for(ctx).append(record_type, message=message, **fields)
+    return run_log.append(record_type, message=message, **fields)
 
 
 _CURRENT_RUN: dict[str, Any] = {"run": None}

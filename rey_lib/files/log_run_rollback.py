@@ -486,7 +486,7 @@ def log_source_file_mutation(
             reason_code=reason_code,
             reason=reason,
         )
-        manifest_record_id = log_file_manifest_record(run_log, record)
+        manifest_record_id = log_file_manifest_record(ctx, record)
         return SourceFileMutationEvidenceResult(
             manifest_record_id,
             run_log_record_id=run_log_record_id,
@@ -1119,7 +1119,7 @@ def _write_run_rollback_summary(
         application_name="rey_lib",
     )
     try:
-        return log_file_manifest_record(run_log, record)
+        return log_file_manifest_record(ctx, record)
     except FileManifestError:
         return None
 

@@ -34,7 +34,7 @@ def _recorder() -> tuple[list[tuple[str, dict[str, Any]]], Any]:
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def test_dispatch_by_process_name_reused_across_steps() -> None:
+def test_dispatch_by_process_name_reused_across_steps(run_log) -> None:
     """One process handler is reused by multiple steps, dispatched by process."""
     calls: list[str] = []
 
@@ -58,14 +58,14 @@ def test_dispatch_by_process_name_reused_across_steps() -> None:
         ],
     }
 
-    run = run_workflow(object(), workflow, {"git_commit": git_commit, "export": export})
+    run = run_workflow(object(), run_log, workflow, {"git_commit": git_commit, "export": export})
 
     assert run.status == "success"
     assert [o.process for o in run.outcomes] == ["export", "git_commit", "git_commit"]
     assert calls == ["before-ddl", "after-ddl"]
 
 
-def test_dispatch_ignores_labels() -> None:
+def test_dispatch_ignores_labels(run_log) -> None:
     """Two steps with different labels but the same process hit one handler."""
     hits = []
 
@@ -81,7 +81,7 @@ def test_dispatch_ignores_labels() -> None:
             {"id": "b", "label": "Another Human Label", "process": "p"},
         ],
     }
-    run_workflow(object(), workflow, {"p": handler})
+    run_workflow(object(), run_log, workflow, {"p": handler})
     assert len(hits) == 2
 
 
@@ -89,7 +89,7 @@ def test_dispatch_ignores_labels() -> None:
 # Effective config + tokens
 # ---------------------------------------------------------------------------
 
-def test_effective_config_merges_step_over_process() -> None:
+def test_effective_config_merges_step_over_process(run_log) -> None:
     """Step config overrides process defaults; nested dicts merge."""
     seen: dict[str, Any] = {}
 
@@ -103,11 +103,11 @@ def test_effective_config_merges_step_over_process() -> None:
         "steps": [{"id": "s", "label": "S", "process": "p",
                    "config": {"b": 9, "nested": {"y": 20, "z": 30}}}],
     }
-    run_workflow(object(), workflow, {"p": handler})
+    run_workflow(object(), run_log, workflow, {"p": handler})
     assert seen == {"a": 1, "b": 9, "nested": {"x": 1, "y": 20, "z": 30}}
 
 
-def test_workflow_tokens_resolve_into_process_config() -> None:
+def test_workflow_tokens_resolve_into_process_config(run_log) -> None:
     """Workflow-local tokens expand in config; global path tokens are left intact."""
     seen: dict[str, Any] = {}
 
@@ -121,7 +121,7 @@ def test_workflow_tokens_resolve_into_process_config() -> None:
         "processes": {"p": {"output_root": "{ddl_root}", "repo_root": "{ddl_root}"}},
         "steps": [{"id": "s", "label": "S", "process": "p"}],
     }
-    run_workflow(object(), workflow, {"p": handler})
+    run_workflow(object(), run_log, workflow, {"p": handler})
     # Local {ddl_root} expanded; global {data} preserved for the ctx path resolver.
     assert seen["output_root"] == "{data}/rey_db_admin/database_ddl"
     assert seen["repo_root"] == "{data}/rey_db_admin/database_ddl"
@@ -131,7 +131,7 @@ def test_workflow_tokens_resolve_into_process_config() -> None:
 # Dry-run and single-step
 # ---------------------------------------------------------------------------
 
-def test_dry_run_skips_apply_only_process() -> None:
+def test_dry_run_skips_apply_only_process(run_log) -> None:
     """A process whose effective config sets apply_only is skipped in dry-run."""
     ran: list[str] = []
 
@@ -146,13 +146,13 @@ def test_dry_run_skips_apply_only_process() -> None:
         "steps": [{"id": "lint", "label": "L", "process": "lint"},
                   {"id": "recreate", "label": "R", "process": "recreate"}],
     }
-    run = run_workflow(object(), workflow, {"lint": handler, "recreate": handler},
+    run = run_workflow(object(), run_log, workflow, {"lint": handler, "recreate": handler},
                        apply=False)
     assert [o.status for o in run.outcomes] == ["ok", "skipped"]
     assert ran == ["lint"]
 
 
-def test_dry_run_skips_apply_only_from_step_override() -> None:
+def test_dry_run_skips_apply_only_from_step_override(run_log) -> None:
     """apply_only may come from a step override (e.g. the second export)."""
     ran: list[str] = []
 
@@ -167,12 +167,12 @@ def test_dry_run_skips_apply_only_from_step_override() -> None:
                   {"id": "after", "label": "A", "process": "export",
                    "config": {"apply_only": True}}],
     }
-    run = run_workflow(object(), workflow, {"export": handler}, apply=False)
+    run = run_workflow(object(), run_log, workflow, {"export": handler}, apply=False)
     assert [o.status for o in run.outcomes] == ["ok", "skipped"]
     assert ran == ["export"]
 
 
-def test_single_step_only_runs_matching_id() -> None:
+def test_single_step_only_runs_matching_id(run_log) -> None:
     """only=<id> runs just that step."""
     ran: list[str] = []
     workflow = {
@@ -182,7 +182,7 @@ def test_single_step_only_runs_matching_id() -> None:
                   {"id": "sb", "label": "B", "process": "b"}],
     }
     registry = {"a": lambda *_: ran.append("a"), "b": lambda *_: ran.append("b")}
-    run = run_workflow(object(), workflow, registry, only="sb")
+    run = run_workflow(object(), run_log, workflow, registry, only="sb")
     assert ran == ["b"]
     assert [o.id for o in run.outcomes] == ["sb"]
 
@@ -191,31 +191,31 @@ def test_single_step_only_runs_matching_id() -> None:
 # Fail-closed
 # ---------------------------------------------------------------------------
 
-def test_step_id_required() -> None:
+def test_step_id_required(run_log) -> None:
     """A step without an id fails closed."""
     workflow = {"name": "w", "processes": {"p": {}},
                 "steps": [{"label": "S", "process": "p"}]}
     with pytest.raises(WorkflowError, match="missing required 'id'"):
-        run_workflow(object(), workflow, {"p": lambda *_: None})
+        run_workflow(object(), run_log, workflow, {"p": lambda *_: None})
 
 
-def test_undefined_process_fails_closed() -> None:
+def test_undefined_process_fails_closed(run_log) -> None:
     """A step calling a process absent from workflow.processes fails closed."""
     workflow = {"name": "w", "processes": {"p": {}},
                 "steps": [{"id": "s", "label": "S", "process": "missing"}]}
     with pytest.raises(WorkflowError, match="undefined process"):
-        run_workflow(object(), workflow, {"p": lambda *_: None})
+        run_workflow(object(), run_log, workflow, {"p": lambda *_: None})
 
 
-def test_process_without_registered_handler_fails_closed() -> None:
+def test_process_without_registered_handler_fails_closed(run_log) -> None:
     """A process with no handler in this app's registry fails closed."""
     workflow = {"name": "w", "processes": {"p": {}},
                 "steps": [{"id": "s", "label": "S", "process": "p"}]}
     with pytest.raises(WorkflowError, match="no registered handler"):
-        run_workflow(object(), workflow, {})
+        run_workflow(object(), run_log, workflow, {})
 
 
-def test_handler_error_stops_run_fail_closed() -> None:
+def test_handler_error_stops_run_fail_closed(run_log) -> None:
     """A handler exception records a failed outcome and stops the run."""
     ran: list[str] = []
 
@@ -232,7 +232,7 @@ def test_handler_error_stops_run_fail_closed() -> None:
         "steps": [{"id": "s1", "label": "1", "process": "boom"},
                   {"id": "s2", "label": "2", "process": "after"}],
     }
-    run = run_workflow(object(), workflow, {"boom": boom, "after": after})
+    run = run_workflow(object(), run_log, workflow, {"boom": boom, "after": after})
     assert run.status == "failed"
     assert run.outcomes[-1].status == "failed"
     assert "nope" in (run.outcomes[-1].error or "")
@@ -242,7 +242,7 @@ def test_handler_error_stops_run_fail_closed() -> None:
 # Retired configuration (SGC_Log_Run_Rollback)
 # ---------------------------------------------------------------------------
 
-def test_retired_restore_mappings_key_is_rejected() -> None:
+def test_retired_restore_mappings_key_is_rejected(run_log) -> None:
     """A retired key fails closed rather than being silently ignored."""
     workflow = {
         "name": "standalone",
@@ -252,10 +252,10 @@ def test_retired_restore_mappings_key_is_rejected() -> None:
     }
 
     with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
-        run_workflow(object(), workflow, {"noop": lambda *_: None})
+        run_workflow(object(), run_log, workflow, {"noop": lambda *_: None})
 
 
-def test_retired_key_is_rejected_before_any_step_runs() -> None:
+def test_retired_key_is_rejected_before_any_step_runs(run_log) -> None:
     """Rejection happens during validation, so no handler is invoked."""
     calls, handler = _recorder()
     workflow = {
@@ -266,12 +266,12 @@ def test_retired_key_is_rejected_before_any_step_runs() -> None:
     }
 
     with pytest.raises(WorkflowError, match="retired key"):
-        run_workflow(object(), workflow, {"noop": handler})
+        run_workflow(object(), run_log, workflow, {"noop": handler})
 
     assert calls == []
 
 
-def test_workflow_without_the_retired_key_runs_normally() -> None:
+def test_workflow_without_the_retired_key_runs_normally(run_log) -> None:
     calls, handler = _recorder()
     workflow = {
         "name": "standalone",
@@ -279,7 +279,7 @@ def test_workflow_without_the_retired_key_runs_normally() -> None:
         "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
     }
 
-    run = run_workflow(object(), workflow, {"noop": handler})
+    run = run_workflow(object(), run_log, workflow, {"noop": handler})
 
     assert run.status == "success"
     assert len(calls) == 1
@@ -289,7 +289,7 @@ def test_workflow_without_the_retired_key_runs_normally() -> None:
 # Disabled workflows and pre-execution failure evidence
 # ---------------------------------------------------------------------------
 
-def test_disabled_workflow_is_refused_without_raising() -> None:
+def test_disabled_workflow_is_refused_without_raising(run_log) -> None:
     """enabled: false is a governed outcome, not a fault: no exception."""
     workflow = {
         "name": "reduce_source_files",
@@ -302,7 +302,7 @@ def test_disabled_workflow_is_refused_without_raising() -> None:
     def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
         calls.append("ran")
 
-    run = run_workflow(object(), workflow, {"p": handler})
+    run = run_workflow(object(), run_log, workflow, {"p": handler})
 
     assert run.status == "refused"
     assert run.status != "success"
@@ -310,7 +310,7 @@ def test_disabled_workflow_is_refused_without_raising() -> None:
     assert calls == []
 
 
-def test_a_disabled_workflow_is_refused_before_its_definition_is_parsed() -> None:
+def test_a_disabled_workflow_is_refused_before_its_definition_is_parsed(run_log) -> None:
     """A workflow that will not run is never rejected for an unrelated defect."""
     workflow = {
         "name": "w",
@@ -319,10 +319,10 @@ def test_a_disabled_workflow_is_refused_before_its_definition_is_parsed() -> Non
         "steps": [{"label": "no id here"}],
     }
 
-    assert run_workflow(object(), workflow, {}).status == "refused"
+    assert run_workflow(object(), run_log, workflow, {}).status == "refused"
 
 
-def test_a_workflow_without_an_enabled_key_still_runs() -> None:
+def test_a_workflow_without_an_enabled_key_still_runs(run_log) -> None:
     """Absent means enabled; only an explicit false refuses."""
     calls: list[str] = []
 
@@ -334,10 +334,9 @@ def test_a_workflow_without_an_enabled_key_still_runs() -> None:
         "processes": {"p": {}},
         "steps": [{"id": "s", "process": "p"}],
     }
-    assert run_workflow(object(), workflow, {"p": handler}).status == "success"
+    assert run_workflow(object(), run_log, workflow, {"p": handler}).status == "success"
     assert calls == ["ran"]
-    assert run_workflow(
-        object(), {**workflow, "enabled": True}, {"p": handler}
+    assert run_workflow(object(), run_log, {**workflow, "enabled": True}, {"p": handler}
     ).status == "success"
 
 
@@ -367,7 +366,7 @@ def _log_ctx(tmp_path: Any) -> Any:
     return ctx
 
 
-def test_missing_handler_writes_failure_evidence_before_raising(
+def test_missing_handler_writes_failure_evidence_before_raising(run_log, 
     tmp_path: Any,
 ) -> None:
     """A failure between RUN_START and the first step is still evidenced."""
@@ -410,7 +409,7 @@ def test_missing_handler_writes_failure_evidence_before_raising(
     assert failure["process"] == "prepare_rule_set_inputs"
 
 
-def test_undefined_process_writes_failure_evidence_before_raising(
+def test_undefined_process_writes_failure_evidence_before_raising(run_log, 
     tmp_path: Any,
 ) -> None:
     ctx = _log_ctx(tmp_path)
@@ -426,7 +425,7 @@ def test_undefined_process_writes_failure_evidence_before_raising(
     assert complete["status"] == "failed"
 
 
-def test_disabled_workflow_is_recorded_through_the_normal_run_path(
+def test_disabled_workflow_is_recorded_through_the_normal_run_path(run_log, 
     tmp_path: Any,
 ) -> None:
     """The attempt is evidence: a run starts, completes, and is finalized."""

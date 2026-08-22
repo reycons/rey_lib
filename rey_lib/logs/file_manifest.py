@@ -145,7 +145,7 @@ def manifest_state_path(manifest_path: Path | str) -> Path:
     return Path(str(manifest_path) + _STATE_SUFFIX)
 
 
-def log_file_manifest_record(run_log: 'RunLog', record: dict[str, Any]) -> int:
+def log_file_manifest_record(ctx: Any, record: dict[str, Any]) -> int:
     """
     Append one governed record to the installation file manifest.
 
