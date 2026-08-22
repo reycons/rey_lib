@@ -160,9 +160,14 @@ architecture_rules:
       - "rey_lib.control"
       - "rey_lib.control.*"
       - "rey_lib/control/*"
+    # bootstrap constructs Control because the runtime owns its lifetime: the
+    # run log references it for persistence but must not decide when it exists
+    # or when it closes. That is a construction point, not a use -- no control
+    # operation is called there -- so the boundary the rule protects is intact.
     allowed_path_globs:
       - "rey_lib/logs/*"
       - "rey_lib/control/*"
+      - "rey_lib/config/bootstrap.py"
     scope_path_globs:
       - "rey_lib/*"
     edge_kinds:

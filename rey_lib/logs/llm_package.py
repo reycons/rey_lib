@@ -18,8 +18,9 @@ __all__ = [
 ]
 
 
-def create_llm_package(run_log, 
-    log_path: str | Path,
+def create_llm_package(
+    run_log: Any,
+    *,
     analysis_name: str,
     source_record_type: str,
     package_record_type: str,
@@ -34,7 +35,7 @@ def create_llm_package(run_log,
     from rey_lib.config.config_utils import build_ctx_from_path
     from rey_lib.logs.record_enrichment import log_run_record
 
-    path = Path(log_path).expanduser().resolve()
+    path = Path(run_log.path()).expanduser().resolve()
     run = read_run_log_sections(path)
     records = run["records"]
 
@@ -578,8 +579,9 @@ def run_workbench_input_stream(
     return _run(request, on_chunk=on_chunk, cancelled=cancelled)
 
 
-def run_configured_log_analysis(run_log, 
-    log_path: str | Path,
+def run_configured_log_analysis(
+    run_log: Any,
+    *,
     analysis_name: str,
     package_record_type: str,
 ) -> dict[str, Any]:
@@ -601,7 +603,7 @@ def run_configured_log_analysis(run_log,
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": [], "failures": []}
 
-    path = Path(log_path).expanduser().resolve()
+    path = Path(run_log.path()).expanduser().resolve()
     run = read_run_log_sections(path)
     records = run["records"]
 

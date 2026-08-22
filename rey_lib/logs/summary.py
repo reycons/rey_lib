@@ -33,7 +33,7 @@ _RUN_COMPLETE = "RUN_COMPLETE"
 _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
 
-def finalize_run_log(run_log, log_path: str | Path) -> dict[str, Any]:
+def finalize_run_log(run_log: Any) -> dict[str, Any]:
     """Run the canonical post-run log processing sequence.
 
     Order: RESULTS_SUMMARY, then the log_interpreter stage
@@ -47,13 +47,12 @@ def finalize_run_log(run_log, log_path: str | Path) -> dict[str, Any]:
     """
     from rey_lib.logs.llm_package import create_llm_package, run_configured_log_analysis
 
-    result = create_results_summary(log_path=log_path)
+    result = create_results_summary(run_log)
     if result.get("summary") is None:
         return {**result, "package": None, "analysis": None}
     try:
         package = create_llm_package(
             run_log,
-            log_path,
             analysis_name="log_interpreter",
             source_record_type="RESULTS_SUMMARY",
             package_record_type="LLM_PACKAGE",
@@ -62,17 +61,15 @@ def finalize_run_log(run_log, log_path: str | Path) -> dict[str, Any]:
         return {**result, "package": None, "package_failures": [str(exc)],
                 "analysis": None}
     analysis = run_configured_log_analysis(
-        run_log,
-        log_path, analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
+        run_log, analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
     )
 
     return {**result, "package": package, "package_failures": [], "analysis": analysis}
 
 
 def create_results_summary(
-    run_log: Any = None,
+    run_log: Any,
     *,
-    log_path: str | Path | None = None,
     execution_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create the canonical RESULTS_SUMMARY for a completed run log.
@@ -113,12 +110,10 @@ def create_results_summary(
         "failures": [],
     }
 
-    resolved = log_path
-    if not resolved and run_log is not None:
-        try:
-            resolved = str(run_log.path())
-        except Exception:  # noqa: BLE001 — an unopened run log resolves nothing.
-            resolved = None
+    try:
+        resolved = str(run_log.path())
+    except Exception:  # noqa: BLE001 — an unopened run log resolves nothing.
+        resolved = None
     if not resolved:
         result["skipped"].append("no_run_log_path")
         return result
@@ -167,21 +162,10 @@ def create_results_summary(
             )
             return result
 
-        # A run log limited to the fields already present in the canonical
-        # Summary. Optional app/workflow enrichment would otherwise alter the
-        # builder payload, and the sequence resolves from the log's own path.
-        from rey_lib.logs.run_log import RunLog
-
-        write_log = RunLog(
-            app="",
-            run_id=str(summary["run_id"]),
-            run_timestamp=str(summary["run_timestamp"]),
-            path=str(payload["path"]),
-        )
         records_before = read_run_log_sections(payload["path"])["records"]
         summary_fields = dict(summary)
         summary_fields.pop("record_type", None)
-        log_run_record(write_log, _RESULTS_SUMMARY, **summary_fields)
+        log_run_record(run_log, _RESULTS_SUMMARY, **summary_fields)
         records_after = read_run_log_sections(payload["path"])["records"]
         appended = records_after[len(records_before):]
         if len(appended) != 1 or not _is_record_type(appended[0], _RESULTS_SUMMARY):

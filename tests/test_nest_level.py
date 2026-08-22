@@ -113,10 +113,10 @@ def test_pipeline_base_and_deterministic_later_resets(run_log) -> None:
     assert set_nest_level(run_log, "app") == 3
 
 
-def test_state_lives_on_ctx_not_globally(run_log) -> None:
-    """Two contexts keep independent levels."""
+def test_state_lives_on_the_run_log_not_globally() -> None:
+    """Two run logs keep independent levels."""
     a, b = _ctx(), _ctx()
-    set_nest_level(run_log, "pipeline")
-    set_nest_level(run_log, "app")
-    assert get_nest_level(run_log) == 1
-    assert get_nest_level(run_log) == 3
+    set_nest_level(a, "pipeline")
+    set_nest_level(b, "app")
+    assert get_nest_level(a) == 1
+    assert get_nest_level(b) == 3

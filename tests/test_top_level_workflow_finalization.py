@@ -94,7 +94,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     run_app_operation(ctx, run_log, "run-workflow", operation_body)
 
     # The run-owning application finalizes again because it is not a pipeline step.
-    finalize_run_log(run_log, run_log.path())
+    finalize_run_log(run_log)
 
 
 def test_top_level_run_workflow_summarizes_exactly_once(run_log, tmp_path: Path) -> None:
@@ -114,7 +114,7 @@ def test_repeated_finalization_appends_no_further_summary(run_log, tmp_path: Pat
     _run_top_level_workflow(run_log, tmp_path, ctx)
 
     before = _records(run_log.path())
-    finalize_run_log(run_log, run_log.path())
+    finalize_run_log(run_log)
 
     after = _records(run_log.path())
     assert _count(after, "RESULTS_SUMMARY") == 1
@@ -132,7 +132,7 @@ def test_create_results_summary_returns_the_existing_summary(run_log, tmp_path: 
         if str(record.get("record_type") or "").upper() == "RESULTS_SUMMARY"
     )
 
-    result = create_results_summary(log_path=run_log.path())
+    result = create_results_summary(run_log)
 
     assert result["action"] is None
     assert "already_summarized" in result["skipped"]

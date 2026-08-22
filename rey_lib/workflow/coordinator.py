@@ -92,7 +92,7 @@ def _finalize_run(ctx: Any, run_log: Any) -> None:
     if _get(getattr(ctx, "runtime", None), "pipeline_run_id"):
         return
     if getattr(ctx, "run_log_path", None):
-        finalize_run_log(run_log, ctx.run_log_path)
+        finalize_run_log(run_log)
 
 
 def _refused_disabled_workflow(
