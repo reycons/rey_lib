@@ -23,7 +23,7 @@ def _recorder() -> tuple[list[tuple[str, dict[str, Any]]], Any]:
     """Return (calls, handler) where handler records (process-scope, config)."""
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         calls.append((config.get("_scope", ""), config))
         return None
 
@@ -38,11 +38,11 @@ def test_dispatch_by_process_name_reused_across_steps(run_log) -> None:
     """One process handler is reused by multiple steps, dispatched by process."""
     calls: list[str] = []
 
-    def git_commit(ctx: Any, config: dict[str, Any], run: RunContext) -> StepResult:
+    def git_commit(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> StepResult:
         calls.append(str(config.get("label")))
         return StepResult("git_commit", "ok")
 
-    def export(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def export(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         return None
 
     workflow = {
@@ -69,7 +69,7 @@ def test_dispatch_ignores_labels(run_log) -> None:
     """Two steps with different labels but the same process hit one handler."""
     hits = []
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         hits.append(config)
         return None
 
@@ -93,7 +93,7 @@ def test_effective_config_merges_step_over_process(run_log) -> None:
     """Step config overrides process defaults; nested dicts merge."""
     seen: dict[str, Any] = {}
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         seen.update(config)
         return None
 
@@ -111,7 +111,7 @@ def test_workflow_tokens_resolve_into_process_config(run_log) -> None:
     """Workflow-local tokens expand in config; global path tokens are left intact."""
     seen: dict[str, Any] = {}
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         seen.update(config)
         return None
 
@@ -135,7 +135,7 @@ def test_dry_run_skips_apply_only_process(run_log) -> None:
     """A process whose effective config sets apply_only is skipped in dry-run."""
     ran: list[str] = []
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         ran.append(config.get("_scope", ""))
         return None
 
@@ -156,7 +156,7 @@ def test_dry_run_skips_apply_only_from_step_override(run_log) -> None:
     """apply_only may come from a step override (e.g. the second export)."""
     ran: list[str] = []
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         ran.append(config["_scope"])
         return None
 
@@ -219,10 +219,10 @@ def test_handler_error_stops_run_fail_closed(run_log) -> None:
     """A handler exception records a failed outcome and stops the run."""
     ran: list[str] = []
 
-    def boom(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def boom(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         raise RuntimeError("nope")
 
-    def after(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def after(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         ran.append("after")
         return None
 
@@ -299,7 +299,7 @@ def test_disabled_workflow_is_refused_without_raising(run_log) -> None:
     }
     calls: list[str] = []
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         calls.append("ran")
 
     run = run_workflow(object(), run_log, workflow, {"p": handler})
@@ -326,7 +326,7 @@ def test_a_workflow_without_an_enabled_key_still_runs(run_log) -> None:
     """Absent means enabled; only an explicit false refuses."""
     calls: list[str] = []
 
-    def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         calls.append("ran")
 
     workflow = {

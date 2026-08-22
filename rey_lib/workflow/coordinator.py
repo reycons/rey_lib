@@ -53,9 +53,12 @@ _logger = get_logger(__name__)
 # error, never a silently ignored key (SGC_Log_Run_Rollback).
 _RETIRED_WORKFLOW_KEYS = ("restore_mappings",)
 
-# A process handler: (ctx, effective_config, run_context) -> result-or-None.
+# A process handler: (ctx, run_log, effective_config, run_context) -> result-or-None.
 # The result may be any object exposing ``status``/``detail``; None means "ok".
-ProcessHandler = Callable[[Any, dict[str, Any], RunContext], Any]
+#
+# The run log is passed rather than reached through ctx or the run context: a
+# handler that writes records is a run-log writer, and a writer takes its owner.
+ProcessHandler = Callable[[Any, Any, dict[str, Any], RunContext], Any]
 
 
 @dataclass
@@ -384,7 +387,7 @@ def run_workflow(
                 continue
 
             try:
-                result = handler(ctx, effective, run_ctx)
+                result = handler(ctx, run_log, effective, run_ctx)
             except Exception as exc:  # noqa: BLE001 — fail closed: record and stop
                 error_payload = build_safe_error_payload(
                     exc,

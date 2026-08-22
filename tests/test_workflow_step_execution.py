@@ -18,7 +18,7 @@ from rey_lib.workflow import RunContext, WorkflowError, run_workflow
 def _registry(process_names: list[str], calls: list[str]) -> dict[str, Any]:
     """Return a registry whose handlers record the process they ran."""
     def make(process_name: str) -> Any:
-        def handler(ctx: Any, config: dict[str, Any], run: RunContext) -> None:
+        def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
             calls.append(process_name)
             return None
         return handler

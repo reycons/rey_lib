@@ -63,7 +63,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     # The workflow, the app and finalization all write one run log.
     run_log._path = str(ctx.run_log_path)
 
-    def handler(_ctx: Any, _config: dict[str, Any], _run: Any) -> None:
+    def handler(_ctx: Any, _run_log: Any, _config: dict[str, Any], _run: Any) -> None:
         log_artifact_reference(run_log,
             str(tmp_path / "out" / "converted.csv"),
             role="converted_csv",
