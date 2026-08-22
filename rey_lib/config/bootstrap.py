@@ -185,7 +185,7 @@ def open_run_log(ctx: Namespace) -> Any:
         if found:
             lineage[field] = found
 
-    return RunLog(
+    run_log = RunLog(
         app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
                 or getattr(ctx, "name", "") or ""),
         run_id=ctx.run_id,
@@ -198,6 +198,52 @@ def open_run_log(ctx: Namespace) -> Any:
         pipeline=getattr(ctx, "pipeline_name", None),
         lineage=lineage,
     )
+    _surrender_adopted_fields(ctx)
+    return run_log
+
+
+# Fields the run log adopts wholesale: after construction they exist on the run
+# log and nowhere else. Adoption is a move, not a copy -- a value left on the
+# context is a second place the same fact can be read from and a second place it
+# can drift.
+#
+# Only fields with no remaining reader outside this construction are listed. The
+# identity and naming facts the rest of the estate legitimately reads --
+# run_id, run_timestamp, app_name, pipeline_name, workflow_name, log_file -- are
+# execution facts the run log copied, not run-log state, and removing them is a
+# wider change than run-log ownership.
+_ADOPTED_FIELDS = (
+    "owner_app_name",
+    "run_log_dir",
+    "parent_run_id",
+    "subject_type",
+    "subject_id",
+    "subject_name",
+    "pipeline_run_id",
+    "workflow_run_id",
+    "pipeline_id",
+    "workflow_id",
+)
+
+
+def _surrender_adopted_fields(ctx: Namespace) -> None:
+    """Remove from the context every field the run log has just taken over.
+
+    Leaving them behind is how the migration would quietly reintroduce what it
+    removed: a caller reads ``ctx.parent_run_id`` to stamp a record, the run log
+    stamps its own, and the two disagree the moment one of them moves.
+
+    ``ctx.runtime`` is left alone. It is the pipeline's inherited snapshot, not
+    this context's own fields, and it is how a subprocess step receives the
+    enclosing run in the first place.
+    """
+    for field in _ADOPTED_FIELDS:
+        try:
+            delattr(ctx, field)
+        except (AttributeError, TypeError):
+            # Absent, or a context that refuses attribute removal. Either way
+            # there is nothing left to read from.
+            pass
 
 
 @contextmanager

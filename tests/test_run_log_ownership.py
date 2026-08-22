@@ -416,3 +416,73 @@ class TestOneRunIsOneLog:
         assert '"frames"' in source and "threading.get_ident()" in source, (
             "the ambient frames are no longer keyed by thread"
         )
+
+
+# ---------------------------------------------------------------------------
+# Adoption is a move
+# ---------------------------------------------------------------------------
+
+class TestAdoptionIsAMove:
+    """A field the run log took over does not stay readable on the context.
+
+    Leaving it behind is how this migration would quietly reintroduce what it
+    removed: a caller reads ctx.parent_run_id to stamp a record, the run log
+    stamps its own, and the two disagree the moment either moves.
+    """
+
+    def test_the_adopted_fields_are_removed_from_the_context(self, tmp_path) -> None:
+        from rey_lib.config.bootstrap import _ADOPTED_FIELDS, open_run_log
+        from rey_lib.config.config_utils import Namespace
+
+        ctx = Namespace({
+            "run_id": "R1", "run_timestamp": "ts", "app_name": "rey_loader",
+            "owner_app_name": "rey_loader", "run_log_dir": str(tmp_path),
+            "log_file": str(tmp_path / "a.jsonl"),
+            "parent_run_id": "R0", "subject_type": "app", "subject_id": "s",
+            "subject_name": "S", "pipeline_run_id": "P1", "workflow_run_id": "W1",
+            "pipeline_id": "PI", "workflow_id": "WI",
+        })
+        run_log = open_run_log(ctx)
+
+        left = [f for f in _ADOPTED_FIELDS if getattr(ctx, f, None) is not None]
+        assert left == [], f"the run log adopted these but the context kept them: {left}"
+        # And the run log actually took them, rather than both losing the value.
+        assert run_log._lineage["parent_run_id"] == "R0"
+        assert run_log._lineage["pipeline_run_id"] == "P1"
+
+    def test_the_inherited_runtime_snapshot_survives(self, tmp_path) -> None:
+        """ctx.runtime is the enclosing pipeline's snapshot, not this run's fields.
+
+        It is how a step subprocess receives the run above it, so removing it
+        would cut the lineage the records are supposed to carry.
+        """
+        from rey_lib.config.bootstrap import open_run_log
+        from rey_lib.config.config_utils import Namespace
+
+        ctx = Namespace({
+            "run_id": "R1", "run_timestamp": "ts", "app_name": "rey_loader",
+            "log_file": str(tmp_path / "a.jsonl"),
+            "runtime": Namespace({"pipeline_run_id": "P1"}),
+        })
+        run_log = open_run_log(ctx)
+
+        assert getattr(ctx.runtime, "pipeline_run_id", None) == "P1"
+        assert run_log._lineage.get("pipeline_run_id") == "P1"
+
+    def test_no_caller_restamps_lineage_the_run_log_already_adds(self) -> None:
+        """A payload that sets a lineage field by hand is a second stamper."""
+        from rey_lib.logs.run_log import DOMAIN_FIELDS, LINEAGE_FIELDS
+
+        offenders = []
+        for path in APPS_ROOT.rglob("*.py"):
+            if any(p.startswith(".") or p in {"venv", "tests", "build", "dist"}
+                   for p in path.parts):
+                continue
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            for field in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):
+                if re.search(rf'"{field}":\s*getattr\(ctx,', source):
+                    offenders.append(f"{path.name}:{field}")
+        assert offenders == [], (
+            "these stamp a lineage field the run log already stamps: "
+            f"{', '.join(sorted(set(offenders)))}"
+        )
