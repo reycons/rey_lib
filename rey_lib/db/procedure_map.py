@@ -18,13 +18,13 @@ Config shape (list-based named records):
     procedure_maps:
       - name: control
         routine_bindings:
-          - name: start_batch
+          - name: <logical name callers use>
             execution_target: routine        # optional; default routine
-            routine: control.f_start_batch
+            routine: <schema>.<db routine>   # named here only; never in code
             routine_type: function           # function | procedure
             result_mode: scalar_result
-            output: {variable: batch_id, load_to_ctx: batch_id}
-            input: {p_run_id: run_id}
+            output: {variable: <ctx key>, load_to_ctx: <ctx key>}
+            input: {<db param>: <ctx value>}
         sql_bindings:
           - name: start_batch
             execution_target: mapped_sql

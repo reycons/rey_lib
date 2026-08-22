@@ -56,7 +56,7 @@ def _routine_map(name: str = "control") -> SimpleNamespace:
         name=name,
         routine_bindings=[SimpleNamespace(
             name="start_batch",
-            routine="control.f_start_batch",
+            routine="control.mapped_function",
             result_mode="scalar_result",
             inputs={"p_batch_name": "batch_name"},
             output={"variable": "batch_id", "load_to_ctx": "batch_id"},
@@ -172,7 +172,7 @@ class TestOneMapRunsAgainstTwoConnections:
 
         # One routine contract, two databases, no duplicated bindings.
         assert [routine for routine, _ in seen] == [
-            "control.f_start_batch", "control.f_start_batch"]
+            "control.mapped_function", "control.mapped_function"]
         assert [conn for _, conn in seen] == ["handle:control", "handle:control_test"]
 
     def test_the_map_is_unchanged_by_which_connection_ran_it(self) -> None:
@@ -181,4 +181,4 @@ class TestOneMapRunsAgainstTwoConnections:
         resolved = get_procedure_map(ctx, "control")
 
         assert getattr(resolved, "connection_name", None) is None
-        assert resolved.routine_bindings[0].routine == "control.f_start_batch"
+        assert resolved.routine_bindings[0].routine == "control.mapped_function"

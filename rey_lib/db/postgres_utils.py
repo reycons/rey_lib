@@ -156,7 +156,7 @@ def execute_function(
     conn : Any
         Open Rey connection handle.
     routine : str
-        Fully-qualified function name (e.g. control.f_start_batch).
+        Fully-qualified function name, as the procedure map binds it.
     named_params : dict[str, Any]
         DB parameter name → value. Order must match the function signature.
 
@@ -203,7 +203,7 @@ def execute_procedure(
     conn : Any
         Open Rey connection handle.
     routine : str
-        Fully-qualified procedure name (e.g. control.p_end_batch).
+        Fully-qualified procedure name, as the procedure map binds it.
     named_params : dict[str, Any]
         DB parameter name → value.
 

@@ -50,7 +50,7 @@ def _run_records(run_log) -> list[dict]:
     ]
 
 
-def _rb(name="start_batch", routine="control.f_start_batch", call_type=None,
+def _rb(name="start_batch", routine="control.mapped_function", call_type=None,
         routine_type=None, result_mode=None, output=None, inp=None):
     binding = {"name": name, "routine": routine}
     if call_type:
@@ -102,7 +102,7 @@ def test_routine_binding_normalizes_legacy_call_type():
 
 
 def test_routine_binding_accepts_new_fields():
-    m = _map({"name": "x", "routine": "control.p_end", "routine_type": "procedure",
+    m = _map({"name": "x", "routine": "control.mapped_procedure", "routine_type": "procedure",
               "result_mode": "no_return"})
     b = resolve_routine_binding(m, "control", "x")
     assert b["routine_type"] == "procedure" and b["result_mode"] == "no_return"
@@ -167,7 +167,7 @@ def test_input_and_inputs_spellings_both_supported():
 
 def test_legacy_actions_normalize_inside_db_utils():
     m = {"name": "control", "actions": {
-        "start_batch": {"routine": "control.f_start_batch", "call_type": "function",
+        "start_batch": {"routine": "control.mapped_function", "call_type": "function",
                         "return_variable": "batch_id", "inputs": {"p_run_id": "run_id"}}}}
     b = resolve_routine_binding(m, "control", "start_batch")
     assert b["result_mode"] == "scalar_result" and b["routine_type"] == "function"
@@ -216,7 +216,7 @@ def test_routine_scalar_executes_and_loads_output(run_log):
         db.execute_function.return_value = 123
         result = execute_mapped_routine(object(), run_log, conn, "control", "start_batch",
                                         values, run_ctx=run_ctx)
-    db.execute_function.assert_called_once_with(conn, "control.f_start_batch",
+    db.execute_function.assert_called_once_with(conn, "control.mapped_function",
                                                 {"p_run_id": "R1"})
     assert values["batch_id"] == 123 and run_ctx.batch_id == 123
     assert result["outputs"] == {"batch_id": 123}
@@ -240,7 +240,7 @@ def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
     record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "routine"
     assert record["sql_label"] == "start_batch"
-    assert record["routine"] == "control.f_start_batch"
+    assert record["routine"] == "control.mapped_function"
     assert record["status"] == "success"
     assert record["object_count"] == 1
     assert "p_run_id" not in json.dumps(record)
@@ -248,13 +248,13 @@ def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
 
 def test_routine_no_return_executes_procedure(run_log):
     conn = object()
-    m = _map(_rb(name="end_batch", routine="control.p_end_batch",
+    m = _map(_rb(name="end_batch", routine="control.mapped_procedure",
                  call_type="procedure_no_return", inp={"p_batch_id": "batch_id"}))
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         result = execute_mapped_routine(object(), run_log, conn, "control", "end_batch",
                                         {"batch_id": 5})
-    db.execute_procedure.assert_called_once_with(conn, "control.p_end_batch",
+    db.execute_procedure.assert_called_once_with(conn, "control.mapped_procedure",
                                                  {"p_batch_id": 5})
     assert result["result_mode"] == "no_return" and result["outputs"] == {}
 

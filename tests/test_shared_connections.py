@@ -139,8 +139,8 @@ class TestLifetime:
         with patch.object(connection_module, "_db") as adapter:
             adapter.get_connection.return_value = "live-handle"
             control.execute("SELECT 1", {}, "scalar_result")
-            control.execute_function("control.f_start_batch", {})
-            control.execute_procedure("control.p_end_batch", {})
+            control.execute_function("control.mapped_function", {})
+            control.execute_procedure("control.mapped_procedure", {})
 
         assert adapter.get_connection.call_count == 1
 

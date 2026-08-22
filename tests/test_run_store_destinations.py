@@ -44,7 +44,7 @@ def _control_map() -> SimpleNamespace:
     return SimpleNamespace(
         name="control",
         routine_bindings=[SimpleNamespace(
-            name="start_batch", routine="control.f_start_batch",
+            name="start_batch", routine="control.mapped_function",
             result_mode="scalar_result",
             inputs={"p_batch_name": "batch_name"},
             output={"variable": "batch_id", "load_to_ctx": "batch_id"},
