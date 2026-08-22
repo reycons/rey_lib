@@ -74,7 +74,7 @@ def _rows(ctx: Any) -> list[dict]:
 class TestContinuityAcrossWriters:
     """Holds today, and the owner must keep it."""
 
-    def test_a_second_writer_continues_the_sequence(run_log, self, tmp_path: Path) -> None:
+    def test_a_second_writer_continues_the_sequence(self, run_log, tmp_path: Path) -> None:
         first = _ctx(tmp_path)
         log_run_start(run_log, operation="first")
         for i in range(3):
@@ -87,7 +87,7 @@ class TestContinuityAcrossWriters:
         # Continues from where the first writer stopped rather than restarting.
         assert continued == [5, 6, 7]
 
-    def test_the_sequence_is_unbroken_on_disk(run_log, self, tmp_path: Path) -> None:
+    def test_the_sequence_is_unbroken_on_disk(self, run_log, tmp_path: Path) -> None:
         first = _ctx(tmp_path)
         log_run_start(run_log, operation="first")
         log_run_record(run_log, "ROW_COUNT", count_name="a", count=1)

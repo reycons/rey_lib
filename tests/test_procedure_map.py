@@ -204,7 +204,7 @@ def test_sql_binding_scalar_requires_output():
 # execute_mapped_routine (routine target)
 # ---------------------------------------------------------------------------
 
-def test_routine_scalar_executes_and_loads_output():
+def test_routine_scalar_executes_and_loads_output(run_log):
     conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
@@ -214,7 +214,7 @@ def test_routine_scalar_executes_and_loads_output():
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_function.return_value = 123
-        result = execute_mapped_routine(object(), conn, "control", "start_batch",
+        result = execute_mapped_routine(object(), run_log, conn, "control", "start_batch",
                                         values, run_ctx=run_ctx)
     db.execute_function.assert_called_once_with(conn, "control.f_start_batch",
                                                 {"p_run_id": "R1"})
@@ -246,44 +246,44 @@ def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
     assert "p_run_id" not in json.dumps(record)
 
 
-def test_routine_no_return_executes_procedure():
+def test_routine_no_return_executes_procedure(run_log):
     conn = object()
     m = _map(_rb(name="end_batch", routine="control.p_end_batch",
                  call_type="procedure_no_return", inp={"p_batch_id": "batch_id"}))
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
-        result = execute_mapped_routine(object(), conn, "control", "end_batch",
+        result = execute_mapped_routine(object(), run_log, conn, "control", "end_batch",
                                         {"batch_id": 5})
     db.execute_procedure.assert_called_once_with(conn, "control.p_end_batch",
                                                  {"p_batch_id": 5})
     assert result["result_mode"] == "no_return" and result["outputs"] == {}
 
 
-def test_missing_input_fails_closed():
+def test_missing_input_fails_closed(run_log):
     conn = object()
     m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_x": "x"}))
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db"):
         with pytest.raises(ConfigError, match="missing from the runtime context"):
-            execute_mapped_routine(object(), conn, "control", "a", {})
+            execute_mapped_routine(object(), run_log, conn, "control", "a", {})
 
 
-def test_present_none_input_binds_as_null():
+def test_present_none_input_binds_as_null(run_log):
     conn = object()
     m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_x": "x"}))
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
-        execute_mapped_routine(object(), conn, "control", "a", {"x": None})
+        execute_mapped_routine(object(), run_log, conn, "control", "a", {"x": None})
     db.execute_procedure.assert_called_once_with(conn, "r", {"p_x": None})
 
 
-def test_input_resolves_from_run_ctx():
+def test_input_resolves_from_run_ctx(run_log):
     conn = object()
     m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_b": "batch_id"}))
     run_ctx = SimpleNamespace(batch_id=99)
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
-        execute_mapped_routine(object(), conn, "control", "a", {}, run_ctx=run_ctx)
+        execute_mapped_routine(object(), run_log, conn, "control", "a", {}, run_ctx=run_ctx)
     db.execute_procedure.assert_called_once_with(conn, "r", {"p_b": 99})
 
 
@@ -291,7 +291,7 @@ def test_input_resolves_from_run_ctx():
 # execute_operation (generic dispatch: routine / mapped_sql / adhoc_sql)
 # ---------------------------------------------------------------------------
 
-def test_operation_routine_delegates():
+def test_operation_routine_delegates(run_log):
     conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
@@ -300,14 +300,14 @@ def test_operation_routine_delegates():
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_function.return_value = 7
-        result = execute_operation(object(), conn, "control",
+        result = execute_operation(object(), run_log, conn, "control",
                                    {"execution_target": "routine", "binding": "start_batch"},
                                    {"run_id": "R"}, run_ctx)
     assert result["execution_target"] == "routine" and result["outputs"] == {"batch_id": 7}
     assert run_ctx.batch_id == 7
 
 
-def test_operation_mapped_sql_scalar():
+def test_operation_mapped_sql_scalar(run_log):
     conn = object()
     m = {"name": "rey_loader", "sql_bindings": [
         _sb(name="load_staging", sql="INSERT INTO staging VALUES (:row_key) RETURNING staging_id",
@@ -318,7 +318,7 @@ def test_operation_mapped_sql_scalar():
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = 99
-        result = execute_operation(object(), conn, "rey_loader",
+        result = execute_operation(object(), run_log, conn, "rey_loader",
                                    {"execution_target": "mapped_sql", "binding": "load_staging"},
                                    {"row_key": "K"}, run_ctx)
     db.execute_sql.assert_called_once_with(
@@ -327,24 +327,24 @@ def test_operation_mapped_sql_scalar():
     assert result["outputs"] == {"staging_id": 99} and run_ctx.staging_id == 99
 
 
-def test_operation_adhoc_no_return():
+def test_operation_adhoc_no_return(run_log):
     conn = object()
     config = {"execution_target": "adhoc_sql", "result_mode": "no_return",
               "sql_text": "DELETE FROM staging WHERE batch_id = :batch_id",
               "input": {"batch_id": "batch_id"}}
     with patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = None
-        result = execute_operation(object(), conn, "control", config, {"batch_id": 5})
+        result = execute_operation(object(), run_log, conn, "control", config, {"batch_id": 5})
     db.execute_sql.assert_called_once_with(
         conn, "DELETE FROM staging WHERE batch_id = :batch_id", {"batch_id": 5}, "no_return")
     assert result["execution_target"] == "adhoc_sql" and result["result_mode"] == "no_return"
 
 
-def test_operation_adhoc_dataset_returns_rows():
+def test_operation_adhoc_dataset_returns_rows(run_log):
     conn = object()
     with patch("rey_lib.db.procedure_map._db") as db:
         db.execute_sql.return_value = [{"id": 1}, {"id": 2}]
-        result = execute_operation(object(), conn, "control",
+        result = execute_operation(object(), run_log, conn, "control",
                                    {"execution_target": "adhoc_sql",
                                     "result_mode": "dataset_result",
                                     "sql_text": "SELECT id FROM t"}, {})
@@ -517,24 +517,24 @@ def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
     assert records[0]["object_count"] == 1
 
 
-def test_operation_missing_execution_target_fails_closed():
+def test_operation_missing_execution_target_fails_closed(run_log):
     with pytest.raises(ConfigError, match="missing 'execution_target'"):
-        execute_operation(object(), object(), "control", {}, {})
+        execute_operation(object(), run_log, object(), "control", {}, {})
 
 
-def test_operation_unsupported_execution_target_fails_closed():
+def test_operation_unsupported_execution_target_fails_closed(run_log):
     with pytest.raises(ConfigError, match="unsupported execution_target"):
-        execute_operation(object(), object(), "control", {"execution_target": "telepathy"}, {})
+        execute_operation(object(), run_log, object(), "control", {"execution_target": "telepathy"}, {})
 
 
-def test_adhoc_interpolation_fails_closed():
+def test_adhoc_interpolation_fails_closed(run_log):
     conn = object()
     config = {"execution_target": "adhoc_sql", "result_mode": "no_return",
               "sql_text": "DELETE FROM t WHERE id = {batch_id}",
               "input": {"batch_id": "batch_id"}}
     with patch("rey_lib.db.procedure_map._db"):
         with pytest.raises(ConfigError, match="interpolate"):
-            execute_operation(object(), conn, "control", config, {"batch_id": 5})
+            execute_operation(object(), run_log, conn, "control", config, {"batch_id": 5})
 
 
 # ---------------------------------------------------------------------------

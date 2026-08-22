@@ -112,7 +112,7 @@ def writes_db(ctx: Any) -> bool:
     return run_store_mode(ctx) in ("db", "both")
 
 
-def new_batch_intent(ctx: Any, run_log) -> bool:
+def new_batch_intent(run_log: Any) -> bool:
     """Return the declared batch intent for this execution.
 
     Launch states whether this execution starts a batch or continues one. The
