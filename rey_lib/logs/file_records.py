@@ -163,8 +163,17 @@ def record_file_operation(operation: str, *, source_path: str = "",
     if run is None:
         return
     try:
+        from rey_lib.logs.run_log import RunLog
+
+        # The run bound for ambient recording, as the run log that owns writing.
+        bound_log = RunLog(
+            app=str(getattr(run, "app", "") or ""),
+            run_id=str(run.run_id),
+            run_timestamp=str(getattr(run, "run_timestamp", "") or ""),
+            path=str(run.run_log_path),
+        )
         log_file_operation(
-            run, operation, source_path=source_path, target_path=target_path,
+            bound_log, operation, source_path=source_path, target_path=target_path,
             status=status, **fields,
         )
     except Exception as exc:  # noqa: BLE001 — recording must never break a file op.
