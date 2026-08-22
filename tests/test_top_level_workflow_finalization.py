@@ -60,6 +60,8 @@ def _count(records: list[dict[str, Any]], record_type: str) -> int:
 def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> None:
     """Drive the exact nesting a standalone `run-workflow` invocation produces."""
     open_run_log(ctx)
+    # The workflow, the app and finalization all write one run log.
+    run_log._path = str(ctx.run_log_path)
 
     def handler(_ctx: Any, _config: dict[str, Any], _run: Any) -> None:
         log_artifact_reference(run_log,

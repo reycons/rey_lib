@@ -81,7 +81,7 @@ class WorkflowRun:
     context: Optional[RunContext] = None  # final run context (metadata + data)
 
 
-def _finalize_run(ctx: Any) -> None:
+def _finalize_run(ctx: Any, run_log: Any) -> None:
     """Finalize the run log unless a parent pipeline owns finalization.
 
     A pipeline step's ctx carries pipeline run identity in ``ctx.runtime`` (stamped
@@ -129,7 +129,7 @@ def _refused_disabled_workflow(
     bind_run(ctx)
     _logger.warning("%s", message)
     log_run_complete(run_log, "refused", message=message)
-    _finalize_run(ctx)
+    _finalize_run(ctx, run_log)
     clear_run()
     return run
 
@@ -174,7 +174,7 @@ def _pre_execution_failure(
         failed_step_name=label or step_id,
         failure_message=message,
     )
-    _finalize_run(ctx)
+    _finalize_run(ctx, run_log)
     clear_run()
     return WorkflowError(message)
 
@@ -419,7 +419,7 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                _finalize_run(ctx)
+                _finalize_run(ctx, run_log)
                 clear_run()
                 return run
 
@@ -449,7 +449,7 @@ def run_workflow(
                     failed_step_name=step_name,
                     failure_message=failure_message,
                 )
-                _finalize_run(ctx)
+                _finalize_run(ctx, run_log)
                 clear_run()
                 return run
         finally:
@@ -457,7 +457,7 @@ def run_workflow(
 
     set_nest_level(run_log, "workflow")
     log_run_complete(run_log, "success")
-    _finalize_run(ctx)
+    _finalize_run(ctx, run_log)
     clear_run()
     return run
 
