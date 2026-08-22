@@ -66,7 +66,7 @@ def test_effective_context_emits_config_records(tmp_path: Path) -> None:
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
-    refs = _config_refs(Path(ctx.run_log_path))
+    refs = _config_refs(Path(run_log.path()))
     paths = {record["path"] for record in refs}
     assert paths == {"/cfg/config.yaml", "/cfg/workflows/wf.yaml"}
     by_path = {record["path"]: record for record in refs}
@@ -92,7 +92,7 @@ def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
     ctx = _ctx_with_metadata(tmp_path, metadata)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
-    refs = _config_refs(Path(ctx.run_log_path))
+    refs = _config_refs(Path(run_log.path()))
     assert [record["path"] for record in refs] == ["/cfg/config.yaml"]
 
 
@@ -108,7 +108,7 @@ def test_role_comes_from_provenance_not_filename(tmp_path: Path) -> None:
     ctx = _ctx_with_metadata(tmp_path, metadata)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
-    record = _config_refs(Path(ctx.run_log_path))[0]
+    record = _config_refs(Path(run_log.path()))[0]
     assert record["file_role"] == "Workflow"
     assert record["configuration_layer"] == "workflow"
 
@@ -118,7 +118,7 @@ def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) 
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
-    refs = {record["path"]: record for record in _config_refs(Path(ctx.run_log_path))}
+    refs = {record["path"]: record for record in _config_refs(Path(run_log.path()))}
     workflow_ref = refs["/cfg/workflows/wf.yaml"]
     # The workflow file overrode logging.level from the installation layer.
     assert workflow_ref["overrides"] == ["logging.level"]
@@ -133,7 +133,7 @@ def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
-    sections = read_run_log_sections(Path(ctx.run_log_path))["sections"]
+    sections = read_run_log_sections(Path(run_log.path()))["sections"]
     config_files = sections["files"]["config_files"]
     assert config_files["count"] == 2
     roles = {entry["file_role"] for entry in config_files["files"]}

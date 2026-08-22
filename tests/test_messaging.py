@@ -184,7 +184,7 @@ def test_email_recipient_group_allows_explicit_empty_overrides(tmp_path: Path) -
     assert message.request.reply_to == "reply@example.com"
 
 
-def test_execute_message_set_uses_log_and_recipient_group(tmp_path: Path) -> None:
+def test_execute_message_set_uses_log_and_recipient_group(run_log, tmp_path: Path) -> None:
     """execute_message_set reads JSONL log content and delegates delivery to messaging."""
     log_file = tmp_path / "pipeline.jsonl"
     log_file.write_text(
@@ -207,6 +207,7 @@ def test_execute_message_set_uses_log_and_recipient_group(tmp_path: Path) -> Non
 
     results = execute_message_set(
         _ctx(tmp_path),
+        run_log,
         message_set_name="test_run_complete",
         context_file=log_file,
         context_type="jsonl_log",
@@ -220,7 +221,7 @@ def test_execute_message_set_uses_log_and_recipient_group(tmp_path: Path) -> Non
     assert result["message_name"] == "test_email_summary"
 
 
-def test_execute_message_set_logs_archive_as_messaging_artifact(tmp_path: Path) -> None:
+def test_execute_message_set_logs_archive_as_messaging_artifact(run_log, tmp_path: Path) -> None:
     """The message archive is recorded as a messaging-producer artifact."""
     from rey_lib.logs import group_artifacts_by_producer, normalize_artifacts
 

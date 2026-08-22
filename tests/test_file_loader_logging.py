@@ -30,7 +30,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
 def _records(ctx: SimpleNamespace) -> list[dict]:
     return [
         json.loads(line)
-        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
     ]
 
 
