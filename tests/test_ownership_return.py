@@ -43,7 +43,7 @@ def test_success_completion_returns_to_app_level(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
-    def func(run_log) -> int:
+    def func() -> int:
         set_nest_level(run_log, "workflow")       # 4
         set_nest_level(run_log, "workflow_step")  # 5 — left deep, no return
         return 0
@@ -58,7 +58,7 @@ def test_failed_completion_returns_to_app_level(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
-    def func(run_log) -> int:
+    def func() -> int:
         set_nest_level(run_log, "workflow")
         set_nest_level(run_log, "workflow_step")
         raise RuntimeError("boom")

@@ -366,7 +366,7 @@ def _log_ctx(tmp_path: Any) -> Any:
     return ctx
 
 
-def test_missing_handler_writes_failure_evidence_before_raising(run_log, 
+def test_missing_handler_writes_failure_evidence_before_raising(
     tmp_path: Any,
 ) -> None:
     """A failure between RUN_START and the first step is still evidenced."""

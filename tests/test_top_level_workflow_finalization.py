@@ -61,7 +61,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     """Drive the exact nesting a standalone `run-workflow` invocation produces."""
     open_run_log(ctx)
 
-    def handler(run_log, _ctx: Any, _config: dict[str, Any], _run: Any) -> None:
+    def handler(_ctx: Any, _config: dict[str, Any], _run: Any) -> None:
         log_artifact_reference(run_log,
             str(tmp_path / "out" / "converted.csv"),
             role="converted_csv",
@@ -83,7 +83,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
         ],
     }
 
-    def operation_body(run_log) -> int:
+    def operation_body() -> int:
         # The coordinator completes and finalizes the standalone workflow run.
         run_workflow(ctx, run_log, workflow, {"excel_conversion": handler})
         return 0
@@ -95,21 +95,21 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     finalize_run_log(run_log, run_log.path())
 
 
-def test_top_level_run_workflow_summarizes_exactly_once(tmp_path: Path) -> None:
+def test_top_level_run_workflow_summarizes_exactly_once(run_log, tmp_path: Path) -> None:
     """Nested finalization yields one summary and no artifact manifest."""
     ctx = _ctx(tmp_path)
 
-    _run_top_level_workflow(tmp_path, ctx)
+    _run_top_level_workflow(run_log, tmp_path, ctx)
 
     records = _records(run_log.path())
     assert _count(records, "RESULTS_SUMMARY") == 1
     assert _count(records, "ARTIFACT_MANIFEST") == 0
 
 
-def test_repeated_finalization_appends_no_further_summary(tmp_path: Path) -> None:
+def test_repeated_finalization_appends_no_further_summary(run_log, tmp_path: Path) -> None:
     """Finalizing again is a no-op, whoever calls it and however often."""
     ctx = _ctx(tmp_path)
-    _run_top_level_workflow(tmp_path, ctx)
+    _run_top_level_workflow(run_log, tmp_path, ctx)
 
     before = _records(run_log.path())
     finalize_run_log(run_log, run_log.path())
@@ -120,10 +120,10 @@ def test_repeated_finalization_appends_no_further_summary(tmp_path: Path) -> Non
     assert len(after) == len(before)
 
 
-def test_create_results_summary_returns_the_existing_summary(tmp_path: Path) -> None:
+def test_create_results_summary_returns_the_existing_summary(run_log, tmp_path: Path) -> None:
     """The second caller receives the summary already on the log."""
     ctx = _ctx(tmp_path)
-    _run_top_level_workflow(tmp_path, ctx)
+    _run_top_level_workflow(run_log, tmp_path, ctx)
     existing = next(
         record
         for record in _records(run_log.path())
@@ -145,30 +145,30 @@ def test_create_results_summary_returns_the_existing_summary(tmp_path: Path) -> 
         "owns RUN_COMPLETE is a separate shared-architecture change."
     ),
 )
-def test_top_level_run_workflow_completes_exactly_once(tmp_path: Path) -> None:
+def test_top_level_run_workflow_completes_exactly_once(run_log, tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
 
-    _run_top_level_workflow(tmp_path, ctx)
+    _run_top_level_workflow(run_log, tmp_path, ctx)
 
     assert _count(_records(run_log.path()), "RUN_COMPLETE") == 1
 
 
-def test_top_level_run_workflow_does_not_generate_artifact_manifest(tmp_path: Path) -> None:
+def test_top_level_run_workflow_does_not_generate_artifact_manifest(run_log, tmp_path: Path) -> None:
     """Run-log artifact declarations never produce ARTIFACT_MANIFEST."""
     ctx = _ctx(tmp_path)
 
-    _run_top_level_workflow(tmp_path, ctx)
+    _run_top_level_workflow(run_log, tmp_path, ctx)
 
     records = _records(run_log.path())
     assert _count(records, "ARTIFACT_REFERENCE") == 1
     assert _count(records, "ARTIFACT_MANIFEST") == 0
 
 
-def test_terminal_records_are_the_last_records_in_the_log(tmp_path: Path) -> None:
+def test_terminal_records_are_the_last_records_in_the_log(run_log, tmp_path: Path) -> None:
     """Terminal evidence appears in canonical order for inspection."""
     ctx = _ctx(tmp_path)
 
-    _run_top_level_workflow(tmp_path, ctx)
+    _run_top_level_workflow(run_log, tmp_path, ctx)
 
     types = [
         str(record.get("record_type") or "").upper() for record in _records(run_log.path())

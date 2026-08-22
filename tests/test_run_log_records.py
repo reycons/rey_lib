@@ -466,7 +466,7 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
         "steps": [{"id": "s1", "label": "One", "process": "p1"}],
     }
 
-    def handler(run_log, handler_ctx: object, _config: dict, _run: object) -> None:
+    def handler(handler_ctx: object, _config: dict, _run: object) -> None:
         log_run_record(run_log, "ROW_COUNT", count_name="created", count=2)
 
     result = run_workflow(ctx, run_log, workflow, {"p1": handler})
@@ -760,7 +760,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     establish_run_identity(ctx)
     report = tmp_path / "report.json"
 
-    def handler(run_log, _ctx: object, _config: dict, _run: object) -> None:
+    def handler(_ctx: object, _config: dict, _run: object) -> None:
         # A created artifact and an unrelated file move within the same step.
         log_artifact_reference(run_log, str(report), role="report", event="written",
             artifact_group="output_files", producing_app="test_workflow",
