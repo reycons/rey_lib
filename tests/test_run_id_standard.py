@@ -71,11 +71,17 @@ def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:
     execution. It is the launch boundary above that refuses loudly, not this,
     and nothing on this path invents the identity it is missing.
     """
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.run.jsonl"))
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    from rey_lib.logs.run_log import RunLog
 
-    assert log_run_record(run_log, "RUN_START") is None
-    assert getattr(ctx, "run_id", None) is None
+    # Identity is a constructor argument: a run log cannot exist without one,
+    # so the write path has nothing left to mint.
+    run_log = RunLog(app="probe", run_id="R1", run_timestamp="20260822_000000",
+                     log_dir=str(tmp_path))
+    assert run_log.run_id == "R1"
+
+    # And a write that cannot land still degrades rather than raising.
+    unwritable = RunLog(app="probe", run_id="R1", run_timestamp="20260822_000000")
+    assert log_run_record(unwritable, "RUN_START") is None
 
 
 def test_ensure_helpers_share_one_identity() -> None:
