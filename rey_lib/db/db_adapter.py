@@ -686,6 +686,43 @@ class DBAdapter:
             conn, routine, named_params
         )
 
+    def execute_function_rows(
+        self,
+        conn: Any,
+        routine: str,
+        named_params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Call a set-returning database function and return its rows.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        routine : str
+            Fully-qualified function name.
+        named_params : dict[str, Any]
+            DB parameter name → value mapping.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One column→value dict per row.
+
+        Raises
+        ------
+        NotImplementedError
+            If the connection's provider cannot select from a function.
+        """
+        provider = self._provider_for_conn(conn)
+        backend = _backend(provider)
+        if not hasattr(backend, "execute_function_rows"):
+            raise NotImplementedError(
+                f"DBAdapter: provider '{provider}' does not support "
+                "selecting rows from a function."
+            )
+        return backend.execute_function_rows(conn, routine, named_params)
+
     def execute_procedure(
         self,
         conn: Any,

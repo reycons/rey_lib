@@ -350,8 +350,14 @@ def execute_mapped_routine(
 
     Resolves the named routine binding, binds inputs, executes per
     ``result_mode`` (``scalar_result`` -> function/SELECT; ``no_return`` ->
-    procedure/CALL), and stores a captured scalar via ``output``.
-    ``dataset_result`` for a routine is not supported — use a mapped_sql binding.
+    procedure/CALL; ``dataset_result`` -> set-returning function/SELECT FROM),
+    and stores a captured scalar via ``output``.
+
+    A routine that returns rows is bound like any other routine. Restating its
+    signature as SQL in a mapped_sql binding would put the routine's shape in a
+    second place and give it a second path in, so the binding carries the
+    dataset instead. Rows are returned under ``rows``, as the mapped-SQL path
+    returns them.
 
     ``map_cfg`` lets a caller that already holds the resolved map supply it
     rather than have it looked up on ``ctx`` again. That is not a shortcut: an
@@ -377,6 +383,7 @@ def execute_mapped_routine(
 
     t0 = time.monotonic()
     outputs: dict[str, Any] = {}
+    rows: Optional[list[dict[str, Any]]] = None
     try:
         if result_mode == "scalar_result":
             scalar = _db.execute_function(conn, binding["routine"], named_params)
@@ -384,10 +391,7 @@ def execute_mapped_routine(
         elif result_mode == "no_return":
             _db.execute_procedure(conn, binding["routine"], named_params)
         else:  # dataset_result
-            raise ConfigError(
-                f"procedure_map: routine '{routine_name}' in map '{procedure_map}' "
-                "requests 'dataset_result'; use a mapped_sql binding for datasets."
-            )
+            rows = _db.execute_function_rows(conn, binding["routine"], named_params)
     except Exception as exc:
         log_sql_execution(run_log,
             sql_label=routine_name,
@@ -413,6 +417,7 @@ def execute_mapped_routine(
         routine=str(binding["routine"]),
         routine_type=str(binding.get("routine_type") or ""),
         result_mode=result_mode,
+        row_count=len(rows) if rows is not None else None,
         object_count=len(outputs) if outputs else None,
     )
 
@@ -423,6 +428,7 @@ def execute_mapped_routine(
         "execution_target": "routine",
         "result_mode": result_mode,
         "outputs": outputs,
+        "rows": rows,
         "status": "success",
     }
 

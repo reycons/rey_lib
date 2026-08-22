@@ -188,6 +188,59 @@ def execute_function(
         ) from exc
 
 
+def execute_function_rows(
+    conn: Any,
+    routine: str,
+    named_params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """
+    Call a set-returning PostgreSQL function and return its rows.
+
+    Builds: SELECT * FROM routine(:p_name, ...)
+
+    A set-returning function is selected *from*, not selected. ``SELECT f(...)``
+    would yield one column of composite values rather than the columns the
+    function declares, which is why this is a separate call rather than a
+    result-shape choice made on top of ``execute_function``.
+
+    Parameters
+    ----------
+    conn : Any
+        Open Rey connection handle.
+    routine : str
+        Fully-qualified function name, as the procedure map binds it.
+    named_params : dict[str, Any]
+        DB parameter name → value. Order must match the function signature.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One column→value dict per row; empty when the function returns no rows.
+
+    Raises
+    ------
+    DatabaseError
+        If execution fails.
+    """
+    from rey_lib.db._sqlalchemy import core_connection
+
+    serialised = _serialise_jsonb(named_params)
+    placeholders = ", ".join(f":{key}" for key in serialised)
+    sql = f"SELECT * FROM {routine}({placeholders})"
+    try:
+        from sqlalchemy import text
+
+        result = core_connection(conn).execute(text(sql), serialised)
+        rows = [dict(row) for row in result.mappings().all()]
+        conn.commit()
+        return rows
+    except Exception as exc:
+        conn.rollback()
+        raise DatabaseError(
+            f"postgres_utils: execute_function_rows failed for '{routine}': {exc}"
+        ) from exc
+
+
 def execute_procedure(
     conn: Any,
     routine: str,

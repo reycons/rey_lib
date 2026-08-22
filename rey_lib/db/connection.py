@@ -141,6 +141,11 @@ class Connection:
         """Call a function and return its scalar through the provider backend."""
         return _db.execute_function(self.handle(), routine, named_params)
 
+    def execute_function_rows(self, routine: str,
+                              named_params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Call a set-returning function and return its rows through the backend."""
+        return _db.execute_function_rows(self.handle(), routine, named_params)
+
 
 def build_connections(ctx: Any) -> dict[str, Connection]:
     """Build one Connection per configured connection, keyed by name.
