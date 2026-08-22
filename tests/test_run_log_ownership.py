@@ -24,6 +24,7 @@ was performed against.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -485,4 +486,106 @@ class TestAdoptionIsAMove:
         assert offenders == [], (
             "these stamp a lineage field the run log already stamps: "
             f"{', '.join(sorted(set(offenders)))}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The database destination
+# ---------------------------------------------------------------------------
+
+class TestControlIsSubordinateToRunLog:
+    """Control is the run log's DB mechanism, not a second logging owner."""
+
+    def test_only_the_run_log_drives_the_control_lifecycle(self) -> None:
+        """No caller opens a batch, a step or an event except through RunLog."""
+        import ast
+
+        methods = {"log_event", "start_batch", "end_batch", "start_step", "end_step"}
+        allowed = {"rey_lib/logs/run_log.py", "rey_lib/control/control.py"}
+        offenders = []
+        for path in _production_files():
+            name = str(path.relative_to(REPO))
+            if name in allowed:
+                continue
+            # Parsed, not matched: a usage example in a package docstring is
+            # prose, and a rule that cannot tell prose from a call is a rule
+            # people learn to work around.
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in methods):
+                    offenders.append(f"{name}:{node.lineno}")
+        assert offenders == [], (
+            "these reach the control database for run records without going "
+            f"through the run log: {', '.join(offenders)}"
+        )
+
+    def test_the_run_store_module_holds_no_persistence_authority(self) -> None:
+        """It reads configuration at launch and owns nothing afterwards."""
+        import ast
+
+        source = (LOGS / "run_store.py").read_text(encoding="utf-8")
+        defined = {n.name for n in ast.parse(source).body
+                   if isinstance(n, ast.FunctionDef)}
+        retired = {"writes_jsonl", "writes_db", "new_batch_intent",
+                   "require_structural_record", "persist_run_start",
+                   "persist_step_start", "persist_step_end",
+                   "persist_run_complete", "persist_record", "_severity_of"}
+        assert defined & retired == set(), (
+            "run_store has taken persistence decisions back from the run log: "
+            f"{', '.join(sorted(defined & retired))}"
+        )
+
+    def test_control_is_closed_by_the_runtime(self) -> None:
+        """Registered for collection, so it must answer close() itself.
+
+        Without an explicit one it resolves through __getattr__ to the context,
+        which has none, and every successful run fails at teardown.
+        """
+        from rey_lib.control.control import Control
+
+        assert "close" in vars(Control), (
+            "Control has no close() of its own; runtime collection would send "
+            "it to the context and fail the teardown of every DB-logging run"
+        )
+
+    def test_a_record_raised_by_persistence_is_not_written(self, tmp_path) -> None:
+        """The DB sink runs SQL, and SQL execution is a logged event.
+
+        Without this the run log would record its own writes as run evidence,
+        and persisting those would call the database to record the call that
+        was recording something.
+        """
+        from tests.conftest import make_run_log
+        from rey_lib.logs.sql_records import log_sql_execution
+
+        class _Control:
+            batch_id = 1
+            batch_step_id = None
+            owns_batch = False
+            run_log = None
+            events: list = []
+
+            def log_event(self, **kwargs) -> None:
+                type(self).events.append(kwargs["event_name"])
+                # What every real control routine does: run SQL.
+                log_sql_execution(self.run_log, operation="log_event",
+                                  status="success")
+
+        control = _Control()
+        _Control.events = []
+        run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
+        run_log.destination = "both"
+        run_log.control = control
+        control.run_log = run_log
+
+        run_log.append("ROW_COUNT", count_name="c", count=1)
+
+        assert _Control.events == ["ROW_COUNT"], (
+            f"persistence recursed or recorded itself: {_Control.events}"
+        )
+        written = [json.loads(line) for line
+                   in (tmp_path / "a.jsonl").read_text().splitlines() if line.strip()]
+        assert [r["record_type"] for r in written] == ["ROW_COUNT"], (
+            "the run log recorded its own persistence as run evidence"
         )

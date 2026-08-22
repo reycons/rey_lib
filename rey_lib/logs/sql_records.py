@@ -14,7 +14,15 @@ def log_sql_execution(run_log: 'RunLog', *, connection_name: str = "", database:
                       error_message: str = "",
                       safe_to_preview: bool | None = None,
                       **fields: Any) -> None:
-    """Append SQL_EXECUTION evidence for generated or executed SQL work."""
+    """Append SQL_EXECUTION evidence for generated or executed SQL work.
+
+    ``run_log`` is None only where there is genuinely no run log to record
+    against -- Control's optional capabilities, which predate run-log
+    persistence and are not part of it. SQL with no owner is not recorded
+    rather than recorded somewhere invented for it.
+    """
+    if run_log is None:
+        return
     if error_message:
         from rey_lib.errors.error_utils import build_error_record_payload
         error_message = str(

@@ -74,6 +74,11 @@ class Control:
         # object, never back onto the context.
         self.batch_id: Optional[int] = getattr(ctx, "batch_id", None)
         self.batch_step_id: Optional[int] = None
+        # Set by the RunLog that adopts this Control. Control persists on that
+        # run log's behalf, so the SQL it runs is instrumented against it. None
+        # until adopted, which is the case for the optional capabilities that
+        # are not part of run-log persistence.
+        self.run_log: Any = None
         # Whether this execution started the batch, so completion knows whether
         # ending it is its business. A batch may hold several runs; closing one
         # because a single run finished would close it under the others.
@@ -95,6 +100,21 @@ class Control:
         # Only the named map is taken; other maps stay for their own owners.
         maps = list(getattr(ctx, "procedure_maps", None) or [])
         ctx.procedure_maps = [m for m in maps if _name_of(m) != self._map_name]
+
+    def close(self) -> None:
+        """Release this object's references at runtime collection.
+
+        Explicit rather than inherited from ``__getattr__``, which would send
+        ``close`` to the context and fail the whole teardown.
+
+        It does not close the connection: ``Connection`` owns the handle and is
+        collected in its own right, and closing a shared handle here would take
+        it from every other consumer. What ends here is this object's part --
+        the batch state it held and the run log it served.
+        """
+        self.batch_step_id = None
+        self.run_log = None
+        self.connection = None
 
     def __getattr__(self, name: str) -> Any:
         """Fall through to the context for anything Control does not hold.
@@ -295,9 +315,9 @@ class Control:
 
         try:
             result = execute_mapped_routine(
-                ctx=self._ctx, conn=conn, procedure_map=self._map_name,
-                routine_name=action_name, values=variables, run_ctx=self,
-                map_cfg=self._map,
+                ctx=self._ctx, run_log=self.run_log, conn=conn,
+                procedure_map=self._map_name, routine_name=action_name,
+                values=variables, run_ctx=self, map_cfg=self._map,
             )
             outputs = result.get("outputs") or {}
             return next(iter(outputs.values()), None)

@@ -33,6 +33,7 @@ would be a behaviour change hidden in a refactor. The recorded xfail in
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +96,7 @@ class RunLog:
         path: Optional[str] = None,
         destination: str = "jsonl",
         control: Any = None,
+        new_batch: bool = True,
         workflow: Optional[str] = None,
         pipeline: Optional[str] = None,
         lineage: Optional[dict[str, str]] = None,
@@ -130,7 +132,20 @@ class RunLog:
         self.run_id = str(run_id)
         self.run_timestamp = str(run_timestamp)
         self.destination = str(destination or "jsonl").strip().lower()
+        # Launch states whether this execution starts a batch or continues one.
+        # Held here and never inferred: deciding from whether batch_id happens
+        # to be set would make a leftover value silently mean "reuse", which is
+        # how an execution joins a batch it has nothing to do with.
+        self.new_batch = bool(new_batch)
         self.control = control
+        if control is not None:
+            # Control is subordinate: it persists on this run log's behalf, so
+            # it is told which run log it serves rather than finding one.
+            control.run_log = self
+        # True while this run log is writing a record to a destination. The DB
+        # sink runs SQL, and SQL execution is itself a logged event, so without
+        # this a persisted record would persist the record of its own write.
+        self._persisting = False
 
         self._log_dir = log_dir
         self._path = path
@@ -458,6 +473,10 @@ class RunLog:
         """
         from rey_lib.logs.record_validation import _validate_run_record_fields
 
+        if self._persisting:
+            # Raised by this run log's own persistence. Not run evidence; see
+            # _persistence.
+            return None
         _validate_run_record_fields(record_type, fields)
         try:
             record = self._record(record_type, message, fields)
@@ -475,7 +494,8 @@ class RunLog:
                 primitive_file_io.append_jsonl(self.path(), record)
 
             if self.writes_db:
-                self._persist_to_control(record_type, message, record)
+                with self._persistence():
+                    self._persist_to_control(record_type, message, record)
 
             state[LAST_RECORD_ID] = record_id
             anchors = state[LEVEL_ANCHORS]
@@ -491,18 +511,172 @@ class RunLog:
             )
             return None
 
+    # -- the database destination -------------------------------------------
+    #
+    # Control is this run log's persistence mechanism, not a second logging
+    # owner. Every decision about whether to reach the database, and what to do
+    # when reaching it fails, is made here; Control executes the routine and
+    # owns only its own DB state -- batch_id, batch_step_id, owns_batch.
+
+    _SEVERITY_BY_PREFIX = (("ERROR", "ERROR"), ("FAILURE", "ERROR"),
+                           ("WARNING", "WARNING"))
+
+    @classmethod
+    def _severity_of(cls, record_type: str) -> str:
+        """Map a record type to a control-event severity.
+
+        The record type is the event name, so severity is the one thing that
+        has to be derived. Anything not an error or a warning is informational.
+        """
+        upper = str(record_type).upper()
+        for token, severity in cls._SEVERITY_BY_PREFIX:
+            if token in upper:
+                return severity
+        return "INFO"
+
+    def require_structural_record(self, record_id: Optional[int],
+                                  record_type: str) -> None:
+        """Escalate a lost structural record when every destination is required.
+
+        Under ``both`` a missing record means the run log is half written. The
+        record writer has already warned and returned None on its own terms;
+        this is the separate durability contract on top of that.
+
+        Structural records only -- run start, step start, step end, run
+        complete. Losing one leaves a run log that does not describe a run.
+        Evidence records degrade as they always have, because logging must not
+        mask execution and an errored row count is not worth failing a run over.
+
+        Under ``jsonl`` nothing is raised: that is the historical behaviour.
+        """
+        if record_id is not None or self.destination != "both":
+            return
+        from rey_lib.errors.error_utils import StateError
+
+        raise StateError(
+            f"run_store is 'both' but the {record_type} record was not committed "
+            "to every destination. Both are required; the run log now describes "
+            "this run in one place and not the other."
+        )
+
+    def open_batch(self, batch_name: str) -> None:
+        """Establish the control batch this run belongs to.
+
+        Honours the declared intent and nothing else. ``new_batch`` true starts
+        one and records that this execution owns it; false requires an existing
+        ``batch_id`` to continue and starts none -- a batch is never
+        manufactured to satisfy a reuse request.
+
+        Called before the first record, because every persisted record carries
+        ``batch_id`` and the column is NOT NULL.
+        """
+        if not self.writes_db:
+            return
+        from rey_lib.errors.error_utils import ConfigError, StateError
+
+        control = self._require_control()
+        if self.new_batch:
+            with self._persistence():
+                control.start_batch(batch_name=batch_name or self.app or "run",
+                                    required=True)
+            if not control.batch_id:
+                raise StateError(
+                    "control start_batch returned no batch_id. The run store "
+                    "cannot record steps or events without the batch that "
+                    "groups them."
+                )
+            control.owns_batch = True
+        else:
+            if not control.batch_id:
+                raise ConfigError(
+                    "newBatch is false but no batch_id is bound to reuse. A "
+                    "batch is never manufactured to satisfy a reuse request."
+                )
+            control.owns_batch = False
+
+    def close_batch(self, status: str, message: str = "") -> None:
+        """End the control batch, but only if this run began it.
+
+        A batch may contain several runs. Ending it because one of them
+        finished would close it under the others.
+
+        Called after the completion record, so the record lands before the
+        batch it belongs to is closed.
+        """
+        if not self.writes_db:
+            return
+        control = self._require_control()
+        if control.owns_batch:
+            with self._persistence():
+                control.end_batch(
+                    status=status,
+                    error_message=None if status == "success" else (message or status),
+                    required=True,
+                )
+
+    def open_step(self, step_name: str, step_sequence: int,
+                  step_type: str = "") -> None:
+        """Open a control step for this run."""
+        if not self.writes_db:
+            return
+        with self._persistence():
+            self._require_control().start_step(
+                step_name=step_name, step_sequence=step_sequence,
+                step_type=step_type or None, required=True,
+            )
+
+    def close_step(self, status: str, message: str = "") -> None:
+        """Close the open control step; later events belong to the run."""
+        if not self.writes_db:
+            return
+        control = self._require_control()
+        with self._persistence():
+            control.end_step(status=status, message=message or None, required=True)
+        control.batch_step_id = None
+
+    @contextmanager
+    def _persistence(self) -> Any:
+        """Mark the block as this run log writing itself to a destination.
+
+        The database destination executes SQL, and SQL execution is a logged
+        event, so a control call made on this run log's behalf produces records
+        while it runs. Those are not run evidence -- they describe the run log
+        writing, not the application working -- and persisting them would call
+        the database to record the call that was recording something, without
+        end.
+
+        So a record raised inside this block is not written anywhere. The
+        boundary is the run log's own persistence, which is why it is marked
+        here rather than guessed at from record types.
+        """
+        outer = self._persisting
+        self._persisting = True
+        try:
+            yield
+        finally:
+            self._persisting = outer
+
+    def _require_control(self) -> Any:
+        """The Control this run log persists through, or a refusal."""
+        if self.control is None:
+            from rey_lib.errors.error_utils import StateError
+
+            raise StateError(
+                f"run_store is '{self.destination}' but no Control was supplied "
+                "to this run log. The database destination has no mechanism."
+            )
+        return self.control
+
     def _persist_to_control(self, record_type: str, message: str,
                             record: dict[str, Any]) -> None:
         """Persist one record to the control database as a log event."""
-        from rey_lib.logs.run_store import _severity_of
-
         if self.control is None:
             raise ValueError(
                 "run_store selects the control database but no Control was "
                 "supplied to this run log."
             )
         self.control.log_event(
-            severity=_severity_of(record_type),
+            severity=self._severity_of(record_type),
             event_name=str(record_type),
             message=str(message or record.get("message") or record_type),
             event_jsonb=record,

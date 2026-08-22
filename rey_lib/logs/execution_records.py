@@ -6,7 +6,6 @@ import uuid
 from typing import Any
 
 from rey_lib.logs.record_enrichment import log_run_record
-from rey_lib.logs import run_store
 
 
 def log_run_start(run_log: 'RunLog', **fields: Any) -> None:
@@ -19,9 +18,10 @@ def log_run_start(run_log: 'RunLog', **fields: Any) -> None:
     """
     # Batch first: every persisted record carries batch_id, and the column is
     # NOT NULL, so the batch this run belongs to must exist before the first
-    # record is written.
-    run_store.persist_run_start(run_log, **fields)
-    run_store.require_structural_record(run_log, run_log.append("RUN_START", **fields), "RUN_START")
+    # record is written. Whether that means touching a database at all is the
+    # run log's decision, not this writer's.
+    run_log.open_batch(str(fields.get("operation") or ""))
+    run_log.require_structural_record(run_log.append("RUN_START", **fields), "RUN_START")
 
 
 def log_execution_plan(run_log: 'RunLog', *, total_steps: int,
@@ -41,30 +41,31 @@ def log_execution_plan(run_log: 'RunLog', *, total_steps: int,
 def log_step_start(run_log: 'RunLog', step_name: str, step_sequence: int,
                    step_type: str = "", step_id: str = "", **fields: Any) -> None:
     """Append a STEP_START execution record for one step."""
-    run_store.require_structural_record(run_log, run_log.append("STEP_START",
+    run_log.require_structural_record(run_log.append("STEP_START",
         step_name=step_name, step_sequence=step_sequence, step_type=step_type,
         step_id=step_id or fields.pop("step_id", ""),
         **fields,
     ), "STEP_START")
-    run_store.persist_step_start(run_log, step_name, step_sequence, step_type)
+    run_log.open_step(step_name, step_sequence, step_type)
 
 
 def log_step_end(run_log: 'RunLog', step_name: str, status: str, *,
                  message: str = "", **fields: Any) -> None:
     """Append a STEP_END execution record with the step status (success/failure/skipped)."""
-    run_store.require_structural_record(run_log, run_log.append("STEP_END",
+    run_log.require_structural_record(run_log.append("STEP_END",
         step_name=step_name, status=status, message=message, **fields,
     ), "STEP_END")
-    run_store.persist_step_end(run_log, step_name, status, message)
+    run_log.close_step(status, message)
 
 
 def log_run_complete(run_log: 'RunLog', status: str, *, message: str = "", **fields: Any) -> None:
     """Append a RUN_COMPLETE execution record with the final run status."""
     # Record first, then close the batch: the completion record must land
     # before the batch it belongs to is ended.
-    run_store.require_structural_record(run_log, run_log.append("RUN_COMPLETE", status=status, message=message, **fields),
+    run_log.require_structural_record(
+        run_log.append("RUN_COMPLETE", status=status, message=message, **fields),
         "RUN_COMPLETE")
-    run_store.persist_run_complete(run_log, status, message)
+    run_log.close_batch(status, message)
 
 
 def log_run_summary(run_log: 'RunLog', summary: dict[str, Any]) -> None:
