@@ -278,3 +278,66 @@ class TestExitCodesAreNotFailures:
         with pytest.raises(StateError):
             with app_runtime("cfg", "app", "run"):
                 raise SystemExit()
+
+
+class TestEveryEntryPointAdoptedTheBoundary:
+    """The mechanism is only the architecture of record once apps use it."""
+
+    _ENTRY_POINTS = (
+        "file_operator/main.py",
+        "rey_loader/main.py",
+        "rey_analyzer/main.py",
+        "rey_messaging/rey_messaging/cli.py",
+        "rey_db_admin/main.py",
+        "ftp_sync/main.py",
+        "pipeline_coordinator/pipeline_coordinator/cli.py",
+        "rey_console/rey_console/cli.py",
+        "console_next/console_next/cli.py",
+    )
+
+    def _apps(self) -> Path:
+        return REPO.parent
+
+    def test_no_entry_point_calls_bootstrap_directly(self) -> None:
+        """build_ctx_for_app belongs to app_runtime, not to any application."""
+        apps = self._apps()
+        offenders = [
+            name for name in self._ENTRY_POINTS
+            if (apps / name).exists()
+            and "build_ctx_for_app" in (apps / name).read_text(encoding="utf-8")
+        ]
+
+        assert offenders == []
+
+    def test_every_entry_point_enters_through_app_runtime(self) -> None:
+        apps = self._apps()
+        missing = [
+            name for name in self._ENTRY_POINTS
+            if (apps / name).exists()
+            and "with app_runtime(" not in (apps / name).read_text(encoding="utf-8")
+        ]
+
+        assert missing == []
+
+    def test_no_entry_point_performs_its_own_teardown(self) -> None:
+        """Collection is the boundary's; an app reaching for it takes it back.
+
+        Reading the shared connections is not teardown. rey_db_admin lists them
+        for its list-connections command and iterates them for export --all,
+        which is ordinary use of a shared object. What no entry point may do is
+        collect or close them.
+        """
+        apps = self._apps()
+        offenders = []
+        for name in self._ENTRY_POINTS:
+            path = apps / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "collect_runtime" in text:
+                offenders.append(f"{name}: collects")
+            for line in text.splitlines():
+                if "shared_connections" in line and ".close(" in line:
+                    offenders.append(f"{name}: {line.strip()}")
+
+        assert offenders == []
