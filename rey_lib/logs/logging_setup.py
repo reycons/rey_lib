@@ -167,7 +167,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     # part-way through, having already done work it cannot record.
     from rey_lib.logs.run_store import validate_run_store
 
-    validate_run_store(ctx)
+    validate_run_store(ctx, run_log)
 
     timestamp = ctx.run_timestamp
     log_file  = None

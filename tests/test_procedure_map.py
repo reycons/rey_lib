@@ -231,7 +231,7 @@ def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
          patch("rey_lib.db.procedure_map._db") as db:
         db.execute_function.return_value = 123
-        execute_mapped_routine(ctx, conn, "control", "start_batch",
+        execute_mapped_routine(ctx, run_log, conn, "control", "start_batch",
                                {"run_id": "R1"}, run_ctx=run_ctx)
 
     record = next(r for r in _run_records(ctx) if r["record_type"] == "SQL_EXECUTION")
@@ -399,7 +399,7 @@ def test_execute_sql_text_delegates_to_adapter_run_sql(tmp_path: Path):
         db.run_sql.return_value = 1
         execute_sql_text(
             ctx,
-            conn,
+            run_log, conn,
             "select secret_value from source",
             sql_label="hook_file",
             operation="hook_sql_file",
@@ -444,7 +444,7 @@ def test_execute_sql_text_runs_through_postgres_core_connection(tmp_path: Path):
     assert not hasattr(conn, "execute")  # guard: no DuckDB-style connection API
     execute_sql_text(
         ctx,
-        conn,
+        run_log, conn,
         "select secret_value from source",
         sql_label="hook_file",
         operation="post_load_sql",
@@ -470,7 +470,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
         with pytest.raises(DatabaseError, match="run_sql failed"):
             execute_sql_text(
                 ctx,
-                conn,
+                run_log, conn,
                 "delete from source where api_key = 'SECRET'",
                 sql_label="hook_file",
                 operation="hook_sql_file",
@@ -494,7 +494,7 @@ def test_execute_procedure_call_logs_one_authoritative_record(tmp_path: Path):
         db.call_proc_with_output.return_value = {"out_id": 7}
         result = execute_procedure_call(
             ctx,
-            conn,
+            run_log, conn,
             "control.finish_batch",
             [("batch_id", 5)],
             [("out_id", "INT")],

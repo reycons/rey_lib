@@ -96,7 +96,7 @@ def _finalize_run(ctx: Any) -> None:
 
 
 def _refused_disabled_workflow(
-    ctx: Any,
+    ctx: Any, run_log,
     name: str,
     *,
     apply: bool,
@@ -135,7 +135,7 @@ def _refused_disabled_workflow(
 
 
 def _pre_execution_failure(
-    ctx: Any,
+    ctx: Any, run_log,
     run: "WorkflowRun",
     *,
     step_id: str,
@@ -180,7 +180,7 @@ def _pre_execution_failure(
 
 
 def run_workflow(
-    ctx: Any,
+    ctx: Any, run_log,
     workflow: Any,
     registry: Mapping[str, ProcessHandler],
     *,
@@ -250,7 +250,7 @@ def run_workflow(
     # decided before the definition is parsed, so a disabled workflow is never
     # rejected for some unrelated defect in steps it will not run.
     if _get(workflow, "enabled", True) is False:
-        return _refused_disabled_workflow(ctx, name, apply=apply, metadata=metadata)
+        return _refused_disabled_workflow(ctx, run_log, name, apply=apply, metadata=metadata)
     tokens = _resolve_tokens(_get(workflow, "tokens"))
     processes = _to_mapping(_get(workflow, "processes"))
     steps = _as_list(_get(workflow, "steps"))
@@ -315,7 +315,7 @@ def run_workflow(
     bind_run(ctx)
     # Record the config files that fed the effective ctx from provenance
     # (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
 
     sequence = 0
     for index, step_def in enumerate(steps):
@@ -325,7 +325,7 @@ def run_workflow(
         if process not in processes:
             raise _pre_execution_failure(
                 ctx,
-                run,
+                run_log, run,
                 step_id=step_id,
                 label=label,
                 process=process,
@@ -339,7 +339,7 @@ def run_workflow(
         if handler is None:
             raise _pre_execution_failure(
                 ctx,
-                run,
+                run_log, run,
                 step_id=step_id,
                 label=label,
                 process=process,

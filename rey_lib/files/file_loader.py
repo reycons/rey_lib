@@ -24,11 +24,11 @@ file_utils. No raw pyodbc or os calls anywhere in this module.
 
 Public API
 ----------
-transform_files(ctx, data_source, transform_cfg)
+transform_files(ctx, run_log, data_source, transform_cfg)
     Find and transform all pending inbox files for one data source.
     Accepts one transform config or a list of candidate transforms.
     Returns total number of files successfully transformed.
-load_files(ctx, conn, data_source, load_cfg)
+load_files(ctx, run_log, conn, data_source, load_cfg)
     Find and load all pending files for one load configuration.
     Returns total rows loaded across all files processed.
     batch_id is read from ctx.batch_id — set by start_batch() before calling.
@@ -131,7 +131,7 @@ _NON_FATAL_PIPELINE_ERRORS = (
 # ---------------------------------------------------------------------------
 
 def transform_files(
-    ctx: Any,
+    ctx: Any, run_log,
     data_source: Any,
     transform_cfg: Any,
     sql_dir: Optional[Path] = None,
@@ -239,7 +239,7 @@ def transform_files(
         )
 
         for file_path in pending:
-            if transform_one(ctx, data_source, file_path):
+            if transform_one(ctx, run_log, data_source, file_path):
                 total += 1
 
     finally:
@@ -279,7 +279,7 @@ def _coerce_transform_cfgs(transform_cfg: Any) -> list[Any]:
 
 
 def _log_loader_step_failure(
-    ctx: Any,
+    ctx: Any, run_log,
     exc: BaseException,
     *,
     failed_step_id: str,
@@ -372,7 +372,7 @@ def _reject_unmatched_file(
 
 
 def load_files(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     data_source: Any,
     load_cfg: Any,
@@ -443,7 +443,7 @@ def load_files(
 
         for file_path in pending:
             rows_loaded = _load_one_file(
-                ctx, conn, file_path, transform_cfg,
+                ctx, run_log, conn, file_path, transform_cfg,
                 load_cfg, data_source.paths, schema, table,
             )
             total_rows += rows_loaded
@@ -608,7 +608,7 @@ def run_transform(ctx: Any, sql_dir: Optional[Path] = None) -> int:
             )
             continue
         object.__setattr__(ctx, "data_sources", data_source)
-        count = transform_files(ctx, data_source, data_source.transforms, sql_dir=sql_dir)
+        count = transform_files(ctx, run_log, data_source, data_source.transforms, sql_dir=sql_dir)
         total += count
         if count:
             _logger.info("%s: %d file(s) transformed", data_source.name, count)
@@ -630,7 +630,7 @@ def validate_one(file_path: Path, transform_cfg: Any) -> bool:
     return _validate_header(file_path, transform_cfg)
 
 
-def transform_one(ctx: Any, data_source: Any, file_path: Path) -> bool:
+def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
     """Transform exactly one file. No discovery, no hooks.
 
     Matches ``file_path`` against the data source's candidate transforms,
@@ -654,7 +654,7 @@ def transform_one(ctx: Any, data_source: Any, file_path: Path) -> bool:
         _reject_unmatched_file(data_source, transforms, file_path)
         return False
     object.__setattr__(ctx, "transforms", matched_cfg)
-    return _transform_one_file(ctx, data_source, matched_cfg, file_path,
+    return _transform_one_file(ctx, run_log, data_source, matched_cfg, file_path,
                                header_line=header_line)
 
 
@@ -679,7 +679,7 @@ def load_one(ctx: Any, data_source: Any, load_cfg: Any, file_path: Path) -> int:
     # The shared Connection is not closed here: it outlives this load and is
     # held by every other consumer of the same name.
     conn = shared_connection(ctx, str(conn_name)).handle()
-    return _load_one_file(ctx, conn, file_path, transform_cfg, load_cfg,
+    return _load_one_file(ctx, run_log, conn, file_path, transform_cfg, load_cfg,
                           data_source.paths, schema, table)
 
 
@@ -769,7 +769,7 @@ def run_load(
 
                 conn = open_conns[conn_name]
                 last_conn = conn
-                rows = load_files(ctx, conn, data_source, load_cfg)
+                rows = load_files(ctx, run_log, conn, data_source, load_cfg)
                 total += rows
 
             # post_load_sql runs on the last connection used for this source
@@ -818,7 +818,7 @@ def _execute_post_load_sql(ctx: Any, conn: Any, data_source: Any, sql_dir: Optio
         sql_text = sql_path.read_text(encoding="utf-8")
         execute_sql_text(
             ctx,
-            conn,
+            run_log, conn,
             sql_text,
             sql_path=str(sql_path),
             sql_label=sql_filename,
@@ -1148,7 +1148,7 @@ def _execute_one_hook_sql_file(
     sql_text = sql_path.read_text(encoding="utf-8")
     execute_sql_text(
         ctx,
-        conn,
+        run_log, conn,
         sql_text,
         sql_path=str(sql_path),
         sql_label=str(sql_cfg.name),
@@ -1229,7 +1229,7 @@ def _execute_one_hook_procedure(
 
     output_values = execute_procedure_call(
         ctx,
-        conn,
+        run_log, conn,
         proc_name,
         named_inputs,
         output_specs,
@@ -1594,7 +1594,7 @@ def _write_rejections(
 
 
 def _transform_one_file(
-	ctx: Any,
+	ctx: Any, run_log,
 	data_source: Any,
 	transform_cfg: Any,
 	file_path: Path,
@@ -1767,7 +1767,7 @@ def _transform_one_file(
         )
         _log_loader_step_failure(
             ctx,
-            exc,
+            run_log, exc,
             failed_step_id=getattr(transform_cfg, "name", "transform"),
             failed_step_name=getattr(transform_cfg, "name", "transform"),
             related_path=str(file_path),
@@ -1850,7 +1850,7 @@ def _build_output_path(
 
 
 def _load_one_file(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     file_path: Path,
     transform_cfg: Any,
@@ -1987,7 +1987,7 @@ def _load_one_file(
         )
         _log_loader_step_failure(
             ctx,
-            exc,
+            run_log, exc,
             failed_step_id=getattr(load_cfg, "name", "load"),
             failed_step_name=getattr(load_cfg, "name", "load"),
             related_path=str(file_path),

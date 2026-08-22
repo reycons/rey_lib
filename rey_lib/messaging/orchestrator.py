@@ -36,7 +36,7 @@ _JSONL_READ_LIMIT = 10_000
 
 
 def execute_message_set(
-    ctx: Any,
+    ctx: Any, run_log,
     message_set_name: str,
     context_file: Path,
     context_type: str,

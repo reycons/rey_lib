@@ -45,7 +45,7 @@ def test_success_completion_returns_to_app_level(tmp_path: Path) -> None:
         set_nest_level(ctx, "workflow_step")  # 5 — left deep, no return
         return 0
 
-    run_app_operation(ctx, "op", func)
+    run_app_operation(ctx, run_log, "op", func)
     completes = _run_complete_records(tmp_path)
     assert completes and completes[-1]["nest_level"] == 3
 
@@ -60,6 +60,6 @@ def test_failed_completion_returns_to_app_level(tmp_path: Path) -> None:
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom"):
-        run_app_operation(ctx, "op", func)
+        run_app_operation(ctx, run_log, "op", func)
     completes = _run_complete_records(tmp_path)
     assert completes and completes[-1]["nest_level"] == 3

@@ -368,7 +368,7 @@ def _role_for_layer(layer: str) -> str:
     return _LAYER_ROLE.get(layer.lower(), "Configuration")
 
 
-def record_config_file_references(ctx: Namespace) -> None:
+def record_config_file_references(ctx: Namespace, run_log) -> None:
     """Emit one CONFIG_FILE_REFERENCE per config file that fed the effective ctx.
 
     Configuration files are recorded because they contributed to the effective

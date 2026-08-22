@@ -385,7 +385,7 @@ def test_missing_handler_writes_failure_evidence_before_raising(
     }
 
     with pytest.raises(WorkflowError, match="no registered handler"):
-        run_workflow(ctx, workflow, {})
+        run_workflow(ctx, run_log, workflow, {})
 
     records = _run_log_records(tmp_path)
     types = [record.get("record_type") for record in records]
@@ -414,7 +414,7 @@ def test_undefined_process_writes_failure_evidence_before_raising(
     workflow = {"name": "w", "processes": {}, "steps": [{"id": "s", "process": "nope"}]}
 
     with pytest.raises(WorkflowError, match="undefined process"):
-        run_workflow(ctx, workflow, {"nope": lambda *a: None})
+        run_workflow(ctx, run_log, workflow, {"nope": lambda *a: None})
 
     complete = next(
         r for r in _run_log_records(tmp_path) if r.get("record_type") == "RUN_COMPLETE"
@@ -430,7 +430,7 @@ def test_disabled_workflow_is_recorded_through_the_normal_run_path(
 
     run = run_workflow(
         ctx,
-        {"name": "w", "enabled": False, "processes": {}, "steps": []},
+        run_log, {"name": "w", "enabled": False, "processes": {}, "steps": []},
         {},
     )
 

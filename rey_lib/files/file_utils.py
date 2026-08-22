@@ -1509,7 +1509,7 @@ def log_file_operation(run_log: Any,
 
 
 def log_file_move(
-    ctx: Any,
+    ctx: Any, run_log,
     *,
     source: Path | str,
     destination: Path | str,

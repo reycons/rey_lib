@@ -74,7 +74,7 @@ def pipeline_run_ctx_path(
     ) / f"{step_id}.ctx.json"
 
 
-def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
+def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
     """Run one app command inside the shared append-only run lifecycle.
 
     Applications supply only the operation name, context, and callable. This
@@ -98,7 +98,7 @@ def run_app_operation(ctx: Any, operation: str, func: Any) -> Any:
     set_nest_level(ctx, "app")
     log_run_start(run_log, operation=operation)
     bind_run(ctx)
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     try:
         result = func()
     except Exception as exc:

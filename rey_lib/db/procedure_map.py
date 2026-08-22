@@ -316,13 +316,13 @@ def execute_operation(
 
     if target == "routine":
         binding_name = _get(config, "binding") or _get(config, "routine")
-        return execute_mapped_routine(ctx, conn, operation_map, str(binding_name),
+        return execute_mapped_routine(ctx, run_log, conn, operation_map, str(binding_name),
                                       values, run_ctx=run_ctx)
 
     if target == "mapped_sql":
         binding = resolve_sql_binding(get_procedure_map(ctx, operation_map),
                                       operation_map, str(_get(config, "binding")))
-        return _execute_sql(ctx, conn, operation_map, binding["name"], binding["sql"],
+        return _execute_sql(ctx, run_log, conn, operation_map, binding["name"], binding["sql"],
                             binding["result_mode"], binding["inputs"],
                             binding["output"], values, run_ctx)
 
@@ -331,14 +331,14 @@ def execute_operation(
     if not sql_text:
         raise ConfigError("procedure_map: adhoc_sql operation is missing 'sql_text'.")
     result_mode = _validate_result_mode(_get(config, "result_mode"), "adhoc_sql", operation_map)
-    return _execute_sql(ctx, conn, operation_map, "adhoc_sql", str(sql_text), result_mode,
+    return _execute_sql(ctx, run_log, conn, operation_map, "adhoc_sql", str(sql_text), result_mode,
                         _get(config, "input") if _get(config, "input") is not None
                         else _get(config, "inputs"),
                         _get(config, "output"), values, run_ctx)
 
 
 def execute_mapped_routine(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     procedure_map: str,
     routine_name: str,
@@ -428,7 +428,7 @@ def execute_mapped_routine(
 
 
 def execute_sql_text(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     sql_text: str,
     *,
@@ -468,7 +468,7 @@ def execute_sql_text(
 
 
 def execute_procedure_call(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     proc_name: str,
     named_inputs: list[tuple[str, Any]],
@@ -516,7 +516,7 @@ def execute_procedure_call(
 
 
 def _execute_sql(
-    ctx: Any,
+    ctx: Any, run_log,
     conn: Any,
     map_name: str,
     name: str,
@@ -650,7 +650,7 @@ def call_action(
     Returns the captured scalar (functions) or None (procedures). New callers
     should use ``execute_mapped_routine`` or ``execute_operation``.
     """
-    result = execute_mapped_routine(ctx, conn, map_name, action_name, variables, run_ctx=ctx)
+    result = execute_mapped_routine(ctx, run_log, conn, map_name, action_name, variables, run_ctx=ctx)
     outputs = result.get("outputs") or {}
     return next(iter(outputs.values()), None)
 

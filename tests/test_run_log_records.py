@@ -131,7 +131,7 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     establish_run_identity(ctx)
 
     assert lifecycle_run_app_operation is run_app_operation
-    result = run_app_operation(ctx, "transform", lambda: 0)
+    result = run_app_operation(ctx, run_log, "transform", lambda: 0)
 
     assert result == 0
     records = _read(Path(ctx.run_log_path))
@@ -181,7 +181,7 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
         raise ValueError("password=hunter2 failed")
 
     with pytest.raises(ValueError):
-        run_app_operation(ctx, "load", fail)
+        run_app_operation(ctx, run_log, "load", fail)
 
     records = _read(Path(ctx.run_log_path))
     by_type = {record["record_type"]: record for record in records}
@@ -203,7 +203,7 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Pat
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
     establish_run_identity(ctx)
 
-    result = run_app_operation(ctx, "redact", lambda: 1)
+    result = run_app_operation(ctx, run_log, "redact", lambda: 1)
 
     assert result == 1
     records = _read(Path(ctx.run_log_path))
@@ -359,7 +359,7 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
         return None
 
-    result = run_workflow(ctx, workflow, {"p1": handler, "p2": handler})
+    result = run_workflow(ctx, run_log, workflow, {"p1": handler, "p2": handler})
     assert result.status == "success"
 
     records = _read(Path(ctx.run_log_path))
@@ -403,7 +403,7 @@ def test_workflow_declaring_the_retired_restore_key_is_rejected(
         ),
     ):
         with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
-            run_workflow(ctx, workflow, {"p1": lambda *_: None})
+            run_workflow(ctx, run_log, workflow, {"p1": lambda *_: None})
 
 
 
@@ -424,7 +424,7 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
     def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
         seen_steps.append(current_step() or {})
 
-    result = run_workflow(ctx, workflow, {"p1": handler})
+    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
 
     assert result.status == "success"
     assert seen_steps == [{
@@ -452,7 +452,7 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
     def handler(handler_ctx: object, _config: dict, _run: object) -> None:
         log_run_record(handler_ctx, "ROW_COUNT", count_name="created", count=2)
 
-    result = run_workflow(ctx, workflow, {"p1": handler})
+    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
 
     assert result.status == "success"
     records = _read(Path(ctx.run_log_path))
@@ -486,7 +486,7 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
         raise RuntimeError("load failed password=hunter2 token=abc123")
 
-    result = run_workflow(ctx, workflow, {"p1": handler})
+    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
 
     assert result.status == "failed"
     records = _read(Path(ctx.run_log_path))
@@ -536,7 +536,7 @@ def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> 
     def handler(_ctx: object, _config: dict, _run: RunContext) -> None:
         write_file(tmp_path / "ctx.json", {"ok": True}, "JSON")
 
-    result = run_workflow(ctx, workflow, {"p1": handler})
+    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
 
     assert result.status == "success"
     records = _read(Path(ctx.run_log_path))
@@ -563,7 +563,7 @@ def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -
     def handler(_ctx: object, _config: dict, _run: RunContext) -> SimpleNamespace:
         return SimpleNamespace(status="failed", detail="validation failed")
 
-    result = run_workflow(ctx, workflow, {"p1": handler})
+    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
 
     assert result.status == "failed"
     records = _read(Path(ctx.run_log_path))
@@ -748,7 +748,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
                            target_path=str(tmp_path / "done.csv"))
         return None
 
-    result = run_workflow(ctx, {
+    result = run_workflow(ctx, run_log, {
         "name": "wf", "processes": {"p1": {}},
         "steps": [{"id": "s1", "label": "One", "process": "p1"}],
     }, {"p1": handler})
@@ -924,7 +924,7 @@ def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> No
     """A nested app operation never writes a RUN_RESTORE_POLICY (run owner only)."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
     establish_run_identity(ctx)
-    run_app_operation(ctx, "transform", lambda: 0)
+    run_app_operation(ctx, run_log, "transform", lambda: 0)
     records = _read(Path(ctx.run_log_path))
     assert records  # lifecycle records were written
     assert not any(r["record_type"] == "RUN_RESTORE_POLICY" for r in records)

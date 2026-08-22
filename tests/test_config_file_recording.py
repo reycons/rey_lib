@@ -61,7 +61,7 @@ def _two_layer_metadata() -> ConfigMetadata:
 def test_effective_context_emits_config_records(tmp_path: Path) -> None:
     """Each contributing config file emits one CONFIG_FILE_REFERENCE record."""
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     refs = _config_refs(Path(ctx.run_log_path))
     paths = {record["path"] for record in refs}
     assert paths == {"/cfg/config.yaml", "/cfg/workflows/wf.yaml"}
@@ -86,7 +86,7 @@ def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
         layer="installation",
     )
     ctx = _ctx_with_metadata(tmp_path, metadata)
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     refs = _config_refs(Path(ctx.run_log_path))
     assert [record["path"] for record in refs] == ["/cfg/config.yaml"]
 
@@ -101,7 +101,7 @@ def test_role_comes_from_provenance_not_filename(tmp_path: Path) -> None:
         layer="workflow",
     )
     ctx = _ctx_with_metadata(tmp_path, metadata)
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     record = _config_refs(Path(ctx.run_log_path))[0]
     assert record["file_role"] == "Workflow"
     assert record["configuration_layer"] == "workflow"
@@ -110,7 +110,7 @@ def test_role_comes_from_provenance_not_filename(tmp_path: Path) -> None:
 def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) -> None:
     """Contributed sections and overrides stay with their originating file."""
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     refs = {record["path"]: record for record in _config_refs(Path(ctx.run_log_path))}
     workflow_ref = refs["/cfg/workflows/wf.yaml"]
     # The workflow file overrode logging.level from the installation layer.
@@ -124,7 +124,7 @@ def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) 
 def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
     """The projected Config Files section is populated from the records."""
     ctx = _ctx_with_metadata(tmp_path, _two_layer_metadata())
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     sections = read_run_log_sections(Path(ctx.run_log_path))["sections"]
     config_files = sections["files"]["config_files"]
     assert config_files["count"] == 2
@@ -141,7 +141,7 @@ def test_no_metadata_records_nothing(tmp_path: Path) -> None:
     ctx = SimpleNamespace(
         run_log_path=str(run_log), run_id="r1", run_timestamp="20260707_000000",
     )
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
     assert not run_log.exists()
 
 
@@ -155,7 +155,7 @@ def test_recording_is_fail_safe(tmp_path: Path) -> None:
         _config_metadata=_two_layer_metadata(),
     )
     # Must not raise even though the run log path cannot be written.
-    record_config_file_references(ctx)
+    record_config_file_references(ctx, run_log)
 
 
 @pytest.fixture(autouse=True)

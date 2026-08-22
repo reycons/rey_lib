@@ -85,11 +85,11 @@ def _run_top_level_workflow(tmp_path: Path, ctx: SimpleNamespace) -> None:
 
     def operation_body() -> int:
         # The coordinator completes and finalizes the standalone workflow run.
-        run_workflow(ctx, workflow, {"excel_conversion": handler})
+        run_workflow(ctx, run_log, workflow, {"excel_conversion": handler})
         return 0
 
     # run_app_operation appends the application-level RUN_COMPLETE afterwards.
-    run_app_operation(ctx, "run-workflow", operation_body)
+    run_app_operation(ctx, run_log, "run-workflow", operation_body)
 
     # The run-owning application finalizes again because it is not a pipeline step.
     finalize_run_log(ctx.run_log_path)

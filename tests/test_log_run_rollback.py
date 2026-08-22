@@ -137,7 +137,7 @@ def test_shared_mutation_boundary_commits_evidence_before_manifest(
 
     manifest_record_id = log_source_file_mutation(
         ctx,
-        action="create",
+        run_log, action="create",
         status="success",
         destination_path=tmp_path / "created.csv",
         application_name="test",
@@ -183,7 +183,7 @@ def test_mutation_evidence_failure_before_run_log_commit_is_structured(
         "rey_lib.files.log_run_rollback.log_file_manifest_record"
     ) as manifest_append:
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.phase is SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED
@@ -209,7 +209,7 @@ def test_mutation_evidence_filename_failure_preserves_committed_record_id(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=17
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.phase is (
@@ -241,7 +241,7 @@ def test_mutation_serialization_failure_after_run_log_commit_is_structured(
         side_effect=failure,
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.run_log_committed is True
@@ -261,7 +261,7 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
         side_effect=OSError("append blocked"),
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
-            log_source_file_mutation(ctx, action="move", status="success")
+            log_source_file_mutation(ctx, run_log, action="move", status="success")
 
     error = raised.value
     assert error.phase is (
@@ -288,7 +288,7 @@ def test_sequencing_state_failure_preserves_appended_manifest_row(
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
             log_source_file_mutation(
                 ctx,
-                action="move",
+                run_log, action="move",
                 status="success",
                 source_path=tmp_path / "inbox" / "source.csv",
                 destination_path=tmp_path / "processing" / "source.csv",
@@ -341,7 +341,7 @@ def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None
 
     log_source_file_mutation(
         ctx,
-        action="move",
+        run_log, action="move",
         status="success",
         source_path=tmp_path / "in" / "a.xlsx",
         destination_path=tmp_path / "proc" / "a.xlsx",
@@ -388,7 +388,7 @@ def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
 
     log_source_file_mutation(
         ctx,
-        action="create",
+        run_log, action="create",
         status="success",
         destination_path=tmp_path / "created.csv",
         application_name="test",

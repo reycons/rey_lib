@@ -112,7 +112,7 @@ def writes_db(ctx: Any) -> bool:
     return run_store_mode(ctx) in ("db", "both")
 
 
-def new_batch_intent(ctx: Any) -> bool:
+def new_batch_intent(ctx: Any, run_log) -> bool:
     """Return the declared batch intent for this execution.
 
     Launch states whether this execution starts a batch or continues one. The
@@ -130,7 +130,7 @@ def new_batch_intent(ctx: Any) -> bool:
     return bool(declared)
 
 
-def validate_run_store(ctx: Any) -> None:
+def validate_run_store(ctx: Any, run_log) -> None:
     """Refuse an impossible destination before any application work starts.
 
     A run that cannot reach its required run store should fail at launch rather
@@ -326,7 +326,7 @@ def _severity_of(record_type: str) -> str:
     return "INFO"
 
 
-def persist_record(ctx: Any, record_type: str, message: str,
+def persist_record(ctx: Any, run_log, record_type: str, message: str,
                    record: dict[str, Any]) -> None:
     """Persist one run-log record to the control database.
 

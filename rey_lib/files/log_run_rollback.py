@@ -416,7 +416,7 @@ def serialize_run_rollback(
 
 
 def log_source_file_mutation(
-    ctx: Any,
+    ctx: Any, run_log,
     *,
     action: str,
     status: str,
@@ -723,7 +723,7 @@ def rollback_log_run(
     rollback_run_log_file = Path(str(audit_ctx.run_log_path)).name
     run_rollback_record_id = _write_run_rollback_summary(
         ctx,
-        status=status,
+        run_log, status=status,
         rollback_run_id=str(getattr(audit_ctx, "run_id", "") or rollback_run_log_file),
         original_run_id=selected_file,
         records_removed=records_removed,
@@ -1087,7 +1087,7 @@ def _is_filesystem_reversal(
 
 
 def _write_run_rollback_summary(
-    ctx: Any,
+    ctx: Any, run_log,
     *,
     status: str,
     rollback_run_id: str,

@@ -50,7 +50,7 @@ def test_transform_unmatched_header_logs_validation_result(tmp_path: Path) -> No
         ],
     )
 
-    assert file_loader.transform_one(ctx, data_source, inbox_file) is False
+    assert file_loader.transform_one(ctx, run_log, data_source, inbox_file) is False
 
     record = next(r for r in _records(ctx) if r["record_type"] == "VALIDATION_RESULT")
     assert record["validation_name"] == "transform_header"
@@ -78,7 +78,7 @@ def test_transform_unmatched_header_does_not_log_sql_execution(tmp_path: Path) -
         ],
     )
 
-    file_loader.transform_one(ctx, data_source, inbox_file)
+    file_loader.transform_one(ctx, run_log, data_source, inbox_file)
 
     assert all(r["record_type"] != "SQL_EXECUTION" for r in _records(ctx))
 
@@ -111,7 +111,7 @@ def test_transform_failure_logs_error_and_referencing_step_failure(
 
     monkeypatch.setattr(file_loader, "_read_and_transform", fail_transform)
 
-    assert file_loader.transform_one(ctx, data_source, inbox_file) is False
+    assert file_loader.transform_one(ctx, run_log, data_source, inbox_file) is False
 
     records = _records(ctx)
     error = next(r for r in records if r["record_type"] == "ERROR")

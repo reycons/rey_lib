@@ -232,7 +232,7 @@ def test_execute_message_set_logs_archive_as_messaging_artifact(tmp_path: Path) 
     object.__setattr__(ctx, "run_timestamp", "20260708_000000")
 
     execute_message_set(
-        ctx, message_set_name="test_run_complete",
+        ctx, run_log, message_set_name="test_run_complete",
         context_file=log_file, context_type="jsonl_log",
     )
 
