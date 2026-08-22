@@ -1,130 +1,140 @@
-"""RunLog owns writing a run's records; log_run_record is its shim.
+"""RunLog owns run logging: its state, its transitions, and its writing.
 
-Introducing the owner deliberately changes nothing. Path resolution,
-destination selection, enrichment, stamping and the fail-safe all behave
-exactly as they did, because the sequencing model underneath is not yet proven
-safe to change -- see test_run_log_writer_concurrency.
-
-These assert the ownership, not new behaviour: that the object exists, that the
-old entry point delegates to it, that one RunLog serves a run, and that no
-semantics moved with it.
+The test that stood here covered a compatibility shim and a locator that took
+``ctx``. Both are gone, so this covers the owner instead: it holds what a record
+needs, its own methods change what changes during a run, and nothing is read
+from an application context.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from rey_lib.logs import log_run_record
-from rey_lib.logs.run_log import RunLog, run_log_for
-from rey_lib.run.identity import establish_run_identity
+from rey_lib.logs.run_log import RunLog
+from tests.conftest import make_run_log
 
 
-def _ctx(tmp_path: Path, run_store: str = "jsonl") -> SimpleNamespace:
-    """A launched context writing to tmp_path."""
-    ctx = SimpleNamespace(
-        log_file=str(tmp_path / "app.run.jsonl"),
-        owner_app_name="rey_loader",
-        app_name="rey_loader",
-        logging=SimpleNamespace(run_store=run_store, db_connection="control"),
-    )
-    establish_run_identity(ctx)
-    return ctx
-
-
-def _rows(ctx: Any) -> list[dict]:
+def _rows(run_log: RunLog) -> list[dict]:
     return [json.loads(line)
-            for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+            for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 
-class TestOneRunLogPerRun:
-    """The object is made once and reused."""
+class TestItTakesNoContext:
+    """The property the whole migration exists for."""
 
-    def test_the_same_run_yields_the_same_object(self, tmp_path: Path) -> None:
-        ctx = _ctx(tmp_path)
+    def test_the_module_never_reads_a_context(self) -> None:
+        import ast
 
-        assert run_log_for(ctx) is run_log_for(ctx)
+        import rey_lib.logs.run_log as module
 
-    def test_different_runs_get_different_objects(self, tmp_path: Path) -> None:
-        first, second = _ctx(tmp_path), _ctx(tmp_path)
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        reads = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Name) and n.id == "ctx"]
+        assert reads == []
 
-        assert run_log_for(first) is not run_log_for(second)
+    def test_a_record_is_built_from_owned_state(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path, app="rey_loader", workflow="transform")
 
-    def test_a_context_that_cannot_be_cached_still_gets_one(self) -> None:
-        """Writing a record never mutated the context; caching is not the contract."""
-        bare = object()
+        run_log.append("ROW_COUNT", count_name="loaded", count=7)
 
-        assert isinstance(run_log_for(bare), RunLog)
-
-    def test_nothing_is_opened_until_the_first_write(self, tmp_path: Path) -> None:
-        ctx = _ctx(tmp_path)
-
-        run_log = run_log_for(ctx)
-
-        assert run_log.path is None
-        assert not list(tmp_path.glob("*.jsonl"))
+        row = _rows(run_log)[0]
+        assert row["app"] == "rey_loader"
+        assert row["workflow_name"] == "transform"
+        assert row["run_id"] == run_log.run_id
 
 
-class TestTheShimDelegates:
-    """log_run_record keeps its name and hands the work over."""
+class TestItOwnsTheTransitions:
+    """State that changes during a run changes through RunLog."""
 
-    def test_log_run_record_routes_through_the_object(self, tmp_path: Path) -> None:
-        ctx = _ctx(tmp_path)
+    def test_binding_a_workflow_changes_later_records(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+        run_log.append("ROW_COUNT", count_name="before", count=1)
 
-        with patch.object(RunLog, "append", return_value=7) as append:
-            result = log_run_record(run_log, "ROW_COUNT", count_name="loaded", count=1)
+        run_log.bind_workflow("transform_load")
+        run_log.append("ROW_COUNT", count_name="after", count=2)
 
-        assert result == 7
-        assert append.call_args.args[0] == "ROW_COUNT"
-        assert append.call_args.kwargs["count_name"] == "loaded"
+        before, after = _rows(run_log)
+        assert "workflow_name" not in before
+        assert after["workflow_name"] == "transform_load"
 
-    def test_the_shim_and_the_method_write_the_same_record(self, tmp_path: Path) -> None:
-        via_shim = _ctx(tmp_path)
-        log_run_record(via_shim, "ROW_COUNT", count_name="a", count=1)
+    def test_binding_a_pipeline_changes_later_records(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+        run_log.bind_pipeline("daily")
 
-        via_object = _ctx(tmp_path / "other")
-        (tmp_path / "other").mkdir()
-        run_log_for(via_object).append("ROW_COUNT", count_name="a", count=1)
+        run_log.append("ROW_COUNT", count_name="a", count=1)
 
-        shim_row, object_row = _rows(via_shim)[0], _rows(via_object)[0]
-        ignored = {"run_id", "run_timestamp", "timestamp", "run_started_at"}
-        assert ({k: v for k, v in shim_row.items() if k not in ignored}
-                == {k: v for k, v in object_row.items() if k not in ignored})
+        assert _rows(run_log)[0]["pipeline_name"] == "daily"
+
+    def test_lineage_is_bound_and_stamped(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+        run_log.bind_lineage(parent_run_id="R-parent", subject_type="workflow")
+
+        run_log.append("ROW_COUNT", count_name="a", count=1)
+
+        row = _rows(run_log)[0]
+        assert row["parent_run_id"] == "R-parent"
+        assert row["subject_type"] == "workflow"
+
+    def test_a_semantic_base_sets_the_nesting_level(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+
+        assert run_log.set_nest_level("app") == 3
+        assert run_log.nest_level() == 3
+
+    def test_enter_and_exit_move_within_the_scope(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+        run_log.set_nest_level("workflow")
+
+        assert run_log.enter() == 5
+        assert run_log.exit() == 4
+
+    def test_exit_never_rises_above_the_established_minimum(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+        run_log.set_nest_level("pipeline")
+
+        for _ in range(5):
+            run_log.exit()
+
+        assert run_log.nest_level() >= 1
 
 
-class TestNoSemanticsMoved:
-    """What the object must not have changed."""
+class TestSequencing:
+    """Unchanged by the ownership move."""
 
-    def test_destinations_come_from_the_run_store(self, tmp_path: Path) -> None:
-        assert run_log_for(_ctx(tmp_path, "jsonl")).destinations() == (True, False)
-        assert run_log_for(_ctx(tmp_path, "db")).destinations() == (False, True)
-        assert run_log_for(_ctx(tmp_path, "both")).destinations() == (True, True)
+    def test_the_sequence_advances_per_record(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
 
-    def test_the_sequence_still_advances_per_record(self, tmp_path: Path) -> None:
-        ctx = _ctx(tmp_path)
-        run_log = run_log_for(ctx)
-
-        ids = [run_log.append("ROW_COUNT", count_name=f"n{i}", count=i) for i in range(4)]
+        ids = [run_log.append("ROW_COUNT", count_name=f"n{i}", count=i)
+               for i in range(4)]
 
         assert ids == [1, 2, 3, 4]
 
+    def test_a_second_writer_continues_the_sequence(self, tmp_path: Path) -> None:
+        """Cross-process continuation, which the state file exists for."""
+        first = make_run_log(tmp_path)
+        for i in range(3):
+            first.append("ROW_COUNT", count_name=f"a{i}", count=i)
+
+        second = make_run_log(tmp_path, path=str(first.path()))
+        continued = [second.append("ROW_COUNT", count_name=f"b{i}", count=i)
+                     for i in range(2)]
+
+        assert continued == [4, 5]
+
     def test_a_failed_write_never_raises(self, tmp_path: Path) -> None:
-        """Logging must not mask execution -- unchanged by the move."""
-        ctx = _ctx(tmp_path)
+        run_log = make_run_log(tmp_path)
 
         with patch("rey_lib.files.primitive_file_io.append_jsonl",
                    side_effect=OSError("disk gone")):
-            assert run_log_for(ctx).append("ROW_COUNT", count_name="a", count=1) is None
+            assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
 
     def test_a_failed_write_does_not_advance_the_sequence(self, tmp_path: Path) -> None:
-        ctx = _ctx(tmp_path)
-        run_log = run_log_for(ctx)
+        run_log = make_run_log(tmp_path)
         run_log.append("ROW_COUNT", count_name="first", count=1)
 
         with patch("rey_lib.files.primitive_file_io.append_jsonl",
@@ -132,3 +142,46 @@ class TestNoSemanticsMoved:
             run_log.append("ROW_COUNT", count_name="lost", count=2)
 
         assert run_log.append("ROW_COUNT", count_name="next", count=3) == 2
+
+
+class TestDestination:
+    """RunLog decides where a record goes."""
+
+    def test_jsonl_writes_only_the_file(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path, destination="jsonl")
+
+        assert (run_log.writes_jsonl, run_log.writes_db) == (True, False)
+
+    def test_db_writes_only_the_control_database(self, tmp_path: Path) -> None:
+        class FakeControl:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+
+            def log_event(self, *, severity, event_name, message,
+                          event_jsonb=None, required=False):
+                self.events.append(event_name)
+
+        control = FakeControl()
+        run_log = make_run_log(tmp_path, destination="db", control=control)
+
+        run_log.append("ROW_COUNT", count_name="a", count=1)
+
+        assert control.events == ["ROW_COUNT"]
+        assert not list(Path(tmp_path).glob("*.jsonl"))
+
+    def test_a_missing_control_is_a_write_fault_not_a_crash(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path, destination="db", control=None)
+
+        assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
+
+
+class TestLifecycle:
+    """Closed by runtime collection, once."""
+
+    def test_close_is_idempotent(self, tmp_path: Path) -> None:
+        run_log = make_run_log(tmp_path)
+
+        run_log.close()
+        run_log.close()
+
+        assert run_log.is_closed is True
