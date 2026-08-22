@@ -27,7 +27,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
     return ctx
 
 
-def _records(ctx: SimpleNamespace) -> list[dict]:
+def _records(run_log) -> list[dict]:
     return [
         json.loads(line)
         for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
@@ -55,7 +55,7 @@ def test_transform_unmatched_header_logs_validation_result(tmp_path: Path) -> No
 
     assert file_loader.transform_one(ctx, run_log, data_source, inbox_file) is False
 
-    record = next(r for r in _records(ctx) if r["record_type"] == "VALIDATION_RESULT")
+    record = next(r for r in _records(run_log) if r["record_type"] == "VALIDATION_RESULT")
     assert record["validation_name"] == "transform_header"
     assert record["status"] == "failed"
     assert record["path"].endswith("incoming.csv")
@@ -84,7 +84,7 @@ def test_transform_unmatched_header_does_not_log_sql_execution(tmp_path: Path) -
 
     file_loader.transform_one(ctx, run_log, data_source, inbox_file)
 
-    assert all(r["record_type"] != "SQL_EXECUTION" for r in _records(ctx))
+    assert all(r["record_type"] != "SQL_EXECUTION" for r in _records(run_log))
 
 
 def test_transform_failure_logs_error_and_referencing_step_failure(
@@ -118,7 +118,7 @@ def test_transform_failure_logs_error_and_referencing_step_failure(
 
     assert file_loader.transform_one(ctx, run_log, data_source, inbox_file) is False
 
-    records = _records(ctx)
+    records = _records(run_log)
     error = next(r for r in records if r["record_type"] == "ERROR")
     failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
     assert error["error_id"]

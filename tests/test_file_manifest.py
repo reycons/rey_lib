@@ -299,7 +299,7 @@ def test_returned_record_id_matches_the_run_log_row(tmp_path: Path) -> None:
 
     rows = [
         json.loads(line)
-        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     assert rows[record_id - 1]["record_id"] == record_id
@@ -308,9 +308,10 @@ def test_returned_record_id_matches_the_run_log_row(tmp_path: Path) -> None:
 
 def test_log_run_record_returns_none_when_it_cannot_append(tmp_path: Path) -> None:
     """The never-raise contract holds: an unusable run log returns None, not an error."""
-    ctx = SimpleNamespace(app_name="rey_lib", log_depth=0)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    assert log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a") is None
+    from rey_lib.logs.run_log import RunLog
+
+    unusable = RunLog(app="rey_lib", run_id="R1", run_timestamp="20260822_000000")
+    assert log_run_record(unusable, "SOURCE_FILE_INVENTORY", path="/a") is None
 
 
 def test_source_file_inventory_is_grouped_with_file_records(tmp_path: Path) -> None:
@@ -319,7 +320,7 @@ def test_source_file_inventory_is_grouped_with_file_records(tmp_path: Path) -> N
     log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
 
     record = json.loads(
-        Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()[0]
+        Path(run_log.path()).read_text(encoding="utf-8").splitlines()[0]
     )
     assert record["record_group"] == "files"
     assert record["record_subgroup"] == "input_files"
@@ -334,7 +335,7 @@ def test_normal_run_log_writing_is_unaffected(tmp_path: Path) -> None:
 
     rows = [
         json.loads(line)
-        for line in Path(ctx.run_log_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     assert [row["record_type"] for row in rows] == ["STEP_START", "STEP_END"]

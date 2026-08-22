@@ -22,11 +22,11 @@ from rey_lib.config.provenance import ConfigMetadata
 from rey_lib.logs import read_run_log_sections
 
 
-def _config_refs(run_log: Path) -> list[dict]:
+def _config_refs(log_path: Path) -> list[dict]:
     """Return CONFIG_FILE_REFERENCE records from a run log."""
     return [
         record
-        for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines() if line.strip()
+        for line in Path(log_path).read_text(encoding="utf-8").splitlines() if line.strip()
         for record in [json.loads(line)]
         if record.get("record_type") == "CONFIG_FILE_REFERENCE"
     ]
