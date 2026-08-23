@@ -187,10 +187,33 @@ def _open_control(ctx: Namespace) -> Any:
     the run log reaches the control database through the same object, so a
     second Control would mean a second connection and two objects disagreeing
     about which batch is open.
+
+    Control used to be built only when a database destination was selected,
+    which made it a dependency of DB logging. It is a dependency of launching
+    now: every run is recorded in ``control.run_manifest`` and that row is what
+    mints the run's identity, so a process that cannot reach the control
+    database has no id to run under. ``logging.run_store`` still decides where
+    run *records* go and no longer decides whether Control exists.
+
+    Raises
+    ------
+    ConfigError
+        When the installation configures no control database. Reported as what
+        it means -- this installation cannot record a run, so it cannot start
+        one -- because the underlying message names a missing key and reads as
+        a logging problem.
     """
     from rey_lib.control import Control
 
-    control = Control(ctx)
+    try:
+        control = Control(ctx)
+    except ConfigError as exc:
+        raise ConfigError(
+            f"This installation cannot start a run: {exc} Every run is recorded "
+            "in control.run_manifest and that row is what gives the run its id, "
+            "so an installation that reaches no control database cannot launch "
+            "one. Configure control and its connection for this app's scope."
+        ) from exc
     register_runtime_object(ctx, control)
     return control
 

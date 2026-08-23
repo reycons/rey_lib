@@ -166,18 +166,26 @@ class Control:
     # -- connection ---------------------------------------------------------
 
     def _connection_name(self) -> Optional[str]:
-        """Return the connection the run store is written to, or None.
+        """Return the connection the control database is reached through, or None.
 
-        ``logging.db_connection`` names it directly. It is not read from the
-        procedure map: a map is a routine contract and says nothing about which
-        database those routines run on.
+        ``control.connection`` names it, beside the procedure map it is used
+        with. It is not read from the map itself: a map is a routine contract
+        and says nothing about which database those routines run on.
+
+        It used to be read from ``logging.db_connection``, which was right while
+        Control existed only to persist run-log records. Control is a launch
+        dependency now -- every run is recorded in ``control.run_manifest``
+        before logging opens -- so an installation that logs to JSONL and never
+        sets a logging connection still reaches the control database, through
+        the key that describes it. ``logging.db_connection`` keeps its own job:
+        it says where run *records* go when the run store is a database.
         """
-        logging_cfg = getattr(self._ctx, "logging", None)
-        if logging_cfg is None:
+        control_cfg = getattr(self._ctx, "control", None)
+        if control_cfg is None:
             return None
-        name = getattr(logging_cfg, "db_connection", None)
-        if name is None and isinstance(logging_cfg, dict):
-            name = logging_cfg.get("db_connection")
+        name = getattr(control_cfg, "connection", None)
+        if name is None and isinstance(control_cfg, dict):
+            name = control_cfg.get("connection")
         return str(name) if name else None
 
     def _resolve_connection(self) -> Optional[Any]:

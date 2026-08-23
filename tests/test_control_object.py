@@ -45,7 +45,8 @@ def _ctx(**extra: Any) -> SimpleNamespace:
     return SimpleNamespace(
         run_id="R1",
         app_name="rey_loader",
-        control=SimpleNamespace(procedure_map="control", enabled=True),
+        control=SimpleNamespace(procedure_map="control", connection="control",
+                                enabled=True),
         logging=SimpleNamespace(db_connection="control"),
         procedure_maps=[_map(), _map("rey_loader")],
         db_connections=[SimpleNamespace(name="control", provider="postgres",
