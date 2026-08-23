@@ -30,6 +30,22 @@ never touches.
 ``close`` is deliberately not called by ordinary consumers. A shared object
 closed by whoever happened to finish first is a handle pulled out from under
 everyone still holding it, which is the failure this sharing otherwise invites.
+
+Who holds it
+------------
+The runtime, through ``ConnectionOwner``. A context is discovery: it says which
+connections are configured and what each one is. It does not carry the objects.
+
+That distinction is the whole of the objectification, and getting it wrong is
+what broke the console's database tree. ``shared_connection`` looked the object
+up in a dict on the ctx, so sharing was scoped to a ctx rather than to the
+runtime: two contexts for one installation held two objects and two handles, and
+a context built any other way held none. The Console resolves a fresh context
+per request, so every installation-scoped request found nothing and reported the
+connection as unconfigured.
+
+A configured connection has one runtime Connection object. Any context capable
+of identifying that configured connection resolves to that same object.
 """
 
 from __future__ import annotations
@@ -39,7 +55,13 @@ from typing import Any, Optional
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError
 
-__all__ = ["Connection", "build_connections", "shared_connection"]
+__all__ = [
+    "Connection",
+    "ConnectionOwner",
+    "build_connections",
+    "connection_owner",
+    "shared_connection",
+]
 
 _db = DBAdapter()
 
@@ -147,27 +169,150 @@ class Connection:
         return _db.execute_function_rows(self.handle(), routine, named_params)
 
 
-def build_connections(ctx: Any) -> dict[str, Connection]:
-    """Build one Connection per configured connection, keyed by name.
+class ConnectionOwner:
+    """Holds one Connection per configured connection, for the runtime.
 
-    Built once at context composition so every consumer that later names a
-    connection receives the same instance. Duplicate names are a configuration
-    error rather than a silent last-one-wins: two records under one name is how
-    a consumer ends up on a different database from the one it asked for.
+    The authority the objectification intended. A caller names a connection and
+    receives the object for it; whether that object already existed is this
+    object's business and nobody else's.
+
+    Identity is the *configured* connection -- the installation config it was
+    declared in, and its name within that config. Not the endpoint: two
+    installations that each configure ``Rey Apps`` against one database are two
+    configured connections, and collapsing them would be deduplication the
+    configuration model never asked for. Not the bare name, which means
+    different databases in different installations. Not the context object,
+    because a context is not an identity -- it is one of several ways to arrive
+    at the same one.
+
+    Nothing is opened here. ``Connection`` opens lazily on first use, so holding
+    one costs nothing until somebody works through it.
+    """
+
+    def __init__(self) -> None:
+        """Hold nothing yet."""
+        self._owned: dict[tuple[str, str], Connection] = {}
+
+    def __repr__(self) -> str:
+        return f"<ConnectionOwner {len(self._owned)} held>"
+
+    @property
+    def name(self) -> str:
+        """A label for runtime collection reporting."""
+        return "connections"
+
+    def resolve(self, ctx: Any, name: str) -> Connection:
+        """Return the Connection for the named configured connection.
+
+        Built from the definition ``ctx`` carries the first time it is asked
+        for, and returned as-is afterwards.
+
+        Parameters
+        ----------
+        ctx : Any
+            A context that can identify the configured connection. Used for
+            discovery -- its ``connections`` list and its ``config_path`` -- and
+            carried into the Connection so a credential naming an environment
+            variable can be read as the handle opens.
+        name : str
+            The connection's name within that configuration.
+
+        Raises
+        ------
+        ConfigError
+            When no name is given, or the configuration declares none by that
+            name.
+        """
+        if not name:
+            raise ConfigError("connection: no connection name was given.")
+
+        key = (_config_identity(ctx), str(name))
+        held = self._owned.get(key)
+        if held is not None:
+            return held
+
+        definitions = _connection_definitions(ctx)
+        record = definitions.get(str(name))
+        if record is None:
+            raise ConfigError(
+                f"connection: '{name}' is not configured. Known connections: "
+                f"{', '.join(sorted(definitions)) or 'none'}."
+            )
+        built = Connection(record, ctx=ctx)
+        self._owned[key] = built
+        return built
+
+    def close(self) -> None:
+        """Close every connection held, and hold none.
+
+        The last close, called by the boundary that owns runtime shutdown. One
+        failure does not stop the rest -- the alternative is that a single
+        broken handle leaves the others open.
+        """
+        held, self._owned = list(self._owned.values()), {}
+        for connection in held:
+            connection.close()
+
+
+_OWNER = ConnectionOwner()
+
+
+def connection_owner() -> ConnectionOwner:
+    """Return the runtime's connection owner."""
+    return _OWNER
+
+
+def _config_identity(ctx: Any) -> str:
+    """Return the configuration a context was built from.
+
+    ``config_path`` is set on every context built from a path, which is both
+    ways one is built, so it identifies the installation without a second
+    vocabulary for saying which one this is.
+    """
+    return str(getattr(ctx, "config_path", "") or "")
+
+
+def _connection_definitions(ctx: Any) -> dict[str, Any]:
+    """Return the configured connection records, keyed by name.
+
+    Discovery. A duplicate name is a configuration error rather than a silent
+    last-one-wins: two records under one name is how a consumer ends up on a
+    different database from the one it asked for.
     """
     records = list(getattr(ctx, "connections", None)
                    or getattr(ctx, "db_connections", None) or [])
-    built: dict[str, Connection] = {}
+    found: dict[str, Any] = {}
     for record in records:
-        connection = Connection(record, ctx=ctx)
-        if connection.name in built:
+        name = getattr(record, "name", None)
+        if name is None and isinstance(record, dict):
+            name = record.get("name")
+        if not name:
+            raise ConfigError("connection: a connection config must carry a name.")
+        if str(name) in found:
             raise ConfigError(
-                f"connections declares '{connection.name}' more than once. A name "
+                f"connections declares '{name}' more than once. A name "
                 "must identify one database, or a consumer naming it cannot know "
                 "which one it reached."
             )
-        built[connection.name] = connection
-    return built
+        found[str(name)] = record
+    return found
+
+
+def build_connections(ctx: Any) -> dict[str, Connection]:
+    """Return one Connection per configured connection, keyed by name.
+
+    Every one resolved through the runtime owner, so this returns the same
+    objects a later ``shared_connection`` will. It no longer decides who holds
+    them -- it did once, and a context holding the only copy is what scoped
+    sharing to a context instead of to the runtime.
+
+    What it still is: the eager check that a configuration is usable, which
+    fails at composition rather than at the first query.
+    """
+    return {
+        name: _OWNER.resolve(ctx, name)
+        for name in _connection_definitions(ctx)
+    }
 
 
 def shared_connection(ctx: Any, name: str) -> Connection:
@@ -177,24 +322,14 @@ def shared_connection(ctx: Any, name: str) -> Connection:
     or opens a handle itself: naming a connection yields the object every other
     consumer of that name already holds.
 
+    Any context that can identify the configured connection resolves to the same
+    object, whether or not it went through a composition step. That is what lets
+    a Console request resolve a fresh context per request and still reach the
+    connection everything else is using.
+
     Raises
     ------
     ConfigError
-        When no connection is configured under that name, or the shared
-        connections were never built for this context.
+        When no connection is configured under that name.
     """
-    if not name:
-        raise ConfigError("connection: no connection name was given.")
-
-    shared = getattr(ctx, "shared_connections", None)
-    if not shared:
-        raise ConfigError(
-            "connection: shared connections are not built on this context. They "
-            "are created once at composition by build_ctx_for_app."
-        )
-    if name not in shared:
-        raise ConfigError(
-            f"connection: '{name}' is not configured. Known connections: "
-            f"{', '.join(sorted(shared)) or 'none'}."
-        )
-    return shared[name]
+    return _OWNER.resolve(ctx, name)

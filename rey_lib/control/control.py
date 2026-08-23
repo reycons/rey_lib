@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from rey_lib.db.connection import shared_connection
 from rey_lib.db.procedure_map import execute_mapped_routine, get_procedure_map
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
@@ -182,16 +183,21 @@ class Control:
     def _resolve_connection(self) -> Optional[Any]:
         """Take the shared Connection this control database is reached through.
 
-        Looked up by name in the objects built at context composition, so
-        Control references the same instance every other consumer of that name
-        holds. It resolves the object, never a config: opening, reuse and
-        closing belong to Connection.
+        Asked for by name, so Control references the same instance every other
+        consumer of that name holds. It resolves the object, never a config:
+        opening, reuse and closing belong to Connection.
+
+        An unconfigured name answers None rather than raising. Control's
+        optional capabilities are allowed to be unavailable, and the required
+        path reports that through ``_handle``.
         """
         name = self._connection_name()
         if not name:
             return None
-        shared = getattr(self._ctx, "shared_connections", None) or {}
-        return shared.get(name)
+        try:
+            return shared_connection(self._ctx, name)
+        except ConfigError:
+            return None
 
     def _handle(self, required: bool = False) -> Optional[Any]:
         """Return the shared connection's live handle, or None when unusable.

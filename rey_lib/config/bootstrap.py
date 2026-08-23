@@ -40,7 +40,7 @@ from typing import Optional
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
 from rey_lib.errors.error_utils import ConfigError, install_process_error_boundary
 from rey_lib.logs import get_logger, setup_logging
-from rey_lib.db.connection import build_connections
+from rey_lib.db.connection import build_connections, connection_owner
 from rey_lib.run import Run, establish_run_identity
 from rey_lib.runtime import collect_runtime, register_runtime_object
 
@@ -117,17 +117,20 @@ def build_ctx_for_app(
             )
         ctx = _resolve_ctx(installation_config_path, app_name, project_root)
 
-    # One Connection per configured connection, built once here so every
-    # consumer that later names one receives the same instance rather than
-    # opening its own. Each is registered for final collection: no consumer
-    # may close a shared object, so the boundary that created them owns the
-    # last close.
+    # The configuration is checked here rather than at the first query: a
+    # duplicate connection name fails at composition, where it can be read as a
+    # configuration fault. The objects themselves belong to the runtime owner,
+    # not to this context -- a context that held the only copy is what once
+    # scoped sharing to a context instead of to the runtime.
     #
-    # Built before the run exists, because the run is created in the database
+    # Checked before the run exists, because the run is created in the database
     # and cannot be created without a connection to create it in.
-    ctx.shared_connections = build_connections(ctx)
-    for connection in ctx.shared_connections.values():
-        register_runtime_object(ctx, connection)
+    build_connections(ctx)
+
+    # One registration, for the owner. Collecting it closes every connection it
+    # built: no consumer may close a shared object, so the boundary that owns
+    # shutdown owns the last close.
+    register_runtime_object(ctx, connection_owner())
 
     # The app's launch boundary. Recording the run is what creates its
     # identity: the manifest row generates run_manifest_id and the application

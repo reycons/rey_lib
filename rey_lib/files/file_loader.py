@@ -725,7 +725,8 @@ def run_load(
     ctx : Any
         Application context. Must have:
         - ``ctx.data_sources`` — iterable of data source Namespaces
-        - ``ctx.shared_connections`` — one Connection per configured name
+        - ``ctx.connections`` — the configured connections, which the runtime
+          connection owner resolves objects from by name
 
     sql_dir : Optional[Path]
         Base directory for resolving ``post_load_sql`` file names and

@@ -89,13 +89,22 @@ class TestConnectionIsTheRuntimePath:
         from rey_lib.db import connection
 
         assert set(connection.__all__) == {
-            "Connection", "build_connections", "shared_connection"}
+            "Connection", "ConnectionOwner", "build_connections",
+            "connection_owner", "shared_connection"}
 
-    def test_connections_are_built_once_at_composition(self) -> None:
+    def test_composition_checks_the_configuration_and_holds_nothing(self) -> None:
+        """The boundary validates and registers; it does not become the holder.
+
+        A context holding the only copy is what scoped sharing to a context
+        rather than to the runtime, so a second context for the same
+        installation got a second object and a context built any other way got
+        none.
+        """
         source = (PRODUCTION / "config" / "bootstrap.py").read_text(encoding="utf-8")
 
         assert "build_connections(ctx)" in source
-        assert "ctx.shared_connections" in source
+        assert "connection_owner()" in source
+        assert "ctx.shared_connections" not in source
 
     def test_configured_names_must_be_unique(self) -> None:
         from types import SimpleNamespace

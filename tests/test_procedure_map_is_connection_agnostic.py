@@ -124,8 +124,15 @@ class TestTheCallerTakesTheConnection:
         with pytest.raises(ConfigError, match="not configured"):
             shared_connection(ctx, "nope")
 
-    def test_missing_connections_config_is_refused(self) -> None:
-        with pytest.raises(ConfigError, match="not built on this context"):
+    def test_a_context_configuring_nothing_is_refused(self) -> None:
+        """The answer names what is wrong: nothing is configured.
+
+        It used to report that shared connections were "not built on this
+        context", which described a composition step rather than the
+        configuration -- and said the connection was unconfigured when it was
+        configured and simply not yet resolved.
+        """
+        with pytest.raises(ConfigError, match="Known connections: none"):
             shared_connection(SimpleNamespace(), "control")
 
     def test_configured_names_are_unique(self) -> None:
