@@ -1525,3 +1525,21 @@ register_file_compensation(
     validate=_validate_replace,
     execute=_execute_replace,
 )
+# A governed file that was present and is now absent. An ordinary lifecycle
+# fact, not a compensation: the run did not remove the file, it recorded that
+# the file had gone -- externally, manually, or by something outside this
+# system. The action deliberately does not say which.
+#
+# `delete` is not this. That action means the system deleted the file and can
+# put it back, which is why it compensates to restore_recoverable_file.
+#
+# Rolling this back removes the record and touches nothing on disk, the same
+# shape record_only uses. There is no file to restore: undoing the run that
+# noticed a disappearance cannot un-disappear the file, and a compensation that
+# tried would be inventing a file it never had.
+register_file_compensation(
+    "disappear",
+    compensating_action="remove_record",
+    validate=lambda _record: None,
+    execute=lambda _record: {},
+)
