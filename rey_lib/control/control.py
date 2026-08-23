@@ -706,12 +706,18 @@ class Control:
         }, required=required)
 
     def get_run_manifest(self, run_id: int,
-                         required: bool = False) -> Optional[dict[str, Any]]:
+                         required: bool = True) -> Optional[dict[str, Any]]:
         """Return one run's durable record, or None when it was never recorded.
 
         This is what answers a poll once the live run is gone. It reads the row
         and nothing else -- no log file, no evidence projection -- because
         telling a caller the run is finished needs only the row.
+
+        ``required`` defaults True, like create and finish. ``control.enabled``
+        governs the optional capabilities -- artifacts, contracts, config
+        snapshots -- and must not veto the run domain: with it false this
+        returned no rows and every finished run read as one that was never
+        recorded, which is the answer the manifest exists to stop.
         """
         rows = self._call_rows("get_run_manifest", {"run_id": run_id},
                                required=required)
