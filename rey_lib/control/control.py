@@ -722,3 +722,130 @@ class Control:
         rows = self._call_rows("get_run_manifest", {"run_id": run_id},
                                required=required)
         return rows[0] if rows else None
+
+    # -- file manifest ------------------------------------------------------
+
+    def inventory_file(self, path: str, file_name: str, base_name: str,
+                       file_extension: str, checksum_sha256: str,
+                       size_bytes: int, source_name: Optional[str] = None,
+                       recorded_at: Optional[str] = None,
+                       evidence: Optional[dict[str, Any]] = None,
+                       producer: Optional[dict[str, Any]] = None,
+                       classification: Optional[dict[str, Any]] = None,
+                       required: bool = True) -> Optional[int]:
+        """Record a file and the start of its history, returning its id.
+
+        One call, and the routine writes both the manifest row and the baseline
+        mutation. A file never exists without the record of where it was found.
+        """
+        return self._call("insert_file_manifest", {
+            "path":            path,
+            "file_name":       file_name,
+            "base_name":       base_name,
+            "file_extension":  file_extension,
+            "checksum_sha256": checksum_sha256,
+            "size_bytes":      size_bytes,
+            "source_name":     source_name,
+            "recorded_at":     recorded_at,
+            "evidence":        evidence,
+            "producer":        producer,
+            "classification":  classification,
+        }, required=required)
+
+    def update_file_manifest(self, file_manifest_id: int,
+                             required: bool = True, **fields: Any) -> None:
+        """Change a file's current state. Absent fields are left alone."""
+        values = {"file_manifest_id": file_manifest_id}
+        for name in ("path", "file_name", "base_name", "file_extension",
+                     "checksum_sha256", "size_bytes", "source_name",
+                     "recorded_at", "evidence", "producer", "classification"):
+            values[name] = fields.get(name)
+        self._call("update_file_manifest", values, required=required)
+
+    def append_file_mutation(self, file_manifest_id: int, record_type: str,
+                             action: str, status: Optional[str] = None,
+                             source_record_id: Optional[int] = None,
+                             run_log_file: Optional[str] = None,
+                             run_log_record_id: Optional[int] = None,
+                             path: Optional[str] = None,
+                             deleted_in: Optional[int] = None,
+                             deleted_ts: Optional[str] = None,
+                             created_ts: Optional[str] = None,
+                             producer: Optional[dict[str, Any]] = None,
+                             conversion: Optional[dict[str, Any]] = None,
+                             result: Optional[dict[str, Any]] = None,
+                             rollback: Optional[dict[str, Any]] = None,
+                             required: bool = True) -> Optional[int]:
+        """Append one event to a file's history."""
+        return self._call("insert_file_mutation", {
+            "file_manifest_id":  file_manifest_id,
+            "source_record_id":  source_record_id,
+            "record_type":       record_type,
+            "action":            action,
+            "run_log_file":      run_log_file,
+            "run_log_record_id": run_log_record_id,
+            "path":              path,
+            "status":            status,
+            "deleted_in":        deleted_in,
+            "deleted_ts":        deleted_ts,
+            "created_ts":        created_ts,
+            "producer":          producer,
+            "conversion":        conversion,
+            "result":            result,
+            "rollback":          rollback,
+        }, required=required)
+
+    def clear_file_classifications(self, file_manifest_ids: list[int],
+                                   required: bool = True) -> Optional[int]:
+        """Clear the classification on a whole matched set, or none of it.
+
+        One statement, so the set is all-or-nothing. Returns how many were
+        actually cleared, which a caller compares against what it asked for.
+        """
+        return self._call("clear_file_classifications",
+                          {"file_manifest_ids": list(file_manifest_ids or [])},
+                          required=required)
+
+    def get_file_manifest(self, file_manifest_id: int,
+                          required: bool = True) -> Optional[dict[str, Any]]:
+        """Return one file's current state, or None when it was never recorded."""
+        rows = self._call_rows("get_file_manifest",
+                               {"file_manifest_id": file_manifest_id},
+                               required=required)
+        return rows[0] if rows else None
+
+    def find_file_manifest(self, path: Optional[str] = None,
+                           checksum_sha256: Optional[str] = None,
+                           source_name: Optional[str] = None,
+                           file_name: Optional[str] = None,
+                           limit: int = 100,
+                           required: bool = True) -> list[dict[str, Any]]:
+        """Return files matching every filter given. A NULL filter is not one."""
+        return self._call_rows("find_file_manifest", {
+            "path": path, "checksum_sha256": checksum_sha256,
+            "source_name": source_name, "file_name": file_name, "limit": limit,
+        }, required=required)
+
+    def list_file_manifest(self, required: bool = True) -> list[dict[str, Any]]:
+        """Return every current file, in order. No filter, no cap."""
+        return self._call_rows("list_file_manifest", {}, required=required)
+
+    def file_history(self, file_manifest_id: int,
+                     required: bool = True) -> list[dict[str, Any]]:
+        """Return one file's mutations, oldest first."""
+        return self._call_rows("find_file_mutation",
+                               {"file_manifest_id": file_manifest_id},
+                               required=required)
+
+    def list_file_mutations(self, file_manifest_id: Optional[int] = None,
+                            required: bool = True) -> list[dict[str, Any]]:
+        """Return mutations in order, for one file or for every file."""
+        return self._call_rows("list_file_mutation",
+                               {"file_manifest_id": file_manifest_id},
+                               required=required)
+
+    def files_for_run(self, run_id: int,
+                      required: bool = True) -> list[dict[str, Any]]:
+        """Return the files one run recorded, by the run's durable identity."""
+        return self._call_rows("find_file_manifest_for_run",
+                               {"run_id": run_id}, required=required)
