@@ -775,8 +775,15 @@ class Control:
                              conversion: Optional[dict[str, Any]] = None,
                              result: Optional[dict[str, Any]] = None,
                              rollback: Optional[dict[str, Any]] = None,
+                             batch_step_id: Optional[int] = None,
                              required: bool = True) -> Optional[int]:
-        """Append one event to a file's history."""
+        """Append one event to a file's history.
+
+        ``batch_step_id`` defaults to the step this Control currently has open,
+        because that is the step that executed the action -- and it is where
+        the executed SQL and the action's provenance already live. A caller
+        does not have to know which step it is running under to say so.
+        """
         return self._call("insert_file_mutation", {
             "file_manifest_id":  file_manifest_id,
             "source_record_id":  source_record_id,
@@ -793,6 +800,8 @@ class Control:
             "conversion":        conversion,
             "result":            result,
             "rollback":          rollback,
+            "batch_step_id":     (batch_step_id if batch_step_id is not None
+                                  else self.batch_step_id),
         }, required=required)
 
     def clear_file_classifications(self, file_manifest_ids: list[int],

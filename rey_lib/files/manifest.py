@@ -126,11 +126,15 @@ class FileManifest:
         deleted_in: Optional[int] = None,
         deleted_ts: Optional[str] = None,
         created_ts: Optional[str] = None,
+        batch_step_id: Optional[int] = None,
     ) -> int:
         """Append one event to a file's history, and return the mutation's id.
 
         History is append-only. There is no update and no delete here, and the
         routines that could do either are not granted to any application role.
+
+        The mutation points at the batch step that executed it. Left unset it
+        takes the step Control has open, which is the one that ran the action.
         """
         return int(self._control.append_file_mutation(
             file_manifest_id, record_type=record_type, action=action,
@@ -139,7 +143,7 @@ class FileManifest:
             run_log_record_id=run_log_record_id, path=path or None,
             producer=producer, conversion=conversion, result=result,
             rollback=rollback, deleted_in=deleted_in, deleted_ts=deleted_ts,
-            created_ts=created_ts,
+            created_ts=created_ts, batch_step_id=batch_step_id,
         ))
 
     def clear_classifications(self, file_manifest_ids: list[int]) -> int:
