@@ -17,10 +17,7 @@ from rey_lib.logs.file_manifest import (
     FileManifestError,
     FileManifestSession,
     file_manifest_session,
-    file_manifest_write_boundary,
     log_file_manifest_record,
-    manifest_lock_path,
-    manifest_state_path,
     resolve_file_manifest_path,
 )
 from rey_lib.logs.profile_library import (
@@ -135,10 +132,7 @@ __all__ = [
     "FileManifestError",
     "FileManifestSession",
     "file_manifest_session",
-    "file_manifest_write_boundary",
     "log_file_manifest_record",
-    "manifest_lock_path",
-    "manifest_state_path",
     "resolve_file_manifest_path",
     "ProfileLibraryError",
     "append_profile_record",

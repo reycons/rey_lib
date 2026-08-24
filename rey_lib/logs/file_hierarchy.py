@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from rey_lib.logs.file_manifest import FileManifestError, resolve_file_manifest_path
+from rey_lib.logs.file_manifest import FileManifestError
 
 __all__ = [
     "FileHierarchyError",
@@ -31,7 +31,6 @@ __all__ = [
 
 _INVENTORY = "source_file_inventory"
 _MUTATION = "source_file_mutation"
-_CLASSIFICATION = "source_file_classification"
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 250
 _MAX_STAGE_LIMIT = 500
@@ -66,6 +65,19 @@ def _positive_int(value: Any, field: str) -> int:
 def _nonblank(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise FileHierarchyError(f"{field} must be a nonblank string.")
+    return value
+
+
+def _identity(value: Any, field: str) -> int:
+    """Return a governed file's identity.
+
+    That identity is ``control.file_manifest.file_manifest_id``, a generated
+    integer which application code also calls ``file_id``. It is one value, so
+    it is never rendered as a string on the way through -- a second
+    representation is how one object ends up with two identities.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise FileHierarchyError(f"{field} must be a governed file identity.")
     return value
 
 
@@ -115,7 +127,7 @@ class FileHierarchyStage:
     stage_type: str
     label: str
     record_id: int
-    file_id: str
+    file_id: int
     path: str | None
     original_path: str | None
     status: str | None
@@ -142,7 +154,7 @@ class FileHierarchyStagePage:
     """One bounded page of stages for one exact inventory identity."""
 
     file_identity: str
-    file_id: str
+    file_id: int
     current_path: str | None
     lifecycle_status: str
     stages: tuple[FileHierarchyStage, ...]
@@ -207,7 +219,7 @@ class FileHierarchyFile:
     """One inventoried file and its exact-identity mutation children."""
 
     file_identity: str
-    file_id: str
+    file_id: int
     display_label: str
     inventory_record_id: int
     path: str | None
@@ -269,7 +281,7 @@ class FileHierarchyPage:
 class _InventoryNode:
     feed: str
     record_id: int
-    file_id: str
+    file_id: int
     file_name: str
     path: str | None
     metadata: Mapping[str, Any]
@@ -303,19 +315,19 @@ def _classified_feeds(records: list[Mapping[str, Any]]) -> dict[str, str]:
     """
     feeds: dict[str, str] = {}
     for record in records:
-        if record.get("record_type") != _CLASSIFICATION:
+        if record.get("record_type") != _INVENTORY:
             continue
-        record_id = _positive_int(record.get("record_id"), f"{_CLASSIFICATION}.record_id")
         classification = record.get("classification")
         if not isinstance(classification, Mapping):
             continue
         values = classification.get("values")
         if not isinstance(values, Mapping) or values.get("feed") is None:
             continue
-        file_id = _nonblank(record.get("file_id"), f"{_CLASSIFICATION}[{record_id}].file_id")
+        record_id = _positive_int(record.get("record_id"), f"{_INVENTORY}.record_id")
+        file_id = _identity(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
         feeds[file_id] = _nonblank(
             values.get("feed"),
-            f"{_CLASSIFICATION}[{record_id}].classification.values.feed",
+            f"{_INVENTORY}[{record_id}].classification.values.feed",
         )
     return feeds
 
@@ -326,7 +338,7 @@ def _inventory_node(record: Mapping[str, Any], feed: str) -> _InventoryNode:
     return _InventoryNode(
         feed=feed,
         record_id=record_id,
-        file_id=_nonblank(record.get("file_id"), f"source_file_inventory[{record_id}].file_id"),
+        file_id=_identity(record.get("file_id"), f"source_file_inventory[{record_id}].file_id"),
         file_name=_nonblank(
             file_data.get("file_name"),
             f"source_file_inventory[{record_id}].file.file_name",
@@ -357,14 +369,15 @@ def _validated_stage_page(offset: int, limit: int) -> tuple[int, int]:
 
 
 def _read_manifest_records(ctx: Any) -> list[Mapping[str, Any]]:
-    from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file
+    """Every governed file with its mutations beneath it."""
+    from rey_lib.logs.file_manifest import read_records_from_control
 
     try:
-        manifest_path = resolve_file_manifest_path(ctx)
-        rows = read_jsonl_file(manifest_path)
-    except (FileManifestError, JsonlReadError) as exc:
-        raise FileHierarchyError(f"File hierarchy could not read the canonical manifest: {exc}") from exc
-    return [row.record for row in rows]
+        return list(read_records_from_control(ctx))
+    except FileManifestError as exc:
+        raise FileHierarchyError(
+            f"File hierarchy could not read the governed file manifest: {exc}"
+        ) from exc
 
 
 def _build_page(
@@ -373,9 +386,13 @@ def _build_page(
     offset: int,
     limit: int,
 ) -> FileHierarchyPage:
-    seen_record_ids: set[int] = set()
+    # Identity is unique within its own kind. A file and a mutation are rows in
+    # separate tables with separate generated keys, so the same number names
+    # both a file and one of its own mutations; only a collision inside one kind
+    # is a duplicate.
+    seen_record_ids: set[tuple[str, int]] = set()
     inventories: list[_InventoryNode] = []
-    mutations_by_file: dict[str, list[FileHierarchyMutation]] = {}
+    mutations_by_file: dict[int, list[FileHierarchyMutation]] = {}
     feeds_by_file = _classified_feeds(records)
 
     for record in records:
@@ -383,18 +400,19 @@ def _build_page(
         if record_type not in {_INVENTORY, _MUTATION}:
             continue
         record_id = _positive_int(record.get("record_id"), f"{record_type}.record_id")
-        if record_id in seen_record_ids:
-            raise FileHierarchyError(f"Manifest record_id {record_id} is duplicated.")
-        seen_record_ids.add(record_id)
+        if (record_type, record_id) in seen_record_ids:
+            raise FileHierarchyError(
+                f"{record_type} record_id {record_id} is duplicated.")
+        seen_record_ids.add((record_type, record_id))
         if record_type == _INVENTORY:
-            file_id = _nonblank(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
+            file_id = _identity(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
             feed = feeds_by_file.get(file_id, "")
             # A file with no classified feed belongs to no feed and is not
             # grouped under one; its lifecycle remains readable by record.
             if feed:
                 inventories.append(_inventory_node(record, feed))
             continue
-        file_id = _nonblank(record.get("file_id"), f"source_file_mutation[{record_id}].file_id")
+        file_id = _identity(record.get("file_id"), f"source_file_mutation[{record_id}].file_id")
         mutations_by_file.setdefault(file_id, []).append(_mutation_node(record))
 
     inventories.sort(key=lambda item: (item.feed.casefold(), item.feed, item.record_id))
@@ -456,7 +474,7 @@ def build_file_hierarchy_feeds(ctx: Any) -> FileHierarchyFeedPage:
         if record.get("record_type") != _INVENTORY:
             continue
         record_id = _positive_int(record.get("record_id"), f"{_INVENTORY}.record_id")
-        file_id = _nonblank(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
+        file_id = _identity(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
         feed = feeds_by_file.get(file_id, "")
         if not feed:
             continue
@@ -487,15 +505,14 @@ def build_file_hierarchy_feed(
         _positive_int(record.get("record_id"), "source_file_inventory.record_id")
         for record in records
         if record.get("record_type") == _INVENTORY
-        and feeds_by_file.get(str(record.get("file_id") or "")) == feed
+        and feeds_by_file.get(record.get("file_id")) == feed
     }
-    # Classification records travel with the selection: the page groups by
-    # classified feed, so it must still see the evidence that declares it.
+    # No classification record travels with the selection any more: the feed a
+    # page groups by is state on the inventory record itself.
     page = _build_page(
         [
             record for record in records
-            if record.get("record_type") == _CLASSIFICATION
-            or (
+            if (
                 record.get("record_type") == _INVENTORY
                 and _positive_int(record.get("record_id"), "source_file_inventory.record_id") in selected_ids
             )
@@ -506,20 +523,26 @@ def build_file_hierarchy_feed(
     return page
 
 
-def _classification_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStage:
-    record_id = _positive_int(record.get("record_id"), "source_file_classification.record_id")
-    file_data = _file_mapping(record, f"source_file_classification[{record_id}]")
+def _classification_stage(inventory: _Inventory,
+                          classification: Mapping[str, Any]) -> FileHierarchyStage:
+    """Build the classification stage from the file's own state.
+
+    Classification is state on the governed file, not a record beside it, so
+    this reads the file rather than a record describing it. The stage shares the
+    file's identity because it is the same row: a classified file has one
+    identity, and its classification is a property of it.
+    """
     return FileHierarchyStage(
-        stage_identity=f"manifest:{record_id}",
+        stage_identity=f"manifest:{inventory.record_id}:classification",
         stage_type="classification",
         label="Classification",
-        record_id=record_id,
-        file_id=file_id,
-        path=_optional_text(file_data.get("path"), f"source_file_classification[{record_id}].file.path"),
+        record_id=inventory.record_id,
+        file_id=inventory.file_id,
+        path=inventory.path,
         original_path=None,
-        status=_optional_text(record.get("status"), f"source_file_classification[{record_id}].status"),
+        status="classified",
         is_current_primary=False,
-        metadata=_freeze(record),
+        metadata=_freeze(dict(classification)),
     )
 
 
@@ -551,7 +574,7 @@ _CONVERSION_PRESENTATION: dict[str, tuple[str, str]] = {
 }
 
 
-def _mutation_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStage:
+def _mutation_stage(record: Mapping[str, Any], file_id: int) -> FileHierarchyStage:
     """Return the hierarchy stage for one governed mutation record.
 
     Args:
@@ -587,7 +610,7 @@ def _mutation_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchySta
     )
 
 
-def _rollback_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStage:
+def _rollback_stage(record: Mapping[str, Any], file_id: int) -> FileHierarchyStage:
     record_id = _positive_int(record.get("record_id"), "source_file_rollback.record_id")
     status = _optional_text(record.get("status"), f"source_file_rollback[{record_id}].status")
     return FileHierarchyStage(
@@ -597,7 +620,7 @@ def _rollback_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchySta
     )
 
 
-def _profile_stage(record: Mapping[str, Any], file_id: str) -> FileHierarchyStage:
+def _profile_stage(record: Mapping[str, Any], file_id: int) -> FileHierarchyStage:
     # Imported here, not at module scope: rey_lib.encryption reaches back into
     # rey_lib.logs through error_utils, so a top-level import closes a cycle.
     from rey_lib.encryption import sha256_text
@@ -639,7 +662,7 @@ def build_file_hierarchy_stages(
     # classified still resolves its full lifecycle here.
     stage_feeds = _classified_feeds(ordered_records)
     inventories = [
-        _inventory_node(record, stage_feeds.get(str(record.get("file_id") or ""), ""))
+        _inventory_node(record, stage_feeds.get(record.get("file_id"), ""))
         for record in ordered_records
         if record.get("record_type") == _INVENTORY and record.get("record_id") == inventory_id
     ]
@@ -660,16 +683,23 @@ def build_file_hierarchy_stages(
     mutation_targets: dict[int, str] = {}
     lifecycle_status = "active"
     contradictory = 0
+    # Classification is state on the file, so its stage comes from the file and
+    # not from a record that no longer exists. There is nothing to match on
+    # lineage: the classification is on the row this hierarchy is built for.
+    classification = inventory.metadata.get("classification")
+    if isinstance(classification, Mapping) and classification:
+        stages.append(_classification_stage(inventory, classification))
+
     for record in ordered_records:
         record_type = record.get("record_type")
-        if record_type == "source_file_classification" and record.get("file_id") == inventory.file_id:
-            lineage = record.get("lineage")
-            if isinstance(lineage, Mapping) and lineage.get("source_record_id") == inventory.record_id:
-                stages.append(_classification_stage(record, inventory.file_id))
-        elif record_type == _MUTATION and record.get("file_id") == inventory.file_id:
+        if record_type == _MUTATION and record.get("file_id") == inventory.file_id:
             record_id = _positive_int(record.get("record_id"), "source_file_mutation.record_id")
             mutations[record_id] = record
             stages.append(_mutation_stage(record, inventory.file_id))
+            # A reversed mutation stays in the history and stays on the page,
+            # but it no longer moves the file: its effect was undone.
+            if record.get("rollback_complete_in"):
+                continue
             if record.get("status") != "success":
                 continue
             action = record.get("action")
@@ -755,12 +785,12 @@ def build_file_hierarchy_stages(
         if not isinstance(evidence, Mapping):
             continue
         run_log_file = evidence.get("run_log_file")
-        run_log_record_id = evidence.get("run_log_record_id")
-        if isinstance(run_log_file, str) and run_log_file.strip() and isinstance(run_log_record_id, int) and run_log_record_id > 0:
+        run_log_id = evidence.get("run_log_id")
+        if isinstance(run_log_file, str) and run_log_file.strip() and isinstance(run_log_id, int) and run_log_id > 0:
             profile_references.append({
                 "manifest_record_id": stage.record_id,
                 "run_log_file": run_log_file,
-                "run_log_record_id": run_log_record_id,
+                "run_log_id": run_log_id,
             })
     return FileHierarchyStagePage(
         file_identity=f"inventory:{inventory.record_id}", file_id=inventory.file_id,

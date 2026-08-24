@@ -149,6 +149,12 @@ def build_ctx_for_app(
             settings=settings,
         )
         ctx.run_id = ctx.run.run_id
+    elif getattr(ctx, "shared_control", None) is None:
+        # A process that adopted its run still writes governed records under it.
+        # Control was opened only when a run was started, so an adopting child
+        # inherited the identity and no way to reach the database -- every
+        # manifest write refused with "this context exposes no shared Control".
+        ctx.shared_control = _open_control(ctx)
 
     # Display and filing only; the identity above is already settled.
     establish_run_identity(ctx)
@@ -380,6 +386,10 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         run = getattr(ctx, "run", None)
         if run is not None:
             try:
+                # `failed` is what this block saw; run_failed is what the
+                # application reported through its own exit code. Either is a
+                # failed run.
+                failed = failed or bool(getattr(ctx, "run_failed", False))
                 run.finish("FAILED" if failed else "SUCCEEDED")
             except Exception as exc:  # noqa: BLE001
                 # Never replace the error that ended the run, and never turn a

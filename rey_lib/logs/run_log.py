@@ -60,6 +60,25 @@ SEMANTIC_BASES: dict[str, int] = {
     "workflow_step": 5,
 }
 
+#: What the writer stamps on every record, and therefore what has a column.
+#:
+#: Read against ``_record`` and ``append``: anything here is passed to the
+#: control writer by name, and everything else in a record is what the caller
+#: supplied for that record type. ``timestamp`` is included because the database
+#: stamps ``recorded_at`` itself and will not take one.
+_ENVELOPE_FIELDS: frozenset[str] = frozenset({
+    "record_type", "record_group", "record_subgroup", "message",
+    "run_id", "run_timestamp", "timestamp", "record_schema_version",
+    "app", "workflow_name", "pipeline_name",
+    "step_id", "step_name", "step_sequence", "correlation_id",
+    "parent_run_id", "subject_type", "subject_id", "subject_name",
+    "pipeline_run_id", "workflow_run_id", "pipeline_id", "workflow_id",
+    "record_id", "parent_record_id", "nest_level",
+    # Not stamped on every record, but a column because a failure is the one
+    # thing a reader queries for. Named here so it is not also sent in fields.
+    "error_message",
+})
+
 #: The canonical run lineage every durable record carries.
 LINEAGE_FIELDS: tuple[str, ...] = (
     "parent_run_id", "subject_type", "subject_id", "subject_name",
@@ -157,6 +176,9 @@ class RunLog:
         self._step_name: Optional[str] = None
         self._pipeline_step_name: Optional[str] = None
         self._lineage: dict[str, str] = dict(lineage or {})
+        # The control row id of the most recent record, for a governed record
+        # that has to point at it.
+        self._last_control_row_id: Optional[int] = None
         self._memory_state: Optional[dict[str, Any]] = None
         self._closed = False
 
@@ -521,22 +543,6 @@ class RunLog:
     # when reaching it fails, is made here; Control executes the routine and
     # owns only its own DB state -- batch_id, batch_step_id, owns_batch.
 
-    _SEVERITY_BY_PREFIX = (("ERROR", "ERROR"), ("FAILURE", "ERROR"),
-                           ("WARNING", "WARNING"))
-
-    @classmethod
-    def _severity_of(cls, record_type: str) -> str:
-        """Map a record type to a control-event severity.
-
-        The record type is the event name, so severity is the one thing that
-        has to be derived. Anything not an error or a warning is informational.
-        """
-        upper = str(record_type).upper()
-        for token, severity in cls._SEVERITY_BY_PREFIX:
-            if token in upper:
-                return severity
-        return "INFO"
-
     def require_structural_record(self, record_id: Optional[int],
                                   record_type: str) -> None:
         """Escalate a lost structural record when every destination is required.
@@ -670,19 +676,63 @@ class RunLog:
             )
         return self.control
 
+    @property
+    def last_control_row_id(self) -> Optional[int]:
+        """The control row id of the record this run log wrote most recently.
+
+        A governed record points at the log record that supports it, and the
+        database mints that row's id. `append` still returns the run log's own
+        ordinal -- its sequence, which every caller depends on -- so the row id
+        is read here by whoever needs to reference it.
+
+        None when the last record went nowhere near the database.
+        """
+        return self._last_control_row_id
+
     def _persist_to_control(self, record_type: str, message: str,
                             record: dict[str, Any]) -> None:
-        """Persist one record to the control database as a log event."""
+        """Persist one record to the control database as a run-log row.
+
+        Every field this writer stamps has a column, so it is passed by name;
+        what the caller supplied for this record type is what remains, and that
+        is what ``fields`` carries. Nothing of the envelope goes into it -- a
+        stamped field hiding in a payload is a column nobody can query.
+
+        ``timestamp`` is not sent. The database stamps ``recorded_at``.
+        """
         if self.control is None:
             raise ValueError(
                 "run_store selects the control database but no Control was "
                 "supplied to this run log."
             )
-        self.control.log_event(
-            severity=self._severity_of(record_type),
-            event_name=str(record_type),
-            message=str(message or record.get("message") or record_type),
-            event_jsonb=record,
+        caller = {key: value for key, value in record.items()
+                  if key not in _ENVELOPE_FIELDS}
+        self._last_control_row_id = self.control.write_run_log_record(
+            run_id=record.get("run_id"),
+            record_id=int(record["record_id"]),
+            parent_record_id=int(record.get("parent_record_id") or 0),
+            nest_level=int(record["nest_level"]),
+            record_type=str(record_type),
+            record_group=str(record.get("record_group") or ""),
+            record_subgroup=record.get("record_subgroup"),
+            message=str(message or record.get("message") or "") or None,
+            app=record.get("app"),
+            workflow_name=record.get("workflow_name"),
+            pipeline_name=record.get("pipeline_name"),
+            step_id=record.get("step_id"),
+            step_name=record.get("step_name"),
+            step_sequence=record.get("step_sequence"),
+            correlation_id=record.get("correlation_id"),
+            parent_run_id=record.get("parent_run_id"),
+            subject_type=record.get("subject_type"),
+            subject_id=record.get("subject_id"),
+            subject_name=record.get("subject_name"),
+            pipeline_id=record.get("pipeline_id"),
+            workflow_id=record.get("workflow_id"),
+            record_schema_version=int(record["record_schema_version"]),
+            run_timestamp=str(record.get("run_timestamp") or ""),
+            error_message=record.get("error_message"),
+            fields=caller,
             required=True,
         )
 

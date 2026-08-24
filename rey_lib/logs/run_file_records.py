@@ -175,21 +175,19 @@ def find_run_file_records(ctx: Any, run_log_file: Path | str) -> RunFileRecords:
     """
     # Imported lazily because rey_lib.files.jsonl imports get_logger from this
     # package; a module-level import would close a cycle.
-    from rey_lib.files.jsonl import JsonlReadError
-
+    
     selected = _canonical_run_log_identity(run_log_file)
 
     try:
         with file_manifest_session(ctx) as session:
+            # The manifest is a table. There is no file to test for existence,
+            # and an installation that has governed nothing yet is empty rather
+            # than broken.
             manifest_path = session.path
-            if not manifest_path.is_file():
-                raise RunFileRecordsError(
-                    f"File manifest does not exist: {manifest_path}"
-                )
             records = session.read_records()
     except RunFileRecordsError:
         raise
-    except (FileManifestError, JsonlReadError, OSError, ValueError) as exc:
+    except (FileManifestError, OSError, ValueError) as exc:
         raise RunFileRecordsError(
             f"Governed file evidence is unavailable: {exc}"
         ) from exc

@@ -567,10 +567,10 @@ class TestControlIsSubordinateToRunLog:
             run_log = None
             events: list = []
 
-            def log_event(self, **kwargs) -> None:
-                type(self).events.append(kwargs["event_name"])
+            def write_run_log_record(self, **kwargs) -> None:
+                type(self).events.append(kwargs["record_type"])
                 # What every real control routine does: run SQL.
-                log_sql_execution(self.run_log, operation="log_event",
+                log_sql_execution(self.run_log, operation="write_run_log_record",
                                   status="success")
 
         control = _Control()

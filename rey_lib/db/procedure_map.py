@@ -33,6 +33,18 @@ Config shape (list-based named records):
             output: {variable: batch_id, load_to_ctx: batch_id}
             input: {run_id: run_id}
 
+``routine_type`` and ``result_mode`` are independent. A procedure is not a
+routine that returns nothing -- it returns through OUT parameters, so all three
+result modes are open to it:
+
+    routine_type: procedure + no_return       -> CALL, nothing read back
+    routine_type: procedure + scalar_result   -> CALL, first OUT parameter
+    routine_type: procedure + dataset_result  -> CALL, the whole OUT row
+
+That is what lets a routine record its own batch step and still return the id
+it generated: only a procedure can open and close a step, and previously only a
+function could give the caller a value back.
+
 Ad hoc SQL is not registered; it is supplied at execution time via the step
 config (``sql_text`` + ``result_mode`` + ``input``).
 
@@ -51,6 +63,7 @@ from typing import Any, Optional
 
 from rey_lib.logs import get_logger
 from rey_lib.config.ctx import find_by_name
+from rey_lib.db.connection import call_routine
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import log_sql_execution
@@ -385,13 +398,31 @@ def execute_mapped_routine(
     outputs: dict[str, Any] = {}
     rows: Optional[list[dict[str, Any]]] = None
     try:
-        if result_mode == "scalar_result":
-            scalar = _db.execute_function(conn, binding["routine"], named_params)
-            outputs = _apply_output(scalar, binding["output"], values, run_ctx)
-        elif result_mode == "no_return":
-            _db.execute_procedure(conn, binding["routine"], named_params)
-        else:  # dataset_result
-            rows = _db.execute_function_rows(conn, binding["routine"], named_params)
+        # One call. Which statement form this becomes is the connector's, not
+        # this module's and not a provider's: every backend deciding it for
+        # itself is how the same rule came to be written once per provider and
+        # drift in one of them.
+        returned = call_routine(
+            conn, binding["routine"], named_params,
+            routine_type=binding["routine_type"], result_mode=result_mode,
+        )
+        # What the answer means is map semantics, and stays here.
+        if binding["routine_type"] == "procedure":
+            # A procedure returns through OUT parameters, so what it gives back
+            # is decided by how it is called, not by whether it is a function.
+            # This is what lets a write record its own batch step and still
+            # hand the caller the id it generated.
+            if result_mode == "scalar_result":
+                # The first OUT parameter is the result, as a function's return
+                # value is. A converted routine declares its id first.
+                scalar = next(iter((returned or {}).values()), None)
+                outputs = _apply_output(scalar, binding["output"], values, run_ctx)
+            elif result_mode == "dataset_result":
+                rows = [dict(returned)] if returned else []
+        elif result_mode == "scalar_result":
+            outputs = _apply_output(returned, binding["output"], values, run_ctx)
+        elif result_mode == "dataset_result":
+            rows = returned
     except Exception as exc:
         log_sql_execution(run_log,
             sql_label=routine_name,

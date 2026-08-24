@@ -1,20 +1,21 @@
 """The one entry point for configured file-manifest record selection.
 
-This module introduces no search engine. The shared JSONL reader and JMESPath
-search already own parsing, strict-read failure behavior, field matching,
-nested-field evaluation, and comparison. This layer only validates the declared
-``manifest_selection`` configuration, resolves the governed manifest, and routes
-each declared record set onto whichever existing function already satisfies it:
+This module introduces no search engine. It validates the declared
+``manifest_selection`` configuration, reads the governed records, and evaluates
+each declared record set against them:
 
     configured YAML matching
       -> select_manifest_records(...)
-        -> read_jsonl_file(...) / search_jsonl_file(...)
+        -> read_records_from_control(...)  then match
 
 A ``match`` whose fields are all top-level and whose values are all scalars is
-exactly what ``read_jsonl_file(filters=...)`` already evaluates. A ``match`` that
-addresses a nested field or lists accepted values is routed to
-``search_jsonl_file``, which evaluates it through JMESPath. Nothing here
-compares values itself.
+compared directly. A ``match`` that addresses a nested field or lists accepted
+values is evaluated through the same JMESPath expression the file-backed search
+used, applied to the record itself -- so what a configured match means did not
+change when the manifest moved into the database.
+
+Selections are keyed by ``record_id``, the governed identity of the record. The
+manifest is a table; there is no line to key a selection on.
 
 Selection is deliberately narrow. It resolves no file path, joins no lifecycle
 records, infers no lineage or file type, inspects no filesystem, and interprets
@@ -51,7 +52,7 @@ class SelectedManifestRecord:
 
     record_set_index: int
     record_type: str
-    line_number: int
+    record_id: int
     record: Mapping[str, Any]
 
 
@@ -122,42 +123,38 @@ def select_manifest_records(
     """
     # Imported lazily because rey_lib.files.jsonl imports get_logger from this
     # package; a module-level import would close a cycle.
-    from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, search_jsonl_file
-
     record_sets = _validated_record_sets(manifest_selection)
     manifest_path = _governed_manifest_path(ctx, manifest_selection)
 
-    try:
-        # One unfiltered read establishes manifest order and the read total.
-        # It performs no matching; every match below is evaluated by the shared
-        # reader or the shared search.
-        all_records = read_jsonl_file(manifest_path)
+    from rey_lib.logs.file_manifest import (
+        FileManifestError, read_records_from_control,
+    )
 
-        selected: dict[int, SelectedManifestRecord] = {}
-        for index, (record_type, match) in enumerate(record_sets):
-            for line_number, record in _matching_records(
-                manifest_path,
-                record_type,
-                match,
-                read_jsonl_file=read_jsonl_file,
-                search_jsonl_file=search_jsonl_file,
-            ):
-                # A record matching more than one set is one selected record,
-                # attributed to the first set that claimed it. Distinct records
-                # are never collapsed.
-                selected.setdefault(
-                    line_number,
-                    SelectedManifestRecord(
-                        record_set_index=index,
-                        record_type=record_type,
-                        line_number=line_number,
-                        record=record,
-                    ),
-                )
-    except JsonlReadError as exc:
+    try:
+        # One read establishes the governed set and the read total. Matching is
+        # evaluated here, over the records, rather than by a file reader: the
+        # manifest is a table now and there is no line to key a selection on.
+        all_records = read_records_from_control(ctx)
+    except FileManifestError as exc:
         raise ManifestSelectionError(
-            f"Manifest selection cannot read '{manifest_path}': {exc}"
+            f"Manifest selection cannot read the governed file manifest: {exc}"
         ) from exc
+
+    selected: dict[int, SelectedManifestRecord] = {}
+    for index, (record_type, match) in enumerate(record_sets):
+        for record_id, record in _matching_records(all_records, record_type, match):
+            # A record matching more than one set is one selected record,
+            # attributed to the first set that claimed it. Distinct records
+            # are never collapsed.
+            selected.setdefault(
+                record_id,
+                SelectedManifestRecord(
+                    record_set_index=index,
+                    record_type=record_type,
+                    record_id=record_id,
+                    record=record,
+                ),
+            )
 
     ordered = tuple(selected[key] for key in sorted(selected))
     return ManifestRecordSelection(
@@ -169,27 +166,42 @@ def select_manifest_records(
 
 
 def _matching_records(
-    manifest_path: Path,
+    records: list[dict[str, Any]],
     record_type: str,
     match: Mapping[str, Any],
-    *,
-    read_jsonl_file: Any,
-    search_jsonl_file: Any,
 ) -> list[tuple[int, Mapping[str, Any]]]:
-    """Route one record set onto the existing function that already matches it."""
+    """Return the records of one set, keyed by their governed identity.
+
+    Plain top-level equality is compared directly. Anything with a dotted path
+    or a list of accepted values goes through the same JMESPath expression the
+    file-backed search used, evaluated against the record itself, so the match
+    semantics are unchanged by the storage move.
+    """
     if _is_plain_equality(match):
-        filters = {_RECORD_TYPE_FIELD: record_type, **dict(match)}
+        wanted = {_RECORD_TYPE_FIELD: record_type, **dict(match)}
         return [
-            (item.line_number, item.record)
-            for item in read_jsonl_file(manifest_path, filters=filters)
+            (int(record["record_id"]), record)
+            for record in records
+            if all(record.get(field) == expected
+                   for field, expected in wanted.items())
         ]
 
+    import jmespath
+    from jmespath.exceptions import JMESPathError
+
     expression = _search_expression(record_type, match)
-    return [
-        (item.line_number, item.value)
-        for item in search_jsonl_file(manifest_path, expression)
-        if isinstance(item.value, Mapping)
-    ]
+    try:
+        compiled = jmespath.compile(expression)
+    except JMESPathError as exc:
+        raise ManifestSelectionError(
+            f"Manifest selection built an invalid match expression: {exc}"
+        ) from exc
+    matched = []
+    for record in records:
+        value = compiled.search(record)
+        if isinstance(value, Mapping):
+            matched.append((int(record["record_id"]), value))
+    return matched
 
 
 def _is_plain_equality(match: Mapping[str, Any]) -> bool:

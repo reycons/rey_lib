@@ -171,7 +171,7 @@ class FileRoutingResult:
     filesystem_applied: bool
     complete_evidence_acknowledged: bool
     mutation_run_log_committed: bool
-    mutation_run_log_record_id: int | None
+    mutation_run_log_id: int | None
     mutation_run_log_file: str | None
     evidence_phase: SourceFileMutationEvidenceFailurePhase | None
     file_manifest_record_id: int | None
@@ -383,7 +383,7 @@ def _move_to_role(
             status="failed",
             filesystem_applied=True,
             mutation_run_log_committed=exc.run_log_committed,
-            mutation_run_log_record_id=exc.run_log_record_id,
+            mutation_run_log_id=exc.run_log_id,
             mutation_run_log_file=exc.run_log_file,
             evidence_phase=exc.phase,
             destination_existed=destination_existed,
@@ -481,7 +481,7 @@ def _result(
     filesystem_applied: bool = False,
     complete_evidence_acknowledged: bool = False,
     mutation_run_log_committed: bool = False,
-    mutation_run_log_record_id: int | None = None,
+    mutation_run_log_id: int | None = None,
     mutation_run_log_file: str | None = None,
     evidence_phase: SourceFileMutationEvidenceFailurePhase | None = None,
     file_manifest_record_id: int | None = None,
@@ -501,7 +501,7 @@ def _result(
         filesystem_applied=filesystem_applied,
         complete_evidence_acknowledged=complete_evidence_acknowledged,
         mutation_run_log_committed=mutation_run_log_committed,
-        mutation_run_log_record_id=mutation_run_log_record_id,
+        mutation_run_log_id=mutation_run_log_id,
         mutation_run_log_file=mutation_run_log_file,
         evidence_phase=evidence_phase,
         file_manifest_record_id=file_manifest_record_id,

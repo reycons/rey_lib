@@ -33,6 +33,7 @@ import importlib
 import re
 from typing import Any, Optional
 
+from rey_lib.db.routine_call import RoutineCall
 from rey_lib.errors.error_utils import (
     ConfigError,
     DatabaseError,
@@ -656,97 +657,22 @@ class DBAdapter:
     # Function and procedure execution (PostgreSQL control database)
     # ------------------------------------------------------------------
 
-    def execute_function(
-        self,
-        conn: Any,
-        routine: str,
-        named_params: dict[str, Any],
-    ) -> Any:
-        """
-        Call a database function and return its scalar result.
+    def call_routine(self, conn: Any, call: RoutineCall) -> Any:
+        """Execute one normalized routine call on whichever provider this is.
 
-        Uses SELECT for PostgreSQL functions. Other backends must implement
-        this method; raises NotImplementedError if unsupported.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        routine : str
-            Fully-qualified function name.
-        named_params : dict[str, Any]
-            DB parameter name → value mapping.
-
-        Returns
-        -------
-        Any
-            Scalar return value from the function.
-        """
-        return _backend(self._provider_for_conn(conn)).execute_function(
-            conn, routine, named_params
-        )
-
-    def execute_function_rows(
-        self,
-        conn: Any,
-        routine: str,
-        named_params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """
-        Call a set-returning database function and return its rows.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        routine : str
-            Fully-qualified function name.
-        named_params : dict[str, Any]
-            DB parameter name → value mapping.
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            One column→value dict per row.
-
-        Raises
-        ------
-        NotImplementedError
-            If the connection's provider cannot select from a function.
+        One dispatch, not one per statement form. What the call *is* was
+        decided by the connector; this only finds the backend that speaks the
+        dialect and hands it over. A provider that cannot render a routine call
+        says so by name rather than by a missing attribute.
         """
         provider = self._provider_for_conn(conn)
         backend = _backend(provider)
-        if not hasattr(backend, "execute_function_rows"):
+        render = getattr(backend, "render_and_execute", None)
+        if render is None:
             raise NotImplementedError(
-                f"DBAdapter: provider '{provider}' does not support "
-                "selecting rows from a function."
+                f"DBAdapter: provider '{provider}' renders no routine calls."
             )
-        return backend.execute_function_rows(conn, routine, named_params)
-
-    def execute_procedure(
-        self,
-        conn: Any,
-        routine: str,
-        named_params: dict[str, Any],
-    ) -> None:
-        """
-        Call a database procedure with no return value.
-
-        Uses CALL for PostgreSQL procedures. Other backends must implement
-        this method; raises NotImplementedError if unsupported.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        routine : str
-            Fully-qualified procedure name.
-        named_params : dict[str, Any]
-            DB parameter name → value mapping.
-        """
-        _backend(self._provider_for_conn(conn)).execute_procedure(
-            conn, routine, named_params
-        )
+        return render(conn, call)
 
     # ------------------------------------------------------------------
     # Staging / bulk insert

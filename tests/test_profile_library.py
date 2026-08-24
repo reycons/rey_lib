@@ -39,8 +39,7 @@ def _record(**header_overrides: object) -> dict:
         "object_id": "1",
         "source_hash": "abc123",
         "evidence": {
-            "run_log_file": "inventory_and_prepare_files.20260810_163217.jsonl",
-            "run_log_record_id": 44,
+            "run_log_id": 44,
         },
         "profiler": {
             "application": "file_operator",
@@ -107,8 +106,7 @@ def test_different_source_rows_coexist(tmp_path: Path) -> None:
     # how rollback resolves a profile to its run.
     assert [record["header"]["evidence"] for record in records] == [
         {
-            "run_log_file": "inventory_and_prepare_files.20260810_163217.jsonl",
-            "run_log_record_id": 44,
+            "run_log_id": 44,
         },
     ] * 2
     assert all(
@@ -332,9 +330,9 @@ def test_the_retired_log_record_id_uuid_is_rejected(tmp_path: Path) -> None:
     """A profile points at its run-log record, not at a UUID of its own.
 
     log_record_id was a UUID this module minted for itself. It resolved to
-    nothing: rollback selects governed records by evidence.run_log_file, so a
-    profile carrying only that UUID could never be found by the run that wrote
-    it. A header still carrying it is refused rather than quietly stored.
+    nothing -- a profile carrying only that UUID could never be traced back to
+    the run that wrote it. A header still carrying it is refused rather than
+    quietly stored.
     """
     ctx = _ctx(tmp_path)
     with pytest.raises(ProfileLibraryError, match="log_record_id"):
@@ -352,40 +350,31 @@ def test_evidence_is_required(tmp_path: Path) -> None:
     assert read_profile_records(ctx) == []
 
 
-def test_evidence_requires_both_halves_of_the_pointer(tmp_path: Path) -> None:
-    """The filename alone is a half-contract; so is the row number alone."""
-    ctx = _ctx(tmp_path)
-    for partial in ({"run_log_file": "run.jsonl"}, {"run_log_record_id": 44}):
-        with pytest.raises(ProfileLibraryError, match="missing required field"):
-            append_profile_record(ctx, _record(evidence=partial))
+def test_evidence_carries_the_run_log_record_and_nothing_else(tmp_path: Path) -> None:
+    """The run-log record id is the pointer, alone.
 
-    with pytest.raises(ProfileLibraryError, match="unknown field"):
-        append_profile_record(ctx, _record(evidence={
-            "run_log_file": "run.jsonl",
-            "run_log_record_id": 44,
-            "run_id": "extra",
-        }))
+    run_log_file travelled beside it until the run-log driven rollback selector
+    was retired. That selector was its only reader, so a header still carrying
+    it is refused: an unread pointer in a stored record is one more thing that
+    can be wrong.
+    """
+    ctx = _ctx(tmp_path)
+    with pytest.raises(ProfileLibraryError, match="missing required field"):
+        append_profile_record(ctx, _record(evidence={}))
+
+    for retired in ({"run_log_id": 44, "run_log_file": "run.jsonl"},
+                    {"run_log_id": 44, "run_id": "extra"}):
+        with pytest.raises(ProfileLibraryError, match="unknown field"):
+            append_profile_record(ctx, _record(evidence=retired))
     assert read_profile_records(ctx) == []
 
 
-def test_run_log_record_id_must_be_a_positive_integer(tmp_path: Path) -> None:
+def test_run_log_id_must_be_a_positive_integer(tmp_path: Path) -> None:
     """The row number is an integer, as it is in every other governed record."""
     ctx = _ctx(tmp_path)
     for bad in ("44", 0, -1, True, None):
-        with pytest.raises(ProfileLibraryError, match="run_log_record_id"):
+        with pytest.raises(ProfileLibraryError, match="run_log_id"):
             append_profile_record(ctx, _record(evidence={
-                "run_log_file": "run.jsonl",
-                "run_log_record_id": bad,
+                "run_log_id": bad,
             }))
-    assert read_profile_records(ctx) == []
-
-
-def test_run_log_file_is_a_filename_not_a_path(tmp_path: Path) -> None:
-    """Rollback matches the filename exactly, so a path would never match."""
-    ctx = _ctx(tmp_path)
-    with pytest.raises(ProfileLibraryError, match="filename"):
-        append_profile_record(ctx, _record(evidence={
-            "run_log_file": "/var/logs/run.jsonl",
-            "run_log_record_id": 44,
-        }))
     assert read_profile_records(ctx) == []

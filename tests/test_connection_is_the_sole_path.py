@@ -88,9 +88,12 @@ class TestConnectionIsTheRuntimePath:
     def test_the_shared_lookup_is_the_public_surface(self) -> None:
         from rey_lib.db import connection
 
+        # call_routine joins them as the connector's routine entry: it is where
+        # a procedure-map binding is normalized into one provider-neutral call,
+        # so nothing below this module reads a binding or a result mode.
         assert set(connection.__all__) == {
             "Connection", "ConnectionOwner", "build_connections",
-            "connection_owner", "shared_connection"}
+            "call_routine", "connection_owner", "shared_connection"}
 
     def test_composition_checks_the_configuration_and_holds_nothing(self) -> None:
         """The boundary validates and registers; it does not become the holder.

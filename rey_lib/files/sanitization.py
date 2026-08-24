@@ -241,7 +241,7 @@ class FileSanitizationResult:
     destination_replaced: bool
     filesystem_applied: bool
     complete_evidence_acknowledged: bool
-    mutation_run_log_record_id: int | None
+    mutation_run_log_id: int | None
     mutation_run_log_file: str | None
     file_manifest_record_id: int | None
     evidence_phase: SourceFileMutationEvidenceFailurePhase | None
@@ -380,14 +380,14 @@ def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileRefe
             run_log_fields=run_fields,
         )
     except SourceFileMutationEvidenceError as exc:
-        failure = replace(result, mutation_run_log_record_id=exc.run_log_record_id, mutation_run_log_file=exc.run_log_file, evidence_phase=exc.phase, status="evidence_failed", failure_reason=str(exc))
+        failure = replace(result, mutation_run_log_id=exc.run_log_id, mutation_run_log_file=exc.run_log_file, evidence_phase=exc.phase, status="evidence_failed", failure_reason=str(exc))
         raise FileSanitizationEvidenceError(str(exc), failure) from exc
     return replace(
         result,
         complete_evidence_acknowledged=True,
-        mutation_run_log_record_id=getattr(
+        mutation_run_log_id=getattr(
             mutation_evidence,
-            "run_log_record_id",
+            "run_log_id",
             None,
         ),
         mutation_run_log_file=getattr(mutation_evidence, "run_log_file", None),
@@ -793,7 +793,7 @@ def _empty_result(ctx: FileSanitizationContext, file: GovernedFileReference, sou
         destination_replaced=replaced_destination,
         filesystem_applied=False,
         complete_evidence_acknowledged=False,
-        mutation_run_log_record_id=None,
+        mutation_run_log_id=None,
         mutation_run_log_file=None,
         file_manifest_record_id=None,
         evidence_phase=None,

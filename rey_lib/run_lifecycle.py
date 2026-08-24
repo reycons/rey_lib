@@ -126,6 +126,10 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
         raise
     else:
         if _is_failed_result(result):
+            # The run's terminal status. An app that reports failure by exit
+            # code leaves its runtime block normally, so a status decided from
+            # exceptions alone recorded that run as SUCCEEDED.
+            object.__setattr__(ctx, "run_failed", True)
             failure_message = (
                 f"app operation '{operation}' returned nonzero result {result}."
             )

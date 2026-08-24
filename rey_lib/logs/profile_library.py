@@ -22,9 +22,10 @@ _PATH_NAME = "file_profiles"
 _PROFILE_SCHEMA_VERSION = 1
 _WRITER_FIELDS = frozenset({"profile_id", "created_at"})
 # log_record_id was a UUID this module minted for itself. It pointed at nothing:
-# a profile carrying it could not be resolved back to the run that wrote it, and
-# rollback selects on evidence.run_log_file like every other governed record.
-# The canonical evidence pair replaces it.
+# a profile carrying it could not be resolved back to the run that wrote it.
+# run_log_file followed it: the only thing that ever read it was the run-log
+# driven rollback selector, and that engine has been retired in favour of the
+# pending-mutation rows. The run-log record id remains, because it does resolve.
 _RETIRED_HEADER_FIELDS = frozenset({"source_row_id", "log_record_id"})
 _REQUIRED_HEADER_FIELDS = frozenset({
     "profile_schema_version",
@@ -40,7 +41,7 @@ _REQUIRED_HEADER_FIELDS = frozenset({
     "eligible_population_rows",
     "sampling_provenance",
 })
-_EVIDENCE_FIELDS = frozenset({"run_log_file", "run_log_record_id"})
+_EVIDENCE_FIELDS = frozenset({"run_log_id"})
 _CANONICAL_HEADER_FIELDS = (
     "profile_id",
     "profile_schema_version",
@@ -485,12 +486,7 @@ def _validate_evidence(evidence: Any) -> None:
             "evidence carries unknown field(s): "
             + ", ".join(sorted(supplied - _EVIDENCE_FIELDS))
         )
-    run_log_file = _required_text(evidence.get("run_log_file"), "run_log_file")
-    if Path(run_log_file).name != run_log_file:
-        raise ProfileLibraryError(
-            "run_log_file must be a filename, not a path."
-        )
-    _positive_int(evidence.get("run_log_record_id"), "run_log_record_id")
+    _positive_int(evidence.get("run_log_id"), "run_log_id")
 
 
 def _record_object_id(record: Mapping[str, Any]) -> str:

@@ -87,13 +87,10 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
         def end_step(self, status=None, message=None, required=False, **kw):
             _CONTROL_CALLS.append(("end_step", {"status": status}, required))
 
-        def log_event(self, *, severity, event_name, message,
-                      event_jsonb=None, required=False):
-            _CONTROL_CALLS.append(("log_event", {
-                "severity": severity, "event_name": event_name,
-                "message": message, "event_jsonb": event_jsonb,
+        def write_run_log_record(self, *, required=False, **values):
+            _CONTROL_CALLS.append(("write_run_log_record", {
+                **values,
                 "batch_id": self.batch_id, "batch_step_id": self.batch_step_id,
-                "run_id": run_log.run_id,
             }, required))
 
     run_log = RunLog(
@@ -172,7 +169,7 @@ class TestDbMode:
 
         # The batch is opened first, then the record itself is persisted as an
         # event: every record reaches the database, not only the lifecycle ones.
-        assert _actions(control_calls) == ["start_batch", "log_event"]
+        assert _actions(control_calls) == ["start_batch", "write_run_log_record"]
         assert _records(run_log) == []
 
     def test_the_full_lifecycle_reaches_control(self, tmp_path, control_calls) -> None:
@@ -184,10 +181,10 @@ class TestDbMode:
         log_run_complete(run_log, "success")
 
         assert _actions(control_calls) == [
-            "start_batch", "log_event",     # RUN_START record
-            "log_event", "start_step",      # STEP_START record, then the step
-            "log_event", "end_step",        # STEP_END record, then step close
-            "log_event", "end_batch",       # RUN_COMPLETE record, then close
+            "start_batch", "write_run_log_record",     # RUN_START record
+            "write_run_log_record", "start_step",      # STEP_START record, then the step
+            "write_run_log_record", "end_step",        # STEP_END record, then step close
+            "write_run_log_record", "end_batch",       # RUN_COMPLETE record, then close
         ]
 
     def test_every_run_log_control_call_is_required(self, tmp_path, control_calls) -> None:
@@ -209,7 +206,7 @@ class TestBothMode:
 
         log_run_start(run_log, operation="scan")
 
-        assert _actions(control_calls) == ["start_batch", "log_event"]
+        assert _actions(control_calls) == ["start_batch", "write_run_log_record"]
         assert [r["record_type"] for r in _records(run_log)] == ["RUN_START"]
 
     def test_a_db_failure_under_both_is_surfaced(self, tmp_path) -> None:
@@ -332,7 +329,7 @@ class TestOneBatchManyRuns:
         log_step_start(run_log, "extract", 1)
 
         for name, values, _ in control_calls:
-            if name in ("start_step", "log_event"):
+            if name in ("start_step", "write_run_log_record"):
                 assert values["run_id"] == run_log.run_id
 
 
@@ -389,9 +386,8 @@ class TestEveryRecordHonoursTheDestination:
 
         log_error(run_log, message="something failed", error_type="AppError")
 
-        events = [v for name, v, _ in control_calls if name == "log_event"]
-        assert [e["event_name"] for e in events] == ["ERROR"]
-        assert e_sev(events[0]) == "ERROR"
+        events = [v for name, v, _ in control_calls if name == "write_run_log_record"]
+        assert [e["record_type"] for e in events] == ["ERROR"]
 
     def test_an_error_record_writes_no_jsonl_under_db(self, tmp_path,
                                                       control_calls) -> None:
@@ -414,12 +410,14 @@ class TestEveryRecordHonoursTheDestination:
 
         log_row_count(run_log, count_name="loaded", count=42)
 
-        events = [v for name, v, _ in control_calls if name == "log_event"]
-        assert [e["event_name"] for e in events] == ["ROW_COUNT"]
+        events = [v for name, v, _ in control_calls if name == "write_run_log_record"]
+        assert [e["record_type"] for e in events] == ["ROW_COUNT"]
         assert [r["record_type"] for r in _records(run_log)][-1] == "ROW_COUNT"
 
-    def test_the_whole_record_is_carried_as_the_event_payload(self, tmp_path,
-                                                              control_calls) -> None:
+    def test_the_envelope_is_written_by_name_and_fields_holds_the_rest(
+        self, tmp_path, control_calls,
+    ) -> None:
+        """A stamped field hiding in a payload is a column nobody can query."""
         from rey_lib.logs import log_row_count
 
         run_log = _ctx(tmp_path, "db")
@@ -428,25 +426,11 @@ class TestEveryRecordHonoursTheDestination:
 
         log_row_count(run_log, count_name="loaded", count=42)
 
-        payload = [v for name, v, _ in control_calls if name == "log_event"][0]
-        assert payload["event_jsonb"]["record_type"] == "ROW_COUNT"
-        assert payload["event_jsonb"]["run_id"] == run_log.run_id
-
-    def test_severity_is_derived_from_the_record_type(self, tmp_path,
-                                                      control_calls) -> None:
-        from rey_lib.logs import log_run_record
-
-        run_log = _ctx(tmp_path, "db")
-        log_run_start(run_log, operation="scan")
-        control_calls.clear()
-
-        for record_type in ("ERROR", "WARNING", "ROW_COUNT"):
-            log_run_record(run_log, record_type, message="m")
-
-        events = [v for name, v, _ in control_calls if name == "log_event"]
-        assert [e_sev(e) for e in events] == ["ERROR", "WARNING", "INFO"]
-
-
-def e_sev(event: dict) -> str:
-    """The severity a persisted record was recorded under."""
-    return event["severity"]
+        written = [v for name, v, _ in control_calls if name == "write_run_log_record"][0]
+        assert written["record_type"] == "ROW_COUNT"
+        assert written["run_id"] == run_log.run_id
+        assert written["record_id"] > 0
+        # `subject` is log_row_count's own field, so it belongs here too.
+        assert written["fields"] == {
+            "count_name": "loaded", "count": 42, "subject": "",
+        }

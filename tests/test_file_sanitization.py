@@ -370,7 +370,7 @@ def test_evidence_failure_preserves_exact_acknowledgement_state(
         phase=(
             SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
         ),
-        run_log_record_id=17,
+        run_log_id=17,
         run_log_file="run.jsonl",
     )
 
@@ -386,7 +386,7 @@ def test_evidence_failure_preserves_exact_acknowledgement_state(
     assert result is not None
     assert result.filesystem_applied is True
     assert result.complete_evidence_acknowledged is False
-    assert result.mutation_run_log_record_id == 17
+    assert result.mutation_run_log_id == 17
     assert result.mutation_run_log_file == "run.jsonl"
     assert result.evidence_phase is failure.phase
 
@@ -695,7 +695,7 @@ def test_success_result_carries_both_acknowledged_evidence_references(
     source.write_bytes(b"A,B\n")
     acknowledged = SourceFileMutationEvidenceResult(
         41,
-        run_log_record_id=17,
+        run_log_id=17,
         run_log_file="run.jsonl",
     )
 
@@ -707,7 +707,7 @@ def test_success_result_carries_both_acknowledged_evidence_references(
         result = sanitize_file(_ctx(tmp_path), _file(source))
 
     assert result.file_manifest_record_id == 41
-    assert result.mutation_run_log_record_id == 17
+    assert result.mutation_run_log_id == 17
     assert result.mutation_run_log_file == "run.jsonl"
     assert result.complete_evidence_acknowledged is True
 

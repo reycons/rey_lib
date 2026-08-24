@@ -79,14 +79,14 @@ class TestItSerializesAsAnOrdinaryMutation:
             recovery_path="",
             previous_version_path="",
             run_log_file="run.jsonl",
-            run_log_record_id=3,
+            run_log_id=3,
             application_name="file_operator",
             file_id="17",
         )
 
         assert record["action"] == "disappear"
         assert record["record_type"] == "source_file_mutation"
-        assert record["evidence"]["run_log_record_id"] == 3
+        assert record["evidence"]["run_log_id"] == 3
 
     def test_it_says_nothing_about_why(self) -> None:
         """Externally, manually, or by something else -- the action is silent."""
@@ -98,7 +98,7 @@ class TestItSerializesAsAnOrdinaryMutation:
             recovery_path="",
             previous_version_path="",
             run_log_file="run.jsonl",
-            run_log_record_id=3,
+            run_log_id=3,
             application_name="file_operator",
             file_id="17",
         )

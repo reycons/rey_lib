@@ -22,10 +22,9 @@ Public API
 ----------
 get_connection(db_cfg, ctx=None)
     Return an internal-compatible Rey connection handle.
-execute_function(conn, routine, named_params)
-    Call a PostgreSQL function via SELECT and return the scalar result.
-execute_procedure(conn, routine, named_params)
-    Call a PostgreSQL procedure via CALL.
+render_and_execute(conn, call)
+    Render one normalized RoutineCall in this dialect and execute it. The
+    invocation shape is decided by the connector; this only writes it.
 is_truncation_error(exc)
     Return True when exc is a PostgreSQL string truncation error.
 """
@@ -36,6 +35,7 @@ import json
 from typing import Any, Optional
 
 from rey_lib.config.env_reference import resolve_env_reference
+from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
@@ -44,8 +44,7 @@ __all__ = [
     "get_current_database",
     "list_database_objects",
     "get_object_ddl",
-    "execute_function",
-    "execute_procedure",
+    "render_and_execute",
     "query_rows",
     "is_truncation_error",
 ]
@@ -140,30 +139,38 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def execute_function(
-    conn: Any,
-    routine: str,
-    named_params: dict[str, Any],
-) -> Optional[Any]:
-    """
-    Call a PostgreSQL function via SELECT and return the scalar result.
+#: How each invocation shape is written in this dialect, and how its result is
+#: read. The shape is decided by the connector; this only renders it.
+_STATEMENT = {
+    InvocationShape.PROCEDURE:       "CALL {routine}({arguments})",
+    InvocationShape.SCALAR_FUNCTION: "SELECT {routine}({arguments})",
+    InvocationShape.ROW_FUNCTION:    "SELECT * FROM {routine}({arguments})",
+}
 
-    Builds: SELECT routine(%(p_name)s, ...)
-    Dict/list values are serialised to JSON strings for jsonb parameters.
+
+def render_and_execute(conn: Any, call: RoutineCall) -> Any:
+    """Render one normalized routine call in PostgreSQL and execute it.
+
+    Arguments are stated by name -- ``name => :name`` -- because the procedure
+    map binds parameter names. Passing them positionally made the map's order
+    load-bearing and its names decorative: a binding listing the right names in
+    the wrong order put every value in the next parameter's slot, and one
+    naming a parameter the routine does not declare failed with "procedure does
+    not exist" instead of saying which name was wrong.
 
     Parameters
     ----------
     conn : Any
         Open Rey connection handle.
-    routine : str
-        Fully-qualified function name, as the procedure map binds it.
-    named_params : dict[str, Any]
-        DB parameter name → value. Order must match the function signature.
+    call : RoutineCall
+        The already-decided call. Nothing here inspects a result mode or
+        chooses a statement form.
 
     Returns
     -------
-    Any | None
-        Scalar value returned by the function, or None if no row returned.
+    Any
+        A procedure's OUT row (or None), a scalar function's value, or a
+        row-returning function's rows -- whichever its shape produces.
 
     Raises
     ------
@@ -171,115 +178,30 @@ def execute_function(
         If execution fails.
     """
     from rey_lib.db._sqlalchemy import core_connection
+    from sqlalchemy import text
 
-    serialised = _serialise_jsonb(named_params)
-    placeholders = ", ".join(f":{key}" for key in serialised)
-    sql = f"SELECT {routine}({placeholders})"
+    serialised = _serialise_jsonb(call.arguments)
+    arguments = ", ".join(f"{key} => :{key}" for key in serialised)
+    sql = _STATEMENT[call.shape].format(routine=call.routine, arguments=arguments)
     try:
-        from sqlalchemy import text
-
-        row = core_connection(conn).execute(text(sql), serialised).first()
-        conn.commit()
-        return row[0] if row else None
-    except Exception as exc:
-        conn.rollback()
-        raise DatabaseError(
-            f"postgres_utils: execute_function failed for '{routine}': {exc}"
-        ) from exc
-
-
-def execute_function_rows(
-    conn: Any,
-    routine: str,
-    named_params: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """
-    Call a set-returning PostgreSQL function and return its rows.
-
-    Builds: SELECT * FROM routine(:p_name, ...)
-
-    A set-returning function is selected *from*, not selected. ``SELECT f(...)``
-    would yield one column of composite values rather than the columns the
-    function declares, which is why this is a separate call rather than a
-    result-shape choice made on top of ``execute_function``.
-
-    Parameters
-    ----------
-    conn : Any
-        Open Rey connection handle.
-    routine : str
-        Fully-qualified function name, as the procedure map binds it.
-    named_params : dict[str, Any]
-        DB parameter name → value. Order must match the function signature.
-
-    Returns
-    -------
-    list[dict[str, Any]]
-        One column→value dict per row; empty when the function returns no rows.
-
-    Raises
-    ------
-    DatabaseError
-        If execution fails.
-    """
-    from rey_lib.db._sqlalchemy import core_connection
-
-    serialised = _serialise_jsonb(named_params)
-    placeholders = ", ".join(f":{key}" for key in serialised)
-    sql = f"SELECT * FROM {routine}({placeholders})"
-    try:
-        from sqlalchemy import text
-
         result = core_connection(conn).execute(text(sql), serialised)
-        rows = [dict(row) for row in result.mappings().all()]
+        if call.shape is InvocationShape.ROW_FUNCTION:
+            answer: Any = [dict(row) for row in result.mappings().all()]
+        elif call.shape is InvocationShape.SCALAR_FUNCTION:
+            row = result.first()
+            answer = row[0] if row else None
+        else:
+            # A procedure with no OUT parameters returns no row at all, and
+            # asking such a result for one raises rather than returning empty.
+            row = result.mappings().first() if result.returns_rows else None
+            answer = dict(row) if row is not None else None
         conn.commit()
-        return rows
+        return answer
     except Exception as exc:
         conn.rollback()
         raise DatabaseError(
-            f"postgres_utils: execute_function_rows failed for '{routine}': {exc}"
-        ) from exc
-
-
-def execute_procedure(
-    conn: Any,
-    routine: str,
-    named_params: dict[str, Any],
-) -> None:
-    """
-    Call a PostgreSQL procedure via CALL.
-
-    Dict/list values are serialised to JSON strings for jsonb parameters.
-
-    Parameters
-    ----------
-    conn : Any
-        Open Rey connection handle.
-    routine : str
-        Fully-qualified procedure name, as the procedure map binds it.
-    named_params : dict[str, Any]
-        DB parameter name → value.
-
-    Raises
-    ------
-    DatabaseError
-        If execution fails.
-    """
-    from rey_lib.db._sqlalchemy import core_connection
-
-    serialised = _serialise_jsonb(named_params)
-    placeholders = ", ".join(f":{key}" for key in serialised)
-    sql = f"CALL {routine}({placeholders})"
-    try:
-        from sqlalchemy import text
-
-        core_connection(conn).execute(text(sql), serialised)
-        conn.commit()
-        return
-    except Exception as exc:
-        conn.rollback()
-        raise DatabaseError(
-            f"postgres_utils: execute_procedure failed for '{routine}': {exc}"
+            f"postgres_utils: {call.shape.value} call failed for "
+            f"'{call.routine}': {exc}"
         ) from exc
 
 

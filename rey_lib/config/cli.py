@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from dotenv import load_dotenv
 
@@ -101,6 +101,17 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
     # ---------------------------------------------------------------------
     # Pipeline coordinator arguments
     # ---------------------------------------------------------------------
+
+    parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help=(
+            "The run this process executes under, created by whoever launched "
+            "it. Supplied, the process records its work against that run "
+            "rather than starting a second one."
+        ),
+    )
 
     parser.add_argument(
         "--pipeline-name",
@@ -243,18 +254,35 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
         pipeline_name = getattr(args, "pipeline_name", None)
         if pipeline_name:
             object.__setattr__(ctx, "pipeline_name", pipeline_name)
+        _adopt_run_id(ctx, args)
         return ctx
 
     if not config_path:
         raise SystemExit("--config-path is required.")
 
     try:
-        return build_ctx_from_path(
+        ctx = build_ctx_from_path(
             Path(config_path).expanduser().resolve(),
             app_name=app_name,
         )
     except (ConfigError, OSError) as exc:
         raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
+    _adopt_run_id(ctx, args)
+    return ctx
+
+
+def _adopt_run_id(ctx: Any, args: Any) -> None:
+    """Adopt the run this process was launched under, when it was given one.
+
+    A launcher that already recorded the run passes its id down, and
+    ``app_runtime`` starts no second run for a context that arrives carrying
+    one. Without this the launcher's run and the process's run are two
+    manifests for one execution: the launcher's never reaches a terminal
+    status, and the run log belongs to the other.
+    """
+    run_id = getattr(args, "run_id", None)
+    if run_id:
+        object.__setattr__(ctx, "run_id", int(run_id))
 
 
 def apply_env_overrides(overrides: list[str]) -> None:

@@ -37,17 +37,14 @@ import json
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from rey_lib.logs.logging_setup import get_logger
 __all__ = [
     "FileManifestError",
     "FileManifestSession",
     "file_manifest_session",
-    "file_manifest_write_boundary",
     "log_file_manifest_record",
-    "manifest_lock_path",
-    "manifest_state_path",
     "resolve_file_manifest_path",
 ]
 
@@ -135,396 +132,308 @@ def resolve_file_manifest_path(ctx: Any) -> Path:
         ) from exc
 
 
-def manifest_lock_path(manifest_path: Path | str) -> Path:
-    """Return the deterministic companion lock path for a manifest."""
-    return Path(str(manifest_path) + _LOCK_SUFFIX)
-
-
-def manifest_state_path(manifest_path: Path | str) -> Path:
-    """Return the deterministic companion sequencing-state path for a manifest."""
-    return Path(str(manifest_path) + _STATE_SUFFIX)
-
-
 def log_file_manifest_record(ctx: Any, record: dict[str, Any]) -> int:
     """
-    Append one governed record to the installation file manifest.
-
-    The returned ``record_id`` is also written into the record itself, so a
-    manifest line always carries its own durable row number.
+    Record one governed file fact, and return the identity the database gave it.
 
     Parameters
     ----------
     ctx : Any
-        Application context carrying the resolved installation ``paths``.
+        Application context exposing the installation's shared ``Control``.
     record : dict[str, Any]
-        One governed manifest record. It must not already carry ``record_id``;
-        sequencing is owned here, never supplied by the caller.
+        One governed manifest record. It must not carry an identity of its own:
+        a governed file's identity is what recording it establishes.
 
     Returns
     -------
     int
-        The committed monotonically assigned ``record_id``. Governed deletion
-        may leave gaps, so this identity is not necessarily the physical row.
+        ``file_manifest_id`` for inventory and classification,
+        ``file_mutation_id`` for a mutation. For inventory this value *is* the
+        governed file's ``file_id``.
 
     Raises
     ------
     FileManifestError
-        If the manifest path is unconfigured, the record is malformed, or the
-        record could not be sequenced and appended.
+        If the installation exposes no shared Control, the record is malformed,
+        or it carries a type this boundary does not govern.
     """
     _validate_unsequenced_record(record)
-
-    manifest_path = resolve_file_manifest_path(ctx)
-    try:
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise FileManifestError(
-            f"Manifest directory cannot be created for '{manifest_path}': {exc}"
-        ) from exc
-
-    with _ManifestLock(manifest_path):
-        return _append_locked(manifest_path, record)
-
-
-class FileManifestSession:
-    """Public append/read surface held under the shared manifest lock."""
-
-    def __init__(self, manifest_path: Path) -> None:
-        self.path = manifest_path
-
-    def read_records(self) -> list[dict[str, Any]]:
-        """Strictly read every current manifest record in physical order."""
-        if not self.path.exists():
-            return []
-        from rey_lib.files.jsonl import read_jsonl_file
-
-        return [dict(item.record) for item in read_jsonl_file(self.path)]
-
-    def append(self, record: dict[str, Any]) -> int:
-        """Append one record without reacquiring the already-held lock."""
-        _validate_unsequenced_record(record)
-        return _append_locked(self.path, record)
-
-    def remove_records(self, record_ids: Iterable[int]) -> int:
-        """Drop the named records, returning how many were removed.
-
-        This is the governed-rewrite counterpart of :meth:`append`, and exists
-        because the lock is not reentrant: ``file_manifest_write_boundary``
-        opens its own handle and takes the same exclusive lock, so a domain
-        owner holding a session cannot enter the boundary to rewrite. This
-        performs the rewrite under the lock the session already holds.
-
-        Removal is atomic and leaves intentional ID gaps: retained records keep
-        their IDs, and sequencing state is synchronized to the highest retained
-        ID so the next append still lands above everything that came before.
-        """
-        targets = {_removable_record_id(value) for value in record_ids}
-        if not targets:
-            return 0
-        retained = [
-            record
-            for record in self.read_records()
-            if record.get("record_id") not in targets
-        ]
-        _rewrite_locked(self.path, retained)
-        return len(targets)
-
-
-@contextmanager
-def file_manifest_session(ctx: Any) -> Iterator[FileManifestSession]:
-    """Yield a lock-aware manifest session for governed multi-record work."""
-    manifest_path = resolve_file_manifest_path(ctx)
-    try:
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise FileManifestError(
-            f"Manifest directory cannot be created for '{manifest_path}': {exc}"
-        ) from exc
-    with _ManifestLock(manifest_path):
-        yield FileManifestSession(manifest_path)
-
-
-@contextmanager
-def file_manifest_write_boundary(ctx: Any) -> Iterator[Path]:
-    """Yield the governed manifest under its shared exclusive write lock.
-
-    Domain owners may perform a validated atomic rewrite while this boundary is
-    held. On successful exit, sequencing is resynchronized through the one rule
-    every governed rewrite shares.
-    """
-    manifest_path = resolve_file_manifest_path(ctx)
-    with _ManifestLock(manifest_path):
-        # Read before the domain owner rewrites: afterwards the removed ids
-        # are gone from the manifest and cannot be recovered from state.
-        previous = int(_load_state(manifest_path)[_LAST_RECORD_ID])
-        yield manifest_path
-        _commit_after_rewrite(manifest_path, previous)
+    return write_record_to_control(ctx, record)
 
 
 def _validate_unsequenced_record(record: Any) -> None:
-    """Reject malformed records before entering the append primitive."""
+    """Reject malformed records before they reach the governed boundary.
+
+    A record must not carry an identity of its own. Identity is what recording
+    a governed file establishes, and the database mints it -- so a caller that
+    supplies one is naming a file that does not exist yet.
+    """
     if not isinstance(record, dict):
         raise FileManifestError("A manifest record must be a JSON object.")
     if "record_id" in record:
         raise FileManifestError(
-            "A manifest record must not supply 'record_id'; the manifest writer "
-            "owns durable sequencing."
+            "A manifest record must not supply 'record_id'; a governed file's "
+            "identity is established by recording it."
         )
-
-
-def _canonical_record(record: dict[str, Any], record_id: int) -> dict[str, Any]:
-    """Assign ``record_id`` and return the record in canonical root order.
-
-    An unknown root field is rejected rather than written: the manifest is an
-    append-only evidence store, so a field nobody can name must not become
-    permanent. Nested content is untouched — each section belongs to the
-    record-type serializer that built it.
-    """
+    # A field nobody can name is a field the governed boundary would silently
+    # drop. Refusing it keeps a writer from believing it recorded something.
     unknown = sorted(set(record) - set(_CANONICAL_ROOT_FIELDS))
     if unknown:
         raise FileManifestError(
             "Manifest record carries unknown root field(s): " + ", ".join(unknown)
         )
-    sequenced = {"record_id": record_id, **record}
-    return {
-        name: sequenced[name]
-        for name in _CANONICAL_ROOT_FIELDS
-        if name in sequenced
-    }
 
 
-def _append_locked(manifest_path: Path, record: dict[str, Any]) -> int:
-    """Sequence and append one record while the caller holds the manifest lock."""
-    state = _load_state(manifest_path)
-    record_id = int(state[_LAST_RECORD_ID]) + 1
-    sequenced = _canonical_record(record, record_id)
+def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
+    """Route one governed record to ``control.file_manifest``, and return its id.
 
-    from rey_lib.files import primitive_file_io
+    Migration scaffolding. It exists so every writer can keep the call it makes
+    today while authority moves in one commit; once the database is
+    authoritative each writer reaches ``FileManifest`` directly and this
+    translation goes with the JSONL manifest.
 
-    try:
-        primitive_file_io.append_jsonl(manifest_path, sequenced)
-    except (OSError, TypeError, ValueError) as exc:
-        raise FileManifestError(
-            f"Manifest record could not be appended to '{manifest_path}': {exc}"
-        ) from exc
-    _commit_state(manifest_path, record_id)
-    return record_id
+    The record types are the manifest's own, and each maps to one domain
+    operation rather than to a row of the same shape:
 
+        source_file_inventory                    -> inventory()
+        source_file_mutation / _rollback         -> append_mutation()
+        source_file_classification               -> update()
 
-def _commit_after_rewrite(
-    manifest_path: Path,
-    previous_last_record_id: int,
-) -> None:
-    """Resynchronize sequencing after a governed rewrite.
+    Classification is state on the file, not an event beside it, so a
+    classified outcome updates the row it names. A rejected one changes no file
+    state and writes nothing here: the rejection is already committed to the run
+    log before this is reached, and recording it again as a file record would be
+    the duplicate the database model exists to remove.
 
-    Every rewrite path commits through here, so the rule cannot differ between
-    them. Retained IDs keep their identity and removed IDs leave gaps, and the
-    sequence never moves backwards: removing the highest records, or all of
-    them, must not hand their IDs to a later append. The run log stores manifest
-    IDs permanently, so a reissued ID would silently retarget evidence that is
-    already written and can never be corrected.
+    Returns
+    -------
+    int
+        ``file_manifest_id`` for inventory and classification, and
+        ``file_mutation_id`` for a mutation -- in each case the identity the
+        database generated for what was actually written.
 
-    The previous high-water mark must be read before the rewrite. Afterwards it
-    is unrecoverable: state repair recounts it from the manifest, which no
-    longer holds the removed records.
+    Raises
+    ------
+    FileManifestError
+        When the installation exposes no shared Control, or the record carries a
+        type this boundary does not govern.
     """
-    _commit_state(
-        manifest_path,
-        max(_highest_record_id(manifest_path), int(previous_last_record_id)),
-    )
+    from rey_lib.files.manifest import FileManifest
 
-
-def _removable_record_id(value: Any) -> int:
-    """Reject anything that is not a durable record ID before a rewrite."""
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
+    control = getattr(ctx, "shared_control", None)
+    if control is None:
         raise FileManifestError(
-            f"Manifest record id to remove must be an integer, got {value!r}."
-        ) from exc
-    if number < 1:
-        raise FileManifestError(
-            f"Manifest record id to remove must be positive, got {number}."
+            "The governed file manifest is held in the control database, and "
+            "this context exposes no shared Control to reach it through."
         )
-    return number
+    manifest = FileManifest(control)
+    record_type = str(record.get("record_type") or "")
+    file_object = dict(record.get("file") or {})
 
+    if record_type == "source_file_inventory":
+        return manifest.inventory(
+            path=str(file_object.get("path") or ""),
+            file_name=str(file_object.get("file_name") or ""),
+            base_name=str(file_object.get("base_name") or ""),
+            file_extension=str(file_object.get("file_extension") or ""),
+            checksum_sha256=str(file_object.get("checksum_sha256") or ""),
+            size_bytes=int(file_object.get("size_bytes") or 0),
+            source_name=str(record.get("source_name") or ""),
+            evidence=record.get("evidence"),
+            producer=record.get("producer"),
+            classification=record.get("classification"),
+        )
 
-def _rewrite_locked(
-    manifest_path: Path,
-    retained: list[dict[str, Any]],
-) -> None:
-    """Replace the manifest with ``retained`` while the caller holds the lock.
+    if record_type in ("source_file_mutation", "source_file_rollback"):
+        # A governed file has one identity. The application calls it file_id and
+        # the database calls it file_manifest_id; they are the same value, so
+        # the record's file_id is written straight into the column. lineage
+        # points at the previous *mutation*, which is a different thing and
+        # stays where it is.
+        evidence = dict(record.get("evidence") or {})
+        lineage = dict(record.get("lineage") or {})
+        return manifest.append_mutation(
+            int(record.get("file_id")),
+            record_type=record_type,
+            action=str(record.get("action") or ""),
+            status=str(record.get("status") or ""),
+            source_record_id=lineage.get("source_record_id"),
+            run_log_id=evidence.get("run_log_id"),
+            path=str(file_object.get("path") or ""),
+            producer=record.get("producer"),
+            conversion=record.get("conversion"),
+            result=record.get("result"),
+            rollback=record.get("rollback"),
+        )
 
-    The replacement is staged and moved into place, so a failure mid-write
-    leaves the existing manifest untouched rather than truncated.
-    """
-    from rey_lib.files import primitive_file_io
-
-    previous = int(_load_state(manifest_path)[_LAST_RECORD_ID])
-    staged = manifest_path.with_name(f"{manifest_path.name}.rewrite")
-    try:
-        staged.unlink(missing_ok=True)
-        for record in retained:
-            primitive_file_io.append_jsonl(staged, record)
-        if not retained:
-            staged.touch()
-        staged.replace(manifest_path)
-    except (OSError, TypeError, ValueError) as exc:
-        staged.unlink(missing_ok=True)
-        raise FileManifestError(
-            f"Manifest could not be rewritten at '{manifest_path}': {exc}"
-        ) from exc
-    _commit_after_rewrite(manifest_path, previous)
-
-
-class _ManifestLock:
-    """Exclusive advisory lock over one manifest's complete critical section."""
-
-    def __init__(self, manifest_path: Path) -> None:
-        """Record the manifest whose companion lock file will be held."""
-        self._lock_path = manifest_lock_path(manifest_path)
-        self._handle: Any = None
-
-    def __enter__(self) -> _ManifestLock:
-        """Open the companion lock file and block until the lock is acquired."""
-        try:
-            # Opened in append mode so acquiring the lock never truncates it and
-            # never races another writer's creation of the same file.
-            self._handle = self._lock_path.open("a", encoding="utf-8")
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
-        except OSError as exc:
-            if self._handle is not None:
-                self._handle.close()
-                self._handle = None
+    if record_type == "source_file_classification":
+        file_manifest_id = int(record.get("file_id") or 0)
+        if not file_manifest_id:
             raise FileManifestError(
-                f"Manifest lock could not be acquired at '{self._lock_path}': {exc}"
-            ) from exc
-        return self
+                "A classification names the file it classifies by file_id, "
+                "which is that file's manifest identity."
+            )
+        if str(record.get("status") or "") == "classified":
+            # The path moves when classification routes the file to processing,
+            # so it travels with the classification rather than in a second call.
+            manifest.update(
+                file_manifest_id,
+                classification=record.get("classification"),
+                path=file_object.get("path"),
+            )
+        return file_manifest_id
 
-    def __exit__(self, *exc_info: object) -> None:
-        """Release the lock and close the companion handle."""
-        if self._handle is None:
-            return
-        try:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._handle.close()
-            self._handle = None
-
-
-def _load_state(manifest_path: Path) -> dict[str, int]:
-    """
-    Return sequencing state, repaired against the manifest when it disagrees.
-
-    A recorded size that does not match the manifest means an append or governed
-    rewrite occurred after the last state commit, so the manifest's highest
-    retained record ID becomes authoritative.
-    """
-    state = _read_state(manifest_path)
-    actual_size = _manifest_size(manifest_path)
-    if state[_MANIFEST_SIZE_BYTES] == actual_size:
-        return state
-
-    repaired = {
-        _LAST_RECORD_ID: _highest_record_id(manifest_path),
-        _MANIFEST_SIZE_BYTES: actual_size,
-    }
-    _logger.warning(
-        "file manifest: sequencing state repaired for %s "
-        "(recorded size %s, actual size %s, recounted last_record_id %s)",
-        manifest_path,
-        state[_MANIFEST_SIZE_BYTES],
-        actual_size,
-        repaired[_LAST_RECORD_ID],
+    raise FileManifestError(
+        f"'{record_type}' is not a governed file manifest record type."
     )
-    return repaired
 
 
-def _read_state(manifest_path: Path) -> dict[str, int]:
-    """Read the companion state file, tolerating a missing or malformed file."""
-    path = manifest_state_path(manifest_path)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {_LAST_RECORD_ID: 0, _MANIFEST_SIZE_BYTES: -1}
-    if not isinstance(raw, dict):
-        return {_LAST_RECORD_ID: 0, _MANIFEST_SIZE_BYTES: -1}
-    return {
-        _LAST_RECORD_ID: _as_int(raw.get(_LAST_RECORD_ID), 0),
-        # -1 can never equal a real size, so an unreadable state always repairs.
-        _MANIFEST_SIZE_BYTES: _as_int(raw.get(_MANIFEST_SIZE_BYTES), -1),
-    }
+def read_records_from_control(ctx: Any, *,
+                              file_id: Optional[int] = None) -> list[dict[str, Any]]:
+    """Governed files, each followed by its own mutations.
 
+    The stored model is a file and its children, so that is how this reads:
+    every file, and beneath each one its history. It is not a stream to be
+    grouped -- the grouping is the storage.
 
-def _commit_state(manifest_path: Path, record_id: int) -> None:
-    """Persist the committed record id and the manifest size it corresponds to.
+    Two things the database model changed, which a consumer sees here:
 
-    Recovery, not durability. A writer interrupted between appending a record
-    and committing this state leaves the two inconsistent, and that is repaired
-    by recounting the manifest. The recount fixes inconsistent state; it does
-    not make an acknowledged append survive power loss. Neither the append nor
-    this state file is flushed to stable storage, so a machine that loses power
-    can lose a record the caller was told was written. Choosing synchronization
-    boundaries for the append path -- run, batch, checkpoint, or close -- is a
-    separate decision and deliberately not made here.
+    - ``record_id`` and ``file_id`` are the same value on a file. A governed
+      file has one identity and the database mints it.
+    - classification is state on the file, not a record beside it, so there is
+      no ``source_file_classification`` entry. A file's classification is read
+      from the file.
+
+    Parameters
+    ----------
+    ctx : Any
+        Application context exposing the installation's shared ``Control``.
+    file_id : Optional[int]
+        One governed file, instead of all of them.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        The file record, then its mutations, oldest first, per file.
     """
-    from rey_lib.files.json import write_json_file
+    from rey_lib.files.manifest import FileManifest
 
-    state = {
-        _LAST_RECORD_ID: int(record_id),
-        _MANIFEST_SIZE_BYTES: _manifest_size(manifest_path),
-    }
-    try:
-        write_json_file(
-            manifest_state_path(manifest_path),
-            state,
-            mode="compact",
-            newline=False,
+    control = getattr(ctx, "shared_control", None)
+    if control is None:
+        raise FileManifestError(
+            "The governed file manifest is held in the control database, and "
+            "this context exposes no shared Control to reach it through."
         )
-    except OSError as exc:
-        raise FileManifestError(
-            f"Manifest sequencing state could not be committed for "
-            f"'{manifest_path}': {exc}"
-        ) from exc
+    manifest = FileManifest(control)
+    files = ([manifest.get(int(file_id))] if file_id is not None
+             else manifest.list_files())
+    records: list[dict[str, Any]] = []
+    for row in files:
+        if not row:
+            continue
+        records.append(_inventory_record(row))
+        # The baseline mutation records the same fact as the file itself -- that
+        # it was inventoried -- so emitting both would put one event in the
+        # stream twice, under one identity. History keeps it; this does not.
+        #
+        # Where a mutation moved the file *from* is not stored: it is the path
+        # the file had before, which the history in front of it already says.
+        # Carrying that running path is what lets a consumer reduce the
+        # lifecycle without re-deriving it or reading the filesystem.
+        previous_path = row.get("path")
+        for child in manifest.history(int(row["file_manifest_id"])):
+            if child.get("record_type") == "source_file_inventory":
+                previous_path = child.get("path") or previous_path
+                continue
+            record = _mutation_record(child)
+            record["file"]["original_path"] = previous_path
+            if child.get("path") and not child.get("rollback_complete_in"):
+                previous_path = child.get("path")
+            records.append(record)
+    return records
 
 
-def _manifest_size(manifest_path: Path) -> int:
-    """Return the manifest size in bytes, or 0 when it does not yet exist."""
-    try:
-        return manifest_path.stat().st_size
-    except OSError:
-        return 0
+def _inventory_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one file_manifest row into its canonical inventory record."""
+    identity = row.get("file_manifest_id")
+    record: dict[str, Any] = {
+        "record_id": identity,
+        "file_id": identity,
+        "record_type": "source_file_inventory",
+        "recorded_at": row.get("created_ts"),
+        "source_name": row.get("source_name"),
+        "evidence": _as_mapping(row.get("evidence")),
+        "producer": _as_mapping(row.get("producer")),
+        "file": {
+            "path": row.get("path"),
+            "file_name": row.get("file_name"),
+            "base_name": row.get("base_name"),
+            "file_extension": row.get("file_extension"),
+            "checksum_sha256": row.get("checksum_sha256"),
+            "size_bytes": row.get("size_bytes"),
+        },
+    }
+    classification = _as_mapping(row.get("classification"))
+    if classification:
+        record["classification"] = classification
+    return record
 
 
-def _highest_record_id(manifest_path: Path) -> int:
-    """Return the highest valid record ID, preserving intentional gaps."""
-    if not manifest_path.exists():
-        return 0
-    # The governed store is read through the one strict JSONL reader rather
-    # than parsed here: a manifest that cannot be read must fail, not be
-    # silently recounted from whatever lines happened to parse.
-    from rey_lib.files.jsonl import read_jsonl_file
+def _mutation_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one file_mutation row into its canonical mutation record."""
+    record: dict[str, Any] = {
+        "record_id": row.get("file_mutation_id"),
+        "file_id": row.get("file_manifest_id"),
+        "record_type": row.get("record_type"),
+        "action": row.get("action"),
+        "status": row.get("status"),
+        "recorded_at": row.get("created_ts"),
+        "evidence": {
+            "run_log_id": row.get("run_log_id"),
+        },
+        "lineage": {"source_record_id": row.get("source_record_id")},
+        "file": {"path": row.get("path")},
+        # A reversed mutation is still history, but it no longer says where the
+        # file is. A consumer reducing current state reads this rather than
+        # looking for a separate rollback record, because there is not one.
+        "rollback_complete_in": row.get("rollback_complete_in") or 0,
+    }
+    for key in ("producer", "conversion", "result", "rollback"):
+        value = _as_mapping(row.get(key))
+        if value:
+            record[key] = value
+    return record
 
-    try:
-        highest = 0
-        for item in read_jsonl_file(manifest_path):
-            record_id = item.record.get("record_id")
-            if (
-                isinstance(record_id, int)
-                and not isinstance(record_id, bool)
-                and record_id > highest
-            ):
-                highest = record_id
-        return highest
-    except Exception as exc:
-        raise FileManifestError(
-            f"Manifest record IDs cannot be inspected in '{manifest_path}': {exc}"
-        ) from exc
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    """Return a jsonb column as a mapping; the driver may hand back text."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        return json.loads(value)
+    return {}
 
 
-def _as_int(value: Any, default: int) -> int:
-    """Coerce a state value to int, falling back to the supplied default."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+class FileManifestSession:
+    """Public append/read surface held under the shared manifest lock."""
+
+    def __init__(self, manifest_path: Path, ctx: Any = None) -> None:
+        self.path = manifest_path
+        self._ctx = ctx
+
+    def read_records(self) -> list[dict[str, Any]]:
+        """Every current governed record, oldest first."""
+        return read_records_from_control(self._ctx)
+
+
+
+
+@contextmanager
+def file_manifest_session(ctx: Any) -> Iterator[FileManifestSession]:
+    """Yield a manifest session for governed multi-record work.
+
+    No lock is taken. Every operation beneath this session is one atomic
+    routine call, so there is no critical section for a caller to hold open.
+    """
+    yield FileManifestSession(resolve_file_manifest_path(ctx), ctx)
+

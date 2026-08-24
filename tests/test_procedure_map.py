@@ -211,12 +211,13 @@ def test_routine_scalar_executes_and_loads_output(run_log):
     values = {"run_id": "R1"}
     run_ctx = SimpleNamespace()
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db") as db:
-        db.execute_function.return_value = 123
+         patch("rey_lib.db.procedure_map.call_routine") as call:
+        call.return_value = 123
         result = execute_mapped_routine(object(), run_log, conn, "control", "start_batch",
                                         values, run_ctx=run_ctx)
-    db.execute_function.assert_called_once_with(conn, "control.mapped_function",
-                                                {"p_run_id": "R1"})
+    call.assert_called_once_with(conn, "control.mapped_function", {"p_run_id": "R1"},
+                                routine_type="function",
+                                result_mode="scalar_result")
     assert values["batch_id"] == 123 and run_ctx.batch_id == 123
     assert result["outputs"] == {"batch_id": 123}
     assert result["result_mode"] == "scalar_result"
@@ -231,8 +232,8 @@ def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
                  inp={"p_run_id": "run_id"}))
     run_ctx = SimpleNamespace()
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db") as db:
-        db.execute_function.return_value = 123
+         patch("rey_lib.db.procedure_map.call_routine") as call:
+        call.return_value = 123
         execute_mapped_routine(ctx, run_log, conn, "control", "start_batch",
                                {"run_id": "R1"}, run_ctx=run_ctx)
 
@@ -250,11 +251,12 @@ def test_routine_no_return_executes_procedure(run_log):
     m = _map(_rb(name="end_batch", routine="control.mapped_procedure",
                  call_type="procedure_no_return", inp={"p_batch_id": "batch_id"}))
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db") as db:
+         patch("rey_lib.db.procedure_map.call_routine") as call:
         result = execute_mapped_routine(object(), run_log, conn, "control", "end_batch",
                                         {"batch_id": 5})
-    db.execute_procedure.assert_called_once_with(conn, "control.mapped_procedure",
-                                                 {"p_batch_id": 5})
+    call.assert_called_once_with(conn, "control.mapped_procedure", {"p_batch_id": 5},
+                                routine_type="procedure",
+                                result_mode="no_return")
     assert result["result_mode"] == "no_return" and result["outputs"] == {}
 
 
@@ -271,9 +273,11 @@ def test_present_none_input_binds_as_null(run_log):
     conn = object()
     m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_x": "x"}))
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db") as db:
+         patch("rey_lib.db.procedure_map.call_routine") as call:
         execute_mapped_routine(object(), run_log, conn, "control", "a", {"x": None})
-    db.execute_procedure.assert_called_once_with(conn, "r", {"p_x": None})
+    call.assert_called_once_with(conn, "r", {"p_x": None},
+                                routine_type="procedure",
+                                result_mode="no_return")
 
 
 def test_input_resolves_from_run_ctx(run_log):
@@ -281,9 +285,11 @@ def test_input_resolves_from_run_ctx(run_log):
     m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_b": "batch_id"}))
     run_ctx = SimpleNamespace(batch_id=99)
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db") as db:
+         patch("rey_lib.db.procedure_map.call_routine") as call:
         execute_mapped_routine(object(), run_log, conn, "control", "a", {}, run_ctx=run_ctx)
-    db.execute_procedure.assert_called_once_with(conn, "r", {"p_b": 99})
+    call.assert_called_once_with(conn, "r", {"p_b": 99},
+                                routine_type="procedure",
+                                result_mode="no_return")
 
 
 # ---------------------------------------------------------------------------
@@ -297,8 +303,8 @@ def test_operation_routine_delegates(run_log):
                  inp={"p_run_id": "run_id"}))
     run_ctx = SimpleNamespace()
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db") as db:
-        db.execute_function.return_value = 7
+         patch("rey_lib.db.procedure_map.call_routine") as call:
+        call.return_value = 7
         result = execute_operation(object(), run_log, conn, "control",
                                    {"execution_target": "routine", "binding": "start_batch"},
                                    {"run_id": "R"}, run_ctx)

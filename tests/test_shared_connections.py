@@ -140,8 +140,12 @@ class TestLifetime:
         with patch.object(connection_module, "_db") as adapter:
             adapter.get_connection.return_value = "live-handle"
             control.execute("SELECT 1", {}, "scalar_result")
-            control.execute_function("control.mapped_function", {})
-            control.execute_procedure("control.mapped_procedure", {})
+            control.call_routine("control.mapped_function", {},
+                                 routine_type="function",
+                                 result_mode="scalar_result")
+            control.call_routine("control.mapped_procedure", {},
+                                 routine_type="procedure",
+                                 result_mode="no_return")
 
         assert adapter.get_connection.call_count == 1
 
@@ -192,13 +196,19 @@ class TestProviderBehaviourStaysUnderneath:
         with patch.object(connection_module, "_db") as adapter:
             adapter.get_connection.return_value = "h"
             shared.execute("SELECT 1", {"a": 1}, "scalar_result")
-            shared.execute_function("f", {"b": 2})
-            shared.execute_procedure("p", {"c": 3})
+            shared.call_routine("f", {"b": 2},
+                                routine_type="function", result_mode="scalar_result")
+            shared.call_routine("p", {"c": 3},
+                                routine_type="procedure", result_mode="no_return")
 
         adapter.execute_sql.assert_called_once_with("h", "SELECT 1", {"a": 1},
                                                     "scalar_result")
-        adapter.execute_function.assert_called_once_with("h", "f", {"b": 2})
-        adapter.execute_procedure.assert_called_once_with("h", "p", {"c": 3})
+        # One entry for every routine, whatever its shape. The adapter is given
+        # a decided call and never asked which statement form to write.
+        assert adapter.call_routine.call_count == 2
+        shapes = [c.args[1].shape.value for c in adapter.call_routine.call_args_list]
+        assert shapes == ["scalar_function", "procedure"]
+        assert [c.args[1].routine for c in adapter.call_routine.call_args_list] == ["f", "p"]
 
     def test_the_module_imports_no_provider_backend(self) -> None:
         """Dispatch on provider belongs to DBAdapter, and only there.

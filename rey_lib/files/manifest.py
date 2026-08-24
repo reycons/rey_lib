@@ -72,7 +72,6 @@ class FileManifest:
         checksum_sha256: str,
         size_bytes: int,
         source_name: str = "",
-        recorded_at: Optional[str] = None,
         evidence: Optional[dict[str, Any]] = None,
         producer: Optional[dict[str, Any]] = None,
         classification: Optional[dict[str, Any]] = None,
@@ -95,7 +94,7 @@ class FileManifest:
             path=path, file_name=file_name, base_name=base_name,
             file_extension=file_extension, checksum_sha256=checksum_sha256,
             size_bytes=size_bytes, source_name=source_name or None,
-            recorded_at=recorded_at, evidence=evidence, producer=producer,
+            evidence=evidence, producer=producer,
             classification=classification,
         ))
 
@@ -116,8 +115,7 @@ class FileManifest:
         action: str,
         status: str = "",
         source_record_id: Optional[int] = None,
-        run_log_file: str = "",
-        run_log_record_id: Optional[int] = None,
+        run_log_id: Optional[int] = None,
         path: str = "",
         producer: Optional[dict[str, Any]] = None,
         conversion: Optional[dict[str, Any]] = None,
@@ -125,25 +123,23 @@ class FileManifest:
         rollback: Optional[dict[str, Any]] = None,
         deleted_in: Optional[int] = None,
         deleted_ts: Optional[str] = None,
-        created_ts: Optional[str] = None,
-        batch_step_id: Optional[int] = None,
     ) -> int:
         """Append one event to a file's history, and return the mutation's id.
 
         History is append-only. There is no update and no delete here, and the
         routines that could do either are not granted to any application role.
 
-        The mutation points at the batch step that executed it. Left unset it
-        takes the step Control has open, which is the one that ran the action.
+        The mutation points at the batch step that executed it, which the
+        routine sets from the step it opens for itself. It is not a parameter:
+        the caller's step is the parent above that one, not the step that did
+        the work.
         """
         return int(self._control.append_file_mutation(
             file_manifest_id, record_type=record_type, action=action,
             status=status or None, source_record_id=source_record_id,
-            run_log_file=run_log_file or None,
-            run_log_record_id=run_log_record_id, path=path or None,
+            run_log_id=run_log_id, path=path or None,
             producer=producer, conversion=conversion, result=result,
             rollback=rollback, deleted_in=deleted_in, deleted_ts=deleted_ts,
-            created_ts=created_ts, batch_step_id=batch_step_id,
         ))
 
     def clear_classifications(self, file_manifest_ids: list[int]) -> int:
@@ -207,6 +203,48 @@ class FileManifest:
     def all_mutations(self) -> list[dict[str, Any]]:
         """Return every mutation, in order, for building a whole hierarchy."""
         return self._control.list_file_mutations(None)
+
+    # -- rollback ------------------------------------------------------------
+
+    def request_rollback(self, *, file_mutation_id: Optional[int] = None,
+                         batch_step_id: Optional[int] = None,
+                         batch_id: Optional[int] = None,
+                         run_id: Optional[int] = None) -> int:
+        """Mark mutations for reversal, and return how many were newly marked.
+
+        Exactly one scope. Rollback is state on the mutation it reverses -- no
+        rollback record is written and nothing is deleted -- so this freezes the
+        set of rows to reverse and changes no file.
+
+        Asking twice is safe: a mutation already pending keeps the request that
+        claimed it, and one already reversed is not reopened.
+        """
+        return int(self._control.request_file_rollback(
+            file_mutation_id=file_mutation_id, batch_step_id=batch_step_id,
+            batch_id=batch_id, run_id=run_id,
+        ) or 0)
+
+    def pending_rollbacks(self) -> list[dict[str, Any]]:
+        """Return the mutations awaiting reversal, newest first.
+
+        These rows are the durable queue. A reversal that fails, or a process
+        that dies partway, leaves its row here for the next run to pick up.
+
+        Each carries ``restore_to_path``: where that mutation is reversed to,
+        resolved from the file's own history. Current location is whatever the
+        newest mutation that has not been rolled back says, so reversing one
+        returns the file to the previous surviving mutation's path.
+        """
+        return self._control.pending_file_rollbacks()
+
+    def complete_rollback(self, file_mutation_id: int) -> None:
+        """Record that one mutation's inverse succeeded.
+
+        Called immediately after that mutation's filesystem operation is
+        reversed -- one row at a time, because one inverse succeeding proves
+        nothing about the others.
+        """
+        self._control.complete_file_rollback(file_mutation_id)
 
     def records_for_run(self, run_id: int) -> list[dict[str, Any]]:
         """Return the files one run recorded.

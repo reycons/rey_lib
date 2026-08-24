@@ -74,6 +74,13 @@ class Control:
         # is the only place it can come from; every later write lands on this
         # object, never back onto the context.
         self.batch_id: Optional[int] = getattr(ctx, "batch_id", None)
+        # The root step p_batch_start returned, retained until the batch ends.
+        # Held separately from the open step because closing a step clears that
+        # one, and an application step still has to know what it hangs from --
+        # the alternative is making the database rediscover which step was this
+        # batch's original root on every call.
+        self.batch_root_step_id: Optional[int] = None
+        # The application step currently open, or None between steps.
         self.batch_step_id: Optional[int] = None
         # Set by the RunLog that adopts this Control. Control persists on that
         # run log's behalf, so the SQL it runs is instrumented against it. None
@@ -114,6 +121,7 @@ class Control:
         the batch state it held and the run log it served.
         """
         self.batch_step_id = None
+        self.batch_root_step_id = None
         self.run_log = None
         self.connection = None
 
@@ -400,30 +408,51 @@ class Control:
     def start_batch(self, batch_name: str, owner_app_name: Optional[str] = None,
                     context_jsonb: Optional[dict[str, Any]] = None,
                     required: bool = False) -> Optional[int]:
-        """Register a new batch; the map binds the returned id onto ``batch_id``.
+        """Start a batch and its root step, binding both. Returns ``batch_id``.
 
         A batch is a grouping identity: it contains runs and is not one of them.
         Neither ``run_id`` nor ``pipeline_name`` is supplied -- a batch carrying
         one execution's identity was the encoded assumption that a batch *is* a
         run, and a pipeline is one kind of thing a batch may group rather than a
         property of grouping itself.
+
+        Starting a batch creates its root step in the same operation, so a
+        batch never exists without one. That step becomes the parent for work
+        performed under the batch, which is why both ids are bound here.
         """
-        return self._call("start_batch", {
+        rows = self._call_rows("start_batch", {
             "batch_name":      batch_name,
             "owner_app_name":  owner_app_name or getattr(self._ctx, "app_name", None),
             "context_jsonb":   context_jsonb,
+            # Explicit: resolving this from the context would find Control's own
+            # run_id method and bind the method object as a parameter.
+            "run_id":          getattr(self._ctx, "run_id", None),
         }, required=required)
+        if not rows:
+            return None
+        self.batch_id = rows[0].get("o_batch_id")
+        self.batch_root_step_id = rows[0].get("o_batch_step_id")
+        self.batch_step_id = self.batch_root_step_id
+        return self.batch_id
 
     def end_batch(self, status: str, error_message: Optional[str] = None,
                   context_jsonb: Optional[dict[str, Any]] = None,
                   required: bool = False) -> None:
-        """Mark the current batch complete."""
+        """Mark the current batch complete and release its state.
+
+        All three go together. A root left behind would be offered as the parent
+        for the next batch's steps, putting them under a step belonging to a
+        batch that has already ended.
+        """
         self._call("end_batch", {
             "batch_id":      self.batch_id,
             "status":        status,
             "error_message": error_message,
             "context_jsonb": context_jsonb,
         }, required=required)
+        self.batch_id = None
+        self.batch_root_step_id = None
+        self.batch_step_id = None
 
     # -- steps --------------------------------------------------------------
 
@@ -432,11 +461,17 @@ class Control:
                    git_commit_hash: Optional[str] = None,
                    parent_batch_step_id: Optional[int] = None,
                    context_jsonb: Optional[dict[str, Any]] = None,
+                   call_text: Optional[str] = None,
                    required: bool = False) -> Optional[int]:
         """Register a batch step; the map binds the id onto ``batch_step_id``.
 
         Carries the canonical ``run_id`` so a batch containing several runs can
         still say which execution produced this step.
+
+        ``call_text`` is what this step ran, recorded so it can be read back.
+        An application step often has no SQL to show, and NULL is the honest
+        answer there; the routines that render their own invocation fill it in
+        for themselves.
         """
         return self._call("start_step", {
             "batch_id":             self.batch_id,
@@ -446,8 +481,15 @@ class Control:
             "step_type":            step_type,
             "app_name":             app_name or getattr(self._ctx, "app_name", None),
             "git_commit_hash":      git_commit_hash,
-            "parent_batch_step_id": parent_batch_step_id,
+            # Application steps are siblings under the batch root, so the
+            # fallback is the retained root and not the step that happens to be
+            # open. Nesting one application step inside another is done by
+            # naming the parent, never by leaving it out.
+            "parent_batch_step_id": (parent_batch_step_id
+                                     if parent_batch_step_id is not None
+                                     else self.batch_root_step_id),
             "context_jsonb":        context_jsonb,
+            "call_text":            call_text,
         }, required=required)
 
     def end_step(self, status: str, message: Optional[str] = None,
@@ -483,6 +525,64 @@ class Control:
             "event_name":    event_name,
             "message":       message,
             "event_jsonb":   event_jsonb,
+        }, required=required)
+
+    def write_run_log_record(
+        self, *, run_id: Any, record_id: int, parent_record_id: int,
+        nest_level: int, record_type: str, record_group: str,
+        record_schema_version: int, run_timestamp: str,
+        record_subgroup: Optional[str] = None, message: Optional[str] = None,
+        app: Optional[str] = None, workflow_name: Optional[str] = None,
+        pipeline_name: Optional[str] = None, step_id: Optional[str] = None,
+        step_name: Optional[str] = None, step_sequence: Optional[int] = None,
+        correlation_id: Optional[str] = None, parent_run_id: Optional[Any] = None,
+        subject_type: Optional[str] = None, subject_id: Optional[str] = None,
+        subject_name: Optional[str] = None, pipeline_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+        error_message: Optional[str] = None,
+        fields: Optional[dict[str, Any]] = None,
+        required: bool = False,
+    ) -> Optional[int]:
+        """Write one run-log record, and return the row's id.
+
+        The run log's own record, not a control event: the record's order is the
+        run log's and arrives as ``record_id``. ``batch_step_id`` is correlation
+        only -- it says the record was written inside a governed step, and it is
+        null when none is open.
+
+        ``recorded_at`` is not a parameter. The database stamps it, so a writer
+        cannot backdate a log record.
+
+        The row's id is returned because a governed record points at it: the
+        log record is written first, and the file mutation carries its id.
+        """
+        return self._call("write_run_log_record", {
+            "run_id":                run_id,
+            "record_id":             record_id,
+            "parent_record_id":      parent_record_id,
+            "nest_level":            nest_level,
+            "record_type":           record_type,
+            "record_group":          record_group,
+            "record_subgroup":       record_subgroup,
+            "message":               message,
+            "app":                   app,
+            "workflow_name":         workflow_name,
+            "pipeline_name":         pipeline_name,
+            "step_id":               step_id,
+            "step_name":             step_name,
+            "step_sequence":         step_sequence,
+            "correlation_id":        correlation_id,
+            "parent_run_id":         parent_run_id,
+            "subject_type":          subject_type,
+            "subject_id":            subject_id,
+            "subject_name":          subject_name,
+            "pipeline_id":           pipeline_id,
+            "workflow_id":           workflow_id,
+            "record_schema_version": record_schema_version,
+            "fields":                fields or {},
+            "run_timestamp":         run_timestamp,
+            "error_message":         error_message,
+            "batch_step_id":         self.batch_step_id,
         }, required=required)
 
     # -- config snapshots ---------------------------------------------------
@@ -647,10 +747,13 @@ class Control:
     def run_logged_sql(self, sql_text: str, sql_name: Optional[str] = None,
                        context_jsonb: Optional[dict[str, Any]] = None,
                        required: bool = False) -> None:
-        """Run a statement through the control routine that logs it."""
+        """Run a statement through the control routine that logs it.
+
+        The batch and the parent step are not passed here: the binding names
+        them as inputs and the map resolves them off this object, which is
+        where they already live.
+        """
         self._call("run_logged_sql", {
-            "batch_id":      self.batch_id,
-            "batch_step_id": self.batch_step_id,
             "sql_text":      sql_text,
             "sql_name":      sql_name,
             "context_jsonb": context_jsonb,
@@ -705,6 +808,31 @@ class Control:
             "finished_at": finished_at,
         }, required=required)
 
+    def find_run_manifest(self, *, app_name: str = "", subject_type: str = "",
+                          subject_id: str = "", status: str = "",
+                          limit: Optional[int] = None,
+                          required: bool = True) -> list[dict[str, Any]]:
+        """Return the recorded runs matching every criterion supplied.
+
+        Reads rows and nothing else. Which runs are interesting, and what to do
+        about them, is the caller's.
+
+        ``required`` defaults True for the same reason ``get_run_manifest``
+        does: ``control.enabled`` governs the optional capabilities and must
+        not veto the run domain. With it false this returned no rows, and a run
+        left open read as no run at all.
+        """
+        return self._call_rows("find_run_manifest", {
+            "app_name":     app_name or None,
+            "subject_type": subject_type or None,
+            "subject_id":   subject_id or None,
+            "status":       status or None,
+            "parent_run_id": None,
+            "started_from": None,
+            "started_to":   None,
+            "limit":        limit,
+        }, required=required)
+
     def get_run_manifest(self, run_id: int,
                          required: bool = True) -> Optional[dict[str, Any]]:
         """Return one run's durable record, or None when it was never recorded.
@@ -728,7 +856,6 @@ class Control:
     def inventory_file(self, path: str, file_name: str, base_name: str,
                        file_extension: str, checksum_sha256: str,
                        size_bytes: int, source_name: Optional[str] = None,
-                       recorded_at: Optional[str] = None,
                        evidence: Optional[dict[str, Any]] = None,
                        producer: Optional[dict[str, Any]] = None,
                        classification: Optional[dict[str, Any]] = None,
@@ -746,7 +873,6 @@ class Control:
             "checksum_sha256": checksum_sha256,
             "size_bytes":      size_bytes,
             "source_name":     source_name,
-            "recorded_at":     recorded_at,
             "evidence":        evidence,
             "producer":        producer,
             "classification":  classification,
@@ -758,50 +884,44 @@ class Control:
         values = {"file_manifest_id": file_manifest_id}
         for name in ("path", "file_name", "base_name", "file_extension",
                      "checksum_sha256", "size_bytes", "source_name",
-                     "recorded_at", "evidence", "producer", "classification"):
+                     "evidence", "producer", "classification"):
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
 
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
                              action: str, status: Optional[str] = None,
                              source_record_id: Optional[int] = None,
-                             run_log_file: Optional[str] = None,
-                             run_log_record_id: Optional[int] = None,
+                             run_log_id: Optional[int] = None,
                              path: Optional[str] = None,
                              deleted_in: Optional[int] = None,
                              deleted_ts: Optional[str] = None,
-                             created_ts: Optional[str] = None,
-                             producer: Optional[dict[str, Any]] = None,
+                                   producer: Optional[dict[str, Any]] = None,
                              conversion: Optional[dict[str, Any]] = None,
                              result: Optional[dict[str, Any]] = None,
                              rollback: Optional[dict[str, Any]] = None,
-                             batch_step_id: Optional[int] = None,
                              required: bool = True) -> Optional[int]:
         """Append one event to a file's history.
 
-        ``batch_step_id`` defaults to the step this Control currently has open,
-        because that is the step that executed the action -- and it is where
-        the executed SQL and the action's provenance already live. A caller
-        does not have to know which step it is running under to say so.
+        The step that executed the action is not passed. The routine opens its
+        own batch step and records that on the row, so what is stored is the
+        database call that created the mutation rather than the application
+        step above it -- which is the parent, and travels as
+        ``in_parent_batch_step_id`` like every other governed call.
         """
         return self._call("insert_file_mutation", {
             "file_manifest_id":  file_manifest_id,
             "source_record_id":  source_record_id,
             "record_type":       record_type,
             "action":            action,
-            "run_log_file":      run_log_file,
-            "run_log_record_id": run_log_record_id,
+            "run_log_id": run_log_id,
             "path":              path,
             "status":            status,
             "deleted_in":        deleted_in,
             "deleted_ts":        deleted_ts,
-            "created_ts":        created_ts,
             "producer":          producer,
             "conversion":        conversion,
             "result":            result,
             "rollback":          rollback,
-            "batch_step_id":     (batch_step_id if batch_step_id is not None
-                                  else self.batch_step_id),
         }, required=required)
 
     def clear_file_classifications(self, file_manifest_ids: list[int],
@@ -858,3 +978,47 @@ class Control:
         """Return the files one run recorded, by the run's durable identity."""
         return self._call_rows("find_file_manifest_for_run",
                                {"run_id": run_id}, required=required)
+
+    # -- rollback -----------------------------------------------------------
+    #
+    # Rollback is state on the mutation it reverses. Nothing is deleted and no
+    # rollback record is written: a request marks a set of mutations, the
+    # pending rows are the queue, and completion closes one row whose inverse
+    # has succeeded.
+
+    def request_file_rollback(self, *, file_mutation_id: Optional[int] = None,
+                              batch_step_id: Optional[int] = None,
+                              batch_id: Optional[int] = None,
+                              run_id: Optional[int] = None,
+                              required: bool = True) -> Optional[int]:
+        """Mark a set of mutations for reversal; return how many were newly marked.
+
+        Exactly one scope is supplied. A mutation already pending keeps the
+        request step that first claimed it, and a completed rollback is never
+        reopened, so the count is only what this request added.
+        """
+        return self._call("request_file_rollback", {
+            "file_mutation_id":       file_mutation_id,
+            "rollback_batch_step_id": batch_step_id,
+            "rollback_batch_id":      batch_id,
+            "rollback_run_id":        run_id,
+        }, required=required)
+
+    def pending_file_rollbacks(self,
+                               required: bool = True) -> list[dict[str, Any]]:
+        """Return mutations awaiting reversal, newest first.
+
+        Each row carries ``restore_to_path`` -- where that mutation must be
+        reversed to, resolved from the history rather than from the filesystem.
+        """
+        return self._call_rows("pending_file_rollbacks", {}, required=required)
+
+    def complete_file_rollback(self, file_mutation_id: int,
+                               required: bool = True) -> None:
+        """Record that one mutation's inverse succeeded.
+
+        Only a pending row can be completed; the routine refuses to manufacture
+        rollback state for a mutation nobody requested.
+        """
+        self._call("complete_file_rollback",
+                   {"file_mutation_id": file_mutation_id}, required=required)

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from rey_lib.db import mysql_utils, postgres_utils
+from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.db._sqlalchemy import ReyConnection, inspect_schema
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError
@@ -167,15 +168,23 @@ def test_postgres_execution_failure_rolls_back_and_wraps_error() -> None:
 def test_postgres_function_and_procedure_use_bound_core_execution() -> None:
     conn, core, _engine = _connection(_Result(rows=[(41,)]))
 
-    scalar = postgres_utils.execute_function(
-        conn, "control.start_run", {"payload": {"id": 7}}
+    scalar = postgres_utils.render_and_execute(
+        conn,
+        RoutineCall("control.start_run", InvocationShape.SCALAR_FUNCTION,
+                    {"payload": {"id": 7}}),
     )
-    postgres_utils.execute_procedure(conn, "control.finish_run", {"run_id": 41})
+    postgres_utils.render_and_execute(
+        conn,
+        RoutineCall("control.finish_run", InvocationShape.PROCEDURE,
+                    {"run_id": 41}),
+    )
 
     assert scalar == 41
+    # Arguments are stated by name: the procedure map binds parameter names, so
+    # the rendered call names them and the binding's order is not a contract.
     assert [str(call[0]) for call in core.executed] == [
-        "SELECT control.start_run(:payload)",
-        "CALL control.finish_run(:run_id)",
+        "SELECT control.start_run(payload => :payload)",
+        "CALL control.finish_run(run_id => :run_id)",
     ]
     assert core.executed[0][1] == {"payload": '{"id": 7}'}
     assert core.commits == 2

@@ -158,16 +158,17 @@ class TestOneMapRunsAgainstTwoConnections:
 
         seen: list[tuple[str, Any]] = []
 
-        def _execute_function(conn: Any, routine: str, named_params: Any) -> int:
+        def _call_routine(conn: Any, routine: str, arguments: Any,
+                          *, routine_type: str, result_mode: str) -> int:
             seen.append((routine, conn))
             return 1
 
-        # Two adapters, two roles: Connection opens through its own, the
-        # mapped executor runs the routine through the procedure map's.
+        # Connection opens the handle; the map hands one normalized call to the
+        # connector's routine entry. The map itself renders nothing.
         with patch.object(connection_module, "_db") as opener, \
-             patch("rey_lib.db.procedure_map._db") as executor:
+             patch("rey_lib.db.procedure_map.call_routine") as executor:
             opener.get_connection.side_effect = lambda cfg, ctx=None: f"handle:{cfg.name}"
-            executor.execute_function.side_effect = _execute_function
+            executor.side_effect = _call_routine
 
             for connection in (live, test):
                 execute_mapped_routine(

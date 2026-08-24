@@ -349,7 +349,7 @@ def test_evidence_failure_preserves_only_provable_state(
         "evidence failed",
         phase=phase,
         run_log_file="run.jsonl" if committed else None,
-        run_log_record_id=record_id,
+        run_log_id=record_id,
     )
     with patch.object(file_routing, "move_file", return_value=destination), patch.object(
         file_routing, "log_source_file_mutation", side_effect=failure
@@ -361,7 +361,7 @@ def test_evidence_failure_preserves_only_provable_state(
     assert result.filesystem_applied is True
     assert result.complete_evidence_acknowledged is False
     assert result.mutation_run_log_committed is committed
-    assert result.mutation_run_log_record_id == record_id
+    assert result.mutation_run_log_id == record_id
     assert result.evidence_phase is phase
     assert result.rollback_information is not None
     assert result.rollback_information.file_manifest_record_id is None
