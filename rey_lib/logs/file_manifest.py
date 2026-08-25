@@ -327,6 +327,27 @@ def read_records_from_control(ctx: Any, *,
     manifest = FileManifest(control)
     files = ([manifest.get(int(file_id))] if file_id is not None
              else manifest.list_files())
+
+    # One read for every file's mutations, not one read per file. Asking each
+    # file for its own history is a round trip per file, and this projection is
+    # built several times a run: 229 files became 916 reads of one table.
+    #
+    # The rows arrive ordered by file_mutation_id, which is monotonic, so
+    # appending them in arrival order leaves each file's mutations oldest-first
+    # -- the order the running `previous_path` below depends on. Nothing here
+    # may reorder them.
+    #
+    # A single named file still asks for its own history: one call for one file
+    # is already the smallest read, and routing it through the whole table
+    # would be the same mistake inverted.
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    if file_id is None:
+        for mutation in manifest.all_mutations():
+            key = mutation.get("file_manifest_id")
+            if key is None:
+                continue
+            grouped.setdefault(int(key), []).append(mutation)
+
     records: list[dict[str, Any]] = []
     for row in files:
         if not row:
@@ -341,7 +362,12 @@ def read_records_from_control(ctx: Any, *,
         # Carrying that running path is what lets a consumer reduce the
         # lifecycle without re-deriving it or reading the filesystem.
         previous_path = row.get("path")
-        for child in manifest.history(int(row["file_manifest_id"])):
+        identity = int(row["file_manifest_id"])
+        # `.get` rather than `[]`: a file with no mutations produced an empty
+        # history before and must still produce one record and no children.
+        history = (manifest.history(identity) if file_id is not None
+                   else grouped.get(identity, []))
+        for child in history:
             if child.get("record_type") == "source_file_inventory":
                 previous_path = child.get("path") or previous_path
                 continue
