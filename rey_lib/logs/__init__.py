@@ -67,6 +67,7 @@ from rey_lib.logs.log_utils import (
     EXECUTION_RECORD_TYPES,
     FILES_RECORD_SUBGROUP,
     RUN_RESULT_RECORD_TYPES,
+    TYPE_PAYLOAD_COLUMNS,
     bind_correlation,
     bind_run,
     bound_run_log,
@@ -211,5 +212,6 @@ __all__ = [
     "group_artifacts_by_producer",
     "EXECUTION_RECORD_TYPES",
     "RUN_RESULT_RECORD_TYPES",
+    "TYPE_PAYLOAD_COLUMNS",
     "FILES_RECORD_SUBGROUP",
 ]

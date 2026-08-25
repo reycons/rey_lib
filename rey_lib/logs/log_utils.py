@@ -89,6 +89,7 @@ from rey_lib.logs.record_enrichment import (
     sanitize_log_value,
 )
 from rey_lib.logs.record_validation import validate_run_log_completeness
+from rey_lib.logs.run_log import TYPE_PAYLOAD_COLUMNS
 from rey_lib.logs.sql_records import log_sql_execution
 
 __all__ = [
@@ -162,5 +163,6 @@ __all__ = [
     "current_correlation",
     "EXECUTION_RECORD_TYPES",
     "RUN_RESULT_RECORD_TYPES",
+    "TYPE_PAYLOAD_COLUMNS",
     "FILES_RECORD_SUBGROUP",
 ]

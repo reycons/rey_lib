@@ -88,7 +88,12 @@ _SHARED_FIELDS: frozenset[str] = frozenset({
 #:
 #: Generated from the same scan that generated the table, so the schema and
 #: this map describe one vocabulary.
-_TYPE_PAYLOAD_COLUMNS: dict[str, str] = {
+#:
+#: Public because a reader needs the same answer as the writer: which column
+#: holds this record type's payload. A reader that kept its own copy would be a
+#: second vocabulary, and the two would drift the first time a record type was
+#: added here alone.
+TYPE_PAYLOAD_COLUMNS: dict[str, str] = {
     "APP_EXECUTION": "app_execution",
     "ARTIFACT_REFERENCE": "artifact_reference",
     "CONFIG_FILE_MANIFEST": "config_file_manifest",
@@ -723,13 +728,13 @@ class RunLog:
             )
         payload = {key: value for key, value in record.items()
                    if key not in _ENVELOPE_FIELDS and key not in _SHARED_FIELDS}
-        payload_column = _TYPE_PAYLOAD_COLUMNS.get(str(record_type).upper())
+        payload_column = TYPE_PAYLOAD_COLUMNS.get(str(record_type).upper())
         if payload and payload_column is None:
             raise ValueError(
                 f"{record_type} records have no typed payload column, but "
                 f"{sorted(payload)} was supplied. Either the value is a shared "
                 "fact with a column of its own, or this record type needs a "
-                "payload column declared in _TYPE_PAYLOAD_COLUMNS."
+                "payload column declared in TYPE_PAYLOAD_COLUMNS."
             )
         return self.control.write_run_log_record(
             run_id=record.get("run_id"),
@@ -764,6 +769,6 @@ class RunLog:
             error_message=record.get("error_message"),
             payloads={column: (payload or None) if column == payload_column
                       else None
-                      for column in _TYPE_PAYLOAD_COLUMNS.values()},
+                      for column in TYPE_PAYLOAD_COLUMNS.values()},
             required=True,
         )
