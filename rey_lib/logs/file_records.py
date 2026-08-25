@@ -126,12 +126,13 @@ def log_config_file_manifest(run_log: 'RunLog', files: list[dict[str, Any]]) -> 
 def log_file_operation(run_log: 'RunLog', operation: str, *, source_path: str = "",
                        target_path: str = "", status: str = "success",
                        step_id: str = "", **fields: Any) -> None:
-    """Append a FILE_OPERATION execution record for a file movement/operation.
+    """Append a FILE_OPERATION record for a file movement/operation.
 
-    File movement (move/copy/rename/read/delete) is execution history, not artifact
-    inventory. These records carry enough detail (from/to/status) to support
-    rollback/recovery analysis derived from the append-only log rather than state
-    files.
+    File movement (move/copy/rename/read/delete) is a fact about a file, not
+    artifact inventory and not a step of the execution -- it groups under
+    ``files``/``file_operations``. These records carry enough detail
+    (from/to/status) to support rollback/recovery analysis derived from the
+    append-only log rather than state files.
     """
     destination_path = str(fields.pop("destination_path", "") or target_path)
     current_path = str(fields.pop("current_path", "") or target_path or source_path)

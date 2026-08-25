@@ -469,7 +469,15 @@ class RunLog:
         }
         subgroup = FILES_RECORD_SUBGROUP.get(record_type)
         if subgroup:
-            record["record_subgroup"] = subgroup
+            # A record that states its own grouping value is believed over the
+            # per-type default. Every ARTIFACT_REFERENCE was stamped
+            # "artifacts" because the type map was asked and the record was
+            # not, which collapsed output_files, profiles, analysis_context
+            # and analysis_results into one indistinguishable group. The
+            # override is scoped to types the map already places in `files`,
+            # so a subgroup exists exactly where the group is `files`.
+            supplied = (fields or {}).get("artifact_group")
+            record["record_subgroup"] = str(supplied) if supplied else subgroup
         if self.app:
             record["app"] = self.app
         if self._workflow:

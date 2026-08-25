@@ -17,7 +17,7 @@ _RUN_RECORD_SCHEMA_VERSION = 1
 
 EXECUTION_RECORD_TYPES = frozenset({
     "RUN_START", "EXECUTION_PLAN", "STEP_START", "STEP_END", "INFO", "WARNING",
-    "ERROR", "FILE_OPERATION", "RUN_COMPLETE", "STEP_FAILURE", "APP_EXECUTION",
+    "ERROR", "RUN_COMPLETE", "STEP_FAILURE", "APP_EXECUTION",
     "SQL_EXECUTION", "ROW_COUNT", "VALIDATION_RESULT",
 })
 
@@ -29,6 +29,10 @@ RUN_RESULT_RECORD_TYPES = frozenset({
 })
 
 
+#: The default subgroup for a record type that has no grouping value of its
+#: own. A record that carries one overrides this -- see RunLog._record -- so
+#: "artifacts" here means an artifact that never said which group it belongs
+#: to, not every artifact.
 FILES_RECORD_SUBGROUP = {
     "INPUT_FILE_REFERENCE": "input_files",
     "INPUT_DISCOVERED": "input_files",
@@ -37,6 +41,11 @@ FILES_RECORD_SUBGROUP = {
     "CONFIG_FILE_MANIFEST": "config_files",
     "ARTIFACT_REFERENCE": "artifacts",
     "ARTIFACT_MANIFEST": "artifacts",
+    # A file operation is an event about a file, not a step of the execution.
+    # It sat in EXECUTION_RECORD_TYPES and so grouped as "execution" with no
+    # subgroup, which left the File Operations group with no durable key to be
+    # built from.
+    "FILE_OPERATION": "file_operations",
 }
 
 
