@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from rey_lib.logs.run_log import RunLog
-from tests.conftest import make_run_log
+from tests.conftest import make_db_run_log
 
 
 def _rows(run_log: RunLog) -> list[dict]:
@@ -38,7 +38,7 @@ class TestItTakesNoContext:
         assert reads == []
 
     def test_a_record_is_built_from_owned_state(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path, app="rey_loader", workflow="transform")
+        run_log = make_db_run_log(tmp_path, app="rey_loader", workflow="transform")
 
         run_log.append("ROW_COUNT", count_name="loaded", count=7)
 
@@ -52,7 +52,7 @@ class TestItOwnsTheTransitions:
     """State that changes during a run changes through RunLog."""
 
     def test_binding_a_workflow_changes_later_records(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
         run_log.append("ROW_COUNT", count_name="before", count=1)
 
         run_log.bind_workflow("transform_load")
@@ -63,7 +63,7 @@ class TestItOwnsTheTransitions:
         assert after["workflow_name"] == "transform_load"
 
     def test_binding_a_pipeline_changes_later_records(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
         run_log.bind_pipeline("daily")
 
         run_log.append("ROW_COUNT", count_name="a", count=1)
@@ -71,7 +71,7 @@ class TestItOwnsTheTransitions:
         assert _rows(run_log)[0]["pipeline_name"] == "daily"
 
     def test_lineage_is_bound_and_stamped(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
         run_log.bind_lineage(parent_run_id="R-parent", subject_type="workflow")
 
         run_log.append("ROW_COUNT", count_name="a", count=1)
@@ -81,7 +81,7 @@ class TestItOwnsTheTransitions:
         assert row["subject_type"] == "workflow"
 
     def test_a_semantic_base_sets_the_nesting_level(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
 
         assert run_log.set_nest_level("app") == 3
         assert run_log.nest_level() == 3
@@ -92,14 +92,14 @@ class TestItOwnsTheTransitions:
         Relative nesting cannot escape into or below its own base; only
         set_nest_level establishes a new one.
         """
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
         run_log.set_nest_level("workflow")   # 4, floor 5
 
         assert run_log.enter() == 5
         assert run_log.exit() == 5
 
     def test_exit_never_rises_above_the_established_minimum(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
         run_log.set_nest_level("pipeline")
 
         for _ in range(5):
@@ -112,48 +112,25 @@ class TestSequencing:
     """Unchanged by the ownership move."""
 
     def test_the_sequence_advances_per_record(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
 
         ids = [run_log.append("ROW_COUNT", count_name=f"n{i}", count=i)
                for i in range(4)]
 
         assert ids == [1, 2, 3, 4]
 
-    def test_a_second_writer_continues_the_sequence(self, tmp_path: Path) -> None:
-        """Cross-process continuation, which the state file exists for."""
-        first = make_run_log(tmp_path)
-        for i in range(3):
-            first.append("ROW_COUNT", count_name=f"a{i}", count=i)
-
-        second = make_run_log(tmp_path, path=str(first.path()))
-        continued = [second.append("ROW_COUNT", count_name=f"b{i}", count=i)
-                     for i in range(2)]
-
-        assert continued == [4, 5]
-
     def test_a_failed_write_never_raises(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
 
         with patch("rey_lib.files.primitive_file_io.append_jsonl",
                    side_effect=OSError("disk gone")):
             assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
 
-    def test_a_failed_write_does_not_advance_the_sequence(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
-        run_log.append("ROW_COUNT", count_name="first", count=1)
-
-        with patch("rey_lib.files.primitive_file_io.append_jsonl",
-                   side_effect=OSError("disk gone")):
-            run_log.append("ROW_COUNT", count_name="lost", count=2)
-
-        assert run_log.append("ROW_COUNT", count_name="next", count=3) == 2
-
-
 class TestDestination:
     """RunLog decides where a record goes."""
 
     def test_jsonl_writes_only_the_file(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path, destination="jsonl")
+        run_log = make_db_run_log(tmp_path, destination="jsonl")
 
         assert (run_log.writes_jsonl, run_log.writes_db) == (True, False)
 
@@ -166,20 +143,25 @@ class TestDestination:
                 self.written.append(values)
 
         control = FakeControl()
-        run_log = make_run_log(tmp_path, destination="db", control=control)
+        run_log = make_db_run_log(tmp_path, destination="db", control=control)
 
         run_log.append("ROW_COUNT", count_name="a", count=1)
 
         assert [row["record_type"] for row in control.written] == ["ROW_COUNT"]
-        # The envelope is passed by name; only what the caller supplied for this
-        # record type is payload. A stamped field hiding in `fields` is a column
-        # nobody can query.
-        assert control.written[0]["fields"] == {"count_name": "a", "count": 1}
-        assert control.written[0]["record_id"] == 1
+        # The envelope is passed by name; what the caller supplied for this
+        # record type goes to that type's own jsonb column, selected by
+        # record_type. There is no generic `fields` bucket to hide a stamped
+        # field in, and every other payload column stays null.
+        payloads = control.written[0]["payloads"]
+        assert payloads["row_count"] == {"count_name": "a", "count": 1}
+        assert payloads["sql_execution"] is None
+        # The database mints the identity, so the writer sends the parent it
+        # is under -- null at the root -- and receives the row's id back.
+        assert control.written[0]["parent_run_log_id"] is None
         assert not list(Path(tmp_path).glob("*.jsonl"))
 
     def test_a_missing_control_is_a_write_fault_not_a_crash(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path, destination="db", control=None)
+        run_log = make_db_run_log(tmp_path, destination="db", control=None)
 
         assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
 
@@ -188,7 +170,7 @@ class TestLifecycle:
     """Closed by runtime collection, once."""
 
     def test_close_is_idempotent(self, tmp_path: Path) -> None:
-        run_log = make_run_log(tmp_path)
+        run_log = make_db_run_log(tmp_path)
 
         run_log.close()
         run_log.close()

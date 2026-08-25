@@ -404,8 +404,8 @@ def test_missing_handler_writes_failure_evidence_before_raising(
         if r.get("record_type") not in {"RUN_START", "RUN_COMPLETE"}
         and "no registered handler" in json.dumps(r)
     )
-    assert failure["error_type"] == "WorkflowError"
-    assert failure["process"] == "prepare_rule_set_inputs"
+    assert failure["error_message"]["error_type"] == "WorkflowError"
+    assert failure["error_message"]["process"] == "prepare_rule_set_inputs"
 
 
 def test_undefined_process_writes_failure_evidence_before_raising(run_log, 

@@ -278,10 +278,9 @@ def test_profiles_join_only_by_exact_governed_file_id(store) -> None:
     """A profile belongs to the file it names, by identity and nothing else."""
     file_id = store.inventory("file-a", "feed", "a.csv", "/in/a.csv")
     profile = {
-        "record_id": 8, "record_type": "ARTIFACT_REFERENCE",
+        "run_log_id": 8, "record_type": "ARTIFACT_REFERENCE",
         "artifact_group": "profiles", "artifact_type": "row_shape_analysis",
         "source_file_id": file_id, "path": "/profiles/a.profile.json",
-        "__run_log_file": "/logs/run.jsonl",
     }
 
     page = build_file_hierarchy_stages(store.ctx, file_id,
@@ -416,10 +415,9 @@ def test_created_artifacts_are_labelled_for_what_they_are(store) -> None:
 def test_a_profile_stage_is_named_for_the_artifact_it_opens(store) -> None:
     file_id = store.inventory("file-a", "feed", "a.csv", "/in/a.csv")
     profile = {
-        "record_id": 8, "record_type": "ARTIFACT_REFERENCE",
+        "run_log_id": 8, "record_type": "ARTIFACT_REFERENCE",
         "artifact_group": "profiles", "artifact_type": "row_shape_analysis",
         "source_file_id": file_id, "path": "/work/profiles/a.profile.json",
-        "__run_log_file": "/logs/run.jsonl",
     }
 
     page = build_file_hierarchy_stages(store.ctx, file_id,

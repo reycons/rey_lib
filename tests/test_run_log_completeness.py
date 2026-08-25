@@ -45,7 +45,8 @@ def test_failed_run_with_referenced_error_evidence_is_valid() -> None:
     """Failed RUN_COMPLETE is complete when it references structured evidence."""
     records = [
         {"record_type": "RUN_START", "run_id": "r1", "run_timestamp": "20260708_000000"},
-        {"record_type": "ERROR", "run_id": "r1", "error_id": "err-1", "message": "failed"},
+        {"record_type": "ERROR", "run_id": "r1", "message": "failed",
+         "error_message": {"error_id": "err-1", "message": "failed"}},
         {
             "record_type": "RUN_COMPLETE",
             "run_id": "r1",

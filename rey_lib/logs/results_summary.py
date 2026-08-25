@@ -17,6 +17,7 @@ invented (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from rey_lib.logs.run_summary import (
@@ -313,18 +314,33 @@ def _logical_failure_id(record: dict[str, Any], rtype: str,
     traceback similarity) is ever attempted
     (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
     """
+    evidence = _error_evidence(record, rtype)
     if rtype == _ERROR:
-        return str(record.get("error_id") or record.get("record_id") or "")
+        return str(evidence.get("error_id") or record.get("run_log_id") or "")
     if rtype == _STEP_FAILURE:
-        failure_id = str(record.get("failure_record_id") or "")
+        failure_id = str(evidence.get("failure_record_id") or "")
         if failure_id and failure_id in known_error_ids:
             return failure_id
-        step_id = str(record.get("failed_step_id") or "")
+        step_id = str(evidence.get("failed_step_id") or "")
         if step_id:
             return f"step:{step_id}"
-        return str(record.get("record_id") or failure_id or "")
-    step_id = str(record.get("failed_step_id") or record.get("step_id") or "")
+        return str(record.get("run_log_id") or failure_id or "")
+    step_id = str(evidence.get("failed_step_id") or record.get("step_id") or "")
     return f"step:{step_id}" if step_id else ""
+
+
+def _error_evidence(record: dict[str, Any], rtype: str) -> dict[str, Any]:
+    """Where one record's failure detail is held.
+
+    ERROR and STEP_FAILURE carry the whole canonical payload in the
+    ``error_message`` column, so their detail is read from that object.
+    APP_EXECUTION is not a failure record -- its stdout/stderr summaries are
+    execution evidence and stay flat -- so it is read as it is written.
+    """
+    if rtype in (_ERROR, _STEP_FAILURE):
+        payload = record.get("error_message")
+        return dict(payload) if isinstance(payload, Mapping) else {}
+    return record
 
 
 def _collect_error_blocks(records: list[dict[str, Any]],
@@ -341,13 +357,15 @@ def _collect_error_blocks(records: list[dict[str, Any]],
         rtype = _rtype(record)
         if rtype not in (_ERROR, _STEP_FAILURE, _APP_EXECUTION):
             continue
-        record_id = str(record.get("record_id") or record.get("error_id")
-                        or record.get("failure_record_id") or "")
+        evidence = _error_evidence(record, rtype)
+        record_id = str(record.get("run_log_id") or evidence.get("error_id")
+                        or evidence.get("failure_record_id") or "")
         logical_id = _logical_failure_id(record, rtype, known_error_ids)
-        flag_truncated = bool(record.get("output_truncated") or record.get("truncated"))
-        has_full_traceback = bool(record.get("sanitized_traceback"))
+        flag_truncated = bool(evidence.get("output_truncated")
+                              or evidence.get("truncated"))
+        has_full_traceback = bool(evidence.get("sanitized_traceback"))
         for field, stream, priority in _ERROR_FIELDS:
-            value = record.get(field)
+            value = evidence.get(field)
             if not value:
                 continue
             text = str(value)
@@ -432,14 +450,21 @@ def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
     (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
     """
     complete = next((r for r in reversed(records) if _rtype(r) == _RUN_COMPLETE), {})
+    # A failure record carries its identity inside its payload, so these read
+    # through the same resolver the blocks do rather than off the record root.
     known_error_ids = frozenset(
-        str(r.get("error_id") or r.get("record_id") or "")
+        str(_error_evidence(r, _ERROR).get("error_id") or r.get("run_log_id") or "")
         for r in records if _rtype(r) == _ERROR
     ) - {""}
-    failure_ids = [str(r.get("failure_record_id") or r.get("record_id") or "")
-                   for r in records if _rtype(r) == _STEP_FAILURE]
-    error_ids = [str(r.get("error_id") or r.get("record_id") or "")
-                 for r in records if _rtype(r) == _ERROR]
+    failure_ids = [
+        str(_error_evidence(r, _STEP_FAILURE).get("failure_record_id")
+            or r.get("run_log_id") or "")
+        for r in records if _rtype(r) == _STEP_FAILURE
+    ]
+    error_ids = [
+        str(_error_evidence(r, _ERROR).get("error_id") or r.get("run_log_id") or "")
+        for r in records if _rtype(r) == _ERROR
+    ]
 
     raw_blocks = _collect_error_blocks(records, known_error_ids)
     kept, removed = _dedupe_error_blocks(raw_blocks)

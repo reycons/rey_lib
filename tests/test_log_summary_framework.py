@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import make_run_log
+from tests.conftest import make_db_run_log
 
 from rey_lib.logs import (
     create_results_summary,
@@ -30,7 +30,7 @@ def _records(path: Path) -> list[dict]:
 
 def _ctx(tmp_path: Path):
     """The run log these fixtures write through."""
-    return make_run_log(tmp_path, app="demo_app", run_id="r1",
+    return make_db_run_log(tmp_path, app="demo_app", run_id="r1",
                         run_timestamp="20260711_120000")
 
 
@@ -73,8 +73,8 @@ def test_results_summary_is_appended_to_completed_run_log(tmp_path: Path) -> Non
     assert records[-1]["record_type"] == "RESULTS_SUMMARY"
     assert records[-1]["status"] == "success"
     assert records[-1]["run_id"] == "r1"
-    assert records[-1]["record_id"] == records[-2]["record_id"] + 1
-    assert records[-1]["parent_record_id"] == 0
+    assert records[-1]["run_log_id"] == records[-2]["run_log_id"] + 1
+    assert records[-1]["parent_run_log_id"] is None
     assert records[-1]["nest_level"] == 3
 
 
@@ -99,7 +99,7 @@ def test_a_separately_opened_run_log_uses_authoritative_companion_state(
         tmp_path: Path) -> None:
     """A finalizer that did not write the run still continues its sequence."""
     _, log = _completed_run(tmp_path)
-    result = create_results_summary(make_run_log(tmp_path, path=str(log)))
+    result = create_results_summary(make_db_run_log(tmp_path, path=str(log)))
     assert result["action"] == "created"
     assert _records(log)[-1]["record_type"] == "RESULTS_SUMMARY"
 
@@ -128,7 +128,7 @@ def test_results_summary_payload_is_unchanged_apart_from_hierarchy(
     monkeypatch.setattr(summary_module, "build_results_summary", capture)
     result = create_results_summary(run_log)
     emitted = dict(result["summary"])
-    for field in ("record_id", "parent_record_id", "nest_level", "app"):
+    for field in ("run_log_id", "parent_run_log_id", "nest_level", "app"):
         emitted.pop(field)
     assert emitted == captured["built"]
     assert _records(log)[-1] == result["summary"]
@@ -144,14 +144,14 @@ def test_results_summary_uses_active_scope(
     run_log, _ = _completed_run(tmp_path, semantic_level=semantic_level)
     summary = create_results_summary(run_log)["summary"]
     assert summary["nest_level"] == expected_nest
-    assert summary["parent_record_id"] == 0
+    assert summary["parent_run_log_id"] is None
 
 
 def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
     run_log = _ctx(tmp_path)
     run_log.set_nest_level("app")
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
-    app_record_id = _records(Path(run_log.path()))[0]["record_id"]
+    app_record_id = _records(Path(run_log.path()))[0]["run_log_id"]
     run_log.set_nest_level("workflow")
     log_step_start(run_log, "one", 1, step_id="one")
     log_step_end(run_log, "one", "success", step_id="one")
@@ -159,7 +159,7 @@ def test_results_summary_uses_active_workflow_parentage(tmp_path: Path) -> None:
 
     summary = create_results_summary(run_log)["summary"]
     assert summary["nest_level"] == 4
-    assert summary["parent_record_id"] == app_record_id
+    assert summary["parent_run_log_id"] == app_record_id
 
 
 def test_durable_result_record_matrix_preserves_hierarchy_invariant(run_log, 
@@ -179,12 +179,12 @@ def test_durable_result_record_matrix_preserves_hierarchy_invariant(run_log,
     log_file_operation(run_log, "read", source_path=str(log))
 
     records = _records(log)
-    ids = [record["record_id"] for record in records]
+    ids = [record["run_log_id"] for record in records]
     assert ids == list(range(1, len(records) + 1))
     assert len(ids) == len(set(ids))
     preceding_ids: set[int] = set()
     for record in records:
-        assert {"record_id", "parent_record_id", "nest_level"} <= record.keys()
-        parent = record["parent_record_id"]
-        assert parent == 0 or parent in preceding_ids
-        preceding_ids.add(record["record_id"])
+        assert {"run_log_id", "parent_run_log_id", "nest_level"} <= record.keys()
+        parent = record["parent_run_log_id"]
+        assert parent is None or parent in preceding_ids
+        preceding_ids.add(record["run_log_id"])

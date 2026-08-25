@@ -120,10 +120,10 @@ def test_transform_failure_logs_error_and_referencing_step_failure(
     records = _records(run_log)
     error = next(r for r in records if r["record_type"] == "ERROR")
     failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
-    assert error["error_id"]
-    assert error["error_type"] == "ValueError"
+    assert error["error_message"]["error_id"]
+    assert error["error_message"]["error_type"] == "ValueError"
     assert "hunter2" not in error["error_message"]
-    assert error["failed_step_id"] == "trade_transform"
-    assert failure["failure_record_id"] == error["error_id"]
-    assert failure["error_id"] == error["error_id"]
-    assert failure["related_path"].endswith("incoming.csv")
+    assert error["error_message"]["failed_step_id"] == "trade_transform"
+    assert failure["error_message"]["failure_record_id"] == error["error_message"]["error_id"]
+    assert failure["error_message"]["error_id"] == error["error_message"]["error_id"]
+    assert failure["error_message"]["related_path"].endswith("incoming.csv")

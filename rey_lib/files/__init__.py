@@ -77,7 +77,6 @@ from rey_lib.files.log_run_rollback import (
     register_file_compensation,
     rollback_log_run,
     serialize_source_file_mutation,
-    serialize_source_file_rollback,
     unregister_file_compensation,
 )
 from rey_lib.files.file_routing import (
@@ -177,7 +176,6 @@ __all__ = [
     "register_file_compensation",
     "rollback_log_run",
     "serialize_source_file_mutation",
-    "serialize_source_file_rollback",
     "unregister_file_compensation",
     "CollisionPolicy",
     "FileRoutingContext",

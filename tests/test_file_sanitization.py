@@ -79,7 +79,7 @@ def _ctx(
 
 def _file(path: Path, classification: dict | None = None) -> GovernedFileReference:
     return GovernedFileReference(
-        file_id="file-1",
+        file_id=1,
         current_path=path,
         classification=classification,
     )
@@ -345,7 +345,7 @@ def test_classification_is_passed_unchanged_and_not_mutated(tmp_path: Path) -> N
     ) as logged:
         sanitize_file(_ctx(tmp_path), reference)
 
-    assert logged.call_args.kwargs["file_id"] == "file-1"
+    assert logged.call_args.kwargs["file_id"] == 1
     assert logged.call_args.kwargs["source_path"] == source
     assert logged.call_args.kwargs["destination_path"] == (
         tmp_path / "out" / "positions.clean.csv"
@@ -371,7 +371,6 @@ def test_evidence_failure_preserves_exact_acknowledgement_state(
             SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
         ),
         run_log_id=17,
-        run_log_file="run.jsonl",
     )
 
     with patch.object(
@@ -387,7 +386,6 @@ def test_evidence_failure_preserves_exact_acknowledgement_state(
     assert result.filesystem_applied is True
     assert result.complete_evidence_acknowledged is False
     assert result.mutation_run_log_id == 17
-    assert result.mutation_run_log_file == "run.jsonl"
     assert result.evidence_phase is failure.phase
 
 
@@ -696,7 +694,6 @@ def test_success_result_carries_both_acknowledged_evidence_references(
     acknowledged = SourceFileMutationEvidenceResult(
         41,
         run_log_id=17,
-        run_log_file="run.jsonl",
     )
 
     with patch.object(
@@ -708,7 +705,6 @@ def test_success_result_carries_both_acknowledged_evidence_references(
 
     assert result.file_manifest_record_id == 41
     assert result.mutation_run_log_id == 17
-    assert result.mutation_run_log_file == "run.jsonl"
     assert result.complete_evidence_acknowledged is True
 
 

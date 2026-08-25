@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.conftest import make_run_log
+from tests.conftest import make_db_run_log
 from typing import Any
 
 from rey_lib.config.config_utils import Namespace
@@ -31,7 +31,8 @@ from rey_lib.logs import (
 )
 
 # Synthetic root: the parent stamped on records with no active lower scope.
-_ROOT = 0
+#: A root record has no parent row to point at, so its parent is NULL.
+_ROOT = None
 
 
 def _ctx(tmp_path: Path) -> Namespace:
@@ -52,11 +53,15 @@ def _records(tmp_path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
 
 
-def _identity(record: dict[str, Any]) -> tuple[int, int, int]:
-    """Return the hierarchy triple (record_id, parent_record_id, nest_level)."""
+def _identity(record: dict[str, Any]) -> tuple[int, int | None, int]:
+    """Return the hierarchy triple (run_log_id, parent_run_log_id, nest_level).
+
+    A root record has no parent row to point at, so its parent is None.
+    """
+    parent = record["parent_run_log_id"]
     return (
-        int(record["record_id"]),
-        int(record["parent_record_id"]),
+        int(record["run_log_id"]),
+        None if parent is None else int(parent),
         int(record["nest_level"]),
     )
 
@@ -109,7 +114,7 @@ def test_previous_at_the_base_does_not_descend(run_log) -> None:
 def test_record_writes_do_not_change_the_base_or_the_floor(tmp_path: Path) -> None:
     """Informational writes leave parent_level and minimum_nest_level intact."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
@@ -124,7 +129,7 @@ def test_relative_child_anchors_to_the_scope_owner_not_the_last_write(
 ) -> None:
     """Records written at the base do not become the parent of the relative child."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")
@@ -159,7 +164,7 @@ def test_subsequent_set_resets_the_relative_context_and_rebases(run_log) -> None
 def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
     """A set at the current level clears that level's anchor for a new sibling scope."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     # Sibling scope one.
@@ -177,14 +182,14 @@ def test_same_level_set_starts_a_new_sibling_scope(tmp_path: Path) -> None:
     assert _identity(first_step) == (2, 1, 2)
     assert _identity(second_step) == (4, 1, 2)
     # The app anchors on the second step — the new anchor, not the first step.
-    assert _identity(app) == (5, int(second_step["record_id"]), 3)
+    assert _identity(app) == (5, int(second_step["run_log_id"]), 3)
     assert _identity(pipeline) == (1, _ROOT, 1)
 
 
 def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: Path) -> None:
     """Next enters once; sibling replaces peer anchors without changing level."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("app")
     log_run_record(run_log, "RUN_START", app="demo")
 
@@ -206,14 +211,14 @@ def test_set_next_enters_collection_and_sibling_reopens_peer_branches(tmp_path: 
     assert _identity(first_child) == (3, 2, 5)
     assert _identity(second_input) == (4, 1, 4)
     assert _identity(second_child) == (5, 4, 5)
-    assert second_input["parent_record_id"] != first_input["record_id"]
-    assert [record["record_id"] for record in _records(tmp_path)] == [1, 2, 3, 4, 5]
+    assert second_input["parent_run_log_id"] != first_input["run_log_id"]
+    assert [record["run_log_id"] for record in _records(tmp_path)] == [1, 2, 3, 4, 5]
 
 
 def test_set_then_write_orders_the_scope_spine(tmp_path: Path) -> None:
     """Each base's first record anchors the next base's records."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     run_log.set_nest_level("pipeline")
     log_run_record(run_log, "RUN_START", pipeline_name="demo_pipeline")
     log_run_record(run_log, "CONFIG_FILE_REFERENCE", path="installation.yaml")

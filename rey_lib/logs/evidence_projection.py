@@ -316,7 +316,9 @@ def build_jsonl_event_table(
         if str(level).upper() in {"WARNING", "WARN"} or str(event).upper() in {"WARNING", "WARN"}:
             warning_count += 1
         rows.append({
-            "id": str(safe_record.get("id") or safe_record.get("record_id") or f"jsonl:{source_line}:{row_index}"),
+            "id": str(safe_record.get("id") or safe_record.get("record_id")
+                      or safe_record.get("run_log_id")
+                      or f"jsonl:{source_line}:{row_index}"),
             "timestamp": _first_text(safe_record, "timestamp", "time", "created_at"),
             "level": level,
             "event": event,
@@ -487,7 +489,7 @@ def _related_records(
         if not values & keys:
             continue
         lines.append(line)
-        record_id = (record.get("record_id") or record.get("artifact_id")
+        record_id = (record.get("run_log_id") or record.get("artifact_id")
                      or record.get("correlation_id"))
         if record_id:
             ids.append(str(record_id))

@@ -6,13 +6,6 @@ from rey_lib.logs.manifest_selection import (
     normalize_manifest_selection,
     select_manifest_records,
 )
-from rey_lib.logs.run_file_records import (
-    RunFileRecord,
-    RunFileRecords,
-    RunFileRecordsError,
-    find_run_file_records,
-    register_run_file_record_type,
-)
 from rey_lib.logs.file_manifest import (
     FileManifestError,
     FileManifestSession,
@@ -76,6 +69,7 @@ from rey_lib.logs.log_utils import (
     RUN_RESULT_RECORD_TYPES,
     bind_correlation,
     bind_run,
+    bound_run_log,
     bind_step,
     clear_correlation,
     clear_run,
@@ -124,11 +118,6 @@ __all__ = [
     "SelectedManifestRecord",
     "normalize_manifest_selection",
     "select_manifest_records",
-    "RunFileRecord",
-    "RunFileRecords",
-    "RunFileRecordsError",
-    "find_run_file_records",
-    "register_run_file_record_type",
     "FileManifestError",
     "FileManifestSession",
     "file_manifest_session",
@@ -207,6 +196,7 @@ __all__ = [
     "log_file_operation",
     "validate_run_log_completeness",
     "bind_run",
+    "bound_run_log",
     "clear_run",
     "current_run",
     "bind_step",

@@ -621,17 +621,16 @@ def _rollback_stage(record: Mapping[str, Any], file_id: int) -> FileHierarchySta
 
 
 def _profile_stage(record: Mapping[str, Any], file_id: int) -> FileHierarchyStage:
-    # Imported here, not at module scope: rey_lib.encryption reaches back into
-    # rey_lib.logs through error_utils, so a top-level import closes a cycle.
-    from rey_lib.encryption import sha256_text
-
-    record_id = _positive_int(record.get("record_id"), "ARTIFACT_REFERENCE.record_id")
-    run_log = _nonblank(record.get("__run_log_file"), "ARTIFACT_REFERENCE.__run_log_file")
+    # A run-log record, so its identity is the row's. It was addressed as
+    # (log file, ordinal) because the ordinal was file-local; run_log_id needs
+    # no file to be unique.
+    run_log_id = _positive_int(
+        record.get("run_log_id"), "ARTIFACT_REFERENCE.run_log_id")
     path = _nonblank(record.get("path"), "ARTIFACT_REFERENCE.path")
     return FileHierarchyStage(
-        stage_identity=f"run-log:{sha256_text(run_log)}:{record_id}",
+        stage_identity=f"run-log:{run_log_id}",
         stage_type="profile",
-        label="Structural Profile", record_id=record_id, file_id=file_id, path=path,
+        label="Structural Profile", record_id=run_log_id, file_id=file_id, path=path,
         original_path=None, status="created", is_current_primary=False,
         metadata=_freeze(record),
     )
@@ -784,12 +783,12 @@ def build_file_hierarchy_stages(
         evidence = stage.metadata.get("evidence")
         if not isinstance(evidence, Mapping):
             continue
-        run_log_file = evidence.get("run_log_file")
         run_log_id = evidence.get("run_log_id")
-        if isinstance(run_log_file, str) and run_log_file.strip() and isinstance(run_log_id, int) and run_log_id > 0:
+        # One key. The log record was addressed as (file, ordinal) while the
+        # ordinal was file-local; run_log_id is the row itself.
+        if isinstance(run_log_id, int) and run_log_id > 0:
             profile_references.append({
                 "manifest_record_id": stage.record_id,
-                "run_log_file": run_log_file,
                 "run_log_id": run_log_id,
             })
     return FileHierarchyStagePage(

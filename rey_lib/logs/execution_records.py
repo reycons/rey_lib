@@ -108,7 +108,10 @@ def log_step_failure(
     }
     if exit_code is not None:
         payload["exit_code"] = exit_code
-    run_log.append("STEP_FAILURE", **payload)
+    # The whole failure, in the column that is about failures. Spreading it
+    # put half a failure in `fields` and a sentence in `error_message`, so
+    # querying one meant reading two shapes.
+    run_log.append("STEP_FAILURE", message=message, error_message=payload)
     return failure_record_id
 
 
@@ -122,9 +125,8 @@ def log_error(run_log: 'RunLog', *, message: str, error_type: str = "",
     payload = build_error_record_payload(
         message=message, error_type=error_type, **fields
     )
-    record_fields = dict(payload)
-    record_message = str(record_fields.pop("message", "") or message)
-    run_log.append("ERROR", message=record_message, **record_fields)
+    record_message = str(payload.get("message") or message)
+    run_log.append("ERROR", message=record_message, error_message=payload)
     return payload
 
 

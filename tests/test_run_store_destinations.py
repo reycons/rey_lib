@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import make_run_log, start_test_run
+from tests.conftest import make_db_run_log, start_test_run
 
 from rey_lib.control import Control
 from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
@@ -64,6 +64,7 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
         """Records every control routine a destination would invoke."""
 
         def __init__(self) -> None:
+            self._minted = 0
             self.owns_batch = False
             self.batch_id = None
             self.batch_step_id = None
@@ -92,6 +93,11 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
                 **values,
                 "batch_id": self.batch_id, "batch_step_id": self.batch_step_id,
             }, required))
+            # The database mints the row's identity and returns it. A writer
+            # that got nothing back would read as a record that never
+            # committed, which under `both` fails the run.
+            self._minted += 1
+            return self._minted
 
     run_log = RunLog(
         app="rey_loader",
@@ -429,8 +435,12 @@ class TestEveryRecordHonoursTheDestination:
         written = [v for name, v, _ in control_calls if name == "write_run_log_record"][0]
         assert written["record_type"] == "ROW_COUNT"
         assert written["run_id"] == run_log.run_id
-        assert written["record_id"] > 0
-        # `subject` is log_row_count's own field, so it belongs here too.
-        assert written["fields"] == {
+        # The writer sends the parent it is under, not an id of its own: the
+        # database mints that and hands it back.
+        assert written["parent_run_log_id"] is None
+        # `subject` is log_row_count's own field, so it belongs in that record
+        # type's payload column -- and in no other.
+        assert written["payloads"]["row_count"] == {
             "count_name": "loaded", "count": 42, "subject": "",
         }
+        assert written["payloads"]["sql_execution"] is None

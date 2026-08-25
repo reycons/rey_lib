@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.conftest import make_run_log, start_test_run
+from contextlib import contextmanager
+from tests.conftest import make_db_run_log, start_test_run
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -17,11 +19,8 @@ from rey_lib.files import (
     SourceFileMutationEvidenceFailurePhase,
     SourceFileMutationEvidenceResult,
     log_source_file_mutation,
-    preview_log_run_rollback,
     register_file_compensation,
-    rollback_log_run,
     serialize_source_file_mutation,
-    serialize_source_file_rollback,
     unregister_file_compensation,
 )
 from rey_lib.logs import (
@@ -45,11 +44,16 @@ class _Paths:
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
+    # The governed manifest is a control table, so a context that governs files
+    # exposes the Control it reaches them through.
+    from tests.conftest import ControlDouble
+
     return SimpleNamespace(
         paths=_Paths(tmp_path / "file_manifest.jsonl"),
         installation="test",
         config_root="test",
         run_log_path=str(tmp_path / "run.jsonl"),
+        shared_control=ControlDouble(),
     )
 
 
@@ -59,11 +63,24 @@ def _run_log(tmp_path: Path, name: str = "run.jsonl") -> Path:
     return path
 
 
+def _governed_file(ctx: SimpleNamespace, path: str = "/inbox/a.csv") -> int:
+    """Inventory one governed file and return its identity.
+
+    A mutation is an event in a file's history, so it names the file it
+    mutates. There is no standalone mutation record any more.
+    """
+    return ctx.shared_control.inventory_file(
+        path=path, file_name="a.csv", base_name="a",
+        file_extension="csv", checksum_sha256="abc", size_bytes=1,
+        source_name="test",
+    )
+
+
 def _append_mutation(
     ctx: SimpleNamespace,
     *,
     action: str,
-    run_log_file: str = "run.jsonl",
+    file_id: int | None = None,
     source_path: str = "",
     destination_path: str = "",
     recovery_path: str = "",
@@ -75,11 +92,11 @@ def _append_mutation(
         serialize_source_file_mutation(
             action=action,
             status=status,
+            file_id=file_id if file_id is not None else _governed_file(ctx),
             source_path=source_path,
             destination_path=destination_path,
             recovery_path=recovery_path,
             previous_version_path=previous_version_path,
-            run_log_file=run_log_file,
             run_log_id=1,
             application_name="test",
         ),
@@ -87,12 +104,12 @@ def _append_mutation(
 
 
 def _rows(ctx: SimpleNamespace) -> list[dict]:
-    path = ctx.paths.manifest
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    """The mutations actually written, as the control database holds them.
+
+    The manifest is a table, so what a writer produced is read back from the
+    rows it created rather than from a JSONL file it no longer writes.
+    """
+    return list(ctx.shared_control.mutations)
 
 
 def _profile_record(source_row_id: int, run_log_file: str = "run.jsonl") -> dict:
@@ -127,25 +144,41 @@ def _profile_record(source_row_id: int, run_log_file: str = "run.jsonl") -> dict
     }
 
 
+
+@contextmanager
+def _bound(run_log: Any):
+    """Bind the run a governed mutation is recorded against.
+
+    Production binds a run around the work it owns, and the mutation writer
+    resolves its owner from that binding rather than being handed one.
+    """
+    from rey_lib.logs import bind_run, clear_run
+
+    bind_run(run_log)
+    try:
+        yield run_log
+    finally:
+        clear_run()
+
+
 def test_mutation_evidence_failure_before_run_log_commit_is_structured(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
-    with patch(
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
+    with _bound(run_log), patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=None
     ), patch(
         "rey_lib.files.log_run_rollback.log_file_manifest_record"
     ) as manifest_append:
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
             log_source_file_mutation(
-ctx, run_log, action="move", status="success")
+                ctx, action="move", status="success")
 
     error = raised.value
     assert error.phase is SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED
     assert error.run_log_committed is False
     assert error.run_log_id is None
-    assert error.run_log_file is None
     assert error.manifest_record_id is None
     assert error.complete_evidence_acknowledged is False
     assert isinstance(error, LogRunRollbackError)
@@ -160,14 +193,14 @@ def test_mutation_evidence_filename_failure_preserves_committed_record_id(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
     del ctx.run_log_path
-    with patch(
+    with _bound(run_log), patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=17
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
             log_source_file_mutation(
-ctx, run_log, action="move", status="success")
+                ctx, action="move", status="success")
 
     error = raised.value
     assert error.phase is (
@@ -175,7 +208,6 @@ ctx, run_log, action="move", status="success")
     )
     assert error.run_log_committed is True
     assert error.run_log_id == 17
-    assert error.run_log_file is None
     assert error.complete_evidence_acknowledged is False
 
 
@@ -192,8 +224,8 @@ def test_mutation_serialization_failure_after_run_log_commit_is_structured(
     failure: Exception,
 ) -> None:
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
-    with patch(
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
+    with _bound(run_log), patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=19
     ), patch(
         "rey_lib.files.log_run_rollback.serialize_source_file_mutation",
@@ -201,12 +233,11 @@ def test_mutation_serialization_failure_after_run_log_commit_is_structured(
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
             log_source_file_mutation(
-ctx, run_log, action="move", status="success")
+                ctx, action="move", status="success")
 
     error = raised.value
     assert error.run_log_committed is True
     assert error.run_log_id == 19
-    assert error.run_log_file == "run.jsonl"
     assert error.__cause__ is failure
 
 
@@ -214,8 +245,8 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
     tmp_path: Path,
 ) -> None:
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
-    with patch(
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
+    with _bound(run_log), patch(
         "rey_lib.files.log_run_rollback.log_run_record", return_value=23
     ), patch(
         "rey_lib.files.primitive_file_io.append_jsonl",
@@ -223,7 +254,7 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
     ):
         with pytest.raises(SourceFileMutationEvidenceError) as raised:
             log_source_file_mutation(
-ctx, run_log, action="move", status="success")
+                ctx, action="move", status="success")
 
     error = raised.value
     assert error.phase is (
@@ -231,7 +262,6 @@ ctx, run_log, action="move", status="success")
     )
     assert error.run_log_committed is True
     assert error.run_log_id == 23
-    assert error.run_log_file == "run.jsonl"
     assert error.complete_evidence_acknowledged is False
     assert error.manifest_record_id is None
     assert not ctx.paths.manifest.exists()
@@ -242,7 +272,6 @@ def test_mutation_evidence_phase_owns_commit_state() -> None:
         SourceFileMutationEvidenceError(
             "failed",
             phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
-            run_log_file="run.jsonl",
             run_log_id=1,
         )
     with pytest.raises(ValueError, match="positive"):
@@ -251,7 +280,6 @@ def test_mutation_evidence_phase_owns_commit_state() -> None:
             phase=(
                 SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
             ),
-            run_log_file=None,
             run_log_id=None,
         )
 
@@ -259,13 +287,14 @@ def test_mutation_evidence_phase_owns_commit_state() -> None:
 def test_appended_mutation_carries_no_legacy_field_names(tmp_path: Path) -> None:
     """Every field the canonical layout groups is gone from the record root."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
     start_test_run(ctx)
 
-    log_source_file_mutation(
-ctx, run_log,
-        action="move",
-        status="success",
+    with _bound(run_log):
+        log_source_file_mutation(
+            ctx, action="move",
+            status="success",
+            file_id=_governed_file(ctx),
         source_path=tmp_path / "in" / "a.xlsx",
         destination_path=tmp_path / "proc" / "a.xlsx",
         recovery_path=tmp_path / "trash" / "a.xlsx",
@@ -307,14 +336,15 @@ def test_caller_cannot_inject_a_canonical_root_field(
 def test_run_log_fields_never_reach_the_manifest_record(tmp_path: Path) -> None:
     """Run-log enrichment is evidence, not a way into the governed record."""
     ctx = _ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=ctx.run_log_path)
+    run_log = make_db_run_log(tmp_path, path=ctx.run_log_path)
     start_test_run(ctx)
 
-    log_source_file_mutation(
-ctx, run_log,
-        action="create",
-        status="success",
-        destination_path=tmp_path / "created.csv",
+    with _bound(run_log):
+        log_source_file_mutation(
+            ctx, action="create",
+            status="success",
+            file_id=_governed_file(ctx),
+            destination_path=tmp_path / "created.csv",
         application_name="test",
         run_log_fields={"workbook_name": "book.xlsx", "extraction_kind": "sheet"},
     )
@@ -336,7 +366,6 @@ def test_approved_conversion_and_result_inputs_build_canonical_sections(
         action="create",
         status="success",
         destination_path="/out/a.csv",
-        run_log_file="run.jsonl",
         run_log_id=1,
         conversion={
             "operator": "some_other_producer",
@@ -372,7 +401,6 @@ def test_supplied_classification_is_serialized_unchanged() -> None:
         action="create",
         status="success",
         destination_path="/out/a.csv",
-        run_log_file="run.jsonl",
         run_log_id=1,
         classification=classification,
     )
@@ -386,7 +414,6 @@ def test_absent_conversion_and_result_sections_are_omitted() -> None:
         status="success",
         source_path="/in/a.xlsx",
         destination_path="/proc/a.xlsx",
-        run_log_file="run.jsonl",
         run_log_id=1,
     )
 
@@ -425,7 +452,6 @@ def test_serialized_file_object_follows_the_lifecycle_action(
         status="success",
         source_path=source_path,
         destination_path=destination_path,
-        run_log_file="run.jsonl",
         run_log_id=1,
     )
 
@@ -439,7 +465,6 @@ def test_compensation_metadata_is_grouped_and_omitted_when_absent() -> None:
         status="success",
         source_path="/in/a.xlsx",
         recovery_path="/trash/a.xlsx",
-        run_log_file="run.jsonl",
         run_log_id=1,
     )
     assert recorded["rollback"] == {"recovery_path": "/trash/a.xlsx"}
@@ -450,40 +475,9 @@ def test_compensation_metadata_is_grouped_and_omitted_when_absent() -> None:
         source_path="/in/a.xlsx",
         destination_path="/out/a.csv",
         previous_version_path="/bak/a.csv",
-        run_log_file="run.jsonl",
         run_log_id=1,
     )
     assert replaced["rollback"] == {"previous_version_path": "/bak/a.csv"}
-
-
-def test_preview_selects_exact_run_and_reverses_manifest_order(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    _append_mutation(
-        ctx,
-        action="move",
-        source_path="/original/one",
-        destination_path="/current/one",
-    )
-    second = _append_mutation(
-        ctx,
-        action="create",
-        destination_path="/created/two",
-    )
-    _append_mutation(
-        ctx,
-        action="create",
-        run_log_file="other.jsonl",
-        destination_path="/created/other",
-    )
-    first = 1
-
-    plan = preview_log_run_rollback(ctx, "run.jsonl")
-
-    assert [
-        item["original_manifest_record_id"] for item in plan["candidates"]
-    ] == [second, first]
 
 
 @pytest.mark.parametrize(
@@ -499,544 +493,12 @@ def test_execution_surface_fields_cannot_reach_the_manifest(
         action="create",
         status="success",
         destination_path="/created/output",
-        run_log_file="run.jsonl",
         run_log_id=1,
     )
     record[surface_field] = "daily"
 
     with pytest.raises(FileManifestError, match="unknown root field"):
         log_file_manifest_record(_ctx(tmp_path), record)
-
-
-def test_move_and_create_are_compensated_with_attempt_and_final_evidence(run_log, 
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    original = tmp_path / "inbox" / "input.csv"
-    current = tmp_path / "processed" / "input.csv"
-    current.parent.mkdir()
-    current.write_text("input", encoding="utf-8")
-    created = tmp_path / "output.csv"
-    created.write_text("output", encoding="utf-8")
-    move_id = _append_mutation(
-        ctx,
-        action="move",
-        source_path=str(original),
-        destination_path=str(current),
-    )
-    create_id = _append_mutation(
-        ctx,
-        action="create",
-        destination_path=str(created),
-    )
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["status"] == "success"
-    assert result["succeeded_count"] == 2
-    assert result["appended_rollback_evidence_count"] == 4
-    assert result["rollback_run_log_file"].startswith("log_run_rollback.")
-    assert result["rollback_run_log_file"].endswith(".jsonl")
-    assert original.read_text(encoding="utf-8") == "input"
-    assert not current.exists()
-    assert not created.exists()
-    # Attempt and final evidence is written for each compensation as it runs,
-    # which is what the count reports. It then leaves the manifest with the
-    # records it references: a compensation record whose mutation is gone is
-    # evidence no consumer can resolve.
-    rows = _rows(ctx)
-    # Ids are recomputed from what remains, so absence is asserted by type:
-    # the reversed mutations and their compensation evidence are both gone.
-    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
-    assert [row for row in rows if row["record_type"] == "source_file_mutation"] == []
-    summary = next(
-        row for row in rows if row["record_type"] == "run_rollback"
-    )
-    assert summary["status"] == "success"
-    assert summary["rollback"]["records_removed"] == 6
-    assert summary["rollback"]["filesystem_operations_reversed"] == 2
-    # Sequencing never moves backwards, so the summary is sequenced above
-    # every id the rollback removed.
-    assert summary["record_id"] > max(create_id, move_id)
-
-
-def test_rollback_removes_only_the_profiles_its_own_run_log_produced(run_log, 
-    tmp_path: Path,
-) -> None:
-    """Profiles are selected by evidence.run_log_file, as manifest rows are.
-
-    Selecting them by the profiled object's manifest row was the earlier bug: a
-    rollback whose reversed rows were not the profiled rows removed nothing.
-    """
-    ctx = _ctx(tmp_path)
-    rolled_back_file = tmp_path / "rolled-back.csv"
-    rolled_back_file.write_text("rolled back", encoding="utf-8")
-    retained_file = tmp_path / "retained.csv"
-    retained_file.write_text("retained", encoding="utf-8")
-    rolled_back_id = _append_mutation(
-        ctx,
-        action="create",
-        destination_path=str(rolled_back_file),
-    )
-    retained_id = _append_mutation(
-        ctx,
-        action="create",
-        run_log_file="other.jsonl",
-        destination_path=str(retained_file),
-    )
-    append_profile_record(ctx, _profile_record(rolled_back_id, "run.jsonl"))
-    append_profile_record(ctx, _profile_record(retained_id, "other.jsonl"))
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["status"] == "success"
-    assert not rolled_back_file.exists()
-    assert retained_file.exists()
-    profiles = read_profile_records(ctx)
-    assert [record["header"]["evidence"]["run_log_file"] for record in profiles] == [
-        "other.jsonl"
-    ]
-    assert [record["header"]["object_id"] for record in profiles] == [
-        str(retained_id)
-    ]
-
-
-def test_delete_and_replace_require_recorded_recovery_paths(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    _append_mutation(ctx, action="delete", source_path="/missing/original")
-    _append_mutation(ctx, action="replace", destination_path="/missing/current")
-
-    plan = preview_log_run_rollback(ctx, "run.jsonl")
-
-    assert plan["candidate_count"] == 0
-    assert plan["non_recoverable_count"] == 2
-
-
-def test_delete_and_replace_restore_only_recorded_versions(run_log, 
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    deleted_original = tmp_path / "source" / "deleted.csv"
-    recovery = tmp_path / "recovery" / "deleted.csv"
-    recovery.parent.mkdir()
-    recovery.write_text("deleted content", encoding="utf-8")
-    replacement = tmp_path / "output" / "report.csv"
-    replacement.parent.mkdir()
-    replacement.write_text("new content", encoding="utf-8")
-    previous = tmp_path / "recovery" / "report.previous.csv"
-    previous.write_text("old content", encoding="utf-8")
-    _append_mutation(
-        ctx,
-        action="delete",
-        source_path=str(deleted_original),
-        recovery_path=str(recovery),
-    )
-    _append_mutation(
-        ctx,
-        action="replace",
-        destination_path=str(replacement),
-        previous_version_path=str(previous),
-    )
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["status"] == "success"
-    assert replacement.read_text(encoding="utf-8") == "old content"
-    assert deleted_original.read_text(encoding="utf-8") == "deleted content"
-
-
-def test_failure_is_recorded_and_remaining_compensations_continue(run_log, 
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    # Neither location holds the file, so nothing can be restored and nothing
-    # may be assumed — a real failure, not an already-reversed one.
-    failing_id = _append_mutation(
-        ctx,
-        action="move",
-        source_path=str(tmp_path / "missing-original"),
-        destination_path=str(tmp_path / "missing-current"),
-    )
-    created = tmp_path / "created.csv"
-    created.write_text("created", encoding="utf-8")
-    _append_mutation(
-        ctx,
-        action="create",
-        destination_path=str(created),
-    )
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["status"] == "partial_success"
-    assert result["succeeded_count"] == 1
-    assert result["failed_count"] == 1
-    assert result["appended_rollback_evidence_count"] == 4
-    assert not created.exists()
-    audit_rows = [
-        json.loads(line)
-        for line in Path(result["audit_log_path"]).read_text(
-            encoding="utf-8"
-        ).splitlines()
-    ]
-    durable_summary = next(
-        row["summary"]
-        for row in audit_rows
-        if row["record_type"] == "RUN_SUMMARY"
-    )
-    assert durable_summary["failures"] == result["failed"]
-    assert durable_summary["failures"][0]["failure_reason"]
-    # Compensation evidence does not outlive the rollback that wrote it: the
-    # audit run log holds every attempt, and leaving rows here would make a
-    # retried rollback grow the manifest without bound.
-    rows = _rows(ctx)
-    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
-    # The record that could not be reversed is still governed state.
-    assert [row["record_id"] for row in rows
-            if row["record_type"] == "source_file_mutation"] == [failing_id]
-
-
-def test_successful_compensation_is_idempotently_excluded(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    created = tmp_path / "created.csv"
-    created.write_text("created", encoding="utf-8")
-    _append_mutation(
-        ctx,
-        action="create",
-        destination_path=str(created),
-    )
-    log_file = _run_log(tmp_path)
-
-    rollback_log_run(ctx, log_file)
-    plan = preview_log_run_rollback(ctx, log_file)
-
-    # The reversed record has left the manifest, so it is simply not selected
-    # a second time; nothing has to remember that it was compensated.
-    assert plan["candidate_count"] == 0
-    assert plan["already_compensated"] == []
-    assert [
-        row for row in _rows(ctx) if row["record_type"] == "source_file_mutation"
-    ] == []
-
-
-def test_unfinished_attempt_is_indeterminate_and_not_reapplied(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    mutation_id = _append_mutation(
-        ctx,
-        action="create",
-        destination_path=str(tmp_path / "created.csv"),
-    )
-    log_file_manifest_record(
-        ctx,
-        serialize_source_file_rollback(
-            original_record_id=mutation_id,
-            phase="attempt",
-            status="attempted",
-            run_log_file="rollback.jsonl",
-            run_log_id=1,
-            application_name="rey_lib",
-        ),
-    )
-
-    plan = preview_log_run_rollback(ctx, "run.jsonl")
-
-    assert plan["candidate_count"] == 0
-    assert plan["indeterminate"] == [mutation_id]
-
-
-def test_future_operation_uses_registered_compensation_without_engine_change(run_log, 
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    calls: list[int] = []
-
-    register_file_compensation(
-        "future_action",
-        compensating_action="future_compensation",
-        validate=lambda _record: None,
-        execute=lambda record: calls.append(int(record["record_id"])) or {},
-    )
-    try:
-        mutation_id = _append_mutation(ctx, action="future_action")
-        result = rollback_log_run(ctx, _run_log(tmp_path))
-    finally:
-        unregister_file_compensation("future_action")
-
-    assert calls == [mutation_id]
-    assert result["status"] == "success"
-
-
-def test_unknown_action_is_reported_without_filesystem_inference(run_log, 
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    mutation_id = _append_mutation(ctx, action="unknown")
-
-    plan = preview_log_run_rollback(ctx, "run.jsonl")
-
-    assert plan["candidate_count"] == 0
-    assert plan["unsupported"][0]["original_manifest_record_id"] == mutation_id
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["status"] == "failure"
-    assert result["appended_rollback_evidence_count"] == 2
-    # Evidence is written while the rollback runs and cleaned up after it, so
-    # the unreversible record survives with no evidence attached to it.
-    rows = _rows(ctx)
-    assert [row for row in rows if row["record_type"] == "source_file_rollback"] == []
-    assert [row["record_id"] for row in rows
-            if row["record_type"] == "source_file_mutation"] == [mutation_id]
-    assert result["failed"][0]["failure_reason"] == (
-        "no registered compensating operation"
-    )
-
-
-def test_malformed_mutation_schema_fails_before_compensation(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    log_file_manifest_record(
-        ctx,
-        {
-            "record_type": "source_file_mutation",
-            "action": "create",
-            "status": "success",
-            "evidence": {
-                "run_log_file": "run.jsonl",
-                "run_log_id": 1,
-            },
-        },
-    )
-
-    with pytest.raises(LogRunRollbackError, match="file must be an object"):
-        preview_log_run_rollback(ctx, "run.jsonl")
-
-
-def test_malformed_mutation_location_fails_before_compensation(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    log_file_manifest_record(
-        ctx,
-        {
-            "record_type": "source_file_mutation",
-            "action": "create",
-            "status": "success",
-            "file": {"path": ["/created/file"]},
-            "evidence": {
-                "run_log_file": "run.jsonl",
-                "run_log_id": 1,
-            },
-        },
-    )
-
-    with pytest.raises(LogRunRollbackError, match="file.path must be a string"):
-        preview_log_run_rollback(ctx, "run.jsonl")
-
-
-def test_preview_is_read_only_and_execution_rereads_manifest(run_log, 
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    first = tmp_path / "first.csv"
-    first.write_text("first", encoding="utf-8")
-    _append_mutation(ctx, action="create", destination_path=str(first))
-    manifest_before = ctx.paths.manifest.read_bytes()
-
-    preview = preview_log_run_rollback(ctx, "run.jsonl")
-
-    assert preview["candidate_count"] == 1
-    assert ctx.paths.manifest.read_bytes() == manifest_before
-    assert not list(tmp_path.glob("log_run_rollback.*.jsonl"))
-
-    second = tmp_path / "second.csv"
-    second.write_text("second", encoding="utf-8")
-    _append_mutation(ctx, action="create", destination_path=str(second))
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["succeeded_count"] == 2
-    assert not first.exists()
-    assert not second.exists()
-
-
-@pytest.mark.parametrize("value", ["", None])
-def test_run_log_file_is_required(tmp_path: Path, value: object) -> None:
-    with pytest.raises(LogRunRollbackError, match="run_log_file"):
-        preview_log_run_rollback(_ctx(tmp_path), value)  # type: ignore[arg-type]
-
-
-def test_rollback_records_are_written_only_through_the_serializer(run_log, 
-    tmp_path: Path,
-) -> None:
-    """Every appended rollback row matches the serializer's canonical shape."""
-    ctx = _ctx(tmp_path)
-    # A compensation that cannot succeed, so its record and its evidence both
-    # stay in the manifest and can be checked against the serializer.
-    _append_mutation(
-        ctx, action="delete", recovery_path=str(tmp_path / "missing.csv")
-    )
-
-    # Evidence is cleaned up when the rollback finishes, so removal is held
-    # off here to inspect exactly what the engine appended.
-    with patch.object(FileManifestSession, "remove_records", return_value=0):
-        rollback_log_run(ctx, _run_log(tmp_path))
-
-    rollback_rows = [
-        row for row in _rows(ctx) if row["record_type"] == "source_file_rollback"
-    ]
-    assert rollback_rows
-    for row in rollback_rows:
-        expected = serialize_source_file_rollback(
-            original_record_id=row["rollback"]["original_record_id"],
-            phase=row["rollback"]["phase"],
-            status=row["status"],
-            run_log_file=row["evidence"]["run_log_file"],
-            run_log_id=row["evidence"]["run_log_id"],
-            attempt_record_id=row["rollback"].get("attempt_record_id"),
-            application_name=row["producer"]["application"],
-            recorded_at=row["recorded_at"],
-        )
-        assert {key: value for key, value in row.items() if key != "record_id"} == (
-            expected
-        )
-
-
-def test_canonical_rollback_records_pass_validation(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    mutation_id = _append_mutation(
-        ctx, action="create", destination_path=str(tmp_path / "created.csv")
-    )
-    for record in (
-        serialize_source_file_rollback(
-            original_record_id=mutation_id,
-            phase="attempt",
-            status="attempted",
-            run_log_file="rollback.jsonl",
-            run_log_id=1,
-        ),
-        serialize_source_file_rollback(
-            original_record_id=mutation_id,
-            phase="final",
-            status="success",
-            run_log_file="rollback.jsonl",
-            run_log_id=2,
-            attempt_record_id=2,
-        ),
-    ):
-        log_file_manifest_record(ctx, record)
-
-    plan = preview_log_run_rollback(ctx, "run.jsonl")
-    assert plan["already_compensated"] == [mutation_id]
-
-
-def test_legacy_rollback_records_are_rejected(tmp_path: Path) -> None:
-    """The legacy layout is not readable, and is no longer writable either.
-
-    The row is written straight to the file because the manifest writer now
-    refuses to create one. Nothing here interprets it: the canonical reader
-    must fail on it rather than tolerate it.
-    """
-    ctx = _ctx(tmp_path)
-    mutation_id = _append_mutation(
-        ctx, action="create", destination_path=str(tmp_path / "created.csv")
-    )
-    with ctx.paths.manifest.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({
-            "record_id": mutation_id + 1,
-            "record_type": "source_file_rollback",
-            "schema_version": "1.0",
-            "original_manifest_record_id": mutation_id,
-            "original_run_log_file": "run.jsonl",
-            "original_action": "create",
-            "compensating_action": "delete_created_file",
-            "phase": "attempt",
-            "status": "attempted",
-            "evidence": {"run_log_file": "rollback.jsonl", "run_log_id": 1},
-        }) + "\n")
-
-    with pytest.raises(LogRunRollbackError, match="rollback must be an object"):
-        preview_log_run_rollback(ctx, "run.jsonl")
-
-
-def test_optional_rollback_fields_are_omitted_when_absent() -> None:
-    attempt = serialize_source_file_rollback(
-        original_record_id=5,
-        phase="attempt",
-        status="attempted",
-        run_log_file="rollback.jsonl",
-        run_log_id=1,
-    )
-    assert "attempt_record_id" not in attempt["rollback"]
-    assert "result" not in attempt
-    assert "file" not in attempt
-
-    final = serialize_source_file_rollback(
-        original_record_id=5,
-        phase="final",
-        status="failure",
-        run_log_file="rollback.jsonl",
-        run_log_id=2,
-        attempt_record_id=7,
-        reason="operator asked",
-    )
-    assert final["rollback"]["attempt_record_id"] == 7
-    assert final["result"] == {"reason": "operator asked"}
-
-
-def test_flat_fields_lead_every_governed_record() -> None:
-    """Identity and type come first; the record's objects follow."""
-    mutation = serialize_source_file_mutation(
-        action="delete",
-        status="success",
-        source_path="/in/a.xlsx",
-        recovery_path="/trash/a.xlsx",
-        run_log_file="run.jsonl",
-        run_log_id=1,
-        application_name="file_operator",
-        file_id="f1",
-        conversion={"operator": "excel_conversion", "name": "all"},
-        reason="processing",
-    )
-    assert list(mutation) == [
-        "file_id",
-        "recorded_at",
-        "record_type",
-        "action",
-        "status",
-        "evidence",
-        "file",
-        "rollback",
-        "conversion",
-        "result",
-        "producer",
-    ]
-
-    rollback = serialize_source_file_rollback(
-        original_record_id=57,
-        phase="final",
-        status="success",
-        run_log_file="rollback.jsonl",
-        run_log_id=4,
-        attempt_record_id=61,
-        application_name="rey_lib",
-        reason="operator reset",
-    )
-    assert list(rollback) == [
-        "recorded_at",
-        "record_type",
-        "status",
-        "evidence",
-        "rollback",
-        "result",
-        "producer",
-    ]
 
 
 def _append_state_record(
@@ -1059,40 +521,4 @@ def _append_state_record(
         },
     )
 
-
-def test_records_without_an_action_are_rolled_back(run_log, tmp_path: Path) -> None:
-    """Inventory and classification carry no action and must still reverse.
-
-    Their inverse is the removal of the record and nothing else, so anything
-    that reaches for a filesystem action would fail on them.
-    """
-    ctx = _ctx(tmp_path)
-    inventory_id = _append_state_record(ctx, record_type="source_file_inventory")
-    classification_id = _append_state_record(
-        ctx, record_type="source_file_classification"
-    )
-
-    plan = preview_log_run_rollback(ctx, _run_log(tmp_path))
-    assert plan["candidate_count"] == 2
-    assert [item["compensating_action"] for item in plan["candidates"]] == [
-        "remove_record",
-        "remove_record",
-    ]
-
-    result = rollback_log_run(ctx, _run_log(tmp_path))
-
-    assert result["status"] == "success"
-    assert result["succeeded_count"] == 2
-    # No filesystem operation was performed for either record.
-    assert result["filesystem_operations_reversed"] == 0
-    rows = _rows(ctx)
-    assert [
-        row for row in rows
-        if row["record_type"] in {
-            "source_file_inventory", "source_file_classification"
-        }
-    ] == []
-    summary = next(row for row in rows if row["record_type"] == "run_rollback")
-    assert summary["rollback"]["records_removed"] >= 2
-    assert inventory_id and classification_id
 

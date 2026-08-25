@@ -49,6 +49,12 @@ def _validate_run_record_fields(record_type: str, fields: dict[str, Any]) -> Non
         )
 
 
+def _failure_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """The canonical error payload an ERROR or STEP_FAILURE record carries."""
+    payload = record.get("error_message")
+    return payload if isinstance(payload, dict) else {}
+
+
 def validate_run_log_completeness(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Return shared run-log completeness findings without mutating records.
 
@@ -75,13 +81,16 @@ def validate_run_log_completeness(records: list[dict[str, Any]]) -> dict[str, An
             "message": "Run log has no RUN_COMPLETE record.",
         })
 
+    # A failure record carries its whole payload in error_message, so its
+    # identity is read from there. RUN_COMPLETE is not a failure record and
+    # keeps its linkage flat.
     error_ids = {
-        str(record.get("error_id") or "")
+        str(_failure_payload(record).get("error_id") or "")
         for record in records
         if str(record.get("record_type") or "").upper() == "ERROR"
     }
     failure_ids = {
-        str(record.get("failure_record_id") or "")
+        str(_failure_payload(record).get("failure_record_id") or "")
         for record in records
         if str(record.get("record_type") or "").upper() == "STEP_FAILURE"
     }

@@ -351,6 +351,19 @@ def reset_run_binding() -> None:
         _CURRENT_RUN["frames"].clear()
 
 
+def bound_run_log() -> Any:
+    """The run log ambient file operations are recorded through, or None.
+
+    The object itself, not a description of it. Governed file writers sit deep
+    in utility code that holds no run log -- which is what ``bind_run`` exists
+    for -- and they need the owner of the write, because it is the owner that
+    returns the ``control.run_log.run_log_id`` the mutation then points at.
+
+    One mechanism: no producer threads a run log down to reach this.
+    """
+    return _CURRENT_RUN["run"]
+
+
 def current_run() -> dict[str, str] | None:
     """Return the bound run's {run_log_path, run_id}, or None if unbound."""
     run = _CURRENT_RUN["run"]

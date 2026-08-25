@@ -64,7 +64,7 @@ def _file(root: Path) -> tuple[GovernedFileReference, dict]:
         "source_field": "file.path",
         "values": {"feed": "alpha", "nested": {"kept": [1, 2]}},
     }
-    return GovernedFileReference("file-7", source, classification), classification
+    return GovernedFileReference(7, source, classification), classification
 
 
 @pytest.mark.parametrize(
@@ -132,7 +132,7 @@ def test_each_role_uses_shared_move_and_evidence_contract(
         original_source=governed.current_path,
         metadata={"surface": "file_operation"},
     )
-    assert evidence.call_args.kwargs["file_id"] == "file-7"
+    assert evidence.call_args.kwargs["file_id"] == 7
     logged_classification = evidence.call_args.kwargs["classification"]
     assert supplied_classification == logged_classification
     assert supplied_classification == original_snapshot
@@ -142,7 +142,7 @@ def test_each_role_uses_shared_move_and_evidence_contract(
     )
     assert evidence.call_args.kwargs["run_log_fields"] == {"surface": "mutation"}
     assert result.status == "moved"
-    assert result.file_id == "file-7"
+    assert result.file_id == 7
     assert result.file_manifest_record_id == 41
     assert result.complete_evidence_acknowledged is True
     assert result.mutation_run_log_committed is True
@@ -227,12 +227,14 @@ def test_missing_route_fails_before_filesystem_access(
 
 
 def test_missing_file_id_fails_before_path_normalization() -> None:
-    with pytest.raises(ValueError, match="file_id"):
+    # The identity is a database-minted integer, so the empty string is not a
+    # missing id in the old sense -- it is the retired string model.
+    with pytest.raises(ValueError, match="file id"):
         GovernedFileReference("", object())  # type: ignore[arg-type]
 
 
 def test_source_must_exist_before_same_path_handling(tmp_path: Path) -> None:
-    missing = GovernedFileReference("file-1", tmp_path / "inbox" / "gone.csv")
+    missing = GovernedFileReference(1, tmp_path / "inbox" / "gone.csv")
     existing_destination = tmp_path / "processing" / "gone.csv"
     existing_destination.parent.mkdir()
     existing_destination.write_text("already there", encoding="utf-8")
@@ -348,7 +350,6 @@ def test_evidence_failure_preserves_only_provable_state(
     failure = SourceFileMutationEvidenceError(
         "evidence failed",
         phase=phase,
-        run_log_file="run.jsonl" if committed else None,
         run_log_id=record_id,
     )
     with patch.object(file_routing, "move_file", return_value=destination), patch.object(
@@ -372,7 +373,7 @@ def test_evidence_failure_preserves_only_provable_state(
 
 def test_paths_outside_governed_roots_fail_before_mutation(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside-routing-test" / "source.csv"
-    governed = GovernedFileReference("file-1", outside)
+    governed = GovernedFileReference(1, outside)
     with patch.object(file_routing, "move_file") as move:
         with pytest.raises(FileRoutingError, match="outside"):
             file_routing.move_to_processing(_context(tmp_path), governed)

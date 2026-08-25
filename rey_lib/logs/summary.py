@@ -153,15 +153,9 @@ def create_results_summary(
         )
 
         from rey_lib.logs.record_enrichment import log_run_record
-        from rey_lib.logs.run_log import companion_path
 
-        state_path = companion_path(str(payload["path"]))
-        if not state_path.is_file():
-            result["failures"].append(
-                f"Authoritative hierarchy state not found: {state_path}"
-            )
-            return result
-
+        # There is no hierarchy state file to check for: the run log owns its
+        # nesting in memory and control.run_log owns it durably.
         records_before = read_run_log_sections(payload["path"])["records"]
         summary_fields = dict(summary)
         summary_fields.pop("record_type", None)

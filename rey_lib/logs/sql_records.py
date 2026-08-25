@@ -23,11 +23,13 @@ def log_sql_execution(run_log: 'RunLog', *, connection_name: str = "", database:
     """
     if run_log is None:
         return
+    error_payload: dict[str, Any] | None = None
     if error_message:
         from rey_lib.errors.error_utils import build_error_record_payload
-        error_message = str(
-            build_error_record_payload(message=error_message).get("error_message") or ""
-        )
+
+        # The column carries the failure object, so the canonical payload is
+        # kept whole rather than reduced to its message.
+        error_payload = build_error_record_payload(message=error_message)
     payload: dict[str, Any] = {
         "connection_name": connection_name,
         "database": database,
@@ -36,7 +38,7 @@ def log_sql_execution(run_log: 'RunLog', *, connection_name: str = "", database:
         "sql_label": sql_label,
         "operation": operation,
         "status": status,
-        "error_message": error_message,
+        "error_message": error_payload,
         **fields,
     }
     if duration_ms is not None:

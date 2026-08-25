@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from rey_lib.files.file_utils import move_file
+from rey_lib.files.governed_file import FileId, governed_file_id
 from rey_lib.files.log_run_rollback import (
     SourceFileMutationEvidenceError,
     SourceFileMutationEvidenceFailurePhase,
@@ -60,14 +61,12 @@ class CollisionPolicy(str, Enum):
 class GovernedFileReference:
     """Identity and current location of exactly one governed file."""
 
-    file_id: str
+    file_id: FileId
     current_path: Path
     classification: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        file_id = self.file_id.strip() if isinstance(self.file_id, str) else ""
-        if not file_id:
-            raise ValueError("file_id must be a non-empty string.")
+        file_id = governed_file_id(self.file_id, subject="a governed file reference")
         if not isinstance(self.current_path, (str, Path)):
             raise ValueError("current_path must be a path.")
         if self.classification is not None and not isinstance(
@@ -160,7 +159,7 @@ class FileRoutingRollbackInformation:
 class FileRoutingResult:
     """Normalized outcome of one semantic routing operation."""
 
-    file_id: str
+    file_id: FileId
     source_role: str | None
     destination_role: str
     original_path: Path
@@ -172,7 +171,6 @@ class FileRoutingResult:
     complete_evidence_acknowledged: bool
     mutation_run_log_committed: bool
     mutation_run_log_id: int | None
-    mutation_run_log_file: str | None
     evidence_phase: SourceFileMutationEvidenceFailurePhase | None
     file_manifest_record_id: int | None
     collision_policy: CollisionPolicy
@@ -384,7 +382,6 @@ def _move_to_role(
             filesystem_applied=True,
             mutation_run_log_committed=exc.run_log_committed,
             mutation_run_log_id=exc.run_log_id,
-            mutation_run_log_file=exc.run_log_file,
             evidence_phase=exc.phase,
             destination_existed=destination_existed,
             rollback_information=rollback,
@@ -482,7 +479,6 @@ def _result(
     complete_evidence_acknowledged: bool = False,
     mutation_run_log_committed: bool = False,
     mutation_run_log_id: int | None = None,
-    mutation_run_log_file: str | None = None,
     evidence_phase: SourceFileMutationEvidenceFailurePhase | None = None,
     file_manifest_record_id: int | None = None,
     destination_existed: bool = False,
@@ -502,7 +498,6 @@ def _result(
         complete_evidence_acknowledged=complete_evidence_acknowledged,
         mutation_run_log_committed=mutation_run_log_committed,
         mutation_run_log_id=mutation_run_log_id,
-        mutation_run_log_file=mutation_run_log_file,
         evidence_phase=evidence_phase,
         file_manifest_record_id=file_manifest_record_id,
         collision_policy=ctx.collision_policy,

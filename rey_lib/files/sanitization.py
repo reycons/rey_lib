@@ -19,6 +19,7 @@ from rey_lib.files.log_run_rollback import (
     SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
 )
+from rey_lib.files.governed_file import FileId
 from rey_lib.files.primitive_file_io import stage_stream_write
 
 __all__ = [
@@ -213,7 +214,7 @@ class FileSanitizationContext:
 
 @dataclass(frozen=True)
 class FileSanitizationResult:
-    file_id: str
+    file_id: FileId
     source_path: Path
     source_sha256: str | None
     source_size: int | None
@@ -242,7 +243,6 @@ class FileSanitizationResult:
     filesystem_applied: bool
     complete_evidence_acknowledged: bool
     mutation_run_log_id: int | None
-    mutation_run_log_file: str | None
     file_manifest_record_id: int | None
     evidence_phase: SourceFileMutationEvidenceFailurePhase | None
     status: str
@@ -380,7 +380,7 @@ def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileRefe
             run_log_fields=run_fields,
         )
     except SourceFileMutationEvidenceError as exc:
-        failure = replace(result, mutation_run_log_id=exc.run_log_id, mutation_run_log_file=exc.run_log_file, evidence_phase=exc.phase, status="evidence_failed", failure_reason=str(exc))
+        failure = replace(result, mutation_run_log_id=exc.run_log_id, evidence_phase=exc.phase, status="evidence_failed", failure_reason=str(exc))
         raise FileSanitizationEvidenceError(str(exc), failure) from exc
     return replace(
         result,
@@ -390,7 +390,6 @@ def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileRefe
             "run_log_id",
             None,
         ),
-        mutation_run_log_file=getattr(mutation_evidence, "run_log_file", None),
         file_manifest_record_id=int(mutation_evidence),
         status="success",
     )
@@ -794,7 +793,6 @@ def _empty_result(ctx: FileSanitizationContext, file: GovernedFileReference, sou
         filesystem_applied=False,
         complete_evidence_acknowledged=False,
         mutation_run_log_id=None,
-        mutation_run_log_file=None,
         file_manifest_record_id=None,
         evidence_phase=None,
         status="pending",

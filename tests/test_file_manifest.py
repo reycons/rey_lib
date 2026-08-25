@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import make_run_log, start_test_run
+from tests.conftest import make_db_run_log, start_test_run
 
 from rey_lib.logs import (
     FileManifestError,
@@ -102,9 +102,9 @@ def _run_ctx(tmp_path: Path) -> SimpleNamespace:
     return ctx
 
 
-def test_log_run_record_returns_the_committed_record_id(tmp_path: Path) -> None:
+def test_log_run_record_returns_the_committed_run_log_id(tmp_path: Path) -> None:
     ctx = _run_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     first = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
     second = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/b")
 
@@ -113,16 +113,16 @@ def test_log_run_record_returns_the_committed_record_id(tmp_path: Path) -> None:
 
 def test_returned_record_id_matches_the_run_log_row(tmp_path: Path) -> None:
     ctx = _run_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
-    record_id = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log_id = log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
 
     rows = [
         json.loads(line)
         for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert rows[record_id - 1]["record_id"] == record_id
-    assert rows[record_id - 1]["path"] == "/a"
+    assert rows[run_log_id - 1]["run_log_id"] == run_log_id
+    assert rows[run_log_id - 1]["path"] == "/a"
 
 
 def test_log_run_record_returns_none_when_it_cannot_append(tmp_path: Path) -> None:
@@ -135,7 +135,7 @@ def test_log_run_record_returns_none_when_it_cannot_append(tmp_path: Path) -> No
 
 def test_source_file_inventory_is_grouped_with_file_records(tmp_path: Path) -> None:
     ctx = _run_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_record(run_log, "SOURCE_FILE_INVENTORY", path="/a")
 
     record = json.loads(
@@ -148,7 +148,7 @@ def test_source_file_inventory_is_grouped_with_file_records(tmp_path: Path) -> N
 def test_normal_run_log_writing_is_unaffected(tmp_path: Path) -> None:
     """Existing record types keep their group and still append normally."""
     ctx = _run_ctx(tmp_path)
-    run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
+    run_log = make_db_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     log_run_record(run_log, "STEP_START", step_name="one")
     log_run_record(run_log, "STEP_END", step_name="one", status="ok")
 

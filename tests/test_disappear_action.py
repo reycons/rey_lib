@@ -56,15 +56,19 @@ class TestRollingItBackRestoresNothing:
         assert compensation.validate({}) is None
         assert compensation.execute({}) == {}
 
-    def test_delete_is_the_other_thing_and_still_restores(self) -> None:
-        """The distinction the new action exists to keep.
+    def test_disappear_removes_the_record_and_nothing_else(self) -> None:
+        """What the action exists to say, and what reversing it can do.
 
-        `delete` means the system removed the file and can put it back.
-        `disappear` means it is gone and there is nothing to put back.
+        `disappear` means the file is gone and there is nothing to put back,
+        so reversing it removes the record and touches no file.
+
+        `delete` is not registered at all. It would mean the system removed the
+        file and could restore it, but no producer in this estate writes one and
+        nothing ever preserved a recoverable copy, so there is no compensation
+        to register.
         """
-        assert _COMPENSATIONS["delete"].compensating_action == (
-            "restore_recoverable_file")
         assert _COMPENSATIONS["disappear"].compensating_action == "remove_record"
+        assert "delete" not in _COMPENSATIONS
 
 
 class TestItSerializesAsAnOrdinaryMutation:
@@ -78,7 +82,6 @@ class TestItSerializesAsAnOrdinaryMutation:
             destination_path="",
             recovery_path="",
             previous_version_path="",
-            run_log_file="run.jsonl",
             run_log_id=3,
             application_name="file_operator",
             file_id="17",
@@ -97,7 +100,6 @@ class TestItSerializesAsAnOrdinaryMutation:
             destination_path="",
             recovery_path="",
             previous_version_path="",
-            run_log_file="run.jsonl",
             run_log_id=3,
             application_name="file_operator",
             file_id="17",

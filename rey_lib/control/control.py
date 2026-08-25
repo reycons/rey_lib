@@ -528,9 +528,9 @@ class Control:
         }, required=required)
 
     def write_run_log_record(
-        self, *, run_id: Any, record_id: int, parent_record_id: int,
+        self, *, run_id: Any, parent_run_log_id: Optional[int],
         nest_level: int, record_type: str, record_group: str,
-        record_schema_version: int, run_timestamp: str,
+        record_schema_version: int,
         record_subgroup: Optional[str] = None, message: Optional[str] = None,
         app: Optional[str] = None, workflow_name: Optional[str] = None,
         pipeline_name: Optional[str] = None, step_id: Optional[str] = None,
@@ -539,18 +539,32 @@ class Control:
         subject_type: Optional[str] = None, subject_id: Optional[str] = None,
         subject_name: Optional[str] = None, pipeline_id: Optional[str] = None,
         workflow_id: Optional[str] = None,
-        error_message: Optional[str] = None,
-        fields: Optional[dict[str, Any]] = None,
+        status: Optional[str] = None, path: Optional[str] = None,
+        file_id: Optional[int] = None, source_name: Optional[str] = None,
+        checksum_sha256: Optional[str] = None, size_bytes: Optional[int] = None,
+        exists: Optional[bool] = None, modified_at: Optional[str] = None,
+        error_message: Optional[dict[str, Any]] = None,
+        payloads: Optional[dict[str, Any]] = None,
         required: bool = False,
     ) -> Optional[int]:
         """Write one run-log record, and return the row's id.
 
-        The run log's own record, not a control event: the record's order is the
-        run log's and arrives as ``record_id``. ``batch_step_id`` is correlation
-        only -- it says the record was written inside a governed step, and it is
-        null when none is open.
+        The database mints ``run_log_id`` and it is the record's only
+        identity; ``parent_run_log_id`` is its only parent, null at the root.
+        ``batch_step_id`` is correlation only -- it says the record was written
+        inside a governed step, and it is null when none is open. It has no
+        part in identity, order or parentage.
 
-        ``recorded_at`` is not a parameter. The database stamps it, so a writer
+        ``payloads`` is every typed jsonb column with its value -- the one the
+        record type selects, and None for the rest -- so a row's structure is
+        what its record type says it is. Which column belongs to which record
+        type is the run log's to know, not this object's; there is no generic
+        field bucket either way.
+
+        ``run_timestamp`` is not a parameter: the run's launch stamp belongs to
+        the run, and ``run_id`` reaches it through control.run_manifest.
+
+        ``created_ts`` is not a parameter. The database stamps it, so a writer
         cannot backdate a log record.
 
         The row's id is returned because a governed record points at it: the
@@ -558,8 +572,7 @@ class Control:
         """
         return self._call("write_run_log_record", {
             "run_id":                run_id,
-            "record_id":             record_id,
-            "parent_record_id":      parent_record_id,
+            "parent_run_log_id":     parent_run_log_id,
             "nest_level":            nest_level,
             "record_type":           record_type,
             "record_group":          record_group,
@@ -579,10 +592,17 @@ class Control:
             "pipeline_id":           pipeline_id,
             "workflow_id":           workflow_id,
             "record_schema_version": record_schema_version,
-            "fields":                fields or {},
-            "run_timestamp":         run_timestamp,
+            "status":                status,
+            "path":                  path,
+            "file_id":               file_id,
+            "source_name":           source_name,
+            "checksum_sha256":       checksum_sha256,
+            "size_bytes":            size_bytes,
+            "exists":                exists,
+            "modified_at":           modified_at,
             "error_message":         error_message,
             "batch_step_id":         self.batch_step_id,
+            **dict(payloads or {}),
         }, required=required)
 
     # -- config snapshots ---------------------------------------------------
@@ -959,6 +979,37 @@ class Control:
         """Return every current file, in order. No filter, no cap."""
         return self._call_rows("list_file_manifest", {}, required=required)
 
+    def find_files(self,
+                   file_extensions: Optional[list[str]] = None,
+                   classified: Optional[bool] = None,
+                   action: Optional[str] = None,
+                   status: Optional[str] = None,
+                   current_only: bool = True,
+                   converted: Optional[bool] = None,
+                   required: bool = True) -> list[dict[str, Any]]:
+        """Return governed files as the database sees them, filtered.
+
+        Rows come from ``control.file_vw`` -- every mutation carrying the file
+        it is a mutation of -- so a caller receives identity, static facts and
+        current location together and joins nothing itself.
+
+        ``current_only`` is what "where is this file now" means relationally:
+        the latest surviving mutation per governed file. False returns the
+        history instead.
+
+        ``converted`` asks whether the file has ever been converted -- a fact
+        about the file, recorded on the mutation that performed the conversion.
+        False selects the work still to do. A NULL filter is not a filter.
+        """
+        return self._call_rows("find_files", {
+            "file_extensions": list(file_extensions) if file_extensions else None,
+            "classified": classified,
+            "action": action,
+            "status": status,
+            "current_only": current_only,
+            "converted": converted,
+        }, required=required)
+
     def file_history(self, file_manifest_id: int,
                      required: bool = True) -> list[dict[str, Any]]:
         """Return one file's mutations, oldest first."""
@@ -1003,6 +1054,22 @@ class Control:
             "rollback_batch_id":      batch_id,
             "rollback_run_id":        run_id,
         }, required=required)
+
+    def requestable_file_rollbacks(self, run_id: int,
+                                   required: bool = True) -> list[dict[str, Any]]:
+        """Return what a rollback request for this run would mark.
+
+        A preview must not write, and marking is a write, so this answers the
+        question ``request_file_rollback`` answers without performing it. The
+        predicate is that routine's own: a mutation belongs to a run through
+        the batch step that wrote it, and only a row that is neither pending
+        nor already reversed can be newly marked.
+
+        Each row carries ``restore_to_path`` on the same terms as the pending
+        read, so a preview and an execution describe the same reversal.
+        """
+        return self._call_rows("requestable_file_rollbacks",
+                               {"run_id": run_id}, required=required)
 
     def pending_file_rollbacks(self,
                                required: bool = True) -> list[dict[str, Any]]:

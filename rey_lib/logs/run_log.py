@@ -32,7 +32,6 @@ would be a behaviour change hidden in a refactor. The recorded xfail in
 
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 
 from datetime import datetime, timezone
@@ -41,15 +40,7 @@ from typing import Any, Optional
 
 __all__ = ["RunLog"]
 
-_SYNTHETIC_ROOT = 0
 _MIN_LEVEL = 0
-
-LAST_RECORD_ID = "last_record_id"
-CURRENT_NEST_LEVEL = "current_nest_level"
-PARENT_LEVEL = "parent_level"
-MINIMUM_NEST_LEVEL = "minimum_nest_level"
-CURRENT_PARENT_RECORD_ID = "current_parent_record_id"
-LEVEL_ANCHORS = "level_anchors"
 
 #: Semantic nesting bases, unchanged from nest_level.
 SEMANTIC_BASES: dict[str, int] = {
@@ -73,11 +64,66 @@ _ENVELOPE_FIELDS: frozenset[str] = frozenset({
     "step_id", "step_name", "step_sequence", "correlation_id",
     "parent_run_id", "subject_type", "subject_id", "subject_name",
     "pipeline_run_id", "workflow_run_id", "pipeline_id", "workflow_id",
-    "record_id", "parent_record_id", "nest_level",
-    # Not stamped on every record, but a column because a failure is the one
-    # thing a reader queries for. Named here so it is not also sent in fields.
+    "run_log_id", "parent_run_log_id", "nest_level",
+})
+
+#: Facts any record type may state, each with a column of its own.
+#:
+#: These are not stamped on every record -- a record states them when it has
+#: them -- but they are shared and queried across record types, so they are
+#: columns rather than something buried in a per-type payload.
+_SHARED_FIELDS: frozenset[str] = frozenset({
+    "status", "path", "file_id", "source_name", "checksum_sha256",
+    "size_bytes", "exists", "modified_at",
+    # The failure object. A failure is the one thing a reader queries for.
     "error_message",
 })
+
+#: record type -> the one jsonb column that may carry its structure.
+#:
+#: Every record type this estate writes appears here except ERROR and
+#: STEP_FAILURE, whose whole payload is the ``error_message`` object. A record
+#: type missing from this map cannot be persisted, which is deliberate: the
+#: alternative is a generic bucket, and a generic bucket is what this replaced.
+#:
+#: Generated from the same scan that generated the table, so the schema and
+#: this map describe one vocabulary.
+_TYPE_PAYLOAD_COLUMNS: dict[str, str] = {
+    "APP_EXECUTION": "app_execution",
+    "ARTIFACT_REFERENCE": "artifact_reference",
+    "CONFIG_FILE_MANIFEST": "config_file_manifest",
+    "CONFIG_FILE_REFERENCE": "config_file_reference",
+    "EXECUTION_PLAN": "execution_plan",
+    "FILE_OPERATION": "file_operation",
+    "INFO": "info",
+    "INPUT_DISCOVERED": "input_discovered",
+    "INPUT_FILE_REFERENCE": "input_file_reference",
+    "LLM_ANALYSIS_FAILURE": "llm_analysis_failure",
+    "LLM_ANALYSIS_PACKAGE": "llm_analysis_package",
+    "LLM_ANALYSIS_RESULT": "llm_analysis_result",
+    "LLM_CONTEXT": "llm_context",
+    "LLM_CONTRACT": "llm_contract",
+    "LLM_EVALUATION_PAYLOAD": "llm_evaluation_payload",
+    "LLM_EVALUATION_RUN": "llm_evaluation_run",
+    "LLM_INTERPRETATION": "llm_interpretation",
+    "LLM_PACKAGE": "llm_package",
+    "RESULTS_SUMMARY": "results_summary",
+    "ROW_COUNT": "row_count",
+    "RUN_COMPLETE": "run_complete",
+    "RUN_START": "run_start",
+    "RUN_SUMMARY": "run_summary",
+    "SOURCE_FILE_CLASSIFICATION": "source_file_classification",
+    "SOURCE_FILE_CLASSIFICATION_DELETION": "source_file_classification_deletion",
+    "SOURCE_FILE_INVENTORY": "source_file_inventory",
+    "SOURCE_FILE_MUTATION": "source_file_mutation",
+    "SOURCE_FILE_PROFILE": "source_file_profile",
+    "SOURCE_FILE_ROLLBACK": "source_file_rollback",
+    "SQL_EXECUTION": "sql_execution",
+    "STEP_END": "step_end",
+    "STEP_START": "step_start",
+    "VALIDATION_RESULT": "validation_result",
+    "WARNING": "warning",
+}
 
 #: The canonical run lineage every durable record carries.
 LINEAGE_FIELDS: tuple[str, ...] = (
@@ -88,18 +134,6 @@ LINEAGE_FIELDS: tuple[str, ...] = (
 DOMAIN_FIELDS: tuple[str, ...] = (
     "pipeline_run_id", "workflow_run_id", "pipeline_id", "workflow_id",
 )
-
-
-def _initial_state() -> dict[str, Any]:
-    """A fresh hierarchy state with the documented initial values."""
-    return {
-        LAST_RECORD_ID: 0,
-        CURRENT_NEST_LEVEL: 0,
-        PARENT_LEVEL: 0,
-        MINIMUM_NEST_LEVEL: 1,
-        CURRENT_PARENT_RECORD_ID: _SYNTHETIC_ROOT,
-        LEVEL_ANCHORS: {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT},
-    }
 
 
 class RunLog:
@@ -176,10 +210,21 @@ class RunLog:
         self._step_name: Optional[str] = None
         self._pipeline_step_name: Optional[str] = None
         self._lineage: dict[str, str] = dict(lineage or {})
-        # The control row id of the most recent record, for a governed record
-        # that has to point at it.
-        self._last_control_row_id: Optional[int] = None
-        self._memory_state: Optional[dict[str, Any]] = None
+        # The nesting state, owned here for the life of the object.
+        #
+        # It was a JSON file beside the log, because the identities in it were
+        # file-local and had to survive a process. They are database keys now:
+        # control.run_log owns identity and parentage durably, and this is only
+        # the cursor into it while the run is executing.
+        self._current_nest_level = 0
+        self._parent_level = 0
+        self._minimum_nest_level = 1
+        #: The row every record written now is a child of. None at the root.
+        self._current_parent_run_log_id: Optional[int] = None
+        #: nest level -> the run_log_id of the record that opened that level.
+        self._level_anchors: dict[int, Optional[int]] = {}
+        #: Whether any record has been written, for the rebind guard alone.
+        self._has_records = False
         self._closed = False
 
     def __repr__(self) -> str:
@@ -261,16 +306,13 @@ class RunLog:
             the log; moving it mid-run splits one run across two files.
         """
         resolved = str(path)
-        if self._path and str(self._path) != resolved:
-            state, _ = self._load_state()
-            if int(state[LAST_RECORD_ID]) > 0:
-                from rey_lib.errors.error_utils import StateError
+        if self._path and str(self._path) != resolved and self._has_records:
+            from rey_lib.errors.error_utils import StateError
 
-                raise StateError(
-                    f"Cannot rebind the run log to {resolved!r}: "
-                    f"{state[LAST_RECORD_ID]} record(s) are already written to "
-                    f"{self._path!r}. One run is one log."
-                )
+            raise StateError(
+                f"Cannot rebind the run log to {resolved!r}: records are "
+                f"already written to {self._path!r}. One run is one log."
+            )
         self._path = resolved
 
     def set_nest_level(self, semantic: str) -> int:
@@ -281,18 +323,14 @@ class RunLog:
         first record written afterwards anchors it.
         """
         if semantic == "next":
-            state, path = self._load_state()
-            level = max(int(state[MINIMUM_NEST_LEVEL]), _MIN_LEVEL)
-            self._on_level_next(state, level)
-            state[CURRENT_NEST_LEVEL] = level
-            self._save_state(state, path)
+            level = max(self._minimum_nest_level, _MIN_LEVEL)
+            self._on_level_next(level)
+            self._current_nest_level = level
             return level
         if semantic == "sibling":
-            state, path = self._load_state()
-            level = max(int(state[CURRENT_NEST_LEVEL]), _MIN_LEVEL)
-            self._on_level_next(state, level)
-            state[CURRENT_NEST_LEVEL] = level
-            self._save_state(state, path)
+            level = max(self._current_nest_level, _MIN_LEVEL)
+            self._on_level_next(level)
+            self._current_nest_level = level
             return level
         if semantic not in SEMANTIC_BASES:
             raise ValueError(
@@ -301,16 +339,13 @@ class RunLog:
                 "'next', 'sibling'."
             )
         level = SEMANTIC_BASES[semantic]
-        state, path = self._load_state()
-        self._on_level_set(state, level)
-        state[CURRENT_NEST_LEVEL] = level
-        self._save_state(state, path)
+        self._on_level_set(level)
+        self._current_nest_level = level
         return level
 
     def nest_level(self) -> int:
         """The nesting level records are currently written at."""
-        state, _ = self._load_state()
-        return int(state[CURRENT_NEST_LEVEL])
+        return self._current_nest_level
 
     def enter(self) -> int:
         """Descend the relative child hierarchy beneath the established base.
@@ -318,12 +353,10 @@ class RunLog:
         The first descent lands on ``minimum_nest_level`` (base + 1), so a
         descent from the base cannot land on the base itself.
         """
-        state, path = self._load_state()
-        current = int(state[CURRENT_NEST_LEVEL])
-        level = max(current + 1, int(state[MINIMUM_NEST_LEVEL]))
-        self._on_level_next(state, level)
-        state[CURRENT_NEST_LEVEL] = level
-        self._save_state(state, path)
+        current = self._current_nest_level
+        level = max(current + 1, self._minimum_nest_level)
+        self._on_level_next(level)
+        self._current_nest_level = level
         return level
 
     def exit(self) -> int:
@@ -332,24 +365,27 @@ class RunLog:
         Never rises above ``minimum_nest_level`` and never moves deeper, so
         calling it on the base leaves the level unchanged.
         """
-        state, path = self._load_state()
-        current = int(state[CURRENT_NEST_LEVEL])
-        floor = max(int(state[MINIMUM_NEST_LEVEL]), _MIN_LEVEL)
+        current = self._current_nest_level
+        floor = max(self._minimum_nest_level, _MIN_LEVEL)
         level = min(current, max(current - 1, floor))
-        self._on_level_previous(state, level)
-        state[CURRENT_NEST_LEVEL] = level
-        self._save_state(state, path)
+        self._on_level_previous(level)
+        self._current_nest_level = level
         return level
 
     # -- anchors: ported from record_parenting ------------------------------
 
     @staticmethod
-    def _largest_anchor_below(anchors: dict, target: int) -> int:
-        """The anchor at the largest anchored level strictly below ``target``."""
+    def _largest_anchor_below(anchors: dict, target: int) -> Optional[int]:
+        """The anchor at the largest anchored level strictly below ``target``.
+
+        None when nothing is anchored above it: the record is a root, and its
+        ``parent_run_log_id`` is NULL. There is no synthetic root row to point
+        at, because a parent is now an actual row.
+        """
         lower = [level for level in anchors if int(level) < target]
         if not lower:
-            return _SYNTHETIC_ROOT
-        return int(anchors[max(lower, key=int)])
+            return None
+        return anchors[max(lower, key=int)]
 
     @staticmethod
     def _clear_from(anchors: dict, level: int) -> None:
@@ -363,25 +399,25 @@ class RunLog:
         for key in [k for k in list(anchors) if int(k) > level]:
             del anchors[key]
 
-    def _on_level_set(self, state: dict, new_level: int) -> None:
+    def _on_level_set(self, new_level: int) -> None:
         """A semantic base set starts a new named scope at ``new_level``."""
-        anchors = state[LEVEL_ANCHORS]
-        self._clear_from(anchors, new_level)
-        state[PARENT_LEVEL] = new_level
-        state[MINIMUM_NEST_LEVEL] = new_level + 1
-        state[CURRENT_PARENT_RECORD_ID] = self._largest_anchor_below(anchors, new_level)
+        self._clear_from(self._level_anchors, new_level)
+        self._parent_level = new_level
+        self._minimum_nest_level = new_level + 1
+        self._current_parent_run_log_id = self._largest_anchor_below(
+            self._level_anchors, new_level)
 
-    def _on_level_next(self, state: dict, new_level: int) -> None:
+    def _on_level_next(self, new_level: int) -> None:
         """A descent enters an unnamed relative child level fresh."""
-        anchors = state[LEVEL_ANCHORS]
-        self._clear_from(anchors, new_level)
-        state[CURRENT_PARENT_RECORD_ID] = self._largest_anchor_below(anchors, new_level)
+        self._clear_from(self._level_anchors, new_level)
+        self._current_parent_run_log_id = self._largest_anchor_below(
+            self._level_anchors, new_level)
 
-    def _on_level_previous(self, state: dict, new_level: int) -> None:
+    def _on_level_previous(self, new_level: int) -> None:
         """A return keeps the anchor at ``new_level`` and clears deeper ones."""
-        anchors = state[LEVEL_ANCHORS]
-        self._clear_deeper_than(anchors, new_level)
-        state[CURRENT_PARENT_RECORD_ID] = self._largest_anchor_below(anchors, new_level)
+        self._clear_deeper_than(self._level_anchors, new_level)
+        self._current_parent_run_log_id = self._largest_anchor_below(
+            self._level_anchors, new_level)
 
     # -- the log itself ------------------------------------------------------
 
@@ -411,39 +447,6 @@ class RunLog:
     def is_closed(self) -> bool:
         """Whether this run log has been collected."""
         return self._closed
-
-    # -- state persistence ---------------------------------------------------
-
-    def _state_path(self) -> Optional[Path]:
-        """The companion state file, or None when there is no durable log."""
-        try:
-            return companion_path(str(self.path()))
-        except Exception:  # noqa: BLE001 — no durable log; use the in-memory store.
-            return None
-
-    def _load_state(self) -> tuple[dict[str, Any], Optional[Path]]:
-        """Read the hierarchy state, file-backed when a durable log resolves.
-
-        Read per operation rather than cached, deliberately: this is what lets a
-        separate process continue the sequence rather than restart it.
-        """
-        path = self._state_path()
-        if path is None:
-            if self._memory_state is None:
-                self._memory_state = _initial_state()
-            return self._memory_state, None
-        if path.exists():
-            return _read(path), path
-        state = _initial_state()
-        _write(path, state)
-        return state, path
-
-    def _save_state(self, state: dict[str, Any], path: Optional[Path]) -> None:
-        """Persist the hierarchy state to its backing store."""
-        if path is None:
-            self._memory_state = state
-        else:
-            _write(path, state)
 
     # -- writing -------------------------------------------------------------
 
@@ -490,11 +493,16 @@ class RunLog:
 
     def append(self, record_type: str, *, message: str = "",
                **fields: Any) -> int | None:
-        """Append one typed record to every selected destination.
+        """Append one typed record, and return its ``control.run_log`` id.
 
-        Never raises: logging must not mask application execution. A record that
-        could not be committed to every selected destination returns ``None``,
-        and the sequence does not advance.
+        The database mints the identity, so the row is written first and the
+        JSONL serializes the key it was given. This is the one API for "what
+        run-log record did I just write": what comes back is
+        ``control.run_log.run_log_id`` and a governed record may point at it.
+
+        Never raises: logging must not mask application execution. A record
+        that could not be committed to every selected destination returns
+        ``None``.
         """
         from rey_lib.logs.record_validation import _validate_run_record_fields
 
@@ -506,28 +514,29 @@ class RunLog:
         try:
             record = self._record(record_type, message, fields)
 
-            state, state_path = self._load_state()
-            record_id = int(state[LAST_RECORD_ID]) + 1
-            nest_level = int(state[CURRENT_NEST_LEVEL])
-            record["record_id"] = record_id
-            record["parent_record_id"] = int(state[CURRENT_PARENT_RECORD_ID])
+            nest_level = self._current_nest_level
             record["nest_level"] = nest_level
+            record["parent_run_log_id"] = self._current_parent_run_log_id
+
+            # The database first: it mints the identity, and the JSONL is an
+            # output format that serializes it rather than a second source of
+            # one.
+            run_log_id: Optional[int] = None
+            if self.writes_db:
+                with self._persistence():
+                    run_log_id = self._persist_to_control(
+                        record_type, message, record)
+                record["run_log_id"] = run_log_id
 
             if self.writes_jsonl:
                 from rey_lib.files import primitive_file_io
 
                 primitive_file_io.append_jsonl(self.path(), record)
 
-            if self.writes_db:
-                with self._persistence():
-                    self._persist_to_control(record_type, message, record)
-
-            state[LAST_RECORD_ID] = record_id
-            anchors = state[LEVEL_ANCHORS]
-            if nest_level not in anchors and str(nest_level) not in anchors:
-                anchors[nest_level] = record_id
-            self._save_state(state, state_path)
-            return record_id
+            self._has_records = True
+            if nest_level not in self._level_anchors:
+                self._level_anchors[nest_level] = run_log_id
+            return run_log_id
         except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
             from rey_lib.logs.logging_setup import get_logger
 
@@ -543,7 +552,7 @@ class RunLog:
     # when reaching it fails, is made here; Control executes the routine and
     # owns only its own DB state -- batch_id, batch_step_id, owns_batch.
 
-    def require_structural_record(self, record_id: Optional[int],
+    def require_structural_record(self, run_log_id: Optional[int],
                                   record_type: str) -> None:
         """Escalate a lost structural record when every destination is required.
 
@@ -558,7 +567,7 @@ class RunLog:
 
         Under ``jsonl`` nothing is raised: that is the historical behaviour.
         """
-        if record_id is not None or self.destination != "both":
+        if run_log_id is not None or self.destination != "both":
             return
         from rey_lib.errors.error_utils import StateError
 
@@ -676,41 +685,47 @@ class RunLog:
             )
         return self.control
 
-    @property
-    def last_control_row_id(self) -> Optional[int]:
-        """The control row id of the record this run log wrote most recently.
-
-        A governed record points at the log record that supports it, and the
-        database mints that row's id. `append` still returns the run log's own
-        ordinal -- its sequence, which every caller depends on -- so the row id
-        is read here by whoever needs to reference it.
-
-        None when the last record went nowhere near the database.
-        """
-        return self._last_control_row_id
-
     def _persist_to_control(self, record_type: str, message: str,
-                            record: dict[str, Any]) -> None:
+                            record: dict[str, Any]) -> Optional[int]:
         """Persist one record to the control database as a run-log row.
 
-        Every field this writer stamps has a column, so it is passed by name;
-        what the caller supplied for this record type is what remains, and that
-        is what ``fields`` carries. Nothing of the envelope goes into it -- a
-        stamped field hiding in a payload is a column nobody can query.
+        A record's contents divide three ways, and nothing is written twice:
 
-        ``timestamp`` is not sent. The database stamps ``recorded_at``.
+        * the envelope, stamped by this writer, each with its own column
+        * the shared facts -- status, path, the governed file, its size and
+          checksum -- which any record type may state and which are columns
+          because they are queried across types
+        * whatever is left, which is that record type's own structure and goes
+          into the one jsonb column ``record_type`` selects
+
+        A record type with nothing left writes no payload at all, and every
+        other payload column stays NULL. There is no generic bucket: a key
+        arriving for a record type with no payload column is refused rather
+        than dropped somewhere unqueryable.
+
+        ``timestamp`` is not sent. The database stamps ``created_ts``.
+
+        Returns the minted ``run_log_id``, which is the row's identity and the
+        value a governed record stores.
         """
         if self.control is None:
             raise ValueError(
                 "run_store selects the control database but no Control was "
                 "supplied to this run log."
             )
-        caller = {key: value for key, value in record.items()
-                  if key not in _ENVELOPE_FIELDS}
-        self._last_control_row_id = self.control.write_run_log_record(
+        payload = {key: value for key, value in record.items()
+                   if key not in _ENVELOPE_FIELDS and key not in _SHARED_FIELDS}
+        payload_column = _TYPE_PAYLOAD_COLUMNS.get(str(record_type).upper())
+        if payload and payload_column is None:
+            raise ValueError(
+                f"{record_type} records have no typed payload column, but "
+                f"{sorted(payload)} was supplied. Either the value is a shared "
+                "fact with a column of its own, or this record type needs a "
+                "payload column declared in _TYPE_PAYLOAD_COLUMNS."
+            )
+        return self.control.write_run_log_record(
             run_id=record.get("run_id"),
-            record_id=int(record["record_id"]),
-            parent_record_id=int(record.get("parent_record_id") or 0),
+            parent_run_log_id=record.get("parent_run_log_id"),
             nest_level=int(record["nest_level"]),
             record_type=str(record_type),
             record_group=str(record.get("record_group") or ""),
@@ -730,85 +745,17 @@ class RunLog:
             pipeline_id=record.get("pipeline_id"),
             workflow_id=record.get("workflow_id"),
             record_schema_version=int(record["record_schema_version"]),
-            run_timestamp=str(record.get("run_timestamp") or ""),
+            status=record.get("status"),
+            path=record.get("path"),
+            file_id=record.get("file_id"),
+            source_name=record.get("source_name"),
+            checksum_sha256=record.get("checksum_sha256"),
+            size_bytes=record.get("size_bytes"),
+            exists=record.get("exists"),
+            modified_at=record.get("modified_at"),
             error_message=record.get("error_message"),
-            fields=caller,
+            payloads={column: (payload or None) if column == payload_column
+                      else None
+                      for column in _TYPE_PAYLOAD_COLUMNS.values()},
             required=True,
         )
-
-
-# ---------------------------------------------------------------------------
-# The companion state file
-# ---------------------------------------------------------------------------
-#
-# The record sequence, parent linkage and nest level for one physical run log
-# live in one JSON file derived deterministically from that log's path. Every
-# process writing the same run log resolves the same companion path, which is
-# what keeps sequencing continuous across the subprocess boundary a
-# process-local attribute could not cross. Concurrency is out of scope: the
-# model assumes sequential writers to one physical log.
-#
-# Naming: ``<run_log_path>.hstate.json``.
-
-_STATE_SUFFIX = ".hstate.json"
-
-
-def companion_path(run_log_path: str) -> Path:
-    """Return the deterministic companion hierarchy-state path for a run log."""
-    return Path(str(run_log_path) + _STATE_SUFFIX)
-
-def _read(path: Path) -> dict[str, Any]:
-    """Read and normalize the state file, tolerating a malformed/partial file."""
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return _initial_state()
-    if not isinstance(raw, dict):
-        return _initial_state()
-    return _normalize(raw)
-
-def _write(path: Path, state: dict[str, Any]) -> None:
-    """Atomically persist state through the shared primitive file layer."""
-    from rey_lib.files.json import write_json_file
-
-    write_json_file(path, _serializable(state), mode="compact", newline=False)
-
-def _normalize(raw: dict[str, Any]) -> dict[str, Any]:
-    """Coerce a loaded state dict to the in-memory shape (int level_anchors keys)."""
-    anchors_raw = raw.get(LEVEL_ANCHORS) or {}
-    try:
-        anchors = {int(k): int(v) for k, v in anchors_raw.items()}
-    except (TypeError, ValueError):
-        anchors = {}
-    if not anchors:
-        anchors = {_SYNTHETIC_ROOT: _SYNTHETIC_ROOT}
-    parent_level = _as_int(raw.get(PARENT_LEVEL), 0)
-    return {
-        LAST_RECORD_ID: _as_int(raw.get(LAST_RECORD_ID), 0),
-        CURRENT_NEST_LEVEL: _as_int(raw.get(CURRENT_NEST_LEVEL), 0),
-        PARENT_LEVEL: parent_level,
-        # The floor is derived, so a state file predating it still normalizes correctly.
-        MINIMUM_NEST_LEVEL: _as_int(raw.get(MINIMUM_NEST_LEVEL), parent_level + 1),
-        CURRENT_PARENT_RECORD_ID: _as_int(raw.get(CURRENT_PARENT_RECORD_ID), _SYNTHETIC_ROOT),
-        LEVEL_ANCHORS: anchors,
-    }
-
-def _serializable(state: dict[str, Any]) -> dict[str, Any]:
-    """Render state for JSON: level_anchors keys become strings."""
-    anchors = state.get(LEVEL_ANCHORS) or {}
-    parent_level = _as_int(state.get(PARENT_LEVEL), 0)
-    return {
-        LAST_RECORD_ID: _as_int(state.get(LAST_RECORD_ID), 0),
-        CURRENT_NEST_LEVEL: _as_int(state.get(CURRENT_NEST_LEVEL), 0),
-        PARENT_LEVEL: parent_level,
-        MINIMUM_NEST_LEVEL: _as_int(state.get(MINIMUM_NEST_LEVEL), parent_level + 1),
-        CURRENT_PARENT_RECORD_ID: _as_int(state.get(CURRENT_PARENT_RECORD_ID), _SYNTHETIC_ROOT),
-        LEVEL_ANCHORS: {str(int(k)): int(v) for k, v in anchors.items()},
-    }
-
-def _as_int(value: Any, default: int) -> int:
-    """Best-effort int coercion with a default (state must never raise on read)."""
-    try:
-        return int(value if value is not None else default)
-    except (TypeError, ValueError):
-        return default

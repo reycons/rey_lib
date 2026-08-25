@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import make_run_log, start_test_run
+from tests.conftest import make_db_run_log, start_test_run
 
 from rey_lib.logs import (
     bind_correlation,
@@ -74,7 +74,7 @@ def _log(ctx: SimpleNamespace, tmp_path: Path):
     Identity comes from the context because the launch boundary establishes it
     before the run log exists; everything after that is the run log's.
     """
-    return make_run_log(
+    return make_db_run_log(
         tmp_path,
         app=str(getattr(ctx, "owner_app_name", "") or "rey_loader"),
         run_id=ctx.run_id,
@@ -214,11 +214,11 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
         "ERROR",
         "RUN_COMPLETE",
     ]
-    assert by_type["ERROR"]["error_id"]
-    assert by_type["ERROR"]["failed_step_id"] == "load"
+    assert by_type["ERROR"]["error_message"]["error_id"]
+    assert by_type["ERROR"]["error_message"]["failed_step_id"] == "load"
     assert "hunter2" not in by_type["ERROR"]["error_message"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
-    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_message"]["error_id"]
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
@@ -239,10 +239,10 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Pat
         "STEP_FAILURE",
         "RUN_COMPLETE",
     ]
-    assert by_type["ERROR"]["error_type"] == "AppOperationFailed"
-    assert by_type["STEP_FAILURE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
+    assert by_type["ERROR"]["error_message"]["error_type"] == "AppOperationFailed"
+    assert by_type["STEP_FAILURE"]["error_message"]["failure_record_id"] == by_type["ERROR"]["error_message"]["error_id"]
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
-    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_id"]
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_message"]["error_id"]
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
@@ -353,7 +353,7 @@ def test_step_failure_returns_record_id_for_failed_run_complete(tmp_path: Path) 
 
     records = _read(Path(run_log.path()))
     assert records[0]["record_type"] == "STEP_FAILURE"
-    assert records[0]["failure_record_id"] == failure_id
+    assert records[0]["error_message"]["failure_record_id"] == failure_id
     assert records[1]["record_type"] == "RUN_COMPLETE"
     assert records[1]["failure_record_id"] == failure_id
 
@@ -498,10 +498,10 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
     step_end = next(row for row in records if row["record_type"] == "STEP_END")
     run_complete = next(row for row in records if row["record_type"] == "RUN_COMPLETE")
 
-    assert step_start["parent_record_id"] == run_start["record_id"]
-    assert row_count["parent_record_id"] == step_start["record_id"]
-    assert step_end["parent_record_id"] == step_start["record_id"]
-    assert run_complete["parent_record_id"] == run_start["parent_record_id"]
+    assert step_start["parent_run_log_id"] == run_start["run_log_id"]
+    assert row_count["parent_run_log_id"] == step_start["run_log_id"]
+    assert step_end["parent_run_log_id"] == step_start["run_log_id"]
+    assert run_complete["parent_run_log_id"] == run_start["parent_run_log_id"]
 
 
 def test_workflow_failure_emits_canonical_error_and_referenced_completion(
@@ -530,26 +530,26 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     error = next(r for r in records if r["record_type"] == "ERROR")
     failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
     complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
-    assert error["error_id"]
-    assert error["error_type"] == "RuntimeError"
+    assert error["error_message"]["error_id"]
+    assert error["error_message"]["error_type"] == "RuntimeError"
     assert error["error_message"]
-    assert error["sanitized_exception"]
-    assert error["sanitized_traceback"]
-    assert error["traceback_summary"]
-    assert error["failed_step_id"] == "s1"
-    assert error["failed_step_name"] == "One"
-    assert error["failed_step_sequence"] == 1
+    assert error["error_message"]["sanitized_exception"]
+    assert error["error_message"]["sanitized_traceback"]
+    assert error["error_message"]["traceback_summary"]
+    assert error["error_message"]["failed_step_id"] == "s1"
+    assert error["error_message"]["failed_step_name"] == "One"
+    assert error["error_message"]["failed_step_sequence"] == 1
     assert "hunter2" not in json.dumps(error)
     assert "abc123" not in json.dumps(error)
-    assert failure["failed_step_id"] == "s1"
-    assert failure["failed_step_name"] == "One"
-    assert failure["failed_step_sequence"] == 1
-    assert failure["error_id"] == error["error_id"]
-    assert failure["failure_record_id"] == error["error_id"]
+    assert failure["error_message"]["failed_step_id"] == "s1"
+    assert failure["error_message"]["failed_step_name"] == "One"
+    assert failure["error_message"]["failed_step_sequence"] == 1
+    assert failure["error_message"]["error_id"] == error["error_message"]["error_id"]
+    assert failure["error_message"]["failure_record_id"] == error["error_message"]["error_id"]
     assert "hunter2" not in json.dumps(failure)
     assert "abc123" not in json.dumps(failure)
     assert complete["status"] == "failed"
-    assert complete["failure_record_id"] == error["error_id"]
+    assert complete["failure_record_id"] == error["error_message"]["error_id"]
     assert complete["failed_step_id"] == "s1"
     assert complete["failed_step_name"] == "One"
     assert "hunter2" not in json.dumps(complete)
@@ -608,9 +608,9 @@ def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -
     records = _read(Path(run_log.path()))
     failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
     complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
-    assert failure["error_type"] == "WorkflowStepFailed"
-    assert failure["failed_step_id"] == "s1"
-    assert complete["failure_record_id"] == failure["failure_record_id"]
+    assert failure["error_message"]["error_type"] == "WorkflowStepFailed"
+    assert failure["error_message"]["failed_step_id"] == "s1"
+    assert complete["failure_record_id"] == failure["error_message"]["failure_record_id"]
     assert current_step() is None
 
 

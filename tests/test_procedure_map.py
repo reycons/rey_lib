@@ -392,7 +392,7 @@ def test_sql_failure_logs_sanitized_failure_evidence(run_log, tmp_path: Path):
     record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "adhoc_sql"
     assert record["status"] == "failed"
-    assert record["error_message"] == "connection failed"
+    assert record["error_message"]["message"] == "connection failed"
     text = json.dumps(record)
     assert "DELETE FROM" not in text
     assert "SECRET" not in text
@@ -492,7 +492,7 @@ def test_execute_sql_text_failure_logs_one_sanitized_failed_record(tmp_path: Pat
     records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
     assert len(records) == 1
     assert records[0]["status"] == "failed"
-    assert "run_sql failed" in records[0]["error_message"]
+    assert "run_sql failed" in records[0]["error_message"]["message"]
     text = json.dumps(records[0])
     assert "SECRET" not in text
     assert "delete from source" not in text

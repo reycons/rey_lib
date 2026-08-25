@@ -2,7 +2,7 @@
 
 The engine is deliberately neutral to workflows, pipelines, applications, and
 installation-specific folder conventions. It selects immutable
-``source_file_mutation`` records by ``evidence.run_log_file`` and delegates
+``source_file_mutation`` records by ``evidence.run_log_id`` and delegates
 operation-specific behavior to the compensation registry.
 """
 
@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from rey_lib.files.governed_file import FileId, is_governed_file_id
 from rey_lib.files.file_utils import delete_file, run_artifact_path
 from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
 from rey_lib.run import establish_run_identity
@@ -24,6 +25,7 @@ from rey_lib.logs import (
     FileManifestError,
     ProfileLibraryError,
     bind_run,
+    bound_run_log,
     clear_run,
     file_manifest_session,
     log_file_manifest_record,
@@ -70,7 +72,6 @@ class SourceFileMutationEvidenceError(LogRunRollbackError):
         message: str,
         *,
         phase: SourceFileMutationEvidenceFailurePhase,
-        run_log_file: str | None,
         run_log_id: int | None,
     ) -> None:
         normalized_phase = SourceFileMutationEvidenceFailurePhase(phase)
@@ -84,7 +85,7 @@ class SourceFileMutationEvidenceError(LogRunRollbackError):
                     "The post-run-log mutation-evidence phase requires a positive "
                     "run_log_id."
                 )
-        elif run_log_file is not None or run_log_id is not None:
+        elif run_log_id is not None:
             raise ValueError(
                 "The pre-run-log mutation-evidence phase cannot carry a committed "
                 "run-log reference."
@@ -92,7 +93,6 @@ class SourceFileMutationEvidenceError(LogRunRollbackError):
 
         super().__init__(message)
         self.phase = normalized_phase
-        self.run_log_file = run_log_file
         self.run_log_id = run_log_id
 
     @property
@@ -127,7 +127,6 @@ class SourceFileMutationEvidenceResult(int):
         manifest_record_id: int,
         *,
         run_log_id: int,
-        run_log_file: str,
     ) -> SourceFileMutationEvidenceResult:
         value = _positive_int(manifest_record_id, "manifest_record_id")
         instance = int.__new__(cls, value)
@@ -135,7 +134,6 @@ class SourceFileMutationEvidenceResult(int):
             run_log_id,
             "run_log_id",
         )
-        instance.run_log_file = _run_log_name(run_log_file)
         return instance
 
     @property
@@ -202,10 +200,9 @@ def serialize_source_file_mutation(
     destination_path: str = "",
     recovery_path: str = "",
     previous_version_path: str = "",
-    run_log_file: str,
     run_log_id: int,
     application_name: str = "",
-    file_id: str = "",
+    file_id: FileId | None = None,
     classification: Mapping[str, Any] | None = None,
     conversion: Mapping[str, Any] | None = None,
     reason_code: str = "",
@@ -225,7 +222,6 @@ def serialize_source_file_mutation(
     """
     normalized_action = _non_empty(action, "action")
     normalized_status = _non_empty(status, "status")
-    evidence_file = _run_log_name(run_log_file)
     evidence_id = _positive_int(run_log_id, "run_log_id")
 
     # The file object describes the logical file's lifecycle state: its current
@@ -272,14 +268,11 @@ def serialize_source_file_mutation(
         "action": normalized_action,
         "status": normalized_status,
     }
-    if _path_text(file_id):
+    if is_governed_file_id(file_id):
         # Flat identity leads the record, so file_id is placed before the
         # objects rather than appended after them.
-        record = {"file_id": _path_text(file_id), **record}
-    record["evidence"] = {
-        "run_log_file": evidence_file,
-        "run_log_id": evidence_id,
-    }
+        record = {"file_id": file_id, **record}
+    record["evidence"] = {"run_log_id": evidence_id}
     record["file"] = file_object
     if classification is not None:
         # Classification was governed before this serialization boundary.  It
@@ -298,63 +291,6 @@ def serialize_source_file_mutation(
     return record
 
 
-def serialize_source_file_rollback(
-    *,
-    original_record_id: int,
-    phase: str,
-    status: str,
-    run_log_file: str,
-    run_log_id: int,
-    attempt_record_id: int | None = None,
-    application_name: str = "",
-    reason: str = "",
-    recorded_at: str | None = None,
-) -> dict[str, Any]:
-    """Build one canonical rollback-evidence manifest record.
-
-    The record references the compensated lifecycle record rather than
-    duplicating its data, so it carries no ``file`` section. ``rollback``
-    carries the reference plus the linkage that makes compensation
-    idempotent: which phase this record is, and which attempt a final record
-    concludes. An attempt record has no attempt of its own to reference, so
-    that field is omitted rather than recorded null.
-    """
-    normalized_phase = _non_empty(phase, "phase")
-    if normalized_phase not in {"attempt", "final"}:
-        raise LogRunRollbackError(
-            "source_file_rollback.phase must be 'attempt' or 'final'."
-        )
-    normalized_status = _non_empty(status, "status")
-
-    rollback_object: dict[str, Any] = {
-        "original_record_id": _positive_int(
-            original_record_id, "rollback.original_record_id"
-        ),
-        "phase": normalized_phase,
-    }
-    if attempt_record_id is not None:
-        rollback_object["attempt_record_id"] = _positive_int(
-            attempt_record_id, "rollback.attempt_record_id"
-        )
-
-    record: dict[str, Any] = {
-        "recorded_at": recorded_at or _timestamp(),
-        "record_type": ROLLBACK_RECORD_TYPE,
-        "status": normalized_status,
-        "evidence": {
-            "run_log_file": _run_log_name(run_log_file),
-            "run_log_id": _positive_int(
-                run_log_id, "run_log_id"
-            ),
-        },
-        "rollback": rollback_object,
-    }
-    if _path_text(reason):
-        record["result"] = {"reason": _path_text(reason)}
-    record["producer"] = {"application": str(application_name or "")}
-    return record
-
-
 def serialize_run_rollback(
     *,
     rollback_run_id: str,
@@ -362,7 +298,7 @@ def serialize_run_rollback(
     status: str,
     records_removed: int,
     filesystem_operations_reversed: int,
-    affected_file_ids: Sequence[str] = (),
+    affected_file_ids: Sequence[FileId] = (),
     started_at: str,
     ended_at: str,
     failure_details: Sequence[Mapping[str, Any]] = (),
@@ -395,7 +331,7 @@ def serialize_run_rollback(
         "filesystem_operations_reversed": _count(
             filesystem_operations_reversed, "filesystem_operations_reversed"
         ),
-        "affected_file_ids": [str(value) for value in affected_file_ids],
+        "affected_file_ids": list(affected_file_ids),
         "started_at": _non_empty(started_at, "started_at"),
         "ended_at": _non_empty(ended_at, "ended_at"),
     }
@@ -416,7 +352,7 @@ def serialize_run_rollback(
 
 
 def log_source_file_mutation(
-    ctx: Any, run_log,
+    ctx: Any,
     *,
     action: str,
     status: str,
@@ -425,7 +361,7 @@ def log_source_file_mutation(
     recovery_path: Path | str = "",
     previous_version_path: Path | str = "",
     application_name: str = "",
-    file_id: str = "",
+    file_id: FileId | None = None,
     classification: Mapping[str, Any] | None = None,
     conversion: Mapping[str, Any] | None = None,
     reason_code: str = "",
@@ -443,6 +379,19 @@ def log_source_file_mutation(
     caller cannot inject or replace a canonical section. ``run_log_fields``
     enriches the run-log record only and never reaches the manifest.
     """
+    # The owner of the write, resolved rather than threaded. Governed file
+    # operations run deep in utility code that holds no run log, which is what
+    # the ambient binding exists for; every execution boundary binds one.
+    run_log = bound_run_log()
+    if run_log is None:
+        raise SourceFileMutationEvidenceError(
+            "A governed file mutation must be recorded against a run, and no "
+            "run log is bound. Every execution boundary binds one around the "
+            "work it owns; a mutation reaching here outside that scope has no "
+            "run to be evidence of.",
+            phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
+            run_log_id=None,
+        )
     extra_run_log_fields = dict(run_log_fields or {})
     normalized_action = _non_empty(action, "action")
     normalized_status = _non_empty(status, "status")
@@ -463,13 +412,10 @@ def log_source_file_mutation(
             "Source-file mutation run-log evidence did not commit; the file "
             "manifest was not modified.",
             phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
-            run_log_file=None,
             run_log_id=None,
         )
 
-    run_log_file: str | None = None
     try:
-        run_log_file = _context_run_log_name(ctx)
         record = serialize_source_file_mutation(
             action=normalized_action,
             status=normalized_status,
@@ -477,7 +423,6 @@ def log_source_file_mutation(
             destination_path=destination_path,
             recovery_path=recovery_path,
             previous_version_path=previous_version_path,
-            run_log_file=run_log_file,
             run_log_id=run_log_id,
             application_name=application_name,
             file_id=file_id,
@@ -490,7 +435,6 @@ def log_source_file_mutation(
         return SourceFileMutationEvidenceResult(
             manifest_record_id,
             run_log_id=run_log_id,
-            run_log_file=run_log_file,
         )
     except Exception as exc:
         message = str(exc)
@@ -504,459 +448,188 @@ def log_source_file_mutation(
             phase=(
                 SourceFileMutationEvidenceFailurePhase.RUN_LOG_COMMITTED_COMPLETE_EVIDENCE_NOT_ACKNOWLEDGED
             ),
-            run_log_file=run_log_file,
             run_log_id=run_log_id,
         ) from exc
 
 
-def preview_log_run_rollback(
-    ctx: Any,
-    run_log_file: Path | str,
-) -> dict[str, Any]:
-    """Return the manifest-authoritative rollback plan without filesystem writes."""
-    selected_file = _run_log_name(run_log_file)
-    try:
-        with file_manifest_session(ctx) as session:
-            records = _read_required_manifest(session)
-    except (FileManifestError, JsonlReadError, OSError, ValueError) as exc:
-        raise LogRunRollbackError(str(exc)) from exc
-    return _build_plan(records, selected_file)
+def preview_log_run_rollback(ctx: Any, run_id: int) -> dict[str, Any]:
+    """What a rollback of this run would reverse, changing nothing.
+
+    Marking is what selects a rollback set, and marking is a write, so this
+    asks what a request for this run *would* mark rather than performing one.
+    The database answers with the request routine's own predicate, so a
+    preview and its execution cannot disagree about the set.
+    """
+    control = _require_control(ctx)
+    requestable = control.requestable_file_rollbacks(int(run_id), required=True)
+    reversible, refused = _partition_by_reversibility(requestable)
+    return {
+        "operation": "log_run_rollback_preview",
+        "run_id": int(run_id),
+        "requestable_count": len(requestable),
+        "reversible_count": len(reversible),
+        "non_reversible": refused,
+        # Stated rather than implied: a set with anything irreversible in it
+        # reverses nothing, so a preview says so before an operator asks.
+        "would_refuse": bool(refused),
+    }
 
 
 def rollback_log_run(
     ctx: Any,
-    run_log_file: Path | str,
+    run_id: int,
     *,
     reason: str = "",
-    audit_log_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Compensate one run's manifest mutations in reverse execution order."""
-    source_path = Path(run_log_file).expanduser().resolve()
-    selected_file = _run_log_name(source_path)
-    audit_ctx, audit_run_log = _audit_context(ctx, source_path, audit_log_dir)
-    log_run_start(
-        audit_run_log,
-        operation="log_run_rollback",
-        original_run_log_file=selected_file,
-        reason=str(reason or ""),
-    )
+    """Reverse one run's governed filesystem mutations.
+
+    The database owns the rollback set. ``run_id`` scopes the *request*: it
+    marks that run's mutations, and what is then reversed is whatever carries
+    the request. Rollback is state on the mutation row -- ``rollback_request_in``
+    and ``rollback_complete_in`` -- so there is no plan to build here, no
+    selection to evaluate, and no separate evidence record to append.
+
+    Audit goes to ``control.run_log`` through the run that asked for the
+    rollback, like every other record this estate writes.
+    """
+    control = _require_control(ctx)
+    run_log = bound_run_log()
+    if run_log is None:
+        raise LogRunRollbackError(
+            "A rollback records into control.run_log, and no run log is bound. "
+            "Every execution boundary binds one around the work it owns."
+        )
+
+    started_at = _timestamp()
+    log_run_record(run_log, "INFO",
+                   message=f"Rolling back run {int(run_id)}.",
+                   reason=str(reason or ""))
+
+    control.request_file_rollback(run_id=int(run_id), required=True)
+    pending = control.pending_file_rollbacks(required=True)
+    reversible, refused = _partition_by_reversibility(pending)
+
+    if refused:
+        # Nothing is reversed when the set contains something that cannot be.
+        # A partial rollback leaves a run half-undone, which is worse than one
+        # that refused and said why.
+        actions = sorted({str(row["action"]) for row in refused})
+        raise LogRunRollbackError(
+            f"Run {int(run_id)} cannot be rolled back: "
+            f"{', '.join(actions)} is not reversible. "
+            "The forward operation preserved no state to restore from, so "
+            "nothing was reversed."
+        )
 
     succeeded: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
-    appended_rollback_record_ids: list[int] = []
-    reversed_record_ids: set[int] = set()
-    affected_file_ids: set[str] = set()
+    affected_file_ids: set[FileId] = set()
     filesystem_reversals = 0
-    records_removed = 0
-    run_is_clear = False
-    started_at = _timestamp()
-    bind_run(audit_run_log)
-    try:
-        with file_manifest_session(ctx) as session:
-            records = _read_required_manifest(session)
-            plan = _build_plan(records, selected_file)
-            records_by_id = {
-                record.get("record_id"): record for record in records
-            }
-            for issue in [*plan["unsupported"], *plan["non_recoverable"]]:
-                original = records_by_id.get(
-                    issue["original_manifest_record_id"]
-                )
-                if not isinstance(original, Mapping):
-                    continue
-                compensation = _COMPENSATIONS.get(str(issue["action"]))
-                if compensation is None:
-                    compensation = Compensation(
-                        action=str(issue["action"]),
-                        compensating_action="unavailable",
-                        validate=lambda _record: str(issue["reason"]),
-                        execute=lambda _record: {},
-                    )
-                failed.append(_failed_result(original, str(issue["reason"])))
-                attempt_id: int | None = None
-                try:
-                    attempt_id = _append_rollback_evidence(
-                        session,
-                        audit_ctx,
-                        audit_run_log,
-                        original=original,
-                        compensation=compensation,
-                        phase="attempt",
-                        status="attempted",
-                        reason=str(reason or ""),
-                    )
-                    appended_rollback_record_ids.append(attempt_id)
-                    final_id = _append_rollback_evidence(
-                        session,
-                        audit_ctx,
-                        audit_run_log,
-                        original=original,
-                        compensation=compensation,
-                        phase="final",
-                        status="failure",
-                        attempt_record_id=attempt_id,
-                        failure_reason=str(issue["reason"]),
-                        reason=str(reason or ""),
-                    )
-                    appended_rollback_record_ids.append(final_id)
-                except (FileManifestError, LogRunRollbackError):
-                    continue
-            for candidate in plan["candidates"]:
-                original = candidate["original_record"]
-                compensation = _resolved_compensation(candidate)
-                attempt_id: int | None = None
-                try:
-                    attempt_id = _append_rollback_evidence(
-                        session,
-                        audit_ctx,
-                        audit_run_log,
-                        original=original,
-                        compensation=compensation,
-                        phase="attempt",
-                        status="attempted",
-                        reason=str(reason or ""),
-                    )
-                    appended_rollback_record_ids.append(attempt_id)
-                except (FileManifestError, LogRunRollbackError) as exc:
-                    failed.append(_failed_result(original, str(exc)))
-                    continue
 
-                try:
-                    result = compensation.execute(original)
-                except Exception as exc:  # noqa: BLE001 - best effort is contractual.
-                    failure = _failed_result(original, str(exc))
-                    failed.append(failure)
-                    try:
-                        final_id = _append_rollback_evidence(
-                            session,
-                            audit_ctx,
-                            audit_run_log,
-                            original=original,
-                            compensation=compensation,
-                            phase="final",
-                            status="failure",
-                            attempt_record_id=attempt_id,
-                            failure_reason=str(exc),
-                            reason=str(reason or ""),
-                        )
-                        appended_rollback_record_ids.append(final_id)
-                    except (FileManifestError, LogRunRollbackError):
-                        pass
-                    continue
+    for row in reversible:
+        candidate = _reversal_candidate(row)
+        compensation = _resolved_compensation(candidate)
+        problem = compensation.validate(candidate)
+        if problem is not None:
+            failed.append(_failed_result(row, problem))
+            continue
+        try:
+            outcome = compensation.execute(candidate)
+        except OSError as exc:
+            failed.append(_failed_result(row, str(exc)))
+            continue
 
-                success = {
-                    "original_manifest_record_id": original["record_id"],
-                    "action": original.get("action", candidate["action"]),
-                    "compensating_action": compensation.compensating_action,
-                    **result,
-                }
-                try:
-                    final_id = _append_rollback_evidence(
-                        session,
-                        audit_ctx,
-                        audit_run_log,
-                        original=original,
-                        compensation=compensation,
-                        phase="final",
-                        status="success",
-                        attempt_record_id=attempt_id,
-                        reason=str(reason or ""),
-                    )
-                    appended_rollback_record_ids.append(final_id)
-                except (FileManifestError, LogRunRollbackError) as exc:
-                    # The compensation already happened. Failing to write a
-                    # note about it cannot un-happen it, and abandoning the
-                    # record here is what leaves a manifest describing files
-                    # that are no longer there. The reversal stands and the
-                    # bookkeeping failure is reported.
-                    log_run_record(
-                        audit_run_log,
-                        "ERROR",
-                        message=(
-                            "Compensation succeeded but its evidence could not "
-                            f"be appended: {exc}"
-                        ),
-                        original_manifest_record_id=int(original["record_id"]),
-                        original_run_log_file=selected_file,
-                    )
-                succeeded.append(success)
-                reversed_record_ids.add(int(original["record_id"]))
-                if _is_filesystem_reversal(candidate, result):
-                    filesystem_reversals += 1
-                file_id = original.get("file_id")
-                if isinstance(file_id, str) and file_id.strip():
-                    affected_file_ids.add(file_id.strip())
-
-            # Nothing is removed. A reversed mutation is marked reversed on its
-            # own row, and a row marked reversed stops participating in current
-            # state -- which is what the manifest describing current state
-            # meant when records had to be deleted to achieve it. The history
-            # is kept because it is history.
-            #
-            # This also removes the unbounded growth the deletion was defending
-            # against: a retried rollback re-marks the same rows rather than
-            # appending compensation evidence that then has to be reclaimed.
-            if reversed_record_ids:
-                _remove_profiles_for_run_log(ctx, selected_file)
-                records_removed = 0
-            # Whether anything of this run is left is read from the manifest,
-            # not inferred from a status. A record can survive without being a
-            # failure — an indeterminate attempt is neither reversed nor
-            # failed — and a run log is the only way to select that run again.
-            run_is_clear = not any(
-                _record_run_log_file(record) == selected_file
-                for record in session.read_records()
-            )
-    except (FileManifestError, JsonlReadError, OSError, ValueError) as exc:
-        raise LogRunRollbackError(str(exc)) from exc
-    finally:
-        clear_run()
+        control.complete_file_rollback(
+            int(row["file_mutation_id"]), required=True)
+        if is_governed_file_id(row.get("file_manifest_id")):
+            affected_file_ids.add(int(row["file_manifest_id"]))
+        if _is_filesystem_reversal(compensation, outcome):
+            filesystem_reversals += 1
+        succeeded.append({
+            "file_mutation_id": int(row["file_mutation_id"]),
+            "file_manifest_id": row.get("file_manifest_id"),
+            "action": str(row["action"]),
+            "compensating_action": compensation.compensating_action,
+            **outcome,
+        })
+        log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
+                       message=(f"Reversed {row['action']} on file "
+                                f"{row.get('file_manifest_id')}."),
+                       file_id=row.get("file_manifest_id"),
+                       status="success",
+                       **outcome)
 
     status = _aggregate_status(len(succeeded), len(failed))
-    rollback_run_log_file = Path(str(audit_ctx.run_log_path)).name
-    run_rollback_record_id = _write_run_rollback_summary(
-        ctx,
-        audit_run_log, status=status,
-        rollback_run_id=str(getattr(audit_ctx, "run_id", "") or rollback_run_log_file),
-        original_run_id=selected_file,
-        records_removed=records_removed,
+    summary = {
+        "operation": "log_run_rollback",
+        "run_id": int(run_id),
+        "status": status,
+        "filesystem_operations_reversed": filesystem_reversals,
+        "succeeded_count": len(succeeded),
+        "failed_count": len(failed),
+        "failures": failed,
+    }
+    _write_run_rollback_summary(
+        ctx, run_log, status=status,
+        rollback_run_id=str(getattr(run_log, "run_id", "")),
+        original_run_id=str(int(run_id)),
+        records_removed=0,
         filesystem_operations_reversed=filesystem_reversals,
         affected_file_ids=sorted(affected_file_ids),
         started_at=started_at,
         failed=failed,
     )
-    # The log is retired only when the run has nothing left in the manifest.
-    # Anything still there — failed, unsupported, or indeterminate — needs this
-    # log to be selected again, so it stays.
-    deleted_run_log_files = (
-        _delete_rolled_back_run_log(source_path)
-        if status == "success" and run_is_clear
-        else []
-    )
-    summary = {
-        "operation": "log_run_rollback",
-        "deleted_run_log_files": deleted_run_log_files,
-        "original_run_log_file": selected_file,
-        "rollback_run_log_file": rollback_run_log_file,
-        "status": status,
-        "records_removed": records_removed,
-        "filesystem_operations_reversed": filesystem_reversals,
-        "run_rollback_record_id": run_rollback_record_id,
-        "succeeded_count": len(succeeded),
-        "failed_count": len(failed),
-        "unsupported_count": plan["unsupported_count"],
-        "non_recoverable_count": plan["non_recoverable_count"],
-        "already_compensated_count": plan["already_compensated_count"],
-        "indeterminate_count": plan["indeterminate_count"],
-        "appended_rollback_evidence_count": len(
-            appended_rollback_record_ids
-        ),
-        "failures": failed,
-    }
-    log_run_summary(audit_run_log, summary)
-    log_run_complete(
-        audit_run_log,
-        status,
-        **{key: value for key, value in summary.items() if key != "status"},
-    )
-    return {
-        **summary,
-        "reason": str(reason or ""),
-        "audit_log_path": str(audit_ctx.run_log_path),
-        "succeeded": succeeded,
-        "failed": failed,
-    }
+    log_run_summary(run_log, summary)
+    return {**summary, "reason": str(reason or ""),
+            "succeeded": succeeded, "failed": failed}
 
 
-def _remove_profiles_for_run_log(ctx: Any, run_log_file: str) -> int:
-    """Remove the canonical profiles this run log produced.
-
-    Selection is the one the rest of rollback already uses: an exact
-    ``evidence.run_log_file`` match. Matching on the profiled object's
-    manifest row instead was the earlier mistake — a profile's object_id names
-    what was profiled, not which run wrote the profile, so a rollback whose
-    reversed rows happened not to be the profiled rows removed nothing at all.
-
-    The caller already holds the manifest lock used by profile-library writers,
-    so this performs the canonical JSONL rewrite directly without reacquiring
-    that non-reentrant lock.
-    """
-    if not run_log_file:
-        return 0
-    try:
-        target = resolve_profile_library_path(ctx)
-    except ProfileLibraryError:
-        return 0
-    if not target.exists():
-        return 0
-    try:
-        records = [dict(item.record) for item in read_jsonl_file(target)]
-    except (JsonlReadError, OSError) as exc:
+def _require_control(ctx: Any) -> Any:
+    """The Control a rollback reaches the governed file model through."""
+    control = getattr(ctx, "shared_control", None)
+    if control is None:
         raise LogRunRollbackError(
-            f"Profile records could not be read from '{target}': {exc}"
-        ) from exc
-
-    retained: list[dict[str, Any]] = []
-    removed = 0
-    for record in records:
-        header = record.get("header")
-        if not isinstance(header, Mapping):
-            raise LogRunRollbackError(
-                "Stored profile record must contain a canonical header object."
-            )
-        evidence = header.get("evidence")
-        if not isinstance(evidence, Mapping):
-            raise LogRunRollbackError(
-                "Stored profile header requires an evidence object naming the "
-                "run log that produced it."
-            )
-        produced_by = str(evidence.get("run_log_file") or "").strip()
-        if not produced_by:
-            raise LogRunRollbackError(
-                "Stored profile evidence requires a non-empty run_log_file."
-            )
-        if produced_by == run_log_file:
-            removed += 1
-        else:
-            retained.append(record)
-    if removed:
-        try:
-            write_jsonl_file(target, retained)
-        except (OSError, TypeError, ValueError) as exc:
-            raise LogRunRollbackError(
-                f"Profile records could not be rewritten in '{target}': {exc}"
-            ) from exc
-    return removed
-
-
-def _build_plan(
-    records: list[dict[str, Any]],
-    run_log_file: str,
-) -> dict[str, Any]:
-    successful: set[int] = set()
-    attempts: dict[int, int] = {}
-    finalized_attempts: set[int] = set()
-
-    for record in records:
-        if record.get("record_type") == MUTATION_RECORD_TYPE:
-            _validate_mutation_record(record)
-        if record.get("record_type") == ROLLBACK_RECORD_TYPE:
-            _validate_rollback_record(record)
-        if record.get("record_type") != ROLLBACK_RECORD_TYPE:
-            continue
-        rollback = record.get("rollback")
-        if not isinstance(rollback, Mapping):
-            continue
-        source_id = _optional_positive_int(rollback.get("original_record_id"))
-        if source_id is None:
-            continue
-        phase = rollback.get("phase")
-        status = record.get("status")
-        if phase == "attempt" and status == "attempted":
-            attempt_id = _optional_positive_int(record.get("record_id"))
-            if attempt_id is not None:
-                attempts[attempt_id] = source_id
-        if phase == "final":
-            attempt_id = _optional_positive_int(
-                rollback.get("attempt_record_id")
-            )
-            if attempt_id is not None:
-                finalized_attempts.add(attempt_id)
-            if status == "success":
-                successful.add(source_id)
-
-    indeterminate_ids = {
-        source_id
-        for attempt_id, source_id in attempts.items()
-        if attempt_id not in finalized_attempts
-    }
-    candidates: list[dict[str, Any]] = []
-    unsupported: list[dict[str, Any]] = []
-    non_recoverable: list[dict[str, Any]] = []
-    already_compensated: list[int] = []
-    indeterminate: list[int] = []
-
-    mutations = [
-        record
-        for record in records
-        if _is_selected_record(record, run_log_file)
-    ]
-    mutations.sort(key=lambda item: int(item["record_id"]), reverse=True)
-    for record in mutations:
-        record_id = int(record["record_id"])
-        if record_id in successful:
-            already_compensated.append(record_id)
-            continue
-        if record_id in indeterminate_ids:
-            indeterminate.append(record_id)
-            continue
-        if record.get("record_type") != MUTATION_RECORD_TYPE:
-            # Inventory and classification describe state rather than change
-            # it, so removing the record is the whole inverse.
-            candidates.append({
-                "original_manifest_record_id": record_id,
-                "action": "record_only",
-                "compensating_action": "remove_record",
-                "original_record": record,
-            })
-            continue
-        if record.get("status") != "success":
-            # The operation did not happen, so there is nothing to undo and
-            # nothing to be careful about: compensating a failed create would
-            # delete a file this run never wrote. Only the record goes.
-            candidates.append({
-                "original_manifest_record_id": record_id,
-                "action": "record_only",
-                "compensating_action": "remove_record",
-                "original_record": record,
-            })
-            continue
-        action = str(record["action"]).strip().lower()
-        compensation = _COMPENSATIONS.get(action)
-        if compensation is None:
-            unsupported.append({
-                "original_manifest_record_id": record_id,
-                "action": action,
-                "reason": "no registered compensating operation",
-            })
-            continue
-        validation_error = compensation.validate(record)
-        if validation_error:
-            non_recoverable.append({
-                "original_manifest_record_id": record_id,
-                "action": action,
-                "reason": validation_error,
-            })
-            continue
-        candidates.append({
-            "original_manifest_record_id": record_id,
-            "action": action,
-            "compensating_action": compensation.compensating_action,
-            "original_record": record,
-        })
-
-    return {
-        "run_log_file": run_log_file,
-        "candidates": candidates,
-        "candidate_count": len(candidates),
-        "unsupported": unsupported,
-        "unsupported_count": len(unsupported),
-        "non_recoverable": non_recoverable,
-        "non_recoverable_count": len(non_recoverable),
-        "already_compensated": already_compensated,
-        "already_compensated_count": len(already_compensated),
-        "indeterminate": indeterminate,
-        "indeterminate_count": len(indeterminate),
-    }
-
-
-def _read_required_manifest(session: Any) -> list[dict[str, Any]]:
-    """Strictly read the configured authority; rollback never invents an empty one."""
-    if not session.path.is_file():
-        raise LogRunRollbackError(
-            f"File manifest does not exist: {session.path}"
+            "A rollback reads and writes the governed file model in the "
+            "control database, and this context exposes no shared Control."
         )
-    return session.read_records()
+    return control
+
+
+def _partition_by_reversibility(
+    pending: Sequence[Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """Split pending rows into what can be reversed and what cannot.
+
+    An action is reversible only when a compensation resolves for it, and one
+    resolves only where the forward operation preserved enough state to
+    reverse. ``delete`` and ``replace`` overwrite in place and preserve
+    nothing, so neither is registered and neither is reversed.
+    """
+    reversible: list[Mapping[str, Any]] = []
+    refused: list[Mapping[str, Any]] = []
+    for row in pending:
+        target = reversible if _is_reversible(row.get("action")) else refused
+        target.append(row)
+    return reversible, refused
+
+
+def _is_reversible(action: Any) -> bool:
+    """Whether a compensation resolves for this action."""
+    return str(action or "") == "record_only" or str(action or "") in _COMPENSATIONS
+
+
+def _reversal_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
+    """The paths a compensation works from, named as the executors expect.
+
+    ``path`` is where the file is now; ``restore_to_path`` is where the file's
+    own history says it belongs. Both come from the row, so nothing is
+    reconstructed here.
+    """
+    return {
+        "action": str(row.get("action") or ""),
+        "current_path": _path_text(row.get("path")),
+        "original_path": _path_text(row.get("restore_to_path")),
+    }
 
 
 # Logical compensation input -> (canonical object, canonical field). The two
@@ -977,85 +650,6 @@ def _record_path(record: Mapping[str, Any], name: str) -> str:
     if not isinstance(grouped, Mapping):
         return ""
     return _path_text(grouped.get(field))
-
-
-def _record_run_log_file(record: Mapping[str, Any]) -> str:
-    """Resolve the canonical run-log pointer."""
-    evidence = record.get("evidence")
-    if not isinstance(evidence, Mapping):
-        return ""
-    return _path_text(evidence.get("run_log_file"))
-
-
-def _is_selected_mutation(record: Mapping[str, Any], run_log_file: str) -> bool:
-    """Whether this run wrote the mutation, whatever its outcome was.
-
-    A failed mutation is selected too. Its operation never happened, so there
-    is nothing on disk to reverse — but the record it left behind is still one
-    this run introduced, and rollback leaves no mutation records from the run.
-    What it did decides how it is reversed, not whether it is selected.
-    """
-    if record.get("record_type") != MUTATION_RECORD_TYPE:
-        return False
-    if _optional_positive_int(record.get("record_id")) is None:
-        return False
-    action = record.get("action")
-    if not isinstance(action, str) or not action.strip():
-        return False
-    return _record_run_log_file(record) == run_log_file
-
-
-def _is_selected_record(record: Mapping[str, Any], run_log_file: str) -> bool:
-    """Whether this run introduced the record, whatever its canonical type.
-
-    Inventory and classification records have no filesystem effect, so their
-    inverse is the removal of the record and nothing more. They are selected on
-    the same evidence key as a mutation, because that key is what ties any
-    manifest record to the run that wrote it.
-    """
-    if record.get("record_type") == MUTATION_RECORD_TYPE:
-        return _is_selected_mutation(record, run_log_file)
-    if record.get("record_type") not in _SELECTABLE_RECORD_TYPES:
-        return False
-    if _optional_positive_int(record.get("record_id")) is None:
-        return False
-    return _record_run_log_file(record) == run_log_file
-
-
-def _is_run_owned_rollback(record: Mapping[str, Any], removed: set[int]) -> bool:
-    """Whether this compensation record belongs to a record being removed.
-
-    ``source_file_rollback`` references the mutation it compensated by
-    ``rollback.original_record_id``, and the lifecycle projection only renders
-    it while that mutation is present. Removing the mutation and leaving the
-    reference behind would strand evidence that no consumer can resolve, so the
-    compensation records for a rolled-back run leave with it.
-    """
-    if record.get("record_type") != ROLLBACK_RECORD_TYPE:
-        return False
-    rollback = record.get("rollback")
-    if not isinstance(rollback, Mapping):
-        return False
-    return _optional_positive_int(rollback.get("original_record_id")) in removed
-
-
-def _delete_rolled_back_run_log(source_path: Path) -> list[str]:
-    """Delete a fully rolled-back run's log and its companions.
-
-    The run's governed state is gone, so its log stops offering itself as
-    something to inspect or roll back again. Its results summary and sequencing
-    state go with it: neither means anything once the log they describe is not
-    there.
-
-    Only a rollback that reversed everything reaches this. A run that still has
-    records keeps its log, because that log is what a retry selects by.
-    """
-    stem = source_path.name.split(".jsonl")[0]
-    deleted: list[str] = []
-    for companion in sorted(source_path.parent.glob(f"{stem}.*")):
-        if companion.is_file() and delete_file(companion):
-            deleted.append(companion.name)
-    return deleted
 
 
 def _is_filesystem_reversal(
@@ -1087,7 +681,7 @@ def _write_run_rollback_summary(
     original_run_id: str,
     records_removed: int,
     filesystem_operations_reversed: int,
-    affected_file_ids: Sequence[str],
+    affected_file_ids: Sequence[FileId],
     started_at: str,
     failed: Sequence[Mapping[str, Any]],
 ) -> int | None:
@@ -1178,112 +772,10 @@ def _validate_mutation_record(record: Mapping[str, Any]) -> None:
         raise LogRunRollbackError(
             "source_file_mutation.evidence must be an object."
         )
-    _run_log_name(_record_run_log_file(record))
     _positive_int(
         evidence.get("run_log_id"),
         "source_file_mutation.evidence.run_log_id",
     )
-
-
-def _validate_rollback_record(record: Mapping[str, Any]) -> None:
-    """Reject malformed linkage that could undermine idempotency."""
-    _positive_int(record.get("record_id"), "source_file_rollback.record_id")
-    rollback = record.get("rollback")
-    if not isinstance(rollback, Mapping):
-        raise LogRunRollbackError(
-            "source_file_rollback.rollback must be an object."
-        )
-    _positive_int(
-        rollback.get("original_record_id"),
-        "source_file_rollback.rollback.original_record_id",
-    )
-    phase = rollback.get("phase")
-    status = record.get("status")
-    if phase not in {"attempt", "final"}:
-        raise LogRunRollbackError(
-            "source_file_rollback.rollback.phase must be 'attempt' or 'final'."
-        )
-    if phase == "attempt" and status != "attempted":
-        raise LogRunRollbackError(
-            "A rollback attempt record must have status 'attempted'."
-        )
-    if phase == "final" and status not in {"success", "failure"}:
-        raise LogRunRollbackError(
-            "A final rollback record must have status 'success' or 'failure'."
-        )
-    if phase == "final":
-        _positive_int(
-            rollback.get("attempt_record_id"),
-            "source_file_rollback.rollback.attempt_record_id",
-        )
-    evidence = record.get("evidence")
-    if not isinstance(evidence, Mapping):
-        raise LogRunRollbackError(
-            "source_file_rollback.evidence must be an object."
-        )
-    _run_log_name(evidence.get("run_log_file"))
-    _positive_int(
-        evidence.get("run_log_id"),
-        "source_file_rollback.evidence.run_log_id",
-    )
-
-
-def _append_rollback_evidence(
-    session: Any,
-    audit_ctx: Any,
-    audit_run_log: Any,
-    *,
-    original: Mapping[str, Any],
-    compensation: Compensation,
-    phase: str,
-    status: str,
-    reason: str,
-    attempt_record_id: int | None = None,
-    failure_reason: str = "",
-) -> int:
-    fields = {
-        "original_manifest_record_id": int(original["record_id"]),
-        "original_run_log_file": str(original["evidence"]["run_log_file"]),
-        # Inventory and classification records describe state rather than a
-        # filesystem action, so they carry no action of their own. The
-        # compensation names what is being done to them instead.
-        "original_action": str(original.get("action") or compensation.action),
-        "compensating_action": compensation.compensating_action,
-        "phase": phase,
-        "status": status,
-        "source_path": _path_text(original.get("source_path")),
-        "destination_path": _path_text(original.get("destination_path")),
-        "recovery_path": _path_text(original.get("recovery_path")),
-        "previous_version_path": _path_text(
-            original.get("previous_version_path")
-        ),
-        "rollback_attempt_record_id": attempt_record_id,
-        "reason": reason,
-        "failure_reason": failure_reason,
-    }
-    run_record_id = log_run_record(
-        audit_run_log,
-        "SOURCE_FILE_ROLLBACK",
-        **fields,
-    )
-    if run_record_id is None:
-        raise LogRunRollbackError(
-            "Rollback run-log evidence did not commit; no manifest evidence "
-            "or filesystem compensation was performed."
-        )
-    # The record shape belongs to the serializer; this function gathers its
-    # inputs and appends the result through the already-locked session.
-    record = serialize_source_file_rollback(
-        original_record_id=int(original["record_id"]),
-        phase=phase,
-        status=status,
-        run_log_file=Path(str(audit_ctx.run_log_path)).name,
-        run_log_id=run_record_id,
-        attempt_record_id=attempt_record_id,
-        application_name="rey_lib",
-        reason=reason,
-    )
-    return session.append(record)
 
 
 def _validate_move(record: Mapping[str, Any]) -> str | None:
@@ -1312,36 +804,6 @@ def _execute_create(record: Mapping[str, Any]) -> dict[str, Any]:
         return {"deleted_path": str(created), "outcome": "already_absent"}
     created.unlink()
     return {"deleted_path": str(created), "outcome": "deleted"}
-
-
-def _validate_delete(record: Mapping[str, Any]) -> str | None:
-    return _require_paths(record, "original_path", "recovery_path")
-
-
-def _execute_delete(record: Mapping[str, Any]) -> dict[str, Any]:
-    recovery = Path(_record_path(record, "recovery_path"))
-    original = Path(_record_path(record, "original_path"))
-    outcome = _move_exact(recovery, original)
-    return {
-        "from_path": str(recovery),
-        "to_path": str(original),
-        "outcome": outcome,
-    }
-
-
-def _validate_replace(record: Mapping[str, Any]) -> str | None:
-    return _require_paths(record, "current_path", "previous_version_path")
-
-
-def _execute_replace(record: Mapping[str, Any]) -> dict[str, Any]:
-    previous = Path(_record_path(record, "previous_version_path"))
-    destination = Path(_record_path(record, "current_path"))
-    outcome = _move_exact(previous, destination)
-    return {
-        "from_path": str(previous),
-        "to_path": str(destination),
-        "outcome": outcome,
-    }
 
 
 def _move_exact(source: Path, destination: Path) -> str:
@@ -1374,46 +836,6 @@ def _require_paths(
     return None
 
 
-def _audit_context(
-    ctx: Any,
-    source_run_log: Path,
-    audit_log_dir: Path | str | None,
-) -> tuple[SimpleNamespace, Any]:
-    directory = Path(
-        audit_log_dir or source_run_log.parent
-    ).expanduser().resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    audit_ctx = SimpleNamespace(
-        app_name="log_run_rollback",
-        paths=getattr(ctx, "paths", None),
-        installation=getattr(ctx, "installation", ""),
-        config_root=getattr(ctx, "config_root", ""),
-    )
-    # The audit belongs to the run that asked for the rollback. It used to mint
-    # an identity of its own here, which is no longer possible and was never
-    # right: identity comes from recording a run, and a rollback performed
-    # during a run is part of that run rather than a second one.
-    audit_ctx.run_id = getattr(ctx, "run_id", None)
-    establish_run_identity(audit_ctx)
-    audit_ctx.run_log_path = str(
-        run_artifact_path(
-            directory,
-            "log_run_rollback",
-            audit_ctx.run_timestamp,
-            "jsonl",
-        )
-    )
-    from rey_lib.logs.run_log import RunLog
-
-    audit_run_log = RunLog(
-        app="log_run_rollback",
-        run_id=audit_ctx.run_id,
-        run_timestamp=audit_ctx.run_timestamp,
-        path=audit_ctx.run_log_path,
-    )
-    return audit_ctx, audit_run_log
-
-
 def _failed_result(
     original: Mapping[str, Any],
     reason: str,
@@ -1431,24 +853,6 @@ def _aggregate_status(succeeded: int, failed: int) -> str:
     if failed:
         return "failure"
     return "success"
-
-
-def _run_log_name(value: Path | str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise LogRunRollbackError("run_log_file must be a non-empty path or filename.")
-    return Path(text).name
-
-
-def _context_run_log_name(ctx: Any) -> str:
-    for field in ("run_log_path", "log_file"):
-        value = getattr(ctx, field, None)
-        if value:
-            return _run_log_name(value)
-    raise LogRunRollbackError(
-        "Source-file mutation evidence committed without an addressable run-log "
-        "filename."
-    )
 
 
 def _path_text(value: Any) -> str:
@@ -1500,18 +904,6 @@ register_file_compensation(
     compensating_action="delete_created_file",
     validate=_validate_create,
     execute=_execute_create,
-)
-register_file_compensation(
-    "delete",
-    compensating_action="restore_recoverable_file",
-    validate=_validate_delete,
-    execute=_execute_delete,
-)
-register_file_compensation(
-    "replace",
-    compensating_action="restore_previous_version",
-    validate=_validate_replace,
-    execute=_execute_replace,
 )
 # A governed file that was present and is now absent. An ordinary lifecycle
 # fact, not a compensation: the run did not remove the file, it recorded that
