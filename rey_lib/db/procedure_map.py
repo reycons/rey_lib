@@ -138,15 +138,32 @@ def get_procedure_map(ctx: Any, map_name: str) -> Any:
 # Binding resolution (normalized, fail-closed)
 # ---------------------------------------------------------------------------
 
+def _log_execution(binding: Any) -> bool:
+    """Whether a successful call to this routine records SQL_EXECUTION.
+
+    Absent means true. Only an explicit ``false`` turns it off, so a binding
+    that says nothing about logging keeps logging.
+    """
+    declared = _get(binding, "log_execution")
+    return True if declared is None else bool(declared)
+
+
 def resolve_routine_binding(map_cfg: Any, map_name: str, routine_name: str) -> dict[str, Any]:
     """Return a normalized routine binding for ``routine_name``.
 
     Normalized dict:
     ``{procedure_map_name, name, execution_target, routine, routine_type,
-    result_mode, inputs, output}``. Derives ``routine_type``/``result_mode``
-    from a legacy ``call_type`` when present. Fails closed on the usual
-    structural problems and on a ``scalar_result`` binding without
-    ``output.variable``.
+    result_mode, inputs, output, log_execution}``. Derives
+    ``routine_type``/``result_mode`` from a legacy ``call_type`` when present.
+    Fails closed on the usual structural problems and on a ``scalar_result``
+    binding without ``output.variable``.
+
+    ``log_execution: false`` suppresses **successful** ``SQL_EXECUTION`` logging
+    only. Failures are invariant and always recorded. A routine called once per
+    row -- a per-file manifest or mutation write -- reports the same fact on
+    every call and doubles the run log to say it; the step that owns the work is
+    already in the log. Absent means true, so a binding that says nothing keeps
+    logging.
     """
     bindings = _get(map_cfg, "routine_bindings")
     if bindings is None:
@@ -190,6 +207,7 @@ def resolve_routine_binding(map_cfg: Any, map_name: str, routine_name: str) -> d
         "result_mode": result_mode,
         "inputs": _binding_inputs(binding),
         "output": _get(binding, "output"),
+        "log_execution": _log_execution(binding),
     }
 
 
@@ -438,19 +456,23 @@ def execute_mapped_routine(
         )
         raise
 
-    log_sql_execution(run_log,
-        sql_label=routine_name,
-        operation="routine",
-        status="success",
-        duration_ms=int((time.monotonic() - t0) * 1000),
-        safe_to_preview=False,
-        procedure_map=procedure_map,
-        routine=str(binding["routine"]),
-        routine_type=str(binding.get("routine_type") or ""),
-        result_mode=result_mode,
-        row_count=len(rows) if rows is not None else None,
-        object_count=len(outputs) if outputs else None,
-    )
+    # Failures are logged unconditionally above. This is the success record,
+    # and it is the only one a binding may decline. Only the logging is skipped:
+    # what the call returns is the caller's contract and never varies with it.
+    if binding.get("log_execution", True):
+        log_sql_execution(run_log,
+            sql_label=routine_name,
+            operation="routine",
+            status="success",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            safe_to_preview=False,
+            procedure_map=procedure_map,
+            routine=str(binding["routine"]),
+            routine_type=str(binding.get("routine_type") or ""),
+            result_mode=result_mode,
+            row_count=len(rows) if rows is not None else None,
+            object_count=len(outputs) if outputs else None,
+        )
 
     return {
         "procedure_map": procedure_map,
