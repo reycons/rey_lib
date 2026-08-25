@@ -1010,6 +1010,35 @@ class Control:
             "converted": converted,
         }, required=required)
 
+    def run_log_record(self, run_log_id: int,
+                       required: bool = True) -> Optional[dict[str, Any]]:
+        """Return one run-log record, whole, or None.
+
+        Carries the run it belongs to, because a reader looking at one record
+        needs to know what it was part of.
+        """
+        rows = self._call_rows("find_run_log_record",
+                               {"run_log_id": run_log_id},
+                               required=required)
+        return rows[0] if rows else None
+
+    def run_tree_nodes(self, parent_key: Optional[str] = None,
+                       required: bool = True) -> list[dict[str, Any]]:
+        """Return the children of one node in the Run History tree.
+
+        One argument, the parent, because a tree asks one question at a time.
+        The key carries its own kind -- ``installation:<name>``, ``run:<id>``,
+        ``record:<id>``, ``group:<run>:<anchor>:<subgroup>`` -- so a caller
+        walking down passes back the ``node_key`` it was given and never states
+        what level it is on. ``None`` is the root.
+
+        Visibility, ancestry and grouping are the routine's; nothing here
+        decides which records are drawn or what they are called.
+        """
+        return self._call_rows("find_run_tree_nodes",
+                               {"parent_key": parent_key},
+                               required=required)
+
     def file_history(self, file_manifest_id: int,
                      required: bool = True) -> list[dict[str, Any]]:
         """Return one file's mutations, oldest first."""
