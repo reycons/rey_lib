@@ -1022,6 +1022,22 @@ class Control:
                                required=required)
         return rows[0] if rows else None
 
+    def file_tree_nodes(self, parent_key: Optional[str] = None,
+                        required: bool = True) -> list[dict[str, Any]]:
+        """Return the children of one node in the File Manifest tree.
+
+        The same shape as :meth:`run_tree_nodes`: one argument, the parent,
+        whose key carries its own kind -- ``feed:<feed>``, ``file:<id>``,
+        ``stage:<id>`` -- so a caller walking down passes back the ``node_key``
+        it was given and never states what level it is on. ``None`` is the root.
+
+        Which files a feed holds, which stages a file has and what each is
+        called are the routine's; nothing here decides them.
+        """
+        return self._call_rows("find_file_tree_nodes",
+                               {"parent_key": parent_key},
+                               required=required)
+
     def run_tree_nodes(self, parent_key: Optional[str] = None,
                        required: bool = True) -> list[dict[str, Any]]:
         """Return the children of one node in the Run History tree.
