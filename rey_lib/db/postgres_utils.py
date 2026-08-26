@@ -276,6 +276,12 @@ def query_rows(
         values = result.fetchmany(max(1, int(limit))) if columns else []
         return columns, [dict(zip(columns, row)) for row in values]
     except Exception as exc:
+        # PostgreSQL leaves a connection in failed-transaction state after a
+        # failed statement, and this handle is shared. Without the rollback the
+        # next consumer of the same connection is refused whatever its own SQL
+        # says -- one bad ad hoc query poisoned every later one. This is what
+        # execute_named_sql below already does for the routine path.
+        conn.rollback()
         raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
 
 

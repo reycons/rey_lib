@@ -165,6 +165,23 @@ def test_postgres_execution_failure_rolls_back_and_wraps_error() -> None:
     assert core.rollbacks == 1
 
 
+def test_postgres_query_rows_failure_rolls_back_the_shared_connection() -> None:
+    """A failed read must leave the connection usable by the next consumer.
+
+    PostgreSQL refuses every statement after a failed one until the transaction
+    ends, and this handle is shared: without the rollback, one bad ad hoc query
+    made every later query fail whatever its own SQL said.
+    """
+    conn, core, _engine = _connection()
+    core.failure = RuntimeError("no such table")
+
+    with pytest.raises(DatabaseError, match="query failed: no such table"):
+        postgres_utils.query_rows(conn, "SELECT * FROM nope")
+
+    assert core.rollbacks == 1
+    assert core.commits == 0
+
+
 def test_postgres_function_and_procedure_use_bound_core_execution() -> None:
     conn, core, _engine = _connection(_Result(rows=[(41,)]))
 
