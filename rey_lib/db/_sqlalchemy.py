@@ -75,8 +75,15 @@ def open_connection(
     port: int,
     database: str,
     connect_args: dict[str, Any] | None = None,
+    isolation_level: str = "",
 ) -> ReyConnection:
-    """Create an Engine and return its connection behind the Rey handle."""
+    """Create an Engine and return its connection behind the Rey handle.
+
+    ``isolation_level`` is applied to the Engine, so it is in force before any
+    statement runs and is never toggled per call. PostgreSQL passes AUTOCOMMIT:
+    its connections are shared, and an implicit transaction left open by a
+    failed statement made every later consumer fail whatever its own SQL said.
+    """
     URL, create_engine = _sqlalchemy()
     url = URL.create(
         drivername=drivername,
@@ -86,7 +93,11 @@ def open_connection(
         port=port,
         database=database,
     )
-    engine = create_engine(url, connect_args=connect_args or {})
+    engine = create_engine(
+        url,
+        connect_args=connect_args or {},
+        **({"isolation_level": isolation_level} if isolation_level else {}),
+    )
     try:
         connection = engine.connect()
     except Exception:

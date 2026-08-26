@@ -462,8 +462,11 @@ def test_execute_sql_text_runs_through_postgres_core_connection(tmp_path: Path):
         safe_to_preview=True,
     )
 
-    assert core.executed == ["select secret_value from source"]
-    assert core.commits == 1
+    # run_sql owns the layer's one atomicity contract, and issues it as SQL
+    # because the connection is in AUTOCOMMIT.
+    assert core.executed == ["BEGIN", "select secret_value from source", "COMMIT"]
+    # Not the handle's commit: SQLAlchemy's bookkeeping is not managing this.
+    assert core.commits == 0
     records = [r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION"]
     assert len(records) == 1
     assert records[0]["status"] == "success"
@@ -609,7 +612,8 @@ def test_named_sql_scalar_binds_named_params():
     sql, params = cur.executed[0]
     assert sql == "SELECT f(:run_id, :name)"
     assert params == {"run_id": "R", "name": "N"}
-    assert conn.committed
+    # One bound statement on an autocommit connection needs no commit.
+    assert not conn.committed
 
 
 def test_named_sql_leaves_type_casts_alone():
@@ -622,7 +626,8 @@ def test_named_sql_scalar_no_row_fails_closed():
     conn = _FakeConn(_FakeCursor(one=None))
     with pytest.raises(DatabaseError, match="none was returned"):
         execute_named_sql(conn, "SELECT f()", {}, "scalar_result")
-    assert conn.rolledback
+    # Nothing to undo: the failure opened no transaction.
+    assert not conn.rolledback
 
 
 def test_named_sql_scalar_multiple_values_fails_closed():
@@ -638,10 +643,11 @@ def test_named_sql_dataset_returns_dict_rows():
     assert rows == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
 
 
-def test_named_sql_no_return_commits_and_returns_none():
+def test_named_sql_no_return_returns_none_without_committing():
     conn = _FakeConn(_FakeCursor())
     assert execute_named_sql(conn, "DELETE FROM t WHERE b = :b", {"b": 1}, "no_return") is None
-    assert conn.committed
+    # The write is already durable: the connection is in AUTOCOMMIT.
+    assert not conn.committed
 
 
 # ---------------------------------------------------------------------------

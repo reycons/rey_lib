@@ -72,6 +72,32 @@ def _psycopg2() -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _refuse_unsupported_autocommit(db_cfg: Any) -> None:
+    """Refuse a configuration that asserts behaviour this provider does not give.
+
+    PostgreSQL connections are autocommit by contract. Accepting
+    ``autocommit: false`` and ignoring it would let a file claim a transaction
+    lifecycle the runtime does not provide, which is worse than refusing it. A
+    non-boolean is refused rather than coerced, for the same reason.
+    """
+    if not hasattr(db_cfg, "autocommit"):
+        return
+    setting = getattr(db_cfg, "autocommit", None)
+    if setting is None:
+        return
+    name = getattr(db_cfg, "name", "<unnamed>")
+    if not isinstance(setting, bool):
+        raise ConfigError(
+            f"postgres_utils: connection '{name}' sets autocommit to "
+            f"{setting!r}; it must be a boolean."
+        )
+    if setting is False:
+        raise ConfigError(
+            f"postgres_utils: connection '{name}': PostgreSQL connections are "
+            "always autocommit; autocommit: false is not supported."
+        )
+
+
 def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
     """
     Open a SQLAlchemy-backed connection from a connection config Namespace.
@@ -114,6 +140,8 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
             "(host, database, username)."
         )
 
+    _refuse_unsupported_autocommit(db_cfg)
+
     try:
         from rey_lib.db._sqlalchemy import open_connection  # noqa: PLC0415
 
@@ -127,6 +155,10 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
             # Resolved as the connection is opened, and held no longer than
             # the call that uses it.
             password=str(resolve_env_reference(ctx, password)),
+            # The contract, applied before any statement: these connections are
+            # shared, and an implicit transaction left open by one failure made
+            # every later consumer fail whatever its own SQL said.
+            isolation_level="AUTOCOMMIT",
         )
     except Exception as exc:
         raise DatabaseError(
@@ -195,10 +227,11 @@ def render_and_execute(conn: Any, call: RoutineCall) -> Any:
             # asking such a result for one raises rather than returning empty.
             row = result.mappings().first() if result.returns_rows else None
             answer = dict(row) if row is not None else None
-        conn.commit()
+        # No commit and no rollback: one routine call is one statement, and the
+        # connection is in AUTOCOMMIT. A procedure's own writes are inside that
+        # single call and are atomic without help from here.
         return answer
     except Exception as exc:
-        conn.rollback()
         raise DatabaseError(
             f"postgres_utils: {call.shape.value} call failed for "
             f"'{call.routine}': {exc}"
@@ -246,14 +279,28 @@ def run_sql(
     """
     from rey_lib.db._sqlalchemy import core_connection
 
+    core = core_connection(conn)
+    # The one operation with a real atomicity contract, so the one place
+    # transaction language belongs. Issued as SQL because the connection is in
+    # AUTOCOMMIT: SQLAlchemy emits no BEGIN there, but PostgreSQL honours one
+    # sent as a statement.
     try:
-        parameters = tuple(params) if params else None
-        result = core_connection(conn).exec_driver_sql(sql_text, parameters)
-        rowcount = result.rowcount
-        conn.commit()
-        return rowcount
+        core.exec_driver_sql("BEGIN")
+        try:
+            parameters = tuple(params) if params else None
+            result = core.exec_driver_sql(sql_text, parameters)
+            rowcount = result.rowcount
+            core.exec_driver_sql("COMMIT")
+            return rowcount
+        except Exception:
+            # The script failed. A rollback that also fails must not replace
+            # the reason the script did.
+            try:
+                core.exec_driver_sql("ROLLBACK")
+            except Exception:  # noqa: BLE001 -- the original error is the answer
+                pass
+            raise
     except Exception as exc:
-        conn.rollback()
         raise DatabaseError(
             f"postgres_utils: run_sql failed: {exc}"
         ) from exc
@@ -276,12 +323,10 @@ def query_rows(
         values = result.fetchmany(max(1, int(limit))) if columns else []
         return columns, [dict(zip(columns, row)) for row in values]
     except Exception as exc:
-        # PostgreSQL leaves a connection in failed-transaction state after a
-        # failed statement, and this handle is shared. Without the rollback the
-        # next consumer of the same connection is refused whatever its own SQL
-        # says -- one bad ad hoc query poisoned every later one. This is what
-        # execute_named_sql below already does for the routine path.
-        conn.rollback()
+        # No rollback: the connection is in AUTOCOMMIT, so a failed read leaves
+        # no transaction to clear and the next consumer is unaffected. The
+        # rollback that used to be here existed only to undo the implicit
+        # transaction this contract removed.
         raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
 
 
@@ -328,11 +373,9 @@ def execute_named_sql(
 
         result = core_connection(conn).execute(text(sql_text), serialised)
         if result_mode == "no_return":
-            conn.commit()
             return None
         if result_mode == "scalar_result":
             row = result.first()
-            conn.commit()
             if row is None:
                 raise DatabaseError(
                     "execute_named_sql: scalar_result expected a row but none was returned."
@@ -345,16 +388,13 @@ def execute_named_sql(
             return row[0]
         if result_mode == "dataset_result":
             rows = [dict(row) for row in result.mappings().all()]
-            conn.commit()
             return rows
         raise DatabaseError(
             f"execute_named_sql: unsupported result_mode '{result_mode}'."
         )
     except DatabaseError:
-        conn.rollback()
         raise
     except Exception as exc:
-        conn.rollback()
         raise DatabaseError(
             f"postgres_utils: execute_named_sql failed: {exc}"
         ) from exc

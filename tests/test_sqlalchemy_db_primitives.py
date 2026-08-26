@@ -11,7 +11,7 @@ from rey_lib.db import mysql_utils, postgres_utils
 from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.db._sqlalchemy import ReyConnection, inspect_schema
 from rey_lib.db.db_adapter import DBAdapter
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
 
 class _Engine:
@@ -139,7 +139,7 @@ def test_postgres_query_rows_preserves_public_result_shape() -> None:
         ),
     ],
 )
-def test_postgres_named_sql_preserves_modes_and_commits(
+def test_postgres_named_sql_preserves_modes_without_committing(
     mode: str, result: _Result, expected: Any
 ) -> None:
     conn, core, _engine = _connection(result)
@@ -149,28 +149,62 @@ def test_postgres_named_sql_preserves_modes_and_commits(
     )
 
     assert actual == expected
-    assert core.commits == 1
+    # Neither: the connection is in AUTOCOMMIT, so one bound statement needs no
+    # transaction lifecycle around it.
+    assert core.commits == 0
     assert core.rollbacks == 0
     assert core.executed[0][1] == {"record_id": 17}
 
 
-def test_postgres_execution_failure_rolls_back_and_wraps_error() -> None:
+def test_postgres_run_sql_brackets_its_script_in_a_sql_transaction() -> None:
+    """run_sql owns the one real atomicity contract in this layer.
+
+    The connection is in AUTOCOMMIT, where SQLAlchemy emits no BEGIN, so the
+    transaction is sent as PostgreSQL statements. A multi-statement script must
+    apply whole or not at all.
+    """
     conn, core, _engine = _connection()
-    core.failure = RuntimeError("boom")
+
+    postgres_utils.run_sql(conn, "CREATE TABLE a(); CREATE TABLE b();")
+
+    issued = [str(statement) for statement, _ in core.executed]
+    assert issued[0] == "BEGIN"
+    assert issued[-1] == "COMMIT"
+    # Not the handle's methods: those drive SQLAlchemy's bookkeeping, which is
+    # not what is managing this transaction.
+    assert core.commits == 0
+
+
+def test_postgres_run_sql_rolls_back_its_script_and_wraps_the_error() -> None:
+    conn, core, _engine = _connection()
+    issued: list[str] = []
+    original = core.exec_driver_sql
+
+    def only_the_script_fails(statement: Any, params: Any = None) -> Any:
+        issued.append(str(statement))
+        if str(statement) not in {"BEGIN", "COMMIT", "ROLLBACK"}:
+            raise RuntimeError("boom")
+        return original(statement, params)
+
+    core.exec_driver_sql = only_the_script_fails  # type: ignore[method-assign]
 
     with pytest.raises(DatabaseError, match="run_sql failed: boom"):
         postgres_utils.run_sql(conn, "DELETE FROM records")
 
-    assert core.commits == 0
-    assert core.rollbacks == 1
+    assert issued[0] == "BEGIN"
+    assert issued[-1] == "ROLLBACK"
+    assert "COMMIT" not in issued
+    # Not the handle's methods: SQLAlchemy's bookkeeping is not what is
+    # managing this transaction.
+    assert core.rollbacks == 0
 
 
-def test_postgres_query_rows_failure_rolls_back_the_shared_connection() -> None:
-    """A failed read must leave the connection usable by the next consumer.
+def test_postgres_query_rows_failure_needs_no_recovery() -> None:
+    """A failed read leaves the shared connection usable, with nothing to undo.
 
-    PostgreSQL refuses every statement after a failed one until the transaction
-    ends, and this handle is shared: without the rollback, one bad ad hoc query
-    made every later query fail whatever its own SQL said.
+    Under AUTOCOMMIT a failed statement opens no transaction, so the next
+    consumer is unaffected. The rollback that used to be here existed only to
+    clear the implicit transaction this contract removed.
     """
     conn, core, _engine = _connection()
     core.failure = RuntimeError("no such table")
@@ -178,7 +212,7 @@ def test_postgres_query_rows_failure_rolls_back_the_shared_connection() -> None:
     with pytest.raises(DatabaseError, match="query failed: no such table"):
         postgres_utils.query_rows(conn, "SELECT * FROM nope")
 
-    assert core.rollbacks == 1
+    assert core.rollbacks == 0
     assert core.commits == 0
 
 
@@ -252,8 +286,30 @@ def test_postgres_get_connection_preserves_config_mapping(
             "database": "rey_control",
             "username": "rey",
             "password": "secret",
+            # The contract, applied at the engine before any statement runs.
+            "isolation_level": "AUTOCOMMIT",
         },
     }
+
+
+def test_postgres_refuses_a_config_that_asserts_it_is_transactional() -> None:
+    """A file must not claim behaviour the runtime does not provide.
+
+    PostgreSQL connections are autocommit by contract. Accepting
+    `autocommit: false` and ignoring it would make the configuration surface
+    wider than the contract, which is worse than refusing it.
+    """
+    base = dict(
+        name="control", host="db.internal", port="5544",
+        database="rey_control", username="rey", password="secret",
+    )
+
+    with pytest.raises(ConfigError, match="always autocommit"):
+        postgres_utils.get_connection(SimpleNamespace(**base, autocommit=False))
+
+    # Coercing "no" to True would be the same failure by another route.
+    with pytest.raises(ConfigError, match="must be a boolean"):
+        postgres_utils.get_connection(SimpleNamespace(**base, autocommit="no"))
 
 
 def test_mysql_query_rows_and_named_fetch_preserve_dict_shapes(
