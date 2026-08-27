@@ -206,45 +206,33 @@ class FileManifest:
 
     # -- rollback ------------------------------------------------------------
 
-    def request_rollback(self, *, file_mutation_id: Optional[int] = None,
+    def request_rollback(self, *, dry_run: bool = True,
+                         file_mutation_id: Optional[int] = None,
+                         file_manifest_id: Optional[int] = None,
                          batch_step_id: Optional[int] = None,
                          batch_id: Optional[int] = None,
-                         run_id: Optional[int] = None) -> int:
-        """Mark mutations for reversal, and return how many were newly marked.
+                         run_id: Optional[int] = None) -> list[dict[str, Any]]:
+        """Return the rollback set for one scope, marking it unless previewing.
 
-        Exactly one scope. Rollback is state on the mutation it reverses -- no
-        rollback record is written and nothing is deleted -- so this freezes the
-        set of rows to reverse and changes no file.
-
-        Asking twice is safe: a mutation already pending keeps the request that
-        claimed it, and one already reversed is not reopened.
+        Exactly one scope. Under ``dry_run`` nothing is written, so this is the
+        preview as well as the request -- one predicate, one shape, no way for
+        the two to describe different reversals. A row that can be reversed
+        carries the command that reverses it.
         """
-        return int(self._control.request_file_rollback(
-            file_mutation_id=file_mutation_id, batch_step_id=batch_step_id,
+        return self._control.request_file_rollback(
+            dry_run=dry_run, file_mutation_id=file_mutation_id,
+            file_manifest_id=file_manifest_id, batch_step_id=batch_step_id,
             batch_id=batch_id, run_id=run_id,
-        ) or 0)
+        )
 
-    def pending_rollbacks(self) -> list[dict[str, Any]]:
-        """Return the mutations awaiting reversal, newest first.
+    def complete_rollback(self, request_batch_step_id: int) -> None:
+        """Close one rollback request, every reversal it asked for having run.
 
-        These rows are the durable queue. A reversal that fails, or a process
-        that dies partway, leaves its row here for the next run to pick up.
-
-        Each carries ``restore_to_path``: where that mutation is reversed to,
-        resolved from the file's own history. Current location is whatever the
-        newest mutation that has not been rolled back says, so reversing one
-        returns the file to the previous surviving mutation's path.
+        The request is the unit, not the row: its governing batch step is its
+        identity, and completion is claimed for the set once the filesystem
+        work it described has all succeeded.
         """
-        return self._control.pending_file_rollbacks()
-
-    def complete_rollback(self, file_mutation_id: int) -> None:
-        """Record that one mutation's inverse succeeded.
-
-        Called immediately after that mutation's filesystem operation is
-        reversed -- one row at a time, because one inverse succeeding proves
-        nothing about the others.
-        """
-        self._control.complete_file_rollback(file_mutation_id)
+        self._control.complete_file_rollback(request_batch_step_id)
 
     def records_for_run(self, run_id: int) -> list[dict[str, Any]]:
         """Return the files one run recorded.

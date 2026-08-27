@@ -455,23 +455,19 @@ def log_source_file_mutation(
 def preview_log_run_rollback(ctx: Any, run_id: int) -> dict[str, Any]:
     """What a rollback of this run would reverse, changing nothing.
 
-    Marking is what selects a rollback set, and marking is a write, so this
-    asks what a request for this run *would* mark rather than performing one.
-    The database answers with the request routine's own predicate, so a
-    preview and its execution cannot disagree about the set.
+    The request routine answers this itself under ``dry_run``: same predicate,
+    same shape, no writes. So a preview and its execution cannot disagree about
+    the set. A row that can be reversed carries the command that reverses it.
     """
     control = _require_control(ctx)
-    requestable = control.requestable_file_rollbacks(int(run_id), required=True)
-    reversible, refused = _partition_by_reversibility(requestable)
+    candidates = control.request_file_rollback(
+        dry_run=True, run_id=int(run_id), required=True)
     return {
         "operation": "log_run_rollback_preview",
         "run_id": int(run_id),
-        "requestable_count": len(requestable),
-        "reversible_count": len(reversible),
-        "non_reversible": refused,
-        # Stated rather than implied: a set with anything irreversible in it
-        # reverses nothing, so a preview says so before an operator asks.
-        "would_refuse": bool(refused),
+        "requestable_count": len(candidates),
+        "reversible_count": len(_with_commands(candidates)),
+        "candidates": list(candidates),
     }
 
 
@@ -489,37 +485,39 @@ def rollback_log_run(
     and ``rollback_complete_in`` -- so there is no plan to build here, no
     selection to evaluate, and no separate evidence record to append.
 
-    Audit goes to ``control.run_log`` through the run that asked for the
-    rollback, like every other record this estate writes.
+    This is the execution. Nothing upstream owns it and no identity arrives
+    with it: the only id in hand is ``run_id``, the run being reversed. So the
+    batch is started here, at the moment the work begins, and the marking is
+    governed under its root step. A batch groups work and is not a run, which
+    is why one is enough and no execution run is minted to sit beside it.
+
+    Audit goes to ``control.run_log`` when a run log is bound -- a rollback
+    performed inside a run records into it. One performed on its own has no run
+    to record through, and the batch steps are its account of itself.
     """
     control = _require_control(ctx)
     run_log = bound_run_log()
-    if run_log is None:
-        raise LogRunRollbackError(
-            "A rollback records into control.run_log, and no run log is bound. "
-            "Every execution boundary binds one around the work it owns."
-        )
 
     started_at = _timestamp()
-    log_run_record(run_log, "INFO",
-                   message=f"Rolling back run {int(run_id)}.",
-                   reason=str(reason or ""))
+    if run_log is not None:
+        log_run_record(run_log, "INFO",
+                       message=f"Rolling back run {int(run_id)}.",
+                       reason=str(reason or ""))
 
-    control.request_file_rollback(run_id=int(run_id), required=True)
-    pending = control.pending_file_rollbacks(required=True)
-    reversible, refused = _partition_by_reversibility(pending)
-
-    if refused:
-        # Nothing is reversed when the set contains something that cannot be.
-        # A partial rollback leaves a run half-undone, which is worse than one
-        # that refused and said why.
-        actions = sorted({str(row["action"]) for row in refused})
-        raise LogRunRollbackError(
-            f"Run {int(run_id)} cannot be rolled back: "
-            f"{', '.join(actions)} is not reversible. "
-            "The forward operation preserved no state to restore from, so "
-            "nothing was reversed."
-        )
+    # The governing batch. Marking is a write and a write is governed, and a
+    # governed routine never creates its own batch -- so the execution creates
+    # one, and start_batch binds the root step the routine hangs under.
+    control.start_batch(f"rollback_run_{int(run_id)}", required=True)
+    try:
+        # Marks the set and returns it. Rows that can be reversed carry the
+        # command that reverses them; rows that cannot are returned as rollback
+        # facts with nothing to run, and are not an obstacle to the ones that can.
+        requested = control.request_file_rollback(
+            dry_run=False, run_id=int(run_id), required=True)
+    except Exception as exc:
+        control.end_batch("FAILED", error_message=str(exc))
+        raise
+    reversible = _with_commands(requested)
 
     succeeded: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -539,8 +537,6 @@ def rollback_log_run(
             failed.append(_failed_result(row, str(exc)))
             continue
 
-        control.complete_file_rollback(
-            int(row["file_mutation_id"]), required=True)
         if is_governed_file_id(row.get("file_manifest_id")):
             affected_file_ids.add(int(row["file_manifest_id"]))
         if _is_filesystem_reversal(compensation, outcome):
@@ -552,12 +548,20 @@ def rollback_log_run(
             "compensating_action": compensation.compensating_action,
             **outcome,
         })
-        log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
-                       message=(f"Reversed {row['action']} on file "
-                                f"{row.get('file_manifest_id')}."),
-                       file_id=row.get("file_manifest_id"),
-                       status="success",
-                       **outcome)
+        if run_log is not None:
+            log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
+                           message=(f"Reversed {row['action']} on file "
+                                    f"{row.get('file_manifest_id')}."),
+                           file_id=row.get("file_manifest_id"),
+                           status="success",
+                           **outcome)
+
+    # Completion is the whole request's, and only once every reversal it asked
+    # for has run. A failure leaves the rows requested, so an incomplete
+    # rollback stays visible and can be finished later.
+    if not failed:
+        for step_id in _request_steps(requested):
+            control.complete_file_rollback(step_id, required=True)
 
     status = _aggregate_status(len(succeeded), len(failed))
     summary = {
@@ -569,66 +573,97 @@ def rollback_log_run(
         "failed_count": len(failed),
         "failures": failed,
     }
-    _write_run_rollback_summary(
-        ctx, run_log, status=status,
-        rollback_run_id=str(getattr(run_log, "run_id", "")),
-        original_run_id=str(int(run_id)),
-        records_removed=0,
-        filesystem_operations_reversed=filesystem_reversals,
-        affected_file_ids=sorted(affected_file_ids),
-        started_at=started_at,
-        failed=failed,
+    # The batch closes on what happened, whether or not anything failed: a root
+    # step left open is offered as the parent of the next batch's work.
+    control.end_batch(
+        "SUCCEEDED" if not failed else "FAILED",
+        error_message=None if not failed else f"{len(failed)} reversal(s) failed.",
     )
-    log_run_summary(run_log, summary)
+
+    if run_log is not None:
+        _write_run_rollback_summary(
+            ctx, run_log, status=status,
+            rollback_run_id=str(getattr(run_log, "run_id", "")),
+            original_run_id=str(int(run_id)),
+            records_removed=0,
+            filesystem_operations_reversed=filesystem_reversals,
+            affected_file_ids=sorted(affected_file_ids),
+            started_at=started_at,
+            failed=failed,
+        )
+        log_run_summary(run_log, summary)
     return {**summary, "reason": str(reason or ""),
             "succeeded": succeeded, "failed": failed}
 
 
 def _require_control(ctx: Any) -> Any:
-    """The Control a rollback reaches the governed file model through."""
+    """The Control a rollback reaches the governed file model through.
+
+    The shared one when the context carries it, and one built here when it does
+    not. A context holding no Control is ordinary -- the Console's does -- and
+    every reader that reaches the control database builds its own.
+    """
     control = getattr(ctx, "shared_control", None)
     if control is None:
-        raise LogRunRollbackError(
-            "A rollback reads and writes the governed file model in the "
-            "control database, and this context exposes no shared Control."
-        )
+        from rey_lib.control import Control
+
+        control = Control(ctx)
+
     return control
 
 
-def _partition_by_reversibility(
-    pending: Sequence[Mapping[str, Any]],
-) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
-    """Split pending rows into what can be reversed and what cannot.
+def _with_commands(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """The rows that have something to run.
 
-    An action is reversible only when a compensation resolves for it, and one
-    resolves only where the forward operation preserved enough state to
-    reverse. ``delete`` and ``replace`` overwrite in place and preserve
-    nothing, so neither is registered and neither is reversed.
+    Reversibility is the database's answer, not one re-derived here: a row it
+    could build a reversal for carries that reversal, and a row it could not
+    carries none. An irreversible mutation is still a rollback fact and is
+    still returned to the reader -- it simply produces no filesystem work.
     """
-    reversible: list[Mapping[str, Any]] = []
-    refused: list[Mapping[str, Any]] = []
-    for row in pending:
-        target = reversible if _is_reversible(row.get("action")) else refused
-        target.append(row)
-    return reversible, refused
+    return [row for row in rows if str(row.get("command") or "").strip()]
 
 
-def _is_reversible(action: Any) -> bool:
-    """Whether a compensation resolves for this action."""
-    return str(action or "") == "record_only" or str(action or "") in _COMPENSATIONS
+def _request_steps(rows: Sequence[Mapping[str, Any]]) -> list[int]:
+    """The governing steps of the requests these rows belong to.
+
+    Usually one. A mutation already requested under an earlier step keeps that
+    step, so a set can span more than one request, and each is completed on its
+    own terms.
+    """
+    steps = {int(row["request_batch_step_id"]) for row in rows
+             if row.get("request_batch_step_id") is not None}
+    return sorted(steps)
 
 
 def _reversal_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
-    """The paths a compensation works from, named as the executors expect.
+    """One rollback row in the shape a compensation reads.
+
+    The canonical grouped record, not a flat one: the validator resolves every
+    location through its owning object -- ``current_path`` is ``file.path`` and
+    ``original_path`` is ``file.original_path`` -- so a flat dict presents as a
+    record missing both.
 
     ``path`` is where the file is now; ``restore_to_path`` is where the file's
     own history says it belongs. Both come from the row, so nothing is
     reconstructed here.
+
+    ``rollback`` carries the compensation payload for the inverses that need one.
+    The request dataset returns no such column, and the two actions that would
+    read it -- delete and replace -- are irreversible, carry no command, and
+    never reach a compensation.
     """
+    rollback_payload = row.get("rollback")
     return {
-        "action": str(row.get("action") or ""),
-        "current_path": _path_text(row.get("path")),
-        "original_path": _path_text(row.get("restore_to_path")),
+        "record_type": row.get("record_type"),
+        "action": row.get("action"),
+        "status": row.get("status"),
+        "file": {
+            "path": row.get("path"),
+            "original_path": row.get("restore_to_path"),
+        },
+        "rollback": rollback_payload if isinstance(rollback_payload, Mapping) else {},
     }
 
 
@@ -928,79 +963,3 @@ register_file_compensation(
 # ---------------------------------------------------------------------------
 # The pending rollback service
 # ---------------------------------------------------------------------------
-
-
-def run_pending_file_rollbacks(ctx: Any) -> dict[str, Any]:
-    """Reverse every mutation currently marked for rollback.
-
-    The pending rows are the queue. Each is reversed on its own and completed
-    the moment its inverse succeeds, so a run that dies partway leaves exactly
-    the unfinished rows pending and the next run continues them. Nothing is
-    inserted and nothing is deleted: the mutation row that recorded the change
-    also records that it was reversed.
-
-    Targets are never derived from the filesystem. ``restore_to_path`` comes
-    from the file's own history -- the path of the previous mutation that has
-    not itself been rolled back -- because current location is whatever the
-    newest surviving mutation says.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``reversed`` and ``failed`` counts, and the failures with their reasons.
-    """
-    from rey_lib.files.manifest import FileManifest
-
-    control = getattr(ctx, "shared_control", None)
-    if control is None:
-        raise LogRunRollbackError(
-            "Rollback is recorded in the control database, and this context "
-            "exposes no shared Control to reach it through."
-        )
-    manifest = FileManifest(control)
-
-    reversed_count = 0
-    failures: list[dict[str, Any]] = []
-    for row in manifest.pending_rollbacks():
-        mutation_id = row.get("file_mutation_id")
-        record = _pending_as_compensation_record(row)
-        try:
-            compensation = _resolved_compensation(record)
-            refusal = compensation.validate(record)
-            if refusal:
-                raise LogRunRollbackError(refusal)
-            compensation.execute(record)
-        except Exception as exc:  # noqa: BLE001 — one failure must not stop the rest
-            # The row stays pending. It is picked up again next time, which is
-            # the whole reason the queue lives on the rows.
-            failures.append({"file_mutation_id": mutation_id, "reason": str(exc)})
-            continue
-        manifest.complete_rollback(int(mutation_id))
-        reversed_count += 1
-
-    return {
-        "reversed": reversed_count,
-        "failed": len(failures),
-        "failures": failures,
-    }
-
-
-def _pending_as_compensation_record(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Present one pending mutation row in the shape a compensation reads.
-
-    The compensations already know every inverse; what they want is the
-    canonical ``file`` object. ``original_path`` is the resolved restore target,
-    not a stored field -- for a mutation with no surviving predecessor it is
-    absent, and the action's own inverse decides what that means.
-    """
-    rollback_payload = row.get("rollback")
-    return {
-        "record_type": row.get("record_type"),
-        "action": row.get("action"),
-        "status": row.get("status"),
-        "file": {
-            "path": row.get("path"),
-            "original_path": row.get("restore_to_path"),
-        },
-        "rollback": rollback_payload if isinstance(rollback_payload, Mapping) else {},
-    }

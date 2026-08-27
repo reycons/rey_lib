@@ -1077,60 +1077,62 @@ class Control:
 
     # -- rollback -----------------------------------------------------------
     #
-    # Rollback is state on the mutation it reverses. Nothing is deleted and no
-    # rollback record is written: a request marks a set of mutations, the
-    # pending rows are the queue, and completion closes one row whose inverse
-    # has succeeded.
+    # A rollback is a record of its own, in control.file_mutation_rollback. The
+    # request marks the set and returns it; completion closes the request whose
+    # reversals all succeeded. The mutation rows themselves carry no rollback
+    # state, so there is no queue here to read.
 
-    def request_file_rollback(self, *, file_mutation_id: Optional[int] = None,
+    def request_file_rollback(self, *, dry_run: bool = True,
+                              file_mutation_id: Optional[int] = None,
+                              file_manifest_id: Optional[int] = None,
                               batch_step_id: Optional[int] = None,
                               batch_id: Optional[int] = None,
                               run_id: Optional[int] = None,
-                              required: bool = True) -> Optional[int]:
-        """Mark a set of mutations for reversal; return how many were newly marked.
+                              required: bool = True) -> list[dict[str, Any]]:
+        """Return the rollback set for one scope, marking it unless previewing.
 
-        Exactly one scope is supplied. A mutation already pending keeps the
-        request step that first claimed it, and a completed rollback is never
-        reopened, so the count is only what this request added.
+        Exactly one scope is supplied. Under ``dry_run`` nothing is written and
+        the rows come back with no rollback identity; otherwise each row is a
+        requested rollback record. Either way the shape is the same, so a
+        preview and its execution cannot describe different reversals.
+
+        A row that can be reversed carries the command that reverses it. One
+        that cannot is still returned -- it is a fact about the rollback -- and
+        carries no command.
         """
-        return self._call("request_file_rollback", {
-            "file_mutation_id":       file_mutation_id,
-            "rollback_batch_step_id": batch_step_id,
-            "rollback_batch_id":      batch_id,
-            "rollback_run_id":        run_id,
+        # Scoped names, not the ambient ones. A supplied value outranks the run
+        # context, so passing `batch_step_id` here would blank the governing
+        # step the map reads under that name -- which is what the rollback's own
+        # batch steps hang under.
+        return self._call_rows("request_file_rollback", {
+            "rollback_dry_run":         bool(dry_run),
+            "file_mutation_id":         file_mutation_id,
+            "rollback_file_manifest_id": file_manifest_id,
+            "rollback_batch_step_id":   batch_step_id,
+            "rollback_batch_id":        batch_id,
+            "rollback_run_id":          run_id,
+            "rollback_execution_run_id": self._execution_run_id(),
         }, required=required)
 
-    def requestable_file_rollbacks(self, run_id: int,
-                                   required: bool = True) -> list[dict[str, Any]]:
-        """Return what a rollback request for this run would mark.
-
-        A preview must not write, and marking is a write, so this answers the
-        question ``request_file_rollback`` answers without performing it. The
-        predicate is that routine's own: a mutation belongs to a run through
-        the batch step that wrote it, and only a row that is neither pending
-        nor already reversed can be newly marked.
-
-        Each row carries ``restore_to_path`` on the same terms as the pending
-        read, so a preview and an execution describe the same reversal.
-        """
-        return self._call_rows("requestable_file_rollbacks",
-                               {"run_id": run_id}, required=required)
-
-    def pending_file_rollbacks(self,
-                               required: bool = True) -> list[dict[str, Any]]:
-        """Return mutations awaiting reversal, newest first.
-
-        Each row carries ``restore_to_path`` -- where that mutation must be
-        reversed to, resolved from the history rather than from the filesystem.
-        """
-        return self._call_rows("pending_file_rollbacks", {}, required=required)
-
-    def complete_file_rollback(self, file_mutation_id: int,
+    def complete_file_rollback(self, request_batch_step_id: int,
                                required: bool = True) -> None:
-        """Record that one mutation's inverse succeeded.
+        """Close one rollback request, every reversal it asked for having run.
 
-        Only a pending row can be completed; the routine refuses to manufacture
-        rollback state for a mutation nobody requested.
+        The request's governing batch step is the identity of the request, so
+        completion addresses the set rather than a row. Only a requested
+        rollback can be completed.
         """
-        self._call("complete_file_rollback",
-                   {"file_mutation_id": file_mutation_id}, required=required)
+        self._call("complete_file_rollback", {
+            "rollback_request_batch_step_id": request_batch_step_id,
+            "rollback_execution_run_id":      self._execution_run_id(),
+        }, required=required)
+
+    def _execution_run_id(self) -> Optional[int]:
+        """The run performing a rollback, or None when there is not one.
+
+        Not :meth:`run_id`, which refuses when the context carries no run: an
+        invocation with no execution behind it is an ordinary case here, and the
+        routines take NULL for it. The run being rolled back is a separate
+        identity and travels as a scope.
+        """
+        return getattr(self._ctx, "run_id", None)
