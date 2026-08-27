@@ -195,22 +195,22 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
     The record types are the manifest's own, and each maps to one domain
     operation rather than to a row of the same shape:
 
-        source_file_inventory                    -> inventory()
-        source_file_mutation / _rollback         -> append_mutation()
-        source_file_classification               -> update()
+        source_file_inventory                              -> inventory()
+        source_file_mutation / _rollback / _classification  -> append_mutation()
 
-    Classification is state on the file, not an event beside it, so a
-    classified outcome updates the row it names. A rejected one changes no file
-    state and writes nothing here: the rejection is already committed to the run
-    log before this is reached, and recording it again as a file record would be
-    the duplicate the database model exists to remove.
+    Classification is a lifecycle event, so a classified outcome appends one
+    rather than overwriting a field: classifying the same file again leaves
+    both, and the later one is what the view reports. A rejected outcome
+    changes no file state and writes nothing here -- the rejection is already
+    committed to the run log before this is reached, and recording it again as
+    a file record would be the duplicate the database model exists to remove.
 
     Returns
     -------
     int
-        ``file_manifest_id`` for inventory and classification, and
-        ``file_mutation_id`` for a mutation -- in each case the identity the
-        database generated for what was actually written.
+        ``file_manifest_id`` for inventory, and ``file_mutation_id`` for every
+        event -- in each case the identity the database generated for what was
+        actually written.
 
     Raises
     ------
@@ -241,7 +241,6 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
             source_name=str(record.get("source_name") or ""),
             evidence=record.get("evidence"),
             producer=record.get("producer"),
-            classification=record.get("classification"),
         )
 
     if record_type in ("source_file_mutation", "source_file_rollback"):
@@ -273,15 +272,29 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
                 "A classification names the file it classifies by file_id, "
                 "which is that file's manifest identity."
             )
-        if str(record.get("status") or "") == "classified":
-            # The path moves when classification routes the file to processing,
-            # so it travels with the classification rather than in a second call.
-            manifest.update(
-                file_manifest_id,
-                classification=record.get("classification"),
-                path=file_object.get("path"),
-            )
-        return file_manifest_id
+        if str(record.get("status") or "") != "classified":
+            return file_manifest_id
+        # base_path is stored as its own column, so it is lifted out of the
+        # payload rather than written twice; the read projection puts it back
+        # beside values, which is where a destination template reads it.
+        classification = dict(record.get("classification") or {})
+        base_path = str(classification.pop("base_path", "") or "")
+        evidence = dict(record.get("evidence") or {})
+        lineage = dict(record.get("lineage") or {})
+        # The path moves when classification routes the file to processing, so
+        # it travels on the event rather than in a second call.
+        return int(manifest.append_mutation(
+            file_manifest_id,
+            record_type="source_file_classification",
+            action="classify",
+            status="classified",
+            source_record_id=lineage.get("source_record_id"),
+            run_log_id=evidence.get("run_log_id"),
+            path=str(file_object.get("path") or ""),
+            producer=record.get("producer"),
+            classification=classification,
+            base_path=base_path,
+        ))
 
     raise FileManifestError(
         f"'{record_type}' is not a governed file manifest record type."
@@ -300,9 +313,10 @@ def read_records_from_control(ctx: Any, *,
 
     - ``record_id`` and ``file_id`` are the same value on a file. A governed
       file has one identity and the database mints it.
-    - classification is state on the file, not a record beside it, so there is
-      no ``source_file_classification`` entry. A file's classification is read
-      from the file.
+    - classification is a lifecycle event, so it arrives as a
+      ``source_file_classification`` mutation rather than a field on the file.
+      Reclassifying appends another; both are kept, and the later one is what
+      ``control.file_vw`` reports as current.
 
     Parameters
     ----------
@@ -399,9 +413,6 @@ def _inventory_record(row: dict[str, Any]) -> dict[str, Any]:
             "size_bytes": row.get("size_bytes"),
         },
     }
-    classification = _as_mapping(row.get("classification"))
-    if classification:
-        record["classification"] = classification
     return record
 
 
@@ -428,6 +439,16 @@ def _mutation_record(row: dict[str, Any]) -> dict[str, Any]:
         value = _as_mapping(row.get(key))
         if value:
             record[key] = value
+    # What a classification event recorded. base_path sits beside values rather
+    # than inside them: values say what the file was classified as, base_path
+    # says where that classification's lifecycle is rooted, and a destination
+    # reads the second without interpreting the first.
+    classification = _as_mapping(row.get("classification"))
+    if classification:
+        record["classification"] = dict(classification)
+        base_path = row.get("base_path")
+        if base_path:
+            record["classification"]["base_path"] = str(base_path)
     return record
 
 

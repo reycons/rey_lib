@@ -878,7 +878,6 @@ class Control:
                        size_bytes: int, source_name: Optional[str] = None,
                        evidence: Optional[dict[str, Any]] = None,
                        producer: Optional[dict[str, Any]] = None,
-                       classification: Optional[dict[str, Any]] = None,
                        required: bool = True) -> Optional[int]:
         """Record a file and the start of its history, returning its id.
 
@@ -895,7 +894,6 @@ class Control:
             "source_name":     source_name,
             "evidence":        evidence,
             "producer":        producer,
-            "classification":  classification,
         }, required=required)
 
     def update_file_manifest(self, file_manifest_id: int,
@@ -904,7 +902,7 @@ class Control:
         values = {"file_manifest_id": file_manifest_id}
         for name in ("path", "file_name", "base_name", "file_extension",
                      "checksum_sha256", "size_bytes", "source_name",
-                     "evidence", "producer", "classification"):
+                     "evidence", "producer"):
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
 
@@ -919,6 +917,8 @@ class Control:
                              conversion: Optional[dict[str, Any]] = None,
                              result: Optional[dict[str, Any]] = None,
                              rollback: Optional[dict[str, Any]] = None,
+                             classification: Optional[dict[str, Any]] = None,
+                             base_path: Optional[str] = None,
                              required: bool = True) -> Optional[int]:
         """Append one event to a file's history.
 
@@ -942,18 +942,23 @@ class Control:
             "conversion":        conversion,
             "result":            result,
             "rollback":          rollback,
+            "classification":    classification,
+            "base_path":         base_path,
         }, required=required)
 
-    def clear_file_classifications(self, file_manifest_ids: list[int],
-                                   required: bool = True) -> Optional[int]:
-        """Clear the classification on a whole matched set, or none of it.
+    def get_current_classification(self, file_manifest_id: Optional[int] = None,
+                                   required: bool = True) -> list[dict[str, Any]]:
+        """Return what a file is classified as now, or every classified file.
 
-        One statement, so the set is all-or-nothing. Returns how many were
-        actually cleared, which a caller compares against what it asked for.
+        Classification is computed from the file's history rather than stored on
+        the file, so it is asked for by name. Which of a file's classification
+        events is the current one is the database's answer, decided in one
+        routine -- a caller that re-derived it here would be a second authority
+        on the same question.
         """
-        return self._call("clear_file_classifications",
-                          {"file_manifest_ids": list(file_manifest_ids or [])},
-                          required=required)
+        return self._call_rows("get_current_classification",
+                               {"file_manifest_id": file_manifest_id},
+                               required=required)
 
     def get_file_manifest(self, file_manifest_id: int,
                           required: bool = True) -> Optional[dict[str, Any]]:

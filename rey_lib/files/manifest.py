@@ -20,9 +20,9 @@ was global.
 
 A database does not need one. Every operation here is a single mapped call, and
 each of those is atomic on its own: ``inventory`` writes the manifest row and
-its baseline mutation inside one routine, and ``clear_classifications`` clears a
-whole matched set in one statement. Recreating a lock-shaped API over that would
-be modelling the old storage rather than the domain.
+its baseline mutation inside one routine, and ``append_mutation`` writes one
+event. Recreating a lock-shaped API over that would be modelling the old storage
+rather than the domain.
 
     Every domain operation maps to one atomic database call.
 
@@ -74,7 +74,6 @@ class FileManifest:
         source_name: str = "",
         evidence: Optional[dict[str, Any]] = None,
         producer: Optional[dict[str, Any]] = None,
-        classification: Optional[dict[str, Any]] = None,
     ) -> int:
         """Record a governed file for the first time, and return its id.
 
@@ -95,15 +94,15 @@ class FileManifest:
             file_extension=file_extension, checksum_sha256=checksum_sha256,
             size_bytes=size_bytes, source_name=source_name or None,
             evidence=evidence, producer=producer,
-            classification=classification,
         ))
 
     def update(self, file_manifest_id: int, **fields: Any) -> None:
         """Change a file's current state.
 
-        Only what is named changes; anything absent keeps the value it has. A
-        caller that knows the classification does not have to restate the
-        checksum to avoid erasing it.
+        Only what is named changes; anything absent keeps the value it has, so
+        a caller that knows one field does not restate the others to avoid
+        erasing them. Classification is not among the fields: it is an event on
+        the file's history, not current state to be overwritten.
         """
         self._control.update_file_manifest(file_manifest_id, **fields)
 
@@ -123,6 +122,8 @@ class FileManifest:
         rollback: Optional[dict[str, Any]] = None,
         deleted_in: Optional[int] = None,
         deleted_ts: Optional[str] = None,
+        classification: Optional[dict[str, Any]] = None,
+        base_path: str = "",
     ) -> int:
         """Append one event to a file's history, and return the mutation's id.
 
@@ -133,6 +134,11 @@ class FileManifest:
         routine sets from the step it opens for itself. It is not a parameter:
         the caller's step is the parent above that one, not the step that did
         the work.
+
+        ``classification`` and ``base_path`` belong to a classification event.
+        Classifying is something that happens to a file, so it is recorded here
+        like every other thing that happens to one -- and recording it twice
+        leaves both, which is what makes reclassification non-destructive.
         """
         return int(self._control.append_file_mutation(
             file_manifest_id, record_type=record_type, action=action,
@@ -140,21 +146,8 @@ class FileManifest:
             run_log_id=run_log_id, path=path or None,
             producer=producer, conversion=conversion, result=result,
             rollback=rollback, deleted_in=deleted_in, deleted_ts=deleted_ts,
+            classification=classification, base_path=base_path or None,
         ))
-
-    def clear_classifications(self, file_manifest_ids: list[int]) -> int:
-        """Clear the classification on a whole matched set, or none of it.
-
-        Classification is current state, so clearing it returns those files to
-        unclassified. No mutation is appended: ``file_mutation`` records what
-        happened to the *file*, and the file did not change.
-
-        All-or-nothing across the set, because the routine does it in one
-        statement. Returns how many were actually cleared -- comparing that to
-        the size of the set says whether any had already been cleared.
-        """
-        return int(self._control.clear_file_classifications(
-            list(file_manifest_ids or [])))
 
     # -- reading -------------------------------------------------------------
 
@@ -233,6 +226,17 @@ class FileManifest:
         work it described has all succeeded.
         """
         self._control.complete_file_rollback(request_batch_step_id)
+
+    def current_classification(
+        self, file_manifest_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """What a file is classified as now, or every classified file.
+
+        The one way to ask. Classification is a lifecycle event, so "current"
+        is a question about history, and the database answers it -- nothing
+        here selects classification events and works out which one won.
+        """
+        return self._control.get_current_classification(file_manifest_id)
 
     def records_for_run(self, run_id: int) -> list[dict[str, Any]]:
         """Return the files one run recorded.

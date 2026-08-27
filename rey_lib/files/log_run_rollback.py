@@ -509,59 +509,67 @@ def rollback_log_run(
     # one, and start_batch binds the root step the routine hangs under.
     control.start_batch(f"rollback_run_{int(run_id)}", required=True)
     try:
-        # Marks the set and returns it. Rows that can be reversed carry the
-        # command that reverses them; rows that cannot are returned as rollback
-        # facts with nothing to run, and are not an obstacle to the ones that can.
+        # Marks the set and returns it. Rows that can be reversed carry the command
+        # that reverses them; rows that cannot are returned as rollback facts with
+        # nothing to run, and are not an obstacle to the ones that can.
         requested = control.request_file_rollback(
             dry_run=False, run_id=int(run_id), required=True)
+        reversible = _with_commands(requested)
+
+        succeeded: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        affected_file_ids: set[FileId] = set()
+        filesystem_reversals = 0
+
+        for row in reversible:
+            candidate = _reversal_candidate(row)
+            compensation = _resolved_compensation(candidate)
+            problem = compensation.validate(candidate)
+            if problem is not None:
+                failed.append(_failed_result(row, problem))
+                continue
+            try:
+                outcome = compensation.execute(candidate)
+            except OSError as exc:
+                failed.append(_failed_result(row, str(exc)))
+                continue
+
+            if is_governed_file_id(row.get("file_manifest_id")):
+                affected_file_ids.add(int(row["file_manifest_id"]))
+            if _is_filesystem_reversal(candidate, outcome):
+                filesystem_reversals += 1
+            succeeded.append({
+                "file_mutation_id": int(row["file_mutation_id"]),
+                "file_manifest_id": row.get("file_manifest_id"),
+                "action": str(row["action"]),
+                "compensating_action": compensation.compensating_action,
+                **outcome,
+            })
+            if run_log is not None:
+                log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
+                               message=(f"Reversed {row['action']} on file "
+                                        f"{row.get('file_manifest_id')}."),
+                               file_id=row.get("file_manifest_id"),
+                               status="success",
+                               **outcome)
+
+        # Completion is the whole request's, and only once every reversal it asked
+        # for has run. A failure leaves the rows requested, so an incomplete
+        # rollback stays visible and can be finished later.
+        if not failed:
+            for step_id in _request_steps(requested):
+                control.complete_file_rollback(step_id, required=True)
     except Exception as exc:
+        # The batch closes on every exit. A root step left open is offered as
+        # the parent of the next batch's work, so an operation that died
+        # part-way would silently adopt the one that follows it.
         control.end_batch("FAILED", error_message=str(exc))
         raise
-    reversible = _with_commands(requested)
 
-    succeeded: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
-    affected_file_ids: set[FileId] = set()
-    filesystem_reversals = 0
-
-    for row in reversible:
-        candidate = _reversal_candidate(row)
-        compensation = _resolved_compensation(candidate)
-        problem = compensation.validate(candidate)
-        if problem is not None:
-            failed.append(_failed_result(row, problem))
-            continue
-        try:
-            outcome = compensation.execute(candidate)
-        except OSError as exc:
-            failed.append(_failed_result(row, str(exc)))
-            continue
-
-        if is_governed_file_id(row.get("file_manifest_id")):
-            affected_file_ids.add(int(row["file_manifest_id"]))
-        if _is_filesystem_reversal(compensation, outcome):
-            filesystem_reversals += 1
-        succeeded.append({
-            "file_mutation_id": int(row["file_mutation_id"]),
-            "file_manifest_id": row.get("file_manifest_id"),
-            "action": str(row["action"]),
-            "compensating_action": compensation.compensating_action,
-            **outcome,
-        })
-        if run_log is not None:
-            log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
-                           message=(f"Reversed {row['action']} on file "
-                                    f"{row.get('file_manifest_id')}."),
-                           file_id=row.get("file_manifest_id"),
-                           status="success",
-                           **outcome)
-
-    # Completion is the whole request's, and only once every reversal it asked
-    # for has run. A failure leaves the rows requested, so an incomplete
-    # rollback stays visible and can be finished later.
-    if not failed:
-        for step_id in _request_steps(requested):
-            control.complete_file_rollback(step_id, required=True)
+    control.end_batch(
+        "SUCCEEDED" if not failed else "FAILED",
+        error_message=None if not failed else f"{len(failed)} reversal(s) failed.",
+    )
 
     status = _aggregate_status(len(succeeded), len(failed))
     summary = {
@@ -572,14 +580,11 @@ def rollback_log_run(
         "succeeded_count": len(succeeded),
         "failed_count": len(failed),
         "failures": failed,
+        # The rollback records themselves, as they now stand. The reader was
+        # shown this set before executing and is shown the same set after, so
+        # what was reviewed and what happened are the same rows.
+        "records": _records_after(requested, succeeded, failed, completed=not failed),
     }
-    # The batch closes on what happened, whether or not anything failed: a root
-    # step left open is offered as the parent of the next batch's work.
-    control.end_batch(
-        "SUCCEEDED" if not failed else "FAILED",
-        error_message=None if not failed else f"{len(failed)} reversal(s) failed.",
-    )
-
     if run_log is not None:
         _write_run_rollback_summary(
             ctx, run_log, status=status,
@@ -963,3 +968,46 @@ register_file_compensation(
 # ---------------------------------------------------------------------------
 # The pending rollback service
 # ---------------------------------------------------------------------------
+
+
+def _records_after(
+    requested: Sequence[Mapping[str, Any]],
+    succeeded: Sequence[Mapping[str, Any]],
+    failed: Sequence[Mapping[str, Any]],
+    *,
+    completed: bool,
+) -> list[dict[str, Any]]:
+    """The rollback records with what became of each.
+
+    One row per record, in the order the request returned them, so the grid a
+    reader confirmed against is the grid they review afterwards.
+
+    ``outcome`` is the executor's own word for a row that ran, the reason for
+    one that did not, and empty for a row that had no command -- an irreversible
+    mutation is still a rollback record, and says so by having nothing to show
+    here. ``rollback_state`` reports the transition this execution just made
+    rather than the state read before it.
+    """
+    ran = {int(row["file_mutation_id"]): row for row in succeeded
+           if row.get("file_mutation_id") is not None}
+    refused = {int(row["file_mutation_id"]): row for row in failed
+               if row.get("file_mutation_id") is not None}
+
+    records: list[dict[str, Any]] = []
+    for row in requested:
+        key = row.get("file_mutation_id")
+        key = int(key) if key is not None else None
+        done = ran.get(key)
+        problem = refused.get(key)
+        if done is not None:
+            outcome = str(done.get("outcome") or done.get("compensating_action") or "reversed")
+        elif problem is not None:
+            outcome = str(problem.get("failure_reason") or "rollback failed")
+        else:
+            outcome = ""
+        records.append({
+            **row,
+            "outcome": outcome,
+            "rollback_state": "rolled_back" if completed else row.get("rollback_state"),
+        })
+    return records

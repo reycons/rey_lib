@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -219,7 +221,7 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
         # it, an error belongs in the run log, so anything still writing to
         # stderr is an ungoverned error path -- a defect to fix or a bridge to
         # add, not a second log to keep.
-        if not _stderr_is_terminal():
+        if not _stderr_is_watched():
             root.removeHandler(console_handler)
             console_handler.close()
             _bridge_stderr_to_logger()
@@ -369,18 +371,38 @@ def _bridge_stderr_to_logger() -> None:
     sys.stderr = _UngovernedStderr(sys.stderr)
 
 
-def _stderr_is_terminal() -> bool:
-    """Whether stderr is a terminal a reader is actually watching.
+def _stderr_is_watched() -> bool:
+    """Whether anything is reading stderr as the process writes it.
 
     The console handler writes to stderr, so stderr is the stream that decides.
-    A detached or redirected stream is not a terminal; a stream that cannot
-    answer is treated as one, so an unusual environment keeps its output rather
-    than losing it silently.
+    The question is not what kind of handle it is but whether a reader is on the
+    other end -- which is what the console handler exists to serve.
+
+    Three answers, because ``isatty()`` alone conflates two opposite cases:
+
+    * a **terminal** -- someone is watching it.
+    * a **pipe** -- something is reading it, or the pipe would not exist. A
+      Console-launched run is this: the parent captures the stream and shows it
+      live. Treating it as unwatched is what silenced live output.
+    * a **regular file** -- nobody is reading it as it is written. This is the
+      startup capture, and writing governed records there is the shadow text
+      copy of the run log that this handover exists to end.
+
+    A stream that cannot answer is treated as watched, so an unusual environment
+    keeps its output rather than losing it silently.
     """
     try:
-        return bool(sys.stderr.isatty())
+        if sys.stderr.isatty():
+            return True
     except (AttributeError, ValueError, OSError):
         return True
+    try:
+        mode = os.fstat(sys.stderr.fileno()).st_mode
+    except (AttributeError, ValueError, OSError):
+        return True
+    # A regular file is the capture; anything else -- pipe, socket, character
+    # device -- has a reader or is a terminal-like stream.
+    return not stat.S_ISREG(mode)
 
 
 def add_jsonl_handler(
