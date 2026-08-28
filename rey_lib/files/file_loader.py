@@ -296,7 +296,8 @@ def _log_loader_step_failure(
     )
     error_record = log_error(run_log, **error_payload)
     error_id = str(error_record.get("error_id") or "")
-    error_message = str(error_record.get("error_message") or str(exc))
+    # The text, not the payload -- see build_error_record_payload.
+    error_message = str(error_record.get("message") or str(exc))
     return log_step_failure(run_log,
         failed_step_id=failed_step_id,
         failed_step_name=failed_step_name,

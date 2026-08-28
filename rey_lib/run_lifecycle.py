@@ -109,7 +109,9 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
         )
         error_record = log_error(run_log, **error_payload)
         failure_id = str(error_record.get("error_id") or "")
-        failure_message = str(error_record.get("error_message") or str(exc))
+        # The text, not the payload: error_message carries the whole
+        # canonical object for the jsonb column.
+        failure_message = str(error_record.get("message") or str(exc))
         # Ownership-return (SGC_Rey_Log_Hierarchy_Shared_Run_State_Correction): the app
         # may have descended into workflow/analysis/other deeper scopes that left the
         # shared hierarchy deeper than the app base. Reassert app ownership before

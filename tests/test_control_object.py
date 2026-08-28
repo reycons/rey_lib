@@ -163,7 +163,7 @@ class TestControlDoesNotOwnIdentity:
     def test_run_id_is_read_from_the_context(self) -> None:
         control = Control(_ctx())
 
-        assert control.run_id() == "R1"
+        assert control.run_id == "R1"
 
     def test_a_missing_run_id_is_refused_not_minted(self) -> None:
         ctx = _ctx()
@@ -171,7 +171,7 @@ class TestControlDoesNotOwnIdentity:
         control = Control(ctx)
 
         with pytest.raises(ConfigError, match="no run identity"):
-            control.run_id()
+            control.run_id
 
 
 class TestUnheldValuesFallThrough:

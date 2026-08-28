@@ -1,11 +1,4 @@
 from rey_lib.logs.jsonl_handler import JsonlHandler
-from rey_lib.logs.manifest_selection import (
-    ManifestRecordSelection,
-    ManifestSelectionError,
-    SelectedManifestRecord,
-    normalize_manifest_selection,
-    select_manifest_records,
-)
 from rey_lib.logs.file_manifest import (
     FileManifestError,
     FileManifestSession,
@@ -114,11 +107,6 @@ from rey_lib.logs.log_utils import (
 
 __all__ = [
     "JsonlHandler",
-    "ManifestRecordSelection",
-    "ManifestSelectionError",
-    "SelectedManifestRecord",
-    "normalize_manifest_selection",
-    "select_manifest_records",
     "FileManifestError",
     "FileManifestSession",
     "file_manifest_session",

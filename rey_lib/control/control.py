@@ -35,7 +35,9 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from rey_lib.db.connection import shared_connection
-from rey_lib.db.procedure_map import execute_mapped_routine, get_procedure_map
+from rey_lib.db.procedure_map import (
+    execute_mapped_routine, get_procedure_map, resolve_routine_binding,
+)
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
@@ -284,6 +286,7 @@ class Control:
 
     # -- identity (read, never minted) --------------------------------------
 
+    @property
     def run_id(self) -> Any:
         """Return the execution's run identity, refusing when absent.
 
@@ -293,8 +296,15 @@ class Control:
 
         Returned as it is held, not stringified. It is an integer key, and a
         string copy of it would not match the column it is written to.
+
+        A property because a procedure-map binding resolves an unsupplied input
+        by attribute: ``input: {p_run_id: run_id}`` reads ``run_id`` off this
+        object, and as a method that handed the driver a bound method --
+        "can't adapt type 'method'" -- rather than the identity. Seven bindings
+        declare it and were safe only because every caller passed the value
+        explicitly.
         """
-        run_id = getattr(self._ctx, "run_id", None)
+        run_id = self.__dict__.get("_run_id") or getattr(self._ctx, "run_id", None)
         if not run_id:
             raise ConfigError(
                 "control: no run identity on the context. A run is identified at "
@@ -302,6 +312,25 @@ class Control:
                 "DB interaction."
             )
         return run_id
+
+    @run_id.setter
+    def run_id(self, value: Any) -> None:
+        """Take the identity the run manifest generated.
+
+        Control is both the object that reads run identity and the object the
+        map writes it onto: ``create_run_manifest`` declares
+        ``output.load_to_ctx: run_id`` and the map sets that attribute on its
+        binding target, which is this object. Control is built before the run
+        exists -- the run is created *through* it -- so a getter alone made the
+        launch boundary fail on its own result.
+
+        Still mints nothing. The value is the one the database generated.
+
+        Held under ``_run_id`` because :meth:`__getattr__` refuses names
+        beginning with an underscore rather than falling through to the
+        context, so a context attribute cannot shadow the slot.
+        """
+        self.__dict__["_run_id"] = value
 
     def run_timestamp(self) -> str:
         """Return the filename-safe run timestamp, refusing when absent."""
@@ -991,6 +1020,10 @@ class Control:
                    status: Optional[str] = None,
                    current_only: bool = True,
                    converted: Optional[bool] = None,
+                   record_type: Optional[str] = None,
+                   conversion_operator: Optional[str] = None,
+                   result_reason: Optional[str] = None,
+                   source_name: Optional[str] = None,
                    required: bool = True) -> list[dict[str, Any]]:
         """Return governed files as the database sees them, filtered.
 
@@ -1005,6 +1038,16 @@ class Control:
         ``converted`` asks whether the file has ever been converted -- a fact
         about the file, recorded on the mutation that performed the conversion.
         False selects the work still to do. A NULL filter is not a filter.
+
+        ``record_type`` names one kind of lifecycle record, and
+        ``conversion_operator`` names the operator that performed a conversion.
+        The second is about a mutation rather than a file: ``converted`` cannot
+        say which mutation converted, or by what, and a caller wanting the
+        output of one operator reads that mutation's ``path`` as the file.
+
+        ``result_reason`` and ``source_name`` are the remaining facts a
+        configured selection declares: why a mutation was written, and which
+        configured source a file was inventoried from.
         """
         return self._call_rows("find_files", {
             "file_extensions": list(file_extensions) if file_extensions else None,
@@ -1013,7 +1056,59 @@ class Control:
             "status": status,
             "current_only": current_only,
             "converted": converted,
+            "record_type": record_type,
+            "conversion_operator": conversion_operator,
+            "result_reason": result_reason,
+            "source_name": source_name,
         }, required=required)
+
+    def call_rows(self, binding_name: str,
+                  values: Optional[dict[str, Any]] = None
+                  ) -> list[dict[str, Any]]:
+        """Execute one row-producing binding the caller names, and return rows.
+
+        The generic form of every read above: those name one binding each, and
+        this takes the name from whoever is asking. It exists so a selector can
+        be chosen by configuration -- a new one is then a routine and a binding,
+        with no Python -- and the caller still never sees a database routine
+        name. What that binding maps to, which parameters it has and how it is
+        invoked stay in the procedure map.
+
+        ``values`` are runtime variable names, as the map's ``input`` reads
+        them, not database parameter names.
+
+        The call is required. :meth:`_call_rows` returns no rows rather than
+        raising when control is unavailable, which is right for logging -- a run
+        does not stop because its log did -- but here it would report a
+        disabled or unreachable database as an empty result set, which is
+        exactly what "no work to do" looks like. A selection that cannot ask
+        the question must not answer it.
+
+        Parameters
+        ----------
+        binding_name : str
+            A logical binding in the control procedure map.
+        values : Optional[dict[str, Any]]
+            Runtime values for that binding's declared inputs.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            The rows the routine returned.
+
+        Raises
+        ------
+        ConfigError
+            If the binding does not produce rows, or is not in the map.
+        """
+        binding = resolve_routine_binding(self._map, self._map_name, binding_name)
+        if binding["result_mode"] != "dataset_result":
+            raise ConfigError(
+                f"control: binding '{binding_name}' declares result_mode "
+                f"'{binding['result_mode']}', which produces no rows. "
+                "call_rows requires a dataset_result binding."
+            )
+        return self._call_rows(binding_name, dict(values or {}), required=True)
 
     def run_log_record(self, run_log_id: int,
                        required: bool = True) -> Optional[dict[str, Any]]:
@@ -1119,17 +1214,19 @@ class Control:
             "rollback_execution_run_id": self._execution_run_id(),
         }, required=required)
 
-    def complete_file_rollback(self, request_batch_step_id: int,
+    def complete_file_rollback(self, file_mutation_ids: list[int],
                                required: bool = True) -> None:
-        """Close one rollback request, every reversal it asked for having run.
+        """Close the rollbacks whose reversals actually ran.
 
-        The request's governing batch step is the identity of the request, so
-        completion addresses the set rather than a row. Only a requested
-        rollback can be completed.
+        Named row by row, never by request. A requested rollback is the durable
+        record that the work is still owed: a reversal that failed keeps its
+        row and its mutation, so the next run finds it. Closing the whole
+        request would record work nobody did and delete the history that proves
+        it is still owed.
         """
         self._call("complete_file_rollback", {
-            "rollback_request_batch_step_id": request_batch_step_id,
-            "rollback_execution_run_id":      self._execution_run_id(),
+            "rollback_file_mutation_ids": [int(i) for i in file_mutation_ids],
+            "rollback_execution_run_id":  self._execution_run_id(),
         }, required=required)
 
     def _execution_run_id(self) -> Optional[int]:

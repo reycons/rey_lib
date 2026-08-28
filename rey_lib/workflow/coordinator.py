@@ -400,7 +400,8 @@ def run_workflow(
                     failed_step_sequence=sequence,
                 )
                 error_record = log_error(run_log, **error_payload)
-                failure_message = str(error_record.get("error_message") or "")
+                # The text, not the payload -- see build_error_record_payload.
+                failure_message = str(error_record.get("message") or "")
                 failure_id = str(error_record.get("error_id") or "")
                 failure_id = log_step_failure(run_log,
                     failed_step_id=step_id,

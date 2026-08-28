@@ -115,7 +115,7 @@ def test_ensure_helpers_share_one_identity() -> None:
     )
     start_test_run(ctx)
     control = Control(ctx)
-    assert control.run_id() == ctx.run_id
+    assert control.run_id == ctx.run_id
     assert control.run_timestamp() == ctx.run_timestamp
 
 
