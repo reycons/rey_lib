@@ -140,15 +140,46 @@ def build_error_record_payload(
     error_id: str = "",
     **fields: Any,
 ) -> dict[str, Any]:
-    """Build the canonical sanitized ERROR payload; log_utils writes it."""
+    """Build the canonical sanitized ERROR payload; log_utils writes it.
+
+    ``error_message`` carries the whole payload, because that is what the column
+    is and what its readers expect: ``control.run_log.error_message`` is jsonb,
+    and ``results_summary._failure_detail`` says a failure record "carries the
+    whole canonical payload in the error_message column", ranking
+    ``sanitized_exception``, ``error_message``, ``message`` and the tracebacks
+    *within* that object.
+
+    It held the message text instead. ``_serialise_jsonb`` passes a string
+    through untouched, so Postgres parsed it as JSON and rejected any message
+    beginning with a bare word -- ``invalid input syntax for type json ...
+    Token "Expecting" is invalid`` -- and the record was dropped. The detail
+    reader, meanwhile, saw a non-mapping and returned ``{}``: every failure
+    record has been losing its evidence since the run log moved into the
+    database.
+
+    ``message`` stays flat and textual for the text column. The nested
+    ``error_message`` is the rank-2 text field the detail reader looks for
+    inside the payload; the outer one is the column.
+    """
     safe_message = _redact_error_text(message)
-    return {
+    payload = {
         "error_id": str(error_id or uuid.uuid4()),
         "status": "failed",
         "error_type": _redact_error_text(error_type),
         "message": safe_message,
         "error_message": safe_message,
         **_sanitize_error_value(fields),
+    }
+    # Envelope and shared facts flat; everything else inside the object. A key
+    # that is neither is rejected -- an ERROR record has no payload column, so
+    # a caller field left beside error_message ("failure_reason",
+    # "source_path") took the whole record down with it. error_id is not among
+    # the shared facts: control.run_log has no such column, and _SHARED_FIELDS
+    # names real columns rather than fields a caller finds convenient.
+    return {
+        "message": safe_message,
+        "status": "failed",
+        "error_message": payload,
     }
 
 

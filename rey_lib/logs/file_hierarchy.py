@@ -546,31 +546,40 @@ def _classification_stage(inventory: _Inventory,
     )
 
 
-# What a created artifact is called, keyed by the manifest reason that created
-# it. A node is named for what it is, so a reader knows what opens when it is
-# clicked; anything not named here stays a generic lifecycle event.
+# What a mutation is called, keyed by its result -- what the operation
+# produced -- with one entry owning both outcomes.
 #
-# This is data, not a decision. Adding a mutation reason is an entry here, never
-# a branch — recorded as a migrate finding in the rey_lib dispatcher review,
+# result and status are orthogonal: result says what kind of outcome this
+# record is about, status says whether it succeeded. So a failure is not a
+# second result value; it is the same entry read through the other form.
+#
+# This is data, not a decision. Adding an outcome is an entry here, never a
+# branch -- recorded as a migrate finding in the rey_lib dispatcher review,
 # because a seven-armed chain meant every new reason edited the function that
 # was supposed to merely present it.
-_MUTATION_PRESENTATION: dict[str, tuple[str, str]] = {
-    "file_sanitization": ("sanitized", "Sanitized CSV"),
-    "prepared_file": ("prepared", "Prepared CSV"),
-    "kickout_file": ("kickout", "Kickout JSONL"),
-    "redacted_kickout_file": ("kickout_redacted", "Redacted Kickout JSONL"),
-    "redacted_sanitized_file": ("sanitized_redacted", "Redacted Sanitized CSV"),
-    "redacted_prepared_file": ("prepared_redacted", "Redacted Prepared CSV"),
+#
+# One table, keyed on one field. There were two -- one on conversion.operator
+# and one on result.reason -- tried in order, because the fact they presented
+# had two homes. producer.operation gave it one, and the presentation reads
+# the outcome rather than the operation that caused it.
+_MUTATION_PRESENTATION: dict[str, tuple[str, str, str]] = {
+    # result             stage type            success        failure
+    "inventoried":          ("inventoried",       "Inventoried",         "Inventory failed"),
+    "classified":           ("classified",        "Classified",          "Classification failed"),
+    "converted_csv":        ("converted",         "Converted CSV",       "Conversion failed"),
+    "sanitized_file":       ("sanitized",         "Sanitized CSV",       "Sanitization failed"),
+    "prepared_file":        ("prepared",          "Prepared CSV",        "Preparation failed"),
+    "kickout_file":         ("kickout",           "Kickout JSONL",       "Kickout failed"),
+    "redacted_kickout_file":   ("kickout_redacted",   "Redacted Kickout JSONL",   "Redacted kickout failed"),
+    "redacted_sanitized_file": ("sanitized_redacted", "Redacted Sanitized CSV",   "Redacted sanitization failed"),
+    "redacted_prepared_file":  ("prepared_redacted",  "Redacted Prepared CSV",    "Redacted preparation failed"),
     # A profile is shared by every file of its identity, so this node hangs
     # under the file whose profiling run created or appended to it.
-    "structural_profile": ("profile", "Structural Profile"),
-}
-
-# The same, keyed by conversion operator. Kept separate because it is read from
-# a different field, and collapsing the two would make one table lie about
-# where its keys come from.
-_CONVERSION_PRESENTATION: dict[str, tuple[str, str]] = {
-    "excel_conversion": ("converted", "Converted CSV"),
+    "structural_profile":   ("profile",           "Structural Profile",  "Profiling failed"),
+    "moved_to_processing":  ("moved",             "Moved to processing", "Move to processing failed"),
+    "moved_to_kickouts":    ("moved",             "Moved to kickouts",   "Move to kickouts failed"),
+    "moved_to_failed":      ("moved",             "Moved to failed",     "Move to failed failed"),
+    "moved_to_archive":     ("moved",             "Moved to archive",    "Move to archive failed"),
 }
 
 
@@ -585,16 +594,16 @@ def _mutation_stage(record: Mapping[str, Any], file_id: int) -> FileHierarchySta
         The stage, named for the artifact it created where one is recognised.
     """
     mutation = _mutation_node(record)
-    conversion = record.get("conversion") if isinstance(record.get("conversion"), Mapping) else {}
-    result = record.get("result") if isinstance(record.get("result"), Mapping) else {}
+    result = str(record.get("result") or "")
 
-    # Conversion is consulted first, preserving the order the branches had: an
-    # excel conversion is named for the conversion even when it also carries a
-    # result reason.
-    presentation = _CONVERSION_PRESENTATION.get(conversion.get("operator"))
+    # One lookup on one field. status selects which form of the entry to show;
+    # it is never encoded in the result.
+    presentation = _MUTATION_PRESENTATION.get(result)
     if presentation is None:
-        presentation = _MUTATION_PRESENTATION.get(result.get("reason"))
-    stage_type, label = presentation or ("mutation", mutation.label)
+        stage_type, label = "mutation", mutation.label
+    else:
+        stage_type, succeeded, failed = presentation
+        label = failed if str(mutation.status or "") == "failed" else succeeded
 
     return FileHierarchyStage(
         stage_identity=f"manifest:{mutation.record_id}",

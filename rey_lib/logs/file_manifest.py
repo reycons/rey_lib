@@ -43,6 +43,7 @@ from rey_lib.logs.logging_setup import get_logger
 __all__ = [
     "FileManifestError",
     "FileManifestSession",
+    "file_facts_from_path",
     "file_manifest_session",
     "log_file_manifest_record",
     "resolve_file_manifest_path",
@@ -272,7 +273,12 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
                 "A classification names the file it classifies by file_id, "
                 "which is that file's manifest identity."
             )
-        if str(record.get("status") or "") != "classified":
+        # A rejected classification records no mutation: nothing was
+        # classified, so there is no lifecycle event to write. status is now
+        # execution state -- 'success' or 'failed' -- and the outcome moved to
+        # result, so this tests the outcome rather than the status it used to
+        # share a word with.
+        if str(record.get("result") or "") != "classified":
             return file_manifest_id
         # base_path is stored as its own column, so it is lifted out of the
         # payload rather than written twice; the read projection puts it back
@@ -281,17 +287,21 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
         base_path = str(classification.pop("base_path", "") or "")
         evidence = dict(record.get("evidence") or {})
         lineage = dict(record.get("lineage") or {})
-        # The path moves when classification routes the file to processing, so
-        # it travels on the event rather than in a second call.
+        # No path. A classification says what the file *is*; the move that
+        # follows says where it went. Recording the post-move location here
+        # made this event the file's most recent placement, so a rollback read
+        # it as the restore target and told the move to put the file back where
+        # it already was.
         return int(manifest.append_mutation(
             file_manifest_id,
             record_type="source_file_classification",
             action="classify",
-            status="classified",
+            status=str(record.get("status") or "success"),
             source_record_id=lineage.get("source_record_id"),
             run_log_id=evidence.get("run_log_id"),
-            path=str(file_object.get("path") or ""),
+            path="",
             producer=record.get("producer"),
+            result=record.get("result"),
             classification=classification,
             base_path=base_path,
         ))
@@ -386,6 +396,7 @@ def read_records_from_control(ctx: Any, *,
                 previous_path = child.get("path") or previous_path
                 continue
             record = _mutation_record(child)
+            record["file"].update(file_facts_from_path(child.get("path")))
             record["file"]["original_path"] = previous_path
             if child.get("path") and not child.get("rollback_complete_in"):
                 previous_path = child.get("path")
@@ -450,6 +461,29 @@ def _mutation_record(row: dict[str, Any]) -> dict[str, Any]:
         if base_path:
             record["classification"]["base_path"] = str(base_path)
     return record
+
+
+def file_facts_from_path(named_path: Any) -> dict[str, str]:
+    """Name and extension of the file one record's path names.
+
+    A mutation record describes the file the action left recorded, so its name
+    and extension come from that record's own path -- not from the governed
+    file's inventory columns, which describe the source. A conversion that
+    wrote a .csv from a .xls has both, and they are different files.
+
+    The same rule ``serialize_source_file_mutation`` applies when a mutation is
+    written directly, so a record projected from storage matches one that was
+    never stored.
+    """
+    text = str(named_path or "").strip()
+    if not text:
+        return {}
+    file_name = Path(text).name
+    return {
+        "file_name": file_name,
+        "base_name": Path(file_name).stem,
+        "file_extension": Path(file_name).suffix.removeprefix(".").lower(),
+    }
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:

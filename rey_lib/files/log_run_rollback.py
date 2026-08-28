@@ -205,7 +205,7 @@ def serialize_source_file_mutation(
     file_id: FileId | None = None,
     classification: Mapping[str, Any] | None = None,
     conversion: Mapping[str, Any] | None = None,
-    reason_code: str = "",
+    operation: str = "",
     reason: str = "",
     recorded_at: str | None = None,
 ) -> dict[str, Any]:
@@ -256,11 +256,10 @@ def serialize_source_file_mutation(
     if previous_version:
         rollback_object["previous_version_path"] = previous_version
 
-    result_object: dict[str, Any] = {}
-    if _path_text(reason_code):
-        result_object["reason_code"] = _path_text(reason_code)
-    if _path_text(reason):
-        result_object["reason"] = _path_text(reason)
+    # The outcome this operation produced. It is a single canonical name and
+    # is stored as one: it used to sit under a "reason" key, which asked a
+    # different question than the value ever answered.
+    outcome = _path_text(reason)
 
     record: dict[str, Any] = {
         "recorded_at": recorded_at or _timestamp(),
@@ -285,9 +284,16 @@ def serialize_source_file_mutation(
         # function neither reads nor interprets it; it only places it in the
         # one canonical section it is allowed to occupy.
         record["conversion"] = dict(conversion)
-    if result_object:
-        record["result"] = result_object
+    if outcome:
+        record["result"] = outcome
+    # producer identifies what produced the mutation, not merely which
+    # application was running: the operation is the act that caused it. action
+    # says what happened to the file; this says which operation did it. A
+    # consumer asking "which operation produced this row" reads one field
+    # instead of guessing between conversion.operator and result.reason.
     record["producer"] = {"application": str(application_name or "")}
+    if _path_text(operation):
+        record["producer"]["operation"] = _path_text(operation)
     return record
 
 
@@ -364,7 +370,7 @@ def log_source_file_mutation(
     file_id: FileId | None = None,
     classification: Mapping[str, Any] | None = None,
     conversion: Mapping[str, Any] | None = None,
-    reason_code: str = "",
+    operation: str = "",
     reason: str = "",
     message: str = "",
     run_log_fields: Mapping[str, Any] | None = None,
@@ -428,7 +434,7 @@ def log_source_file_mutation(
             file_id=file_id,
             classification=classification,
             conversion=conversion,
-            reason_code=reason_code,
+            operation=operation,
             reason=reason,
         )
         manifest_record_id = log_file_manifest_record(ctx, record)
@@ -515,9 +521,19 @@ def rollback_log_run(
         requested = control.request_file_rollback(
             dry_run=False, run_id=int(run_id), required=True)
         reversible = _with_commands(requested)
+        # A reversal that needs filesystem work and carries no command cannot
+        # be performed and must not be mistaken for one that had nothing to do.
+        # It is a failure, so it keeps its requested row and its mutation and
+        # the next run sees it again.
+        failed = [
+            _failed_result(row, "Rollback requires filesystem work but the "
+                                "request supplied no command for it.")
+            for row in requested
+            if str(row.get("rollback_action") or "") != "delete_record"
+            and not str(row.get("command") or "").strip()
+        ]
 
         succeeded: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
         affected_file_ids: set[FileId] = set()
         filesystem_reversals = 0
 
@@ -553,22 +569,49 @@ def rollback_log_run(
                                status="success",
                                **outcome)
 
-        # Completion is the whole request's, and only once every reversal it asked
-        # for has run. A failure leaves the rows requested, so an incomplete
-        # rollback stays visible and can be finished later.
-        if not failed:
-            for step_id in _request_steps(requested):
-                control.complete_file_rollback(step_id, required=True)
+        # Close exactly the set the filesystem confirmed.
+        #
+        # This is a durable saga, and the database is its coordinator: the
+        # filesystem operation cannot enrol in the transaction, so the state
+        # machine around it carries the guarantee instead --
+        #
+        #     DB   request the work, durably
+        #     FS   perform the compensation, which is idempotent
+        #     DB   close only what the filesystem confirmed
+        #
+        # The invariant is that a mutation is closed and deleted only once its
+        # filesystem result is known successful. A process that dies between
+        # the two leaves the row requested with its mutation, and the next run
+        # repeats a move whose source is already gone -- which the compensation
+        # reports as already restored.
+        #
+        # A delete_record reversal is the deletion itself, so it closes here.
+        # Read from the action, never from the absence of a command: a
+        # move_back that could not be given one needed filesystem work and did
+        # not get it, and closing that as done is how a rollback comes to
+        # report success over files it never moved.
+        reversed_ids = [int(row["file_mutation_id"]) for row in succeeded]
+        reversed_ids += [
+            int(row["file_mutation_id"]) for row in requested
+            if str(row.get("rollback_action") or "") == "delete_record"
+            and row.get("file_mutation_id") is not None
+        ]
+        if reversed_ids:
+            control.complete_file_rollback(reversed_ids, required=True)
     except Exception as exc:
         # The batch closes on every exit. A root step left open is offered as
         # the parent of the next batch's work, so an operation that died
         # part-way would silently adopt the one that follows it.
-        control.end_batch("FAILED", error_message=str(exc))
+        control.end_batch("FAILED", error_message=str(exc), required=True)
         raise
 
+    # required, like the start: end_batch defaults to swallowing its own
+    # failure and returning None, which leaves the batch open for ever and
+    # says nothing. A batch that cannot be closed is an error, not a silence.
     control.end_batch(
         "SUCCEEDED" if not failed else "FAILED",
         error_message=None if not failed else f"{len(failed)} reversal(s) failed.",
+        required=True,
     )
 
     status = _aggregate_status(len(succeeded), len(failed))
@@ -620,26 +663,15 @@ def _require_control(ctx: Any) -> Any:
 def _with_commands(
     rows: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
-    """The rows that have something to run.
+    """The rows whose reversal has filesystem work to do.
 
-    Reversibility is the database's answer, not one re-derived here: a row it
-    could build a reversal for carries that reversal, and a row it could not
-    carries none. An irreversible mutation is still a rollback fact and is
-    still returned to the reader -- it simply produces no filesystem work.
+    Which those are is the database's answer, not one re-derived here: a
+    reversal that moves a file back or deletes a created one carries the
+    command that does it. The rest are reversed by deleting the mutation
+    record, so they carry none -- they are still rollback records and are still
+    returned to the reader, they simply have nothing to run.
     """
     return [row for row in rows if str(row.get("command") or "").strip()]
-
-
-def _request_steps(rows: Sequence[Mapping[str, Any]]) -> list[int]:
-    """The governing steps of the requests these rows belong to.
-
-    Usually one. A mutation already requested under an earlier step keeps that
-    step, so a set can span more than one request, and each is completed on its
-    own terms.
-    """
-    steps = {int(row["request_batch_step_id"]) for row in rows
-             if row.get("request_batch_step_id") is not None}
-    return sorted(steps)
 
 
 def _reversal_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -654,9 +686,9 @@ def _reversal_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
     own history says it belongs. Both come from the row, so nothing is
     reconstructed here.
 
-    ``rollback`` carries the compensation payload for the inverses that need one.
-    The request dataset returns no such column, and the two actions that would
-    read it -- delete and replace -- are irreversible, carry no command, and
+    ``rollback`` carries the compensation payload for the inverses that need
+    one. The request dataset returns no such column, and the actions that would
+    read it carry no command, so they are reversed by deleting the record and
     never reach a compensation.
     """
     rollback_payload = row.get("rollback")
@@ -983,10 +1015,10 @@ def _records_after(
     reader confirmed against is the grid they review afterwards.
 
     ``outcome`` is the executor's own word for a row that ran, the reason for
-    one that did not, and empty for a row that had no command -- an irreversible
-    mutation is still a rollback record, and says so by having nothing to show
-    here. ``rollback_state`` reports the transition this execution just made
-    rather than the state read before it.
+    one that did not, and empty for a row that had no command -- a reversal
+    that is only the record's deletion is still a rollback record, and says so
+    by having nothing to show here. ``rollback_state`` reports the transition
+    this execution just made rather than the state read before it.
     """
     ran = {int(row["file_mutation_id"]): row for row in succeeded
            if row.get("file_mutation_id") is not None}

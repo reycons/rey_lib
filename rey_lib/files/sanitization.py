@@ -21,6 +21,9 @@ from rey_lib.files.log_run_rollback import (
 )
 from rey_lib.files.governed_file import FileId
 from rey_lib.files.primitive_file_io import stage_stream_write
+from rey_lib.logs import get_logger
+
+_logger = get_logger(__name__)
 
 __all__ = [
     "EffectiveSanitizationPolicy",
@@ -294,6 +297,43 @@ class _EncodingPlan:
     bom_size: int
 
 
+def _record_failed_mutation(
+    ctx: Any,
+    file_reference: GovernedFileReference,
+    source: Path,
+    exc: BaseException,
+) -> None:
+    """Record that sanitization ran against a governed file and did not succeed.
+
+    A governed operation that fails is evidence, not silence: the row says the
+    operation ran, names it, and says it produced nothing. Written before the
+    exception is re-raised, which is what makes it durable -- the control
+    connection is autocommit, so this commits and the exception then travels
+    through Python rather than through an open transaction.
+
+    Never raises. Failing to record a failure must not replace the original
+    error with a logging one.
+    """
+    try:
+        log_source_file_mutation(
+            ctx.state_ctx,
+            action="create",
+            status="failed",
+            source_path=source,
+            application_name=ctx.application_name,
+            file_id=file_reference.file_id,
+            classification=file_reference.classification,
+            operation="file_sanitization",
+            # The same outcome as a success: result says what kind of
+            # outcome this record is about, status says whether it worked.
+            reason="sanitized_file",
+            message=f"Sanitization failed for one governed file: {exc}",
+        )
+    except Exception:  # noqa: BLE001 -- the original failure is the one to raise
+        _logger.warning("Could not record the failed sanitization mutation for "
+                        "'%s'", source.name)
+
+
 def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileReference) -> FileSanitizationResult:
     if not isinstance(ctx, FileSanitizationContext):
         raise TypeError("sanitize_file requires FileSanitizationContext.")
@@ -319,8 +359,10 @@ def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileRefe
     except FileSanitizationError as exc:
         if exc.result is not None:
             raise
+        _record_failed_mutation(ctx, file_reference, source, exc)
         raise FileSanitizationError(str(exc), replace(result, status="failed")) from exc
     except (LookupError, OSError, UnicodeError, ValueError) as exc:
+        _record_failed_mutation(ctx, file_reference, source, exc)
         raise FileSanitizationError(str(exc), replace(result, status="failed")) from exc
     result = replace(
         result,
@@ -375,7 +417,8 @@ def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileRefe
             application_name=ctx.application_name,
             file_id=file_reference.file_id,
             classification=file_reference.classification,
-            reason="file_sanitization",
+            operation="file_sanitization",
+            reason="sanitized_file",
             message="Sanitized one governed received text file under configured policy.",
             run_log_fields=run_fields,
         )

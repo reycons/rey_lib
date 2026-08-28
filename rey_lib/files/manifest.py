@@ -218,14 +218,14 @@ class FileManifest:
             batch_id=batch_id, run_id=run_id,
         )
 
-    def complete_rollback(self, request_batch_step_id: int) -> None:
-        """Close one rollback request, every reversal it asked for having run.
+    def complete_rollback(self, file_mutation_ids: list[int]) -> None:
+        """Close the rollbacks whose reversals ran, named one by one.
 
-        The request is the unit, not the row: its governing batch step is its
-        identity, and completion is claimed for the set once the filesystem
-        work it described has all succeeded.
+        The row is the unit, not the request. What stays requested is what is
+        still owed, and it keeps its mutation so the next rollback can pick it
+        up -- which is how the service finishes work an earlier run could not.
         """
-        self._control.complete_file_rollback(request_batch_step_id)
+        self._control.complete_file_rollback(list(file_mutation_ids))
 
     def current_classification(
         self, file_manifest_id: Optional[int] = None,

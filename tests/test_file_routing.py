@@ -35,6 +35,7 @@ def _context(
         state_ctx=SimpleNamespace(),
         run_log=make_run_log(root, path=str(root / "run.jsonl")),
         application_name="test_app",
+        operation="test_operation",
         routes=(
             routes
             if routes is not None

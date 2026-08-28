@@ -11,11 +11,14 @@ from typing import Any, Mapping
 
 from rey_lib.files.file_utils import move_file
 from rey_lib.files.governed_file import FileId, governed_file_id
+from rey_lib.logs import get_logger
 from rey_lib.files.log_run_rollback import (
     SourceFileMutationEvidenceError,
     SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
 )
+
+_logger = get_logger(__name__)
 
 __all__ = [
     "CollisionPolicy",
@@ -93,6 +96,10 @@ class FileRoutingContext:
     state_ctx: Any
     run_log: Any
     application_name: str
+    #: The operation this routing serves. Routing knows destinations, never
+    #: which operation asked for one, so the caller supplies it and the
+    #: mutation states it.
+    operation: str
     routes: Mapping[FileRoutingRole, str | Path | None]
     governed_roots: tuple[Path, ...]
     dry_run: bool = False
@@ -223,6 +230,43 @@ def move_to_archive(
     return _move_to_role(ctx, file, destination_role=FileRoutingRole.ARCHIVE)
 
 
+def _record_failed_move(
+    ctx: "FileRoutingContext",
+    file: "GovernedFileReference",
+    destination_role: FileRoutingRole,
+    original_path: Path,
+    exc: BaseException,
+) -> None:
+    """Record that a governed move ran and did not take effect.
+
+    The operation is the caller's, as it is for a successful move; routing
+    knows the destination and never infers who asked for one.
+
+    Never raises. Failing to record a failure must not replace the original
+    error with a logging one.
+    """
+    try:
+        log_source_file_mutation(
+            ctx.state_ctx,
+            action=_ACTION,
+            status="failed",
+            source_path=original_path,
+            application_name=ctx.application_name,
+            file_id=file.file_id,
+            classification=file.classification,
+            operation=ctx.operation,
+            # Same result as a success; status distinguishes them.
+            reason="moved_to_" + destination_role.value,
+            message=(
+                f"Move to {destination_role.value} failed for "
+                f"'{original_path.name}': {exc}"
+            ),
+        )
+    except Exception:  # noqa: BLE001 -- the move error is the one to raise
+        _logger.warning("Could not record the failed move mutation for '%s'",
+                        original_path.name)
+
+
 def _move_to_role(
     ctx: FileRoutingContext,
     file: GovernedFileReference,
@@ -336,6 +380,11 @@ def _move_to_role(
             ),
         )
     except OSError as exc:
+        # The move itself failed, before any evidence was written. This is the
+        # site: the filesystem operation is known not to have happened and no
+        # mutation exists yet. The later except catches the *evidence* write
+        # failing, which nothing can record.
+        _record_failed_move(ctx, file, destination_role, original_path, exc)
         result = _result(
             ctx,
             file,
@@ -364,7 +413,11 @@ def _move_to_role(
             application_name=ctx.application_name,
             file_id=file.file_id,
             classification=file.classification,
-            reason=destination_role.value,
+            # The destination is routing's; the operation is the caller's.
+            # This layer serves whichever operation invoked it and must not
+            # infer one from the role it was asked for.
+            operation=ctx.operation,
+            reason="moved_to_" + destination_role.value,
             message=_MESSAGES[destination_role.value],
             run_log_fields=(
                 dict(ctx.mutation_run_log_fields)
