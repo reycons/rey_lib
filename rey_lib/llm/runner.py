@@ -621,6 +621,21 @@ def _execute_with_retry(
 
     Returns an _ExecuteResult with status=STATUS_SUCCESS or STATUS_FAILED.
     """
+    # Request provider JSON mode only for the normal JSON-output path: not raw,
+    # not an artifact envelope, and the provider declares real JSON-mode
+    # support. raw_output is a boolean projection of the contract's declared
+    # output_format (analysis.py: raw_output = spec.output_format == "raw"), so
+    # this is the same condition _build_messages uses to send the generic JSON
+    # instruction -- asked once more where it can be enforced rather than
+    # requested.
+    response_format = (
+        "json"
+        if not raw_output
+        and not artifact_type
+        and bool(getattr(provider.capabilities, "supports_json_mode", False))
+        else None
+    )
+
     raw        = ""
     tokens_in  = 0
     tokens_out = 0
@@ -632,7 +647,8 @@ def _execute_with_retry(
         if cancelled is not None and cancelled():
             raise CancellationFailure("LLM execution cancelled.")
         raw, tokens_in, tokens_out, exc = _single_provider_call(
-            provider, messages, model, max_tokens, temperature, on_chunk, cancelled
+            provider, messages, model, max_tokens, temperature, on_chunk,
+            cancelled, response_format=response_format,
         )
 
         if exc is not None:
@@ -807,12 +823,21 @@ def _single_provider_call(
     temperature: float = 0.0,
     on_chunk:    Optional[Callable[[str], None]] = None,
     cancelled:   Optional[Callable[[], bool]] = None,
+    response_format: Optional[str] = None,
 ) -> tuple[str, int, int, Optional[ProviderFailure]]:
-    """Make one provider call. Returns (raw, tokens_in, tokens_out, exc_or_None)."""
+    """Make one provider call. Returns (raw, tokens_in, tokens_out, exc_or_None).
+
+    ``response_format`` constrains generation at the model boundary. Asking for
+    JSON in the prompt and hoping is what produced ``Unterminated string`` from
+    a Markdown body carrying a quoted identifier: escaping the envelope was the
+    model's to get right, and no post-hoc repair can disambiguate an unescaped
+    quote.
+    """
     try:
         resp = provider.run(
             messages=messages, model=model, max_tokens=max_tokens,
-            temperature=temperature, on_chunk=on_chunk, cancelled=cancelled,
+            temperature=temperature, response_format=response_format,
+            on_chunk=on_chunk, cancelled=cancelled,
         )
         if cancelled is not None and cancelled():
             raise CancellationFailure("LLM execution cancelled.")

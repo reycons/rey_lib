@@ -28,7 +28,11 @@ __all__ = ["OpenAIProvider"]
 _CAPABILITIES = ProviderCapabilities(
     supports_tools           = True,
     supports_images          = True,
-    supports_json_mode       = True,
+    # False describes this adapter, not the vendor: OpenAI supports
+    # response_format={"type": "json_object"}, and this adapter does not map it
+    # onto chat.completions.create. The runner gates on this flag, so a True
+    # here would send a format this adapter silently drops.
+    supports_json_mode       = False,
     supports_streaming       = True,
     supports_system_messages = True,
     max_context_tokens       = 128_000,
@@ -64,6 +68,7 @@ class OpenAIProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        response_format: str | dict[str, Any] | None = None,
         on_chunk:    Optional[Callable[[str], None]] = None,
         cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
@@ -84,6 +89,11 @@ class OpenAIProvider(BaseProvider):
             Maximum tokens to generate.
         temperature : float
             Sampling temperature.
+        response_format : str | dict | None
+            Accepted for the shared contract and **not applied**: this adapter
+            does not map it onto ``chat.completions.create``. Its capabilities
+            declare ``supports_json_mode = False`` to say so, and the runner
+            never sends one.
 
         Returns
         -------

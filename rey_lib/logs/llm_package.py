@@ -234,7 +234,9 @@ def _execute_analysis_package(
 
     from rey_lib.config.ctx import find_in_ctx
     from rey_lib.config.env_reference import resolve_env_reference
-    from rey_lib.llm.envelope import build_envelope_instruction, extract_artifact_envelope
+    from rey_lib.llm.envelope import (
+        build_envelope_instruction, extract_artifact_envelope, loads_llm_json,
+    )
     from rey_lib.llm.exceptions import ConfigurationFailure
     from rey_lib.llm.llm_utils import direct_ask
 
@@ -264,7 +266,12 @@ def _execute_analysis_package(
         payload_id=payload_id,
     )
     content, _ = extract_artifact_envelope(raw, artifact_type)
-    return json.loads(content)
+    # The shared policy, not the standard library's: loads_llm_json accepts
+    # literal control characters inside strings, protects invalid Markdown
+    # escapes and completes a truncated document. Parsing extracted artifact
+    # content with json.loads bypassed all three and failed on a control
+    # character the shared loader is written to accept.
+    return loads_llm_json(content)
 
 
 def run_configured_record_analysis(

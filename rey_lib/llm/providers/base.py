@@ -119,6 +119,7 @@ class BaseProvider(ABC):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        response_format: str | dict[str, Any] | None = None,
         on_chunk:    Optional[Callable[[str], None]] = None,
         cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
@@ -134,6 +135,13 @@ class BaseProvider(ABC):
             Maximum tokens the provider may generate.
         temperature : float
             Sampling temperature.  0.0 for deterministic output.
+        response_format : str | dict | None
+            Constrain generation to a format -- ``"json"`` for a JSON object.
+            Only a provider whose capabilities report ``supports_json_mode`` is
+            asked, so that flag means exactly one thing: *this adapter maps this
+            argument onto its API*. A provider that does not map it declares
+            False; accepting the argument and dropping it is the silent failure
+            this parameter exists to remove.
         on_chunk : Optional[Callable[[str], None]]
             Optional incremental-output callback. When supplied and the provider
             supports streaming, it is invoked with each text delta as it arrives;

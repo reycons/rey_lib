@@ -29,21 +29,23 @@ from rey_lib.llm.providers.base import (
 
 __all__ = ["GeminiProvider"]
 
-# The context window is the current 2.5-series figure. Gemini supports
-# structured output through response_mime_type/response_schema, so JSON mode is
-# declared true because the declaration describes the provider, not what Rey
-# currently asks of it.
+# The context window is the current 2.5-series figure.
 #
-# Gap — reachability, not accuracy: BaseProvider.run() carries no parameter for
-# a response format or schema, and runner._single_provider_call passes none, so
-# nothing can request JSON mode through the contract today. Ollama's run() has
-# an extra response_format parameter the contract does not declare, which is the
-# same gap answered locally. Closing it properly is a provider-contract change
-# for its own increment, deliberately not forced into this one.
+# supports_json_mode describes *this adapter*, not the vendor. Gemini the
+# service does support structured output through
+# response_mime_type/response_schema; this adapter maps neither onto
+# generate_content, so it declares False.
+#
+# The flag was True on the older reading -- "the declaration describes the
+# provider, not what Rey currently asks of it" -- which was harmless only while
+# BaseProvider.run carried no way to ask. It carries one now, and the runner
+# gates on this flag: a True here would have the runner send response_format
+# and this adapter drop it, which is the silent failure the parameter exists to
+# remove. Mapping it is a small change and the flag flips back with it.
 _CAPABILITIES = ProviderCapabilities(
     supports_tools           = True,
     supports_images          = True,
-    supports_json_mode       = True,
+    supports_json_mode       = False,
     supports_streaming       = True,
     supports_system_messages = True,
     max_context_tokens       = 1_048_576,
@@ -97,6 +99,7 @@ class GeminiProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        response_format: str | dict[str, Any] | None = None,
         on_chunk:    Optional[Callable[[str], None]] = None,
         cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
@@ -118,6 +121,11 @@ class GeminiProvider(BaseProvider):
             Maximum tokens to generate.
         temperature : float
             Sampling temperature.
+        response_format : str | dict | None
+            Accepted for the shared contract and **not applied**: this adapter
+            does not map it onto ``generate_content``. Its capabilities declare
+            ``supports_json_mode = False`` to say so, and the runner never sends
+            one.
         on_chunk : Optional[Callable[[str], None]]
             Incremental-output callback, invoked with text deltas only.
         cancelled : Optional[Callable[[], bool]]

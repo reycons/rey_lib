@@ -38,6 +38,9 @@ __all__ = ["MockProvider"]
 _CAPABILITIES = ProviderCapabilities(
     supports_tools           = True,
     supports_images          = True,
+    # True because the double answers whatever it is asked, which is what a
+    # double is for -- not because it constrains anything. Do not read it as
+    # evidence that ignoring response_format is acceptable in a real adapter.
     supports_json_mode       = True,
     supports_streaming       = False,
     supports_system_messages = True,
@@ -101,6 +104,7 @@ class MockProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        response_format: str | dict[str, Any] | None = None,
         on_chunk:    Optional[Callable[[str], None]] = None,
         cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
@@ -119,6 +123,10 @@ class MockProvider(BaseProvider):
             Ignored.
         temperature : float
             Ignored.
+        response_format : str | dict | None
+            Accepted and ignored. The double exists to exercise the shared
+            interface, so it takes every contract argument; ignoring this one is
+            not evidence of JSON-mode support.
 
         Returns
         -------

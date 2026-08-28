@@ -64,6 +64,7 @@ class AnthropicProvider(BaseProvider):
         model:       str,
         max_tokens:  int   = 4000,
         temperature: float = 0.0,
+        response_format: str | dict[str, Any] | None = None,
         on_chunk:    Optional[Callable[[str], None]] = None,
         cancelled:   Optional[Callable[[], bool]] = None,
     ) -> ProviderResponse:
@@ -85,6 +86,10 @@ class AnthropicProvider(BaseProvider):
             Maximum tokens to generate.
         temperature : float
             Sampling temperature.
+        response_format : str | dict | None
+            Accepted for the shared contract and not applied. Anthropic already
+            declares ``supports_json_mode = False``, so the runner never sends
+            one.
 
         Returns
         -------

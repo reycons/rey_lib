@@ -122,8 +122,11 @@ def test_capabilities_are_declared_without_claiming_false_parity() -> None:
     capabilities = GeminiProvider(api_key="key").capabilities
     assert capabilities.supports_streaming is True
     assert capabilities.supports_system_messages is True
-    # Gemini genuinely offers structured output, unlike Anthropic's declaration.
-    assert capabilities.supports_json_mode is True
+    # False describes the adapter, not the vendor: Gemini the service offers
+    # structured output, and this adapter maps neither response_mime_type nor
+    # response_schema onto generate_content. The runner gates on this flag, so
+    # True would have it send a response_format this adapter drops in silence.
+    assert capabilities.supports_json_mode is False
     assert capabilities.max_context_tokens == 1_048_576
 
 
