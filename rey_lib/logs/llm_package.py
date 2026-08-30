@@ -234,7 +234,7 @@ def _execute_analysis_package(
 
     from rey_lib.config.ctx import find_in_ctx
     from rey_lib.config.env_reference import resolve_env_reference
-    from rey_lib.llm.envelope import (
+    from rey_lib.artifacts import (
         build_envelope_instruction, extract_artifact_envelope, loads_llm_json,
     )
     from rey_lib.llm.exceptions import ConfigurationFailure
@@ -489,7 +489,7 @@ def run_workbench_input_stream(
     from rey_lib.config.ctx import find_in_ctx
     from rey_lib.config.env_reference import resolve_env_reference
     from rey_lib.llm.api import RunRequest
-    from rey_lib.llm.envelope import build_envelope_instruction
+    from rey_lib.artifacts import build_envelope_instruction
     from rey_lib.llm.exceptions import ConfigurationFailure
     from rey_lib.llm.runner import run as _run
 

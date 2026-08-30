@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from rey_lib.llm.exceptions import ParseFailure
+from rey_lib.artifacts.errors import ArtifactEnvelopeError
 
 __all__ = [
     "ARTIFACT_TYPE_FIELD",
@@ -231,7 +231,7 @@ def extract_artifact_envelope(
         try:
             envelope = loads_llm_json(text)
         except (json.JSONDecodeError, ValueError) as exc:
-            raise ParseFailure(
+            raise ArtifactEnvelopeError(
                 "LLM response extraction failed. Expected a JSON envelope with a "
                 f"'{CONTENT_FIELD}' field. Artifact type: {artifact_type or 'text'}. "
                 f"The raw response was preserved for review. JSON parse error: {exc}"
@@ -267,7 +267,7 @@ def extract_artifact_envelope(
         }
 
     if not isinstance(envelope, dict) or CONTENT_FIELD not in envelope:
-        raise ParseFailure(
+        raise ArtifactEnvelopeError(
             "LLM response extraction failed. The JSON response did not contain "
             f"the required field: '{CONTENT_FIELD}'. No final artifact was written."
         )
@@ -334,7 +334,7 @@ def _validate_content(content: str, artifact_type: str) -> None:
         return
 
     if "```" in content:
-        raise ParseFailure(
+        raise ArtifactEnvelopeError(
             f"LLM artifact validation failed. Artifact type: {artifact_type}. "
             "Reason: extracted content still contains Markdown fencing. "
             "No final artifact was written."
@@ -346,7 +346,7 @@ def _validate_content(content: str, artifact_type: str) -> None:
         and head.startswith("{")
         and f'"{ARTIFACT_TYPE_FIELD}"' in head
     ):
-        raise ParseFailure(
+        raise ArtifactEnvelopeError(
             f"LLM artifact validation failed. Artifact type: {artifact_type}. "
             "Reason: extracted content still contains a JSON envelope wrapper. "
             "No final artifact was written."

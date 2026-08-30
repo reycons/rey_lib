@@ -22,10 +22,34 @@ from rey_lib.artifacts.api import (
     process_artifact,
     validate_artifact_processing,
 )
-from rey_lib.artifacts.errors import ArtifactProcessingError
+from rey_lib.artifacts.envelope import (
+    ARTIFACT_TYPE_FIELD,
+    CONTENT_FIELD,
+    NOTES_FIELD,
+    REJECTION_PREFIX,
+    build_envelope_instruction,
+    extract_artifact,
+    extract_artifact_envelope,
+    loads_llm_json,
+    rejection_reason_from_notes,
+)
+from rey_lib.artifacts.errors import ArtifactEnvelopeError, ArtifactProcessingError
+from rey_lib.artifacts.store import ArtifactStore, LocalArtifactStore
 
 __all__ = [
+    "ARTIFACT_TYPE_FIELD",
+    "CONTENT_FIELD",
+    "NOTES_FIELD",
+    "REJECTION_PREFIX",
+    "ArtifactEnvelopeError",
     "ArtifactProcessingError",
+    "ArtifactStore",
+    "LocalArtifactStore",
+    "build_envelope_instruction",
+    "extract_artifact",
+    "extract_artifact_envelope",
+    "loads_llm_json",
+    "rejection_reason_from_notes",
     "artifact_config_from_ctx",
     "lint_artifact",
     "process_artifact",

@@ -28,7 +28,7 @@ from uuid import UUID
 import pytest
 
 from rey_lib.llm.api import RunRequest, RunResponse
-from rey_lib.llm.artifacts import ArtifactStore, LocalArtifactStore
+from rey_lib.artifacts import ArtifactStore, LocalArtifactStore
 from rey_lib.llm.document_loader import from_csv
 from rey_lib.llm.exceptions import LockConflict, RateLimitFailure, TimeoutFailure
 from rey_lib.llm.retry import RetryPolicy
@@ -49,7 +49,7 @@ from rey_lib.llm.records import (
     reject,
     store_record,
 )
-from rey_lib.llm.envelope import extract_artifact_envelope, loads_llm_json
+from rey_lib.artifacts import extract_artifact_envelope, loads_llm_json
 from rey_lib.llm.redaction import NoopRedactor, PatternRedactor
 from rey_lib.llm.runner import (  # type: ignore[attr-defined]
     _ProviderConfig,

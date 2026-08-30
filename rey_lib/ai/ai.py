@@ -127,6 +127,10 @@ class AI:
         """
         return self._registry.effective_capability(self._profile_for(profile_id))
 
+    def profile(self, profile_id: str = "") -> AIProfile:
+        """One profile this runtime offers, by id, or the selected one."""
+        return self._profile_for(profile_id)
+
     def permitted_access(self, profile_id: str = "", requested: str = "") -> str:
         """Which representation a configured model may receive.
 
