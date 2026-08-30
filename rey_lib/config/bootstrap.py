@@ -44,6 +44,9 @@ from rey_lib.db.connection import build_connections, connection_owner
 from rey_lib.run import Run, establish_run_identity
 from rey_lib.runtime import collect_runtime, register_runtime_object
 
+#: The id of the ad-hoc text instruction every runtime offers.
+AD_HOC_INSTRUCTION = "__ad_hoc__"
+
 __all__ = ["build_ctx_for_app", "app_runtime"]
 
 _logger = get_logger(__name__)
@@ -265,7 +268,11 @@ def _open_ai(ctx: Namespace) -> Any:
     from rey_lib.ai.errors import AIError
 
     try:
-        return ai_from_ctx(ctx, profiles=_ai_profiles(ctx))
+        return ai_from_ctx(
+            ctx,
+            profiles=_ai_profiles(ctx),
+            instructions=_ai_instructions(ctx),
+        )
     except AIError as exc:
         # Configured and broken is not the same as absent, and must not be
         # reported as it. An installation that names providers has asked for an
@@ -301,6 +308,64 @@ def _ai_profiles(ctx: Namespace) -> tuple[Any, ...]:
         )
         for configured in configured_providers_from_ctx(ctx)
     )
+
+
+def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
+    """The instructions this runtime offers.
+
+    Two canonical choices plus whatever configuration declares:
+
+        NONE  send no instruction
+        RAW   ad-hoc text the operator writes
+        CONTRACT  one per configured analysis that names a contract
+
+    The old Console offered "Text Prompt" and "Text Prompt Only" as separate
+    selections. They are not reproduced: both ran the same mode with the same
+    instruction, and differed only in whether the caller sent data alongside it
+    -- which is the caller's input, not a property of the instruction. The old
+    settings object said as much itself.
+    """
+    from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
+
+    offered: list[Any] = [
+        AIInstruction(id="", kind=AIInstructionKind.NONE, name="None"),
+        AIInstruction(id=AD_HOC_INSTRUCTION, kind=AIInstructionKind.RAW,
+                      name="Ad hoc text"),
+    ]
+
+    analyses = getattr(ctx, "log_analysis", None)
+    for name, entry in _named_entries(analyses):
+        contract = str(_entry_field(entry, "contract", "") or "").strip()
+        if not contract:
+            continue
+        offered.append(
+            AIInstruction(
+                id=str(name),
+                kind=AIInstructionKind.CONTRACT,
+                name=str(name),
+                reference=contract,
+            ),
+        )
+    return tuple(offered)
+
+
+def _named_entries(section: Any) -> list[tuple[str, Any]]:
+    """A configured section as ``(name, entry)``, mapping or namespace alike."""
+    if section is None:
+        return []
+    if isinstance(section, (list, tuple)):
+        return [(str(getattr(e, "name", "") or ""), e) for e in section]
+    if hasattr(section, "keys"):
+        return [(str(k), section[k]) for k in section.keys()]
+    return [(k, v) for k, v in vars(section).items() if not str(k).startswith("_")]
+
+
+def _entry_field(entry: Any, name: str, default: Any) -> Any:
+    """One configured field, mapping or namespace alike."""
+    if entry is None:
+        return default
+    value = entry.get(name, default) if hasattr(entry, "get") else getattr(entry, name, default)
+    return default if value is None else value
 
 
 def _configured_access(ctx: Namespace, name: str) -> Any:

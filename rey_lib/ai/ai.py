@@ -30,6 +30,7 @@ retry, tool, validation and normalization code is not here, and no
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Iterator
 
 from rey_lib.ai.capabilities import AICapabilitySet
@@ -127,6 +128,10 @@ class AI:
         """
         return self._registry.effective_capability(self._profile_for(profile_id))
 
+    def instruction(self, instruction_id: str) -> AIInstruction:
+        """One instruction this runtime offers, by id."""
+        return self._registry.instruction(str(instruction_id or ""))
+
     def profile(self, profile_id: str = "") -> AIProfile:
         """One profile this runtime offers, by id, or the selected one."""
         return self._profile_for(profile_id)
@@ -179,6 +184,33 @@ class AI:
     def update_settings(self, settings: AISettings) -> AISettings:
         """Replace the whole selection at once, validated as one change."""
         return self._replace(self._validated(settings))
+
+    def set_instruction_text(self, instruction_id: str, text: str) -> AIInstruction:
+        """Replace what one offered instruction says.
+
+        The canonical instruction content is this runtime's. A consumer that
+        edited text and kept it would be a second answer to what the instruction
+        says, which is the state one owner exists to prevent.
+
+        ``AIInstruction`` is immutable, so this builds the replacement and puts
+        it in place of the old one rather than mutating anything.
+
+        Raises:
+            AISelectionError: when this runtime offers no such instruction, or
+                the instruction is not one whose text a caller may set. A
+                contract's body comes from the contract it references, and
+                overwriting it here would make the stored contract and what was
+                sent disagree.
+        """
+        current = self._registry.instruction(str(instruction_id or ""))
+        if current.kind is not AIInstructionKind.RAW:
+            raise AISelectionError(
+                f"AI instruction '{current.id}' is a {current.kind.value} "
+                "instruction, and its text is not a caller's to set."
+            )
+        replaced = replace(current, text=str(text or ""))
+        self._registry.replace_instruction(replaced)
+        return replaced
 
     def observe(self, listener: Callable[[AISettings], None]) -> Callable[[], None]:
         """Watch the selection, and get back the way to stop.

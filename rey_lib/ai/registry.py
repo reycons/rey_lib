@@ -111,6 +111,26 @@ class AIRegistry:
             )
         return found
 
+    def replace_instruction(self, instruction: AIInstruction) -> None:
+        """Replace one offered instruction with a new value.
+
+        A named operation rather than a caller reaching into the collection:
+        ``AIInstruction`` is immutable, so changing what an instruction says
+        means putting a different one in its place, and the runtime that owns
+        the collection is what puts it there.
+
+        Raises:
+            AISelectionError: when this runtime offers no instruction under that
+                id. Replacing something that is not offered would add one by a
+                side door.
+        """
+        wanted = str(instruction.id or "")
+        if wanted not in self._instructions:
+            raise AISelectionError(
+                f"No AI instruction is configured as '{wanted or '(none)'}'."
+            )
+        self._instructions[wanted] = instruction
+
     def provider(self, name: str) -> AIProvider:
         """The adapter registered under this name.
 
