@@ -60,12 +60,14 @@ class EchoProvider(AIProvider):
         chunk_size: int = 8,
         capability: AICapabilitySet | None = None,
         replay: ReplayFacts | None = None,
+        name: str = "echo",
     ) -> None:
         self._reply_with = reply_with
         self._value = value
         self._tool_calls = tool_calls
         self._remaining_failures = int(fail_times)
         self._chunk_size = max(1, int(chunk_size))
+        self._name = str(name or "echo")
         self._capability = capability if capability is not None else _CAPABILITY
         self._replay = replay if replay is not None else ReplayFacts(
             classification=ReplayClassification.SAFE,
@@ -74,7 +76,13 @@ class EchoProvider(AIProvider):
 
     @property
     def name(self) -> str:
-        return "echo"
+        """The configured provider this adapter stands for.
+
+        Defaults to ``echo``, and is set to a configured identity when a factory
+        builds one, because an adapter is one configured provider rather than
+        one provider type.
+        """
+        return self._name
 
     def capability_for(self, model: str) -> AICapabilitySet:  # noqa: ARG002
         """What this adapter says it can do, whatever the model.

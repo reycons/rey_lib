@@ -444,7 +444,9 @@ def test_the_built_runtime_retains_no_reference_to_ctx() -> None:
 
     def factory(configuration: ConfiguredProvider) -> AIProvider:
         resolved.append(configuration)
-        return EchoProvider()
+        # A factory builds one *configured* provider, so the adapter carries
+        # that identity rather than its type.
+        return EchoProvider(name=configuration.id)
 
     ai = ai_from_ctx(
         ctx,
@@ -462,7 +464,7 @@ def test_a_profile_is_linked_to_its_configured_provider_by_identity() -> None:
     """The public projection references configuration; it does not carry it."""
     ai = ai_from_ctx(
         _Ctx(),
-        adapters={"echo": lambda _: EchoProvider()},
+        adapters={"echo": lambda c: EchoProvider(name=c.id)},
         profiles=(AIProfile(id="fast", name="Fast"),),
     )
 
@@ -502,3 +504,107 @@ def test_capability_truth_is_the_adapters_not_the_profiles() -> None:
 
     assert ai.capabilities("p").has(AICapability.TEXT)
     assert not ai.capabilities("p").has(AICapability.VISION)
+
+
+# -- the shape production actually configures --------------------------------
+#
+# These exist because the unit fixtures above use a mapping, and production
+# holds the estate's named collection: a list of records each carrying a name.
+# Every test passed while every launch failed, because the fixtures invented a
+# configuration shape rather than using the configured one.
+
+def _configured_llm() -> list[Any]:
+    """`ctx.llm` exactly as configuration finalizes it.
+
+    Two entries naming two different providers, as the Console's own
+    installation does. One adapter is registered per provider, so two entries
+    sharing a provider is a separate limitation and not what this exercises.
+    """
+    from argparse import Namespace
+
+    return [
+        Namespace(
+            name="anthropic", provider="echo", model="claude-sonnet-4-6",
+            api_key="env.ANTHROPIC_API_KEY",
+            profile_access=Namespace(allowed=["redacted"], default="redacted"),
+        ),
+        Namespace(
+            name="primary", provider="ollama", model="gpt-4o",
+            api_key="env.OPENAI_API_KEY",
+            profile_access=Namespace(allowed=["redacted", "unredacted"],
+                                     default="redacted"),
+        ),
+    ]
+
+
+def test_the_configured_named_collection_is_read() -> None:
+    """A list of named entries, which is what ctx.llm holds."""
+    from argparse import Namespace
+
+    configured = configured_providers_from_ctx(Namespace(llm=_configured_llm()))
+
+    assert [entry.id for entry in configured] == ["anthropic", "primary"]
+    assert configured[0].credential_ref == "env.ANTHROPIC_API_KEY"
+    assert configured[1].model == "gpt-4o"
+
+
+def test_an_entry_without_a_name_is_refused() -> None:
+    """A named collection whose entry has no name selects nothing."""
+    from argparse import Namespace
+
+    with pytest.raises(AIConfigurationError, match="carries no name"):
+        configured_providers_from_ctx(
+            Namespace(llm=[Namespace(provider="echo", model="m")]),
+        )
+
+
+def test_a_shape_that_is_neither_is_refused_rather_than_guessed() -> None:
+    """The fault that broke every launch: walking a shape nobody configured."""
+    from argparse import Namespace
+
+    with pytest.raises(AIConfigurationError, match="named collection"):
+        configured_providers_from_ctx(Namespace(llm="not-a-collection"))
+
+
+def test_bootstrap_builds_a_shared_ai_from_the_configured_shape() -> None:
+    """The bootstrap contract, against the real configuration shape."""
+    from argparse import Namespace
+
+    from rey_lib.config.bootstrap import _open_ai
+
+    ai = _open_ai(Namespace(llm=_configured_llm(), env=[]))
+
+    assert ai is not None
+    assert [profile.id for profile in ai.profiles()] == ["anthropic", "primary"]
+    # The declared access policy travels with the profile, into AI-owned state.
+    assert ai.profile("primary").access_policy()["allowed"] == [
+        "redacted", "unredacted",
+    ]
+
+
+def test_bootstrap_returns_none_when_no_ai_is_configured() -> None:
+    """Absent AI is an ordinary state, and builds nothing."""
+    from argparse import Namespace
+
+    from rey_lib.config.bootstrap import _open_ai
+
+    assert _open_ai(Namespace()) is None
+    assert _open_ai(Namespace(llm=[])) is None
+
+
+def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
+    """Configured and broken is not reported as absent.
+
+    An installation that names providers has asked for an AI. Answering
+    "unavailable" would turn a configuration defect into silent capability loss.
+    """
+    from argparse import Namespace
+
+    from rey_lib.config.bootstrap import _open_ai
+    from rey_lib.errors.error_utils import ConfigError
+
+    with pytest.raises(ConfigError, match="configures AI but one could not be built"):
+        _open_ai(Namespace(
+            llm=[Namespace(name="x", provider="no-such-adapter", model="m")],
+            env=[],
+        ))

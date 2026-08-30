@@ -56,7 +56,15 @@ class AnthropicProvider(AIProvider):
 
     @property
     def name(self) -> str:
-        return self._configured.provider or "anthropic"
+        """The configured provider this adapter *is*, by its stable identity.
+
+        Not the provider type. Several configured providers share a type -- this
+        estate configures six against ``ollama``, each with its own model -- so
+        keying an adapter by its type would let one configuration replace
+        another. ``ConfiguredProvider.provider`` remains the type, and is
+        descriptive.
+        """
+        return self._configured.id or "anthropic"
 
     def capability_for(self, model: str) -> AICapabilitySet:  # noqa: ARG002
         """What this adapter can do. The same for every Anthropic model here."""

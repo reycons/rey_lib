@@ -84,7 +84,7 @@ def default_adapters(credentials: CredentialResolver) -> dict[str, ProviderFacto
         "openai": lambda configured: OpenAIProvider(configured, credentials),
         "gemini": lambda configured: GeminiProvider(configured, credentials),
         "ollama": lambda configured: OllamaProvider(configured, credentials),
-        "echo": lambda configured: EchoProvider(),  # noqa: ARG005 -- takes none
+        "echo": lambda configured: EchoProvider(name=configured.id),
     }
 
 
@@ -117,14 +117,13 @@ def configured_providers_from_ctx(ctx: Any) -> tuple[ConfiguredProvider, ...]:
             no provider.
     """
     instances = getattr(ctx, "llm", None)
-    if instances is None:
+    if not instances:
         raise AIConfigurationError(
             "ctx.llm is not set, so there is no AI configuration to build from."
         )
 
     configured: list[ConfiguredProvider] = []
-    for name in _names_of(instances):
-        entry = _entry(instances, name)
+    for name, entry in _entries(instances):
         provider = str(_field(entry, "provider", "") or "").strip()
         if not provider:
             raise AIConfigurationError(
@@ -232,24 +231,47 @@ def _linked(
     return tuple(linked)
 
 
-def _names_of(instances: Any) -> tuple[str, ...]:
-    """Every configured instance name, however the mapping is shaped."""
+def _entries(instances: Any) -> list[tuple[str, Any]]:
+    """Every configured instance, as ``(name, entry)``.
+
+    ``ctx.llm`` is the estate's **named collection**: a list of records each
+    carrying its own ``name``, which is what ``_alias_named_collection`` produces
+    when it aliases ``llm_profiles`` onto the canonical ``llm`` key. That is the
+    configured shape, and ``find_in_ctx`` reads every other section the same way.
+
+    A mapping is also accepted, because building a runtime from explicit inputs
+    is legitimate and a caller holding a dict should not have to build a list to
+    be understood. What is *not* accepted is guessing: an earlier version of this
+    walked ``vars()`` when the value was neither, which failed on the only shape
+    production actually uses.
+    """
+    if instances is None:
+        return []
     if hasattr(instances, "keys"):
-        return tuple(str(name) for name in instances.keys())
-    return tuple(
-        str(name) for name in vars(instances) if not str(name).startswith("_")
+        return [(str(name), instances[name]) for name in instances.keys()]
+    if isinstance(instances, (list, tuple)):
+        named: list[tuple[str, Any]] = []
+        for entry in instances:
+            name = _field(entry, "name", "")
+            if not str(name or "").strip():
+                raise AIConfigurationError(
+                    "An AI configuration entry carries no name, so nothing can "
+                    "select it."
+                )
+            named.append((str(name), entry))
+        return named
+    raise AIConfigurationError(
+        "ctx.llm must be the configured named collection -- a list of entries "
+        f"each carrying a name -- and this runtime holds {type(instances).__name__}."
     )
 
 
-def _entry(instances: Any, name: str) -> Any:
-    """One configured instance."""
-    if hasattr(instances, "get"):
-        return instances.get(name)
-    return getattr(instances, name, None)
-
-
 def _field(entry: Any, name: str, default: Any) -> Any:
-    """One configured field, however the entry is shaped."""
+    """One configured field, whether the entry is a Namespace or a mapping.
+
+    Both shapes reach here: configuration finalizes into Namespaces, and a
+    caller constructing a runtime directly may hand plain dictionaries.
+    """
     if entry is None:
         return default
     if hasattr(entry, "get"):

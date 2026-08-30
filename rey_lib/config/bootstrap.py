@@ -242,10 +242,20 @@ def _open_ai(ctx: Namespace) -> Any:
     to it -- a structural guard in the AI test suite enforces that the ``ctx``
     identifier appears nowhere in ``rey_lib.ai`` outside its construction seam.
 
+    **Absent is not the same as broken.** No configuration returns ``None``;
+    configuration that cannot be built raises. An installation that names
+    providers has asked for an AI, and reporting that as "unavailable" would
+    turn a configuration defect into silent capability loss.
+
     Returns
     -------
     Any
         The runtime's ``AI``, or ``None`` when no AI is configured.
+
+    Raises
+    ------
+    ConfigError
+        When AI is configured and one could not be built.
     """
     configured = getattr(ctx, "llm", None)
     if not configured:
@@ -257,50 +267,56 @@ def _open_ai(ctx: Namespace) -> Any:
     try:
         return ai_from_ctx(ctx, profiles=_ai_profiles(ctx))
     except AIError as exc:
-        # Configuration that names an AI but cannot build one is a fault worth
-        # reporting, not a silent absence -- an operator who configured a
-        # provider should not discover at the first request that it never
-        # existed. The run continues without AI rather than failing to launch,
-        # because an application that does not use AI must not be stopped by
-        # another application's misconfiguration.
-        _logger.error("AI is configured for this runtime but could not be built: %s", exc)
-        return None
+        # Configured and broken is not the same as absent, and must not be
+        # reported as it. An installation that names providers has asked for an
+        # AI; failing to build one is a configuration defect, and swallowing it
+        # would show an operator "AI unavailable" for something they configured.
+        raise ConfigError(
+            f"This installation configures AI but one could not be built: {exc}"
+        ) from exc
 
 
 def _ai_profiles(ctx: Namespace) -> tuple[Any, ...]:
     """The public selection projections this runtime offers.
 
-    One profile per configured entry, carrying the access policy that entry
-    declares. Capability is not read here: the adapter is the authority on what
-    a configured provider can do, and a profile that stated its own could
-    advertise something no adapter implements.
+    Derived from ``configured_providers_from_ctx``, which is the one reader of
+    this configuration. An earlier version walked ``ctx.llm`` itself, which meant
+    two readers of one section that could disagree about its shape -- and did:
+    this one guessed a mapping where production holds the estate's named
+    collection, and every launch failed.
+
+    Capability is not read here. The adapter is the authority on what a
+    configured provider can do, so a profile that stated its own could advertise
+    something no adapter implements.
     """
+    from rey_lib.ai.construction import configured_providers_from_ctx
     from rey_lib.ai.profiles import AIProfile
 
-    configured = getattr(ctx, "llm", None) or {}
-    names = (
-        list(configured.keys()) if hasattr(configured, "keys")
-        else [n for n in vars(configured) if not str(n).startswith("_")]
+    return tuple(
+        AIProfile(
+            id=configured.id,
+            name=configured.id,
+            configured_provider_id=configured.id,
+            profile_access=_configured_access(ctx, configured.id),
+        )
+        for configured in configured_providers_from_ctx(ctx)
     )
-    profiles: list[Any] = []
-    for name in names:
-        entry = (
-            configured.get(name) if hasattr(configured, "get")
-            else getattr(configured, name, None)
-        )
-        access = (
-            entry.get("profile_access") if hasattr(entry, "get")
-            else getattr(entry, "profile_access", None)
-        )
-        profiles.append(
-            AIProfile(
-                id=str(name),
-                name=str(name),
-                configured_provider_id=str(name),
-                profile_access=access,
-            ),
-        )
-    return tuple(profiles)
+
+
+def _configured_access(ctx: Namespace, name: str) -> Any:
+    """The profile-access policy one configured entry declares, if any.
+
+    Read through ``find_in_ctx``, the canonical reader for a named list section,
+    rather than by walking the section a second way.
+    """
+    from rey_lib.config.ctx import find_in_ctx
+
+    entry = find_in_ctx(ctx, "llm", name)
+    if entry is None:
+        return None
+    if hasattr(entry, "get"):
+        return entry.get("profile_access")
+    return getattr(entry, "profile_access", None)
 
 
 def open_run_log(ctx: Namespace) -> Any:

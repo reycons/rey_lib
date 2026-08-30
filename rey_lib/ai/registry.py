@@ -126,12 +126,20 @@ class AIRegistry:
         return found
 
     def provider_for(self, profile: AIProfile) -> AIProvider:
-        """The adapter that answers for this profile."""
-        found = self._providers.get(profile.provider)
+        """The adapter that answers for this profile.
+
+        Resolved by the *configured provider* the profile selects, not by
+        provider type. Several configured providers share a type -- this estate
+        configures six against ollama, each with its own model -- so resolving
+        by type would hand a profile whichever configuration happened to
+        register last.
+        """
+        wanted = profile.configured_provider_id or profile.provider
+        found = self._providers.get(wanted)
         if found is None:
             raise AIConfigurationError(
-                f"AI profile '{profile.id}' names provider '{profile.provider}', "
-                "which is not registered in this runtime."
+                f"AI profile '{profile.id}' selects configured provider "
+                f"'{wanted}', which is not registered in this runtime."
             )
         return found
 
