@@ -16,6 +16,7 @@ from rey_lib.ai.errors import AIConfigurationError, AISelectionError
 from rey_lib.ai.instructions import AIInstruction
 from rey_lib.ai.profiles import AIProfile
 from rey_lib.ai.providers.base import AIProvider
+from rey_lib.ai.providers.configuration import ConfiguredProvider, ProviderCapabilities
 
 __all__ = ["AIRegistry"]
 
@@ -34,6 +35,7 @@ class AIRegistry:
         profiles: tuple[AIProfile, ...] = (),
         instructions: tuple[AIInstruction, ...] = (),
         providers: tuple[AIProvider, ...] = (),
+        configured: tuple[ConfiguredProvider, ...] = (),
     ) -> None:
         self._profiles: dict[str, AIProfile] = {}
         for profile in profiles:
@@ -52,6 +54,14 @@ class AIRegistry:
                     f"Two AI instructions are configured as '{instruction.id}'."
                 )
             self._instructions[instruction.id] = instruction
+
+        self._configured: dict[str, ConfiguredProvider] = {}
+        for configuration in configured:
+            if configuration.id in self._configured:
+                raise AIConfigurationError(
+                    f"Two configured providers share the id '{configuration.id}'."
+                )
+            self._configured[configuration.id] = configuration
 
         self._providers: dict[str, AIProvider] = {}
         for provider in providers:
@@ -101,6 +111,20 @@ class AIRegistry:
             )
         return found
 
+    def provider(self, name: str) -> AIProvider:
+        """The adapter registered under this name.
+
+        Used where execution names a provider directly rather than reaching one
+        through a profile -- a fallback transition, which selects from an
+        already-resolved sequence and never re-reads configuration.
+        """
+        found = self._providers.get(name)
+        if found is None:
+            raise AIConfigurationError(
+                f"No AI provider is registered as '{name}' in this runtime."
+            )
+        return found
+
     def provider_for(self, profile: AIProfile) -> AIProvider:
         """The adapter that answers for this profile."""
         found = self._providers.get(profile.provider)
@@ -113,19 +137,28 @@ class AIRegistry:
 
     # -- what an application actually gets -------------------------------
 
-    def effective_capability(self, profile: AIProfile) -> AICapabilitySet:
-        """Layer three: the provider's capability, narrowed by policy.
+    def configuration(self, configured_provider_id: str) -> ConfiguredProvider:
+        """The configured provider registered under this identity."""
+        found = self._configured.get(configured_provider_id)
+        if found is None:
+            raise AIConfigurationError(
+                f"No configured provider is registered as "
+                f"'{configured_provider_id}' in this runtime."
+            )
+        return found
 
-        The provider is asked what its model can do rather than the profile
-        being trusted about it, so a profile that claims a capability its
-        adapter does not have cannot advertise one.
+    def capabilities_of(self, profile: AIProfile) -> ProviderCapabilities:
+        """Layer one: what the configured provider behind this profile can do.
+
+        The adapter is asked rather than configuration being trusted, so a
+        profile cannot advertise something its adapter does not implement.
         """
         provider = self.provider_for(profile)
-        reported = provider.capability_for(profile.model)
-        declared = profile.provider_capability
-        # Configuration may state a capability, but the adapter is the
-        # authority on what it can do: what both agree on is what exists.
-        combined = reported if not declared.members else AICapabilitySet(
-            members=reported.members & declared.members,
+        return ProviderCapabilities(
+            configured_provider_id=profile.configured_provider_id or profile.id,
+            capability=provider.capability_for(profile.model),
         )
-        return combined.narrowed_by(profile.policy)
+
+    def effective_capability(self, profile: AIProfile) -> AICapabilitySet:
+        """Layer three: the configured capability, narrowed by policy."""
+        return profile.effective_capability(self.capabilities_of(profile).capability)

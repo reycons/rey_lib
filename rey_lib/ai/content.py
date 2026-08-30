@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from rey_lib.ai.tools import AIToolCall
+
 __all__ = [
     "AIContent",
     "AIContentKind",
@@ -51,13 +53,16 @@ class AIContentKind(str, Enum):
 class AIRole(str, Enum):
     """Who is speaking.
 
-    Three, because three are established. A role is added when something needs
-    it, not in anticipation.
+    A role is added when something needs it, not in anticipation. ``TOOL`` was
+    added when tool continuation needed it: a continuation turn carries the
+    results of the calls the assistant asked for, and a provider distinguishes
+    that turn from a user turn.
     """
 
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
 
 
 @dataclass(frozen=True)
@@ -103,16 +108,41 @@ def audio(reference: str, media_type: str = "") -> AIContent:
 
 @dataclass(frozen=True)
 class AIMessage:
-    """One turn: who said it, what it was made of, and anything about it."""
+    """One turn: who said it, what it was made of, and anything about it.
+
+    ``tool_calls`` and ``tool_call_id`` are the two halves of a tool exchange,
+    kept as fields rather than buried in ``metadata`` because a continuation
+    turn is built from them and a reader that had to guess a metadata key would
+    be reconstructing the protocol.
+
+    ``tool_calls``   what an assistant turn asked for.
+    ``tool_call_id`` which call a ``TOOL`` turn is answering.
+    """
 
     role: AIRole
     content: tuple[AIContent, ...] = ()
+    tool_calls: tuple["AIToolCall", ...] = ()
+    tool_call_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def of(role: AIRole, *parts: AIContent) -> "AIMessage":
         """One message from its parts."""
         return AIMessage(role=role, content=tuple(parts))
+
+    @staticmethod
+    def asked_for_tools(calls: tuple["AIToolCall", ...]) -> "AIMessage":
+        """The assistant turn that requested these tool calls."""
+        return AIMessage(role=AIRole.ASSISTANT, tool_calls=tuple(calls))
+
+    @staticmethod
+    def tool_answer(call_id: str, value: Any) -> "AIMessage":
+        """The turn that answers one tool call."""
+        return AIMessage(
+            role=AIRole.TOOL,
+            content=(structured(value),),
+            tool_call_id=str(call_id),
+        )
 
 
 @dataclass(frozen=True)

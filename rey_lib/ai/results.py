@@ -54,19 +54,27 @@ class AIOutput:
     A structured result keeps its value. It is not stringified to simplify the
     API -- an application that wanted the object would have to parse the text
     back, which is the round trip this exists to prevent.
+
+    Already normalized by the time it is here: any envelope resolution
+    introduced has been removed, so ``value`` is the caller's own payload and
+    ``text`` is the caller's own text. ``media_type`` carries the representation
+    the contract asked for, so a Markdown contract answers Markdown.
     """
 
     form: AIOutputForm = AIOutputForm.TEXT
     text: str = ""
     value: Any = None
+    media_type: str = ""
 
     @staticmethod
-    def of_text(value: str) -> "AIOutput":
-        return AIOutput(form=AIOutputForm.TEXT, text=value)
+    def of_text(value: str, media_type: str = "") -> "AIOutput":
+        return AIOutput(form=AIOutputForm.TEXT, text=value, media_type=media_type)
 
     @staticmethod
-    def of_value(value: Any, text: str = "") -> "AIOutput":
-        return AIOutput(form=AIOutputForm.STRUCTURED, text=text, value=value)
+    def of_value(value: Any, text: str = "", media_type: str = "") -> "AIOutput":
+        return AIOutput(
+            form=AIOutputForm.STRUCTURED, text=text, value=value, media_type=media_type,
+        )
 
 
 @dataclass(frozen=True)
@@ -87,7 +95,30 @@ class AIUsage:
 
 @dataclass(frozen=True)
 class AIArtifact:
-    """A durable reference to something the execution produced."""
+    """A durable reference to something the execution produced.
+
+    **A reference, never persistence.** AI produces a value; the estate's
+    run-artifact owner persists and names it. That ownership is not this
+    subsystem's and is not migrating here: ``rey_lib.files.file_utils`` owns the
+    universal ``<artifact_name>.<run_timestamp>.<extension>`` convention, and
+    the old LLM subsystem followed it as a caller "like every other Rey
+    run-created artifact" -- it never owned it either.
+
+    So the conversion boundary is::
+
+        AI            produces the value and this reference
+        run-artifact  names and persists it under the estate convention
+        owner
+
+    The converter is the **caller's** to supply at attachment: something holding
+    both a run and this reference turns one into the other. Nothing in
+    ``rey_lib.ai`` writes a file, and a future version that did would be taking
+    ownership the estate already assigned elsewhere.
+
+    ``uri`` is empty until that owner has persisted it -- an artifact that has
+    been produced but not yet stored is a real state, and it says so rather than
+    carrying a path that does not exist yet.
+    """
 
     id: str
     uri: str = ""
@@ -140,7 +171,22 @@ class AIExecutionInfo:
 
 @dataclass(frozen=True)
 class AIResult:
-    """One completed execution, whole."""
+    """One completed execution, whole.
+
+    **The public invariant: successful output is already normalized.** By the
+    time a result exists, execution structure has been removed and the caller
+    reads its own content directly. A caller never unwraps, and never reaches
+    something like ``result.output.value["result"]["content"]``.
+
+    ``owns != implements``: the invariant is this object's, the work is the
+    output normalizer's, which runs where the resolved contract and the raw
+    provider output are both still in hand. This frozen value does not inspect
+    itself.
+
+    Usage, artifacts, tool exchange and execution evidence stay *beside* the
+    payload rather than inside it, so nothing an application reads as content
+    is really machinery.
+    """
 
     output: AIOutput
     execution: AIExecutionInfo
@@ -156,5 +202,19 @@ class AIResult:
 
     @property
     def text(self) -> str:
-        """The output as text, where it has one. Never a stringified value."""
+        """The canonical textual payload, where the output has one.
+
+        Never a stringified value, and never an execution wrapper: for a
+        contract whose representation is Markdown text, this is the Markdown.
+        """
         return self.output.text
+
+    @property
+    def value(self) -> Any:
+        """The caller's own structured payload, already unwrapped."""
+        return self.output.value
+
+    @property
+    def media_type(self) -> str:
+        """The representation the output contract asked for, if it named one."""
+        return self.output.media_type

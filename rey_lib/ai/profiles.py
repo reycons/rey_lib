@@ -30,13 +30,17 @@ class AIProfile:
         What the profile is addressed by. Configuration's own name.
     name:
         What a reader sees. Never what addresses it.
+    configured_provider_id:
+        The stable Rey identity of the ``ConfiguredProvider`` this profile
+        selects. The reference is the link; the configuration itself -- endpoint,
+        timeout, credential reference -- stays internal and never reaches a
+        reader through here.
     provider:
-        Which provider adapter answers for this profile.
+        Which provider adapter answers for this profile. Identity, projected for
+        a reader; ``ConfiguredProvider`` is the authority.
     model:
-        The model identity handed to that provider.
-    provider_capability:
-        What the provider and model can do. Layer one, reported by the adapter
-        or declared by configuration.
+        The model identity handed to that provider. Projected for the same
+        reason.
     policy:
         What this installation permits, where it restricts anything. Layer two.
         ``None`` restricts nothing.
@@ -49,9 +53,9 @@ class AIProfile:
 
     id: str
     name: str = ""
+    configured_provider_id: str = ""
     provider: str = ""
     model: str = ""
-    provider_capability: AICapabilitySet = field(default_factory=AICapabilitySet)
     policy: AICapabilitySet | None = None
     options: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -61,11 +65,11 @@ class AIProfile:
         """What a reader sees, falling back to what addresses it."""
         return self.name or self.id
 
-    def effective_capability(self) -> AICapabilitySet:
+    def effective_capability(self, provider_capability: AICapabilitySet) -> AICapabilitySet:
         """What an application actually gets: layer three.
 
-        Provider capability narrowed by installation policy. This is the only
-        answer that leaves the subsystem; the two layers behind it are how it
-        was arrived at, not something a consumer reasons about.
+        The configured provider's capability, narrowed by this installation's
+        policy. Layer one is passed in rather than held, because a profile that
+        held it could disagree with the adapter.
         """
-        return self.provider_capability.narrowed_by(self.policy)
+        return provider_capability.narrowed_by(self.policy)

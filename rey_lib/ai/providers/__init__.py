@@ -7,6 +7,14 @@ have.
 """
 
 from rey_lib.ai.providers.base import AIProvider, ProviderCall, ProviderReply
+from rey_lib.ai.providers.configuration import ConfiguredProvider, ProviderCapabilities
 from rey_lib.ai.providers.echo_provider import EchoProvider
 
-__all__ = ["AIProvider", "EchoProvider", "ProviderCall", "ProviderReply"]
+__all__ = [
+    "AIProvider",
+    "ConfiguredProvider",
+    "EchoProvider",
+    "ProviderCall",
+    "ProviderCapabilities",
+    "ProviderReply",
+]

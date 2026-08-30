@@ -6,6 +6,7 @@ designed: a boundary is not kept by intending to keep it.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -133,3 +134,60 @@ def test_every_error_the_subsystem_raises_is_its_own() -> None:
     ]
     for name in hierarchy:
         assert issubclass(getattr(errors, name), errors.AIError), name
+
+
+def test_ctx_is_named_only_at_the_construction_boundary() -> None:
+    """ctx is construction/discovery input, never retained runtime state.
+
+    The guard targets the ``ctx`` **identifier** -- as a parameter, an
+    attribute or a name that is read -- and deliberately not the English word
+    "context". ``AIRequest.context`` and ``ResolvedAIRequest.context`` are
+    unrelated caller metadata, and a crude substring guard would fail on them
+    while catching nothing that matters.
+    """
+    offenders: list[str] = []
+    for path in sorted(AI.rglob("*.py")):
+        if "__pycache__" in path.parts or path.name == "construction.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "ctx":
+                offenders.append(f"{path.name}:{node.lineno} reads ctx")
+            elif isinstance(node, ast.Attribute) and node.attr == "ctx":
+                offenders.append(f"{path.name}:{node.lineno} holds .ctx")
+            elif isinstance(node, ast.arg) and node.arg == "ctx":
+                offenders.append(f"{path.name}:{node.lineno} takes ctx")
+
+    assert not offenders, (
+        "ctx must not cross the construction boundary: " + "; ".join(offenders)
+    )
+
+
+def test_the_caller_metadata_context_fields_are_untouched_by_that_guard() -> None:
+    """The exemption is real: these exist and are not ctx."""
+    from rey_lib.ai import AIRequest
+
+    assert AIRequest.prompt("x", context={"caller": "console"}).context == {
+        "caller": "console",
+    }
+
+
+def test_no_provider_sdk_is_imported_above_the_adapter_boundary() -> None:
+    """Provider vocabulary stops at the adapter, and no external agent model enters."""
+    banned = ("openai", "anthropic", "litellm", "pydantic_ai", "agents")
+    offenders: list[str] = []
+    for path in sorted(AI.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module.split(".")[0]]
+            for name in names:
+                if name in banned:
+                    offenders.append(f"{path.name}:{node.lineno} imports {name}")
+
+    assert not offenders, "external model leaked inward: " + "; ".join(offenders)

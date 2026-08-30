@@ -35,7 +35,7 @@ from rey_lib.ai import (
     AIRegistry,
     AIRequest,
     AIRequestOptions,
-    AIRetryPolicy,
+    AIExecutionPolicy,
     AIRole,
     AISelectionError,
     AISettings,
@@ -57,7 +57,7 @@ def runtime(
     profiles: tuple[AIProfile, ...] = (),
     instructions: tuple[AIInstruction, ...] = (),
     settings: AISettings | None = None,
-    retry_policy: AIRetryPolicy | None = None,
+    policy: AIExecutionPolicy | None = None,
 ) -> AI:
     """One runtime, built the way a bootstrap will build one."""
     echo = provider or EchoProvider()
@@ -69,7 +69,7 @@ def runtime(
     return AI(
         registry=registry,
         settings=settings or AISettings(profile_id="fast"),
-        **({"retry_policy": retry_policy} if retry_policy else {}),
+        **({"policy": policy} if policy else {}),
     )
 
 
@@ -144,11 +144,8 @@ def test_scenario_5_multimodal_needs_no_new_request_model() -> None:
 
 def test_scenario_5b_a_missing_capability_refuses_before_the_provider() -> None:
     """Refused on capability, with the provider never called."""
-    provider = EchoProvider()
-    blind = AIProfile(
-        id="blind", provider="echo", model="m1",
-        provider_capability=AICapabilitySet.of(AICapability.TEXT),
-    )
+    provider = EchoProvider(capability=AICapabilitySet.of(AICapability.TEXT))
+    blind = AIProfile(id="blind", provider="echo", model="m1")
     ai = runtime(provider=provider, profiles=(blind,), settings=AISettings(profile_id="blind"))
 
     with pytest.raises(AICapabilityError, match="vision"):
@@ -383,10 +380,13 @@ def test_policy_narrows_provider_capability_and_never_widens_it() -> None:
     """An installation cannot grant what the model cannot do."""
     restricted = AIProfile(
         id="restricted", provider="echo", model="m1",
-        provider_capability=AICapabilitySet.of(AICapability.TEXT),
         policy=AICapabilitySet.of(AICapability.TEXT, AICapability.VISION),
     )
-    ai = runtime(profiles=(restricted,), settings=AISettings(profile_id="restricted"))
+    ai = runtime(
+        provider=EchoProvider(capability=AICapabilitySet.of(AICapability.TEXT)),
+        profiles=(restricted,),
+        settings=AISettings(profile_id="restricted"),
+    )
 
     effective = ai.capabilities("restricted")
 

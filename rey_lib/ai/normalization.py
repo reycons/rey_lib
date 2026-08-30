@@ -1,0 +1,91 @@
+"""Turning validated output into the caller's own canonical payload.
+
+The rule, stated once because everything here follows from it:
+
+    **Normalization removes only the envelope that resolution itself
+    introduced.**
+
+Resolution records that envelope on ``ResolvedAIRequest.envelope_key``. This
+removes exactly that key and nothing else. It never inspects the caller's schema,
+never matches on key names, and never guesses -- so a legitimate payload whose
+own shape happens to use ``result``, ``content`` or ``data`` is returned intact.
+If resolution introduced no envelope, this removes nothing.
+
+That is what separates it from the defect it exists to prevent. Unwrapping by
+recognising familiar-looking keys would silently strip real caller data, and the
+failure would look like success.
+
+Three mechanisms, deliberately not one:
+
+    validation      does the output satisfy the contract
+    correction      the model-visible turn taken when it does not
+    normalization   what the caller finally receives
+
+None implies ownership of the others. This module is the third only.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from rey_lib.ai.errors import AIOutputError
+from rey_lib.ai.requests import ResolvedAIRequest
+from rey_lib.ai.results import AIOutput
+
+__all__ = ["OutputNormalizer"]
+
+
+class OutputNormalizer:
+    """Produces the caller-facing payload from validated output.
+
+    It runs where both the resolved contract and the raw successful output are
+    still in hand, which is why the direction is ``contract -> normalization ->
+    AIResult`` and never ``AIResult -> inspect itself -> unwrap``.
+    """
+
+    def normalize(self, request: ResolvedAIRequest, output: AIOutput) -> AIOutput:
+        """The output as the caller asked for it.
+
+        Args:
+            request: The resolved contract, which alone knows what envelope was
+                introduced and what representation was asked for.
+            output: Validated output, still carrying whatever envelope
+                resolution added.
+
+        Returns:
+            The output with that envelope removed and the contract's
+            representation attached.
+
+        Raises:
+            AIOutputError: when an envelope was introduced and the output does
+                not carry it -- a failure to produce what was asked for, not
+                something to paper over by returning the wrapper.
+        """
+        value = self._unwrapped(request, output.value)
+        media_type = request.output.media_type or output.media_type
+
+        if output.value is value and media_type == output.media_type:
+            return output
+        if output.form is AIOutput().form and value is None:
+            return AIOutput.of_text(output.text, media_type=media_type)
+        if value is None:
+            return AIOutput.of_text(output.text, media_type=media_type)
+        return AIOutput.of_value(value, text=output.text, media_type=media_type)
+
+    @staticmethod
+    def _unwrapped(request: ResolvedAIRequest, value: Any) -> Any:
+        """The caller's payload, with only a Rey-introduced envelope removed."""
+        key = request.envelope_key
+        if not key or value is None:
+            return value
+        if not isinstance(value, dict):
+            raise AIOutputError(
+                f"The output contract wrapped the value in '{key}', so an object "
+                f"was expected back and {type(value).__name__} came instead."
+            )
+        if key not in value:
+            raise AIOutputError(
+                f"The output contract wrapped the value in '{key}' and the "
+                "output does not carry it."
+            )
+        return value[key]

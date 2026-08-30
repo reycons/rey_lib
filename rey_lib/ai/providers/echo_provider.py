@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 from rey_lib.ai.capabilities import AICapability, AICapabilitySet
 from rey_lib.ai.errors import AIProviderError
+from rey_lib.ai.content import AIContentKind, AIMessage, AIRole
+from rey_lib.ai.policies import ReplayClassification, ReplayFacts
 from rey_lib.ai.providers.base import AIProvider, ProviderCall, ProviderReply
 from rey_lib.ai.results import AIUsage
 from rey_lib.ai.tools import AIToolCall
@@ -56,12 +58,18 @@ class EchoProvider(AIProvider):
         tool_calls: tuple[AIToolCall, ...] = (),
         fail_times: int = 0,
         chunk_size: int = 8,
+        capability: AICapabilitySet | None = None,
+        replay: ReplayFacts | None = None,
     ) -> None:
         self._reply_with = reply_with
         self._value = value
         self._tool_calls = tool_calls
         self._remaining_failures = int(fail_times)
         self._chunk_size = max(1, int(chunk_size))
+        self._capability = capability if capability is not None else _CAPABILITY
+        self._replay = replay if replay is not None else ReplayFacts(
+            classification=ReplayClassification.SAFE,
+        )
         self.calls = 0
 
     @property
@@ -69,8 +77,22 @@ class EchoProvider(AIProvider):
         return "echo"
 
     def capability_for(self, model: str) -> AICapabilitySet:  # noqa: ARG002
-        """Every capability, whatever the model. It answers for itself."""
-        return _CAPABILITY
+        """What this adapter says it can do, whatever the model.
+
+        Configurable so a test can build an adapter that genuinely lacks a
+        capability. The adapter is the authority on layer one, so refusing a
+        request is only testable by an adapter that reports less.
+        """
+        return self._capability
+
+    def replay_facts(self, failure: BaseException) -> ReplayFacts:  # noqa: ARG002
+        """What repeating a failed call would mean here.
+
+        Safe by default: this adapter reaches nothing and holds no state, so a
+        repeat is genuinely equivalent. A configured value lets a test exercise
+        the refusal path.
+        """
+        return self._replay
 
     def invoke(
         self,
@@ -124,11 +146,31 @@ class EchoProvider(AIProvider):
     def _said(call: ProviderCall) -> str:
         """The last thing the caller said, which is what an echo answers with."""
         for message in reversed(call.messages):
-            if message.get("role") == "user":
-                return str(message.get("content") or "")
+            if message.role is AIRole.USER:
+                return _rendered(message)
         return ""
 
     @staticmethod
     def _count(call: ProviderCall) -> int:
         """A word count, which is as honest as this adapter can be about usage."""
-        return sum(len(str(message.get("content") or "").split()) for message in call.messages)
+        return sum(len(_rendered(message).split()) for message in call.messages)
+
+
+def _rendered(message: AIMessage) -> str:
+    """One canonical message as the text this adapter can answer about.
+
+    An adapter renders content itself now, from the canonical parts, rather than
+    receiving something already flattened. A real adapter translates each part
+    into what its SDK takes -- an image part becomes an image. This one has only
+    text to offer, so it says what a non-text part was rather than pretending it
+    was words.
+    """
+    rendered: list[str] = []
+    for part in message.content:
+        if part.kind is AIContentKind.TEXT:
+            rendered.append(str(part.value))
+        elif part.kind is AIContentKind.STRUCTURED:
+            rendered.append(json.dumps(part.value, ensure_ascii=False, sort_keys=True))
+        else:
+            rendered.append(f"[{part.kind.value}: {part.value}]")
+    return "\n\n".join(rendered)

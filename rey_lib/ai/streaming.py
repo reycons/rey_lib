@@ -30,6 +30,7 @@ class AIEventKind(str, Enum):
     STRUCTURED_DELTA = "structured_delta"
     TOOL_CALL_REQUESTED = "tool_call_requested"
     TOOL_RESULT_ACCEPTED = "tool_result_accepted"
+    PROVIDER_CHANGED = "provider_changed"
     ARTIFACT_PRODUCED = "artifact_produced"
     USAGE_UPDATED = "usage_updated"
     EXECUTION_COMPLETED = "execution_completed"
@@ -87,6 +88,23 @@ class AIEvent:
     def artifact_produced(execution_id: str, artifact: AIArtifact) -> "AIEvent":
         return AIEvent(
             kind=AIEventKind.ARTIFACT_PRODUCED, execution_id=execution_id, artifact=artifact,
+        )
+
+    @staticmethod
+    def provider_changed(
+        *, from_provider: str, to_provider: str, reason: str = "",
+    ) -> "AIEvent":
+        """A fallback moved this execution to the next configured provider.
+
+        Model-invisible -- the model sees nothing of it -- but never
+        observer-invisible. Without this event a provider switch would be a
+        silent substitution, which is the failure the fallback domain exists to
+        make visible.
+        """
+        return AIEvent(
+            kind=AIEventKind.PROVIDER_CHANGED,
+            error=reason,
+            metadata={"from": from_provider, "to": to_provider},
         )
 
     @staticmethod

@@ -32,6 +32,11 @@ from rey_lib.ai.content import (
     structured,
     text,
 )
+from rey_lib.ai.construction import (
+    ProviderFactory,
+    ai_from_ctx,
+    configured_providers_from_ctx,
+)
 from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.errors import (
     AICancelled,
@@ -51,7 +56,14 @@ from rey_lib.ai.execution import AIExecutor
 from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 from rey_lib.ai.output import OutputParser
 from rey_lib.ai.profiles import AIProfile
-from rey_lib.ai.providers import AIProvider, EchoProvider, ProviderCall, ProviderReply
+from rey_lib.ai.providers import (
+    AIProvider,
+    ConfiguredProvider,
+    EchoProvider,
+    ProviderCall,
+    ProviderCapabilities,
+    ProviderReply,
+)
 from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.requests import (
     AIOutputKind,
@@ -71,11 +83,27 @@ from rey_lib.ai.results import (
     AIResult,
     AIUsage,
 )
-from rey_lib.ai.retry import DEFAULT_RETRY_POLICY, NO_RETRY, AIRetryPolicy
+from rey_lib.ai.normalization import OutputNormalizer
+from rey_lib.ai.policies import (
+    DEFAULT_EXECUTION_POLICY,
+    NO_RETRY,
+    AIExecutionPolicy,
+    ExecutionBudget,
+    FallbackPolicy,
+    ReplayClassification,
+    ReplayFacts,
+    ReplaySafety,
+    ToolCorrectionPolicy,
+    TransportRetryPolicy,
+    ValidationCorrectionPolicy,
+)
 from rey_lib.ai.sessions import AISession
+from rey_lib.ai.state import ExecutionState
 from rey_lib.ai.settings import AISettings
 from rey_lib.ai.streaming import AIEvent, AIEventKind
+from rey_lib.ai.tool_loop import CanonicalToolLoop, ToolLoop, ToolRunner
 from rey_lib.ai.tools import AITool, AIToolCall, AIToolResult
+from rey_lib.ai.turns import TurnExecutor
 
 __all__ = [
     "AI",
@@ -95,6 +123,7 @@ __all__ = [
     "AIEvidence",
     "AIExecutionError",
     "AIExecutionInfo",
+    "AIExecutionPolicy",
     "AIExecutor",
     "AIFinishReason",
     "AIInput",
@@ -114,7 +143,6 @@ __all__ = [
     "AIRequestError",
     "AIRequestOptions",
     "AIResult",
-    "AIRetryPolicy",
     "AIRole",
     "AISelectionError",
     "AISession",
@@ -127,16 +155,35 @@ __all__ = [
     "AIUnavailableError",
     "AIUsage",
     "CancellationToken",
+    "CanonicalToolLoop",
+    "ConfiguredProvider",
     "ContractResolver",
-    "DEFAULT_RETRY_POLICY",
+    "DEFAULT_EXECUTION_POLICY",
     "EchoProvider",
+    "ExecutionBudget",
+    "ExecutionState",
+    "FallbackPolicy",
     "NO_RETRY",
+    "OutputNormalizer",
     "OutputParser",
     "ProviderCall",
+    "ProviderCapabilities",
+    "ProviderFactory",
     "ProviderReply",
+    "ReplayClassification",
+    "ReplayFacts",
+    "ReplaySafety",
     "ResolvedAIRequest",
+    "ToolCorrectionPolicy",
+    "ToolLoop",
+    "ToolRunner",
+    "TransportRetryPolicy",
+    "TurnExecutor",
+    "ValidationCorrectionPolicy",
     "after",
+    "ai_from_ctx",
     "audio",
+    "configured_providers_from_ctx",
     "document",
     "image",
     "never",

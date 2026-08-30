@@ -17,10 +17,15 @@ that -- and delegates the mechanisms:
 
     AI ─ settings, profiles, instructions, sessions, observation
      └─ resolve(AIRequest) -> ResolvedAIRequest
-          └─ AIExecutor ─ retry, provider adapter, parser, canonical events
+          └─ AIExecutor ─ orders one execution, delegating every mechanism:
+               TurnExecutor      transport retry, replay safety, fallback
+               ToolLoop          continuation through tool calls
+               OutputParser      validation
+               OutputNormalizer  the caller-facing payload
 
 ``execute`` therefore reads as it should: resolve, then delegate. The provider,
-retry and parsing code is not here, and no ``if provider ==`` ever will be.
+retry, tool, validation and normalization code is not here, and no
+``if provider ==`` ever will be.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from rey_lib.ai.profiles import AIProfile
 from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.requests import AIRequest, ResolvedAIRequest
 from rey_lib.ai.results import AIResult
-from rey_lib.ai.retry import DEFAULT_RETRY_POLICY, AIRetryPolicy
+from rey_lib.ai.policies import DEFAULT_EXECUTION_POLICY, AIExecutionPolicy
 from rey_lib.ai.sessions import AISession
 from rey_lib.ai.settings import AISettings
 from rey_lib.ai.streaming import AIEvent
@@ -77,7 +82,8 @@ class AI:
             runtime cannot begin holding a selection it does not offer.
         contracts: How a referenced contract's body is obtained.
         parser: How a structured output is produced and checked.
-        retry_policy: The execution policy for this runtime.
+        policy: The control domains for this runtime -- turn budget, transport
+            retry, replay safety, fallback and the two correction budgets.
         executor: Supplied only where a caller needs to substitute the execution
             owner. Absent, one is built from the parts above.
     """
@@ -89,7 +95,7 @@ class AI:
         settings: AISettings | None = None,
         contracts: ContractResolver | None = None,
         parser: OutputParser | None = None,
-        retry_policy: AIRetryPolicy = DEFAULT_RETRY_POLICY,
+        policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
         executor: AIExecutor | None = None,
     ) -> None:
         self._registry = registry
@@ -97,7 +103,7 @@ class AI:
             registry=registry,
             contracts=contracts,
             parser=parser,
-            retry_policy=retry_policy,
+            policy=policy,
         )
         self._observers: list[Callable[[AISettings], None]] = []
         self._settings = self._validated(settings or AISettings())
@@ -192,6 +198,7 @@ class AI:
             options=request.options,
             context=dict(request.context),
             cancelled=request.cancelled,
+            tool_runner=request.tool_runner,
             session_id=session_id,
         )
 
