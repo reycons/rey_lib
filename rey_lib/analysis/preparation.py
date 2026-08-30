@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from rey_lib.encryption import sha256_text
-from rey_lib.llm.datasource import SourceData
+from rey_lib.analysis.datasource import SourceData
 
 __all__ = ["DataProfile", "PreparedInput", "prepare"]
 

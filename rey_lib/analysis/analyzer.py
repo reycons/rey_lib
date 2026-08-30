@@ -64,15 +64,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from rey_lib.llm.api import RunRequest, RunResponse
-from rey_lib.llm.artifacts import ArtifactStore
-from rey_lib.llm.contract import Contract, load as _load_contract
-from rey_lib.llm.datasource import DataSource
-from rey_lib.llm.exceptions import ConfigurationFailure
-from rey_lib.llm.preparation import PreparedInput, prepare
-from rey_lib.llm.records import ExecutionRecord
-from rey_lib.llm.redaction import RedactionFilter
-from rey_lib.llm.runner import run
+from rey_lib.ai.errors import AIConfigurationError
+from rey_lib.analysis.api import RunRequest, RunResponse
+from rey_lib.analysis.contract import Contract, load as _load_contract
+from rey_lib.analysis.datasource import DataSource
+from rey_lib.analysis.execution import run
+from rey_lib.analysis.preparation import PreparedInput, prepare
+from rey_lib.analysis.records import ExecutionRecord
+from rey_lib.artifacts import ArtifactStore
 from rey_lib.logs.log_utils import get_logger
 
 __all__ = [
@@ -227,7 +226,7 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
 
     Raises
     ------
-    ConfigurationFailure
+    AIConfigurationError
         If the base contract is invalid or domain fields have illegal values.
     """
     from rey_lib.errors.error_utils import ConfigError  # noqa: PLC0415
@@ -235,13 +234,13 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
     try:
         base = _load_contract(Path(path))
     except ConfigError as exc:
-        raise ConfigurationFailure(str(exc)) from exc
+        raise AIConfigurationError(str(exc)) from exc
 
     fm = base.raw_frontmatter
 
     source_type = str(fm.get("source_type", "any")).lower()
     if source_type not in _VALID_SOURCE_TYPES:
-        raise ConfigurationFailure(
+        raise AIConfigurationError(
             f"Contract '{base.name}': source_type '{source_type}' is not valid. "
             f"Choose one of: {sorted(_VALID_SOURCE_TYPES)}"
         )
@@ -249,7 +248,7 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
     sampling_cfg    = fm.get("sampling") or {}
     sampling_method = str(sampling_cfg.get("method", "head")).lower()
     if sampling_method not in _VALID_SAMPLING_METHODS:
-        raise ConfigurationFailure(
+        raise AIConfigurationError(
             f"Contract '{base.name}': sampling.method '{sampling_method}' is not valid. "
             f"Choose one of: {sorted(_VALID_SAMPLING_METHODS)}"
         )
@@ -318,39 +317,37 @@ class Analyzer:
     def __init__(
         self,
         contract_path:    Path,
-        provider:         str                          = "",
-        model:            str                          = "",
-        api_key:          str                          = "",
-        temperature:      float                        = 0.0,
-        provider_options: Optional[dict[str, Any]]     = None,
+        ai:               Any                          = None,
+        profile_id:       str                          = "",
         log:              Optional[Path]               = None,
         artifact_store:   Optional[ArtifactStore]     = None,
-        redaction_filter: Optional[RedactionFilter]    = None,
+        redactor:         Optional[Any]                = None,
         max_extract:      int                          = 10_000,
         requires_approval: bool                        = False,
         artifact_processing: Optional[dict[str, Any]]  = None,
-        eval_payload_log_path: Optional[Path]          = None,
-        eval_run_log_path:     Optional[Path]          = None,
+        run_log:               Any                     = None,
         payload_id:            Optional[str]           = None,
     ) -> None:
-        """Load the contract and store provider configuration."""
+        """Load the contract and hold the runtime this analysis executes on.
+
+        ``ai`` is the bootstrap-owned shared runtime, handed in rather than
+        discovered. Which provider and model answer, and how a failed call is
+        retried, are its decisions -- this object names a profile and nothing
+        more about how the model is reached.
+        """
         self._contract         = load_analysis_contract(contract_path)
-        self._provider         = provider
-        self._model            = model
-        self._api_key          = api_key
-        self._temperature      = temperature
-        self._provider_options = provider_options or {}
+        self._ai               = ai
+        self._profile_id       = profile_id
         self._log              = Path(log) if log else None
         self._artifact_store   = artifact_store
-        self._redaction_filter = redaction_filter
+        self._redactor         = redactor
         self._max_extract      = max_extract
         self._requires_approval = requires_approval
         self._artifact_processing = artifact_processing or {}
         # Resolved llm_evaluation.payload_log_path / run_log_path, supplied by the
         # ctx-holding caller exactly as the run-log ``log`` path already is
         # (SGC_Rey_LLM_Evaluation_Append_Only_Log). Evaluation logging is additive.
-        self._eval_payload_log_path = Path(eval_payload_log_path) if eval_payload_log_path else None
-        self._eval_run_log_path     = Path(eval_run_log_path) if eval_run_log_path else None
+        self._run_log               = run_log
         self._payload_id            = payload_id
 
         _logger.info(
@@ -416,7 +413,7 @@ class Analyzer:
         )
 
         _logger.info(
-            "analyzer: prepared %d rows (extracted=%d, filtered=%d) — calling LLM",
+            "analyzer: prepared %d rows (extracted=%d, filtered=%d) — calling the AI runtime",
             prepared.profile.rows_sampled,
             prepared.profile.rows_extracted,
             prepared.profile.rows_after_filter,
@@ -427,26 +424,22 @@ class Analyzer:
             stage_id          = self._contract.name,
             contract_path     = self._contract.path,
             input_data        = prepared.rendered_text,
-            provider          = self._provider,
-            model             = self._model,
-            api_key           = self._api_key,
-            temperature       = self._temperature,
-            provider_options  = self._provider_options,
+            profile_id        = self._profile_id,
             output_schema     = spec.output_schema,
             log               = self._log,
             requires_approval = self._requires_approval,
             raw_output        = spec.output_format == "raw",
             artifact_type     = spec.artifact_type,
             artifact_processing = self._artifact_processing,
-            eval_payload_log_path = self._eval_payload_log_path,
-            eval_run_log_path     = self._eval_run_log_path,
             payload_id            = self._payload_id,
         )
 
         response: RunResponse = run(
             request,
-            redaction_filter = self._redaction_filter,
-            artifact_store   = self._artifact_store,
+            self._ai,
+            redactor       = self._redactor,
+            artifact_store = self._artifact_store,
+            run_log        = self._run_log,
         )
 
         if response.status == "failed":

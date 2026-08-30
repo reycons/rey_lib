@@ -1,9 +1,15 @@
 """
-Public API models for the LLM orchestration framework.
+Public API models for the contract-driven analysis domain.
 
-External programs integrate through these stable types.  Internal execution
-objects (ExecutionRecord, provider instances, contract internals) must not
-be imported directly by application code.
+External programs integrate through these stable types. Internal objects
+(ExecutionRecord, contract internals) must not be imported directly by
+application code.
+
+**Provider vocabulary is deliberately absent.** A request names a
+``profile_id`` and nothing else about how the model is reached: which provider
+and model answer, how a failed call is retried, and what a provider may be sent
+are all owned by ``rey_lib.ai``. This domain says what analysis to run; it does
+not say who runs it.
 
 Public API
 ----------
@@ -19,8 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from rey_lib.llm.records import ExecutionRecord
-from rey_lib.llm.retry import DEFAULT_RETRY_POLICY, RetryPolicy
+from rey_lib.analysis.records import ExecutionRecord
 
 __all__ = ["RunRequest", "RunResponse"]
 
@@ -34,9 +39,9 @@ IDEMPOTENCY_FAIL_IF_EXISTS = "fail_if_exists"
 class RunRequest:
     """Fully describes one LLM stage execution request.
 
-    All provider, model, and policy configuration lives here.  The runner
-    reads nothing from global state or environment variables unless a field
-    is left empty.
+    Analysis configuration only. Provider, model, credential and retry policy
+    are the AI runtime's, selected by ``profile_id``. Nothing here is read from
+    global state or the environment.
 
     Attributes
     ----------
@@ -49,15 +54,10 @@ class RunRequest:
     input_data : str | list[dict]
         Input data.  A string is sent as-is; a list of dicts is formatted
         as a markdown table.
-    provider : str
+    profile_id : str
         Provider name ('anthropic', 'openai', 'ollama', 'mock', or any
         registered custom name).  Falls back to LLM_PROVIDER env var if
         empty.
-    model : str
-        Model identifier.  Falls back to LLM_MODEL env var if empty.
-    api_key : str
-        API key for the provider.  Falls back to the provider's standard
-        env var if empty.  Not required for 'ollama' or 'mock'.
     output_schema : Optional[dict]
         JSON Schema dict for output validation.  When omitted, the runner
         looks for a sidecar .schema.json file alongside the contract.
@@ -73,15 +73,13 @@ class RunRequest:
     classification : str
         Data classification tag stored in the execution record.
     max_tokens : int
-        Maximum tokens the provider may generate.
+        Maximum tokens the model may generate.
     max_rows : int
         Maximum rows included when input_data is a list of dicts.
     requires_approval : bool
         When True, the runner stores this stage's record as 'pending_approval'
         on success rather than 'success'.  The pipeline halts at this point.
         Use records.approve() + pipeline.resume() to continue.
-    retry_policy : RetryPolicy
-        Retry behaviour for this stage.
     """
 
     pipeline_id:       str
@@ -89,14 +87,11 @@ class RunRequest:
     contract_path:     Path
     input_data:        Union[str, list[dict[str, Any]]]
 
-    provider:          str            = ""
-    model:             str            = ""
-    api_key:           str            = ""
+    profile_id:        str            = ""
 
     # Provider-specific options sourced from the LLM profile (e.g. Ollama
     # endpoint, timeout_seconds, and capability flags). Empty for providers
     # that take no extra options.
-    provider_options:  dict[str, Any] = field(default_factory=dict)
 
     output_schema:     Optional[dict[str, Any]] = None
     schema_version:    str                      = ""
@@ -108,7 +103,6 @@ class RunRequest:
     classification:    str            = ""
     max_tokens:        int            = 4000
     max_rows:          int            = 200
-    temperature:       float          = 0.0
 
     # When True the runner stores the record as 'pending_approval' on success
     # instead of 'success'.  The pipeline halts at this stage until the record
@@ -131,7 +125,6 @@ class RunRequest:
     # formatting via rey_lib.artifacts) before returning the final content.
     artifact_processing: dict[str, Any] = field(default_factory=dict)
 
-    retry_policy:      RetryPolicy    = field(default_factory=lambda: DEFAULT_RETRY_POLICY)
 
     # Append-only LLM evaluation logs (SGC_Rey_LLM_Evaluation_Append_Only_Log).
     # Callers pass the already-resolved llm_evaluation.payload_log_path and
@@ -139,8 +132,8 @@ class RunRequest:
     # a path is set. payload_id is the stable reusable-payload identity: when
     # supplied the payload is reused (no new payload record), otherwise the runner
     # generates one for the newly captured payload.
-    eval_payload_log_path: Optional[Path] = None
-    eval_run_log_path:     Optional[Path] = None
+    # Names an already-recorded evaluation payload, so a reused payload is
+    # not recorded twice. Where that record goes is rey_lib.logs' decision.
     payload_id:            Optional[str]  = None
 
     # In-memory contract text for the deprecated direct_ask() compatibility
