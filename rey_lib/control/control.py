@@ -1163,10 +1163,17 @@ class Control:
                                required=required)
 
     def list_file_mutations(self, file_manifest_id: Optional[int] = None,
+                            file_mutation_id: Optional[int] = None,
                             required: bool = True) -> list[dict[str, Any]]:
-        """Return mutations in order, for one file or for every file."""
+        """Return mutations in order: one mutation, one file's, or every one.
+
+        A mutation is addressable on its own because it is what a File Manifest
+        row stands for. Naming one narrows to it; naming neither returns them
+        all, as it always did.
+        """
         return self._call_rows("list_file_mutation",
-                               {"file_manifest_id": file_manifest_id},
+                               {"file_manifest_id": file_manifest_id,
+                                "file_mutation_id": file_mutation_id},
                                required=required)
 
     def files_for_run(self, run_id: int,
