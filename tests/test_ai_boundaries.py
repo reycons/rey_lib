@@ -108,20 +108,34 @@ def test_a_provider_reply_never_escapes_as_itself() -> None:
         assert "ProviderCall" not in code, f"{name} exposes a provider call"
 
 
-def test_no_production_consumer_imports_the_new_subsystem() -> None:
-    """Build is not cutover: nothing is attached yet."""
-    found: list[str] = []
-    for path in (REPO).rglob("*.py"):
+def test_only_bootstrap_constructs_the_shared_ai() -> None:
+    """Only bootstrap constructs an AI; consumers receive the shared one.
+
+    The Step-B version of this guard asserted that nothing imported the
+    subsystem at all -- correct while the build was unattached, and expired the
+    moment cutover began. Its successor is the invariant that actually protects
+    the runtime: one AI per runtime invocation, owned by bootstrap. A consumer
+    that built its own would hold a second runtime with its own providers and
+    its own settings, which is the state ``ctx.shared_ai`` exists to prevent.
+    """
+    allowed = {"construction.py", "bootstrap.py"}
+    offenders: list[str] = []
+    for path in REPO.rglob("*.py"):
         parts = set(path.parts)
         if ".venv" in parts or "__pycache__" in parts:
             continue
         if AI in path.parents or path.name.startswith("test_"):
             continue
+        if path.name in allowed:
+            continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if re.search(r"\bfrom rey_lib\.ai\b|\bimport rey_lib\.ai\b", text):
-            found.append(str(path.relative_to(REPO)))
+        if re.search(r"(?<![\w.])AI\s*\(\s*registry\s*=", text):
+            offenders.append(str(path.relative_to(REPO)))
 
-    assert not found, f"the new subsystem is already attached to {found}"
+    assert not offenders, (
+        "these construct their own AI instead of using the shared one: "
+        + ", ".join(offenders)
+    )
 
 
 def test_every_error_the_subsystem_raises_is_its_own() -> None:
@@ -173,12 +187,22 @@ def test_the_caller_metadata_context_fields_are_untouched_by_that_guard() -> Non
 
 
 def test_no_provider_sdk_is_imported_above_the_adapter_boundary() -> None:
-    """Provider vocabulary stops at the adapter, and no external agent model enters."""
-    banned = ("openai", "anthropic", "litellm", "pydantic_ai", "agents")
+    """Provider vocabulary stops at the adapter, and no external agent model enters.
+
+    Two bans, and they are not the same ban. A provider SDK is legitimate
+    *inside* ``providers/`` -- that is what an adapter is for -- and forbidden
+    everywhere above it. An external agent framework is forbidden everywhere,
+    including in an adapter, because adopting one there would still put its
+    execution model under the boundary.
+    """
+    sdks = ("openai", "anthropic", "google")
+    frameworks = ("litellm", "pydantic_ai", "agents")
     offenders: list[str] = []
     for path in sorted(AI.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
+        adapter = path.parent.name == "providers"
+        banned = frameworks if adapter else sdks + frameworks
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             names: list[str] = []

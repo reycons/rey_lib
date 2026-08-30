@@ -127,6 +127,20 @@ class AI:
         """
         return self._registry.effective_capability(self._profile_for(profile_id))
 
+    def permitted_access(self, profile_id: str = "", requested: str = "") -> str:
+        """Which representation a configured model may receive.
+
+        Authorization, answered from AI-owned state that was consumed at
+        construction. Nothing re-reads an application context per request, which
+        is what the old ``resolve_profile_for_llm`` did on every call.
+
+        The representation itself is produced elsewhere: this says *which* one is
+        allowed, and ``rey_lib.logs.profile_library`` produces it. That
+        separation is why an operator inspecting both presentations does not
+        depend on this layer.
+        """
+        return self._profile_for(profile_id).permitted_access(requested)
+
     def snapshot(self) -> AISnapshot:
         """Everything a presentation layer needs, in one immutable answer."""
         return AISnapshot(

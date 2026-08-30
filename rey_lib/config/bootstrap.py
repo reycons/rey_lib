@@ -224,6 +224,85 @@ def _open_control(ctx: Namespace) -> Any:
     return control
 
 
+def _open_ai(ctx: Namespace) -> Any:
+    """Build this runtime's one AI, when the installation configures one.
+
+    **Optional, unlike Control.** Not every installation has AI configured, and
+    the existence of an installation does not imply the existence of an AI. When
+    ``ctx.llm`` names nothing, this returns ``None`` and the runtime simply has
+    no AI -- an ordinary capability state, not a failure. A non-AI application
+    boots and runs exactly as it did.
+
+    Built here for the same reason RunLog is: one object per runtime invocation,
+    from configuration read in one place, so the dependency surface is closed
+    rather than ctx exploded across callers. Consumers reach it through
+    ``ctx.shared_ai`` and never construct their own.
+
+    ctx is a construction input only. Nothing this returns retains a reference
+    to it -- a structural guard in the AI test suite enforces that the ``ctx``
+    identifier appears nowhere in ``rey_lib.ai`` outside its construction seam.
+
+    Returns
+    -------
+    Any
+        The runtime's ``AI``, or ``None`` when no AI is configured.
+    """
+    configured = getattr(ctx, "llm", None)
+    if not configured:
+        return None
+
+    from rey_lib.ai.construction import ai_from_ctx
+    from rey_lib.ai.errors import AIError
+
+    try:
+        return ai_from_ctx(ctx, profiles=_ai_profiles(ctx))
+    except AIError as exc:
+        # Configuration that names an AI but cannot build one is a fault worth
+        # reporting, not a silent absence -- an operator who configured a
+        # provider should not discover at the first request that it never
+        # existed. The run continues without AI rather than failing to launch,
+        # because an application that does not use AI must not be stopped by
+        # another application's misconfiguration.
+        _logger.error("AI is configured for this runtime but could not be built: %s", exc)
+        return None
+
+
+def _ai_profiles(ctx: Namespace) -> tuple[Any, ...]:
+    """The public selection projections this runtime offers.
+
+    One profile per configured entry, carrying the access policy that entry
+    declares. Capability is not read here: the adapter is the authority on what
+    a configured provider can do, and a profile that stated its own could
+    advertise something no adapter implements.
+    """
+    from rey_lib.ai.profiles import AIProfile
+
+    configured = getattr(ctx, "llm", None) or {}
+    names = (
+        list(configured.keys()) if hasattr(configured, "keys")
+        else [n for n in vars(configured) if not str(n).startswith("_")]
+    )
+    profiles: list[Any] = []
+    for name in names:
+        entry = (
+            configured.get(name) if hasattr(configured, "get")
+            else getattr(configured, name, None)
+        )
+        access = (
+            entry.get("profile_access") if hasattr(entry, "get")
+            else getattr(entry, "profile_access", None)
+        )
+        profiles.append(
+            AIProfile(
+                id=str(name),
+                name=str(name),
+                configured_provider_id=str(name),
+                profile_access=access,
+            ),
+        )
+    return tuple(profiles)
+
+
 def open_run_log(ctx: Namespace) -> Any:
     """Construct the one run log this process writes through, and what it needs.
 
@@ -364,6 +443,10 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     ctx = build_ctx_for_app(*args, **kwargs)
     run_log = open_run_log(ctx)
     register_runtime_object(ctx, run_log)
+
+    # Optional: present only when this installation configures AI. Absent is an
+    # ordinary state, and no consumer may construct one lazily instead.
+    ctx.shared_ai = _open_ai(ctx)
     failed = False
     try:
         yield ctx, run_log

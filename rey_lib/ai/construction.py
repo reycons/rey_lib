@@ -20,10 +20,12 @@ by accident; the first application to wire it up is what would have broken it.
 config subtree is read and normalized, never retained as an opaque stand-in for
 ``ctx`` -- keeping the subtree would reintroduce ambient lookup under a new name.
 
-**Adapters are supplied, not invented here.** A factory turns one
-``ConfiguredProvider`` into one ``AIProvider``, resolving its credential
-reference at that moment. This module owns normalization and refuses to own an
-adapter inventory, so adding a provider does not mean editing the boundary.
+**Adapters are built here, credentials are not resolved here.** A factory turns
+one ``ConfiguredProvider`` into one ``AIProvider``, handing it the credential
+*reference* and a resolver. The environment is read later, at each point of use,
+so nothing resolved is carried out of this module and no cleartext credential
+becomes adapter state.
+
 Isolated construction from explicit resolved inputs remains possible without any
 application context: ``AI(registry=...)`` needs nothing here.
 """
@@ -33,24 +35,67 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from rey_lib.ai.ai import AI
+from rey_lib.ai.credentials import CredentialResolver
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstruction
 from rey_lib.ai.policies import DEFAULT_EXECUTION_POLICY, AIExecutionPolicy
 from rey_lib.ai.profiles import AIProfile
+from rey_lib.ai.providers import (
+    AnthropicProvider,
+    EchoProvider,
+    GeminiProvider,
+    OllamaProvider,
+    OpenAIProvider,
+)
 from rey_lib.ai.providers.base import AIProvider
 from rey_lib.ai.providers.configuration import ConfiguredProvider
 from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.settings import AISettings
+from rey_lib.config.env_reference import declaration_map
 
-__all__ = ["ProviderFactory", "ai_from_ctx", "configured_providers_from_ctx"]
+__all__ = [
+    "ProviderFactory",
+    "ai_from_ctx",
+    "configured_providers_from_ctx",
+    "default_adapters",
+]
 
 #: How one configured provider becomes one adapter.
 #:
-#: Called once, during construction. The adapter resolves the credential
-#: reference here and owns what results -- so no credential discovery happens
-#: during execution, and the factory is the last place that could have read
-#: ``ctx``.
+#: Called once, during construction, and it is the last place that could have
+#: read ``ctx``. It resolves no credential: the adapter is given the reference
+#: and reads the environment when it builds its client.
 ProviderFactory = Callable[[ConfiguredProvider], AIProvider]
+
+
+def default_adapters(credentials: CredentialResolver) -> dict[str, ProviderFactory]:
+    """The adapters this library ships, each bound to one credential resolver.
+
+    A function rather than a module-level dict. The old subsystem kept providers
+    in a process-global map that two installations in one process then shared;
+    this builds a fresh mapping per runtime, so nothing is shared and nothing
+    accumulates across constructions.
+
+    Adding a provider is adding a line here and implementing ``AIProvider`` --
+    never a branch anywhere else.
+    """
+    return {
+        "anthropic": lambda configured: AnthropicProvider(configured, credentials),
+        "openai": lambda configured: OpenAIProvider(configured, credentials),
+        "gemini": lambda configured: GeminiProvider(configured, credentials),
+        "ollama": lambda configured: OllamaProvider(configured, credentials),
+        "echo": lambda configured: EchoProvider(),  # noqa: ARG005 -- takes none
+    }
+
+
+def credentials_from_ctx(ctx: Any) -> CredentialResolver:
+    """The credential resolver for this runtime.
+
+    Takes the ``env`` declaration block -- plain configuration naming variables,
+    holding no values -- and binds it. The environment itself is read later, at
+    each point of use, so nothing resolved is carried out of this function.
+    """
+    return CredentialResolver(declaration_map(getattr(ctx, "env", None)))
 
 
 def configured_providers_from_ctx(ctx: Any) -> tuple[ConfiguredProvider, ...]:
@@ -102,7 +147,7 @@ def configured_providers_from_ctx(ctx: Any) -> tuple[ConfiguredProvider, ...]:
 def ai_from_ctx(
     ctx: Any,
     *,
-    adapters: Mapping[str, ProviderFactory],
+    adapters: Mapping[str, ProviderFactory] | None = None,
     profiles: tuple[AIProfile, ...] = (),
     instructions: tuple[AIInstruction, ...] = (),
     settings: AISettings | None = None,
@@ -113,8 +158,8 @@ def ai_from_ctx(
     Args:
         ctx: The application context. Read here and nowhere else, and not
             retained by anything this returns.
-        adapters: A factory per provider name. Each is called once with its
-            ``ConfiguredProvider`` and resolves any credential reference then.
+        adapters: A factory per provider name. Absent, the adapters this
+            library ships are used, bound to this runtime's credential resolver.
         profiles: The public selection projections this runtime offers. A
             profile naming no ``configured_provider_id`` is taken to select the
             configured provider sharing its own id.
@@ -130,9 +175,13 @@ def ai_from_ctx(
             no factory can build.
     """
     configured = configured_providers_from_ctx(ctx)
+    factories = (
+        adapters if adapters is not None
+        else default_adapters(credentials_from_ctx(ctx))
+    )
     built: list[AIProvider] = []
     for configuration in configured:
-        factory = adapters.get(configuration.provider)
+        factory = factories.get(configuration.provider)
         if factory is None:
             raise AIConfigurationError(
                 f"ctx.llm['{configuration.id}'] names provider "
@@ -175,6 +224,7 @@ def _linked(
                 provider=profile.provider or configuration.provider,
                 model=profile.model or configuration.model,
                 policy=profile.policy,
+                profile_access=profile.profile_access,
                 options=profile.options,
                 metadata=profile.metadata,
             ),
