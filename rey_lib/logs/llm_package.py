@@ -178,7 +178,7 @@ def _build_analysis_package(
     """Return the log-analysis LLM_PACKAGE, pairing a contract with a source record.
 
     This is the legacy provider wire package for the log-analysis path, not the
-    canonical LLM package (rey_lib/llm/package.py). The same object is written as
+    canonical LLM package (rey_lib/analysis/package.py). The same object is written as
     the durable LLM_PACKAGE record and serialized as the provider prompt, and every
     configured contract reads this shape, so its structure and fields are an
     established wire contract preserved unchanged
@@ -237,8 +237,7 @@ def _execute_analysis_package(
     from rey_lib.artifacts import (
         build_envelope_instruction, extract_artifact_envelope, loads_llm_json,
     )
-    from rey_lib.llm.exceptions import ConfigurationFailure
-    from rey_lib.llm.llm_utils import direct_ask
+    from rey_lib.ai.errors import AIConfigurationError
 
     prompt = json.dumps(package) + build_envelope_instruction(artifact_type)
     if max_input_characters and len(prompt) > max_input_characters:
@@ -249,22 +248,10 @@ def _execute_analysis_package(
 
     profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
     if profile is None:
-        raise ConfigurationFailure(
+        raise AIConfigurationError(
             f"llm_execution_profile not found: {execution_profile}"
         )
-    _eval = getattr(ctx, "llm_evaluation", None)
-    _payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
-    _run_log = getattr(_eval, "run_log_path", None) if _eval else None
-    raw = direct_ask(
-        prompt,
-        model=profile.model,
-        provider=profile.provider,
-        # Read as the request is built, and carried no further than it.
-        api_key=resolve_env_reference(ctx, getattr(profile, "api_key", "")),
-        eval_payload_log_path=Path(_payload_log) if _payload_log else None,
-        eval_run_log_path=Path(_run_log) if _run_log else None,
-        payload_id=payload_id,
-    )
+    raw = _ask(ctx, prompt, execution_profile, payload_id=payload_id)
     content, _ = extract_artifact_envelope(raw, artifact_type)
     # The shared policy, not the standard library's: loads_llm_json accepts
     # literal control characters inside strings, protects invalid Markdown
@@ -320,15 +307,15 @@ def run_configured_record_analysis(
 
     Raises
     ------
-    ConfigurationFailure
+    AIConfigurationError
         The analysis or its execution profile is not configured, or the
         configured contract cannot be read.
     ValueError
         The supplied record is not a JSON object, or exceeds the size limit.
-    ProviderFailure, ParseFailure
+    AIProviderError, ArtifactEnvelopeError
         Raised by the shared execution path; the caller owns presentation.
     """
-    from rey_lib.llm.exceptions import ConfigurationFailure
+    from rey_lib.ai.errors import AIConfigurationError
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
 
@@ -338,7 +325,7 @@ def run_configured_record_analysis(
     analyses = getattr(ctx, "log_analysis", None)
     analysis = analyses.get(analysis_name) if analyses is not None else None
     if analysis is None:
-        raise ConfigurationFailure(f"log_analysis configuration not found: {analysis_name}")
+        raise AIConfigurationError(f"log_analysis configuration not found: {analysis_name}")
     if not getattr(analysis, "enabled", False):
         result["skipped"].append("disabled")
         result["action"] = "skipped"
@@ -398,8 +385,7 @@ def run_uncontracted_record_analysis(
 
     from rey_lib.config.ctx import find_in_ctx
     from rey_lib.config.env_reference import resolve_env_reference
-    from rey_lib.llm.exceptions import ConfigurationFailure
-    from rey_lib.llm.llm_utils import direct_ask
+    from rey_lib.ai.errors import AIConfigurationError
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
 
@@ -407,7 +393,7 @@ def run_uncontracted_record_analysis(
         raise ValueError("Record analysis requires a JSON object record")
     profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
     if profile is None:
-        raise ConfigurationFailure(f"llm_execution_profile not found: {execution_profile}")
+        raise AIConfigurationError(f"llm_execution_profile not found: {execution_profile}")
 
     # Raw send: the supplied package is serialized and sent exactly as-is. No
     # envelope instruction is appended and the raw response is returned unparsed
@@ -419,17 +405,8 @@ def run_uncontracted_record_analysis(
             f"over the configured limit of {max_input_characters}"
         )
 
-    _eval = getattr(ctx, "llm_evaluation", None)
-    _payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
-    _run_log = getattr(_eval, "run_log_path", None) if _eval else None
-    result["result"] = direct_ask(
-        prompt,
-        model=profile.model,
-        provider=profile.provider,
-        # Read as the request is built, and carried no further than it.
-        api_key=resolve_env_reference(ctx, getattr(profile, "api_key", "")),
-        eval_payload_log_path=Path(_payload_log) if _payload_log else None,
-        eval_run_log_path=Path(_run_log) if _run_log else None,
+    result["result"] = _ask(
+        ctx, prompt, execution_profile,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
     )
     result["action"] = "analysed"
@@ -486,29 +463,14 @@ def run_workbench_input_stream(
     """
     import json
 
-    from rey_lib.config.ctx import find_in_ctx
-    from rey_lib.config.env_reference import resolve_env_reference
-    from rey_lib.llm.api import RunRequest
+    from rey_lib.analysis.api import RunRequest
+    from rey_lib.analysis.execution import run as _run
     from rey_lib.artifacts import build_envelope_instruction
-    from rey_lib.llm.exceptions import ConfigurationFailure
-    from rey_lib.llm.runner import run as _run
-
-    profile = find_in_ctx(ctx, "llm_profiles", profile_name)
-    if profile is None:
-        raise ConfigurationFailure(f"llm_execution_profile not found: {profile_name}")
-
-    _eval = getattr(ctx, "llm_evaluation", None)
-    payload_log = getattr(_eval, "payload_log_path", None) if _eval else None
-    run_log = getattr(_eval, "run_log_path", None) if _eval else None
 
     common: dict[str, Any] = {
         "pipeline_id": "ai_workbench",
         "stage_id": "run",
-        "provider": str(getattr(profile, "provider", "") or ""),
-        "model": str(getattr(profile, "model", "") or ""),
-        "api_key": str(resolve_env_reference(ctx, getattr(profile, "api_key", "")) or ""),
-        "eval_payload_log_path": Path(payload_log) if payload_log else None,
-        "eval_run_log_path": Path(run_log) if run_log else None,
+        "profile_id": str(profile_name or ""),
         "payload_id": payload_id or None,
     }
 
@@ -519,7 +481,7 @@ def run_workbench_input_stream(
             if analyses is not None and hasattr(analyses, "get") else None
         )
         if entry is None or not str(getattr(entry, "contract", "") or ""):
-            raise ConfigurationFailure(
+            raise AIConfigurationError(
                 f"No contract configured for '{instruction_value}'."
             )
         # Match configured AI Analysis exactly: read the configured YAML through
@@ -527,8 +489,8 @@ def run_workbench_input_stream(
         # analysis package, include its configured references, and send the whole
         # package through the inline/direct execution behavior. These analysis
         # contracts intentionally use Rey's `contract: {name, ...}` document
-        # convention; they are not low-level rey_lib.llm Contract files and must
-        # never be passed to runner.load_contract().
+        # convention; they are not low-level rey_lib.analysis Contract files
+        # and must never be passed to contract.load().
         try:
             source: Any = json.loads(input_text)
         except (TypeError, json.JSONDecodeError):
@@ -573,7 +535,14 @@ def run_workbench_input_stream(
             **common,
         )
 
-    return _run(request, on_chunk=on_chunk, cancelled=cancelled)
+    from rey_lib.ai.errors import AIUnavailableError  # noqa: PLC0415
+
+    ai = getattr(ctx, "shared_ai", None)
+    if ai is None:
+        raise AIUnavailableError(
+            "This runtime has no AI configured, so the workbench cannot run."
+        )
+    return _run(request, ai, on_text=on_chunk, cancelled=cancelled)
 
 
 def run_configured_log_analysis(
@@ -595,7 +564,8 @@ def run_configured_log_analysis(
     from rey_lib.config.config_utils import build_ctx_from_path
     from rey_lib.errors.error_utils import build_safe_error_payload
     from rey_lib.files import write_file
-    from rey_lib.llm.exceptions import ConfigurationFailure, ParseFailure, ProviderFailure
+    from rey_lib.ai.errors import AIConfigurationError, AIProviderError
+    from rey_lib.artifacts import ArtifactEnvelopeError
     from rey_lib.logs.record_enrichment import log_run_record
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": [], "failures": []}
@@ -673,7 +643,7 @@ def run_configured_log_analysis(
             package,
         )
     except (
-        ProviderFailure, ParseFailure, ConfigurationFailure, json.JSONDecodeError,
+        AIProviderError, ArtifactEnvelopeError, AIConfigurationError, json.JSONDecodeError,
         AttributeError, KeyError, TypeError,
     ) as exc:
         # Canonical failure record for any failure in this stage — LLM failure or
@@ -699,3 +669,28 @@ def run_configured_log_analysis(
 
     result["result"] = parsed_result
     return result
+
+
+def _ask(ctx: Any, prompt: str, execution_profile: str, *, payload_id: Any = None) -> str:
+    """Send one prompt through the runtime's shared AI and answer with its text.
+
+    The runtime owns the AI: which provider and model answer, how a credential
+    is resolved, how a failed call is retried and whether a replay is legal are
+    all its decisions, taken once at bootstrap. This reads no provider
+    configuration and resolves no credential.
+
+    Evaluation evidence is recorded by ``rey_lib.logs`` through the run's
+    ``RunLog``, which is why no log path appears here.
+    """
+    from rey_lib.ai import AIRequest  # noqa: PLC0415
+    from rey_lib.ai.errors import AIUnavailableError  # noqa: PLC0415
+
+    ai = getattr(ctx, "shared_ai", None)
+    if ai is None:
+        raise AIUnavailableError(
+            "This runtime has no AI configured, so an analysis cannot run."
+        )
+    result = ai.execute(
+        AIRequest.prompt(str(prompt), profile_id=str(execution_profile or "")),
+    )
+    return result.text

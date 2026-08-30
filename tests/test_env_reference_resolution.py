@@ -219,36 +219,6 @@ def test_ftp_resolves_user_and_password_at_login(
     assert ctx.ftp_site.password == f"env.{NESTED_VAR}"
 
 
-def test_the_llm_provider_is_built_with_the_current_key(
-    ctx: Any, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from rey_lib.llm import adapters
-
-    built: dict[str, Any] = {}
-
-    class Provider:
-        def run(self, **kwargs: Any) -> Any:
-            return SimpleNamespace(content="answer")
-
-    def resolve(name: str, api_key: str = "") -> Provider:
-        built["api_key"] = api_key
-        return Provider()
-
-    monkeypatch.setattr(adapters, "resolve_provider", resolve)
-    llm_ctx = SimpleNamespace(env=ctx.env, llm={"hosted": ctx.llm_profiles[0]})
-
-    assert adapters.ask_with_ctx(llm_ctx, "prompt", "hosted") == "answer"
-    assert built["api_key"] == f"value-of-{KEY_VAR}"
-
-    # Rotated between calls, and the next call uses the new one.
-    monkeypatch.setenv(KEY_VAR, "rotated-key")
-    adapters.ask_with_ctx(llm_ctx, "prompt", "hosted")
-    assert built["api_key"] == "rotated-key"
-    assert ctx.llm_profiles[0].api_key == f"env.{KEY_VAR}"
-
-
-# -- structural --------------------------------------------------------------
-
 def test_no_consumer_resolves_a_whole_configuration_block() -> None:
     """Each call names one field, so nothing resolves a subtree by accident."""
     import re

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rey_lib.encryption import sha256_file
-from rey_lib.llm.package import (
+from rey_lib.analysis.package import (
     LlmPackageContract,
     LlmPackageInput,
     build_package,
@@ -126,7 +126,7 @@ def test_builder_does_not_invoke_a_provider() -> None:
     """The builder is pure assembly: it imports no provider/runner/orchestration."""
     import ast
 
-    import rey_lib.llm.package as pkg
+    import rey_lib.analysis.package as pkg
 
     tree = ast.parse(Path(pkg.__file__).read_text(encoding="utf-8"))
     imported: set[str] = set()
@@ -137,9 +137,11 @@ def test_builder_does_not_invoke_a_provider() -> None:
             imported.update(alias.name for alias in node.names)
     # File utilities only — never the provider, runner, adapters, or analysis layer.
     assert "rey_lib.files" in imported
+    # The retired names and the paths that replaced them: building a package
+    # never invokes a model.
     for forbidden in ("rey_lib.llm.runner", "rey_lib.llm.adapters",
-                      "rey_lib.llm.providers", "rey_lib.llm.analysis",
-                      "rey_lib.llm.llm_utils"):
+                      "rey_lib.llm.providers", "rey_lib.llm.llm_utils",
+                      "rey_lib.analysis.execution", "rey_lib.ai"):
         assert forbidden not in imported, forbidden
 
 

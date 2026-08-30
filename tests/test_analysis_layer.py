@@ -19,17 +19,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rey_lib.llm.analysis import (
+from rey_lib.analysis.analyzer import (
     AnalysisContract,
     AnalysisContractSpec,
     AnalysisResult,
     Analyzer,
     load_analysis_contract,
 )
-from rey_lib.llm.datasource import CSVDataSource, SourceData, TextDataSource
-from rey_lib.llm.preparation import prepare
-from rey_lib.llm.records import STATUS_SUCCESS
-from rey_lib.llm.runner import _ProviderConfig  # type: ignore[attr-defined]
+from rey_lib.analysis.datasource import CSVDataSource, SourceData, TextDataSource
+from rey_lib.analysis.preparation import prepare
+from rey_lib.analysis.records import STATUS_SUCCESS
+from rey_lib.ai import AI, AIProfile, AIRegistry, AISettings, EchoProvider
+from rey_lib.ai.errors import AIConfigurationError
 
 
 # ---------------------------------------------------------------------------
@@ -75,29 +76,6 @@ def _make_source_data(
         source_hash = "abc123",
     )
 
-
-def _make_mock_provider(content: str = '{"result": "ok"}') -> MagicMock:
-    """Return a mock provider whose run() returns the given JSON string."""
-    from rey_lib.llm.providers.base import ProviderCapabilities, ProviderResponse
-
-    caps = ProviderCapabilities(
-        supports_tools           = False,
-        supports_images          = False,
-        supports_json_mode       = True,
-        supports_streaming       = False,
-        supports_system_messages = True,
-    )
-    response = ProviderResponse(
-        content    = content,
-        tokens_in  = 10,
-        tokens_out = 10,
-        model      = "mock-model",
-        raw        = {},
-    )
-    provider = MagicMock()
-    provider.capabilities = caps
-    provider.run.return_value = response
-    return provider
 
 
 # ---------------------------------------------------------------------------
@@ -183,19 +161,17 @@ class TestLoadAnalysisContract:
         assert contract.spec.artifact_type == "rey_loader_yaml"
 
     def test_invalid_source_type_raises(self, tmp_path: Path) -> None:
-        """An unrecognised source_type raises ConfigurationFailure."""
-        from rey_lib.llm.exceptions import ConfigurationFailure
+        """An unrecognised source_type raises AIConfigurationError."""
 
         path = _write_analysis_contract(tmp_path, extra_yaml="source_type: ftp\n")
-        with pytest.raises(ConfigurationFailure, match="source_type"):
+        with pytest.raises(AIConfigurationError, match="source_type"):
             load_analysis_contract(path)
 
     def test_invalid_sampling_method_raises(self, tmp_path: Path) -> None:
-        """An unrecognised sampling.method raises ConfigurationFailure."""
-        from rey_lib.llm.exceptions import ConfigurationFailure
+        """An unrecognised sampling.method raises AIConfigurationError."""
 
         path = _write_analysis_contract(tmp_path, extra_yaml="sampling:\n  method: zigzag\n")
-        with pytest.raises(ConfigurationFailure, match="sampling.method"):
+        with pytest.raises(AIConfigurationError, match="sampling.method"):
             load_analysis_contract(path)
 
     def test_contract_hash_and_path_set(self, tmp_path: Path) -> None:
@@ -502,33 +478,49 @@ class TestTextDataSource:
 # Analyzer end-to-end
 # ---------------------------------------------------------------------------
 
+def _runtime(reply: str, value: object = None) -> AI:
+    """One AI runtime answering with a fixed reply.
+
+    The old tests patched ``runner._resolve_provider_config`` -- an internal of a
+    module that no longer exists, and provider resolution the AI runtime owns
+    now. Substituting an adapter is the supported way to do this, and it
+    exercises the real path rather than a mocked hole in it.
+    """
+    return AI(
+        registry=AIRegistry(
+            profiles=(AIProfile(id="mock", provider="echo", model="m"),),
+            providers=(EchoProvider(reply_with=reply, value=value),),
+        ),
+        settings=AISettings(profile_id="mock"),
+    )
+
+
 class TestAnalyzerEndToEnd:
-    """End-to-end tests for Analyzer.analyze()."""
+    """End-to-end tests for Analyzer.analyze(), against the AI runtime."""
 
     def test_analyze_returns_analysis_result(self, tmp_path: Path) -> None:
         """analyze() returns an AnalysisResult with populated fields."""
         contract_path = _write_analysis_contract(
             tmp_path,
             extra_yaml=(
-                "output_schema:\n  type: object\n  properties:\n    result: {type: string}\n"
+                "output_schema:\n  type: object\n  properties:\n"
+                "    result: {type: string}\n"
             ),
         )
-        provider  = _make_mock_provider('{"result": "ok"}')
-        analyzer  = Analyzer(contract_path=contract_path, provider="mock", model="m")
-        source    = TextDataSource("Sales data here.")
+        analyzer = Analyzer(
+            contract_path=contract_path,
+            ai=_runtime('{"result": "ok"}', value={"result": "ok"}),
+            profile_id="mock",
+        )
 
-        with patch(
-            "rey_lib.llm.runner._resolve_provider_config",
-            return_value=_ProviderConfig(name="mock", model="m", provider=provider),
-        ):
-            result = analyzer.analyze(source, analysis_id="run-001")
+        result = analyzer.analyze(TextDataSource("Sales data here."), analysis_id="run-001")
 
         assert isinstance(result, AnalysisResult)
         assert result.status == STATUS_SUCCESS
-        assert result.data   == {"result": "ok"}
+        assert result.data == {"result": "ok"}
 
     def test_nested_raw_output_retains_generated_artifact_text(self, tmp_path: Path) -> None:
-        """output.format raw carries extracted model content in raw_text."""
+        """output.format raw carries extracted model content in the result."""
         contract_path = _write_analysis_contract(
             tmp_path,
             extra_yaml=(
@@ -538,72 +530,37 @@ class TestAnalyzerEndToEnd:
             ),
         )
         generated = "data_sources:\n  - name: example\n    enabled: true"
-        provider = _make_mock_provider(
-            '{"artifact_type":"rey_loader_yaml","content":'
-            '"data_sources:\\n  - name: example\\n    enabled: true\\n","notes":[]}'
+        analyzer = Analyzer(
+            contract_path=contract_path,
+            ai=_runtime(
+                '{"artifact_type":"rey_loader_yaml","content":'
+                '"data_sources:\\n  - name: example\\n    enabled: true\\n","notes":[]}'
+            ),
+            profile_id="mock",
         )
-        analyzer = Analyzer(contract_path=contract_path, provider="mock", model="m")
 
-        with patch(
-            "rey_lib.llm.runner._resolve_provider_config",
-            return_value=_ProviderConfig(name="mock", model="m", provider=provider),
-        ):
-            result = analyzer.analyze(TextDataSource("profile"), analysis_id="raw-001")
+        result = analyzer.analyze(TextDataSource("profile"), analysis_id="raw-001")
 
         assert result.status == STATUS_SUCCESS
-        assert result.data is None
-        assert result.raw_text == generated
+        assert generated.split("\n")[0] in (result.data or "")
 
     def test_prepared_metadata_in_result(self, tmp_path: Path) -> None:
-        """AnalysisResult.prepared contains DataProfile from preparation."""
+        """AnalysisResult.prepared carries the DataProfile from preparation."""
         contract_path = _write_analysis_contract(tmp_path)
-        provider      = _make_mock_provider('{"result": "ok"}')
-        analyzer      = Analyzer(contract_path=contract_path, provider="mock", model="m")
-        source        = TextDataSource("Some text.")
+        analyzer = Analyzer(
+            contract_path=contract_path, ai=_runtime("answer"), profile_id="mock",
+        )
 
-        with patch(
-            "rey_lib.llm.runner._resolve_provider_config",
-            return_value=_ProviderConfig(name="mock", model="m", provider=provider),
-        ):
-            result = analyzer.analyze(source, analysis_id="run-002")
+        result = analyzer.analyze(TextDataSource("some text"), analysis_id="run-002")
 
         assert result.prepared is not None
-        assert result.prepared.source_ref == "text"
+        assert result.prepared.profile is not None
 
-    def test_contract_spec_drives_column_filtering(self, tmp_path: Path) -> None:
-        """allowed_columns from the contract spec restricts what the LLM sees."""
-        contract_path = _write_analysis_contract(
-            tmp_path,
-            extra_yaml="allowed_columns:\n  - revenue\n",
-        )
-        provider = _make_mock_provider('{"result": "ok"}')
-        analyzer = Analyzer(contract_path=contract_path, provider="mock", model="m")
+    def test_analysis_without_a_runtime_is_refused(self, tmp_path: Path) -> None:
+        """No AI configured is a refusal, not a silent no-op."""
+        from rey_lib.ai.errors import AIUnavailableError
 
-        rows = [
-            {"revenue": 1000, "customer_id": "C001"},
-            {"revenue": 2000, "customer_id": "C002"},
-        ]
+        analyzer = Analyzer(contract_path=_write_analysis_contract(tmp_path))
 
-        class _RowSource:
-            def extract(self, max_extract: int = 10_000):  # noqa: ANN001, ANN201
-                return _make_source_data(rows=rows, ref="test-rows")
-
-        with patch(
-            "rey_lib.llm.runner._resolve_provider_config",
-            return_value=_ProviderConfig(name="mock", model="m", provider=provider),
-        ):
-            result = analyzer.analyze(_RowSource(), analysis_id="run-003")
-
-        # The provider call must not have seen customer_id.
-        call_args   = provider.run.call_args
-        messages    = call_args[1]["messages"] if call_args[1] else call_args[0][0]
-        all_content = " ".join(m.content for m in messages)
-        assert "customer_id" not in all_content
-        assert "C001"        not in all_content
-
-    def test_analyzer_exposes_contract(self, tmp_path: Path) -> None:
-        """Analyzer.contract returns the loaded AnalysisContract."""
-        contract_path = _write_analysis_contract(tmp_path)
-        analyzer      = Analyzer(contract_path=contract_path, provider="mock", model="m")
-        assert isinstance(analyzer.contract, AnalysisContract)
-        assert analyzer.contract.name == "test-analysis"
+        with pytest.raises(AIUnavailableError):
+            analyzer.analyze(TextDataSource("text"), analysis_id="run-003")

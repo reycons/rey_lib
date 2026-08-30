@@ -10,7 +10,7 @@ import pytest
 
 from tests.conftest import make_run_log
 
-from rey_lib.llm.exceptions import ProviderFailure
+from rey_lib.ai.errors import AIProviderError
 from rey_lib.logs import (
     create_llm_package,
     create_results_summary,
@@ -247,35 +247,41 @@ def _envelope(content: dict) -> str:
 
 
 def _patch_direct_ask(monkeypatch, *, response=None, capture=None, raises=None) -> None:
-    def fake(prompt, *, model, provider, api_key, **_kwargs):
+    """Substitute the module's one AI entry point.
+
+    The signature follows what replaced ``direct_ask``: a prompt and an
+    execution profile. Provider, model and credential are no longer arguments
+    here -- the AI runtime owns those, chosen once at bootstrap -- so a test that
+    asserted on them is asserting about a decision this module no longer makes.
+    """
+    def fake(ctx, prompt, execution_profile, **_kwargs):
         if capture is not None:
             capture.update({
                 "prompt": prompt,
-                "model": model,
-                "provider": provider,
+                "execution_profile": execution_profile,
                 **_kwargs,
             })
         if raises is not None:
             raise raises
         return response
-    monkeypatch.setattr("rey_lib.llm.llm_utils.direct_ask", fake)
+    monkeypatch.setattr("rey_lib.logs.llm_package._ask", fake)
 
 
 def _stage_direct_ask(monkeypatch) -> None:
-    """direct_ask returning the interpreter's single-pass result.
+    """The AI entry point returning the interpreter's single-pass result.
 
     The configured contract renders the subject, html, and text in the same
     response as the structured interpretation, so one call returns both and no
     second stage is needed to produce the presentation fields.
     """
-    def fake(_prompt, **_kwargs):
+    def fake(_ctx, _prompt, _execution_profile, **_kwargs):
         return _envelope({
             "verdict": "ok",
             "subject": "Run report",
             "html": "<p>ok</p>",
             "text": "ok",
         })
-    monkeypatch.setattr("rey_lib.llm.llm_utils.direct_ask", fake)
+    monkeypatch.setattr("rey_lib.logs.llm_package._ask", fake)
 
 
 # ---------------------------------------------------------------------------
@@ -645,19 +651,20 @@ def test_configured_analysis_uses_execution_profile(tmp_path, monkeypatch) -> No
     captured: dict = {}
     _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
     _run(log_path)
-    assert captured["provider"] == "mock"
-    assert captured["model"] == "mock-model"
+    # Provider and model are no longer this module's to choose: it names the
+    # execution profile and the AI runtime resolves the rest.
+    assert captured["execution_profile"] == "local_precision"
 
 
 def test_configured_analysis_calls_existing_llm_executor(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path))
     called = {"n": 0}
 
-    def fake(prompt, **_kwargs):
+    def fake(ctx, prompt, execution_profile, **_kwargs):
         called["n"] += 1
         return _envelope({"ok": True})
 
-    monkeypatch.setattr("rey_lib.llm.llm_utils.direct_ask", fake)
+    monkeypatch.setattr("rey_lib.logs.llm_package._ask", fake)
     _run(log_path)
     assert called["n"] == 1
 
@@ -734,7 +741,7 @@ def test_disabled_analysis_is_skipped(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path, enabled=False))
     called = {"n": 0}
     monkeypatch.setattr(
-        "rey_lib.llm.llm_utils.direct_ask",
+        "rey_lib.logs.llm_package._ask",
         lambda *a, **k: called.__setitem__("n", called["n"] + 1),
     )
     out = _run(log_path)
@@ -753,7 +760,7 @@ def test_missing_package_record_fails_explicitly(tmp_path, monkeypatch) -> None:
 def test_nonfatal_llm_failure_writes_failure_record(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
     before = _records(log_path)
-    _patch_direct_ask(monkeypatch, raises=ProviderFailure("boom"))
+    _patch_direct_ask(monkeypatch, raises=AIProviderError("boom"))
     out = _run(log_path)
     assert out["result"] is None
     assert out["failures"]
@@ -765,7 +772,7 @@ def test_nonfatal_llm_failure_writes_failure_record(tmp_path, monkeypatch) -> No
     assert failure["record_type"] == "LLM_INTERPRETATION"
     assert failure["record_group"] == "results"
     assert failure["status"] == "failed"
-    assert failure["error_type"] == "ProviderFailure"
+    assert failure["error_type"] == "AIProviderError"
     assert failure["error_message"]
     assert failure["sanitized_traceback"]
     assert failure["analysis_name"] == "log_interpreter"
@@ -786,8 +793,8 @@ def test_nonfatal_parse_failure_writes_failure_record(tmp_path, monkeypatch) -> 
 
 def test_fail_on_error_true_records_and_reraises(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=True))
-    _patch_direct_ask(monkeypatch, raises=ProviderFailure("boom"))
-    with pytest.raises(ProviderFailure):
+    _patch_direct_ask(monkeypatch, raises=AIProviderError("boom"))
+    with pytest.raises(AIProviderError):
         _run(log_path)
 
 
@@ -834,7 +841,7 @@ def test_record_analysis_runs_the_configured_analysis_over_a_supplied_record(
     assert package["source"] == record                       # the exact record supplied
     assert package["source_record_type"] == "LLM_INTERPRETATION"
     assert package["instructions"]["name"] == "email_results"
-    assert capture["provider"] == "mock" and capture["model"] == "mock-model"
+    assert capture["execution_profile"] == "local_precision"
 
 
 def test_record_analysis_preserves_existing_payload_id(
@@ -920,9 +927,9 @@ def test_record_analysis_unconfigured_analysis_is_a_configuration_failure(
     tmp_path: Path,
 ) -> None:
     """An unknown analysis name fails closed as configuration."""
-    from rey_lib.llm.exceptions import ConfigurationFailure
+    from rey_lib.ai.errors import AIConfigurationError
 
-    with pytest.raises(ConfigurationFailure, match="log_analysis configuration not found"):
+    with pytest.raises(AIConfigurationError, match="log_analysis configuration not found"):
         run_configured_record_analysis(_record_ctx(tmp_path), {"a": 1}, "no_such_analysis")
 
 
@@ -938,8 +945,8 @@ def test_record_analysis_missing_contract_is_reported(tmp_path: Path) -> None:
 
 def test_record_analysis_provider_failure_propagates(tmp_path: Path, monkeypatch) -> None:
     """Provider failures reach the caller, which owns presentation."""
-    _patch_direct_ask(monkeypatch, raises=ProviderFailure("model unavailable"))
-    with pytest.raises(ProviderFailure, match="model unavailable"):
+    _patch_direct_ask(monkeypatch, raises=AIProviderError("model unavailable"))
+    with pytest.raises(AIProviderError, match="model unavailable"):
         run_configured_record_analysis(_record_ctx(tmp_path), {"a": 1}, "email_results")
 
 
@@ -961,13 +968,16 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
     callback = lambda _chunk: None
     cancellation_check = lambda: False
 
-    def fake_run(request, *, on_chunk=None, cancelled=None):
+    def fake_run(request, ai, *, on_text=None, cancelled=None, **_kwargs):
         capture["request"] = request
-        capture["on_chunk"] = on_chunk
+        capture["on_chunk"] = on_text
         capture["cancelled"] = cancelled
         return SimpleNamespace(raw_text="complete", parsed_response=None)
 
-    monkeypatch.setattr("rey_lib.llm.runner.run", fake_run)
+    monkeypatch.setattr("rey_lib.logs.llm_package._run", fake_run, raising=False)
+    monkeypatch.setattr("rey_lib.analysis.execution.run", fake_run)
+    # The runtime owns the AI; the workbench receives it rather than building one.
+    ctx.shared_ai = object()
     source = {
         "record_type": "LLM_EVALUATION_PAYLOAD",
         "payload_id": "existing-payload-id",

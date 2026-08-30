@@ -977,20 +977,47 @@ def _execute_one_hook_llm(
 
     Raises
     ------
-    ConfigError
-        If ctx.llm is absent or the named LLM instance is not configured.
+    AIUnavailableError
+        If this runtime has no AI configured.
+    AISelectionError
+        If the named profile is not one this runtime offers.
     """
-    from rey_lib.llm.llm_utils import ask, default_llm  # local import — llm is optional dep
+    # Local import: the AI runtime is optional, and a loader hook that names no
+    # AI must not make importing this module depend on one.
+    from rey_lib.ai import (  # noqa: PLC0415
+        AIInstruction,
+        AIInstructionKind,
+        AIRequest,
+        AIRequestOptions,
+    )
+    from rey_lib.ai.errors import AIUnavailableError  # noqa: PLC0415
 
-    llm_name      = getattr(llm_cfg, "llm", None) or default_llm(ctx)
+    ai = getattr(ctx, "shared_ai", None)
+    if ai is None:
+        raise AIUnavailableError(
+            f"LLM hook '{llm_cfg.name}' needs AI, and this runtime has none "
+            "configured."
+        )
+
+    llm_name      = getattr(llm_cfg, "llm", None) or ""
     system_prompt = getattr(llm_cfg, "system_prompt", None)
     max_tokens    = int(getattr(llm_cfg, "max_tokens", 500))
     template      = getattr(llm_cfg, "prompt_template", "") or ""
 
     prompt = _render_prompt(template, ctx, data_source)
 
-    _logger.debug("LLM hook '%s': calling '%s'", llm_cfg.name, llm_name)
-    response = ask(ctx, prompt, llm=llm_name, max_tokens=max_tokens, system_prompt=system_prompt)
+    _logger.debug("LLM hook '%s': calling profile '%s'", llm_cfg.name, llm_name)
+    response = ai.execute(
+        AIRequest.prompt(
+            prompt,
+            profile_id=llm_name,
+            instruction=(
+                AIInstruction(kind=AIInstructionKind.RAW, text=str(system_prompt))
+                if system_prompt else None
+            ),
+            options=AIRequestOptions(max_tokens=max_tokens),
+        ),
+    ).text
     _logger.info("LLM hook '%s' response (truncated): %.200s", llm_cfg.name, response)
 
     row_columns: dict[str, Any] = {}

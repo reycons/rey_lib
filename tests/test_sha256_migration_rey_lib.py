@@ -19,10 +19,9 @@ import pytest
 
 from rey_lib.files.csv import read_csv_text
 from rey_lib.encryption import sha256_bytes, sha256_file
-from rey_lib.llm import contract as llm_contract
-from rey_lib.llm import datasource as llm_datasource
-from rey_lib.llm import document_loader, preparation
-from rey_lib.llm import runner as llm_runner
+from rey_lib.analysis import contract as llm_contract
+from rey_lib.analysis import datasource as llm_datasource
+from rey_lib.analysis import document_loader, preparation
 
 # Text chosen to exercise what a careless migration would break: non-ASCII,
 # CRLF, a NUL, and a trailing newline.
@@ -96,13 +95,10 @@ def test_the_csv_source_text_digest_is_of_the_text_as_read(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# llm/
+# analysis/
 # ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("text", SAMPLES)
-def test_the_runner_text_digest_is_unchanged(text: str) -> None:
-    assert llm_runner._hash_text(text) == _utf8(text)
-
+# The runner's own digest test went with the runner: rey_lib.ai owns execution
+# now, and hashes nothing.
 
 @pytest.mark.parametrize("text", SAMPLES)
 def test_the_document_loader_digest_is_unchanged(text: str) -> None:
@@ -166,11 +162,10 @@ def test_no_migrated_module_computes_a_digest_itself() -> None:
     """The point of the increment: one owner, and these are not it."""
     import rey_lib.files.csv as csv_module
     import rey_lib.files.file_utils as file_utils_module
-    import rey_lib.llm.contract as contract_module
-    import rey_lib.llm.datasource as datasource_module
-    import rey_lib.llm.document_loader as loader_module
-    import rey_lib.llm.preparation as preparation_module
-    import rey_lib.llm.runner as runner_module
+    import rey_lib.analysis.contract as contract_module
+    import rey_lib.analysis.datasource as datasource_module
+    import rey_lib.analysis.document_loader as loader_module
+    import rey_lib.analysis.preparation as preparation_module
 
     for module in (
         csv_module,
@@ -179,7 +174,6 @@ def test_no_migrated_module_computes_a_digest_itself() -> None:
         datasource_module,
         loader_module,
         preparation_module,
-        runner_module,
     ):
         source = Path(module.__file__).read_text(encoding="utf-8")
         assert "hashlib" not in source, module.__name__

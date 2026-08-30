@@ -22,11 +22,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from rey_lib.config.config_utils import parse_yaml
+from rey_lib.files.json import read_json_file
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError
+from rey_lib.logs import get_logger
 
 __all__ = ["Contract", "load"]
 
@@ -35,6 +37,9 @@ _FRONTMATTER_RE = re.compile(
     r"^---\s*\n(.*?)\n---\s*\n",
     re.DOTALL,
 )
+
+
+_logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -162,3 +167,22 @@ def load(path: Path) -> Contract:
         path            = path,
         raw_frontmatter = fields,
     )
+
+
+def load_sidecar_schema(contract_path: Path) -> Optional[dict[str, Any]]:
+    """The JSON Schema beside a contract, when one exists.
+
+    Named ``<contract_stem>.schema.json``. A contract and the shape it must
+    produce are one decision, so the schema is read here rather than by whatever
+    happens to execute the contract.
+
+    A malformed sidecar names itself: ``JsonReadError`` carries the path, so an
+    operator is not left with a line and column belonging to no file. Nothing is
+    asserted about the shape -- whether a schema must be an object is a schema
+    decision, not a reading one.
+    """
+    schema_path = contract_path.with_name(contract_path.stem + ".schema.json")
+    if schema_path.exists():
+        _logger.debug("contract: loaded sidecar schema from %s", schema_path)
+        return read_json_file(schema_path)
+    return None
