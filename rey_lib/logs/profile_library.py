@@ -520,7 +520,8 @@ def resolve_profile_presentation(
     record". Whether a particular consumer may receive that representation is a
     separate question, asked one layer up: ``profile_access.allowed`` and
     ``profile_access.default`` govern what a model may be sent and are enforced by
-    ``rey_lib.llm.profiles.resolve_profile_for_llm``. An operator reading the two
+    the AI runtime, which consumed that policy at construction --
+    ``AI.permitted_access``. An operator reading the two
     presentations in the tree is not subject to that policy and does not consult
     it.
 
