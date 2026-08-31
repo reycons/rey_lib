@@ -432,3 +432,73 @@ def test_no_consumer_names_an_instruction_of_its_own() -> None:
     for source in sources:
         assert "instruction=AIInstruction" not in source
         assert "AIInstructionKind.NONE" not in source
+
+
+# -- reading what a provider actually said -----------------------------------
+#
+# A model often wraps its answer in a fence. The runtime's own output reader
+# already retries at the outermost object, so a caller that says it wants JSON
+# gets a parsed payload; one that says nothing still gets text.
+
+class _Fenced(EchoProvider):
+    """A provider that wraps its JSON the way a real one often does."""
+
+    def invoke(self, call: Any, *, cancelled: Any = None, on_text: Any = None) -> Any:  # noqa: ANN401, ARG002
+        from rey_lib.ai.providers.base import ProviderReply
+
+        return ProviderReply(text='```json\n{"items": [{"label": "from"}]}\n```')
+
+
+def fenced_runtime(structured: bool) -> Any:
+    """One runtime over a provider that fences, and a profile that permits JSON."""
+    from rey_lib.ai.capabilities import AICapability, AICapabilitySet
+
+    provider = _Fenced(name="echo")
+    provider.capability_for = lambda model: AICapabilitySet.of(  # type: ignore[method-assign]
+        AICapability.TEXT, AICapability.STRUCTURED_OUTPUT,
+    )
+    registry = AIRegistry(
+        profiles=(AIProfile(id="dflt", provider="echo", model="m"),),
+        providers=(provider,),
+    )
+    return AI(registry=registry, settings=AISettings(profile_id="dflt"))
+
+
+def test_a_fenced_answer_is_parsed_when_the_caller_asked_for_json() -> None:
+    """Normalized at the runtime's output boundary, not at each caller.
+
+    OutputParser already retries at the outermost object when a model wraps its
+    answer in prose or a fence. Asking for JSON is what puts that boundary in
+    the path.
+    """
+    from rey_lib.ai.requests import AIOutputSpec
+
+    result = fenced_runtime(True).execute(
+        AIRequest.prompt("x", output=AIOutputSpec.json()),
+    )
+
+    assert result.value == {"items": [{"label": "from"}]}
+
+
+def test_a_caller_that_asks_for_nothing_still_receives_text() -> None:
+    """The log-interpretation path returns Markdown inside an envelope, so
+    parsing every answer as JSON would break it. Each caller states its own need."""
+    result = fenced_runtime(False).execute(AIRequest.prompt("x"))
+
+    assert result.value is None
+    assert result.text.startswith("```json")
+
+
+def test_the_ollama_adapter_declares_the_structured_output_it_implements() -> None:
+    """The adapter is the sole authority on what it can do, and it sets Ollama's
+    format: json from call.json_output. Declaring less than it implements made
+    the capability check refuse requests it could serve."""
+    from rey_lib.ai.capabilities import AICapability
+    from rey_lib.ai.providers.configuration import ConfiguredProvider
+    from rey_lib.ai.providers.ollama_provider import OllamaProvider
+
+    adapter = OllamaProvider(ConfiguredProvider(id="local", provider="ollama", model="m"))
+
+    assert AICapability.STRUCTURED_OUTPUT in adapter.capability_for("m")
+    # Still absent, because neither is implemented here.
+    assert AICapability.TOOLS not in adapter.capability_for("m")

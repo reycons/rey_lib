@@ -39,9 +39,17 @@ __all__ = ["OllamaProvider"]
 #: Where a local Ollama server is, when configuration names none.
 DEFAULT_ENDPOINT = "http://localhost:11434"
 
-#: What this adapter implements. Text and streaming only: the old adapter
-#: declared tools and images false, and nothing here implements either.
-_CAPABILITY = AICapabilitySet.of(AICapability.TEXT, AICapability.STREAMING)
+#: What this adapter implements. Tools and images are absent because the old
+#: adapter declared them false and nothing here implements either.
+#: ``STRUCTURED_OUTPUT`` is present because this one does: ``call.json_output``
+#: sets Ollama's ``format: json`` below. It was omitted while the comment above
+#: reasoned only about tools and images, so the capability check refused
+#: structured requests this adapter could serve.
+_CAPABILITY = AICapabilitySet.of(
+    AICapability.TEXT,
+    AICapability.STREAMING,
+    AICapability.STRUCTURED_OUTPUT,
+)
 
 
 class OllamaProvider(AIProvider):

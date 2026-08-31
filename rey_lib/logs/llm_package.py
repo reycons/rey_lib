@@ -244,6 +244,11 @@ def _execute_analysis_package(
         The complete, self-contained LLM input.
     max_input_characters : int
         Optional prompt size limit. ``0`` disables the check.
+    structured : bool
+        Whether the caller needs a parsed JSON payload rather than text. Asking
+        tells the provider to answer in JSON and puts the runtime's output
+        reader in the path, which is what normalizes a fenced or prose-wrapped
+        answer. A caller that says nothing still receives text.
     """
     import json
 
@@ -376,6 +381,7 @@ def run_uncontracted_record_analysis(
     execution_profile: str = "",
     max_input_characters: int = 0,
     task: str = "",
+    structured: bool = False,
 ) -> dict[str, Any]:
     """Run one already-complete package through the LLM with NO contract added.
 
@@ -436,6 +442,7 @@ def run_uncontracted_record_analysis(
         ctx, prompt, execution_profile,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
         task=task,
+        structured=structured,
     )
     result["action"] = "analysed"
     return result
@@ -710,8 +717,8 @@ def run_configured_log_analysis(
 
 def _ask(
     ctx: Any, prompt: str, execution_profile: str, *,
-    payload_id: Any = None, task: str = "",
-) -> str:
+    payload_id: Any = None, task: str = "", structured: bool = False,
+) -> Any:
     """Send one prompt through the runtime's shared AI and answer with its text.
 
     The runtime owns the AI: which provider and model answer, how a credential
@@ -730,11 +737,20 @@ def _ask(
         raise AIUnavailableError(
             "This runtime has no AI configured, so an analysis cannot run."
         )
+    from rey_lib.ai.requests import AIOutputSpec  # noqa: PLC0415
+
+    # A caller asking for JSON says so, and the runtime does two things with it:
+    # the provider is told to answer in JSON, and OutputParser reads what comes
+    # back -- including a model that wrapped its answer in prose or a fence,
+    # which it already retries at the outermost object or array. Asking here is
+    # what puts that boundary in the path; a caller that says nothing still gets
+    # text, which is what the log-interpretation path returns.
     result = ai.execute(
         AIRequest.prompt(
             str(prompt),
             task=str(task or ""),
             profile_id=str(execution_profile or ""),
+            **({"output": AIOutputSpec.json()} if structured else {}),
         ),
     )
-    return result.text
+    return result.value if structured else result.text
