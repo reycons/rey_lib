@@ -339,10 +339,12 @@ def _evaluation_payload(input_text: str) -> Any:
         package, _ = json.JSONDecoder().raw_decode(input_text.lstrip())
     except (json.JSONDecodeError, TypeError, ValueError):
         return input_text
+    # The pair that identifies this package. "instructions" was a third key
+    # until the contract stopped being embedded and became the task's resolved
+    # instruction; a payload written before that still matches on these two.
     if (
         isinstance(package, dict)
         and "analysis_name" in package
-        and "instructions" in package
         and "source" in package
     ):
         return package["source"]

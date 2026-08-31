@@ -149,8 +149,15 @@ def test_builder_does_not_invoke_a_provider() -> None:
 # SGC reconciliation (c): the log-analysis LLM_PACKAGE is the existing provider
 # wire package, not the canonical representation, and is preserved unchanged.
 
-def test_legacy_llm_package_wire_shape_is_unchanged() -> None:
-    """The log-analysis package keeps its four-field wire shape."""
+def test_the_legacy_package_carries_the_situation_and_not_the_contract() -> None:
+    """The log-analysis package states what to read, never what governs it.
+
+    Supersedes SGC_Rey_Lib_Canonical_LLM_Package_And_Contract_Evidence
+    reconciliation (c), which preserved a four-field shape carrying the contract
+    inline. The contract now arrives as the instruction the task resolves through
+    the canonical AI settings object, so carrying it here as well would send it
+    twice and let this path disagree with the setting a reader can see.
+    """
     from rey_lib.logs.llm_package import _build_analysis_package
 
     # No references are declared, so ctx is never consulted.
@@ -161,11 +168,30 @@ def test_legacy_llm_package_wire_shape_is_unchanged() -> None:
         instructions={"rules": ["explain failures"]},
         source={"record_type": "RESULTS_SUMMARY", "summary": "..."},
     )
-    assert set(package) == {"analysis_name", "source_record_type", "instructions", "source"}
-    # Not the canonical shape.
+    assert set(package) == {"analysis_name", "source_record_type", "source"}
+    # The contract is resolved as an instruction, not embedded here.
+    assert "instructions" not in package
+    # Still not the canonical shape.
     assert "contract" not in package
     assert "inputs" not in package
     assert "execution_context" not in package
+
+
+def test_a_contract_declaring_references_still_has_them_resolved() -> None:
+    """The contract is still parsed for what it declares; only where it is sent
+    changed."""
+    from rey_lib.logs.llm_package import _build_analysis_package
+
+    package = _build_analysis_package(
+        ctx=None,
+        analysis_name="a",
+        source_record_type="RESULTS_SUMMARY",
+        instructions={"rules": []},
+        source={"record_type": "RESULTS_SUMMARY"},
+    )
+
+    # Nothing declared, so nothing resolved -- and no empty key invented for it.
+    assert "references" not in package
 
 
 def test_legacy_and_canonical_packages_are_distinct_shapes() -> None:

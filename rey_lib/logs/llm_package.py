@@ -75,7 +75,6 @@ def create_llm_package(
         str(record.get("record_type") or "").upper() == package_record_type.upper()
         and record.get("analysis_name") == analysis_name
         and record.get("source_record_type") == source_record_type
-        and record.get("instructions") == instructions
         and record.get("source") == source_record
         for record in records
     ):
@@ -175,21 +174,32 @@ def _build_analysis_package(
     instructions: Any,
     source: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return the log-analysis LLM_PACKAGE, pairing a contract with a source record.
+    """Return the log-analysis LLM_PACKAGE: the situation an analysis reads.
 
     This is the legacy provider wire package for the log-analysis path, not the
-    canonical LLM package (rey_lib/analysis/package.py). The same object is written as
-    the durable LLM_PACKAGE record and serialized as the provider prompt, and every
-    configured contract reads this shape, so its structure and fields are an
-    established wire contract preserved unchanged
-    (SGC_Rey_Lib_Canonical_LLM_Package_And_Contract_Evidence, reconciliation c).
-    The canonical package is adopted separately in paths whose fields exist without
-    reconstruction (rey_analyzer).
+    canonical LLM package (rey_lib/analysis/package.py). The same object is
+    written as the durable LLM_PACKAGE record and serialized as the provider
+    prompt. The canonical package is adopted separately in paths whose fields
+    exist without reconstruction (rey_analyzer).
+
+    **The contract is no longer embedded here.** It arrives as the instruction
+    the task resolves, through the canonical AI settings object, so that every
+    task answers the same way about what governs it. Carrying it here as well
+    would send it twice and let this path disagree with the setting a reader can
+    see.
+
+    That supersedes SGC_Rey_Lib_Canonical_LLM_Package_And_Contract_Evidence
+    reconciliation (c), which preserved this object unchanged as a legacy wire
+    package. The invariant that replaces it: no consumer supplies or suppresses
+    AI settings independently. Safe for the contracts themselves -- they describe
+    their input by kind, never by the field it arrives in.
+
+    The contract is still *parsed* to resolve the references it declares. What
+    changed is where it is sent, not who reads it.
     """
     package: dict[str, Any] = {
         "analysis_name": analysis_name,
         "source_record_type": source_record_type,
-        "instructions": instructions,
     }
     declared = instructions.get("references") if isinstance(instructions, dict) else None
     references = load_contract_references(ctx, declared)
@@ -206,8 +216,9 @@ def _execute_analysis_package(
     package: dict[str, Any],
     max_input_characters: int = 0,
     payload_id: str | None = None,
+    task: str = "",
 ) -> Any:
-    """Send one package to a named execution profile and return the parsed artifact.
+    """Send one package to an execution profile and return the parsed artifact.
 
     The single execution path for both configured analyses and No Contract runs:
     profile resolution, the envelope instruction, the provider call, envelope
@@ -219,9 +230,13 @@ def _execute_analysis_package(
     ctx : Any
         A resolved context carrying ``llm_profiles``.
     execution_profile : str
-        Name of the ``llm_profiles`` entry to run the package against. For a
-        configured analysis this is ``analysis.llm_execution_profile``; for a No
-        Contract run it is the Workbench-selected profile.
+        Name of the ``llm_profiles`` entry to run the package against. For a No
+        Contract run this is the Workbench-selected profile. Empty when ``task``
+        is given, because the runtime's settings then own the choice.
+    task : str
+        What the AI is being asked to do. Given instead of a profile, the
+        runtime's task-aware settings decide which one answers, so this caller
+        stops carrying execution policy it never owned.
     artifact_type : str
         Artifact envelope type. ``analysis.artifact_type`` for a configured
         analysis, ``""`` for a No Contract run.
@@ -246,12 +261,17 @@ def _execute_analysis_package(
             f"over the configured limit of {max_input_characters}"
         )
 
-    profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
-    if profile is None:
-        raise AIConfigurationError(
-            f"llm_execution_profile not found: {execution_profile}"
-        )
-    raw = _ask(ctx, prompt, execution_profile, payload_id=payload_id)
+    # A named profile is still checked here, because a caller that names one is
+    # asserting it exists. A task names none: the settings answer, and the AI
+    # refuses a selection it does not offer, so repeating the check would be a
+    # second authority on the same question.
+    if not task:
+        profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
+        if profile is None:
+            raise AIConfigurationError(
+                f"llm_execution_profile not found: {execution_profile}"
+            )
+    raw = _ask(ctx, prompt, execution_profile, payload_id=payload_id, task=task)
     content, _ = extract_artifact_envelope(raw, artifact_type)
     # The shared policy, not the standard library's: loads_llm_json accepts
     # literal control characters inside strings, protects invalid Markdown
@@ -353,8 +373,9 @@ def run_configured_record_analysis(
 def run_uncontracted_record_analysis(
     ctx: Any,
     record: dict[str, Any],
-    execution_profile: str,
+    execution_profile: str = "",
     max_input_characters: int = 0,
+    task: str = "",
 ) -> dict[str, Any]:
     """Run one already-complete package through the LLM with NO contract added.
 
@@ -391,9 +412,15 @@ def run_uncontracted_record_analysis(
 
     if not isinstance(record, dict):
         raise ValueError("Record analysis requires a JSON object record")
-    profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
-    if profile is None:
-        raise AIConfigurationError(f"llm_execution_profile not found: {execution_profile}")
+    # A caller naming a profile is asserting it exists. A caller naming a task
+    # names none: its settings answer, and the AI refuses a selection it does
+    # not offer, so checking here would be a second authority on one question.
+    if not task:
+        profile = find_in_ctx(ctx, "llm_profiles", execution_profile)
+        if profile is None:
+            raise AIConfigurationError(
+                f"llm_execution_profile not found: {execution_profile}"
+            )
 
     # Raw send: the supplied package is serialized and sent exactly as-is. No
     # envelope instruction is appended and the raw response is returned unparsed
@@ -408,6 +435,7 @@ def run_uncontracted_record_analysis(
     result["result"] = _ask(
         ctx, prompt, execution_profile,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
+        task=task,
     )
     result["action"] = "analysed"
     return result
@@ -550,14 +578,22 @@ def run_configured_log_analysis(
     *,
     analysis_name: str,
     package_record_type: str,
+    task: str = "",
 ) -> dict[str, Any]:
     """Run the configured LLM analysis over the existing package record.
 
-    Sends the complete ``package_record_type`` record unchanged to the configured LLM
-    through ``direct_ask``, extracts and validates the configured artifact from the
-    standard rey_lib envelope, and writes the parsed structured result through the
-    configured writer. The embedded contract is never reloaded — only existing
-    rey_lib functions are composed.
+    Sends the complete ``package_record_type`` record unchanged to the runtime's
+    AI, extracts and validates the configured artifact from the standard rey_lib
+    envelope, and writes the parsed structured result through the configured
+    writer. The embedded contract is never reloaded — only existing rey_lib
+    functions are composed.
+
+    ``task`` names what this analysis is for, and is what a caller gives instead
+    of carrying an execution profile. Given one, the runtime's task-aware
+    settings decide which profile answers, so an operator changing that task's
+    settings changes what this stage runs on. Absent, the analysis entry's own
+    ``llm_execution_profile`` still applies, which is what every unmigrated
+    caller keeps doing.
     """
     import json
 
@@ -638,9 +674,10 @@ def run_configured_log_analysis(
 
         parsed_result = _execute_analysis_package(
             ctx,
-            str(analysis.llm_execution_profile),
+            "" if task else str(analysis.llm_execution_profile),
             str(getattr(analysis, "artifact_type", "")),
             package,
+            task=task,
         )
     except (
         AIProviderError, ArtifactEnvelopeError, AIConfigurationError, json.JSONDecodeError,
@@ -671,7 +708,10 @@ def run_configured_log_analysis(
     return result
 
 
-def _ask(ctx: Any, prompt: str, execution_profile: str, *, payload_id: Any = None) -> str:
+def _ask(
+    ctx: Any, prompt: str, execution_profile: str, *,
+    payload_id: Any = None, task: str = "",
+) -> str:
     """Send one prompt through the runtime's shared AI and answer with its text.
 
     The runtime owns the AI: which provider and model answer, how a credential
@@ -691,6 +731,10 @@ def _ask(ctx: Any, prompt: str, execution_profile: str, *, payload_id: Any = Non
             "This runtime has no AI configured, so an analysis cannot run."
         )
     result = ai.execute(
-        AIRequest.prompt(str(prompt), profile_id=str(execution_profile or "")),
+        AIRequest.prompt(
+            str(prompt),
+            task=str(task or ""),
+            profile_id=str(execution_profile or ""),
+        ),
     )
     return result.text

@@ -398,21 +398,18 @@ def test_package_pairs_resolved_contract_with_canonical_source(tmp_path: Path) -
     package = _pkg(log_path)
     record = _records(log_path)[-1]
 
+    # The contract is not here: it is the instruction the task resolves through
+    # the canonical AI settings object, so embedding it would send it twice.
     assert package == {
         "analysis_name": "log_interpreter",
         "source_record_type": "RESULTS_SUMMARY",
-        "instructions": {
-            "name": "rey_log_interpreter",
-            "version": 1,
-            "rules": ["explain failures"],
-        },
         "source": summary,
     }
     assert record["record_type"] == "LLM_PACKAGE"
     assert record["record_group"] == "results"
     assert record["analysis_name"] == "log_interpreter"
     assert record["source_record_type"] == "RESULTS_SUMMARY"
-    assert record["instructions"] == package["instructions"]
+    assert "instructions" not in record
     assert record["source"] == summary
 
 
@@ -438,7 +435,6 @@ def test_requested_analysis_name_selects_that_resolved_configuration(tmp_path: P
     assert package == {
         "analysis_name": "alternate",
         "source_record_type": "RESULTS_SUMMARY",
-        "instructions": {"name": "alternate", "version": 2},
         "source": summary,
     }
 
@@ -463,8 +459,7 @@ def test_email_package_uses_interpretation_source_and_configured_type(tmp_path: 
     assert record["record_type"] == "LLM_EMAIL_PACKAGE"
     assert package["analysis_name"] == "email_results"
     assert package["source_record_type"] == "LLM_INTERPRETATION"
-    assert package["instructions"] == {"name": "email_results", "version": 1,
-                                       "rules": ["render email"]}
+    assert "instructions" not in package
     assert package["source"] == interpretation
 
 
@@ -840,7 +835,10 @@ def test_record_analysis_runs_the_configured_analysis_over_a_supplied_record(
     assert package["analysis_name"] == "email_results"
     assert package["source"] == record                       # the exact record supplied
     assert package["source_record_type"] == "LLM_INTERPRETATION"
-    assert package["instructions"]["name"] == "email_results"
+    # The analysis is named; what governs it is the instruction the task
+    # resolves, not a contract carried in the package.
+    assert package["analysis_name"] == "email_results"
+    assert "instructions" not in package
     assert capture["execution_profile"] == "local_precision"
 
 
@@ -1004,7 +1002,8 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
     assert package["analysis_name"] == "email_results"
     assert package["source_record_type"] == "LLM_EVALUATION_PAYLOAD"
     assert package["source"] == source
-    assert package["instructions"]["contract"]["name"] == "email_results"
+    assert package["analysis_name"] == "email_results"
+    assert "instructions" not in package
     assert capture["on_chunk"] is callback
     assert capture["cancelled"] is cancellation_check
     assert response.raw_text == "complete"

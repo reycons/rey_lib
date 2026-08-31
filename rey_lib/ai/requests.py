@@ -101,11 +101,21 @@ class AIRequest:
     """One caller's intent.
 
     ``profile_id`` and ``instruction_id`` are *overrides*. Absent, the runtime's
-    current defaults apply; present, they win -- so a governed operation never
-    silently depends on whatever an operator last selected.
+    settings apply; present, they win -- so a governed operation never silently
+    depends on whatever an operator last selected.
+
+    ``task`` names what the AI is being asked to do, and is how a caller stops
+    naming a profile at all: the runtime resolves the settings configured for
+    that purpose. Optional, and empty means the defaults -- so a caller that
+    knows nothing about tasks behaves exactly as it did.
+
+    The precedence, for every task-aware setting:
+
+        this request's override  ->  the task's override  ->  the default
     """
 
     input: AIInput
+    task: str = ""
     profile_id: str = ""
     instruction_id: str = ""
     instruction: AIInstruction | None = None

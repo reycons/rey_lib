@@ -41,11 +41,11 @@ from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 from rey_lib.ai.output import OutputParser
 from rey_lib.ai.profiles import AIProfile
 from rey_lib.ai.registry import AIRegistry
-from rey_lib.ai.requests import AIRequest, ResolvedAIRequest
+from rey_lib.ai.requests import AIRequest, AIRequestOptions, ResolvedAIRequest
 from rey_lib.ai.results import AIResult
 from rey_lib.ai.policies import DEFAULT_EXECUTION_POLICY, AIExecutionPolicy
 from rey_lib.ai.sessions import AISession
-from rey_lib.ai.settings import AISettings
+from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
 
 __all__ = ["AI", "AISnapshot"]
@@ -136,7 +136,9 @@ class AI:
         """One profile this runtime offers, by id, or the selected one."""
         return self._profile_for(profile_id)
 
-    def permitted_access(self, profile_id: str = "", requested: str = "") -> str:
+    def permitted_access(
+        self, profile_id: str = "", requested: str = "", task: str = "",
+    ) -> str:
         """Which representation a configured model may receive.
 
         Authorization, answered from AI-owned state that was consumed at
@@ -147,8 +149,21 @@ class AI:
         allowed, and ``rey_lib.logs.profile_library`` produces it. That
         separation is why an operator inspecting both presentations does not
         depend on this layer.
+
+        Settings choose which representation is *asked* for, with the same
+        precedence as everything else -- the caller's, then the task's, then the
+        default. They cannot widen what is permitted: the envelope is
+        ``profile_access.allowed`` on the profile, and the profile still refuses
+        anything outside it. That is why a settings mutation can change the
+        request and never the authorization.
         """
-        return self._profile_for(profile_id).permitted_access(requested)
+        configured = self._settings.task(task)
+        wanted = (
+            str(requested or "")
+            or (configured.representation if configured else "")
+            or self._settings.representation
+        )
+        return self._profile_for(profile_id, configured).permitted_access(wanted)
 
     def snapshot(self) -> AISnapshot:
         """Everything a presentation layer needs, in one immutable answer."""
@@ -232,20 +247,24 @@ class AI:
     def resolve(self, request: AIRequest, *, session_id: str = "") -> ResolvedAIRequest:
         """What this request would actually execute as.
 
-        Explicit request settings beat the current defaults, so a governed
-        operation never silently depends on an operator's selection. The request
-        is not mutated: a resolved value is built beside it, which is what makes
-        an in-flight execution immune to a later settings change.
+        Explicit request settings beat the task's, which beat the defaults, so a
+        governed operation never silently depends on an operator's selection.
+        The request is not mutated: a resolved value is built beside it, which is
+        what makes an in-flight execution immune to a later settings change.
+
+        The task's settings are read here, once, and what they produced is what
+        executes. A later mutation reaches the next run and never this one.
         """
-        profile = self._profile_for(request.profile_id)
-        instruction = self._instruction_for(request)
+        effective = self._settings.task(request.task)
+        profile = self._profile_for(request.profile_id, effective)
+        instruction = self._instruction_for(request, effective)
         return ResolvedAIRequest(
             input=request.input,
             profile=profile,
             instruction=instruction,
             output=request.output,
             tools=request.tools,
-            options=request.options,
+            options=self._options_for(request, effective),
             context=dict(request.context),
             cancelled=request.cancelled,
             tool_runner=request.tool_runner,
@@ -266,9 +285,15 @@ class AI:
 
     # -- internals ---------------------------------------------------------
 
-    def _profile_for(self, profile_id: str) -> AIProfile:
-        """The profile a request or caller named, or the selected one."""
-        wanted = str(profile_id or "") or self._settings.profile_id
+    def _profile_for(
+        self, profile_id: str, task: AISettingsTask | None = None,
+    ) -> AIProfile:
+        """The profile a request named, then the task's, then the selected one."""
+        wanted = (
+            str(profile_id or "")
+            or (task.profile_id if task else "")
+            or self._settings.profile_id
+        )
         if not wanted:
             available = self._registry.profiles()
             if not available:
@@ -278,7 +303,9 @@ class AI:
             )
         return self._registry.profile(wanted)
 
-    def _instruction_for(self, request: AIRequest) -> AIInstruction:
+    def _instruction_for(
+        self, request: AIRequest, task: AISettingsTask | None = None,
+    ) -> AIInstruction:
         """The instruction that applies: the request's, then the selection's.
 
         A request may carry an instruction outright rather than name one, which
@@ -288,24 +315,60 @@ class AI:
         """
         if request.instruction is not None:
             return request.instruction
-        wanted = str(request.instruction_id or "") or self._settings.instruction_id
+        wanted = (
+            str(request.instruction_id or "")
+            or (task.instruction_id if task else "")
+            or self._settings.instruction_id
+        )
         if not wanted:
             return AIInstruction(kind=AIInstructionKind.NONE)
         return self._registry.instruction(wanted)
 
+    def _options_for(
+        self, request: AIRequest, task: AISettingsTask | None,
+    ) -> AIRequestOptions:
+        """The request's options, with the effective temperature filled in.
+
+        ``None`` on the request means "unset", not "send no temperature", so it
+        is the point where a configured value applies. A request that states one
+        keeps it, including an explicit ``0`` -- which is why this tests for
+        ``None`` rather than falsiness, a configured zero being the value this
+        estate actually uses.
+        """
+        if request.options.temperature is not None:
+            return request.options
+        temperature = task.temperature if task else None
+        if temperature is None:
+            temperature = self._settings.temperature
+        if temperature is None:
+            return request.options
+        return replace(request.options, temperature=temperature)
+
     def _validated(self, settings: AISettings) -> AISettings:
-        """Refuse a selection this runtime does not offer."""
-        if settings.profile_id and not self._registry.has_profile(settings.profile_id):
-            raise AISelectionError(
-                f"No AI profile is configured as '{settings.profile_id}'."
-            )
-        if settings.instruction_id and not self._registry.has_instruction(
-            settings.instruction_id,
-        ):
-            raise AISelectionError(
-                f"No AI instruction is configured as '{settings.instruction_id}'."
+        """Refuse a selection this runtime does not offer.
+
+        Every level, not only the defaults: a task override naming an absent
+        profile fails the same way a default does. Refusing one and accepting
+        the other would let a task be configured into a state that only fails
+        when that task next runs.
+        """
+        self._offered(settings.profile_id, settings.instruction_id, "")
+        for task in settings.tasks:
+            self._offered(
+                task.profile_id, task.instruction_id, f" for task '{task.name}'",
             )
         return settings
+
+    def _offered(self, profile_id: str, instruction_id: str, where: str) -> None:
+        """Refuse a profile or instruction this runtime does not offer."""
+        if profile_id and not self._registry.has_profile(profile_id):
+            raise AISelectionError(
+                f"No AI profile is configured as '{profile_id}'{where}."
+            )
+        if instruction_id and not self._registry.has_instruction(instruction_id):
+            raise AISelectionError(
+                f"No AI instruction is configured as '{instruction_id}'{where}."
+            )
 
     def _replace(self, settings: AISettings) -> AISettings:
         """One canonical answer, replaced, and everyone interested told.

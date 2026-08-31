@@ -47,7 +47,7 @@ from rey_lib.runtime import collect_runtime, register_runtime_object
 #: The id of the ad-hoc text instruction every runtime offers.
 AD_HOC_INSTRUCTION = "__ad_hoc__"
 
-__all__ = ["build_ctx_for_app", "app_runtime"]
+__all__ = ["build_ctx_for_app", "app_runtime", "open_shared_ai"]
 
 _logger = get_logger(__name__)
 
@@ -227,8 +227,8 @@ def _open_control(ctx: Namespace) -> Any:
     return control
 
 
-def _open_ai(ctx: Namespace) -> Any:
-    """Build this runtime's one AI, when the installation configures one.
+def open_shared_ai(ctx: Namespace) -> Namespace:
+    """Make a resolved context into a runtime by giving it its one AI.
 
     **Optional, unlike Control.** Not every installation has AI configured, and
     the existence of an installation does not imply the existence of an AI. When
@@ -250,10 +250,15 @@ def _open_ai(ctx: Namespace) -> Any:
     providers has asked for an AI, and reporting that as "unavailable" would
     turn a configuration defect into silent capability loss.
 
+    The assignment lives here rather than at each caller, so ``ctx.shared_ai``
+    is written in one place however many kinds of runtime exist -- an
+    application's, and a Console page session's for the installation it is on.
+
     Returns
     -------
-    Any
-        The runtime's ``AI``, or ``None`` when no AI is configured.
+    Namespace
+        The same context, now carrying ``shared_ai`` -- ``None`` when no AI is
+        configured.
 
     Raises
     ------
@@ -262,17 +267,28 @@ def _open_ai(ctx: Namespace) -> Any:
     """
     configured = getattr(ctx, "llm", None)
     if not configured:
-        return None
+        ctx.shared_ai = None
+        return ctx
 
-    from rey_lib.ai.construction import ai_from_ctx
+    from rey_lib.ai.construction import ai_from_ctx, settings_from_ctx
     from rey_lib.ai.errors import AIError
 
     try:
-        return ai_from_ctx(
+        # Built in one order because the settings are validated against what
+        # this runtime offers: a selection naming an absent profile or
+        # instruction is a configuration defect, and the only way to say so is
+        # to know both first.
+        profiles = _ai_profiles(ctx)
+        instructions = _ai_instructions(ctx)
+        ctx.shared_ai = ai_from_ctx(
             ctx,
-            profiles=_ai_profiles(ctx),
-            instructions=_ai_instructions(ctx),
+            profiles=profiles,
+            instructions=instructions,
+            settings=settings_from_ctx(
+                ctx, profiles=profiles, instructions=instructions,
+            ),
         )
+        return ctx
     except AIError as exc:
         # Configured and broken is not the same as absent, and must not be
         # reported as it. An installation that names providers has asked for an
@@ -315,15 +331,40 @@ def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
 
     Two canonical choices plus whatever configuration declares:
 
-        NONE  send no instruction
-        RAW   ad-hoc text the operator writes
-        CONTRACT  one per configured analysis that names a contract
+        NONE      send no instruction
+        RAW       ad-hoc text the operator writes
+        CONTRACT  one per entry in ``ai_settings``' sibling ``ai_instructions``
+
+    **Declared, never discovered.** Configuration is the authority over what may
+    be selected; nothing here scans a directory to find a contract. Corrected
+    2026-08-30, when the list was still derived from ``log_analysis``: that
+    offered *analysis bindings* as though they were prompts, so two entries named
+    for two analyses pointed at one contract and every unbound contract was
+    unreachable. ``log_analysis`` still binds an analysis to its contract, which
+    is a different question and untouched.
+
+    Three identities are kept apart:
+
+        the declared ``name``   the stable id a setting references
+        ``contract``            the file that id currently resolves to
+        the contract's own name and version   what a reader sees
+
+    Reading the file happens here because ``rey_lib.ai`` deliberately opens no
+    path -- "where contracts live is configuration's answer" -- and bootstrap is
+    already the place configuration is read.
 
     The old Console offered "Text Prompt" and "Text Prompt Only" as separate
     selections. They are not reproduced: both ran the same mode with the same
     instruction, and differed only in whether the caller sent data alongside it
-    -- which is the caller's input, not a property of the instruction. The old
-    settings object said as much itself.
+    -- which is the caller's input, not a property of the instruction.
+
+    Raises
+    ------
+    ConfigError
+        When a declared entry names no contract, repeats an id, cannot be read,
+        declares no name or version, or shows a reader the same name and version
+        as another. Each was declared, so each is a defect rather than an entry
+        to drop silently.
     """
     from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 
@@ -333,20 +374,81 @@ def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
                       name="Ad hoc text"),
     ]
 
-    analyses = getattr(ctx, "log_analysis", None)
-    for name, entry in _named_entries(analyses):
+    seen_ids: set[str] = set()
+    shown: dict[str, str] = {}
+    for name, entry in _named_entries(getattr(ctx, "ai_instructions", None)):
+        identity = str(name or "").strip()
+        if not identity:
+            raise ConfigError(
+                "An ai_instructions entry carries no name, so nothing can "
+                "select it."
+            )
+        if identity in seen_ids:
+            raise ConfigError(
+                f"ai_instructions declares '{identity}' twice. The name is what "
+                "an AI setting resolves through, so which one applied would be "
+                "ambiguous."
+            )
+        seen_ids.add(identity)
+
         contract = str(_entry_field(entry, "contract", "") or "").strip()
         if not contract:
-            continue
+            raise ConfigError(
+                f"ai_instructions['{identity}'] names no contract file."
+            )
+
+        label = _contract_label(identity, contract)
+        if label in shown:
+            raise ConfigError(
+                f"ai_instructions['{identity}'] and ai_instructions"
+                f"['{shown[label]}'] both show '{label}', so a reader could not "
+                "tell them apart."
+            )
+        shown[label] = identity
+
         offered.append(
             AIInstruction(
-                id=str(name),
+                id=identity,
                 kind=AIInstructionKind.CONTRACT,
-                name=str(name),
+                name=label,
                 reference=contract,
             ),
         )
     return tuple(offered)
+
+
+def _contract_label(identity: str, contract: str) -> str:
+    """What a reader sees for one declared contract: its own name and version.
+
+    Read from the contract itself rather than taken from the declaration, so the
+    list says what a prompt *is* rather than what an installation happened to
+    call the entry pointing at it.
+    """
+    # The sanctioned pair, as parse_yaml's own contract states: read the file
+    # with rey_lib.files, parse the text here. Nothing imports yaml.
+    from rey_lib.config.config_loader import parse_yaml
+    from rey_lib.files import read_text_file
+
+    try:
+        parsed = parse_yaml(read_text_file(contract))
+    except Exception as exc:  # noqa: BLE001 -- any unreadable declaration is one refusal
+        raise ConfigError(
+            f"ai_instructions['{identity}'] names a contract that could not be "
+            f"read: {contract} ({exc})"
+        ) from exc
+    declared = (parsed or {}).get("contract") or {}
+    if not isinstance(declared, dict):
+        declared = {}
+
+    name = str(declared.get("name") or "").strip()
+    version = str(declared.get("version") or "").strip()
+    if not name or not version:
+        raise ConfigError(
+            f"ai_instructions['{identity}'] names a contract declaring no "
+            f"{'name' if not name else 'version'}: {contract}. A reader is "
+            "shown the contract's name and version, so both must exist."
+        )
+    return f"{name} {version}"
 
 
 def _named_entries(section: Any) -> list[tuple[str, Any]]:
@@ -527,7 +629,7 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
 
     # Optional: present only when this installation configures AI. Absent is an
     # ordinary state, and no consumer may construct one lazily instead.
-    ctx.shared_ai = _open_ai(ctx)
+    open_shared_ai(ctx)
     failed = False
     try:
         yield ctx, run_log

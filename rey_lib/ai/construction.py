@@ -32,9 +32,11 @@ application context: ``AI(registry=...)`` needs nothing here.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Mapping
 
 from rey_lib.ai.ai import AI
+from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.credentials import CredentialResolver
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstruction
@@ -50,7 +52,7 @@ from rey_lib.ai.providers import (
 from rey_lib.ai.providers.base import AIProvider
 from rey_lib.ai.providers.configuration import ConfiguredProvider
 from rey_lib.ai.registry import AIRegistry
-from rey_lib.ai.settings import AISettings
+from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.config.env_reference import declaration_map
 
 __all__ = [
@@ -58,6 +60,8 @@ __all__ = [
     "ai_from_ctx",
     "configured_providers_from_ctx",
     "default_adapters",
+    "settings_from_ctx",
+    "DEFAULT_TASK_NAME",
 ]
 
 #: How one configured provider becomes one adapter.
@@ -66,6 +70,11 @@ __all__ = [
 #: read ``ctx``. It resolves no credential: the adapter is given the reference
 #: and reads the environment when it builds its client.
 ProviderFactory = Callable[[ConfiguredProvider], AIProvider]
+
+#: What addresses the defaults rather than a task. Reserved, because the same
+#: word names the block the tasks sit beside, and a surface offering a scope per
+#: task needs one stable name for "no task".
+DEFAULT_TASK_NAME = "default"
 
 
 def default_adapters(credentials: CredentialResolver) -> dict[str, ProviderFactory]:
@@ -143,6 +152,95 @@ def configured_providers_from_ctx(ctx: Any) -> tuple[ConfiguredProvider, ...]:
     return tuple(configured)
 
 
+def settings_from_ctx(
+    ctx: Any,
+    *,
+    profiles: tuple[AIProfile, ...] = (),
+    instructions: tuple[AIInstruction, ...] = (),
+) -> AISettings:
+    """Normalize ``ctx.ai_settings`` into this runtime's initial settings.
+
+    The initial state only. From here the runtime owns them: the settings panel
+    mutates the value on the ``AI``, and configuration is never re-read to find
+    out what is selected now.
+
+    Validated against what this runtime actually offers, because a selection
+    naming something absent is a configuration defect and silently dropping it
+    would show an operator a runtime that ignores what they wrote. Task *names*
+    are not validated: the collection is overrides, so an unconfigured name is a
+    task with no overrides rather than an error.
+
+    Args:
+        ctx: The application context. Treated as opaque and never retained.
+        profiles: What this runtime offers, for validating a named profile.
+        instructions: What this runtime offers, for validating a named
+            instruction.
+
+    Returns:
+        The initial ``AISettings``. Absent configuration yields the defaults,
+        which is the behaviour of a runtime that configures no settings.
+
+    Raises:
+        AIConfigurationError: when a selection names something this runtime does
+            not offer, or a task is unnamed or named twice.
+    """
+    declared = getattr(ctx, "ai_settings", None)
+    if not declared:
+        return AISettings()
+
+    profile_ids = {profile.id for profile in profiles}
+    instruction_ids = {instruction.id for instruction in instructions}
+
+    def _selection(entry: Any, field_name: str, offered: set[str], what: str,
+                   where: str) -> str:
+        value = str(_field(entry, field_name, "") or "").strip()
+        if value and value not in offered:
+            raise AIConfigurationError(
+                f"ai_settings{where} names {what} '{value}', "
+                "which this runtime does not offer."
+            )
+        return value
+
+    default = _field(declared, "default", None)
+    settings = AISettings(
+        profile_id=_selection(default, "profile", profile_ids, "profile", ".default"),
+        instruction_id=_selection(
+            default, "instruction", instruction_ids, "instruction", ".default",
+        ),
+        temperature=_optional_number(_field(default, "temperature", None)),
+        representation=str(_field(default, "representation", "") or "").strip(),
+    )
+
+    tasks: list[AISettingsTask] = []
+    seen: set[str] = set()
+    for name, entry in _entries(_field(declared, "tasks", None)):
+        if name == DEFAULT_TASK_NAME:
+            raise AIConfigurationError(
+                f"ai_settings.tasks names a task '{name}', which is the word "
+                "that addresses the defaults beside it. Name it for what the "
+                "AI is being asked to do."
+            )
+        if name in seen:
+            raise AIConfigurationError(
+                f"ai_settings.tasks names '{name}' twice, so which one applies "
+                "would depend on order."
+            )
+        seen.add(name)
+        where = f".tasks['{name}']"
+        tasks.append(
+            AISettingsTask(
+                name=name,
+                profile_id=_selection(entry, "profile", profile_ids, "profile", where),
+                instruction_id=_selection(
+                    entry, "instruction", instruction_ids, "instruction", where,
+                ),
+                temperature=_optional_number(_field(entry, "temperature", None)),
+                representation=str(_field(entry, "representation", "") or "").strip(),
+            ),
+        )
+    return replace(settings, tasks=tuple(tasks))
+
+
 def ai_from_ctx(
     ctx: Any,
     *,
@@ -194,7 +292,28 @@ def ai_from_ctx(
         providers=tuple(built),
         configured=configured,
     )
-    return AI(registry=registry, settings=settings, policy=policy)
+    return AI(
+        registry=registry,
+        settings=settings,
+        policy=policy,
+        contracts=ContractResolver(loader=_contract_loader),
+    )
+
+
+def _contract_loader(reference: str) -> str:
+    """One configured contract's body, read through the canonical file reader.
+
+    ``rey_lib.ai`` opens no path of its own -- "where contracts live is
+    configuration's answer" -- so the loader is supplied here, at the one place
+    an AI is built, and reads exactly the reference configuration declared.
+
+    Without it a CONTRACT instruction carries a reference and no text, and
+    refuses at execution. That made the Instruction setting unusable: every
+    instruction this runtime offers is a reference, so none could run.
+    """
+    from rey_lib.files import read_text_file
+
+    return read_text_file(reference)
 
 
 def _linked(

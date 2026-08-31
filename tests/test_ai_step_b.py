@@ -570,9 +570,12 @@ def test_bootstrap_builds_a_shared_ai_from_the_configured_shape() -> None:
     """The bootstrap contract, against the real configuration shape."""
     from argparse import Namespace
 
-    from rey_lib.config.bootstrap import _open_ai
+    from rey_lib.config.bootstrap import open_shared_ai
 
-    ai = _open_ai(Namespace(llm=_configured_llm(), env=[]))
+    # Bootstrap makes a resolved context into a runtime by giving it its one AI,
+    # and owns that assignment so ctx.shared_ai is written in one place -- an
+    # application's runtime, and a Console page session's.
+    ai = open_shared_ai(Namespace(llm=_configured_llm(), env=[])).shared_ai
 
     assert ai is not None
     assert [profile.id for profile in ai.profiles()] == ["anthropic", "primary"]
@@ -586,10 +589,10 @@ def test_bootstrap_returns_none_when_no_ai_is_configured() -> None:
     """Absent AI is an ordinary state, and builds nothing."""
     from argparse import Namespace
 
-    from rey_lib.config.bootstrap import _open_ai
+    from rey_lib.config.bootstrap import open_shared_ai
 
-    assert _open_ai(Namespace()) is None
-    assert _open_ai(Namespace(llm=[])) is None
+    assert open_shared_ai(Namespace()).shared_ai is None
+    assert open_shared_ai(Namespace(llm=[])).shared_ai is None
 
 
 def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
@@ -600,11 +603,11 @@ def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
     """
     from argparse import Namespace
 
-    from rey_lib.config.bootstrap import _open_ai
+    from rey_lib.config.bootstrap import open_shared_ai
     from rey_lib.errors.error_utils import ConfigError
 
     with pytest.raises(ConfigError, match="configures AI but one could not be built"):
-        _open_ai(Namespace(
+        open_shared_ai(Namespace(
             llm=[Namespace(name="x", provider="no-such-adapter", model="m")],
             env=[],
         ))

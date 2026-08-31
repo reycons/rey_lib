@@ -32,6 +32,11 @@ _MAX_EMBEDDED_STEPS = 250
 _RUN_COMPLETE = "RUN_COMPLETE"
 _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
+#: What the post-run stage is asking the AI to do. The analysis entry named
+#: below is the contract it uses; this is the purpose, and the AI settings
+#: answer it with a profile.
+LOG_INTERPRETATION_TASK = "log_interpretation"
+
 
 def finalize_run_log(run_log: Any) -> dict[str, Any]:
     """Run the canonical post-run log processing sequence.
@@ -60,8 +65,12 @@ def finalize_run_log(run_log: Any) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — post-run processing must preserve the run
         return {**result, "package": None, "package_failures": [str(exc)],
                 "analysis": None}
+    # Names what this stage is for and no profile. Which model interprets a log
+    # is task policy, and it moved to the runtime's AI settings: the analysis
+    # entry still supplies the contract, and the task supplies the engine.
     analysis = run_configured_log_analysis(
         run_log, analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
+        task=LOG_INTERPRETATION_TASK,
     )
 
     return {**result, "package": package, "package_failures": [], "analysis": analysis}
