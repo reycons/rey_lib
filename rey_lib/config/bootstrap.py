@@ -47,7 +47,9 @@ from rey_lib.runtime import collect_runtime, register_runtime_object
 #: The id of the ad-hoc text instruction every runtime offers.
 AD_HOC_INSTRUCTION = "__ad_hoc__"
 
-__all__ = ["build_ctx_for_app", "app_runtime", "open_shared_ai"]
+__all__ = [
+    "app_runtime", "build_ctx_for_app", "open_shared_ai", "open_shared_control",
+]
 
 _logger = get_logger(__name__)
 
@@ -225,6 +227,40 @@ def _open_control(ctx: Namespace) -> Any:
         ) from exc
     register_runtime_object(ctx, control)
     return control
+
+
+def open_shared_control(ctx: Namespace) -> Namespace:
+    """Make a resolved context into a runtime by giving it its one Control.
+
+    The sibling of ``open_shared_ai``, and the same seam: the assignment lives
+    here rather than at each caller, so ``ctx.shared_control`` is written in one
+    place however many kinds of runtime exist -- an application's, and a Console
+    page session's for the installation it is on.
+
+    **Exactly once per retained graph, and that is the point.** ``Control``
+    takes the control procedure map off ``ctx.procedure_maps`` when it is
+    built, deliberately, so nothing holding the context can reach control
+    routines around the object. A second ``Control`` against the same context
+    therefore refuses -- the map it needs is already owned. That is harmless
+    where a context is resolved per request and fatal where one is retained and
+    reused, which is what a Console page session does.
+
+    Idempotent, so a runtime already carrying one is left alone rather than
+    opening a second and orphaning the first.
+
+    Returns
+    -------
+    Namespace
+        The same context, now carrying ``shared_control``.
+
+    Raises
+    ------
+    ConfigError
+        When this installation configures no control database.
+    """
+    if getattr(ctx, "shared_control", None) is None:
+        ctx.shared_control = _open_control(ctx)
+    return ctx
 
 
 def open_shared_ai(ctx: Namespace) -> Namespace:
