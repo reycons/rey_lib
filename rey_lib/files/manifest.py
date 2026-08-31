@@ -123,6 +123,8 @@ class FileManifest:
         deleted_in: Optional[int] = None,
         deleted_ts: Optional[str] = None,
         classification: Optional[dict[str, Any]] = None,
+        clear_profile: Optional[dict[str, Any]] = None,
+        redacted_profile: Optional[dict[str, Any]] = None,
         base_path: str = "",
     ) -> int:
         """Append one event to a file's history, and return the mutation's id.
@@ -135,6 +137,10 @@ class FileManifest:
         the caller's step is the parent above that one, not the step that did
         the work.
 
+        ``clear_profile`` and ``redacted_profile`` belong to a profiling event.
+        They are two representations of one profiling of one file, so they are
+        written together on a single mutation or not at all.
+
         ``classification`` and ``base_path`` belong to a classification event.
         Classifying is something that happens to a file, so it is recorded here
         like every other thing that happens to one -- and recording it twice
@@ -146,7 +152,9 @@ class FileManifest:
             run_log_id=run_log_id, path=path or None,
             producer=producer, conversion=conversion, result=result,
             rollback=rollback, deleted_in=deleted_in, deleted_ts=deleted_ts,
-            classification=classification, base_path=base_path or None,
+            classification=classification,
+            clear_profile=clear_profile, redacted_profile=redacted_profile,
+            base_path=base_path or None,
         ))
 
     # -- reading -------------------------------------------------------------

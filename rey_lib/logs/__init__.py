@@ -7,12 +7,11 @@ from rey_lib.logs.file_manifest import (
     resolve_file_manifest_path,
 )
 from rey_lib.logs.profile_library import (
+    PROFILE_RECORD_TYPE,
     ProfileLibraryError,
-    append_profile_record,
     lookup_profile_record,
     read_profile_records,
-
-    resolve_profile_library_path,
+    resolve_profile_presentation,
 )
 from rey_lib.logs.file_hierarchy import (
     FileHierarchyError,
@@ -112,12 +111,11 @@ __all__ = [
     "file_manifest_session",
     "log_file_manifest_record",
     "resolve_file_manifest_path",
+    "PROFILE_RECORD_TYPE",
     "ProfileLibraryError",
-    "append_profile_record",
     "lookup_profile_record",
     "read_profile_records",
-
-    "resolve_profile_library_path",
+    "resolve_profile_presentation",
     "FileHierarchyError",
     "FileHierarchyFeed",
     "FileHierarchyFile",

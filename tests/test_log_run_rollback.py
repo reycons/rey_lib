@@ -23,24 +23,16 @@ from rey_lib.files import (
     serialize_source_file_mutation,
     unregister_file_compensation,
 )
-from rey_lib.logs import (
-    append_profile_record,
-    log_file_manifest_record,
-    read_profile_records,
-)
+from rey_lib.logs import log_file_manifest_record
 from rey_lib.logs.file_manifest import FileManifestError, FileManifestSession
 
 
 class _Paths:
     def __init__(self, manifest: Path) -> None:
         self.manifest = manifest
-        self.profiles = manifest.with_name("profiles.jsonl")
 
     def resolve(self, name: str) -> Path:
-        return {
-            "file_manifest": self.manifest,
-            "file_profiles": self.profiles,
-        }[name]
+        return {"file_manifest": self.manifest}[name]
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -110,39 +102,6 @@ def _rows(ctx: SimpleNamespace) -> list[dict]:
     rows it created rather than from a JSONL file it no longer writes.
     """
     return list(ctx.shared_control.mutations)
-
-
-def _profile_record(source_row_id: int, run_log_file: str = "run.jsonl") -> dict:
-    return {
-        "header": {
-            "profile_schema_version": 1,
-            "object_id": str(source_row_id),
-            "source_hash": f"hash-{source_row_id}",
-            # A profile names the run that produced it, which is how rollback
-            # selects it — the same evidence pair every governed record carries.
-            "evidence": {
-                "run_log_file": run_log_file,
-                "run_log_id": source_row_id,
-            },
-            "profiler": {},
-            "sampling_strategy": "random_without_replacement_v1",
-            "requested_sample_rows": 500,
-            "sampled_rows": 1,
-            "eligible_population_rows": 1,
-            "sampling_provenance": {},
-        },
-        "structure": {
-            "header_definition": {
-                "row_number": 1,
-                "columns": ["value"],
-            },
-            "distribution": {},
-            "columns": [{"name": "value"}],
-            "samples": [{"column": "value"}],
-            "redacted_samples": [{"column": "value"}],
-        },
-    }
-
 
 
 @contextmanager

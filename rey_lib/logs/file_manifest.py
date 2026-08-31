@@ -73,6 +73,8 @@ _CANONICAL_ROOT_FIELDS: tuple[str, ...] = (
     "file",
     "lineage",
     "classification",
+    "clear_profile",
+    "redacted_profile",
     "rollback",
     "conversion",
     "result",
@@ -244,7 +246,9 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
             producer=record.get("producer"),
         )
 
-    if record_type in ("source_file_mutation", "source_file_rollback"):
+    if record_type in (
+        "source_file_mutation", "source_file_rollback", "source_file_profile",
+    ):
         # A governed file has one identity. The application calls it file_id and
         # the database calls it file_manifest_id; they are the same value, so
         # the record's file_id is written straight into the column. lineage
@@ -264,6 +268,11 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
             conversion=record.get("conversion"),
             result=record.get("result"),
             rollback=record.get("rollback"),
+            # Two representations of one profiling event. They are written
+            # together on one mutation or not at all: a profile is complete or
+            # absent, never half-recorded.
+            clear_profile=record.get("clear_profile"),
+            redacted_profile=record.get("redacted_profile"),
         )
 
     if record_type == "source_file_classification":

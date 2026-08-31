@@ -33,7 +33,6 @@ from rey_lib.logs import (
     log_run_record,
     log_run_start,
     log_run_summary,
-    resolve_profile_library_path,
 )
 
 MUTATION_RECORD_TYPE = "source_file_mutation"
@@ -204,6 +203,7 @@ def serialize_source_file_mutation(
     application_name: str = "",
     file_id: FileId | None = None,
     classification: Mapping[str, Any] | None = None,
+    source_record_id: int | None = None,
     conversion: Mapping[str, Any] | None = None,
     operation: str = "",
     reason: str = "",
@@ -273,6 +273,13 @@ def serialize_source_file_mutation(
         record = {"file_id": file_id, **record}
     record["evidence"] = {"run_log_id": evidence_id}
     record["file"] = file_object
+    if source_record_id is not None:
+        # The prior record this mutation was produced from, as the step's own
+        # selector returned it. file_manifest_id says which governed file this
+        # belongs to; this says which record was consumed to make it, and the
+        # two are never the same fact. Placed, never resolved: what it points
+        # at is the writer's to know.
+        record["lineage"] = {"source_record_id": int(source_record_id)}
     if classification is not None:
         # Classification was governed before this serialization boundary.  It
         # is preserved as supplied and is never resolved or interpreted here.
@@ -369,6 +376,7 @@ def log_source_file_mutation(
     application_name: str = "",
     file_id: FileId | None = None,
     classification: Mapping[str, Any] | None = None,
+    source_record_id: int | None = None,
     conversion: Mapping[str, Any] | None = None,
     operation: str = "",
     reason: str = "",
@@ -433,6 +441,7 @@ def log_source_file_mutation(
             application_name=application_name,
             file_id=file_id,
             classification=classification,
+            source_record_id=source_record_id,
             conversion=conversion,
             operation=operation,
             reason=reason,

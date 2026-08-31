@@ -1,380 +1,177 @@
-"""Focused tests for the installation-scoped governed profile library."""
+"""A profile is a mutation, and this is how one is found and presented.
+
+The rows are seeded through ``log_file_manifest_record`` -- the writer profiling
+itself uses -- so what these read is what the real writer produces.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-from rey_lib.logs import (
+from rey_lib.logs import log_file_manifest_record
+from rey_lib.logs.profile_library import (
+    PROFILE_ACCESS_REDACTED,
+    PROFILE_ACCESS_UNREDACTED,
     ProfileLibraryError,
-    append_profile_record,
     lookup_profile_record,
     read_profile_records,
-    resolve_profile_library_path,
+    resolve_profile_presentation,
 )
 
-
-class _Paths:
-    def __init__(self, manifest: Path, profiles: Path) -> None:
-        self._paths = {"file_manifest": manifest, "file_profiles": profiles}
-
-    def resolve(self, name: str) -> Path:
-        return self._paths[name]
+from tests.support.control_double import control_backed_ctx
 
 
-def _ctx(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        paths=_Paths(
-            tmp_path / "file_manifest" / "manifest.jsonl",
-            tmp_path / "file_manifest" / "profiles.jsonl",
-        )
+def _ctx() -> Any:
+    """A context holding one governed file for profiles to attach to."""
+    ctx = control_backed_ctx()
+    ctx.shared_control.inventory_file(
+        path="/source/report.csv", file_name="report.csv", base_name="report",
+        file_extension="csv", checksum_sha256="abc", size_bytes=1,
+        evidence={"run_log_id": 1},
     )
+    return ctx
 
 
-def _record(**header_overrides: object) -> dict:
-    header = {
-        "profile_schema_version": 1,
-        "object_id": "1",
-        "source_hash": "abc123",
-        "evidence": {
-            "run_log_id": 44,
+def _profile(
+    ctx: Any,
+    *,
+    source_record_id: int,
+    source_hash: str = "hash-a",
+    clear_samples: Any = None,
+    redacted_samples: Any = None,
+) -> int:
+    """Append one profiling mutation the way the profiler appends it."""
+    shared = {"profile_schema_version": 1, "source_hash": source_hash,
+              "header_definition": {"columns": ["a"]}, "distribution": {},
+              "columns": []}
+    return log_file_manifest_record(ctx, {
+        "record_type": "source_file_profile",
+        "action": "record_only",
+        "status": "success",
+        "file_id": 1,
+        "evidence": {"run_log_id": 1},
+        "file": {"path": "/source/report.csv"},
+        "lineage": {"source_record_id": source_record_id},
+        "clear_profile": {
+            **shared,
+            "samples": [{"value": "Alice"}] if clear_samples is None else clear_samples,
         },
-        "profiler": {
-            "application": "file_operator",
+        "redacted_profile": {
+            **shared,
+            "samples": [{"value": "X"}] if redacted_samples is None else redacted_samples,
         },
-        "sampling_strategy": "random_without_replacement_v1",
-        "requested_sample_rows": 500,
-        "sampled_rows": 42,
-        "eligible_population_rows": 42,
-        "sampling_provenance": {
-            "implementation": "rey_lib.files.csv.sample_indices",
-            "strategy": "random_without_replacement_v1",
-            "inputs": ["eligible_population_rows", "requested_sample_rows"],
-        },
-    }
-    header.update(header_overrides)
-    return {
-        "header": header,
-        "structure": {
-            "header_definition": {
-                "row_number": 1,
-                "columns": ["Account Name"],
-            },
-            "distribution": {
-                "row_count": 42,
-            },
-            "columns": [{"name": "Account Name", "type": "text"}],
-            "samples": [
-                {
-                    "column": "Account Name",
-                    "sample_values": [{"value": "ACME", "count": 8}],
-                }
-            ],
-            "redacted_samples": [
-                {
-                    "column": "Account Name",
-                    "sample_values": [{"value": "RANDOM", "count": 8}],
-                }
-            ],
-        },
-    }
+    })
 
 
-def test_profile_path_comes_only_from_installation_configuration(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    assert resolve_profile_library_path(ctx) == (
-        tmp_path / "file_manifest" / "profiles.jsonl"
-    )
+def _mutation(ctx: Any, record_type: str) -> int:
+    """One non-profiling mutation, so narrowing has something to exclude."""
+    return log_file_manifest_record(ctx, {
+        "record_type": record_type,
+        "action": "move",
+        "status": "success",
+        "file_id": 1,
+        "evidence": {"run_log_id": 1},
+        "file": {"path": "/source/report.csv"},
+    })
 
 
-def test_different_source_rows_coexist(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    first_id = append_profile_record(ctx, _record(object_id="1"))
-    second_id = append_profile_record(ctx, _record(object_id="2"))
+def test_only_profiling_mutations_are_profiles() -> None:
+    """Reading profiles narrows the file's mutations to the profiling ones."""
+    ctx = _ctx()
+    _mutation(ctx, "source_file_mutation")
+    _profile(ctx, source_record_id=2)
 
     records = read_profile_records(ctx)
-    assert [record["header"]["profile_id"] for record in records] == [
-        first_id,
-        second_id,
-    ]
-    assert [record["header"]["object_id"] for record in records] == ["1", "2"]
-    # Every record points back at the run-log record that produced it, which is
-    # how rollback resolves a profile to its run.
-    assert [record["header"]["evidence"] for record in records] == [
-        {
-            "run_log_id": 44,
-        },
-    ] * 2
-    assert all(
-        record["header"]["created_at"].endswith("+00:00") for record in records
-    )
-    assert not Path(str(resolve_profile_library_path(ctx)) + ".hstate.json").exists()
+
+    assert [record["record_type"] for record in records] == ["source_file_profile"]
 
 
-def test_same_object_id_is_atomically_replaced(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    first_id = append_profile_record(ctx, _record(source_hash="old"))
-    second_id = append_profile_record(ctx, _record(source_hash="new"))
+def test_lookup_distinguishes_missing_stale_and_available() -> None:
+    """The three states, keyed on the mutation the profile consumed."""
+    ctx = _ctx()
+    assert lookup_profile_record(ctx, 2, "hash-a")["status"] == "profile_missing"
 
-    records = read_profile_records(ctx)
-    assert len(records) == 1
-    assert records[0]["header"]["profile_id"] == second_id
-    assert records[0]["header"]["profile_id"] != first_id
-    assert records[0]["header"]["source_hash"] == "new"
+    _profile(ctx, source_record_id=2, source_hash="hash-a")
 
-
-def test_lookup_distinguishes_missing_stale_and_available(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    assert lookup_profile_record(ctx, "1", "hash-a")["status"] == "profile_missing"
-
-    append_profile_record(ctx, _record(source_hash="hash-a"))
-
-    stale = lookup_profile_record(ctx, "1", "hash-b")
-    available = lookup_profile_record(ctx, "1", "hash-a")
-    assert stale == {"status": "profile_stale", "object_id": "1", "record": None}
+    assert lookup_profile_record(ctx, 2, "hash-b")["status"] == "profile_stale"
+    available = lookup_profile_record(ctx, 2, "hash-a")
     assert available["status"] == "profile_available"
-    assert available["record"]["header"]["source_hash"] == "hash-a"
+    assert available["record"]["source_record_id"] == 2
 
 
-def test_profile_append_does_not_modify_manifest_content(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    manifest = ctx.paths.resolve("file_manifest")
-    manifest.parent.mkdir(parents=True)
-    manifest.write_bytes(b"governed manifest bytes\n")
+def test_a_profile_of_another_mutation_is_not_this_ones() -> None:
+    """The key is the consumed mutation, not the file they share."""
+    ctx = _ctx()
+    _profile(ctx, source_record_id=2)
 
-    append_profile_record(ctx, _record())
-
-    assert manifest.read_bytes() == b"governed manifest bytes\n"
+    assert lookup_profile_record(ctx, 3, "hash-a")["status"] == "profile_missing"
 
 
-def test_writer_owns_profile_id_and_created_at(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    with pytest.raises(ProfileLibraryError, match="writer-owned"):
-        append_profile_record(ctx, _record(profile_id="caller-value"))
-    with pytest.raises(ProfileLibraryError, match="writer-owned"):
-        append_profile_record(ctx, _record(created_at="caller-value"))
+def test_reprofiling_appends_and_the_last_is_current() -> None:
+    """Re-profiling never replaces; the newest reading is the current one."""
+    ctx = _ctx()
+    _profile(ctx, source_record_id=2, source_hash="hash-a")
+    _profile(ctx, source_record_id=2, source_hash="hash-b")
+
+    assert len(read_profile_records(ctx)) == 2
+    assert lookup_profile_record(ctx, 2, "hash-b")["status"] == "profile_available"
+    assert lookup_profile_record(ctx, 2, "hash-a")["status"] == "profile_stale"
 
 
-def test_invalid_sampling_counts_are_rejected_before_append(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    with pytest.raises(ProfileLibraryError, match="sampled_rows cannot exceed"):
-        append_profile_record(
-            ctx,
-            _record(
-                requested_sample_rows=10,
-                sampled_rows=11,
-                eligible_population_rows=20,
-            ),
-        )
-    assert read_profile_records(ctx) == []
+@pytest.mark.parametrize("supplied", [0, -1, "2", None, True])
+def test_a_consumed_record_is_a_positive_mutation_id(supplied: Any) -> None:
+    """No manifest id, no string, no truthy stand-in resolves to a lookup."""
+    with pytest.raises(ProfileLibraryError):
+        lookup_profile_record(_ctx(), supplied, "hash-a")
 
 
-def test_the_retired_source_row_id_is_rejected(tmp_path: Path) -> None:
-    """object_id and the run-log evidence are two identity spaces, never one.
+def test_each_access_returns_its_own_representation() -> None:
+    """Clear and redacted are separate columns, so one is read not derived."""
+    ctx = _ctx()
+    _profile(ctx, source_record_id=2, clear_samples=[{"value": "Alice"}],
+             redacted_samples=[{"value": "X"}])
+    record = lookup_profile_record(ctx, 2, "hash-a")["record"]
 
-    source_row_id straddled them, which is why it had to be equal to object_id
-    and why nothing could own a rollback. A header still carrying it is refused
-    rather than silently accepted alongside the fields that replaced it.
-    """
-    ctx = _ctx(tmp_path)
-    with pytest.raises(ProfileLibraryError, match="source_row_id"):
-        append_profile_record(ctx, _record(object_id="2", source_row_id=1))
-    assert read_profile_records(ctx) == []
+    clear = resolve_profile_presentation(record, PROFILE_ACCESS_UNREDACTED)
+    redacted = resolve_profile_presentation(record, PROFILE_ACCESS_REDACTED)
 
-
-def test_structure_rejects_value_fields_in_columns_and_shape_drift(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    value_in_column = _record()
-    value_in_column["structure"]["columns"][0]["sample_values"] = ["ACME"]
-    with pytest.raises(ProfileLibraryError, match="value-bearing"):
-        append_profile_record(ctx, value_in_column)
-
-    shape_drift = _record()
-    shape_drift["structure"]["redacted_samples"][0].pop("sample_values")
-    with pytest.raises(ProfileLibraryError, match="same shape"):
-        append_profile_record(ctx, shape_drift)
+    assert clear["samples"] == [{"value": "Alice"}]
+    assert redacted["samples"] == [{"value": "X"}]
 
 
-def test_structure_rejects_invalid_counted_samples_and_count_drift(
-    tmp_path: Path,
-) -> None:
-    ctx = _ctx(tmp_path)
-    invalid_entry = _record()
-    invalid_entry["structure"]["samples"][0]["sample_values"] = ["ACME"]
-    with pytest.raises(ProfileLibraryError, match="value and count"):
-        append_profile_record(ctx, invalid_entry)
+def test_the_redacted_representation_has_no_path_back_to_the_clear_values() -> None:
+    """What a caller is handed holds one reading and never the other."""
+    ctx = _ctx()
+    _profile(ctx, source_record_id=2, clear_samples=[{"value": "Alice"}],
+             redacted_samples=[{"value": "X"}])
+    record = lookup_profile_record(ctx, 2, "hash-a")["record"]
 
-    count_drift = _record()
-    count_drift["structure"]["redacted_samples"][0]["sample_values"][0][
-        "count"
-    ] = 7
-    with pytest.raises(ProfileLibraryError, match="count and order"):
-        append_profile_record(ctx, count_drift)
+    redacted = resolve_profile_presentation(record, PROFILE_ACCESS_REDACTED)
+
+    assert "clear_profile" not in redacted
+    assert "Alice" not in repr(redacted)
 
 
-def test_structure_rejects_retired_distinct_sample(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    retired = _record()
-    retired["structure"]["samples"][0]["distinct_sample"] = [
-        {"value": "ACME", "count": 8}
-    ]
-    retired["structure"]["redacted_samples"][0]["distinct_sample"] = [
-        {"value": "RANDOM", "count": 8}
-    ]
-    with pytest.raises(ProfileLibraryError, match="unknown field.*distinct_sample"):
-        append_profile_record(ctx, retired)
+def test_an_unknown_access_names_no_representation() -> None:
+    """Only the two readings exist, so a third is refused rather than guessed."""
+    ctx = _ctx()
+    _profile(ctx, source_record_id=2)
+    record = lookup_profile_record(ctx, 2, "hash-a")["record"]
+
+    with pytest.raises(ProfileLibraryError):
+        resolve_profile_presentation(record, "partial")
 
 
-def test_retired_metadata_is_rejected(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    retired = _record()
-    retired["structure"]["structural_profile"] = {"schema_version": 6}
-    with pytest.raises(ProfileLibraryError, match="unknown field.*structural_profile"):
-        append_profile_record(ctx, retired)
+def test_a_representation_the_mutation_lacks_is_refused() -> None:
+    """A half-recorded profile fails rather than answering with the other half."""
+    ctx = _ctx()
+    ctx.shared_control.append_file_mutation(
+        1, record_type="source_file_profile", action="record_only",
+        source_record_id=2, clear_profile={"source_hash": "hash-a", "samples": []},
+    )
+    record = lookup_profile_record(ctx, 2, "hash-a")["record"]
 
-    retired_distribution = _record()
-    retired_distribution["structure"]["distribution"]["llm_hints"] = {}
-    with pytest.raises(ProfileLibraryError, match="llm_hints"):
-        append_profile_record(ctx, retired_distribution)
-
-
-def test_distribution_rejects_the_retired_csv_subsection(tmp_path: Path) -> None:
-    """distribution says what the dataset looks like, and says it once.
-
-    The csv subsection restated the row and column counts, the delimiter and the
-    encoding, each of which already had a home. A stored record carrying it, or
-    carrying a read instruction that belongs to loader_hints, is refused rather
-    than left to disagree with itself.
-    """
-    ctx = _ctx(tmp_path)
-    with_subsection = _record()
-    with_subsection["structure"]["distribution"]["csv"] = {"delimiter": ","}
-    with pytest.raises(ProfileLibraryError, match="csv"):
-        append_profile_record(ctx, with_subsection)
-
-    for instruction in ("delimiter", "encoding"):
-        duplicated = _record()
-        duplicated["structure"]["distribution"][instruction] = ","
-        with pytest.raises(ProfileLibraryError, match=instruction):
-            append_profile_record(ctx, duplicated)
-
-
-def test_canonical_header_must_match_columns(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    mismatch = _record()
-    mismatch["structure"]["header_definition"]["columns"] = ["Other"]
-    with pytest.raises(ProfileLibraryError, match="match structure.columns"):
-        append_profile_record(ctx, mismatch)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("type_hint", "text"),
-        ("ordinal", 1),
-        ("row_count", 42),
-        ("integer_digit_counts", {"7": 42}),
-        ("has_negative", False),
-    ],
-)
-def test_columns_reject_derived_and_duplicate_fields(
-    tmp_path: Path,
-    field: str,
-    value: object,
-) -> None:
-    ctx = _ctx(tmp_path)
-    duplicate = _record()
-    duplicate["structure"]["columns"][0][field] = value
-    with pytest.raises(ProfileLibraryError, match=f"non-canonical.*{field}"):
-        append_profile_record(ctx, duplicate)
-
-
-def test_canonical_header_must_match_columns(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    mismatch = _record()
-    mismatch["structure"]["header_definition"]["columns"] = ["Other"]
-    with pytest.raises(ProfileLibraryError, match="match structure.columns"):
-        append_profile_record(ctx, mismatch)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("type_hint", "text"),
-        ("ordinal", 1),
-        ("row_count", 42),
-        ("integer_digit_counts", {"7": 42}),
-        ("has_negative", False),
-    ],
-)
-def test_columns_reject_derived_and_duplicate_fields(
-    tmp_path: Path,
-    field: str,
-    value: object,
-) -> None:
-    ctx = _ctx(tmp_path)
-    duplicate = _record()
-    duplicate["structure"]["columns"][0][field] = value
-    with pytest.raises(ProfileLibraryError, match=f"non-canonical.*{field}"):
-        append_profile_record(ctx, duplicate)
-
-
-
-def test_the_retired_log_record_id_uuid_is_rejected(tmp_path: Path) -> None:
-    """A profile points at its run-log record, not at a UUID of its own.
-
-    log_record_id was a UUID this module minted for itself. It resolved to
-    nothing -- a profile carrying only that UUID could never be traced back to
-    the run that wrote it. A header still carrying it is refused rather than
-    quietly stored.
-    """
-    ctx = _ctx(tmp_path)
-    with pytest.raises(ProfileLibraryError, match="log_record_id"):
-        append_profile_record(ctx, _record(log_record_id="6096a153-957c"))
-    assert read_profile_records(ctx) == []
-
-
-def test_evidence_is_required(tmp_path: Path) -> None:
-    """A profile that cannot be resolved back to its run is not stored."""
-    ctx = _ctx(tmp_path)
-    without = _record()
-    del without["header"]["evidence"]
-    with pytest.raises(ProfileLibraryError, match="evidence"):
-        append_profile_record(ctx, without)
-    assert read_profile_records(ctx) == []
-
-
-def test_evidence_carries_the_run_log_record_and_nothing_else(tmp_path: Path) -> None:
-    """The run-log record id is the pointer, alone.
-
-    run_log_file travelled beside it until the run-log driven rollback selector
-    was retired. That selector was its only reader, so a header still carrying
-    it is refused: an unread pointer in a stored record is one more thing that
-    can be wrong.
-    """
-    ctx = _ctx(tmp_path)
-    with pytest.raises(ProfileLibraryError, match="missing required field"):
-        append_profile_record(ctx, _record(evidence={}))
-
-    for retired in ({"run_log_id": 44, "run_log_file": "run.jsonl"},
-                    {"run_log_id": 44, "run_id": "extra"}):
-        with pytest.raises(ProfileLibraryError, match="unknown field"):
-            append_profile_record(ctx, _record(evidence=retired))
-    assert read_profile_records(ctx) == []
-
-
-def test_run_log_id_must_be_a_positive_integer(tmp_path: Path) -> None:
-    """The row number is an integer, as it is in every other governed record."""
-    ctx = _ctx(tmp_path)
-    for bad in ("44", 0, -1, True, None):
-        with pytest.raises(ProfileLibraryError, match="run_log_id"):
-            append_profile_record(ctx, _record(evidence={
-                "run_log_id": bad,
-            }))
-    assert read_profile_records(ctx) == []
+    with pytest.raises(ProfileLibraryError):
+        resolve_profile_presentation(record, PROFILE_ACCESS_REDACTED)

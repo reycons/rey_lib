@@ -947,6 +947,8 @@ class Control:
                              result: Optional[dict[str, Any]] = None,
                              rollback: Optional[dict[str, Any]] = None,
                              classification: Optional[dict[str, Any]] = None,
+                             clear_profile: Optional[dict[str, Any]] = None,
+                             redacted_profile: Optional[dict[str, Any]] = None,
                              base_path: Optional[str] = None,
                              required: bool = True) -> Optional[int]:
         """Append one event to a file's history.
@@ -972,6 +974,8 @@ class Control:
             "result":            result,
             "rollback":          rollback,
             "classification":    classification,
+            "clear_profile":     clear_profile,
+            "redacted_profile":  redacted_profile,
             "base_path":         base_path,
         }, required=required)
 

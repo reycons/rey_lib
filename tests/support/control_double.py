@@ -219,6 +219,7 @@ class ControlDouble:
             "status": None, "deleted_in": None, "deleted_ts": None,
             "created_ts": None, "producer": None, "conversion": None,
             "result": None, "rollback": None,
+            "clear_profile": None, "redacted_profile": None,
             "batch_step_id": self.batch_step_id,
             "rollback_request_in": 0, "rollback_complete_in": 0,
             "rollback_request_batch_step_id": None,
