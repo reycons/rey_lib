@@ -1,4 +1,11 @@
-"""Focused tests for parameterized LLM package creation and configured execution."""
+"""Focused tests for the log interpreter and the configured record analyses.
+
+Two different consumers live here. The log interpreter is a finalization stage
+that resolves no configuration -- it names the log_interpretation task and lets
+AI settings answer with the profile and instruction. The record analyses are
+still selected from log_analysis entries by the Console, which is why the
+installation fixture below still writes them.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,7 @@ import pytest
 
 from tests.conftest import make_run_log
 
-from rey_lib.ai.errors import AIProviderError, AIUnavailableError
+from rey_lib.ai.errors import AIProviderError
 from rey_lib.logs import (
     create_llm_package,
     create_results_summary,
@@ -91,13 +98,11 @@ def _log(log_path: Path):
 
 def _pkg(
     log_path: Path,
-    analysis_name: str = "log_interpreter",
     source_record_type: str = "RESULTS_SUMMARY",
     package_record_type: str = "LLM_PACKAGE",
 ) -> dict:
     return create_llm_package(
         _log(log_path),
-        analysis_name=analysis_name,
         source_record_type=source_record_type,
         package_record_type=package_record_type,
     )
@@ -111,13 +116,12 @@ _AN_AI = object()
 
 def _run(
     log_path: Path,
-    analysis_name: str = "log_interpreter",
     package_record_type: str = "LLM_PACKAGE",
     ai: object = _AN_AI,
     task: str = "log_interpretation",
 ) -> dict:
     return run_configured_log_analysis(
-        _log(log_path), ai=ai, analysis_name=analysis_name,
+        _log(log_path), ai=ai,
         package_record_type=package_record_type, task=task,
     )
 
@@ -368,34 +372,6 @@ def test_summary_failure_prevents_package_creation(
     assert called is False
 
 
-def test_email_package_not_created_when_interpretation_absent(
-    tmp_path, monkeypatch,
-) -> None:
-    log_path, _contract_path = _unfinalized_run(tmp_path, interpreter_enabled=False)
-    _stage_direct_ask(monkeypatch)
-
-    finalize_run_log(_log(log_path))
-
-    types = [r["record_type"] for r in _records(log_path)]
-    # Interpreter disabled -> no interpretation, and no result record at all.
-    assert "LLM_INTERPRETATION" not in types
-
-
-
-def test_package_failure_preserves_summary_and_completed_log(tmp_path: Path) -> None:
-    log_path, contract_path = _unfinalized_run(tmp_path)
-    contract_path.unlink()
-
-    result = finalize_run_log(_log(log_path))
-
-    record_types = [record["record_type"] for record in _records(log_path)]
-    assert result["package"] is None
-    assert "Configured log_analysis contract" in result["package_failures"][0]
-    assert record_types[-1] == "RESULTS_SUMMARY"
-    assert "RUN_COMPLETE" in record_types
-    assert "LLM_PACKAGE" not in record_types
-
-
 # ---------------------------------------------------------------------------
 # create_llm_package (parameterized)
 # ---------------------------------------------------------------------------
@@ -435,76 +411,6 @@ def test_canonical_writer_supplies_existing_run_identity_and_metadata(tmp_path: 
     assert record["record_schema_version"] == 1
 
 
-def test_requested_analysis_name_selects_that_resolved_configuration(tmp_path: Path) -> None:
-    log_path, _contract_path, summary = _prepared_run(tmp_path)
-
-    package = _pkg(log_path, analysis_name="alternate")
-
-    assert package == {
-        "analysis_name": "alternate",
-        "source_record_type": "RESULTS_SUMMARY",
-        "source": summary,
-    }
-
-
-def test_email_package_uses_interpretation_source_and_configured_type(tmp_path: Path) -> None:
-    log_path, _contract_path, _summary = _prepared_run(tmp_path)
-    interpretation = {
-        "record_type": "LLM_INTERPRETATION", "record_group": "results",
-        "run_id": "run-1", "verdict": "ok",
-    }
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(interpretation) + "\n")
-
-    package = _pkg(
-        log_path,
-        analysis_name="email_results",
-        source_record_type="LLM_INTERPRETATION",
-        package_record_type="LLM_EMAIL_PACKAGE",
-    )
-    record = _records(log_path)[-1]
-
-    assert record["record_type"] == "LLM_EMAIL_PACKAGE"
-    assert package["analysis_name"] == "email_results"
-    assert package["source_record_type"] == "LLM_INTERPRETATION"
-    assert "instructions" not in package
-    assert package["source"] == interpretation
-
-
-def test_missing_analysis_fails_without_inference_and_preserves_log(tmp_path: Path) -> None:
-    log_path, _contract_path, _summary = _prepared_run(tmp_path)
-    before = log_path.read_bytes()
-
-    with pytest.raises(ValueError, match="log_analysis configuration not found"):
-        _pkg(log_path, analysis_name="missing")
-
-    assert log_path.read_bytes() == before
-
-
-def test_missing_configured_contract_preserves_existing_summary(tmp_path: Path) -> None:
-    log_path, contract_path, summary = _prepared_run(tmp_path)
-    contract_path.unlink()
-    before = log_path.read_bytes()
-
-    with pytest.raises(FileNotFoundError, match="Configured log_analysis contract"):
-        _pkg(log_path)
-
-    assert log_path.read_bytes() == before
-    assert _records(log_path)[-1] == summary
-
-
-def test_package_requires_load_order_zero_installation_reference(tmp_path: Path) -> None:
-    config_path, _contract_path = _configuration(tmp_path)
-    log_path = tmp_path / "demo.20260714_120000.jsonl"
-    records = _completed_records(config_path)
-    records[1]["load_order"] = 1
-    _write_completed_run(log_path, records)
-    create_results_summary(_log(log_path))
-
-    with pytest.raises(ValueError, match="load-order-zero installation"):
-        _pkg(log_path)
-
-
 def test_missing_source_record_fails_with_requested_type(tmp_path: Path) -> None:
     config_path, _contract_path = _configuration(tmp_path)
     log_path = tmp_path / "demo.20260714_120000.jsonl"
@@ -516,35 +422,15 @@ def test_missing_source_record_fails_with_requested_type(tmp_path: Path) -> None
     assert not any(record["record_type"] == "LLM_PACKAGE" for record in _records(log_path))
 
 
-def test_missing_email_source_record_names_that_type(tmp_path: Path) -> None:
+def test_repeated_creation_of_the_package_is_idempotent(tmp_path: Path) -> None:
+    """A finalization that runs twice describes one package, not two."""
     log_path, _contract_path, _summary = _prepared_run(tmp_path)
-
-    with pytest.raises(ValueError, match="source record: LLM_INTERPRETATION"):
-        _pkg(
-            log_path,
-            analysis_name="email_results",
-            source_record_type="LLM_INTERPRETATION",
-            package_record_type="LLM_EMAIL_PACKAGE",
-        )
-
-
-def test_repeated_creation_of_each_package_type_is_idempotent(tmp_path: Path) -> None:
-    log_path, _contract_path, _summary = _prepared_run(tmp_path)
-    interpretation = {"record_type": "LLM_INTERPRETATION", "record_group": "results",
-                      "verdict": "ok"}
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(interpretation) + "\n")
 
     _pkg(log_path)
     _pkg(log_path)
-    _pkg(log_path, analysis_name="email_results",
-         source_record_type="LLM_INTERPRETATION", package_record_type="LLM_EMAIL_PACKAGE")
-    _pkg(log_path, analysis_name="email_results",
-         source_record_type="LLM_INTERPRETATION", package_record_type="LLM_EMAIL_PACKAGE")
 
     types = [record["record_type"] for record in _records(log_path)]
     assert types.count("LLM_PACKAGE") == 1
-    assert types.count("LLM_EMAIL_PACKAGE") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -641,14 +527,6 @@ def test_configured_analysis_reads_existing_package(tmp_path, monkeypatch) -> No
     assert '"source"' in captured["prompt"]
 
 
-def test_configured_analysis_uses_resolved_log_analysis_entry(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path))
-    _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
-    assert _run(log_path, analysis_name="log_interpreter")["action"] == "written_stdout"
-    with pytest.raises(ValueError, match="log_analysis configuration not found"):
-        _run(log_path, analysis_name="missing")
-
-
 def test_the_configured_analysis_selects_only_its_task(tmp_path, monkeypatch) -> None:
     """It names what it is asking for, and nothing about how to answer.
 
@@ -713,54 +591,6 @@ def test_stdout_result_uses_configured_record_type_and_group(tmp_path, monkeypat
     assert record["reasons"] == ["r"]
 
 
-def test_email_result_embeds_subject_html_and_text(tmp_path, monkeypatch) -> None:
-    config = _analysis_config(tmp_path, name="email_results", record_type="LLM_EMAIL_RESULT")
-    email_fields = {
-        "analysis_name": "email_results", "source_record_type": "LLM_INTERPRETATION",
-        "instructions": {"name": "email_results"}, "source": {"verdict": "ok"},
-    }
-    log_path = _package_log(
-        tmp_path, config, record_type="LLM_EMAIL_PACKAGE", package_fields=email_fields,
-    )
-    _patch_direct_ask(
-        monkeypatch,
-        response=_envelope({"subject": "S", "html": "<p>b</p>", "text": "b"}),
-    )
-
-    _run(log_path, analysis_name="email_results", package_record_type="LLM_EMAIL_PACKAGE")
-
-    record = _records(log_path)[-1]
-    assert record["record_type"] == "LLM_EMAIL_RESULT"
-    assert record["subject"] == "S"
-    assert record["html"] == "<p>b</p>"
-    assert record["text"] == "b"
-
-
-def test_file_result_uses_existing_writer_and_configured_path(tmp_path, monkeypatch) -> None:
-    out_file = tmp_path / "interpretation.json"
-    log_path = _package_log(
-        tmp_path, _analysis_config(tmp_path, destination="file", output_path=out_file)
-    )
-    _patch_direct_ask(monkeypatch, response=_envelope({"verdict": "ok"}))
-    _run(log_path)
-    assert out_file.is_file()
-    assert json.loads(out_file.read_text(encoding="utf-8")) == {"verdict": "ok"}
-    assert not any(r["record_type"] == "LLM_INTERPRETATION" for r in _records(log_path))
-
-
-def test_disabled_analysis_is_skipped(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, enabled=False))
-    called = {"n": 0}
-    monkeypatch.setattr(
-        "rey_lib.logs.llm_package._ask",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1),
-    )
-    out = _run(log_path)
-    assert out["skipped"] == ["disabled"]
-    assert called["n"] == 0
-    assert not any(r["record_type"] == "LLM_INTERPRETATION" for r in _records(log_path))
-
-
 def test_missing_package_record_fails_explicitly(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path), with_package=False)
     _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
@@ -807,13 +637,6 @@ def test_nonfatal_parse_failure_writes_failure_record(tmp_path, monkeypatch) -> 
     assert out["result"] is None
     assert out["failures"]
     assert _records(log_path)[-1]["status"] == "failed"
-
-
-def test_fail_on_error_true_records_and_reraises(tmp_path, monkeypatch) -> None:
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=True))
-    _patch_direct_ask(monkeypatch, raises=AIProviderError("boom"))
-    with pytest.raises(AIProviderError):
-        _run(log_path)
 
 
 def test_repeated_execution_does_not_duplicate_result(tmp_path, monkeypatch) -> None:
@@ -1057,11 +880,3 @@ def test_a_runtime_without_an_ai_records_the_failure_and_returns(tmp_path) -> No
     assert failure["error_message"]["error_type"] == "AIUnavailableError"
 
 
-def test_a_runtime_without_an_ai_still_reraises_when_configured_to(tmp_path) -> None:
-    """fail_on_error governs a missing AI exactly as it governs any failure."""
-    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=True))
-
-    with pytest.raises(AIUnavailableError):
-        _run(log_path, ai=None)
-
-    assert _records(log_path)[-1]["record_type"] == "LLM_ANALYSIS_FAILURE"

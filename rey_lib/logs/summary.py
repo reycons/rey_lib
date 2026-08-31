@@ -32,9 +32,12 @@ _MAX_EMBEDDED_STEPS = 250
 _RUN_COMPLETE = "RUN_COMPLETE"
 _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
-#: What the post-run stage is asking the AI to do. The analysis entry named
-#: below is the contract it uses; this is the purpose, and the AI settings
-#: answer it with a profile.
+#: What the post-run stage is asking the AI to do.
+#:
+#: The consumer owns the semantic task it performs, so this is code rather than
+#: configuration. It is the only selection the stage makes: AI settings answer
+#: it with a profile and an instruction, and there is no analysis entry left to
+#: name either.
 LOG_INTERPRETATION_TASK = "log_interpretation"
 
 
@@ -43,14 +46,17 @@ def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
 
     ``ai`` is the runtime's one AI -- the installation's, built by bootstrap for
     the run that is executing. It is passed down rather than discovered, because
-    an AI belongs to a runtime and the analysis stage below rebuilds only
-    configuration. ``None`` means this runtime configures none, which the
-    analysis stage records as a failure rather than raising.
+    an AI belongs to a runtime. ``None`` means this runtime configures none,
+    which the interpretation stage records as a failure rather than raising.
 
+    Order: RESULTS_SUMMARY, then the log interpreter
+    (RESULTS_SUMMARY -> LLM_PACKAGE -> LLM_INTERPRETATION).
 
-    Order: RESULTS_SUMMARY, then the log_interpreter stage
-    (RESULTS_SUMMARY -> LLM_PACKAGE -> LLM_INTERPRETATION). The analysis honors its
-    own ``fail_on_error`` setting.
+    The interpretation stage is unconditional and never fails the run. It runs
+    after the run it describes has finished, so a stage that could not interpret
+    the log must not be the thing that fails it. There is no installation-level
+    switch: that was an analysis-entry setting, and the entry was removed rather
+    than reproduced.
 
     One LLM call produces one authoritative result record. LLM_INTERPRETATION
     carries the structured interpretation together with the rendered subject, html,
@@ -65,7 +71,6 @@ def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     try:
         package = create_llm_package(
             run_log,
-            analysis_name="log_interpreter",
             source_record_type="RESULTS_SUMMARY",
             package_record_type="LLM_PACKAGE",
         )
@@ -76,8 +81,7 @@ def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     # is task policy, and it moved to the runtime's AI settings: the analysis
     # entry still supplies the contract, and the task supplies the engine.
     analysis = run_configured_log_analysis(
-        run_log, ai=ai,
-        analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
+        run_log, ai=ai, package_record_type="LLM_PACKAGE",
         task=LOG_INTERPRETATION_TASK,
     )
 

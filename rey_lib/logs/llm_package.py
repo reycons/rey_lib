@@ -18,46 +18,43 @@ __all__ = [
 ]
 
 
+#: The interpreter's output shape. Once configured per installation, it is the
+#: stage's own: what it writes is what it is, not a choice an operator makes.
+_INTERPRETATION_RECORD_TYPE = "LLM_INTERPRETATION"
+_FAILURE_RECORD_TYPE = "LLM_ANALYSIS_FAILURE"
+_RECORD_GROUP = "results"
+_ARTIFACT_TYPE = "json"
+
+#: The finalization stage's own name, carried on its records so a summary can
+#: attribute them. It is the stage's, not configuration's: there is no
+#: log_analysis entry to look it up in, and the stage is not selectable.
+LOG_INTERPRETER_ANALYSIS = "log_interpreter"
+
+
 def create_llm_package(
     run_log: Any,
     *,
-    analysis_name: str,
     source_record_type: str,
     package_record_type: str,
 ) -> dict[str, Any]:
-    """Append a configured analysis contract and a source record as a package record.
+    """Append the newest source record as the log interpreter's package.
 
-    Pairs the parsed analysis contract (``instructions``) with the newest
-    ``source_record_type`` record (generic ``source`` field) and appends it as
-    ``package_record_type``. The same function serves every analysis stage.
+    The situation the interpreter reads, and nothing else. It carries no
+    instructions: what governs the analysis is the instruction the
+    ``log_interpretation`` task resolves through AI settings, so embedding a
+    contract here would send it twice and let this path disagree with the
+    setting a reader can see.
+
+    It resolves no configuration either. This stage was once selected by a
+    ``log_analysis`` entry that bound it to a contract and a profile -- both of
+    which the AI object already owns -- so the entry was removed along with the
+    context rebuild that existed to find it.
+
+    Appending is idempotent: a package already describing this source is not
+    written twice.
     """
-    # Imports stay local because config/files import the public logs facade.
-    from rey_lib.config.config_utils import build_ctx_from_path
-    from rey_lib.logs.record_enrichment import log_run_record
-
     path = Path(run_log.path()).expanduser().resolve()
-    run = read_run_log_sections(path)
-    records = run["records"]
-
-    config_record = next((
-        record for record in records
-        if str(record.get("record_type") or "").upper() == "CONFIG_FILE_REFERENCE"
-        and record.get("load_order") == 0
-        and str(record.get("configuration_layer") or record.get("config_type") or "").lower()
-        == "installation"
-    ), None)
-    if config_record is None:
-        raise ValueError(
-            "Execution log has no load-order-zero installation CONFIG_FILE_REFERENCE"
-        )
-
-    ctx = build_ctx_from_path(Path(config_record["path"]), full_installation=True)
-    analyses = getattr(ctx, "log_analysis", None)
-    analysis = analyses.get(analysis_name) if analyses is not None else None
-    if analysis is None:
-        raise ValueError(f"log_analysis configuration not found: {analysis_name}")
-
-    instructions = _analysis_instructions(analysis)
+    records = read_run_log_sections(path)["records"]
 
     source_record = next((
         record for record in reversed(records)
@@ -68,18 +65,19 @@ def create_llm_package(
             f"Execution log does not contain source record: {source_record_type}"
         )
 
-    package = _build_analysis_package(
-        ctx, analysis_name, source_record_type, instructions, source_record
-    )
+    package = {
+        "analysis_name": LOG_INTERPRETER_ANALYSIS,
+        "source_record_type": source_record_type,
+        "source": source_record,
+    }
     if any(
         str(record.get("record_type") or "").upper() == package_record_type.upper()
-        and record.get("analysis_name") == analysis_name
+        and record.get("analysis_name") == LOG_INTERPRETER_ANALYSIS
         and record.get("source_record_type") == source_record_type
         and record.get("source") == source_record
         for record in records
     ):
         return package
-
 
     run_log.append(package_record_type, record_group="results", **package)
     return package
@@ -597,48 +595,44 @@ def run_configured_log_analysis(
     run_log: Any,
     *,
     ai: Any,
-    analysis_name: str,
     package_record_type: str,
     task: str,
 ) -> dict[str, Any]:
-    """Run the configured LLM analysis over the existing package record.
+    """Interpret the run's package record and append the interpretation.
 
     Sends the complete ``package_record_type`` record unchanged to the runtime's
-    AI, extracts and validates the configured artifact from the standard rey_lib
-    envelope, and writes the parsed structured result through the configured
-    writer. The embedded contract is never reloaded — only existing rey_lib
-    functions are composed.
+    AI, extracts and validates the artifact from the standard rey_lib envelope,
+    and appends the parsed result as LLM_INTERPRETATION.
 
-    ``task`` names what this analysis is for, and it is the only selection this
-    stage makes. The AI resolves request override -> task override -> default
-    from its own settings, so an operator changing that task's settings changes
-    what this stage runs on, and no profile or instruction is named here.
+    ``task`` is the only selection this stage makes -- what it is asking the AI
+    to do. The AI resolves request override -> task override -> default from its
+    own settings, so an operator changing that task's settings changes what this
+    stage runs on, and no profile or instruction is named here.
 
-    ``ai`` is the runtime's one AI, belonging to the installation currently
-    executing the run. It is handed in rather than discovered: the context below
-    is rebuilt from the installation this run recorded and resolves the analysis
-    configuration only, which is a different question from which runtime is
-    executing. ``None`` means this runtime configures no AI, and the failure
-    boundary records it.
+    ``ai`` is the runtime's one AI, belonging to the installation executing the
+    run, handed in rather than discovered. ``None`` means this runtime configures
+    no AI, which the failure boundary records.
+
+    The stage is unconditional and owns its own output shape. It was once a
+    selectable ``log_analysis`` entry carrying a contract, a profile, an output
+    record type and an enable switch; the contract and profile duplicated what
+    AI settings own, the output shape is the stage's own, and the switch was
+    retired rather than replaced. Nothing here resolves configuration.
     """
     import json
 
-    from rey_lib.config.config_utils import build_ctx_from_path
     from rey_lib.errors.error_utils import build_safe_error_payload
-    from rey_lib.files import write_file
     from rey_lib.ai.errors import (
         AIConfigurationError, AIProviderError, AIUnavailableError,
     )
     from rey_lib.artifacts import ArtifactEnvelopeError
-    from rey_lib.logs.record_enrichment import log_run_record
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": [], "failures": []}
 
     path = Path(run_log.path()).expanduser().resolve()
-    run = read_run_log_sections(path)
-    records = run["records"]
+    records = read_run_log_sections(path)["records"]
 
-    # Newest existing package record — the complete, self-contained LLM input.
+    # Newest existing package record -- the complete, self-contained LLM input.
     package = next((
         record for record in reversed(records)
         if str(record.get("record_type") or "").upper() == package_record_type.upper()
@@ -648,75 +642,28 @@ def run_configured_log_analysis(
             f"Execution log does not contain package record: {package_record_type}"
         )
 
-    config_record = next((
-        record for record in records
-        if str(record.get("record_type") or "").upper() == "CONFIG_FILE_REFERENCE"
-        and record.get("load_order") == 0
-        and str(record.get("configuration_layer") or record.get("config_type") or "").lower()
-        == "installation"
-    ), None)
-    if config_record is None:
-        raise ValueError(
-            "Execution log has no load-order-zero installation CONFIG_FILE_REFERENCE"
-        )
-
-    ctx = build_ctx_from_path(Path(config_record["path"]), full_installation=True)
-    analyses = getattr(ctx, "log_analysis", None)
-    analysis = analyses.get(analysis_name) if analyses is not None else None
-    if analysis is None:
-        raise ValueError(f"log_analysis configuration not found: {analysis_name}")
-
-    if not getattr(analysis, "enabled", False):
-        result["skipped"].append("disabled")
+    # Idempotency. The stage has already run for this log if it produced either
+    # outcome, so a second finalization appends nothing -- a repeated failure is
+    # as duplicative as a repeated interpretation, and finalizing twice is a
+    # thing that happens.
+    if any(
+        str(record.get("record_type") or "").upper()
+        in (_INTERPRETATION_RECORD_TYPE, _FAILURE_RECORD_TYPE)
+        for record in records
+    ):
+        result["action"] = "existing"
         return result
 
-
-    # Safe record identity for the failure record, resolved without dereferencing a
-    # possibly malformed output block. When the configured output type cannot be read,
-    # the failure is still recorded (never silent) rather than repaired or inferred.
-    #
-    # The type is this stage's, never the configured one. output.record_type names
-    # the successful analysis payload -- LLM_INTERPRETATION here -- and an exception
-    # is a different kind of record. Typing a failure as a success left a reader
-    # unable to tell them apart by record type, which is what four stored
-    # LLM_INTERPRETATION rows carrying an error_message already are.
-    output = getattr(analysis, "output", None)
-    failure_record_type = "LLM_ANALYSIS_FAILURE"
-    failure_record_group = str(getattr(output, "record_group", "") or "results")
-
-    # Every configuration access and validation for this stage lives inside the failure
-    # boundary: reading record_type, record_group, destination, format,
-    # the idempotency probe, profile resolution, execution, and parsing.
     try:
-        record_type = str(output.record_type)
-        record_group = str(output.record_group)
-        destination = str(getattr(output, "destination", "stdout")).lower()
-        output_format = str(getattr(output, "format", ""))
-        output_path = getattr(output, "path", None)
-
-        # Idempotency: a prior configured result must not be duplicated on re-run.
-        if destination == "file":
-            if output_path is not None and Path(str(output_path)).expanduser().exists():
-                result["action"] = "existing"
-                return result
-        elif any(
-            str(record.get("record_type") or "").upper() == record_type.upper()
-            for record in records
-        ):
-            result["action"] = "existing"
-            return result
-
         parsed_result = _execute_analysis_package(
-            # Configuration and runtime, separately. ctx was rebuilt from the
-            # installation this run recorded and resolves the analysis entry; the
-            # AI belongs to the runtime executing the run and is handed in.
-            ctx,
+            # No ctx. Nothing on this path resolves configuration any more, and
+            # the AI belongs to the runtime executing the run.
+            None,
             ai,
-            # No profile. This chain always names a task, and the AI resolves
-            # request override -> task override -> default from its own settings.
-            # Naming a profile here would be a second answer to that question.
+            # No profile. This stage names a task and the AI answers with the
+            # rest; naming one here would be a second answer to that question.
             "",
-            str(getattr(analysis, "artifact_type", "")),
+            _ARTIFACT_TYPE,
             package,
             task=task,
         )
@@ -724,32 +671,27 @@ def run_configured_log_analysis(
         AIProviderError, ArtifactEnvelopeError, AIConfigurationError,
         # A runtime with no AI is one more way this stage cannot run, not a
         # reason to fail a run that already finished. It is a sibling of
-        # AIConfigurationError rather than a subclass, so it matched nothing
-        # here and skipped the record below along with fail_on_error.
+        # AIConfigurationError rather than a subclass, so it once matched
+        # nothing here and skipped the record below.
         AIUnavailableError, json.JSONDecodeError,
         AttributeError, KeyError, TypeError,
     ) as exc:
-        # Canonical failure record for any failure in this stage — LLM failure or
-        # malformed configuration. Shaped by error_utils so the full sanitized scope
-        # (type, message, exception, traceback) is captured, keyed by the configured
-        # analysis name and stamped run metadata. fail_on_error then decides whether to
-        # re-raise or return nonfatally.
-        run_log.append(failure_record_type, record_group=failure_record_group,
-            analysis_name=analysis_name, **build_safe_error_payload(exc),
+        # Canonical failure record. An exception is its own kind of record, so it
+        # is never written under the type a successful interpretation uses.
+        run_log.append(
+            _FAILURE_RECORD_TYPE, record_group=_RECORD_GROUP,
+            analysis_name=LOG_INTERPRETER_ANALYSIS, **build_safe_error_payload(exc),
         )
         result["failures"].append(str(exc))
         result["action"] = "failed"
-        if getattr(analysis, "fail_on_error", False):
-            raise
+        # Finalization runs after the run it describes has finished. A stage that
+        # could not interpret the log must never be the thing that fails it.
         return result
 
-    if destination == "file":
-        write_file(Path(str(output_path)), parsed_result, file_type=output_format)
-        result["action"] = "written_file"
-    else:
-        run_log.append(record_type, record_group=record_group, **parsed_result)
-        result["action"] = "written_stdout"
-
+    run_log.append(
+        _INTERPRETATION_RECORD_TYPE, record_group=_RECORD_GROUP, **parsed_result,
+    )
+    result["action"] = "written_stdout"
     result["result"] = parsed_result
     return result
 
