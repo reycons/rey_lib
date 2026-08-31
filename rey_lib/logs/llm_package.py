@@ -211,6 +211,7 @@ def _build_analysis_package(
 
 def _execute_analysis_package(
     ctx: Any,
+    ai: Any,
     execution_profile: str,
     artifact_type: str,
     package: dict[str, Any],
@@ -228,7 +229,14 @@ def _execute_analysis_package(
     Parameters
     ----------
     ctx : Any
-        A resolved context carrying ``llm_profiles``.
+        Resolved configuration, carrying ``llm_profiles``. Configuration only --
+        the AI is handed in separately, because a context that resolves an
+        installation's settings is not the same thing as that installation's
+        running AI.
+    ai : Any
+        The runtime's one AI, built by bootstrap for the installation currently
+        executing. ``None`` when this runtime configures none, which the caller's
+        failure boundary records.
     execution_profile : str
         Name of the ``llm_profiles`` entry to run the package against. For a No
         Contract run this is the Workbench-selected profile. Empty when ``task``
@@ -276,7 +284,7 @@ def _execute_analysis_package(
             raise AIConfigurationError(
                 f"llm_execution_profile not found: {execution_profile}"
             )
-    raw = _ask(ctx, prompt, execution_profile, payload_id=payload_id, task=task)
+    raw = _ask(ai, prompt, execution_profile, payload_id=payload_id, task=task)
     content, _ = extract_artifact_envelope(raw, artifact_type)
     # The shared policy, not the standard library's: loads_llm_json accepts
     # literal control characters inside strings, protects invalid Markdown
@@ -365,6 +373,9 @@ def run_configured_record_analysis(
     )
     result["result"] = _execute_analysis_package(
         ctx,
+        # This entry point takes a ctx by contract, so the runtime's AI is read
+        # once here at the boundary rather than looked up further down.
+        getattr(ctx, "shared_ai", None),
         str(analysis.llm_execution_profile),
         str(getattr(analysis, "artifact_type", "")),
         package,
@@ -439,7 +450,9 @@ def run_uncontracted_record_analysis(
         )
 
     result["result"] = _ask(
-        ctx, prompt, execution_profile,
+        # A ctx-taking entry point, so the runtime's AI is read once here at the
+        # boundary rather than looked up inside the execution path.
+        getattr(ctx, "shared_ai", None), prompt, execution_profile,
         payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
         task=task,
         structured=structured,
@@ -583,9 +596,10 @@ def run_workbench_input_stream(
 def run_configured_log_analysis(
     run_log: Any,
     *,
+    ai: Any,
     analysis_name: str,
     package_record_type: str,
-    task: str = "",
+    task: str,
 ) -> dict[str, Any]:
     """Run the configured LLM analysis over the existing package record.
 
@@ -595,19 +609,26 @@ def run_configured_log_analysis(
     writer. The embedded contract is never reloaded — only existing rey_lib
     functions are composed.
 
-    ``task`` names what this analysis is for, and is what a caller gives instead
-    of carrying an execution profile. Given one, the runtime's task-aware
-    settings decide which profile answers, so an operator changing that task's
-    settings changes what this stage runs on. Absent, the analysis entry's own
-    ``llm_execution_profile`` still applies, which is what every unmigrated
-    caller keeps doing.
+    ``task`` names what this analysis is for, and it is the only selection this
+    stage makes. The AI resolves request override -> task override -> default
+    from its own settings, so an operator changing that task's settings changes
+    what this stage runs on, and no profile or instruction is named here.
+
+    ``ai`` is the runtime's one AI, belonging to the installation currently
+    executing the run. It is handed in rather than discovered: the context below
+    is rebuilt from the installation this run recorded and resolves the analysis
+    configuration only, which is a different question from which runtime is
+    executing. ``None`` means this runtime configures no AI, and the failure
+    boundary records it.
     """
     import json
 
     from rey_lib.config.config_utils import build_ctx_from_path
     from rey_lib.errors.error_utils import build_safe_error_payload
     from rey_lib.files import write_file
-    from rey_lib.ai.errors import AIConfigurationError, AIProviderError
+    from rey_lib.ai.errors import (
+        AIConfigurationError, AIProviderError, AIUnavailableError,
+    )
     from rey_lib.artifacts import ArtifactEnvelopeError
     from rey_lib.logs.record_enrichment import log_run_record
 
@@ -653,8 +674,14 @@ def run_configured_log_analysis(
     # Safe record identity for the failure record, resolved without dereferencing a
     # possibly malformed output block. When the configured output type cannot be read,
     # the failure is still recorded (never silent) rather than repaired or inferred.
+    #
+    # The type is this stage's, never the configured one. output.record_type names
+    # the successful analysis payload -- LLM_INTERPRETATION here -- and an exception
+    # is a different kind of record. Typing a failure as a success left a reader
+    # unable to tell them apart by record type, which is what four stored
+    # LLM_INTERPRETATION rows carrying an error_message already are.
     output = getattr(analysis, "output", None)
-    failure_record_type = str(getattr(output, "record_type", "") or "LLM_ANALYSIS_FAILURE")
+    failure_record_type = "LLM_ANALYSIS_FAILURE"
     failure_record_group = str(getattr(output, "record_group", "") or "results")
 
     # Every configuration access and validation for this stage lives inside the failure
@@ -680,14 +707,26 @@ def run_configured_log_analysis(
             return result
 
         parsed_result = _execute_analysis_package(
+            # Configuration and runtime, separately. ctx was rebuilt from the
+            # installation this run recorded and resolves the analysis entry; the
+            # AI belongs to the runtime executing the run and is handed in.
             ctx,
-            "" if task else str(analysis.llm_execution_profile),
+            ai,
+            # No profile. This chain always names a task, and the AI resolves
+            # request override -> task override -> default from its own settings.
+            # Naming a profile here would be a second answer to that question.
+            "",
             str(getattr(analysis, "artifact_type", "")),
             package,
             task=task,
         )
     except (
-        AIProviderError, ArtifactEnvelopeError, AIConfigurationError, json.JSONDecodeError,
+        AIProviderError, ArtifactEnvelopeError, AIConfigurationError,
+        # A runtime with no AI is one more way this stage cannot run, not a
+        # reason to fail a run that already finished. It is a sibling of
+        # AIConfigurationError rather than a subclass, so it matched nothing
+        # here and skipped the record below along with fail_on_error.
+        AIUnavailableError, json.JSONDecodeError,
         AttributeError, KeyError, TypeError,
     ) as exc:
         # Canonical failure record for any failure in this stage — LLM failure or
@@ -716,15 +755,18 @@ def run_configured_log_analysis(
 
 
 def _ask(
-    ctx: Any, prompt: str, execution_profile: str, *,
+    ai: Any, prompt: str, execution_profile: str, *,
     payload_id: Any = None, task: str = "", structured: bool = False,
 ) -> Any:
-    """Send one prompt through the runtime's shared AI and answer with its text.
+    """Send one prompt through the runtime's AI and answer with its text.
 
-    The runtime owns the AI: which provider and model answer, how a credential
-    is resolved, how a failed call is retried and whether a replay is legal are
-    all its decisions, taken once at bootstrap. This reads no provider
-    configuration and resolves no credential.
+    The AI is handed in, never discovered. It is the runtime's one AI, built by
+    bootstrap, and it owns which provider and model answer, how a credential is
+    resolved, how a failed call is retried and whether a replay is legal. This
+    reads no provider configuration and resolves no credential.
+
+    ``None`` is an explicit value meaning this runtime configures no AI. It is an
+    ordinary capability state, and the caller's failure boundary records it.
 
     Evaluation evidence is recorded by ``rey_lib.logs`` through the run's
     ``RunLog``, which is why no log path appears here.
@@ -732,7 +774,6 @@ def _ask(
     from rey_lib.ai import AIRequest  # noqa: PLC0415
     from rey_lib.ai.errors import AIUnavailableError  # noqa: PLC0415
 
-    ai = getattr(ctx, "shared_ai", None)
     if ai is None:
         raise AIUnavailableError(
             "This runtime has no AI configured, so an analysis cannot run."

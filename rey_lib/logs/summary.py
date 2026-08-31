@@ -38,8 +38,15 @@ _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 LOG_INTERPRETATION_TASK = "log_interpretation"
 
 
-def finalize_run_log(run_log: Any) -> dict[str, Any]:
+def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     """Run the canonical post-run log processing sequence.
+
+    ``ai`` is the runtime's one AI -- the installation's, built by bootstrap for
+    the run that is executing. It is passed down rather than discovered, because
+    an AI belongs to a runtime and the analysis stage below rebuilds only
+    configuration. ``None`` means this runtime configures none, which the
+    analysis stage records as a failure rather than raising.
+
 
     Order: RESULTS_SUMMARY, then the log_interpreter stage
     (RESULTS_SUMMARY -> LLM_PACKAGE -> LLM_INTERPRETATION). The analysis honors its
@@ -69,7 +76,8 @@ def finalize_run_log(run_log: Any) -> dict[str, Any]:
     # is task policy, and it moved to the runtime's AI settings: the analysis
     # entry still supplies the contract, and the task supplies the engine.
     analysis = run_configured_log_analysis(
-        run_log, analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
+        run_log, ai=ai,
+        analysis_name="log_interpreter", package_record_type="LLM_PACKAGE",
         task=LOG_INTERPRETATION_TASK,
     )
 

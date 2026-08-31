@@ -761,7 +761,10 @@ def _artifact_groups(
         },
         "created_by_role": dict(sorted(created_by_role.items())),
         "important_created": _sort_artifacts(important_created),
-        "inputs": _sort_artifacts(inputs),
+        # Inputs are counted, not listed. A run consuming hundreds of files
+        # produced hundreds of entries that said nothing a reader could act on;
+        # counts.inputs carries the fact, and the per-file evidence stays in the
+        # INPUT_FILE_REFERENCE records that are authoritative for it.
         "failed_or_missing": _sort_artifacts(failed_or_missing),
         "diagnostics": _sort_artifacts(diagnostics),
         "execution_context": _sort_artifacts(execution_context),

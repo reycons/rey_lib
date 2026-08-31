@@ -10,7 +10,7 @@ import pytest
 
 from tests.conftest import make_run_log
 
-from rey_lib.ai.errors import AIProviderError
+from rey_lib.ai.errors import AIProviderError, AIUnavailableError
 from rey_lib.logs import (
     create_llm_package,
     create_results_summary,
@@ -103,14 +103,22 @@ def _pkg(
     )
 
 
+#: Stands in for the runtime's AI. The analysis stage is handed one and never
+#: discovers it, so a test that patches _ask only needs something that is not
+#: None. A test of the no-AI path passes ai=None explicitly.
+_AN_AI = object()
+
+
 def _run(
     log_path: Path,
     analysis_name: str = "log_interpreter",
     package_record_type: str = "LLM_PACKAGE",
+    ai: object = _AN_AI,
+    task: str = "log_interpretation",
 ) -> dict:
     return run_configured_log_analysis(
-        _log(log_path), analysis_name=analysis_name,
-        package_record_type=package_record_type,
+        _log(log_path), ai=ai, analysis_name=analysis_name,
+        package_record_type=package_record_type, task=task,
     )
 
 
@@ -641,14 +649,22 @@ def test_configured_analysis_uses_resolved_log_analysis_entry(tmp_path, monkeypa
         _run(log_path, analysis_name="missing")
 
 
-def test_configured_analysis_uses_execution_profile(tmp_path, monkeypatch) -> None:
+def test_the_configured_analysis_selects_only_its_task(tmp_path, monkeypatch) -> None:
+    """It names what it is asking for, and nothing about how to answer.
+
+    Provider, model and instruction are the AI's, resolved from its own settings
+    as request override -> task override -> default. Naming a profile here would
+    be a second answer to a question the runtime already owns, so this chain
+    names none -- not even the analysis entry's llm_execution_profile.
+    """
     log_path = _package_log(tmp_path, _analysis_config(tmp_path))
     captured: dict = {}
     _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}), capture=captured)
-    _run(log_path)
-    # Provider and model are no longer this module's to choose: it names the
-    # execution profile and the AI runtime resolves the rest.
-    assert captured["execution_profile"] == "local_precision"
+
+    _run(log_path, task="log_interpretation")
+
+    assert captured["task"] == "log_interpretation"
+    assert captured["execution_profile"] == ""
 
 
 def test_configured_analysis_calls_existing_llm_executor(tmp_path, monkeypatch) -> None:
@@ -764,12 +780,19 @@ def test_nonfatal_llm_failure_writes_failure_record(tmp_path, monkeypatch) -> No
     # full error scope shaped by error_utils (type, message, exception, traceback).
     assert after[:len(before)] == before
     failure = after[-1]
-    assert failure["record_type"] == "LLM_INTERPRETATION"
+    # An exception is its own kind of record. output.record_type names the
+    # successful payload, and typing a failure as one left a reader unable to
+    # tell them apart.
+    assert failure["record_type"] == "LLM_ANALYSIS_FAILURE"
     assert failure["record_group"] == "results"
     assert failure["status"] == "failed"
-    assert failure["error_type"] == "AIProviderError"
-    assert failure["error_message"]
-    assert failure["sanitized_traceback"]
+    # error_message carries the whole payload, because that is what the column
+    # is: control.run_log.error_message is jsonb and the detail reader ranks
+    # sanitized_exception, error_message, message and the tracebacks within that
+    # object. Flat siblings have no column and would take the record down.
+    assert failure["error_message"]["error_type"] == "AIProviderError"
+    assert failure["error_message"]["error_message"]
+    assert failure["error_message"]["sanitized_traceback"]
     assert failure["analysis_name"] == "log_interpreter"
 
 
@@ -1007,3 +1030,38 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
     assert capture["on_chunk"] is callback
     assert capture["cancelled"] is cancellation_check
     assert response.raw_text == "complete"
+
+
+def test_a_runtime_without_an_ai_records_the_failure_and_returns(tmp_path) -> None:
+    """No AI is an ordinary capability state, not a failed run.
+
+    The stage runs after the run has finished and fail_on_error is false, so the
+    absence is written down and the caller carries on. AIUnavailableError is a
+    sibling of AIConfigurationError rather than a subclass, so it once matched
+    nothing in the failure boundary and took the run down with it.
+
+    _ask is not patched here: the real one is what refuses when handed None.
+    """
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=False))
+    before = _records(log_path)
+
+    out = _run(log_path, ai=None)
+
+    assert out["action"] == "failed"
+    assert out["result"] is None
+    assert any("no AI configured" in failure for failure in out["failures"])
+    after = _records(log_path)
+    assert after[:len(before)] == before
+    failure = after[-1]
+    assert failure["record_type"] == "LLM_ANALYSIS_FAILURE"
+    assert failure["error_message"]["error_type"] == "AIUnavailableError"
+
+
+def test_a_runtime_without_an_ai_still_reraises_when_configured_to(tmp_path) -> None:
+    """fail_on_error governs a missing AI exactly as it governs any failure."""
+    log_path = _package_log(tmp_path, _analysis_config(tmp_path, fail_on_error=True))
+
+    with pytest.raises(AIUnavailableError):
+        _run(log_path, ai=None)
+
+    assert _records(log_path)[-1]["record_type"] == "LLM_ANALYSIS_FAILURE"

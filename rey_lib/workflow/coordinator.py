@@ -98,7 +98,7 @@ def _finalize_run(ctx: Any, run_log: Any) -> None:
         run_log.path()
     except Exception:  # noqa: BLE001 — nothing durable to finalize.
         return
-    finalize_run_log(run_log)
+    finalize_run_log(run_log, ai=getattr(ctx, "shared_ai", None))
 
 
 def _refused_disabled_workflow(
