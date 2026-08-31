@@ -248,18 +248,34 @@ def open_shared_control(ctx: Namespace) -> Namespace:
     Idempotent, so a runtime already carrying one is left alone rather than
     opening a second and orphaning the first.
 
+    **Absence is an ordinary state, exactly as it is for the AI.** Not every
+    installation configures a control database -- the Console's own does not --
+    and a runtime without one is not broken. Opening it here must not decide
+    that: a context that names no control map is left carrying ``None``, and a
+    consumer that genuinely needs one still refuses at the point of use, with
+    the message that names what is missing. Raising here instead turned a
+    per-route refusal into a session that could not be built at all, so an
+    installation without control could do nothing whatever.
+
     Returns
     -------
     Namespace
-        The same context, now carrying ``shared_control``.
+        The same context, now carrying ``shared_control`` -- ``None`` when this
+        installation configures no control database.
 
     Raises
     ------
     ConfigError
-        When this installation configures no control database.
+        When control is configured and one could not be built.
     """
-    if getattr(ctx, "shared_control", None) is None:
-        ctx.shared_control = _open_control(ctx)
+    if getattr(ctx, "shared_control", None) is not None:
+        return ctx
+    # The same test Control makes before it does anything: no named routine
+    # contract means this installation has not asked for a control database.
+    if not getattr(getattr(ctx, "control", None), "procedure_map", None):
+        ctx.shared_control = None
+        return ctx
+    ctx.shared_control = _open_control(ctx)
     return ctx
 
 
