@@ -47,6 +47,16 @@ from rey_lib.runtime import collect_runtime, register_runtime_object
 #: The id of the ad-hoc text instruction every runtime offers.
 AD_HOC_INSTRUCTION = "__ad_hoc__"
 
+#: The id of the "send no instruction" choice every runtime offers.
+#:
+#: Reserved for the same reason the ad-hoc id is: it is a canonical choice that
+#: is not a contract, so it needs a name of its own. It carried the empty string
+#: until 2026-09-01, which a task already spends on "inherit the default" -- so
+#: "send nothing" and "use whatever the default says" were one value and a task
+#: could only express the second. A package that supplies its own instruction
+#: needs the first.
+NO_INSTRUCTION = "__none__"
+
 __all__ = [
     "app_runtime", "build_ctx_for_app", "open_shared_ai", "open_shared_control",
 ]
@@ -421,7 +431,7 @@ def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
     from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 
     offered: list[Any] = [
-        AIInstruction(id="", kind=AIInstructionKind.NONE, name="None"),
+        AIInstruction(id=NO_INSTRUCTION, kind=AIInstructionKind.NONE, name="None"),
         AIInstruction(id=AD_HOC_INSTRUCTION, kind=AIInstructionKind.RAW,
                       name="Ad hoc text"),
     ]
