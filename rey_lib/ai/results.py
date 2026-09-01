@@ -59,21 +59,37 @@ class AIOutput:
     introduced has been removed, so ``value`` is the caller's own payload and
     ``text`` is the caller's own text. ``media_type`` carries the representation
     the contract asked for, so a Markdown contract answers Markdown.
+
+    ``html`` is the one canonical derived representation, and it exists so a
+    consumer never converts an AI result for itself. A Markdown answer rendered
+    separately by a viewer and by an email is the same answer rendered twice,
+    and the two can disagree; ``OutputNormalizer`` prepares it once, from the
+    representation the contract asked for.
+
+    Derived, never a second result. ``text`` and ``value`` remain the requested
+    result, and a media type with no defined rendering carries no ``html``
+    rather than an invented one.
     """
 
     form: AIOutputForm = AIOutputForm.TEXT
     text: str = ""
     value: Any = None
     media_type: str = ""
+    html: str = ""
 
     @staticmethod
-    def of_text(value: str, media_type: str = "") -> "AIOutput":
-        return AIOutput(form=AIOutputForm.TEXT, text=value, media_type=media_type)
-
-    @staticmethod
-    def of_value(value: Any, text: str = "", media_type: str = "") -> "AIOutput":
+    def of_text(value: str, media_type: str = "", html: str = "") -> "AIOutput":
         return AIOutput(
-            form=AIOutputForm.STRUCTURED, text=text, value=value, media_type=media_type,
+            form=AIOutputForm.TEXT, text=value, media_type=media_type, html=html,
+        )
+
+    @staticmethod
+    def of_value(
+        value: Any, text: str = "", media_type: str = "", html: str = "",
+    ) -> "AIOutput":
+        return AIOutput(
+            form=AIOutputForm.STRUCTURED, text=text, value=value,
+            media_type=media_type, html=html,
         )
 
 
@@ -218,3 +234,13 @@ class AIResult:
     def media_type(self) -> str:
         """The representation the output contract asked for, if it named one."""
         return self.output.media_type
+
+    @property
+    def html(self) -> str:
+        """The canonical rendered representation, where the result has one.
+
+        Empty when the requested representation defines no rendering. A consumer
+        reads this rather than converting: the conversion happened once, in the
+        one place holding the contract that asked for it.
+        """
+        return self.output.html

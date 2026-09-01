@@ -611,3 +611,69 @@ def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
             llm=[Namespace(name="x", provider="no-such-adapter", model="m")],
             env=[],
         ))
+
+
+# -- the canonical derived representation ----------------------------------
+
+def test_markdown_output_carries_its_rendering_and_keeps_its_source() -> None:
+    """The AI prepares the rendering once, and the source stays the result."""
+    from rey_lib.ai.requests import AIOutputSpec
+    from rey_lib.ai.results import AIOutput
+
+    ai = runtime()
+    request = ai.resolve(AIRequest.prompt("hi", output=AIOutputSpec.markdown()))
+
+    normalized = OutputNormalizer().normalize(
+        request, AIOutput.of_text("# Title\n\ntext"),
+    )
+
+    assert normalized.media_type == "text/markdown"
+    assert normalized.text == "# Title\n\ntext"
+    assert "<h1>Title</h1>" in normalized.html
+
+
+def test_a_markdown_table_renders_as_a_table() -> None:
+    """Contracts ask for tables, so the one renderer produces them.
+
+    CommonMark has no tables -- they are a GFM extension -- so a table came
+    back as a paragraph of pipe characters wherever Markdown was rendered.
+    """
+    from rey_lib.ai.requests import AIOutputSpec
+    from rey_lib.ai.results import AIOutput
+
+    ai = runtime()
+    request = ai.resolve(AIRequest.prompt("hi", output=AIOutputSpec.markdown()))
+    table = "| Field | Value |\n|---|---|\n| Run | 330 |\n"
+
+    normalized = OutputNormalizer().normalize(request, AIOutput.of_text(table))
+
+    assert "<table>" in normalized.html
+    assert "<td>330</td>" in normalized.html
+
+
+def test_html_output_is_its_own_rendering() -> None:
+    """Already rendered, so it is carried rather than converted again."""
+    from rey_lib.ai.requests import AIOutputSpec
+    from rey_lib.ai.results import AIOutput
+
+    ai = runtime()
+    request = ai.resolve(AIRequest.prompt("hi", output=AIOutputSpec.text("text/html")))
+
+    normalized = OutputNormalizer().normalize(request, AIOutput.of_text("<p>hi</p>"))
+
+    assert normalized.html == "<p>hi</p>"
+
+
+@pytest.mark.parametrize("media_type", ["", "text/yaml", "application/json", "text/plain"])
+def test_a_representation_with_no_defined_rendering_gains_none(media_type: str) -> None:
+    """No invented presentation: source and value only."""
+    from rey_lib.ai.requests import AIOutputSpec
+    from rey_lib.ai.results import AIOutput
+
+    ai = runtime()
+    request = ai.resolve(AIRequest.prompt("hi", output=AIOutputSpec.text(media_type)))
+
+    normalized = OutputNormalizer().normalize(request, AIOutput.of_text("a: 1"))
+
+    assert normalized.html == ""
+    assert normalized.text == "a: 1"

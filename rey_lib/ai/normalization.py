@@ -22,6 +22,12 @@ Three mechanisms, deliberately not one:
     normalization   what the caller finally receives
 
 None implies ownership of the others. This module is the third only.
+
+What the caller receives includes the canonical rendering of the requested
+representation, prepared here because this is where the contract that asked for
+it is still in hand. A consumer that rendered an AI result itself would be the
+second place deciding what the answer looks like, and two consumers rendering
+the same Markdown can disagree.
 """
 
 from __future__ import annotations
@@ -63,14 +69,41 @@ class OutputNormalizer:
         """
         value = self._unwrapped(request, output.value)
         media_type = request.output.media_type or output.media_type
+        html = self._rendered(media_type, output.text)
 
-        if output.value is value and media_type == output.media_type:
+        if (output.value is value and media_type == output.media_type
+                and html == output.html):
             return output
         if output.form is AIOutput().form and value is None:
-            return AIOutput.of_text(output.text, media_type=media_type)
+            return AIOutput.of_text(output.text, media_type=media_type, html=html)
         if value is None:
-            return AIOutput.of_text(output.text, media_type=media_type)
-        return AIOutput.of_value(value, text=output.text, media_type=media_type)
+            return AIOutput.of_text(output.text, media_type=media_type, html=html)
+        return AIOutput.of_value(
+            value, text=output.text, media_type=media_type, html=html,
+        )
+
+    @staticmethod
+    def _rendered(media_type: str, text: str) -> str:
+        """The canonical rendering of one representation, or nothing.
+
+        Only representations with a defined rendering acquire one. Markdown is
+        converted through the estate's single shared converter, so tables and
+        every other supported construct behave the same here as anywhere else.
+        HTML is already its own rendering and is carried unchanged.
+
+        Everything else -- YAML, JSON, SQL, Python, plain text -- keeps its
+        source and gains nothing. Inventing a rendering for them would be this
+        layer deciding a presentation no contract asked for.
+        """
+        if not text:
+            return ""
+        if media_type == "text/markdown":
+            from rey_lib.formatting import markdown_to_html
+
+            return markdown_to_html(text)
+        if media_type == "text/html":
+            return text
+        return ""
 
     @staticmethod
     def _unwrapped(request: ResolvedAIRequest, value: Any) -> Any:

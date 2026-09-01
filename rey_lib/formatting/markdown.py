@@ -6,7 +6,16 @@ from markdown_it import MarkdownIt
 
 __all__ = ["markdown_to_html"]
 
-_MARKDOWN = MarkdownIt("commonmark", {"html": False})
+# CommonMark plus tables. Tables are a GFM extension and not part of CommonMark,
+# so a table came through as a paragraph of pipe characters -- and contracts that
+# ask for Markdown ask for tables. Enabled here rather than at a consumer,
+# because this is the estate's one Markdown renderer and a dialect that varies by
+# caller is two dialects.
+#
+# html stays False. A contract that forbids raw HTML in its Markdown is not
+# weakened by rendering tables, and passing model-supplied HTML through is a
+# different decision that nothing has asked for.
+_MARKDOWN = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 
 def markdown_to_html(markdown_text: str) -> str:
