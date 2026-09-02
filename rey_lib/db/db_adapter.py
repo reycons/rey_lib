@@ -466,6 +466,50 @@ class DBAdapter:
         """Return normalized functions, optionally restricted to one schema."""
         return self._list_routines(conn, "functions", schema)
 
+    def get_schema_metadata(self, conn: Any, schema: str) -> dict[str, Any]:
+        """Return one schema's relations, each with what it is made of.
+
+        The provider's own bulk schema read: every table with its columns,
+        primary key, foreign keys, indexes and unique constraints, and every
+        view with its definition, in one pass rather than a read per relation.
+
+        Args:
+            conn: Open connection.
+            schema: The schema to read.
+
+        Returns:
+            ``{"schemas": [...], "tables": [...], "views": [...]}`` as the
+            inspection layer assembled it.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: When the provider answers about
+                no columns, which is what makes a relation describable.
+        """
+        self._require_metadata_capability(conn, "columns")
+        from rey_lib.db._sqlalchemy import inspect_schema
+
+        return inspect_schema(conn, schema)
+
+    def get_object_ddl(self, conn: Any, obj: dict[str, Any]) -> str:
+        """Return one database object's provider-native DDL.
+
+        The same definition the DDL export writes to a file, for one object and
+        returned rather than written. Which SQL that is belongs to the provider;
+        nothing here composes any of it.
+
+        Args:
+            conn: Open connection.
+            obj: ``object_type``, ``schema`` and ``name``.
+
+        Raises:
+            ConfigError: When the provider writes no object DDL.
+        """
+        provider = self._provider_for_conn(conn)
+        backend = _backend(provider)
+        if not hasattr(backend, "get_object_ddl"):
+            raise ConfigError(f"Provider '{provider}' is missing get_object_ddl().")
+        return str(backend.get_object_ddl(conn, obj))
+
     def get_procedure_definition(self, conn: Any, identity: dict[str, Any]) -> str:
         """Return one procedure's provider-native definition SQL."""
         return self._routine_definition(conn, "procedures", identity)
