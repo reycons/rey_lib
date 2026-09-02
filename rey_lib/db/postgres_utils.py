@@ -989,6 +989,48 @@ def _postgres_dependencies(
         cursor.close()
 
 
+def get_column_ddl(conn: Any, schema: str, table: str, column: str) -> str:
+    """Return the definition of one column, as it appears in its table.
+
+    A fragment and not a statement: a column has no standalone CREATE, and
+    pretending otherwise would hand a caller SQL that does not run. What comes
+    back is the same line ``_postgres_table_ddl`` writes for this column, read
+    from the same catalog -- name, ``format_type`` of the resolved type, any
+    default, and whether it is nullable.
+
+    Returns an empty string when the column does not exist, which is what a
+    caller asking about a dropped column should get rather than an error.
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT
+                a.attname,
+                format_type(a.atttypid, a.atttypmod),
+                a.attnotnull,
+                pg_get_expr(ad.adbin, ad.adrelid)
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+            """,
+            [schema, table, column],
+        )
+        row = cursor.fetchone()
+    finally:
+        cursor.close()
+
+    if not row:
+        return ""
+    default = f" DEFAULT {row[3]}" if row[3] is not None else ""
+    nullable = "NOT NULL" if bool(row[2]) else "NULL"
+    return f'"{row[0]}" {row[1]}{default} {nullable}'
+
+
 def _postgres_table_ddl(conn: Any, schema: str, table: str) -> str:
     """Build CREATE TABLE DDL from the catalog for base tables.
 
