@@ -944,7 +944,8 @@ class Control:
                              deleted_ts: Optional[str] = None,
                                    producer: Optional[dict[str, Any]] = None,
                              conversion: Optional[dict[str, Any]] = None,
-                             result: Optional[dict[str, Any]] = None,
+                             # Text: the reason, as the column holds it.
+                             result: Optional[str] = None,
                              rollback: Optional[dict[str, Any]] = None,
                              classification: Optional[dict[str, Any]] = None,
                              clear_profile: Optional[dict[str, Any]] = None,

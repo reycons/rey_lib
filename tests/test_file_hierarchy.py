@@ -396,17 +396,6 @@ def test_a_file_without_a_classified_feed_is_not_grouped_under_a_feed(
     assert stages["current_path"] == "/processing/a.csv"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Blocked by a defect in rey_lib.logs.file_manifest._mutation_record: it "
-    "projects `result` through _as_mapping, but control.file_mutation.result is "
-    "a varchar holding the reason. So the field is dropped from every mutation "
-    "record, _mutation_stage never finds a _MUTATION_PRESENTATION entry, and "
-    "every artifact is labelled with the generic lifecycle verb this test "
-    "exists to prevent. The presenter is right -- console_next's "
-    "file_manifest_tvw reads the same column as text. This test also seeds the "
-    "superseded dict shape and needs its `result=` values flattened to strings "
-    "when the projection is fixed."
-))
 def test_created_artifacts_are_labelled_for_what_they_are(store) -> None:
     """A node names the artifact it opens, never a generic lifecycle verb."""
     file_id = store.inventory("file-a", "feed_inbox", "a.xls", "/in/a.xls")
@@ -415,11 +404,14 @@ def test_created_artifacts_are_labelled_for_what_they_are(store) -> None:
     store.manifest.append_mutation(
         file_id, record_type="source_file_mutation", action="create",
         status="success", path="/work/converted/a.csv",
+        # The conversion block is evidence about how it ran; the reason is what
+        # names the stage.
+        result="converted_csv",
         conversion={"operator": "excel_conversion", "name": "all"})
     store.manifest.append_mutation(
         file_id, record_type="source_file_mutation", action="create",
         status="success", path="/work/sanitized/a.csv",
-        result={"reason": "file_sanitization"})
+        result="sanitized_file")
     for path, reason in (
         ("/work/prepared/a.csv", "prepared_file"),
         ("/work/kickouts/a.kickouts.jsonl", "kickout_file"),
@@ -430,8 +422,7 @@ def test_created_artifacts_are_labelled_for_what_they_are(store) -> None:
     ):
         store.manifest.append_mutation(
             file_id, record_type="source_file_mutation", action="create",
-            status="success", path=path,
-            result={"reason_code": "create_prepared_files", "reason": reason})
+            status="success", path=path, result=reason)
 
     stages = build_file_hierarchy_stages(store.ctx, file_id).to_payload()["stages"]
     named = {stage["stage_type"]: stage["label"] for stage in stages}

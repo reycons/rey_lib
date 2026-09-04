@@ -455,10 +455,17 @@ def _mutation_record(row: dict[str, Any]) -> dict[str, Any]:
         # looking for a separate rollback record, because there is not one.
         "rollback_complete_in": row.get("rollback_complete_in") or 0,
     }
-    for key in ("producer", "conversion", "result", "rollback"):
+    for key in ("producer", "conversion", "rollback"):
         value = _as_mapping(row.get(key))
         if value:
             record[key] = value
+    # The reason the mutation records, as text. `control.file_mutation.result`
+    # is a varchar and the writers emit the reason itself, so this is carried
+    # rather than parsed: read as a mapping it was dropped from every record,
+    # and the presentation keyed by it never matched.
+    result = row.get("result")
+    if result:
+        record["result"] = str(result)
     # What a classification event recorded. base_path sits beside values rather
     # than inside them: values say what the file was classified as, base_path
     # says where that classification's lifecycle is rooted, and a destination

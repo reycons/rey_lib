@@ -118,7 +118,8 @@ class FileManifest:
         path: str = "",
         producer: Optional[dict[str, Any]] = None,
         conversion: Optional[dict[str, Any]] = None,
-        result: Optional[dict[str, Any]] = None,
+        # The reason this mutation records -- text, as the column holds it.
+        result: Optional[str] = None,
         rollback: Optional[dict[str, Any]] = None,
         deleted_in: Optional[int] = None,
         deleted_ts: Optional[str] = None,
