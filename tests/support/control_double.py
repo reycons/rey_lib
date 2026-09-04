@@ -15,7 +15,9 @@ have stored, with the same semantics the routines have:
   the governed file's ``file_id``
 - recording a file writes its baseline mutation in the same operation
 - an update changes only the fields it names
-- classification is state on the file, never a record beside it
+- classification is an event, not manifest state: it is a
+  ``source_file_classification`` mutation, and the file row has no
+  classification column because ``control.file_manifest`` has none
 - a rollback request marks only untouched rows and never reopens a completed
   one; a completion transitions exactly one pending row
 
@@ -53,7 +55,6 @@ class ControlDouble:
                        recorded_at: Optional[str] = None,
                        evidence: Optional[dict[str, Any]] = None,
                        producer: Optional[dict[str, Any]] = None,
-                       classification: Optional[dict[str, Any]] = None,
                        required: bool = True) -> int:
         """Record a governed file and its baseline mutation, as one operation."""
         file_manifest_id = self._next_file
@@ -70,7 +71,6 @@ class ControlDouble:
             "recorded_at": recorded_at,
             "evidence": evidence,
             "producer": producer,
-            "classification": classification,
         })
         # A file never exists without the record of where it was discovered.
         self._append(
@@ -82,14 +82,23 @@ class ControlDouble:
         )
         return file_manifest_id
 
+    #: The columns ``control.update_file_manifest`` writes. Anything else a
+    #: caller names is dropped, as the routine drops it -- which is what makes
+    #: a call the database would ignore visible here rather than silently
+    #: effective.
+    UPDATABLE_FILE_COLUMNS = (
+        "path", "file_name", "base_name", "file_extension",
+        "checksum_sha256", "size_bytes", "source_name", "evidence", "producer",
+    )
+
     def update_file_manifest(self, file_manifest_id: int,
                              required: bool = True, **fields: Any) -> None:
-        """Change only what is named; anything absent keeps its value."""
+        """Change only what is named, and only what the routine can change."""
         row = self._file(file_manifest_id)
         if row is None:
             return
         for name, value in fields.items():
-            if value is not None:
+            if value is not None and name in self.UPDATABLE_FILE_COLUMNS:
                 row[name] = value
 
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
@@ -97,17 +106,6 @@ class ControlDouble:
                              **fields: Any) -> int:
         return self._append(file_manifest_id, record_type=record_type,
                             action=action, **fields)
-
-    def clear_file_classifications(self, file_manifest_ids: list[int],
-                                   required: bool = True) -> int:
-        """Clear the whole matched set, returning how many actually changed."""
-        wanted = set(file_manifest_ids or [])
-        cleared = 0
-        for row in self.files:
-            if row["file_manifest_id"] in wanted and row.get("classification"):
-                row["classification"] = None
-                cleared += 1
-        return cleared
 
     # -- reading -------------------------------------------------------------
 
@@ -244,6 +242,10 @@ class ControlDouble:
             "status": None, "deleted_in": None, "deleted_ts": None,
             "created_ts": None, "producer": None, "conversion": None,
             "result": None, "rollback": None,
+            # Where a classification event records what the file is, and where
+            # that classification's lifecycle is rooted. Columns on
+            # control.file_mutation, because classifying is an event.
+            "classification": None, "base_path": None,
             "clear_profile": None, "redacted_profile": None,
             "batch_step_id": self.batch_step_id,
             "rollback_request_in": 0, "rollback_complete_in": 0,

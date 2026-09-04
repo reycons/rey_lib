@@ -72,6 +72,18 @@ def make_run_log(
     )
 
 
+#: The columns ``control.update_file_manifest`` writes.
+#:
+#: The routine names these and drops anything else, so a caller handing it a
+#: field the table has no column for -- ``classification``, which is an event
+#: rather than manifest state -- changes nothing. Mirrored here so a call the
+#: database would ignore is ignored in a test too.
+_UPDATABLE_FILE_COLUMNS = (
+    "path", "file_name", "base_name", "file_extension",
+    "checksum_sha256", "size_bytes", "source_name", "evidence", "producer",
+)
+
+
 class MintingControl:
     """A Control that mints run_log_ids the way the control database does.
 
@@ -140,7 +152,6 @@ class ControlDouble(MintingControl):
                        file_extension: str, checksum_sha256: str,
                        size_bytes: int, source_name: Any = None,
                        evidence: Any = None, producer: Any = None,
-                       classification: Any = None,
                        required: bool = True) -> int:
         file_manifest_id = len(self.files) + 1
         self.files[file_manifest_id] = {
@@ -149,15 +160,19 @@ class ControlDouble(MintingControl):
             "file_extension": file_extension,
             "checksum_sha256": checksum_sha256, "size_bytes": size_bytes,
             "source_name": source_name, "evidence": evidence,
-            "producer": producer, "classification": classification,
+            "producer": producer,
         }
         return file_manifest_id
 
     def update_file_manifest(self, file_manifest_id: int, required: bool = True,
                              **fields: Any) -> None:
+        """Change only what the routine can change; anything else is dropped."""
         row = self.files.get(int(file_manifest_id))
         if row is not None:
-            row.update({k: v for k, v in fields.items() if v is not None})
+            row.update({
+                key: value for key, value in fields.items()
+                if value is not None and key in _UPDATABLE_FILE_COLUMNS
+            })
 
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
                              action: str, status: Any = None,
@@ -177,16 +192,6 @@ class ControlDouble(MintingControl):
         if path:
             self.update_file_manifest(file_manifest_id, path=path)
         return file_mutation_id
-
-    def clear_file_classifications(self, file_manifest_ids: list[int],
-                                   required: bool = True) -> int:
-        cleared = 0
-        for file_manifest_id in file_manifest_ids or []:
-            row = self.files.get(int(file_manifest_id))
-            if row and row.get("classification") is not None:
-                row["classification"] = None
-                cleared += 1
-        return cleared
 
     # -- reads --------------------------------------------------------------
 
@@ -238,7 +243,12 @@ class ControlDouble(MintingControl):
             file_row = self.files[file_manifest_id]
             if wanted and str(file_row.get("file_extension") or "").lower() not in wanted:
                 continue
-            is_classified = file_row.get("classification") is not None
+            # Classification is an event, so being classified is a question
+            # about this file's history rather than a column on its row.
+            is_classified = any(
+                mutation.get("record_type") == "source_file_classification"
+                for mutation in self.list_file_mutations(file_manifest_id)
+            )
             if classified is not None and is_classified != classified:
                 continue
             history = [m for m in self.list_file_mutations(file_manifest_id)

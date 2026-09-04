@@ -26,27 +26,6 @@ from rey_lib.logs.file_hierarchy import (
 from tests.support.control_double import control_backed_ctx
 
 
-#: Every hierarchy question that depends on a file's classified feed.
-#:
-#: Blocked by a defect in rey_lib.logs.file_manifest._inventory_record: it
-#: projects a file_manifest row into a canonical inventory record and does not
-#: carry `classification`. _classified_feeds reads that field off the inventory
-#: record, so it finds none, every file belongs to no feed, and
-#: build_file_hierarchy returns an empty page for a manifest that is fully
-#: classified.
-#:
-#: The field is there to carry: control.file_vw reports the current
-#: classification on the file row, and console_next's file_manifest_tvw reads
-#: `classification->'values'->>'feed'` from it to build the same tree in SQL.
-#: One line of projection, and these tests are correct as written -- proved by
-#: re-running them with the field carried through, which turns all ten green.
-NEEDS_CLASSIFICATION = pytest.mark.xfail(strict=True, reason=(
-    "rey_lib.logs.file_manifest._inventory_record drops `classification`, so "
-    "_classified_feeds finds no feed for any file and the hierarchy is empty. "
-    "The file row carries it; the projection does not pass it on."
-))
-
-
 class _Store:
     """A governed manifest seeded through the real FileManifest.
 
@@ -70,13 +49,39 @@ class _Store:
         )
         return self.ids[name]
 
-    def classify(self, name: str, feed: str) -> None:
-        """Classification is state on the file, not a record beside it."""
-        self.manifest.update(self.ids[name], classification={
-            "type": "file_name_regex",
-            "source_field": "file.file_name",
-            "values": {"feed": feed},
-        })
+    def classify(self, name: str, feed: str) -> int:
+        """Classify a file, which is an event in its history.
+
+        Classifying is something that happens to a file, so it is appended as a
+        ``source_file_classification`` mutation. It is not written to the file's
+        own row: ``control.file_manifest`` has no classification column, and
+        ``control.update_file_manifest`` would drop the field.
+
+        Reclassifying appends another event rather than replacing this one; the
+        later event is what counts as current.
+
+        Args:
+            name: The seeded file, by the name this store knows it under.
+            feed: The feed the classification declares.
+
+        Returns:
+            The mutation's own generated identity.
+        """
+        return self.manifest.append_mutation(
+            self.ids[name],
+            record_type="source_file_classification",
+            action="classify",
+            status="success",
+            # A classification says what the file *is*; the move that follows
+            # says where it went. So it records no path.
+            path="",
+            result="classified",
+            classification={
+                "type": "file_name_regex",
+                "source_field": "file.file_name",
+                "values": {"feed": feed},
+            },
+        )
 
     def mutate(self, name: str, action: str, *, path: str,
                status: str = "success", file_id: int | None = None) -> int:
@@ -124,7 +129,6 @@ def test_library_has_only_canonical_shared_data_dependencies() -> None:
     )
 
 
-@NEEDS_CLASSIFICATION
 def test_only_inventory_records_create_files_and_group_by_classified_feed(
     store,
 ) -> None:
@@ -146,7 +150,6 @@ def test_only_inventory_records_create_files_and_group_by_classified_feed(
     ]
 
 
-@NEEDS_CLASSIFICATION
 def test_mutations_join_only_by_exact_file_id_not_name_or_path(store) -> None:
     """Identity joins a mutation to its file. A shared path does not."""
     governed = store.inventory("governed-a", "feed", "same.csv", "/in/same.csv")
@@ -165,7 +168,6 @@ def test_mutations_join_only_by_exact_file_id_not_name_or_path(store) -> None:
     assert other != governed
 
 
-@NEEDS_CLASSIFICATION
 def test_generated_identity_controls_file_and_mutation_order(store) -> None:
     """Order follows generated identity, which is the order things happened."""
     store.inventory("file-a", "feed", "a.csv", "/in/a.csv")
@@ -186,7 +188,6 @@ def test_generated_identity_controls_file_and_mutation_order(store) -> None:
     ]
 
 
-@NEEDS_CLASSIFICATION
 def test_page_is_bounded_and_model_is_immutable(store) -> None:
     """Paging is bounded and what a page hands back cannot be edited."""
     for index in range(1, 302):
@@ -208,7 +209,6 @@ def test_page_is_bounded_and_model_is_immutable(store) -> None:
         files(first)[0].metadata["changed"] = True  # type: ignore[index]
 
 
-@NEEDS_CLASSIFICATION
 def test_payload_preserves_supplied_governed_values(store) -> None:
     """The payload carries the stored record, not a rebuilt summary of it."""
     file_id = store.inventory("file-a", "Feed A", "a.csv", "/in/a.csv")
@@ -225,7 +225,6 @@ def test_payload_preserves_supplied_governed_values(store) -> None:
     assert file_payload["mutations"][0]["metadata"]["action"] == "create"
 
 
-@NEEDS_CLASSIFICATION
 def test_phase_two_queries_lazy_load_feed_files_and_exact_file_stages(store) -> None:
     """Feeds, then that feed's files, then one file's stages -- three queries."""
     file_id = store.inventory("file-a", "Feed A", "a.csv", "/in/a.csv")
@@ -251,7 +250,6 @@ def test_phase_two_queries_lazy_load_feed_files_and_exact_file_stages(store) -> 
     ]
 
 
-@NEEDS_CLASSIFICATION
 def test_create_never_replaces_primary_current_path(store) -> None:
     """A created artifact is its own node; it does not move the governed file."""
     file_id = store.inventory("file-a", "feed", "a.xlsx", "/in/a.xlsx")
@@ -324,7 +322,6 @@ def test_profiles_join_only_by_exact_governed_file_id(store) -> None:
             profile_artifacts=({**profile, "source_file_id": file_id + 1},))
 
 
-@NEEDS_CLASSIFICATION
 def test_configured_inventory_source_name_is_never_a_feed(store) -> None:
     """`feed_inbox` is discovery configuration, not governed feed identity."""
     store.inventory("file-a", "feed_inbox", "CWATranMay26.xls",
@@ -342,7 +339,6 @@ def test_configured_inventory_source_name_is_never_a_feed(store) -> None:
     assert "feed_inbox" not in summaries
 
 
-@NEEDS_CLASSIFICATION
 def test_records_from_different_feeds_group_under_separate_feed_nodes(store) -> None:
     """One shared inventory source still yields one node per classified feed."""
     store.inventory("file-a", "feed_inbox", "CWATranMay26.xls", "/in/a.xls")
@@ -366,7 +362,6 @@ def test_records_from_different_feeds_group_under_separate_feed_nodes(store) -> 
     ]
 
 
-@NEEDS_CLASSIFICATION
 def test_file_lifecycle_children_are_unchanged_by_feed_grouping(store) -> None:
     """Grouping changed; the file's lifecycle stages still read in order."""
     file_id = store.inventory("file-a", "feed_inbox", "CWATranMay26.xls",

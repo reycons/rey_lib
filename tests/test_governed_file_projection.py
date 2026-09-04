@@ -16,18 +16,6 @@ from rey_lib.logs.file_manifest import read_records_from_control
 from tests.support.control_double import control_backed_ctx
 
 
-#: The same defect the file-hierarchy suite is blocked on.
-#:
-#: rey_lib.logs.file_manifest._inventory_record does not carry `classification`
-#: into the inventory record, so _classified_feeds finds no feed and
-#: build_file_hierarchy returns an empty page. Both of these read the built
-#: hierarchy, so both see nothing to assert against.
-NEEDS_CLASSIFICATION = pytest.mark.xfail(strict=True, reason=(
-    "rey_lib.logs.file_manifest._inventory_record drops `classification`, so "
-    "the built hierarchy is empty and there is no projected file to assert on."
-))
-
-
 @pytest.fixture()
 def seeded():
     """One governed file, classified, with one mutation beneath it."""
@@ -38,10 +26,18 @@ def seeded():
         file_extension="csv", checksum_sha256="sha-a", size_bytes=1,
         source_name="feed",
     )
-    manifest.update(file_id, classification={
-        "type": "file_name_regex", "source_field": "file.file_name",
-        "values": {"feed": "feed"},
-    })
+    # Classification is an event in the file's history, not a field on its
+    # row: control.file_manifest has no such column and update_file_manifest
+    # would drop it.
+    manifest.append_mutation(
+        file_id,
+        record_type="source_file_classification",
+        action="classify", status="success", path="", result="classified",
+        classification={
+            "type": "file_name_regex", "source_field": "file.file_name",
+            "values": {"feed": "feed"},
+        },
+    )
     mutation_id = manifest.append_mutation(
         file_id, record_type="source_file_mutation", action="move",
         status="success", path="/work/a.csv",
@@ -49,7 +45,6 @@ def seeded():
     return ctx, manifest, file_id, mutation_id
 
 
-@NEEDS_CLASSIFICATION
 def test_a_governed_identity_is_an_integer(seeded) -> None:
     """The identity is the generated key, carried as itself.
 
@@ -65,7 +60,6 @@ def test_a_governed_identity_is_an_integer(seeded) -> None:
     assert isinstance(files[0].file_id, int)
 
 
-@NEEDS_CLASSIFICATION
 def test_a_file_and_a_mutation_may_share_a_number(seeded) -> None:
     """Identity is unique within its kind, not across kinds.
 
@@ -81,11 +75,20 @@ def test_a_file_and_a_mutation_may_share_a_number(seeded) -> None:
         file_extension="csv", checksum_sha256="sha-b", size_bytes=1,
         source_name="feed",
     )
-    manifest.update(second_file, classification={
-        "type": "file_name_regex", "source_field": "file.file_name",
-        "values": {"feed": "feed"},
-    })
-    assert second_file == move_id, "the fixture must actually collide"
+    manifest.append_mutation(
+        second_file,
+        record_type="source_file_classification",
+        action="classify", status="success", path="", result="classified",
+        classification={
+            "type": "file_name_regex", "source_field": "file.file_name",
+            "values": {"feed": "feed"},
+        },
+    )
+    # Some mutation already holds this number. Which one is not the point and
+    # is not pinned: the sequences are independent, so what matters is that a
+    # file id and a mutation id have met.
+    mutation_ids = {row["file_mutation_id"] for row in manifest.all_mutations()}
+    assert second_file in mutation_ids, "the fixture must actually collide"
 
     records = read_records_from_control(ctx)
     kinds = {(record["record_type"], record["record_id"]) for record in records}
@@ -126,7 +129,12 @@ class TestTheBaselineIsRecordedOnce:
 
         history = manifest.history(file_id)
 
+        # The baseline, then the classification event, then the move. Being
+        # classified is something that happened to the file, so it is in the
+        # history beside everything else that happened to it.
         assert [row["record_type"] for row in history] == [
-            "source_file_inventory", "source_file_mutation",
+            "source_file_inventory",
+            "source_file_classification",
+            "source_file_mutation",
         ]
         assert history[0]["action"] == "record_only"

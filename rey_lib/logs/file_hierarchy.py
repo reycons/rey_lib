@@ -31,6 +31,10 @@ __all__ = [
 
 _INVENTORY = "source_file_inventory"
 _MUTATION = "source_file_mutation"
+#: The lifecycle event that says what a file is. Classification is history
+#: rather than manifest state, so a feed is read from these and never from the
+#: file's own record.
+_CLASSIFICATION = "source_file_classification"
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 250
 _MAX_STAGE_LIMIT = 500
@@ -306,28 +310,57 @@ def _mutation_node(record: Mapping[str, Any]) -> FileHierarchyMutation:
 
 
 def _classified_feeds(records: list[Mapping[str, Any]]) -> dict[str, str]:
-    """Map each governed file to the feed its classification record declares.
+    """Map each governed file to the feed its current classification declares.
+
+    Classification is an event, not manifest state: it is recorded as a
+    ``source_file_classification`` mutation, and reclassifying appends another
+    rather than overwriting the first. Both are kept, and the later one is what
+    ``control.file_vw`` reports as current -- so this reads the classification
+    events and takes the last one per file.
 
     Feed identity is governed evidence and comes only from
     ``classification.values.feed``. The configured inventory ``source_name`` is
     configuration metadata that names a discovery source, never a feed, so a
-    file without a classified feed is reported here as belonging to none.
+    file without a classified feed is reported here as belonging to none. A
+    file whose current classification names no feed belongs to none either: the
+    latest event is the answer, including when the answer is nothing.
+
+    Args:
+        records: The canonical record stream, in the order it was read.
+
+    Returns:
+        The feed each classified file belongs to, keyed by governed file
+        identity. A file with no current feed is absent.
     """
-    feeds: dict[str, str] = {}
+    # The last classification event per file, in the order the stream carries.
+    # `read_records_from_control` emits each file's mutations oldest-first by
+    # `file_mutation_id`, which is monotonic and which nothing may reorder, so
+    # overwriting as they arrive leaves the current one. Keyed by the record's
+    # own `file_id` -- the governed identity -- never by a path or a name,
+    # because a file is renamed and moved through its own history.
+    current: dict[str, Mapping[str, Any]] = {}
     for record in records:
-        if record.get("record_type") != _INVENTORY:
+        if record.get("record_type") != _CLASSIFICATION:
             continue
+        record_id = _positive_int(
+            record.get("record_id"), f"{_CLASSIFICATION}.record_id")
+        file_id = _identity(
+            record.get("file_id"), f"{_CLASSIFICATION}[{record_id}].file_id")
+        current[file_id] = record
+
+    feeds: dict[str, str] = {}
+    for file_id, record in current.items():
         classification = record.get("classification")
         if not isinstance(classification, Mapping):
             continue
         values = classification.get("values")
         if not isinstance(values, Mapping) or values.get("feed") is None:
             continue
-        record_id = _positive_int(record.get("record_id"), f"{_INVENTORY}.record_id")
-        file_id = _identity(record.get("file_id"), f"{_INVENTORY}[{record_id}].file_id")
+        record_id = _positive_int(
+            record.get("record_id"), f"{_CLASSIFICATION}.record_id")
         feeds[file_id] = _nonblank(
             values.get("feed"),
-            f"{_INVENTORY}[{record_id}].classification.values.feed",
+            f"{_CLASSIFICATION}[{record_id}].classification.values.feed",
         )
     return feeds
 
@@ -501,21 +534,22 @@ def build_file_hierarchy_feed(
     page_offset, page_limit = _validated_page(offset, limit)
     records = _read_manifest_records(ctx)
     feeds_by_file = _classified_feeds(records)
-    selected_ids = {
-        _positive_int(record.get("record_id"), "source_file_inventory.record_id")
+    selected_files = {
+        record.get("file_id")
         for record in records
         if record.get("record_type") == _INVENTORY
         and feeds_by_file.get(record.get("file_id")) == feed
     }
-    # No classification record travels with the selection any more: the feed a
-    # page groups by is state on the inventory record itself.
+    # The selected files, and the classification events that say which feed
+    # they belong to. Both travel: the feed is declared by an event in a file's
+    # history, so a selection carrying only inventory records would be handed
+    # to `_build_page` with nothing left to group by. Mutations are left out --
+    # this page materializes no stages.
     page = _build_page(
         [
             record for record in records
-            if (
-                record.get("record_type") == _INVENTORY
-                and _positive_int(record.get("record_id"), "source_file_inventory.record_id") in selected_ids
-            )
+            if record.get("file_id") in selected_files
+            and record.get("record_type") in {_INVENTORY, _CLASSIFICATION}
         ],
         offset=page_offset,
         limit=page_limit,
@@ -523,26 +557,39 @@ def build_file_hierarchy_feed(
     return page
 
 
-def _classification_stage(inventory: _Inventory,
-                          classification: Mapping[str, Any]) -> FileHierarchyStage:
-    """Build the classification stage from the file's own state.
+def _classification_stage(record: Mapping[str, Any],
+                          file_id: str) -> FileHierarchyStage:
+    """Build the classification stage from the classification event.
 
-    Classification is state on the governed file, not a record beside it, so
-    this reads the file rather than a record describing it. The stage shares the
-    file's identity because it is the same row: a classified file has one
-    identity, and its classification is a property of it.
+    Classifying is something that happens to a file, so it is a record in the
+    file's history and the stage is that record. Reclassifying appends another
+    event and draws another stage: both happened, and the history says so.
+
+    Args:
+        record: The ``source_file_classification`` record.
+        file_id: Governed file identity the stage hangs under.
+
+    Returns:
+        The stage, carrying the classification the event recorded.
     """
+    record_id = _positive_int(
+        record.get("record_id"), f"{_CLASSIFICATION}.record_id")
+    classification = record.get("classification")
     return FileHierarchyStage(
-        stage_identity=f"manifest:{inventory.record_id}:classification",
+        stage_identity=f"manifest:{record_id}",
         stage_type="classification",
         label="Classification",
-        record_id=inventory.record_id,
-        file_id=inventory.file_id,
-        path=inventory.path,
+        record_id=record_id,
+        file_id=file_id,
+        # A classification says what the file *is*; the move that follows says
+        # where it went. The event records no path, so neither does the stage.
+        path=None,
         original_path=None,
-        status="classified",
+        status=_optional_text(
+            record.get("status"), f"{_CLASSIFICATION}[{record_id}].status"),
         is_current_primary=False,
-        metadata=_freeze(dict(classification)),
+        metadata=_freeze(dict(classification))
+        if isinstance(classification, Mapping) else _freeze({}),
     )
 
 
@@ -691,15 +738,15 @@ def build_file_hierarchy_stages(
     mutation_targets: dict[int, str] = {}
     lifecycle_status = "active"
     contradictory = 0
-    # Classification is state on the file, so its stage comes from the file and
-    # not from a record that no longer exists. There is nothing to match on
-    # lineage: the classification is on the row this hierarchy is built for.
-    classification = inventory.metadata.get("classification")
-    if isinstance(classification, Mapping) and classification:
-        stages.append(_classification_stage(inventory, classification))
-
     for record in ordered_records:
         record_type = record.get("record_type")
+        # Classification is an event in this file's history, so its stage is
+        # drawn where the event falls rather than spliced in ahead of the
+        # history. The stream is ordered by record identity, so a reclassified
+        # file shows both events in the order they happened.
+        if record_type == _CLASSIFICATION and record.get("file_id") == inventory.file_id:
+            stages.append(_classification_stage(record, inventory.file_id))
+            continue
         if record_type == _MUTATION and record.get("file_id") == inventory.file_id:
             record_id = _positive_int(record.get("record_id"), "source_file_mutation.record_id")
             mutations[record_id] = record
