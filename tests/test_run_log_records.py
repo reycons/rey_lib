@@ -928,15 +928,6 @@ def test_run_log_projection_ignores_moved_or_read_artifact_references(tmp_path: 
     assert artifacts_node["count"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "FILE_OPERATION has left the execution audit trail. _run_log_sections "
-    "still documents that file movement 'stays in execution and is "
-    "additionally surfaced as a file-centric files.file_operations view', but "
-    "it routes into execution only on record_type in _RUN_EXECUTION_TYPES (no "
-    "FILE_OPERATION) or record_group == 'execution' -- and _record_group now "
-    "returns 'files' for it. The files view is right; the additional execution "
-    "routing is the half that was lost."
-))
 def test_writer_helpers_group_records_by_view(tmp_path: Path) -> None:
     """Writer helpers stamp the SGC groups/subgroups and carry run identity."""
     ctx = _ctx(tmp_path)

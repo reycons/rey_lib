@@ -379,6 +379,13 @@ _RUN_EXECUTION_TYPES = {
     "WARNING",
     "ERROR",
     "RUN_COMPLETE",
+    # Moving a file is something the run did, so it belongs to the audit trail
+    # of what happened as much as to the file-centric view of what was touched.
+    # It is named here because its record_group is `files`: the group says
+    # which kind of evidence a record is, and this set says what execution is,
+    # so a record that is both is in both. Named by type rather than given a
+    # second group -- one record has one group.
+    "FILE_OPERATION",
 }
 
 
