@@ -209,15 +209,56 @@ def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
         failed_step_id="load",
     )
 
-    # The whole canonical object lives in error_message, because that is what
-    # the column holds. Only message, status and that block are top level --
-    # a caller field left beside them took the whole record down.
-    evidence = payload["error_message"]
-    assert evidence["exit_code"] == 1
-    assert evidence["failed_step_id"] == "load"
-    assert evidence["stderr_summary"] == "database failed password=[REDACTED]"
+    # The canonical fields, and nothing wrapping them: this builds what a
+    # record is made from, and log_error makes the record.
+    assert "error_message" not in payload
+    assert payload["exit_code"] == 1
+    assert payload["failed_step_id"] == "load"
+    assert payload["stderr_summary"] == "database failed password=[REDACTED]"
     assert "hunter2" not in json.dumps(payload)
     assert payload["message"].startswith("Application exited with code 1: database failed")
+
+
+def test_a_process_failure_payload_is_built_into_one_record(tmp_path: Path) -> None:
+    """The two builders answer with the same shape, and log_error builds once.
+
+    build_process_failure_payload used to return a finished record, so
+    log_error(**payload) ran the builder again over its own output: the
+    canonical object became a field of a second canonical object, and every
+    reader of a summary had to know to unwrap it first. Two of them did not,
+    and a failing pipeline step forwarded no diagnostic at all.
+
+    This asserts both ends of the repair -- nothing wrapping the fields on the
+    way in, exactly one canonical object on the way out.
+    """
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    start_test_run(ctx)
+    run_log = _log(ctx, tmp_path)
+
+    payload = build_process_failure_payload(
+        message="Application exited with code 2",
+        error_type="AppExecutionError",
+        exit_code=2,
+        stderr="failed password=hunter2",
+    )
+
+    # Fields, not a record.
+    assert "error_message" not in payload
+    assert payload["error_type"] == "AppExecutionError"
+    assert payload["stderr_summary"] == "failed password=[REDACTED]"
+
+    returned = log_error(run_log, **payload)
+    stored = next(record for record in _read(Path(run_log.path()))
+                  if record["record_type"] == "ERROR")
+    canonical = stored["error_message"]
+
+    # One canonical object, holding the identity and the evidence, with no
+    # second copy of itself inside.
+    assert not isinstance(canonical.get("error_message"), Mapping)
+    assert canonical["error_id"] == returned["error_id"]
+    assert canonical["error_type"] == "AppExecutionError"
+    assert canonical["stderr_summary"] == "failed password=[REDACTED]"
+    assert canonical["exit_code"] == 2
 
 
 def test_process_failure_payload_reports_missing_diagnostics() -> None:

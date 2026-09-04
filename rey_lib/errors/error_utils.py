@@ -198,6 +198,10 @@ def build_process_failure_payload(
 
     This helper owns subprocess diagnostic interpretation: stdout/stderr are
     sanitized and bounded before being written to run logs.
+
+    Returns the canonical fields, as ``build_safe_error_payload`` does. The
+    sanitizing, the bounding and the composed message are all still this
+    function's; making the record out of them is not.
     """
     safe_stdout = _diagnostic_summary(stdout_summary if stdout_summary else stdout)
     safe_stderr = _diagnostic_summary(stderr_summary if stderr_summary else stderr)
@@ -223,11 +227,14 @@ def build_process_failure_payload(
     if safe_stderr:
         payload_fields["stderr_summary"] = safe_stderr
 
-    return build_error_record_payload(
-        message=message,
-        error_type=error_type,
-        **payload_fields,
-    )
+    # The canonical fields, not a finished record -- the same shape
+    # ``build_safe_error_payload`` answers with. Whoever writes them builds the
+    # record once: ``log_error`` does, and a caller appending directly passes
+    # these through ``build_error_record_payload`` itself. Returning a record
+    # here meant ``log_error(**payload)`` ran the builder a second time over
+    # its own output, and every reader of a summary had to know to unwrap it
+    # first -- which two of them did not.
+    return {"message": message, "error_type": error_type, **payload_fields}
 
 
 def build_safe_error_payload(
