@@ -497,13 +497,6 @@ class TestAdoptionIsAMove:
 class TestControlIsSubordinateToRunLog:
     """Control is the run log's DB mechanism, not a second logging owner."""
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "rey_lib/files/log_run_rollback.py drives the control lifecycle "
-        "itself: start_batch at :525 and end_batch at :614 and :620. The "
-        "module governs its own rollback batch rather than going through "
-        "RunLog, which is the ownership this rule holds. Same module as the "
-        "Control-construction violation, and the same decision settles both."
-    ))
     def test_only_the_run_log_drives_the_control_lifecycle(self) -> None:
         """No caller opens a batch, a step or an event except through RunLog."""
         import ast
