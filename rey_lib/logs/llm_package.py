@@ -621,7 +621,10 @@ def run_configured_log_analysis(
     """
     import json
 
-    from rey_lib.errors.error_utils import build_safe_error_payload
+    from rey_lib.errors.error_utils import (
+        build_error_record_payload,
+        build_safe_error_payload,
+    )
     from rey_lib.ai.errors import (
         AIConfigurationError, AIProviderError, AIUnavailableError,
     )
@@ -680,7 +683,10 @@ def run_configured_log_analysis(
         # is never written under the type a successful interpretation uses.
         run_log.append(
             _FAILURE_RECORD_TYPE, record_group=_RECORD_GROUP,
-            analysis_name=LOG_INTERPRETER_ANALYSIS, **build_safe_error_payload(exc),
+            analysis_name=LOG_INTERPRETER_ANALYSIS,
+            # Appended directly rather than through log_error, so the record is
+            # built here -- once.
+            **build_error_record_payload(**build_safe_error_payload(exc)),
         )
         result["failures"].append(str(exc))
         result["action"] = "failed"

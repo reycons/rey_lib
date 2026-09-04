@@ -10,6 +10,7 @@ open without a durable log path, and fail-safe appends.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -167,24 +168,36 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
-#: A failed run records no completion.
-#:
-#: rey_lib/run_lifecycle.py reads the error identity as
-#: ``error_record.get("error_id")``, but build_error_record_payload returns only
-#: ``{message, status, error_message}`` and mints ``error_id`` *inside* the
-#: nested error_message payload -- deliberately, because "control.run_log has no
-#: such column". So the identity resolves to "", log_run_complete refuses with
-#: "RUN_COMPLETE status='failed' requires structured failure evidence fields:
-#: failure_record_id", and a failed run terminates with RUN_START and ERROR and
-#: no RUN_COMPLETE at all.
-#:
-#: The tests are correct: they already read the nested payload, which is where
-#: the id lives. The one-line fix is in run_lifecycle, not here.
-NO_COMPLETION_ON_FAILURE = pytest.mark.xfail(strict=True, reason=(
-    "rey_lib/run_lifecycle.py reads error_id off the returned payload instead "
-    "of its nested error_message block, so failure_record_id is empty, "
-    "log_run_complete refuses it, and a failed run records no RUN_COMPLETE."
-))
+def test_log_error_writes_the_canonical_object_once(tmp_path: Path) -> None:
+    """The producer, proved on both sides of itself.
+
+    One change repairs two contracts -- what is stored and what is returned --
+    and the failed-run tests only prove the consequence downstream. The record's
+    error_message column *is* the canonical object, and the object log_error
+    hands back is that same object, so a completion can reference its error_id.
+
+    The third assertion is the one that failed: the payload used to be wrapped
+    in its own field set before being written, which buried the object a level
+    down and left error_id where nothing looked for it.
+    """
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    start_test_run(ctx)
+    run_log = _log(ctx, tmp_path)
+
+    returned = log_error(run_log, message="it failed", error_type="ProofError",
+                         failed_step_id="load")
+
+    stored = next(record for record in _read(Path(run_log.path()))
+                  if record["record_type"] == "ERROR")
+    payload = stored["error_message"]
+
+    assert payload["error_id"] == returned["error_id"]
+    assert returned["error_id"]
+    # Not wrapped: the object is the payload, not a field set holding one.
+    assert not isinstance(payload.get("error_message"), Mapping)
+    # And the fields the caller gave are in it, rather than a level deeper.
+    assert payload["error_type"] == "ProofError"
+    assert payload["failed_step_id"] == "load"
 
 
 def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
@@ -219,7 +232,6 @@ def test_process_failure_payload_reports_missing_diagnostics() -> None:
     assert "stderr_summary" not in payload
 
 
-@NO_COMPLETION_ON_FAILURE
 def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) -> None:
     """Failures produce canonical ERROR evidence and preserve exception behavior."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
@@ -247,7 +259,6 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
-@NO_COMPLETION_ON_FAILURE
 def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
     """A nonzero integer return is failed evidence but still returned unchanged."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
@@ -535,7 +546,6 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
     assert run_complete["parent_run_log_id"] == run_start["parent_run_log_id"]
 
 
-@NO_COMPLETION_ON_FAILURE
 def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     tmp_path: Path,
 ) -> None:

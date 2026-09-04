@@ -241,6 +241,14 @@ def build_safe_error_payload(
 
     error_utils owns exception interpretation, traceback shaping, and
     exception-text redaction. log_utils owns the event envelope.
+
+    Returns the canonical *fields*, not a finished record. Whoever writes them
+    builds the record once: ``log_error`` does, and a caller appending directly
+    passes these through ``build_error_record_payload`` itself. Returning a
+    finished record here meant ``log_error(**payload)`` ran the builder a second
+    time over its own output, which nested the canonical object inside a fresh
+    one -- so ``error_id`` sat two levels down and every field the first build
+    had gathered sat three.
     """
     error_message = _redact_error_text(exc)
     payload: dict[str, Any] = {
@@ -254,7 +262,8 @@ def build_safe_error_payload(
         sanitized_lines = [_redact_error_text(line) for line in lines]
         payload["sanitized_traceback"] = "".join(sanitized_lines).strip()
         payload["traceback_summary"] = _traceback_summary(sanitized_lines)
-    return build_error_record_payload(**payload, **fields)
+    payload.update(fields)
+    return payload
 
 # ---------------------------------------------------------------------------
 # Generic exception hierarchy

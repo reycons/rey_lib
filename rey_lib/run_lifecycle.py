@@ -82,7 +82,7 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
     caller's existing exit-code behavior remains unchanged.
     """
     from rey_lib.config.config_utils import record_config_file_references
-    from rey_lib.errors.error_utils import build_error_record_payload, build_safe_error_payload
+    from rey_lib.errors.error_utils import build_safe_error_payload
     from rey_lib.logs.log_utils import (
         bind_run,
         clear_run,
@@ -135,14 +135,15 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
             failure_message = (
                 f"app operation '{operation}' returned nonzero result {result}."
             )
+            # The fields, not a finished record: log_error builds it, and
+            # building one here as well nested the canonical object inside a
+            # second copy of itself.
             error_record = log_error(run_log,
-                **build_error_record_payload(
-                    message=failure_message,
-                    error_type="AppOperationFailed",
-                    failed_step_id=operation,
-                    failed_step_name=operation,
-                    result=result,
-                ),
+                message=failure_message,
+                error_type="AppOperationFailed",
+                failed_step_id=operation,
+                failed_step_name=operation,
+                result=result,
             )
             failure_record_id = str(error_record.get("error_id") or "")
             failure_id = log_step_failure(run_log,

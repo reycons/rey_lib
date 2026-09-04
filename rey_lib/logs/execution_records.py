@@ -117,17 +117,38 @@ def log_step_failure(
 
 def log_error(run_log: 'RunLog', *, message: str, error_type: str = "",
               sanitized_exception: str = "", **fields: Any) -> dict[str, Any]:
-    """Append a structured ERROR record from an error_utils canonical payload."""
+    """Append a structured ERROR record and return the canonical error object.
+
+    ``build_error_record_payload`` answers with the record's fields --
+    ``message``, ``status`` and ``error_message`` -- where ``error_message`` is
+    the canonical object carrying ``error_id``. The canonical object is what
+    goes in the column and what comes back: ERROR is one of the two record
+    types whose whole payload *is* the ``error_message`` object, and writing
+    the field wrapper into that column instead buried the object a second level
+    down, where ``error_id`` could not be found by anything that looked for it.
+
+    Args:
+        run_log: The run log to append to.
+        message: What happened, before sanitizing.
+        error_type: The canonical name for this kind of failure.
+        sanitized_exception: The exception text, already made safe.
+        **fields: Anything else the canonical payload carries.
+
+    Returns:
+        The canonical error object, including the ``error_id`` that a
+        completion record references as its ``failure_record_id``.
+    """
     from rey_lib.errors.error_utils import build_error_record_payload
 
     if sanitized_exception:
         fields["sanitized_exception"] = sanitized_exception
-    payload = build_error_record_payload(
+    built = build_error_record_payload(
         message=message, error_type=error_type, **fields
     )
-    record_message = str(payload.get("message") or message)
-    run_log.append("ERROR", message=record_message, error_message=payload)
-    return payload
+    canonical = built["error_message"]
+    record_message = str(built.get("message") or message)
+    run_log.append("ERROR", message=record_message, error_message=canonical)
+    return canonical
 
 
 def log_app_execution(
