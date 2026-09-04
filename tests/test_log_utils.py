@@ -46,16 +46,14 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
         "build_file_hierarchy_feeds",
         "build_file_hierarchy_feed",
         "build_file_hierarchy_stages",
-        "ManifestRecordSelection",
-        "ManifestSelectionError",
-        "SelectedManifestRecord",
-        "normalize_manifest_selection",
-        "select_manifest_records",
-        "RunFileRecord",
-        "RunFileRecords",
-        "RunFileRecordsError",
-        "find_run_file_records",
-        "register_run_file_record_type",
+        # The profile library: a record type, its reader and the presentation
+        # it resolves. Reached through rey_lib.logs, and not part of the
+        # log_utils facade.
+        "PROFILE_RECORD_TYPE",
+        "ProfileLibraryError",
+        "lookup_profile_record",
+        "read_profile_records",
+        "resolve_profile_presentation",
     }
     missing = [
         name for name in logs.__all__

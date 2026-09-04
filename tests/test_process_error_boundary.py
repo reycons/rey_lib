@@ -33,8 +33,21 @@ from rey_lib.errors.error_utils import install_process_error_boundary
 
 @pytest.fixture
 def boundary(caplog: pytest.LogCaptureFixture):
-    """Install the boundary on clean hooks and restore them afterwards."""
+    """Install the boundary on clean hooks and restore them afterwards.
+
+    Clean means the interpreter's own hooks, not merely a cleared flag. Any
+    test that builds an app context installs the boundary and the flag stops it
+    installing twice -- but nothing puts the hooks back, so by the time this
+    runs in a full suite `sys.excepthook` is already a boundary. Installing over
+    that one chains them, and a single exception is then recorded twice, which
+    is what `test_installing_twice_records_once` exists to detect. Restoring the
+    interpreter hooks first makes every test here independent of what ran
+    before it.
+    """
     saved = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+    sys.excepthook = sys.__excepthook__
+    threading.excepthook = threading.__excepthook__
+    sys.unraisablehook = sys.__unraisablehook__
     error_utils._boundary_installed = False
     caplog.set_level(logging.ERROR)
     install_process_error_boundary()
@@ -43,13 +56,18 @@ def boundary(caplog: pytest.LogCaptureFixture):
     error_utils._boundary_installed = False
 
 
-def _thread_args(exc: BaseException) -> SimpleNamespace:
-    """The shape threading.excepthook receives."""
-    return SimpleNamespace(
-        exc_type=type(exc),
-        exc_value=exc,
-        exc_traceback=exc.__traceback__,
-        thread=SimpleNamespace(name="worker-1"),
+def _thread_args(exc: BaseException) -> threading.ExceptHookArgs:
+    """What threading.excepthook receives -- the real type, not a stand-in.
+
+    The boundary delegates to whatever hook it replaced, and the interpreter's
+    own `threading.__excepthook__` is written in C: it rejects anything that is
+    not an ExceptHookArgs. A look-alike worked only while the hook underneath
+    happened to be another Python function, which is a property of what ran
+    before rather than of this test.
+    """
+    worker = threading.Thread(name="worker-1")
+    return threading.ExceptHookArgs(
+        (type(exc), exc, exc.__traceback__, worker),
     )
 
 

@@ -154,25 +154,44 @@ class ControlDouble:
 
     # -- rollback ------------------------------------------------------------
 
-    def request_file_rollback(self, *, file_mutation_id: Optional[int] = None,
+    def request_file_rollback(self, *, dry_run: bool = True,
+                              file_mutation_id: Optional[int] = None,
+                              file_manifest_id: Optional[int] = None,
                               batch_step_id: Optional[int] = None,
                               batch_id: Optional[int] = None,
                               run_id: Optional[int] = None,
-                              required: bool = True) -> int:
-        """Mark untouched rows only, and report just what this call added."""
-        scopes = [file_mutation_id, batch_step_id, batch_id, run_id]
+                              required: bool = True) -> list[dict[str, Any]]:
+        """Return the rollback set for one scope, marking it unless previewing.
+
+        One predicate and one shape either way, as the routine has: a preview
+        and its execution cannot describe different reversals. Under
+        ``dry_run`` nothing is written.
+        """
+        scopes = [file_mutation_id, file_manifest_id, batch_step_id, batch_id, run_id]
         if sum(scope is not None for scope in scopes) != 1:
             raise ValueError("exactly one rollback scope is required")
-        marked = 0
+        selected: list[dict[str, Any]] = []
         for row in self.mutations:
-            if file_mutation_id is not None and row["file_mutation_id"] != file_mutation_id:
+            if (file_mutation_id is not None
+                    and row["file_mutation_id"] != file_mutation_id):
+                continue
+            if (file_manifest_id is not None
+                    and row["file_manifest_id"] != file_manifest_id):
                 continue
             if row["rollback_request_in"] or row["rollback_complete_in"]:
                 continue
-            row["rollback_request_in"] = 1
-            row["rollback_request_batch_step_id"] = self.batch_step_id
-            marked += 1
-        return marked
+            if not dry_run:
+                row["rollback_request_in"] = 1
+                row["rollback_request_batch_step_id"] = self.batch_step_id
+            selected.append({
+                "file_mutation_id": row["file_mutation_id"],
+                "file_manifest_id": row["file_manifest_id"],
+                "action": row["action"],
+                "status": row["status"],
+                "path": row["path"],
+                "restore_to_path": self._restore_target(row),
+            })
+        return selected
 
     def pending_file_rollbacks(self,
                                required: bool = True) -> list[dict[str, Any]]:
@@ -188,19 +207,25 @@ class ControlDouble:
             rows.append(out)
         return rows
 
-    def complete_file_rollback(self, file_mutation_id: int,
+    def complete_file_rollback(self, file_mutation_ids: list[int],
                                required: bool = True) -> None:
-        """Transition exactly one pending row; refuse anything else."""
-        for row in self.mutations:
-            if (row["file_mutation_id"] == file_mutation_id
-                    and row["rollback_request_in"] == 1
-                    and row["rollback_complete_in"] == 0):
-                row["rollback_request_in"] = 0
-                row["rollback_complete_in"] = 1
-                row["rollback_batch_step_id"] = self.batch_step_id
-                return
-        raise ValueError(
-            f"file_mutation {file_mutation_id} is not pending rollback")
+        """Transition the named pending rows; refuse anything else.
+
+        The row is the unit, not the request: what stays requested is what is
+        still owed.
+        """
+        for wanted in list(file_mutation_ids or []):
+            for row in self.mutations:
+                if (row["file_mutation_id"] == wanted
+                        and row["rollback_request_in"] == 1
+                        and row["rollback_complete_in"] == 0):
+                    row["rollback_request_in"] = 0
+                    row["rollback_complete_in"] = 1
+                    row["rollback_batch_step_id"] = self.batch_step_id
+                    break
+            else:
+                raise ValueError(
+                    f"file_mutation {wanted} is not pending rollback")
 
     # -- internals -----------------------------------------------------------
 

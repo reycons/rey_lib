@@ -235,7 +235,13 @@ def test_handler_error_stops_run_fail_closed(run_log) -> None:
     run = run_workflow(object(), run_log, workflow, {"boom": boom, "after": after})
     assert run.status == "failed"
     assert run.outcomes[-1].status == "failed"
-    assert "nope" in (run.outcomes[-1].error or "")
+    # The outcome carries the safe message, which names the workflow and the
+    # step. The exception's own text is evidence and lives in the ERROR
+    # record's sanitized payload, so a raw message never reaches a surface that
+    # may be shown or serialized.
+    outcome_error = run.outcomes[-1].error or ""
+    assert "w" in outcome_error and "s1" in outcome_error
+    assert "nope" not in outcome_error
     assert ran == []
 
 # ---------------------------------------------------------------------------

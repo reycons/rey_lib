@@ -29,6 +29,10 @@ class _Mappings:
     def all(self) -> list[dict[str, Any]]:
         return self._rows
 
+    def first(self) -> dict[str, Any] | None:
+        """The first mapping, or None. How a procedure's OUT row is taken."""
+        return self._rows[0] if self._rows else None
+
 
 class _Result:
     def __init__(
@@ -43,6 +47,11 @@ class _Result:
         self._rows = rows or []
         self._mappings = mappings or []
         self.rowcount = rowcount
+        # SQLAlchemy's own flag, which the primitive reads before asking a
+        # procedure result for a row: a procedure with no OUT parameters
+        # returns none at all, and asking such a result raises. A double
+        # missing it makes every procedure call look like a driver failure.
+        self.returns_rows = bool(columns or rows or mappings)
 
     def keys(self) -> tuple[str, ...]:
         return self._columns
@@ -238,7 +247,11 @@ def test_postgres_function_and_procedure_use_bound_core_execution() -> None:
         "CALL control.finish_run(run_id => :run_id)",
     ]
     assert core.executed[0][1] == {"payload": '{"id": 7}'}
-    assert core.commits == 2
+    # No commit here. One routine call is one statement on a connection in
+    # AUTOCOMMIT: a procedure's own writes are inside that single call and are
+    # atomic without help from the primitive, and committing would take a
+    # transaction decision away from the caller that owns it.
+    assert core.commits == 0
     assert core.rollbacks == 0
 
 

@@ -331,7 +331,6 @@ def test_approved_conversion_and_result_inputs_build_canonical_sections(
             "name": "wolff_popper",
             "source": {"sheet_name": "Sheet1", "table_name": "Table1"},
         },
-        reason_code="converted",
         reason="workbook converted",
     )
 
@@ -342,10 +341,10 @@ def test_approved_conversion_and_result_inputs_build_canonical_sections(
         "name": "wolff_popper",
         "source": {"sheet_name": "Sheet1", "table_name": "Table1"},
     }
-    assert record["result"] == {
-        "reason_code": "converted",
-        "reason": "workbook converted",
-    }
+    # The result is the reason itself. It was a two-field section; the reason
+    # is now the whole of it, which is what the manifest column holds and what
+    # the file hierarchy's presentation table is keyed by.
+    assert record["result"] == "workbook converted"
 
 
 def test_supplied_classification_is_serialized_unchanged() -> None:

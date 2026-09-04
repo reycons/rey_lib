@@ -137,7 +137,10 @@ def test_each_role_uses_shared_move_and_evidence_contract(
     logged_classification = evidence.call_args.kwargs["classification"]
     assert supplied_classification == logged_classification
     assert supplied_classification == original_snapshot
-    assert evidence.call_args.kwargs["reason"] == role.value
+    # The evidence reason names the destination, not just the role: a mutation
+    # reading "moved" does not say where it went, and the hierarchy's
+    # presentation table is keyed by these.
+    assert evidence.call_args.kwargs["reason"] == f"moved_to_{role.value}"
     assert evidence.call_args.kwargs["message"] == (
         f"Governed file moved to {message}."
     )
@@ -306,18 +309,28 @@ def test_non_file_collision_fails_before_mutation(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("failure", [FileNotFoundError("gone"), OSError("blocked")])
-def test_physical_failures_are_normalized_without_evidence(
+def test_physical_failures_are_normalized_and_recorded_as_failed(
     tmp_path: Path,
     failure: OSError,
 ) -> None:
+    """A move that did not happen is still a mutation, recorded as failed.
+
+    This used to assert no evidence at all. A failed move is evidence -- the
+    hierarchy's presentation table carries a failure label for every reason for
+    exactly this -- so what matters is that the record says the move failed,
+    not that nothing was written.
+    """
     governed, _ = _file(tmp_path)
     with patch.object(file_routing, "move_file", side_effect=failure), patch.object(
         file_routing, "log_source_file_mutation"
     ) as evidence:
         with pytest.raises(FileRoutingError) as raised:
             file_routing.move_to_processing(_context(tmp_path), governed)
+
     assert raised.value.result.filesystem_applied is False
-    evidence.assert_not_called()
+    recorded = evidence.call_args.kwargs
+    assert recorded["status"] == "failed"
+    assert recorded["reason"] == "moved_to_processing"
 
 
 def test_non_oserror_from_move_is_not_hidden(tmp_path: Path) -> None:

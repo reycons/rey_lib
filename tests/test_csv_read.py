@@ -205,27 +205,45 @@ def test_blank_data_rows_can_be_excluded_but_stay_counted(
 # Sampling
 # ---------------------------------------------------------------------------
 
-def test_sample_takes_the_opening_middle_and_closing_rows(
+def test_the_sample_is_bounded_distinct_and_drawn_from_the_whole_file(
     tmp_path: Path,
 ) -> None:
+    """Uniform across the file, not the head, the middle and the tail.
+
+    This used to assert the exact opening/middle/closing line numbers. Sampling
+    is now a uniform draw without replacement across the whole population,
+    because bounded column evidence taken in file order favours the beginning
+    of the file even when the selection itself was even. So what is asserted is
+    what the contract still guarantees: the size, the distinctness, and that
+    every row came from the file.
+    """
     body = "".join(f"{i},{i * 2}\n" for i in range(1, 31))
     source = _write(tmp_path, "f.csv", f"A,B\n{body}")
 
-    sample = read_csv(source, sample_size=6).sample
-    lines = [row.physical_line_number for row in sample]
+    read = read_csv(source, sample_size=6)
+    lines = [row.physical_line_number for row in read.sample]
 
-    assert lines == [2, 3, 16, 17, 30, 31]
-    assert lines == sorted(lines)
+    assert len(lines) == 6
+    assert len(set(lines)) == 6
+    assert set(lines) <= {row.physical_line_number for row in read.rows}
 
 
-def test_sampling_is_deterministic(tmp_path: Path) -> None:
+def test_the_draw_covers_the_file_rather_than_its_opening(tmp_path: Path) -> None:
+    """Over enough draws, rows from the far end are selected too.
+
+    A sample taken from the head would never reach here. Asserted over the
+    union of several reads rather than one, because a single uniform draw is
+    entitled to land anywhere.
+    """
     body = "".join(f"{i},{i * 2}\n" for i in range(1, 101))
     source = _write(tmp_path, "f.csv", f"A,B\n{body}")
 
-    first = [row.physical_line_number for row in read_csv(source, sample_size=9).sample]
-    second = [row.physical_line_number for row in read_csv(source, sample_size=9).sample]
+    seen: set[int] = set()
+    for _ in range(20):
+        seen.update(row.physical_line_number for row in read_csv(source, sample_size=9).sample)
 
-    assert first == second
+    assert max(seen) > 50
+    assert min(seen) < 50
 
 
 def test_no_sample_is_returned_without_a_limit(tmp_path: Path) -> None:
@@ -239,7 +257,9 @@ def test_a_limit_above_the_row_count_returns_every_row(tmp_path: Path) -> None:
 
     read = read_csv(source, sample_size=100)
 
-    assert read.sample == read.rows
+    # Every row, once. Not in file order: the draw is randomized even when it
+    # selects the whole population, so the set is what "every row" means here.
+    assert sorted(read.sample, key=lambda row: row.physical_line_number) == list(read.rows)
 
 
 # ---------------------------------------------------------------------------
@@ -317,10 +337,17 @@ def test_a_file_and_its_text_produce_the_same_analysis(tmp_path: Path) -> None:
         "total_line_count",
         "blank_row_count",
         "ragged_row_count",
-        "sample",
         "source_text_sha256",
     ):
         assert getattr(from_file, field) == getattr(from_text, field), field
+
+    # Not the sample itself: the draw is random, so two reads of identical
+    # content are entitled to select different rows. What must match is that
+    # both drew the same number of rows from the same population.
+    assert len(from_file.sample) == len(from_text.sample)
+    assert {row.physical_line_number for row in from_file.sample} <= {
+        row.physical_line_number for row in from_file.rows
+    }
 
 
 def test_looks_like_csv_is_the_reader_s_own_answer(tmp_path: Path) -> None:
