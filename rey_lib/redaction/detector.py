@@ -38,8 +38,20 @@ def detect_mask_type(values: list[str]) -> str:
     Returns
     -------
     str
-        One of the mask type strings from ``KNOWN_MASKS``, or ``"text"``
-        when no specific type is detected.
+        A *proposed* profiling datatype, or ``"text"`` when no specific type
+        is detected.
+
+    Notes
+    -----
+    This answers *what kind of data is this*, in profiling's vocabulary. That
+    is not the masking vocabulary and is not required to agree with it:
+    ``detect_datatype`` also returns ``alpha``, ``alphanumeric``, ``boolean``
+    and ``blank``, none of which names a mask.
+
+    The proposal is resolved on the masking side, which honours it only when
+    ``KNOWN_MASKS`` holds it and uses generic redaction otherwise. An
+    unresolvable proposal therefore means generic redaction -- never no
+    redaction.
     """
     from rey_lib.profiling.file_profiler import detect_datatype
 

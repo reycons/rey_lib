@@ -33,8 +33,11 @@ KNOWN_MASKS: frozenset[str] = frozenset({
 def apply_mask(mask_type: str, value: str, counter: int) -> str:
     """Return a type-aware replacement for ``value``.
 
-    Dispatches to the handler registered for ``mask_type``.  Unknown types
-    are passed through unchanged.
+    Dispatches to the handler registered for ``mask_type``.  An unrecognised
+    type raises: this function is only ever reached for a value that must be
+    obscured, so returning the value unchanged would be a silent leak.  Callers
+    resolve the type first -- see ``_resolve_mask`` in ``registry``, which sends
+    anything outside ``KNOWN_MASKS`` to generic redaction instead.
 
     Parameters
     ----------
@@ -49,12 +52,19 @@ def apply_mask(mask_type: str, value: str, counter: int) -> str:
     Returns
     -------
     str
-        Masked replacement, or ``value`` unchanged if ``mask_type`` is
-        not recognised.
+        Masked replacement.
+
+    Raises
+    ------
+    ValueError
+        If ``mask_type`` is not one of ``KNOWN_MASKS``.
     """
     handler = _HANDLERS.get(mask_type)
     if handler is None:
-        return value
+        raise ValueError(
+            f"Unknown mask type {mask_type!r}; expected one of "
+            f"{sorted(KNOWN_MASKS)}. Refusing to return the value unmasked."
+        )
     return handler(value, counter)
 
 

@@ -27,14 +27,14 @@ Result   : ``000-00-0001``
 
 Original : ``SMITH``   (5 uppercase alpha positions)
 Counter  : 1
-Alpha fill: digit 1 → letter 'B', padded with 'A' → ``BAAAA``
-Result   : ``BAAAA``
+Alpha fill: digit 1 → letter 'B', right-aligned and 'A'-padded → ``AAAAB``
+Result   : ``AAAAB``
 
 Original : ``ABC123``  (3 upper + 3 digit)
 Counter  : 1
-Upper fill (3 slots): ``BAA``
+Upper fill (3 slots): ``AAB``
 Digit fill (3 slots): ``001``
-Result   : ``BAA001``
+Result   : ``AAB001``
 
 Public API
 ----------
