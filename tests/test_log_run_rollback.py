@@ -480,3 +480,92 @@ def _append_state_record(
     )
 
 
+
+
+# ---------------------------------------------------------------------------
+# The batch a standalone rollback owns
+# ---------------------------------------------------------------------------
+
+class _BatchRecordingControl:
+    """A Control that records the lifecycle rather than performing it.
+
+    The batch is what the rollback owns, so what is asserted is the ordering of
+    its calls -- not batch machinery, which is the control database's.
+    """
+
+    def __init__(self, on_request: Any = None) -> None:
+        self.calls: list[str] = []
+        self._on_request = on_request
+
+    def start_batch(self, batch_name: str, required: bool = False, **_: Any) -> int:
+        self.calls.append(f"start:{batch_name}")
+        return 1
+
+    def end_batch(self, status: str, required: bool = False, **_: Any) -> None:
+        self.calls.append(f"end:{status}")
+
+    def request_file_rollback(self, **_: Any) -> list[dict[str, Any]]:
+        self.calls.append("request")
+        if self._on_request is not None:
+            raise self._on_request
+        return []
+
+    def complete_file_rollback(self, *_: Any, **__: Any) -> None:
+        self.calls.append("complete")
+
+
+def test_a_standalone_rollback_opens_its_own_batch_and_closes_it() -> None:
+    """Nothing above it owns one, so the execution opens one at the work.
+
+    The name carries the run being reversed, which is the only identity the
+    execution arrives with.
+    """
+    from rey_lib.files.log_run_rollback import rollback_log_run
+
+    control = _BatchRecordingControl()
+    rollback_log_run(SimpleNamespace(shared_control=control), 330)
+
+    assert control.calls == ["start:rollback_run_330", "request", "end:SUCCEEDED"]
+
+
+def test_the_batch_closes_on_the_failure_path_too() -> None:
+    """The exit that matters, and the one an absent batch makes invisible.
+
+    A root step left open is offered as the parent of the next batch's work, so
+    a rollback that died part-way would have the operation after it silently
+    adopt its step. The failure is still raised -- closing the batch is not
+    handling it.
+    """
+    from rey_lib.files.log_run_rollback import rollback_log_run
+
+    control = _BatchRecordingControl(on_request=RuntimeError("the database said no"))
+
+    with pytest.raises(RuntimeError, match="the database said no"):
+        rollback_log_run(SimpleNamespace(shared_control=control), 330)
+
+    assert control.calls == ["start:rollback_run_330", "request", "end:FAILED"]
+
+
+def test_the_batch_is_owned_but_the_control_is_not() -> None:
+    """The distinction that was erased, held as two facts about one call.
+
+    A rollback opens its batch and never builds a Control: the object is the
+    runtime's and arrives on the context. Collapsing these into one question is
+    what removed a working batch alongside a genuine violation.
+    """
+    from rey_lib.files.log_run_rollback import rollback_log_run
+
+    control = _BatchRecordingControl()
+    ctx = SimpleNamespace(shared_control=control)
+    rollback_log_run(ctx, 330)
+
+    # Its own batch ...
+    assert control.calls[0] == "start:rollback_run_330"
+    # ... reached through the Control it was given, and no other.
+    assert ctx.shared_control is control
+
+    # And with no Control on the context there is nothing to own a batch under,
+    # so it refuses rather than manufacturing either one.
+    with pytest.raises(LogRunRollbackError):
+        rollback_log_run(SimpleNamespace(shared_control=None), 330)
+

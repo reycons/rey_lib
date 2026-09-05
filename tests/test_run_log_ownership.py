@@ -497,11 +497,37 @@ class TestControlIsSubordinateToRunLog:
     """Control is the run log's DB mechanism, not a second logging owner."""
 
     def test_only_the_run_log_drives_the_control_lifecycle(self) -> None:
-        """No caller opens a batch, a step or an event except through RunLog."""
+        """No caller opens a batch, a step or an event except through RunLog.
+
+        The rule holds for every module with a RunLog above it, which is nearly
+        all of them: the run log owns the batch its work is governed under, and
+        a module opening its own would be a second owner beside it.
+
+        A standalone governed execution is the exception, and it is admitted on
+        that criterion rather than by name. Such an execution has no RunLog and
+        no caller-owned batch above it, so there is no owner to defer to and the
+        marking it must do is a governed write with nothing to hang under. It
+        may own its batch. It may not own its Control, which arrives from the
+        runtime -- ``test_control_is_reached_only_through_logs`` is what holds
+        that half, and the two are separate questions.
+
+        Read the allowance as the criterion, not the filename. Reading it the
+        other way round is what removed a working batch from the rollback: two
+        guards named one module, the second was taken to follow from the first,
+        and the mechanism was deleted to make it green.
+        """
         import ast
 
         methods = {"log_event", "start_batch", "end_batch", "start_step", "end_step"}
-        allowed = {"rey_lib/logs/run_log.py", "rey_lib/control/control.py"}
+        allowed = {
+            "rey_lib/logs/run_log.py",
+            "rey_lib/control/control.py",
+            # Standalone governed execution: rollback_log_run is reached with
+            # only the id of the run being reversed, and nothing above it owns
+            # a batch. It opens one and closes it on every exit; its Control
+            # comes from the runtime.
+            "rey_lib/files/log_run_rollback.py",
+        }
         offenders = []
         for path in _production_files():
             name = str(path.relative_to(REPO))

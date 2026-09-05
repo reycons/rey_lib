@@ -519,93 +519,111 @@ def rollback_log_run(
                        message=f"Rolling back run {int(run_id)}.",
                        reason=str(reason or ""))
 
-    # Marking is a write and a write is governed, so the routine hangs its own
-    # step under the batch its caller already opened. This does not open one:
-    # a batch is the owner's, and a rollback that started and ended its own was
-    # a second lifecycle owner beside the run log.
-    # Marks the set and returns it. Rows that can be reversed carry the command
-    # that reverses them; rows that cannot are returned as rollback facts with
-    # nothing to run, and are not an obstacle to the ones that can.
-    requested = control.request_file_rollback(
-        dry_run=False, run_id=int(run_id), required=True)
-    reversible = _with_commands(requested)
-    # A reversal that needs filesystem work and carries no command cannot
-    # be performed and must not be mistaken for one that had nothing to do.
-    # It is a failure, so it keeps its requested row and its mutation and
-    # the next run sees it again.
-    failed = [
-        _failed_result(row, "Rollback requires filesystem work but the "
-                            "request supplied no command for it.")
-        for row in requested
-        if str(row.get("rollback_action") or "") != "delete_record"
-        and not str(row.get("command") or "").strip()
-    ]
+    # The governing batch. Marking is a write and a write is governed, and a
+    # governed routine never creates its own batch -- so the execution creates
+    # one, and start_batch binds the root step the routine hangs under.
+    control.start_batch(f"rollback_run_{int(run_id)}", required=True)
+    try:
+        # Marks the set and returns it. Rows that can be reversed carry the command
+        # that reverses them; rows that cannot are returned as rollback facts with
+        # nothing to run, and are not an obstacle to the ones that can.
+        requested = control.request_file_rollback(
+            dry_run=False, run_id=int(run_id), required=True)
+        reversible = _with_commands(requested)
+        # A reversal that needs filesystem work and carries no command cannot
+        # be performed and must not be mistaken for one that had nothing to do.
+        # It is a failure, so it keeps its requested row and its mutation and
+        # the next run sees it again.
+        failed = [
+            _failed_result(row, "Rollback requires filesystem work but the "
+                                "request supplied no command for it.")
+            for row in requested
+            if str(row.get("rollback_action") or "") != "delete_record"
+            and not str(row.get("command") or "").strip()
+        ]
 
-    succeeded: list[dict[str, Any]] = []
-    affected_file_ids: set[FileId] = set()
-    filesystem_reversals = 0
+        succeeded: list[dict[str, Any]] = []
+        affected_file_ids: set[FileId] = set()
+        filesystem_reversals = 0
 
-    for row in reversible:
-        candidate = _reversal_candidate(row)
-        compensation = _resolved_compensation(candidate)
-        problem = compensation.validate(candidate)
-        if problem is not None:
-            failed.append(_failed_result(row, problem))
-            continue
-        try:
-            outcome = compensation.execute(candidate)
-        except OSError as exc:
-            failed.append(_failed_result(row, str(exc)))
-            continue
+        for row in reversible:
+            candidate = _reversal_candidate(row)
+            compensation = _resolved_compensation(candidate)
+            problem = compensation.validate(candidate)
+            if problem is not None:
+                failed.append(_failed_result(row, problem))
+                continue
+            try:
+                outcome = compensation.execute(candidate)
+            except OSError as exc:
+                failed.append(_failed_result(row, str(exc)))
+                continue
 
-        if is_governed_file_id(row.get("file_manifest_id")):
-            affected_file_ids.add(int(row["file_manifest_id"]))
-        if _is_filesystem_reversal(candidate, outcome):
-            filesystem_reversals += 1
-        succeeded.append({
-            "file_mutation_id": int(row["file_mutation_id"]),
-            "file_manifest_id": row.get("file_manifest_id"),
-            "action": str(row["action"]),
-            "compensating_action": compensation.compensating_action,
-            **outcome,
-        })
-        if run_log is not None:
-            log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
-                           message=(f"Reversed {row['action']} on file "
-                                    f"{row.get('file_manifest_id')}."),
-                           file_id=row.get("file_manifest_id"),
-                           status="success",
-                           **outcome)
+            if is_governed_file_id(row.get("file_manifest_id")):
+                affected_file_ids.add(int(row["file_manifest_id"]))
+            if _is_filesystem_reversal(candidate, outcome):
+                filesystem_reversals += 1
+            succeeded.append({
+                "file_mutation_id": int(row["file_mutation_id"]),
+                "file_manifest_id": row.get("file_manifest_id"),
+                "action": str(row["action"]),
+                "compensating_action": compensation.compensating_action,
+                **outcome,
+            })
+            if run_log is not None:
+                log_run_record(run_log, "SOURCE_FILE_ROLLBACK",
+                               message=(f"Reversed {row['action']} on file "
+                                        f"{row.get('file_manifest_id')}."),
+                               file_id=row.get("file_manifest_id"),
+                               status="success",
+                               **outcome)
 
-    # Close exactly the set the filesystem confirmed.
-    #
-    # This is a durable saga, and the database is its coordinator: the
-    # filesystem operation cannot enrol in the transaction, so the state
-    # machine around it carries the guarantee instead --
-    #
-    #     DB   request the work, durably
-    #     FS   perform the compensation, which is idempotent
-    #     DB   close only what the filesystem confirmed
-    #
-    # The invariant is that a mutation is closed and deleted only once its
-    # filesystem result is known successful. A process that dies between
-    # the two leaves the row requested with its mutation, and the next run
-    # repeats a move whose source is already gone -- which the compensation
-    # reports as already restored.
-    #
-    # A delete_record reversal is the deletion itself, so it closes here.
-    # Read from the action, never from the absence of a command: a
-    # move_back that could not be given one needed filesystem work and did
-    # not get it, and closing that as done is how a rollback comes to
-    # report success over files it never moved.
-    reversed_ids = [int(row["file_mutation_id"]) for row in succeeded]
-    reversed_ids += [
-        int(row["file_mutation_id"]) for row in requested
-        if str(row.get("rollback_action") or "") == "delete_record"
-        and row.get("file_mutation_id") is not None
-    ]
-    if reversed_ids:
-        control.complete_file_rollback(reversed_ids, required=True)
+        # Close exactly the set the filesystem confirmed.
+        #
+        # This is a durable saga, and the database is its coordinator: the
+        # filesystem operation cannot enrol in the transaction, so the state
+        # machine around it carries the guarantee instead --
+        #
+        #     DB   request the work, durably
+        #     FS   perform the compensation, which is idempotent
+        #     DB   close only what the filesystem confirmed
+        #
+        # The invariant is that a mutation is closed and deleted only once its
+        # filesystem result is known successful. A process that dies between
+        # the two leaves the row requested with its mutation, and the next run
+        # repeats a move whose source is already gone -- which the compensation
+        # reports as already restored.
+        #
+        # A delete_record reversal is the deletion itself, so it closes here.
+        # Read from the action, never from the absence of a command: a
+        # move_back that could not be given one needed filesystem work and did
+        # not get it, and closing that as done is how a rollback comes to
+        # report success over files it never moved.
+
+        reversed_ids = [int(row["file_mutation_id"]) for row in succeeded]
+        reversed_ids += [
+            int(row["file_mutation_id"]) for row in requested
+            if str(row.get("rollback_action") or "") == "delete_record"
+            and row.get("file_mutation_id") is not None
+        ]
+        if reversed_ids:
+            control.complete_file_rollback(reversed_ids, required=True)
+    except Exception as exc:
+        # The batch closes on every exit. A root step left open is offered as
+        # the parent of the next batch's work, so an operation that died
+        # part-way would silently adopt the one that follows it.
+        control.end_batch("FAILED", error_message=str(exc), required=True)
+        raise
+
+    # required, like the start: end_batch defaults to swallowing its own
+    # failure and returning None, which leaves the batch open for ever and
+    # says nothing. A batch that cannot be closed is an error, not a silence.
+    control.end_batch(
+        "SUCCEEDED" if not failed else "FAILED",
+        error_message=None if not failed else f"{len(failed)} reversal(s) failed.",
+        required=True,
+    )
+
     status = _aggregate_status(len(succeeded), len(failed))
     summary = {
         "operation": "log_run_rollback",
@@ -640,10 +658,16 @@ def _require_control(ctx: Any) -> Any:
     """The Control a rollback reaches the governed file model through.
 
     The one the context already owns, and only that one. Constructing a second
-    made this module a control owner: it took the object, opened a batch and
-    closed one, which is a lifecycle the run log owns. A context reaching the
+    made this module a control owner: the object is the runtime's, and a module
+    that builds its own is a second lifecycle beside it. A context reaching the
     control database carries its Control; one that does not is a caller error
     rather than a reason to manufacture another owner.
+
+    This is about Control and nothing else. The batch is a separate ownership
+    and belongs to this execution -- ``rollback_log_run`` opens one because
+    nothing above it does. Reading the two as one question is what removed a
+    working batch along with a genuine violation, and left the rollback with no
+    batch to govern its marking under.
 
     Args:
         ctx: The application context the rollback was asked in.
@@ -658,9 +682,9 @@ def _require_control(ctx: Any) -> Any:
     if control is None:
         raise LogRunRollbackError(
             "A rollback reaches the governed file model through the Control "
-            "its context already holds, and this context holds none. Whoever "
-            "owns the run owns the control connection and the batch its writes "
-            "are governed under."
+            "its context already holds, and this context holds none. The "
+            "runtime owns the control connection; the batch this rollback's "
+            "writes are governed under is its own."
         )
     return control
 
