@@ -931,7 +931,7 @@ class Control:
         values = {"file_manifest_id": file_manifest_id}
         for name in ("path", "file_name", "base_name", "file_extension",
                      "checksum_sha256", "size_bytes", "source_name",
-                     "evidence", "producer"):
+                     "evidence", "producer", "data_profile_key"):
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
 
