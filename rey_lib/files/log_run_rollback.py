@@ -600,12 +600,20 @@ def rollback_log_run(
         # not get it, and closing that as done is how a rollback comes to
         # report success over files it never moved.
 
-        reversed_ids = [int(row["file_mutation_id"]) for row in succeeded]
-        reversed_ids += [
+        # Named rather than accumulated, because this is work that has to be
+        # reported. A removal is counted in neither `succeeded` nor `failed`:
+        # `succeeded` is built from `reversible`, and a delete_record row
+        # carries no command to reach it. Left anonymous, a rollback whose whole
+        # effect was removing records reported zero of everything.
+        #
+        # Disjoint from `succeeded` by the same fact, so the two counts never
+        # describe one row twice.
+        removed = [
             int(row["file_mutation_id"]) for row in requested
             if str(row.get("rollback_action") or "") == "delete_record"
             and row.get("file_mutation_id") is not None
         ]
+        reversed_ids = [int(row["file_mutation_id"]) for row in succeeded] + removed
         if reversed_ids:
             control.complete_file_rollback(reversed_ids, required=True)
     except Exception as exc:
@@ -632,6 +640,11 @@ def rollback_log_run(
         "filesystem_operations_reversed": filesystem_reversals,
         "succeeded_count": len(succeeded),
         "failed_count": len(failed),
+        # Records whose reversal was their own deletion. Reported beside the
+        # other two rather than folded into them: nothing was restored and
+        # nothing failed, and a reader shown only those two saw a rollback that
+        # appeared to do nothing.
+        "records_removed": len(removed),
         "failures": failed,
         # The rollback records themselves, as they now stand. The reader was
         # shown this set before executing and is shown the same set after, so
@@ -643,7 +656,7 @@ def rollback_log_run(
             ctx, run_log, status=status,
             rollback_run_id=str(getattr(run_log, "run_id", "")),
             original_run_id=str(int(run_id)),
-            records_removed=0,
+            records_removed=len(removed),
             filesystem_operations_reversed=filesystem_reversals,
             affected_file_ids=sorted(affected_file_ids),
             started_at=started_at,

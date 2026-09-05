@@ -569,3 +569,81 @@ def test_the_batch_is_owned_but_the_control_is_not() -> None:
     with pytest.raises(LogRunRollbackError):
         rollback_log_run(SimpleNamespace(shared_control=None), 330)
 
+
+# ---------------------------------------------------------------------------
+# Reporting the records a rollback removed
+# ---------------------------------------------------------------------------
+
+class _RollbackReportingControl(_BatchRecordingControl):
+    """A Control answering one fixed rollback set, and recording what closed."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self._rows = rows
+        self.closed: list[int] = []
+
+    def request_file_rollback(self, **_: Any) -> list[dict[str, Any]]:
+        self.calls.append("request")
+        return self._rows
+
+    def complete_file_rollback(self, ids: list[int], **__: Any) -> None:
+        self.calls.append("complete")
+        self.closed.extend(ids)
+
+
+def _record_only(file_mutation_id: int) -> dict[str, Any]:
+    """A mutation that touched no file, as the request returns one."""
+    return {
+        "file_mutation_id": file_mutation_id,
+        "action": "record_only",
+        "rollback_action": "delete_record",
+        "command": "",
+    }
+
+
+def test_a_rollback_of_records_says_how_many_it_removed() -> None:
+    """The shape run 330 produced, which reported zero of everything.
+
+    Nothing is restored and nothing fails, so both existing counts are honestly
+    zero -- and a reader shown only those two sees a rollback that did nothing.
+    The removals are the work, and they are now counted as work.
+    """
+    from rey_lib.files.log_run_rollback import rollback_log_run
+
+    control = _RollbackReportingControl([_record_only(i) for i in (19511, 19512)])
+    result = rollback_log_run(SimpleNamespace(shared_control=control), 330)
+
+    assert result["records_removed"] == 2
+    assert result["succeeded_count"] == 0
+    assert result["failed_count"] == 0
+    # Counted because they were closed, not instead of being closed.
+    assert control.closed == [19511, 19512]
+    # Removing records and failing nothing is a success, and was always right.
+    assert result["status"] == "success"
+
+
+def test_a_removal_and_a_reversal_are_never_the_same_row() -> None:
+    """The two counts stay disjoint, so neither double-counts the other.
+
+    A row with filesystem work carries a command and is reversed; a row without
+    one is removed. Nothing carries both, which is what lets them be summed by
+    a reader.
+    """
+    from rey_lib.files.log_run_rollback import rollback_log_run
+
+    control = _RollbackReportingControl([_record_only(19511)])
+    result = rollback_log_run(SimpleNamespace(shared_control=control), 330)
+
+    assert result["records_removed"] == 1
+    assert result["succeeded_count"] == 0
+    assert result["filesystem_operations_reversed"] == 0
+
+
+def test_a_rollback_that_removes_nothing_reports_no_removals() -> None:
+    """Zero is a count here, not an absence -- the field is always answered."""
+    from rey_lib.files.log_run_rollback import rollback_log_run
+
+    control = _RollbackReportingControl([])
+    result = rollback_log_run(SimpleNamespace(shared_control=control), 330)
+
+    assert result["records_removed"] == 0
