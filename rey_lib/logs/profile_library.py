@@ -1,9 +1,16 @@
 """Canonical retrieval and presentation of governed file profiles.
 
-A profile is a mutation. Profiling reads a file as one prior mutation left it
-and appends a ``source_file_profile`` record naming that mutation as the record
-it consumed, so profiles are read from where mutations are read and this module
-holds no storage of its own.
+**This is where file profiles are stored today, not what a profile is.** A
+profile is a first-class snapshot with its own identity, and the object using
+one owns the reference to it -- see ``data_profile_model`` in
+01_core_architecture.yaml. ``ai.data_profile`` is the canonical store for that
+model. File profiles have not migrated to it, and this remains their live path
+until they do.
+
+As stored here, a profile is a mutation. Profiling reads a file as one prior
+mutation left it and appends a ``source_file_profile`` record naming that
+mutation as the record it consumed, so profiles are read from where mutations
+are read and this module holds no storage of its own.
 
 It answers two questions and no others: which profile is current for a consumed
 mutation, and which of its two representations a caller asked for. Whether a
