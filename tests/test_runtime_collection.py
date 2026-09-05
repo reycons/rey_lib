@@ -299,7 +299,6 @@ class TestEveryEntryPointAdoptedTheBoundary:
         "ftp_sync/main.py",
         "pipeline_coordinator/pipeline_coordinator/cli.py",
         "rey_console/rey_console/cli.py",
-        "console_next/console_next/cli.py",
     )
 
     def _apps(self) -> Path:

@@ -47,7 +47,6 @@ ENTRY_POINTS = (
     "ftp_sync/main.py",
     "pipeline_coordinator/pipeline_coordinator/cli.py",
     "rey_console/rey_console/cli.py",
-    "console_next/console_next/cli.py",
 )
 
 # Retired: their state moved into RunLog and the modules were deleted rather
