@@ -948,6 +948,18 @@ class Control:
             }, required=required) or [])
         ]
 
+    def ai_engine_profiles(self, required: bool = True) -> list[dict[str, Any]]:
+        """Every engine profile the estate offers.
+
+        One shared set, not a set per installation: ai.ai_engine_profile carries
+        no installation and profile_key is unique across it, so there is nothing
+        to filter on and no argument to pass.
+        """
+        return [
+            dict(row) for row in
+            (self._call_rows("get_ai_engine_profile", {}, required=required) or [])
+        ]
+
     def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:
         """Every instruction the estate offers, with its contract body."""
         return [

@@ -58,7 +58,6 @@ from rey_lib.config.env_reference import declaration_map
 __all__ = [
     "ProviderFactory",
     "ai_from_ctx",
-    "configured_providers_from_ctx",
     "default_adapters",
     "DEFAULT_TASK_NAME",
 ]
@@ -106,51 +105,6 @@ def credentials_from_ctx(ctx: Any) -> CredentialResolver:
     return CredentialResolver(declaration_map(getattr(ctx, "env", None)))
 
 
-def configured_providers_from_ctx(ctx: Any) -> tuple[ConfiguredProvider, ...]:
-    """Normalize ``ctx.llm`` into Rey-owned configured providers.
-
-    Reads only what the AI runtime contract names: provider, model, credential
-    reference, and where configuration states them, endpoint, timeout and
-    provider options.
-
-    Args:
-        ctx: The application context. Treated as opaque and never retained.
-
-    Returns:
-        One ``ConfiguredProvider`` per configured instance, keyed by the
-        instance name as its stable Rey identity.
-
-    Raises:
-        AIConfigurationError: when ``ctx.llm`` is absent, or an instance names
-            no provider.
-    """
-    instances = getattr(ctx, "llm", None)
-    if not instances:
-        raise AIConfigurationError(
-            "ctx.llm is not set, so there is no AI configuration to build from."
-        )
-
-    configured: list[ConfiguredProvider] = []
-    for name, entry in _entries(instances):
-        provider = str(_field(entry, "provider", "") or "").strip()
-        if not provider:
-            raise AIConfigurationError(
-                f"ctx.llm['{name}'] names no provider."
-            )
-        configured.append(
-            ConfiguredProvider(
-                id=str(name),
-                provider=provider,
-                model=str(_field(entry, "model", "") or ""),
-                endpoint=str(_field(entry, "endpoint", "") or ""),
-                timeout_seconds=_optional_number(_field(entry, "timeout", None)),
-                credential_ref=str(_field(entry, "api_key", "") or ""),
-                options=dict(_field(entry, "options", {}) or {}),
-            ),
-        )
-    return tuple(configured)
-
-
 def ai_from_ctx(
     ctx: Any,
     *,
@@ -159,6 +113,7 @@ def ai_from_ctx(
     instructions: tuple[AIInstruction, ...] = (),
     settings: AISettings | None = None,
     policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
+    configured: tuple[ConfiguredProvider, ...] = (),
 ) -> AI:
     """Build one runtime's ``AI`` from installation context, then let ctx go.
 
@@ -173,6 +128,9 @@ def ai_from_ctx(
         instructions: The instructions this runtime offers.
         settings: The starting selection, validated on construction.
         policy: The control domains for this runtime.
+        configured: The engines this runtime may reach, already read. Supplied
+            like profiles, instructions and settings are, so this opens no
+            configuration source of its own.
 
     Returns:
         An ``AI`` holding only Rey-owned state.
@@ -181,7 +139,6 @@ def ai_from_ctx(
         AIConfigurationError: when configuration is missing, or names a provider
             no factory can build.
     """
-    configured = configured_providers_from_ctx(ctx)
     factories = (
         adapters if adapters is not None
         else default_adapters(credentials_from_ctx(ctx))
@@ -191,7 +148,7 @@ def ai_from_ctx(
         factory = factories.get(configuration.provider)
         if factory is None:
             raise AIConfigurationError(
-                f"ctx.llm['{configuration.id}'] names provider "
+                f"Engine profile '{configuration.id}' names provider "
                 f"'{configuration.provider}', which no adapter factory builds."
             )
         built.append(factory(configuration))
@@ -260,41 +217,6 @@ def _linked(
     return tuple(linked)
 
 
-def _entries(instances: Any) -> list[tuple[str, Any]]:
-    """Every configured instance, as ``(name, entry)``.
-
-    ``ctx.llm`` is the estate's **named collection**: a list of records each
-    carrying its own ``name``, which is what ``_alias_named_collection`` produces
-    when it aliases ``llm_profiles`` onto the canonical ``llm`` key. That is the
-    configured shape, and ``find_in_ctx`` reads every other section the same way.
-
-    A mapping is also accepted, because building a runtime from explicit inputs
-    is legitimate and a caller holding a dict should not have to build a list to
-    be understood. What is *not* accepted is guessing: an earlier version of this
-    walked ``vars()`` when the value was neither, which failed on the only shape
-    production actually uses.
-    """
-    if instances is None:
-        return []
-    if hasattr(instances, "keys"):
-        return [(str(name), instances[name]) for name in instances.keys()]
-    if isinstance(instances, (list, tuple)):
-        named: list[tuple[str, Any]] = []
-        for entry in instances:
-            name = _field(entry, "name", "")
-            if not str(name or "").strip():
-                raise AIConfigurationError(
-                    "An AI configuration entry carries no name, so nothing can "
-                    "select it."
-                )
-            named.append((str(name), entry))
-        return named
-    raise AIConfigurationError(
-        "ctx.llm must be the configured named collection -- a list of entries "
-        f"each carrying a name -- and this runtime holds {type(instances).__name__}."
-    )
-
-
 def _field(entry: Any, name: str, default: Any) -> Any:
     """One configured field, whether the entry is a Namespace or a mapping.
 
@@ -310,13 +232,3 @@ def _field(entry: Any, name: str, default: Any) -> Any:
     return default if value is None else value
 
 
-def _optional_number(value: Any) -> float | None:
-    """A configured number, or nothing when configuration stated nothing."""
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise AIConfigurationError(
-            f"A configured AI timeout must be a number, got {value!r}."
-        ) from exc

@@ -292,9 +292,9 @@ def open_shared_control(ctx: Namespace) -> Namespace:
 def open_shared_ai(ctx: Namespace) -> Namespace:
     """Make a resolved context into a runtime by giving it its one AI.
 
-    **Optional, unlike Control.** Not every installation has AI configured, and
-    the existence of an installation does not imply the existence of an AI. When
-    ``ctx.llm`` names nothing, this returns ``None`` and the runtime simply has
+    **Optional, unlike Control.** Not every estate has AI configured, and the
+    existence of an installation does not imply the existence of an AI. When no
+    engine profiles are stored, this returns ``None`` and the runtime simply has
     no AI -- an ordinary capability state, not a failure. A non-AI application
     boots and runs exactly as it did.
 
@@ -327,25 +327,32 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
     ConfigError
         When AI is configured and one could not be built.
     """
-    configured = getattr(ctx, "llm", None)
-    if not configured:
-        ctx.shared_ai = None
-        return ctx
-
     from rey_lib.ai.construction import ai_from_ctx
     from rey_lib.ai.errors import AIError
 
     try:
+        # Whether this installation has an AI is now the engine set's answer,
+        # not a configuration block's. An estate with no engines has no AI,
+        # which is the ordinary state ctx.llm being absent used to mean.
+        control = _ai_control(ctx)
+        rows = control.ai_engine_profiles() if control is not None else []
+        if not rows:
+            ctx.shared_ai = None
+            return ctx
         # Built in one order because the settings are validated against what
         # this runtime offers: a selection naming an absent profile or
         # instruction is a configuration defect, and the only way to say so is
         # to know both first.
-        profiles = _ai_profiles(ctx)
+        # One read, used for both the runtime's providers and the projections
+        # a reader selects between.
+        engines = _ai_engines(rows)
+        profiles = _ai_profiles(engines, rows)
         instructions = _ai_instructions(ctx)
         ctx.shared_ai = ai_from_ctx(
             ctx,
             profiles=profiles,
             instructions=instructions,
+            configured=engines,
             settings=_ai_settings(
                 ctx, profiles=profiles, instructions=instructions,
             ),
@@ -362,16 +369,32 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
 
 
 def _ai_control(ctx: Namespace) -> Any:
-    """The Control this runtime reads its AI configuration through.
+    """The Control this runtime reads its AI configuration through, if any.
 
-    AI configuration is held in the control database, so a runtime that
-    configures AI and exposes no Control cannot build one. That is a refusal
-    rather than an absence, which is the stance ``open_shared_ai`` already
-    takes: an installation naming providers has asked for an AI, and reporting
-    "unavailable" for something configured would turn a configuration defect
-    into silent capability loss.
+    AI configuration is held in the control database, so a runtime exposing no
+    Control has no engine set to read and therefore no AI. That is an absence,
+    not a refusal: ``open_shared_control`` leaves a context carrying ``None``
+    wherever an installation configures no control database -- the Console's
+    own does not -- and refusing here would stop such a runtime from starting
+    at all.
+
+    Whether an installation configured AI used to be readable off the context
+    before any database was reached. It is not any more, so a missing Control
+    cannot be called a configuration defect; it is simply no engines.
     """
-    control = getattr(ctx, "shared_control", None)
+    return getattr(ctx, "shared_control", None)
+
+
+def _required_ai_control(ctx: Namespace) -> Any:
+    """The Control a reader has already established this runtime must have.
+
+    Reached only once the engine set answered that this installation has an AI,
+    so a Control missing here is a defect rather than the ordinary absence
+    ``_ai_control`` reports: an installation with engines has asked for an AI,
+    and reporting "unavailable" for the rest of its configuration would turn a
+    configuration defect into silent capability loss.
+    """
+    control = _ai_control(ctx)
     if control is None:
         raise ConfigError(
             "This installation configures AI, and AI configuration is held in "
@@ -400,31 +423,89 @@ def _ai_installation(ctx: Namespace) -> str:
     return installation
 
 
-def _ai_profiles(ctx: Namespace) -> tuple[Any, ...]:
+def _ai_engines(rows: list[dict[str, Any]]) -> tuple[Any, ...]:
+    """The engines this runtime may reach, read from the control database.
+
+    One shared set. ``ai.ai_engine_profile`` carries no installation and
+    ``profile_key`` is unique across it, so there is nothing to filter on.
+
+    Each row becomes a ``ConfiguredProvider`` -- the object the adapters already
+    take -- so nothing database-shaped travels past here and no adapter changes.
+
+    ``credential_ref`` carries a reference, never a secret: the row holds
+    ``env.ANTHROPIC_API_KEY`` and the adapter resolves it through the credential
+    resolver exactly as it did when the same string came from configuration.
+    """
+    from rey_lib.ai.providers.configuration import ConfiguredProvider
+
+    engines: list[Any] = []
+    for row in rows:
+        key = str(row.get("profile_key") or "").strip()
+        provider = str(row.get("provider") or "").strip()
+        if not provider:
+            raise ConfigError(
+                f"Engine profile '{key}' names no provider."
+            )
+        timeout = row.get("timeout_seconds")
+        engines.append(ConfiguredProvider(
+            id=key,
+            provider=provider,
+            model=str(row.get("model") or ""),
+            endpoint=str(row.get("endpoint") or ""),
+            # By its own name. The configured value used to be read under
+            # `timeout`, which the configuration never declared, so it never
+            # reached an adapter.
+            timeout_seconds=None if timeout is None else float(timeout),
+            credential_ref=str(row.get("credential_ref") or ""),
+            options=dict(row.get("options") or {}),
+        ))
+    return tuple(engines)
+
+
+def _ai_profiles(engines: tuple[Any, ...],
+                 rows: list[dict[str, Any]]) -> tuple[Any, ...]:
     """The public selection projections this runtime offers.
 
-    Derived from ``configured_providers_from_ctx``, which is the one reader of
-    this configuration. An earlier version walked ``ctx.llm`` itself, which meant
-    two readers of one section that could disagree about its shape -- and did:
-    this one guessed a mapping where production holds the estate's named
-    collection, and every launch failed.
+    One per engine, carrying the access policy its own row states.
 
     Capability is not read here. The adapter is the authority on what a
-    configured provider can do, so a profile that stated its own could advertise
-    something no adapter implements.
+    configured provider can do, so a profile that stated its own could
+    advertise something no adapter implements.
     """
-    from rey_lib.ai.construction import configured_providers_from_ctx
     from rey_lib.ai.profiles import AIProfile
 
+    access = {
+        str(row.get("profile_key") or ""): _row_access(row)
+        for row in rows
+    }
     return tuple(
         AIProfile(
-            id=configured.id,
-            name=configured.id,
-            configured_provider_id=configured.id,
-            profile_access=_configured_access(ctx, configured.id),
+            id=engine.id,
+            name=engine.id,
+            configured_provider_id=engine.id,
+            profile_access=access.get(engine.id),
         )
-        for configured in configured_providers_from_ctx(ctx)
+        for engine in engines
     )
+
+
+def _row_access(row: dict[str, Any]) -> Any:
+    """One engine's access policy, as the profile object carries it.
+
+    The envelope of what an engine may ever receive, and the reading it takes
+    when nothing states one. Absent where the row states neither, which is what
+    a configured entry declaring no policy meant.
+    """
+    allowed = row.get("access_allowed")
+    default = row.get("access_default")
+    if not allowed and not default:
+        return None
+    policy: dict[str, Any] = {}
+    if allowed:
+        policy["allowed"] = [str(value) for value in allowed]
+    if default:
+        policy["default"] = str(default)
+    return policy
 
 
 def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
@@ -458,7 +539,7 @@ def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
 
     offered: list[Any] = []
     shown: dict[str, str] = {}
-    for row in _ai_control(ctx).ai_instructions():
+    for row in _required_ai_control(ctx).ai_instructions():
         identity = str(row.get("instruction_key") or "").strip()
         kind = AIInstructionKind(str(row.get("kind") or "none"))
         if kind is not AIInstructionKind.CONTRACT:
@@ -515,7 +596,7 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
     from rey_lib.ai.errors import AIConfigurationError
     from rey_lib.ai.settings import AISettings, AISettingsTask
 
-    rows = _ai_control(ctx).ai_configuration(_ai_installation(ctx))
+    rows = _required_ai_control(ctx).ai_configuration(_ai_installation(ctx))
     if not rows:
         return AISettings()
 
@@ -622,22 +703,6 @@ def _entry_field(entry: Any, name: str, default: Any) -> Any:
         return default
     value = entry.get(name, default) if hasattr(entry, "get") else getattr(entry, name, default)
     return default if value is None else value
-
-
-def _configured_access(ctx: Namespace, name: str) -> Any:
-    """The profile-access policy one configured entry declares, if any.
-
-    Read through ``find_in_ctx``, the canonical reader for a named list section,
-    rather than by walking the section a second way.
-    """
-    from rey_lib.config.ctx import find_in_ctx
-
-    entry = find_in_ctx(ctx, "llm", name)
-    if entry is None:
-        return None
-    if hasattr(entry, "get"):
-        return entry.get("profile_access")
-    return getattr(entry, "profile_access", None)
 
 
 def open_run_log(ctx: Namespace) -> Any:

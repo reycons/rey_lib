@@ -7,6 +7,7 @@ the contract does not have to rewrite these.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -40,10 +41,10 @@ from rey_lib.ai import (
     TransportRetryPolicy,
     ValidationCorrectionPolicy,
     ai_from_ctx,
-    configured_providers_from_ctx,
     image,
 )
 from rey_lib.ai.errors import AIError, AIProviderError, AIToolError
+from rey_lib.config.bootstrap import _ai_engines
 from rey_lib.ai.providers.base import AIProvider
 
 
@@ -399,25 +400,61 @@ def test_validation_correction_is_off_until_a_runtime_asks_for_it() -> None:
     assert ValidationCorrectionPolicy().max_corrections == 0
 
 
+class _AIControl:
+    """The Control an AI reads its configuration through, in memory.
+
+    AI configuration lives in the control database, so a runtime is built with
+    one. These answer the two reads bootstrap makes.
+    """
+
+    def __init__(self, configuration=(), instructions=(), engines=()) -> None:
+        self._configuration = list(configuration)
+        self._instructions = list(instructions)
+        self._engines = list(engines)
+
+    def ai_configuration(self, installation, required: bool = True):
+        return [dict(row) for row in self._configuration]
+
+    def ai_instructions(self, required: bool = True):
+        return [dict(row) for row in self._instructions]
+
+    def ai_engine_profiles(self, required: bool = True):
+        return [dict(row) for row in self._engines]
+
+
 # -- obligation 10: ctx is construction-only --------------------------------
+
+#: One engine profile, as control.f_ai_engine_profile_get returns it.
+ENGINE_ROW = {
+    "profile_key": "fast",
+    "provider": "echo",
+    "model": "m1",
+    "credential_ref": "env.ANTHROPIC_API_KEY",
+    "endpoint": None,
+    "timeout_seconds": 30,
+    "temperature": 0,
+    "model_family": None,
+    "model_size": None,
+    "supports_streaming": False,
+    "supports_json_mode": True,
+    "access_allowed": ["redacted", "unredacted"],
+    "access_default": "unredacted",
+    "is_enabled": True,
+    "options": None,
+}
+
 
 class _Ctx:
     """Just enough of an application context to construct from."""
 
     def __init__(self) -> None:
-        self.llm = {
-            "fast": {
-                "provider": "echo",
-                "model": "m1",
-                "api_key": "env.ANTHROPIC_API_KEY",
-                "timeout": 30,
-            },
-        }
+        self.installation = SimpleNamespace(name="test")
+        self.shared_control = _AIControl(engines=[ENGINE_ROW])
 
 
-def test_configuration_is_normalized_out_of_ctx_into_rey_owned_state() -> None:
+def test_configuration_is_normalized_into_rey_owned_state() -> None:
     """Only fields the runtime contract names are carried forward."""
-    configured = configured_providers_from_ctx(_Ctx())
+    configured = _ai_engines([ENGINE_ROW])
 
     assert len(configured) == 1
     assert configured[0] == ConfiguredProvider(
@@ -429,9 +466,24 @@ def test_configuration_is_normalized_out_of_ctx_into_rey_owned_state() -> None:
     )
 
 
+def test_the_configured_timeout_reaches_the_provider() -> None:
+    """It is read under the name the column uses.
+
+    The YAML reader looked for `timeout` while configuration declared
+    `timeout_seconds`, so the configured value never arrived and every adapter
+    fell back to its own default.
+    """
+    from rey_lib.config.bootstrap import _ai_engines
+
+    assert _ai_engines([ENGINE_ROW])[0].timeout_seconds == 30.0
+    assert _ai_engines([{**ENGINE_ROW, "timeout_seconds": None}])[0].timeout_seconds is None
+
+
 def test_a_credential_reference_is_carried_never_a_resolved_credential() -> None:
     """ConfiguredProvider describes how to authenticate; the adapter resolves."""
-    configured = configured_providers_from_ctx(_Ctx())[0]
+    from rey_lib.config.bootstrap import _ai_engines
+
+    configured = _ai_engines([ENGINE_ROW])[0]
 
     assert configured.credential_ref == "env.ANTHROPIC_API_KEY"
     assert not hasattr(configured, "api_key")
@@ -451,6 +503,7 @@ def test_the_built_runtime_retains_no_reference_to_ctx() -> None:
     ai = ai_from_ctx(
         ctx,
         adapters={"echo": factory},
+        configured=_ai_engines([ENGINE_ROW]),
         profiles=(AIProfile(id="fast", name="Fast"),),
     )
 
@@ -465,6 +518,7 @@ def test_a_profile_is_linked_to_its_configured_provider_by_identity() -> None:
     ai = ai_from_ctx(
         _Ctx(),
         adapters={"echo": lambda c: EchoProvider(name=c.id)},
+        configured=_ai_engines([ENGINE_ROW]),
         profiles=(AIProfile(id="fast", name="Fast"),),
     )
 
@@ -479,17 +533,10 @@ def test_a_profile_is_linked_to_its_configured_provider_by_identity() -> None:
 def test_an_unbuildable_provider_is_refused_at_construction() -> None:
     """Configuration naming an adapter nobody supplies fails now, not later."""
     with pytest.raises(AIConfigurationError, match="no adapter factory builds"):
-        ai_from_ctx(_Ctx(), adapters={})
-
-
-def test_missing_configuration_is_refused_rather_than_guessed() -> None:
-    """No path-guessing fallback when ctx carries no AI configuration."""
-
-    class _Empty:
-        pass
-
-    with pytest.raises(AIConfigurationError, match="ctx.llm is not set"):
-        configured_providers_from_ctx(_Empty())
+        ai_from_ctx(
+            _Ctx(), adapters={},
+            configured=_ai_engines([{**ENGINE_ROW, "provider": "echo"}]),
+        )
 
 
 def test_capability_truth_is_the_adapters_not_the_profiles() -> None:
@@ -506,114 +553,49 @@ def test_capability_truth_is_the_adapters_not_the_profiles() -> None:
     assert not ai.capabilities("p").has(AICapability.VISION)
 
 
-# -- the shape production actually configures --------------------------------
-#
-# These exist because the unit fixtures above use a mapping, and production
-# holds the estate's named collection: a list of records each carrying a name.
-# Every test passed while every launch failed, because the fixtures invented a
-# configuration shape rather than using the configured one.
-
-def _configured_llm() -> list[Any]:
-    """`ctx.llm` exactly as configuration finalizes it.
-
-    Two entries naming two different providers, as the Console's own
-    installation does. One adapter is registered per provider, so two entries
-    sharing a provider is a separate limitation and not what this exercises.
-    """
-    from argparse import Namespace
-
-    return [
-        Namespace(
-            name="anthropic", provider="echo", model="claude-sonnet-4-6",
-            api_key="env.ANTHROPIC_API_KEY",
-            profile_access=Namespace(allowed=["redacted"], default="redacted"),
-        ),
-        Namespace(
-            name="primary", provider="ollama", model="gpt-4o",
-            api_key="env.OPENAI_API_KEY",
-            profile_access=Namespace(allowed=["redacted", "unredacted"],
-                                     default="redacted"),
-        ),
-    ]
-
-
-def test_the_configured_named_collection_is_read() -> None:
-    """A list of named entries, which is what ctx.llm holds."""
-    from argparse import Namespace
-
-    configured = configured_providers_from_ctx(Namespace(llm=_configured_llm()))
-
-    assert [entry.id for entry in configured] == ["anthropic", "primary"]
-    assert configured[0].credential_ref == "env.ANTHROPIC_API_KEY"
-    assert configured[1].model == "gpt-4o"
-
-
-def test_an_entry_without_a_name_is_refused() -> None:
-    """A named collection whose entry has no name selects nothing."""
-    from argparse import Namespace
-
-    with pytest.raises(AIConfigurationError, match="carries no name"):
-        configured_providers_from_ctx(
-            Namespace(llm=[Namespace(provider="echo", model="m")]),
-        )
-
-
-def test_a_shape_that_is_neither_is_refused_rather_than_guessed() -> None:
-    """The fault that broke every launch: walking a shape nobody configured."""
-    from argparse import Namespace
-
-    with pytest.raises(AIConfigurationError, match="named collection"):
-        configured_providers_from_ctx(Namespace(llm="not-a-collection"))
-
-
-class _AIControl:
-    """The Control an AI reads its configuration through, in memory.
-
-    AI configuration lives in the control database, so a runtime is built with
-    one. These answer the two reads bootstrap makes.
-    """
-
-    def __init__(self, configuration=(), instructions=()) -> None:
-        self._configuration = list(configuration)
-        self._instructions = list(instructions)
-
-    def ai_configuration(self, installation, required: bool = True):
-        return [dict(row) for row in self._configuration]
-
-    def ai_instructions(self, required: bool = True):
-        return [dict(row) for row in self._instructions]
-
-
-def test_bootstrap_builds_a_shared_ai_from_the_configured_shape() -> None:
-    """The bootstrap contract, against the real configuration shape."""
+def test_bootstrap_builds_a_shared_ai_from_the_stored_engines() -> None:
+    """The bootstrap contract, against the engines the store holds."""
     from argparse import Namespace
 
     from rey_lib.config.bootstrap import open_shared_ai
+
+    engines = [
+        {**ENGINE_ROW, "profile_key": "anthropic",
+         "access_allowed": ["redacted"], "access_default": "redacted"},
+        {**ENGINE_ROW, "profile_key": "primary"},
+    ]
 
     # Bootstrap makes a resolved context into a runtime by giving it its one AI,
     # and owns that assignment so ctx.shared_ai is written in one place -- an
     # application's runtime, and a Console page session's.
     ai = open_shared_ai(Namespace(
-        llm=_configured_llm(), env=[], installation="test",
-        shared_control=_AIControl(),
+        env=[], installation=SimpleNamespace(name="test"),
+        shared_control=_AIControl(engines=engines),
     )).shared_ai
 
     assert ai is not None
     assert [profile.id for profile in ai.profiles()] == ["anthropic", "primary"]
-    # The declared access policy travels with the profile, into AI-owned state.
+    # The stored access policy travels with the profile, into AI-owned state.
     assert ai.profile("primary").access_policy()["allowed"] == [
         "redacted", "unredacted",
     ]
+    assert ai.profile("anthropic").access_policy()["default"] == "redacted"
 
 
-def test_bootstrap_returns_none_when_no_ai_is_configured() -> None:
-    """Absent AI is an ordinary state, and builds nothing."""
+def test_bootstrap_returns_none_when_no_engines_are_stored() -> None:
+    """Absent AI is an ordinary state, and builds nothing.
+
+    The question used to be whether a configuration block existed. It is now
+    whether the store holds any engine.
+    """
     from argparse import Namespace
 
     from rey_lib.config.bootstrap import open_shared_ai
 
-    assert open_shared_ai(Namespace()).shared_ai is None
-    assert open_shared_ai(Namespace(llm=[])).shared_ai is None
+    assert open_shared_ai(Namespace(
+        env=[], installation=SimpleNamespace(name="test"),
+        shared_control=_AIControl(engines=[]),
+    )).shared_ai is None
 
 
 def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
@@ -629,8 +611,10 @@ def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
 
     with pytest.raises(ConfigError, match="configures AI but one could not be built"):
         open_shared_ai(Namespace(
-            llm=[Namespace(name="x", provider="no-such-adapter", model="m")],
-            env=[], installation="test", shared_control=_AIControl(),
+            env=[], installation=SimpleNamespace(name="test"),
+            shared_control=_AIControl(engines=[
+                {**ENGINE_ROW, "provider": "no-such-adapter"},
+            ]),
         ))
 
 

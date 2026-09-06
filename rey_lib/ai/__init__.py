@@ -35,7 +35,6 @@ from rey_lib.ai.content import (
 from rey_lib.ai.construction import (
     ProviderFactory,
     ai_from_ctx,
-    configured_providers_from_ctx,
 )
 from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.errors import (
@@ -183,7 +182,6 @@ __all__ = [
     "after",
     "ai_from_ctx",
     "audio",
-    "configured_providers_from_ctx",
     "document",
     "image",
     "never",
