@@ -931,8 +931,7 @@ class Control:
         values = {"file_manifest_id": file_manifest_id}
         for name in ("path", "file_name", "base_name", "file_extension",
                      "checksum_sha256", "size_bytes", "source_name",
-                     "evidence", "producer", "data_profile_key",
-                     "data_profile_id"):
+                     "evidence", "producer", "data_profile_key"):
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
 
@@ -973,23 +972,61 @@ class Control:
         return None
 
     def insert_data_profile(self, data_profile_key: str,
-                            clear_profile: dict[str, Any],
-                            redacted_profile: dict[str, Any],
+                            source_hash: Optional[str] = None,
+                            profile_schema_version: Optional[int] = None,
+                            profile_method: Optional[str] = None,
+                            profile_method_version: Optional[str] = None,
+                            row_count: Optional[int] = None,
+                            field_count: Optional[int] = None,
+                            size_bytes: Optional[int] = None,
+                            header_definition: Optional[dict[str, Any]] = None,
+                            distribution: Optional[dict[str, Any]] = None,
                             required: bool = True) -> Optional[int]:
-        """Persist one group's profile, as produced, and answer with its identity.
+        """Resolve this group's profile, creating it only if it is absent.
 
-        One identity holding both readings. They describe a single profiling
-        event, so a profile carrying one and not the other would describe
-        something that never happened.
+        Idempotent by identity: profiling the same group again resolves the
+        profile that exists rather than making a second one, and creation
+        provenance is stamped only on the insert that created it.
 
-        The objects are stored as they were handed over. Nothing here reads
-        them, decides what they mean, or takes them apart beyond the field rows
-        the routine writes so a field is addressable.
+        Values, never an object. What the profiler produced is taken apart where
+        it is understood, and each fact arrives here under its own name.
         """
         return self._call("insert_data_profile", {
-            "data_profile_key": str(data_profile_key),
-            "clear_profile":    clear_profile,
-            "redacted_profile": redacted_profile,
+            "data_profile_key":       str(data_profile_key),
+            "source_hash":            source_hash,
+            "profile_schema_version": profile_schema_version,
+            "profile_method":         profile_method,
+            "profile_method_version": profile_method_version,
+            "row_count":              row_count,
+            "field_count":            field_count,
+            "size_bytes":             size_bytes,
+            "header_definition":      header_definition,
+            "distribution":           distribution,
+        }, required=required)
+
+    #: The field columns a reading carries, in the order the routine takes them.
+    #: Named here so the caller states each one rather than handing over a row.
+    DATA_PROFILE_FIELD_COLUMNS = (
+        "ordinal", "detected_type", "blank_count", "min_length", "max_length",
+        "min_decimal_places", "max_decimal_places", "min_numeric", "max_numeric",
+        "min_date", "max_date", "sample_values", "null_like_values",
+        "constant_value",
+    )
+
+    def insert_data_profile_field(self, data_profile_id: int, field_name: str,
+                                  data_profile_field_type: str,
+                                  required: bool = True, **values: Any) -> None:
+        """One field reading, written only if that reading is not already there.
+
+        A field is missing when (data_profile_id, field_name,
+        data_profile_field_type) is absent, so a half-written profile is
+        completed and a row that exists is never rewritten.
+        """
+        self._call("insert_data_profile_field", {
+            "data_profile_id":         int(data_profile_id),
+            "field_name":              str(field_name),
+            "data_profile_field_type": str(data_profile_field_type),
+            **{name: values.get(name) for name in self.DATA_PROFILE_FIELD_COLUMNS},
         }, required=required)
 
     def append_file_mutation(self, file_manifest_id: int, record_type: str,

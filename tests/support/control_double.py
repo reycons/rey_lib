@@ -89,7 +89,7 @@ class ControlDouble:
     UPDATABLE_FILE_COLUMNS = (
         "path", "file_name", "base_name", "file_extension",
         "checksum_sha256", "size_bytes", "source_name", "evidence", "producer",
-        "data_profile_key", "data_profile_id",
+        "data_profile_key",
     )
 
     def update_file_manifest(self, file_manifest_id: int,
