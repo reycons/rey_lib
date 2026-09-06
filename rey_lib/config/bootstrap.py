@@ -346,7 +346,7 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
             ctx,
             profiles=profiles,
             instructions=instructions,
-            settings=settings_from_ctx(
+            settings=_ai_settings(
                 ctx, profiles=profiles, instructions=instructions,
             ),
         )
@@ -359,6 +359,45 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
         raise ConfigError(
             f"This installation configures AI but one could not be built: {exc}"
         ) from exc
+
+
+def _ai_control(ctx: Namespace) -> Any:
+    """The Control this runtime reads its AI configuration through.
+
+    AI configuration is held in the control database, so a runtime that
+    configures AI and exposes no Control cannot build one. That is a refusal
+    rather than an absence, which is the stance ``open_shared_ai`` already
+    takes: an installation naming providers has asked for an AI, and reporting
+    "unavailable" for something configured would turn a configuration defect
+    into silent capability loss.
+    """
+    control = getattr(ctx, "shared_control", None)
+    if control is None:
+        raise ConfigError(
+            "This installation configures AI, and AI configuration is held in "
+            "the control database, but this context exposes no shared Control "
+            "to read it through."
+        )
+    return control
+
+
+def _ai_installation(ctx: Namespace) -> str:
+    """Which installation's AI configuration this runtime is asking for.
+
+    ``ctx.installation`` finalizes into a namespace carrying its name rather
+    than a bare string, so the name is read from it. Stringifying the namespace
+    produced a value no group matches, and the runtime resolved to no tasks at
+    all -- silently, because an installation with no AI configuration is an
+    ordinary state.
+    """
+    declared = getattr(ctx, "installation", None)
+    installation = str(getattr(declared, "name", None) or declared or "").strip()
+    if not installation:
+        raise ConfigError(
+            "AI configuration is held per installation, and this context names "
+            "none."
+        )
+    return installation
 
 
 def _ai_profiles(ctx: Namespace) -> tuple[Any, ...]:
@@ -389,94 +428,147 @@ def _ai_profiles(ctx: Namespace) -> tuple[Any, ...]:
 
 
 def _ai_instructions(ctx: Namespace) -> tuple[Any, ...]:
-    """The instructions this runtime offers.
+    """The instructions this runtime offers, read from the control database.
 
-    Two canonical choices plus whatever configuration declares:
+    Three identities are kept apart, as they always were:
 
-        NONE      send no instruction
-        RAW       ad-hoc text the operator writes
-        CONTRACT  one per entry in ``ai_settings``' sibling ``ai_instructions``
+        the declared key        the stable id a setting references
+        the contract            what that id resolves to
+        its name and version    what a reader sees
 
-    **Declared, never discovered.** Configuration is the authority over what may
-    be selected; nothing here scans a directory to find a contract. Corrected
-    2026-08-30, when the list was still derived from ``log_analysis``: that
-    offered *analysis bindings* as though they were prompts, so two entries named
-    for two analyses pointed at one contract and every unbound contract was
-    unreachable. ``log_analysis`` still binds an analysis to its contract, which
-    is a different question and untouched.
+    **Declared, never discovered.** The database is the authority over what may
+    be selected; nothing here scans a directory to find a contract. The reserved
+    keys ``__none__`` and ``__ad_hoc__`` are rows like any other -- they are what
+    keeps "send no instruction" and "ad-hoc text the operator writes" distinct
+    from a named contract, and from each other.
 
-    Three identities are kept apart:
-
-        the declared ``name``   the stable id a setting references
-        ``contract``            the file that id currently resolves to
-        the contract's own name and version   what a reader sees
-
-    Reading the file happens here because ``rey_lib.ai`` deliberately opens no
-    path -- "where contracts live is configuration's answer" -- and bootstrap is
-    already the place configuration is read.
-
-    The old Console offered "Text Prompt" and "Text Prompt Only" as separate
-    selections. They are not reproduced: both ran the same mode with the same
-    instruction, and differed only in whether the caller sent data alongside it
-    -- which is the caller's input, not a property of the instruction.
+    The body travels with the instruction rather than as a reference to load
+    later. ``ContractResolver`` answers with ``text`` before it looks at
+    ``reference``, so a contract that carries its own body needs no loader and
+    the resolver is untouched.
 
     Raises
     ------
     ConfigError
-        When a declared entry names no contract, repeats an id, cannot be read,
-        declares no name or version, or shows a reader the same name and version
-        as another. Each was declared, so each is a defect rather than an entry
-        to drop silently.
+        When a contract instruction carries no body, or two instructions show a
+        reader the same name and version. Each was declared, so each is a defect
+        rather than an entry to drop silently.
     """
     from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 
-    offered: list[Any] = [
-        AIInstruction(id=NO_INSTRUCTION, kind=AIInstructionKind.NONE, name="None"),
-        AIInstruction(id=AD_HOC_INSTRUCTION, kind=AIInstructionKind.RAW,
-                      name="Ad hoc text"),
-    ]
-
-    seen_ids: set[str] = set()
+    offered: list[Any] = []
     shown: dict[str, str] = {}
-    for name, entry in _named_entries(getattr(ctx, "ai_instructions", None)):
-        identity = str(name or "").strip()
-        if not identity:
-            raise ConfigError(
-                "An ai_instructions entry carries no name, so nothing can "
-                "select it."
-            )
-        if identity in seen_ids:
-            raise ConfigError(
-                f"ai_instructions declares '{identity}' twice. The name is what "
-                "an AI setting resolves through, so which one applied would be "
-                "ambiguous."
-            )
-        seen_ids.add(identity)
+    for row in _ai_control(ctx).ai_instructions():
+        identity = str(row.get("instruction_key") or "").strip()
+        kind = AIInstructionKind(str(row.get("kind") or "none"))
+        if kind is not AIInstructionKind.CONTRACT:
+            # The two reserved instructions. They name no contract and show the
+            # reader their own label.
+            offered.append(AIInstruction(
+                id=identity, kind=kind,
+                name="None" if kind is AIInstructionKind.NONE else "Ad hoc text",
+            ))
+            continue
 
-        contract = str(_entry_field(entry, "contract", "") or "").strip()
-        if not contract:
+        body = row.get("body")
+        if not body:
             raise ConfigError(
-                f"ai_instructions['{identity}'] names no contract file."
+                f"AI instruction '{identity}' is a contract and carries no "
+                "body, so nothing could be sent for it."
             )
-
-        label = _contract_label(identity, contract)
+        label = f"{row.get('contract_key')} {row.get('contract_version')}"
         if label in shown:
             raise ConfigError(
-                f"ai_instructions['{identity}'] and ai_instructions"
-                f"['{shown[label]}'] both show '{label}', so a reader could not "
-                "tell them apart."
+                f"AI instructions '{identity}' and '{shown[label]}' both show "
+                f"'{label}', so a reader could not tell them apart."
             )
         shown[label] = identity
+        offered.append(AIInstruction(
+            id=identity, kind=kind, name=label, text=str(body),
+        ))
 
-        offered.append(
-            AIInstruction(
-                id=identity,
-                kind=AIInstructionKind.CONTRACT,
-                name=label,
-                reference=contract,
-            ),
-        )
-    return tuple(offered)
+    # The order a reader sees: the reserved choices first, as they were when
+    # this list was assembled by hand.
+    reserved = [i for i in offered if i.kind is not AIInstructionKind.CONTRACT]
+    contracts = [i for i in offered if i.kind is AIInstructionKind.CONTRACT]
+    reserved.sort(key=lambda i: 0 if i.kind is AIInstructionKind.NONE else 1)
+    return tuple(reserved + contracts)
+
+
+def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
+                 instructions: tuple[Any, ...]) -> Any:
+    """This runtime's initial AI settings, read from the control database.
+
+    The initial state only. From here the runtime owns them: the settings panel
+    mutates the value on the ``AI``, and configuration is never re-read to find
+    out what is selected now.
+
+    ``ai.ai_vw`` has already resolved what a task inherits from its group, so a
+    task row states what applies to it. Two row types arrive: the group row is
+    the default scope, and each task row is one task.
+
+    Validated against what this runtime offers, for the same reason it always
+    was: a selection naming an absent profile or instruction is a configuration
+    defect, and dropping it silently would show an operator a runtime that
+    ignores what they configured.
+    """
+    from rey_lib.ai.errors import AIConfigurationError
+    from rey_lib.ai.settings import AISettings, AISettingsTask
+
+    rows = _ai_control(ctx).ai_configuration(_ai_installation(ctx))
+    if not rows:
+        return AISettings()
+
+    profile_ids = {profile.id for profile in profiles}
+    instruction_ids = {instruction.id for instruction in instructions}
+
+    def _selection(row: Any, field: str, offered: set[str], what: str,
+                   where: str) -> str:
+        value = str(row.get(field) or "").strip()
+        if value and value not in offered:
+            raise AIConfigurationError(
+                f"AI configuration{where} names {what} '{value}', "
+                "which this runtime does not offer."
+            )
+        return value
+
+    def _temperature(row: Any) -> Any:
+        # A stated 0 is a value and NULL is inherit, so this asks whether one
+        # was stored rather than whether it is truthy.
+        value = row.get("temperature")
+        return None if value is None else float(value)
+
+    group = next((row for row in rows if str(row.get("row_type")) == "group"), None)
+    settings = AISettings(
+        profile_id=_selection(group or {}, "profile_key", profile_ids,
+                              "profile", ".default"),
+        instruction_id=_selection(group or {}, "instruction_key",
+                                  instruction_ids, "instruction", ".default"),
+        temperature=_temperature(group or {}),
+        representation=str((group or {}).get("representation") or "").strip(),
+    )
+
+    tasks: list[Any] = []
+    for row in rows:
+        if str(row.get("row_type")) != "task":
+            continue
+        name = str(row.get("task_key") or "").strip()
+        where = f".tasks['{name}']"
+        tasks.append(AISettingsTask(
+            name=name,
+            profile_id=_selection(row, "profile_key", profile_ids, "profile", where),
+            instruction_id=_selection(row, "instruction_key", instruction_ids,
+                                      "instruction", where),
+            temperature=_temperature(row),
+            representation=str(row.get("representation") or "").strip(),
+        ))
+    return AISettings(
+        profile_id=settings.profile_id,
+        instruction_id=settings.instruction_id,
+        temperature=settings.temperature,
+        representation=settings.representation,
+        tasks=tuple(tasks),
+    )
 
 
 def _contract_label(identity: str, contract: str) -> str:

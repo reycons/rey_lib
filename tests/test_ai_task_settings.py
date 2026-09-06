@@ -247,28 +247,39 @@ from rey_lib.config.bootstrap import _ai_instructions  # noqa: E402
 from rey_lib.errors.error_utils import ConfigError  # noqa: E402
 
 
-def contract_file(tmp_path: Any, stem: str, name: Any, version: Any) -> str:
-    """One contract file declaring whatever it was given."""
-    body = "contract:\n"
-    if name is not None:
-        body += f"  name: {name}\n"
-    if version is not None:
-        body += f"  version: '{version}'\n"
-    path = tmp_path / f"{stem}.yaml"
-    path.write_text(body, encoding="utf-8")
-    return str(path)
+class _AIControl:
+    """The Control an AI reads its configuration through, in memory.
 
-
-def instructions(**entries: str) -> SimpleNamespace:
-    """A context declaring ai_instructions as the estate's named collection.
-
-    Namespaces rather than dicts, because that is what configuration finalizes
-    into and therefore what this reader is given in production.
+    The estate reads the control database through Control, so a test of what the
+    runtime offers supplies one rather than a configuration section. What it
+    answers is the shape ``control.f_ai_instruction_get`` returns.
     """
-    return SimpleNamespace(ai_instructions=[
-        SimpleNamespace(name=name, contract=contract)
-        for name, contract in entries.items()
-    ])
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._rows]
+
+
+def contract_row(key: str, name: Any, version: Any, body: str = "rules: []") -> dict:
+    """One contract instruction, as the routine returns it."""
+    return {"instruction_key": key, "kind": "contract",
+            "contract_key": name, "contract_version": version, "body": body}
+
+
+RESERVED = [
+    {"instruction_key": "__none__", "kind": "none",
+     "contract_key": None, "contract_version": None, "body": None},
+    {"instruction_key": "__ad_hoc__", "kind": "raw",
+     "contract_key": None, "contract_version": None, "body": None},
+]
+
+
+def instructions(*rows: dict, reserved: bool = True) -> SimpleNamespace:
+    """A context whose Control answers with these instructions."""
+    return SimpleNamespace(
+        shared_control=_AIControl((RESERVED if reserved else []) + list(rows)))
 
 
 def offered(ctx: Any) -> dict[str, str]:
@@ -279,28 +290,26 @@ def offered(ctx: Any) -> dict[str, str]:
     }
 
 
-def test_a_runtime_declaring_none_offers_the_two_canonical_choices(tmp_path: Any) -> None:
-    """No instruction configuration is an ordinary state, not a failure."""
-    built = _ai_instructions(SimpleNamespace())
+def test_a_runtime_declaring_none_offers_the_two_canonical_choices() -> None:
+    """No contracts is an ordinary state, not a failure."""
+    built = _ai_instructions(instructions())
 
     assert [i.kind for i in built] == [AIInstructionKind.NONE, AIInstructionKind.RAW]
 
 
-def test_a_declared_entry_is_shown_by_the_contract_s_own_name_and_version(
-    tmp_path: Any,
-) -> None:
-    """Not the entry's id, and not the filename: what the prompt calls itself."""
-    ctx = instructions(anything=contract_file(tmp_path, "f", "rey_log_interpreter", "1.3.1"))
+def test_a_declared_entry_is_shown_by_the_contract_s_own_name_and_version() -> None:
+    """Not the entry's key: what the prompt calls itself."""
+    ctx = instructions(contract_row("anything", "rey_log_interpreter", "1.3.1"))
 
     assert offered(ctx) == {"anything": "rey_log_interpreter 1.3.1"}
 
 
-def test_contracts_sharing_a_name_stay_distinct_by_version(tmp_path: Any) -> None:
-    """Four files declare rey_log_interpreter in this estate; a name alone does
+def test_contracts_sharing_a_name_stay_distinct_by_version() -> None:
+    """Four rows declare rey_log_interpreter in this estate; a name alone does
     not identify one."""
     ctx = instructions(
-        current=contract_file(tmp_path, "a", "rey_log_interpreter", "1.3.1"),
-        previous=contract_file(tmp_path, "b", "rey_log_interpreter", "1.2.1"),
+        contract_row("current", "rey_log_interpreter", "1.3.1"),
+        contract_row("previous", "rey_log_interpreter", "1.2.1"),
     )
 
     assert offered(ctx) == {
@@ -309,65 +318,46 @@ def test_contracts_sharing_a_name_stay_distinct_by_version(tmp_path: Any) -> Non
     }
 
 
-def test_the_id_is_configuration_s_so_the_file_behind_it_may_change(
-    tmp_path: Any,
-) -> None:
-    """The property the identity distinction exists to give: repointing an entry
-    leaves every setting that references it working."""
-    before = instructions(log_interpreter=contract_file(tmp_path, "a", "rey", "1.0.0"))
-    after = instructions(log_interpreter=contract_file(tmp_path, "b", "rey", "2.0.0"))
+def test_the_key_is_stable_so_the_contract_behind_it_may_change() -> None:
+    """The property the identity distinction exists to give: repointing an
+    instruction at another contract leaves every setting referencing it
+    working."""
+    before = instructions(contract_row("log_interpreter", "rey", "1.0.0"))
+    after = instructions(contract_row("log_interpreter", "rey", "2.0.0"))
 
     assert set(offered(before)) == set(offered(after)) == {"log_interpreter"}
     assert offered(after)["log_interpreter"] == "rey 2.0.0"
 
 
-def test_a_repeated_id_is_refused_even_when_the_files_differ(tmp_path: Any) -> None:
-    """The id is what a setting resolves through, so two would be ambiguous."""
-    ctx = SimpleNamespace(ai_instructions=[
-        SimpleNamespace(name="same", contract=contract_file(tmp_path, "a", "one", "1.0.0")),
-        SimpleNamespace(name="same", contract=contract_file(tmp_path, "b", "two", "1.0.0")),
-    ])
-
-    with pytest.raises(ConfigError, match="twice"):
-        _ai_instructions(ctx)
-
-
-def test_two_entries_shown_identically_are_refused(tmp_path: Any) -> None:
-    """Distinct ids, but a reader sees one label twice and cannot choose."""
+def test_two_instructions_shown_identically_are_refused() -> None:
+    """Distinct keys, but a reader sees one label twice and cannot choose."""
     ctx = instructions(
-        one=contract_file(tmp_path, "a", "rey", "1.0.0"),
-        two=contract_file(tmp_path, "b", "rey", "1.0.0"),
+        contract_row("one", "rey", "1.0.0"),
+        contract_row("two", "rey", "1.0.0"),
     )
 
     with pytest.raises(ConfigError, match="tell them apart"):
         _ai_instructions(ctx)
 
 
-@pytest.mark.parametrize("name,version", [(None, "1.0.0"), ("rey", None)])
-def test_a_contract_declaring_no_name_or_version_is_refused(
-    tmp_path: Any, name: Any, version: Any,
-) -> None:
-    """A reader is shown both, so an instruction missing either cannot be
-    labelled by the model this establishes."""
-    ctx = instructions(x=contract_file(tmp_path, "f", name, version))
+def test_a_contract_carrying_no_body_is_refused_rather_than_dropped() -> None:
+    """It was declared, so nothing to send is a defect rather than an omission.
 
-    with pytest.raises(ConfigError, match="declaring no"):
+    A repeated key, a missing contract and a contract with no name or version
+    are refused by the schema -- instruction_key is unique, the kind check
+    requires a contract, and the columns are NOT NULL -- so they cannot reach
+    this reader. What can is a row whose contract has no body.
+    """
+    ctx = instructions(contract_row("x", "rey", "1.0.0", body=""))
+
+    with pytest.raises(ConfigError, match="carries no"):
         _ai_instructions(ctx)
 
 
-def test_an_unreadable_contract_is_refused_rather_than_dropped(tmp_path: Any) -> None:
-    """It was declared, so its absence is a defect."""
-    ctx = instructions(x=str(tmp_path / "missing.yaml"))
-
-    with pytest.raises(ConfigError, match="could not be read"):
-        _ai_instructions(ctx)
-
-
-def test_an_entry_naming_no_contract_is_refused(tmp_path: Any) -> None:
-    ctx = SimpleNamespace(ai_instructions=[SimpleNamespace(name="x")])
-
-    with pytest.raises(ConfigError, match="names no contract"):
-        _ai_instructions(ctx)
+def test_a_runtime_with_no_control_cannot_read_its_configuration() -> None:
+    """Configured and unreadable is a refusal, not an absent capability."""
+    with pytest.raises(ConfigError, match="no shared Control"):
+        _ai_instructions(SimpleNamespace())
 
 
 # -- the invariant: one path, no consumer supplying or suppressing -----------
@@ -502,3 +492,69 @@ def test_the_ollama_adapter_declares_the_structured_output_it_implements() -> No
     assert AICapability.STRUCTURED_OUTPUT in adapter.capability_for("m")
     # Still absent, because neither is implemented here.
     assert AICapability.TOOLS not in adapter.capability_for("m")
+
+
+# -- the cutover: configuration comes from the database ----------------------
+
+def test_the_runtime_reads_no_task_or_contract_configuration_from_yaml() -> None:
+    """The property the cutover exists to give, asserted structurally.
+
+    `ctx.ai_settings` and `ctx.ai_instructions` were the YAML sections the
+    runtime built itself from. Nothing in the production build may read them
+    now, and no contract file may be opened for a task's instruction -- the
+    body arrives on the instruction.
+
+    `ctx.llm` is deliberately not included: it is provider connection
+    configuration, not task or contract configuration, and it stays in YAML.
+    """
+    import ast
+    import inspect
+
+    from rey_lib.config import bootstrap
+
+    source = inspect.getsource(bootstrap)
+    tree = ast.parse(source)
+    built_by = {"_ai_instructions", "_ai_settings", "_ai_control", "_ai_installation"}
+
+    reads: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in built_by:
+            continue
+        for inner in ast.walk(node):
+            # getattr(ctx, "ai_settings") / getattr(ctx, "ai_instructions")
+            if (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "getattr"
+                    and len(inner.args) >= 2
+                    and isinstance(inner.args[1], ast.Constant)
+                    and inner.args[1].value in ("ai_settings", "ai_instructions")):
+                reads.append(f"{node.name} reads ctx.{inner.args[1].value}")
+            # ctx.ai_settings / ctx.ai_instructions -- on ctx itself, which is
+            # what distinguishes it from Control.ai_instructions(), the read
+            # that replaced it.
+            if (isinstance(inner, ast.Attribute)
+                    and inner.attr in ("ai_settings", "ai_instructions")
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id == "ctx"):
+                reads.append(f"{node.name} reads ctx.{inner.attr}")
+
+    assert reads == [], "; ".join(reads)
+
+
+def test_a_contract_body_arrives_on_the_instruction() -> None:
+    """No file is opened for it, so the resolver needs no loader.
+
+    ContractResolver answers with `text` before it looks at `reference`, which
+    is what let the body move to the database without touching it.
+    """
+    from rey_lib.ai.contracts import ContractResolver
+
+    ctx = instructions(contract_row("x", "rey", "1.0.0", body="rules: [one]"))
+    instruction = next(
+        i for i in _ai_instructions(ctx) if i.kind is AIInstructionKind.CONTRACT
+    )
+
+    assert instruction.text == "rules: [one]"
+    assert not instruction.reference
+    # No loader supplied, and it still resolves.
+    assert ContractResolver().body_of(instruction) == "rules: [one]"

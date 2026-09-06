@@ -566,6 +566,24 @@ def test_a_shape_that_is_neither_is_refused_rather_than_guessed() -> None:
         configured_providers_from_ctx(Namespace(llm="not-a-collection"))
 
 
+class _AIControl:
+    """The Control an AI reads its configuration through, in memory.
+
+    AI configuration lives in the control database, so a runtime is built with
+    one. These answer the two reads bootstrap makes.
+    """
+
+    def __init__(self, configuration=(), instructions=()) -> None:
+        self._configuration = list(configuration)
+        self._instructions = list(instructions)
+
+    def ai_configuration(self, installation, required: bool = True):
+        return [dict(row) for row in self._configuration]
+
+    def ai_instructions(self, required: bool = True):
+        return [dict(row) for row in self._instructions]
+
+
 def test_bootstrap_builds_a_shared_ai_from_the_configured_shape() -> None:
     """The bootstrap contract, against the real configuration shape."""
     from argparse import Namespace
@@ -575,7 +593,10 @@ def test_bootstrap_builds_a_shared_ai_from_the_configured_shape() -> None:
     # Bootstrap makes a resolved context into a runtime by giving it its one AI,
     # and owns that assignment so ctx.shared_ai is written in one place -- an
     # application's runtime, and a Console page session's.
-    ai = open_shared_ai(Namespace(llm=_configured_llm(), env=[])).shared_ai
+    ai = open_shared_ai(Namespace(
+        llm=_configured_llm(), env=[], installation="test",
+        shared_control=_AIControl(),
+    )).shared_ai
 
     assert ai is not None
     assert [profile.id for profile in ai.profiles()] == ["anthropic", "primary"]
@@ -609,7 +630,7 @@ def test_bootstrap_raises_when_configured_ai_cannot_be_built() -> None:
     with pytest.raises(ConfigError, match="configures AI but one could not be built"):
         open_shared_ai(Namespace(
             llm=[Namespace(name="x", provider="no-such-adapter", model="m")],
-            env=[],
+            env=[], installation="test", shared_control=_AIControl(),
         ))
 
 

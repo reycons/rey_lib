@@ -935,6 +935,55 @@ class Control:
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
 
+    def ai_configuration(self, installation: str,
+                         required: bool = True) -> list[dict[str, Any]]:
+        """One installation's resolved AI configuration.
+
+        The view owns the group/task inheritance, so what comes back is already
+        resolved. Nothing here re-derives it.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_ai_configuration", {
+                "installation": str(installation),
+            }, required=required) or [])
+        ]
+
+    def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:
+        """Every instruction the estate offers, with its contract body."""
+        return [
+            dict(row) for row in
+            (self._call_rows("get_ai_instruction", {}, required=required) or [])
+        ]
+
+    def data_profile_for_key(self, data_profile_key: str,
+                             required: bool = True) -> list[dict[str, Any]]:
+        """The profiles a group already has, if any.
+
+        An empty answer means the group has not been profiled. A group is
+        profiled once and never again, so this is what decides whether the work
+        is done rather than something re-derived from the files in it.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_data_profile", {
+                "data_profile_key": str(data_profile_key),
+            }, required=required) or [])
+        ]
+
+    def insert_data_profile(self, data_profile_key: str, representation: str,
+                            profile: dict[str, Any],
+                            required: bool = True) -> Optional[int]:
+        """Persist one profile, as produced, and answer with its identity.
+
+        The profile object is stored as it was handed over. Nothing here reads
+        it, decides what it means, or takes it apart beyond the column rows the
+        routine writes so a field is addressable.
+        """
+        return self._call("insert_data_profile", {
+            "data_profile_key": str(data_profile_key),
+            "representation":   str(representation),
+            "profile":          profile,
+        }, required=required)
+
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
                              action: str, status: Optional[str] = None,
                              source_record_id: Optional[int] = None,
