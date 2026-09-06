@@ -60,7 +60,6 @@ __all__ = [
     "ai_from_ctx",
     "configured_providers_from_ctx",
     "default_adapters",
-    "settings_from_ctx",
     "DEFAULT_TASK_NAME",
 ]
 
@@ -150,95 +149,6 @@ def configured_providers_from_ctx(ctx: Any) -> tuple[ConfiguredProvider, ...]:
             ),
         )
     return tuple(configured)
-
-
-def settings_from_ctx(
-    ctx: Any,
-    *,
-    profiles: tuple[AIProfile, ...] = (),
-    instructions: tuple[AIInstruction, ...] = (),
-) -> AISettings:
-    """Normalize ``ctx.ai_settings`` into this runtime's initial settings.
-
-    The initial state only. From here the runtime owns them: the settings panel
-    mutates the value on the ``AI``, and configuration is never re-read to find
-    out what is selected now.
-
-    Validated against what this runtime actually offers, because a selection
-    naming something absent is a configuration defect and silently dropping it
-    would show an operator a runtime that ignores what they wrote. Task *names*
-    are not validated: the collection is overrides, so an unconfigured name is a
-    task with no overrides rather than an error.
-
-    Args:
-        ctx: The application context. Treated as opaque and never retained.
-        profiles: What this runtime offers, for validating a named profile.
-        instructions: What this runtime offers, for validating a named
-            instruction.
-
-    Returns:
-        The initial ``AISettings``. Absent configuration yields the defaults,
-        which is the behaviour of a runtime that configures no settings.
-
-    Raises:
-        AIConfigurationError: when a selection names something this runtime does
-            not offer, or a task is unnamed or named twice.
-    """
-    declared = getattr(ctx, "ai_settings", None)
-    if not declared:
-        return AISettings()
-
-    profile_ids = {profile.id for profile in profiles}
-    instruction_ids = {instruction.id for instruction in instructions}
-
-    def _selection(entry: Any, field_name: str, offered: set[str], what: str,
-                   where: str) -> str:
-        value = str(_field(entry, field_name, "") or "").strip()
-        if value and value not in offered:
-            raise AIConfigurationError(
-                f"ai_settings{where} names {what} '{value}', "
-                "which this runtime does not offer."
-            )
-        return value
-
-    default = _field(declared, "default", None)
-    settings = AISettings(
-        profile_id=_selection(default, "profile", profile_ids, "profile", ".default"),
-        instruction_id=_selection(
-            default, "instruction", instruction_ids, "instruction", ".default",
-        ),
-        temperature=_optional_number(_field(default, "temperature", None)),
-        representation=str(_field(default, "representation", "") or "").strip(),
-    )
-
-    tasks: list[AISettingsTask] = []
-    seen: set[str] = set()
-    for name, entry in _entries(_field(declared, "tasks", None)):
-        if name == DEFAULT_TASK_NAME:
-            raise AIConfigurationError(
-                f"ai_settings.tasks names a task '{name}', which is the word "
-                "that addresses the defaults beside it. Name it for what the "
-                "AI is being asked to do."
-            )
-        if name in seen:
-            raise AIConfigurationError(
-                f"ai_settings.tasks names '{name}' twice, so which one applies "
-                "would depend on order."
-            )
-        seen.add(name)
-        where = f".tasks['{name}']"
-        tasks.append(
-            AISettingsTask(
-                name=name,
-                profile_id=_selection(entry, "profile", profile_ids, "profile", where),
-                instruction_id=_selection(
-                    entry, "instruction", instruction_ids, "instruction", where,
-                ),
-                temperature=_optional_number(_field(entry, "temperature", None)),
-                representation=str(_field(entry, "representation", "") or "").strip(),
-            ),
-        )
-    return replace(settings, tasks=tuple(tasks))
 
 
 def ai_from_ctx(

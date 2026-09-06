@@ -22,7 +22,6 @@ from rey_lib.ai import (
     AISettings,
     EchoProvider,
 )
-from rey_lib.ai.construction import settings_from_ctx
 from rey_lib.ai.errors import AIConfigurationError, AISelectionError
 from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.settings import AISettingsTask
@@ -50,27 +49,40 @@ def runtime(settings: AISettings) -> AI:
     return AI(registry=registry, settings=settings)
 
 
-def declared(**ai_settings: Any) -> SimpleNamespace:
-    """A context declaring an ``ai_settings`` block and nothing else."""
-    return SimpleNamespace(ai_settings=SimpleNamespace(**ai_settings))
+def configured(default: dict[str, Any] | None = None,
+               tasks: list[dict[str, Any]] | None = None) -> SimpleNamespace:
+    """A context whose Control answers with these configuration rows.
+
+    The shape ``control.f_ai_configuration_get`` returns: one group row for the
+    default scope and one task row each, already resolved by the view.
+    """
+    rows: list[dict[str, Any]] = []
+    if default is not None:
+        rows.append({"row_type": "group", **default})
+    for task in tasks or []:
+        rows.append({"row_type": "task", **task})
+    return SimpleNamespace(
+        installation=SimpleNamespace(name="test"),
+        shared_control=_AIControl(configuration=rows),
+    )
 
 
 def read(ctx: Any) -> AISettings:
-    return settings_from_ctx(ctx, profiles=PROFILES, instructions=INSTRUCTIONS)
+    return _ai_settings(ctx, profiles=PROFILES, instructions=INSTRUCTIONS)
 
 
 # -- construction -----------------------------------------------------------
 
 def test_absent_configuration_is_the_current_behaviour_not_a_failure() -> None:
-    """A runtime configuring no settings gets the defaults, as it always did."""
-    assert read(SimpleNamespace()) == AISettings()
+    """A runtime whose installation configures no scopes gets the defaults."""
+    assert read(configured()) == AISettings()
 
 
 def test_configured_defaults_and_tasks_are_read() -> None:
-    settings = read(declared(
-        default={"profile": "dflt", "instruction": "one",
+    settings = read(configured(
+        default={"profile_key": "dflt", "instruction_key": "one",
                  "temperature": 0, "representation": "redacted"},
-        tasks=[{"name": "t", "profile": "other"}],
+        tasks=[{"task_key": "t", "profile_key": "other"}],
     ))
 
     assert settings.profile_id == "dflt"
@@ -80,35 +92,32 @@ def test_configured_defaults_and_tasks_are_read() -> None:
     assert settings.task("t").profile_id == "other"
 
 
-def test_a_duplicate_task_name_is_refused() -> None:
-    """Which of two entries applied would otherwise depend on order."""
-    with pytest.raises(AIConfigurationError, match="twice"):
-        read(declared(default={}, tasks=[{"name": "t"}, {"name": "t"}]))
+def test_a_stated_zero_temperature_survives() -> None:
+    """0 is a value and absent is inherit, so this asks whether one was stored
+    rather than whether it is truthy."""
+    settings = read(configured(default={"temperature": 0}, tasks=[]))
+
+    assert settings.temperature == 0
 
 
-def test_a_task_named_default_is_refused() -> None:
-    """The word addresses the defaults beside it, so it cannot name a task."""
-    with pytest.raises(AIConfigurationError, match="addresses the defaults"):
-        read(declared(default={}, tasks=[{"name": "default"}]))
-
-
-def test_an_unnamed_task_is_refused() -> None:
-    with pytest.raises(AIConfigurationError):
-        read(declared(default={}, tasks=[{"profile": "dflt"}]))
-
-
-@pytest.mark.parametrize("block,message", [
-    ({"default": {"profile": "ghost"}, "tasks": []}, "profile"),
-    ({"default": {"instruction": "ghost"}, "tasks": []}, "instruction"),
-    ({"default": {}, "tasks": [{"name": "t", "profile": "ghost"}]}, "profile"),
-    ({"default": {}, "tasks": [{"name": "t", "instruction": "ghost"}]}, "instruction"),
+@pytest.mark.parametrize("default,tasks,message", [
+    ({"profile_key": "ghost"}, [], "profile"),
+    ({"instruction_key": "ghost"}, [], "instruction"),
+    ({}, [{"task_key": "t", "profile_key": "ghost"}], "profile"),
+    ({}, [{"task_key": "t", "instruction_key": "ghost"}], "instruction"),
 ])
 def test_a_selection_this_runtime_does_not_offer_fails_construction(
-    block: dict[str, Any], message: str,
+    default: dict[str, Any], tasks: list[dict[str, Any]], message: str,
 ) -> None:
-    """Both levels. Dropping a bad entry would hide a configuration defect."""
+    """Both scopes. Dropping a bad entry would hide a configuration defect.
+
+    A duplicate task, a task named `default` and an unnamed task are refused by
+    the schema -- the group/task key is unique, `default` is a reserved scope
+    the check constraint forbids as a task, and the column is NOT NULL -- so
+    they cannot reach this reader.
+    """
     with pytest.raises(AIConfigurationError, match=message):
-        read(declared(**block))
+        read(configured(default=default, tasks=tasks))
 
 
 # -- resolution -------------------------------------------------------------
@@ -243,7 +252,7 @@ def test_settings_cannot_widen_what_a_profile_is_authorised_to_receive() -> None
 # declared id is what a setting resolves through, so it is config's identity
 # rather than the filename's.
 
-from rey_lib.config.bootstrap import _ai_instructions  # noqa: E402
+from rey_lib.config.bootstrap import _ai_instructions, _ai_settings  # noqa: E402
 from rey_lib.errors.error_utils import ConfigError  # noqa: E402
 
 
@@ -251,15 +260,23 @@ class _AIControl:
     """The Control an AI reads its configuration through, in memory.
 
     The estate reads the control database through Control, so a test of what the
-    runtime offers supplies one rather than a configuration section. What it
-    answers is the shape ``control.f_ai_instruction_get`` returns.
+    runtime offers supplies one rather than a configuration section. It answers
+    the two reads bootstrap makes, in the shapes
+    ``control.f_ai_instruction_get`` and ``control.f_ai_configuration_get``
+    return.
     """
 
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
+    def __init__(self, rows: list[dict[str, Any]] | None = None, *,
+                 configuration: list[dict[str, Any]] | None = None) -> None:
+        self._rows = rows or []
+        self._configuration = configuration or []
 
     def ai_instructions(self, required: bool = True) -> list[dict[str, Any]]:
         return [dict(row) for row in self._rows]
+
+    def ai_configuration(self, installation: str,
+                         required: bool = True) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._configuration]
 
 
 def contract_row(key: str, name: Any, version: Any, body: str = "rules: []") -> dict:

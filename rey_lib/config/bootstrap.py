@@ -332,7 +332,7 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
         ctx.shared_ai = None
         return ctx
 
-    from rey_lib.ai.construction import ai_from_ctx, settings_from_ctx
+    from rey_lib.ai.construction import ai_from_ctx
     from rey_lib.ai.errors import AIError
 
     try:
