@@ -931,7 +931,8 @@ class Control:
         values = {"file_manifest_id": file_manifest_id}
         for name in ("path", "file_name", "base_name", "file_extension",
                      "checksum_sha256", "size_bytes", "source_name",
-                     "evidence", "producer", "data_profile_key"):
+                     "evidence", "producer", "data_profile_key",
+                     "data_profile_id"):
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
 
@@ -956,32 +957,39 @@ class Control:
         ]
 
     def data_profile_for_key(self, data_profile_key: str,
-                             required: bool = True) -> list[dict[str, Any]]:
-        """The profiles a group already has, if any.
+                             required: bool = True) -> Optional[int]:
+        """The profile this group already has, or None.
 
-        An empty answer means the group has not been profiled. A group is
-        profiled once and never again, so this is what decides whether the work
-        is done rather than something re-derived from the files in it.
+        None means the group has not been profiled. A group is profiled once and
+        never again, so this is what decides whether the work is done rather
+        than something re-derived from the files in it -- and the id it answers
+        with is what a file's manifest is stamped with.
         """
-        return [
-            dict(row) for row in (self._call_rows("get_data_profile", {
-                "data_profile_key": str(data_profile_key),
-            }, required=required) or [])
-        ]
+        rows = self._call_rows("get_data_profile", {
+            "data_profile_key": str(data_profile_key),
+        }, required=required) or []
+        for row in rows:
+            return int(dict(row)["data_profile_id"])
+        return None
 
-    def insert_data_profile(self, data_profile_key: str, representation: str,
-                            profile: dict[str, Any],
+    def insert_data_profile(self, data_profile_key: str,
+                            clear_profile: dict[str, Any],
+                            redacted_profile: dict[str, Any],
                             required: bool = True) -> Optional[int]:
-        """Persist one profile, as produced, and answer with its identity.
+        """Persist one group's profile, as produced, and answer with its identity.
 
-        The profile object is stored as it was handed over. Nothing here reads
-        it, decides what it means, or takes it apart beyond the column rows the
-        routine writes so a field is addressable.
+        One identity holding both readings. They describe a single profiling
+        event, so a profile carrying one and not the other would describe
+        something that never happened.
+
+        The objects are stored as they were handed over. Nothing here reads
+        them, decides what they mean, or takes them apart beyond the field rows
+        the routine writes so a field is addressable.
         """
         return self._call("insert_data_profile", {
             "data_profile_key": str(data_profile_key),
-            "representation":   str(representation),
-            "profile":          profile,
+            "clear_profile":    clear_profile,
+            "redacted_profile": redacted_profile,
         }, required=required)
 
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
