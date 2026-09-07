@@ -1233,6 +1233,21 @@ class Control:
                                required=required)
         return rows[0] if rows else None
 
+    def file_profile(self, file_manifest_id: int, representation: str,
+                     required: bool = True) -> Optional[dict[str, Any]]:
+        """Return one file's profile document, for one representation.
+
+        The document is composed in the view and returned whole. Which
+        representation is a bound argument the routine chooses two fixed
+        statements with -- not a name this builds, and not a filter applied
+        afterwards on something that carried both.
+        """
+        rows = self._call_rows("find_file_profile",
+                               {"file_manifest_id": file_manifest_id,
+                                "representation": representation},
+                               required=required)
+        return rows[0] if rows else None
+
     def file_tree_nodes(self, parent_key: Optional[str] = None,
                         required: bool = True) -> list[dict[str, Any]]:
         """Return the children of one node in the File Manifest tree.
