@@ -236,9 +236,10 @@ def test_postgres_routines_normalize_with_their_signatures(
         "postgres",
         [[
             ("public", "audit_trade", "integer, text", "public.audit_trade",
-             False, "NULL::integer, NULL::text", True),
+             False, "NULL::integer, NULL::text",
+             "p_id => NULL::integer, p_note => NULL::text", True, False),
             ("public", "audit_trade", "bigint", "public.audit_trade",
-             False, "NULL::bigint", True),
+             False, "NULL::bigint", "p_id => NULL::bigint", True, False),
         ]],
     )
     monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "reporting")
@@ -252,7 +253,7 @@ def test_postgres_routines_normalize_with_their_signatures(
             "name": "audit_trade",
             "object_type": "function",
             "signature": "bigint",
-            "invocation": "SELECT public.audit_trade(NULL::bigint);",
+            "invocation": "SELECT public.audit_trade(p_id => NULL::bigint);",
         },
         {
             "catalog": "reporting",
@@ -260,7 +261,7 @@ def test_postgres_routines_normalize_with_their_signatures(
             "name": "audit_trade",
             "object_type": "function",
             "signature": "integer, text",
-            "invocation": "SELECT public.audit_trade(NULL::integer, NULL::text);",
+            "invocation": "SELECT public.audit_trade(p_id => NULL::integer, p_note => NULL::text);",
         },
     ]
     for record in records:

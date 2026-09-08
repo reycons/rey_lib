@@ -21,13 +21,26 @@ def _render(
     kind: str = "function",
     qualified: str = "control.f_thing",
     returns_set: bool = False,
-    arguments: str | None = None,
-    plain: bool = True,
+    positional: str | None = None,
+    named: str | None = None,
+    all_named: bool | None = None,
+    has_variadic: bool | None = None,
 ) -> str:
     """Render one invocation the way ``list_routines`` renders it."""
     return postgres_utils._routine_invocation(
-        kind, qualified, returns_set, arguments, plain,
+        kind=kind,
+        qualified=qualified,
+        returns_set=returns_set,
+        positional=positional,
+        named=named,
+        all_named=all_named,
+        has_variadic=has_variadic,
     )
+
+
+def _args(positional: str, named: str) -> dict[str, Any]:
+    """One argument list in both forms, as the query supplies them."""
+    return {"positional": positional, "named": named, "all_named": True}
 
 
 class TestShape:
@@ -49,33 +62,82 @@ class TestShape:
         assert "SELECT" not in _render(kind="procedure")
 
 
+class TestNotation:
+    """Named where the arguments are named, positional where they are not."""
+
+    def test_named_arguments_are_written_by_name(self) -> None:
+        rendered = _render(**_args("NULL::bigint", "p_id => NULL::bigint"))
+        assert rendered == "SELECT control.f_thing(p_id => NULL::bigint);"
+
+    def test_unnamed_arguments_fall_back_to_position(self) -> None:
+        rendered = _render(
+            positional="NULL::bigint", named=" => NULL::bigint", all_named=False,
+        )
+        assert rendered == "SELECT control.f_thing(NULL::bigint);"
+
+    def test_a_routine_with_no_arguments_needs_neither(self) -> None:
+        # all_named is null for a routine carrying no arguments, which is not
+        # an unnamed one: both forms are the same empty list.
+        assert _render(all_named=None) == "SELECT control.f_thing();"
+
+    def test_the_procedure_shape_this_estate_actually_has(self) -> None:
+        # control.p_data_profile_ins: named inputs, then INOUT outputs that
+        # carry DEFAULT NULL. One INOUT makes the whole routine mode-carrying,
+        # which is the shape that rendered nothing and showed the refusal.
+        rendered = _render(
+            kind="procedure",
+            qualified="control.p_data_profile_ins",
+            **_args(
+                "NULL::character varying, NULL::jsonb, NULL::bigint",
+                "p_data_profile_key => NULL::character varying, "
+                "p_clear_profile => NULL::jsonb, "
+                "o_data_profile_id => NULL::bigint",
+            ),
+        )
+
+        assert rendered == (
+            "CALL control.p_data_profile_ins("
+            "p_data_profile_key => NULL::character varying, "
+            "p_clear_profile => NULL::jsonb, "
+            "o_data_profile_id => NULL::bigint);"
+        )
+
+
 class TestArguments:
-    """Every argument occupies its position, typed."""
+    """Every argument is carried, and typed."""
 
     def test_zero_arguments_render_empty_parentheses(self) -> None:
-        assert _render(arguments=None).endswith("f_thing();")
-
-    def test_each_argument_is_placed_and_typed(self) -> None:
-        rendered = _render(arguments="NULL::bigint, NULL::text")
-        assert rendered == "SELECT control.f_thing(NULL::bigint, NULL::text);"
+        assert _render().endswith("f_thing();")
 
     def test_a_type_containing_a_comma_stays_one_argument(self) -> None:
         # numeric(10,2) is the case that defeats splitting a signature string
         # on commas. Nothing splits anything here: the types arrived separate.
-        rendered = _render(arguments="NULL::numeric(10,2), NULL::text[]")
+        rendered = _render(**_args(
+            "NULL::numeric(10,2), NULL::text[]",
+            "p_amount => NULL::numeric(10,2), p_tags => NULL::text[]",
+        ))
         assert rendered.count("NULL::") == 2
         assert "NULL::numeric(10,2)" in rendered
 
     def test_overloads_render_different_statements(self) -> None:
-        one = _render(arguments="NULL::bigint")
-        two = _render(arguments="NULL::text")
+        one = _render(**_args("NULL::bigint", "p_id => NULL::bigint"))
+        two = _render(**_args("NULL::text", "p_id => NULL::text"))
         assert one != two
+
+    def test_every_argument_is_cast(self) -> None:
+        # The cast is what names one overload rather than whichever shares the
+        # name, and it is on both forms for that reason.
+        for rendered in (
+            _render(**_args("NULL::bigint", "p_id => NULL::bigint")),
+            _render(positional="NULL::bigint", named="", all_named=False),
+        ):
+            assert "NULL::bigint" in rendered
 
     def test_an_overload_never_renders_as_a_zero_argument_call(self) -> None:
         # The defect that sank the earlier attempt: a call carrying its
         # arguments only as a comment is a zero-argument call, and resolves to
         # whichever namesake takes no arguments.
-        rendered = _render(arguments="NULL::bigint")
+        rendered = _render(**_args("NULL::bigint", "p_id => NULL::bigint"))
         assert "()" not in rendered
 
 
@@ -95,14 +157,21 @@ class TestQuoting:
 class TestUnrendered:
     """Absent is an answer, and it is the safe one."""
 
-    def test_non_plain_arguments_render_nothing(self) -> None:
-        # OUT, INOUT and VARIADIC are placed by rules this does not implement.
-        assert _render(arguments="NULL::text[]", plain=False) == ""
+    def test_a_variadic_argument_renders_nothing(self) -> None:
+        # Named notation does not accept one, and its keyword form is a second
+        # convention rather than a variation of this one.
+        rendered = _render(
+            positional="NULL::text[]", named="p_tags => NULL::text[]",
+            all_named=True, has_variadic=True,
+        )
+        assert rendered == ""
 
     def test_nothing_is_rendered_for_any_shape(self) -> None:
         for kind in ("function", "procedure"):
             for returns_set in (False, True):
-                assert _render(kind=kind, returns_set=returns_set, plain=False) == ""
+                assert _render(
+                    kind=kind, returns_set=returns_set, has_variadic=True,
+                ) == ""
 
 
 class TestListing:
@@ -134,18 +203,18 @@ class TestListing:
             self._Conn(rows), "catalog", "control", "function",
         )
 
+    #: One catalog row, in the order the query selects.
+    _ROW = (
+        "control", "f_thing", "p_id bigint", "control.f_thing", False,
+        "NULL::bigint", "p_id => NULL::bigint", True, False,
+    )
+
     def test_a_rendered_routine_carries_its_invocation(self) -> None:
-        listed = self._listed([
-            ("control", "f_thing", "p_id bigint", "control.f_thing",
-             False, "NULL::bigint", True),
-        ])
-        assert listed[0]["invocation"] == "SELECT control.f_thing(NULL::bigint);"
+        listed = self._listed([self._ROW])
+        assert listed[0]["invocation"] == "SELECT control.f_thing(p_id => NULL::bigint);"
 
     def test_identity_is_unchanged_by_the_new_key(self) -> None:
-        listed = self._listed([
-            ("control", "f_thing", "p_id bigint", "control.f_thing",
-             False, "NULL::bigint", True),
-        ])
+        listed = self._listed([self._ROW])
         assert listed[0]["schema"] == "control"
         assert listed[0]["name"] == "f_thing"
         assert listed[0]["signature"] == "p_id bigint"
@@ -153,8 +222,8 @@ class TestListing:
     def test_an_unrendered_routine_carries_no_key_at_all(self) -> None:
         # Not an empty string to be truthiness-tested downstream: absent.
         listed = self._listed([
-            ("control", "f_var", "VARIADIC t text[]", "control.f_var",
-             False, "NULL::text[]", False),
+            ("control", "f_var", "VARIADIC t text[]", "control.f_var", False,
+             "NULL::text[]", "p_tags => NULL::text[]", True, True),
         ])
         assert "invocation" not in listed[0]
 

@@ -689,18 +689,47 @@ def list_routines(
                    -- without anything here deciding when quoting is needed.
                    format('%%I.%%I', n.nspname, p.proname),
                    p.proretset,
-                   -- Every argument's type, in call order, cast so the call
-                   -- names one overload rather than resolving to whichever
-                   -- shares the name.
-                   (SELECT string_agg('NULL::' || format_type(t.oid, NULL),
-                                      ', ' ORDER BY t.ord)
-                      FROM unnest(p.proargtypes) WITH ORDINALITY AS t(oid, ord)),
-                   -- Modes are null exactly when every argument is a plain IN.
-                   -- Anything else -- OUT, INOUT, VARIADIC -- places arguments
-                   -- by rules this does not implement, and renders nothing.
-                   p.proargmodes IS NULL
+                   -- The two ways this dialect writes an argument list, and
+                   -- the two facts that decide between them. The query knows
+                   -- the catalog; the choice is made where it can be tested.
+                   call.positional,
+                   call.named,
+                   call.all_named,
+                   call.has_variadic
             FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
+            LEFT JOIN LATERAL (
+                SELECT
+                    bool_or(a.amode = 'v') AS has_variadic,
+                    bool_and(a.aname IS NOT NULL AND a.aname <> '') AS all_named,
+                    -- Cast per argument either way: the type is what names one
+                    -- overload rather than resolving to whichever shares the
+                    -- name, and what stops a call rendering as a zero-argument
+                    -- namesake.
+                    string_agg('NULL::' || format_type(a.atype, NULL),
+                               ', ' ORDER BY a.ord) AS positional,
+                    string_agg(quote_ident(COALESCE(a.aname, ''))
+                               || ' => NULL::' || format_type(a.atype, NULL),
+                               ', ' ORDER BY a.ord) AS named
+                FROM (
+                    -- proargmodes indexes proallargtypes, not proargtypes, and
+                    -- both are null exactly when every argument is a plain IN.
+                    -- Coalescing both is what lets a routine with an INOUT
+                    -- output -- the ordinary shape here -- render at all.
+                    SELECT t.ord,
+                           t.oid AS atype,
+                           COALESCE((p.proargmodes)[t.ord], 'i') AS amode,
+                           (p.proargnames)[t.ord] AS aname
+                    FROM unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
+                         WITH ORDINALITY AS t(oid, ord)
+                ) a
+                -- What a call carries. A function's OUT and TABLE arguments
+                -- are its result, not its call. A procedure's OUT arguments
+                -- are part of its call and are written NULL, which is
+                -- accepted because they are not evaluated.
+                WHERE a.amode <> 't'
+                    AND (p.prokind = 'p' OR a.amode <> 'o')
+            ) call ON true
             WHERE p.prokind = %s
                 AND n.nspname NOT IN ('pg_catalog', 'information_schema')
                 AND (%s IS NULL OR n.nspname = %s)
@@ -713,14 +742,23 @@ def list_routines(
         cursor.close()
 
     listed: list[dict[str, str]] = []
-    for schema_name, routine_name, signature, qualified, returns_set, arguments, plain in rows:
+    for (
+        schema_name, routine_name, signature, qualified, returns_set,
+        positional, named, all_named, has_variadic,
+    ) in rows:
         routine = {
             "schema": str(schema_name),
             "name": str(routine_name),
             "signature": str(signature or ""),
         }
         rendered = _routine_invocation(
-            kind, str(qualified), bool(returns_set), arguments, bool(plain),
+            kind=kind,
+            qualified=str(qualified),
+            returns_set=bool(returns_set),
+            positional=positional,
+            named=named,
+            all_named=all_named,
+            has_variadic=has_variadic,
         )
         if rendered:
             routine["invocation"] = rendered
@@ -729,36 +767,54 @@ def list_routines(
 
 
 def _routine_invocation(
+    *,
     kind: str,
     qualified: str,
     returns_set: bool,
-    arguments: str | None,
-    plain_arguments: bool,
+    positional: str | None,
+    named: str | None,
+    all_named: bool | None,
+    has_variadic: bool | None,
 ) -> str:
-    """One routine's call, or nothing where PostgreSQL's rules are not all met.
+    """One routine's call, or nothing for the one shape left unrendered.
 
     Rendered from the catalog rather than from the signature string. The
     signature is one piece of text -- ``p_amount numeric(10,2), p_tags text[]``
     -- and recovering arguments from it means splitting on commas that also
-    appear inside types. The types are already separate in ``proargtypes``, so
-    they are read separately.
+    appear inside types. The arguments arrive already separate, so nothing here
+    splits anything.
 
-    Every argument is written as ``NULL::type`` and occupies its position, which
-    is what makes the statement a call to *this* routine: two overloads of one
-    name render two different statements, and neither renders as a call to a
-    zero-argument namesake.
+    **Named notation where every carried argument has a name.** That is how
+    calls are already written in this module: ``render_and_execute`` states the
+    reason, and it holds for a template just as much -- a name says what to
+    fill in, and order stops being load-bearing. Positional is the fallback for
+    a routine whose arguments are unnamed, and both cast every argument, which
+    is what names one overload rather than whichever shares the name and what
+    stops a call rendering as a zero-argument namesake.
 
-    **Nothing is rendered for a routine with OUT, INOUT or VARIADIC arguments.**
-    Those are placed by rules this does not implement -- ``proargmodes`` indexes
-    a different array than ``proargtypes`` once they appear, and VARIADIC needs
-    its keyword at the call site -- so the routine carries no statement and is
-    refused rather than called wrongly. Absent is an ordinary answer.
+    **Nothing is rendered for a routine with a VARIADIC argument**: named
+    notation does not accept one, and its keyword form is a second convention
+    rather than a variation of this one. That routine carries no statement and
+    keeps the refusal, which is an ordinary answer and not a gap.
 
     The shape comes from the catalog because a listed routine has no
     declaration to take it from: a procedure is CALLed, a set-returning function
     is selected from, and a scalar function is selected.
+
+    Args:
+        kind: The routine kind being listed.
+        qualified: The routine's name, already quoted as this dialect quotes it.
+        returns_set: Whether the routine returns a set.
+        positional: The argument list written positionally.
+        named: The same arguments written by name.
+        all_named: Whether every carried argument has a name. Null for a
+            routine carrying none, where the two forms are the same empty list.
+        has_variadic: Whether any carried argument is VARIADIC. Null likewise.
+
+    Returns:
+        The statement that calls the routine, or empty where none is rendered.
     """
-    if not plain_arguments:
+    if has_variadic:
         return ""
     if _ROUTINE_PROKIND[kind] == "p":
         shape = InvocationShape.PROCEDURE
@@ -767,6 +823,9 @@ def _routine_invocation(
             InvocationShape.ROW_FUNCTION if returns_set
             else InvocationShape.SCALAR_FUNCTION
         )
+    # ``all_named`` is null for a routine with no arguments at all, which is
+    # not an unnamed one: both forms are the same empty list, so either serves.
+    arguments = positional if all_named is False else named
     return _STATEMENT[shape].format(
         routine=qualified, arguments=str(arguments or ""),
     ) + ";"
