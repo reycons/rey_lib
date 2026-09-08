@@ -192,6 +192,7 @@ def test_a_procedure_serializes_its_identity_and_its_source() -> None:
             "name": "rate", "signature": "text, date",
         },
         "ddl": "CREATE PROCEDURE control.rate(text, date) ...",
+        "invocation": "",
     }
 
 
@@ -199,6 +200,7 @@ def test_a_function_serializes_the_same_way() -> None:
     assert DatabaseFunction(identity=ROUTINE).to_dict() == {
         "identity": ROUTINE.to_dict(),
         "ddl": "",
+        "invocation": "",
     }
 
 

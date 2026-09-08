@@ -242,28 +242,48 @@ class DatabaseView:
 
 @dataclass(frozen=True)
 class DatabaseProcedure:
-    """One procedure: which one it is, and the SQL that created it.
+    """One procedure: which one it is, the SQL that created it, and the call.
 
-    No statement that opens it. Opening a procedure is a call, and what a call
-    looks like is not this object's to decide.
+    What a call looks like is still not this object's to decide -- it carries
+    the one its provider rendered. How a call is spelled, how its arguments are
+    placed and how overloads are told apart differ by provider, so the object
+    holds the answer rather than the rules.
+
+    ``invocation`` is empty where the provider renders none, and that is an
+    ordinary state: no statement is safer than one composed by something that
+    does not know the provider's rules.
     """
 
     identity: DatabaseRoutineIdentity
     ddl: str = ""
+    invocation: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"identity": self.identity.to_dict(), "ddl": self.ddl}
+        return {
+            "identity": self.identity.to_dict(),
+            "ddl": self.ddl,
+            "invocation": self.invocation,
+        }
 
 
 @dataclass(frozen=True)
 class DatabaseFunction:
-    """One function, identified as a procedure is: by name and arguments."""
+    """One function, identified as a procedure is: by name and arguments.
+
+    Carries its provider's rendered call for the same reason, and on the same
+    terms -- empty where none was rendered.
+    """
 
     identity: DatabaseRoutineIdentity
     ddl: str = ""
+    invocation: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"identity": self.identity.to_dict(), "ddl": self.ddl}
+        return {
+            "identity": self.identity.to_dict(),
+            "ddl": self.ddl,
+            "invocation": self.invocation,
+        }
 
 
 @dataclass(frozen=True)

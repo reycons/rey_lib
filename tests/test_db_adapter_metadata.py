@@ -234,7 +234,12 @@ def test_postgres_routines_normalize_with_their_signatures(
 ) -> None:
     conn = _StubConnection(
         "postgres",
-        [[("public", "audit_trade", "integer, text"), ("public", "audit_trade", "bigint")]],
+        [[
+            ("public", "audit_trade", "integer, text", "public.audit_trade",
+             False, "NULL::integer, NULL::text", True),
+            ("public", "audit_trade", "bigint", "public.audit_trade",
+             False, "NULL::bigint", True),
+        ]],
     )
     monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "reporting")
 
@@ -247,6 +252,7 @@ def test_postgres_routines_normalize_with_their_signatures(
             "name": "audit_trade",
             "object_type": "function",
             "signature": "bigint",
+            "invocation": "SELECT public.audit_trade(NULL::bigint);",
         },
         {
             "catalog": "reporting",
@@ -254,12 +260,16 @@ def test_postgres_routines_normalize_with_their_signatures(
             "name": "audit_trade",
             "object_type": "function",
             "signature": "integer, text",
+            "invocation": "SELECT public.audit_trade(NULL::integer, NULL::text);",
         },
     ]
     for record in records:
         _assert_rey_primitives(record)
     # Overloads survive as distinct records; nothing collapses them by name.
     assert len({record["signature"] for record in records}) == 2
+    # And each overload's call names its own arguments, so neither statement
+    # would reach the other routine.
+    assert len({record["invocation"] for record in records}) == 2
     assert all(cursor.closed for cursor in conn.cursors)
 
 

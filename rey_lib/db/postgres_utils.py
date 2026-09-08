@@ -681,7 +681,24 @@ def list_routines(
     try:
         cursor.execute(
             """
-            SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
+            SELECT n.nspname,
+                   p.proname,
+                   pg_get_function_identity_arguments(p.oid),
+                   -- The qualified name as PostgreSQL itself writes it, so a
+                   -- mixed-case or otherwise quoted name is quoted correctly
+                   -- without anything here deciding when quoting is needed.
+                   format('%%I.%%I', n.nspname, p.proname),
+                   p.proretset,
+                   -- Every argument's type, in call order, cast so the call
+                   -- names one overload rather than resolving to whichever
+                   -- shares the name.
+                   (SELECT string_agg('NULL::' || format_type(t.oid, NULL),
+                                      ', ' ORDER BY t.ord)
+                      FROM unnest(p.proargtypes) WITH ORDINALITY AS t(oid, ord)),
+                   -- Modes are null exactly when every argument is a plain IN.
+                   -- Anything else -- OUT, INOUT, VARIADIC -- places arguments
+                   -- by rules this does not implement, and renders nothing.
+                   p.proargmodes IS NULL
             FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.prokind = %s
@@ -695,14 +712,64 @@ def list_routines(
     finally:
         cursor.close()
 
-    return [
-        {
+    listed: list[dict[str, str]] = []
+    for schema_name, routine_name, signature, qualified, returns_set, arguments, plain in rows:
+        routine = {
             "schema": str(schema_name),
             "name": str(routine_name),
             "signature": str(signature or ""),
         }
-        for schema_name, routine_name, signature in rows
-    ]
+        rendered = _routine_invocation(
+            kind, str(qualified), bool(returns_set), arguments, bool(plain),
+        )
+        if rendered:
+            routine["invocation"] = rendered
+        listed.append(routine)
+    return listed
+
+
+def _routine_invocation(
+    kind: str,
+    qualified: str,
+    returns_set: bool,
+    arguments: str | None,
+    plain_arguments: bool,
+) -> str:
+    """One routine's call, or nothing where PostgreSQL's rules are not all met.
+
+    Rendered from the catalog rather than from the signature string. The
+    signature is one piece of text -- ``p_amount numeric(10,2), p_tags text[]``
+    -- and recovering arguments from it means splitting on commas that also
+    appear inside types. The types are already separate in ``proargtypes``, so
+    they are read separately.
+
+    Every argument is written as ``NULL::type`` and occupies its position, which
+    is what makes the statement a call to *this* routine: two overloads of one
+    name render two different statements, and neither renders as a call to a
+    zero-argument namesake.
+
+    **Nothing is rendered for a routine with OUT, INOUT or VARIADIC arguments.**
+    Those are placed by rules this does not implement -- ``proargmodes`` indexes
+    a different array than ``proargtypes`` once they appear, and VARIADIC needs
+    its keyword at the call site -- so the routine carries no statement and is
+    refused rather than called wrongly. Absent is an ordinary answer.
+
+    The shape comes from the catalog because a listed routine has no
+    declaration to take it from: a procedure is CALLed, a set-returning function
+    is selected from, and a scalar function is selected.
+    """
+    if not plain_arguments:
+        return ""
+    if _ROUTINE_PROKIND[kind] == "p":
+        shape = InvocationShape.PROCEDURE
+    else:
+        shape = (
+            InvocationShape.ROW_FUNCTION if returns_set
+            else InvocationShape.SCALAR_FUNCTION
+        )
+    return _STATEMENT[shape].format(
+        routine=qualified, arguments=str(arguments or ""),
+    ) + ";"
 
 
 def get_routine_definition(

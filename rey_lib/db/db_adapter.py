@@ -455,7 +455,10 @@ class DBAdapter:
         conn: Any,
         schema: str | None = None,
     ) -> list[dict[str, str]]:
-        """Return normalized procedures, optionally restricted to one schema."""
+        """Return normalized procedures, optionally restricted to one schema.
+
+        See :meth:`list_functions` for what "normalized" carries.
+        """
         return self._list_routines(conn, "procedures", schema)
 
     def list_functions(
@@ -463,7 +466,28 @@ class DBAdapter:
         conn: Any,
         schema: str | None = None,
     ) -> list[dict[str, str]]:
-        """Return normalized functions, optionally restricted to one schema."""
+        """Return normalized functions, optionally restricted to one schema.
+
+        Each routine carries ``schema``, ``name`` and ``signature`` -- the
+        argument list the provider itself uses to tell one routine from its
+        overloads.
+
+        It **may** also carry ``invocation``: a statement that calls it, written
+        the way that provider writes one. How a call is spelled, how its
+        arguments are placed, how overloads are told apart and whether a routine
+        returns a value or a set are all provider facts, so the provider renders
+        the whole statement and no caller assembles one from the parts.
+
+        **Optional, and absent is an ordinary answer.** A provider that renders
+        none returns the key not at all, and a caller is left with no statement
+        rather than one it built itself -- which is the right outcome, because a
+        call composed by a caller that does not know the provider's rules can
+        invoke the wrong routine rather than fail.
+
+        Returns:
+            One dict per routine: ``schema``, ``name``, ``signature``, and
+            ``invocation`` where the provider renders one.
+        """
         return self._list_routines(conn, "functions", schema)
 
     def get_schema_metadata(self, conn: Any, schema: str) -> dict[str, Any]:
@@ -598,21 +622,31 @@ class DBAdapter:
         keeps overloaded routines distinguishable — a routine is identified by
         catalog, schema, name, object_type and signature together, never by
         name alone.
+
+        ``invocation`` rides along untouched where the provider rendered one.
+        This layer normalizes identity; it does not read, validate or rewrite a
+        statement, because it does not know the syntax the statement is in.
         """
         provider = self._require_metadata_capability(conn, capability)
         catalog = self._metadata_catalog(conn, provider)
         kind = _ROUTINE_KINDS[capability]
         rows = _backend(provider).list_routines(conn, catalog, schema, kind)
-        result = [
-            {
+        result = []
+        for row in rows:
+            record = {
                 "catalog": str(catalog),
                 "schema": str(row.get("schema") or ""),
                 "name": str(row.get("name") or ""),
                 "object_type": kind,
                 "signature": str(row.get("signature") or ""),
             }
-            for row in rows
-        ]
+            # Carried through exactly as rendered, and only when rendered. The
+            # key is added rather than defaulted, so a provider that renders no
+            # call is distinguishable here from one that rendered an empty one.
+            invocation = row.get("invocation")
+            if invocation:
+                record["invocation"] = str(invocation)
+            result.append(record)
         return sorted(
             result,
             key=lambda item: (item["schema"], item["name"], item["signature"]),
