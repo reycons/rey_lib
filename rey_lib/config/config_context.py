@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.config.config_namespace import Namespace
+from rey_lib.config.applications import build_applications
 from rey_lib.config.config_loader import (
     _ENV_FILE_NAME,
     _deep_merge,
@@ -203,6 +204,12 @@ def build_ctx_from_path(
         metadata.resolve_values(resolver_strs)
         for name, resolved in path_resolver._paths.items():
             metadata.set_resolved(f"paths.{name}", str(resolved))
+
+    # Applications last of the collections: a parameter may resolve its choices
+    # from workflows, pipelines or tools, and those are on ctx by now. Built
+    # here rather than read later so the resolution happens once -- the
+    # declaration under `apps` is the input and is never written to.
+    object.__setattr__(ctx, "applications", build_applications(ctx))
 
     object.__setattr__(ctx, "config_path", str(config_path))
     if app_name:
