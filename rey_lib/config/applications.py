@@ -106,22 +106,14 @@ class Application:
 
     @property
     def command_names(self) -> tuple[str, ...]:
-        """Every command name this application advertises.
+        """Every command name this application offers.
 
-        Two declarations, both already in use. An application either lists
-        ``cli.commands``, or takes a **positional parameter named ``command``**
-        whose values are the commands it accepts -- and several declare the
-        second and no commands at all.
-
-        Stated once here because it was stated once before, in
-        ``execution_service._registered_app_commands``, and two places deciding
-        what an application offers is how they come to disagree.
+        The names of :attr:`commands`, and nothing else. Construction has
+        already normalized the two declaration styles into one, so this is a
+        reading of the commands rather than a second rule about where they come
+        from.
         """
-        listed = [one.name for one in self.commands if one.name]
-        for parameter in self.parameters:
-            if parameter.positional and parameter.name == "command":
-                listed.extend(parameter.possible_values)
-        return tuple(dict.fromkeys(listed))
+        return tuple(one.name for one in self.commands)
 
 
 def build_applications(ctx: Any) -> tuple[Application, ...]:
@@ -175,11 +167,76 @@ def _application(entry: dict[str, Any], ctx: Any) -> Application:
             for one in (_plain(item) for item in (cli.get("parameters") or []))
             if isinstance(one, dict)
         ),
-        commands=tuple(
-            _command(one, ctx, name)
-            for one in (_plain(item) for item in (cli.get("commands") or []))
-            if isinstance(one, dict)
+        commands=_commands(cli, ctx, name),
+    )
+
+
+#: The parameter whose values are an application's commands, where it declares
+#: them that way. Positional, and named for what it carries.
+_COMMAND_PARAMETER = "command"
+
+
+def _commands(
+    cli: dict[str, Any],
+    ctx: Any,
+    application: str,
+) -> tuple[ApplicationCommand, ...]:
+    """Every command this application offers, however it declared them.
+
+    Two styles are in use, and a consumer should not have to know which:
+
+    - ``cli.commands`` lists them, each with its own parameters;
+    - a **positional parameter named ``command``** carries them as its values,
+      and the application's own ``cli.parameters`` are what those invocations
+      take. Several applications declare only this.
+
+    Both become :class:`ApplicationCommand` objects here, so
+    ``Application.commands`` is every executable command and each one carries
+    exactly the parameters that invocation takes. Nothing downstream reads the
+    positional parameter, and nothing falls back to the application's own
+    parameters to work out what a selected command accepts.
+
+    An application declaring **neither** offers no commands. That is not a gap:
+    it is invoked with no command word, and its own parameters are what that
+    invocation takes.
+    """
+    listed = tuple(
+        _command(one, ctx, application)
+        for one in (_plain(item) for item in (cli.get("commands") or []))
+        if isinstance(one, dict)
+    )
+    declared = tuple(
+        _parameter(one, ctx, application)
+        for one in (_plain(item) for item in (cli.get("parameters") or []))
+        if isinstance(one, dict)
+    )
+    carrier = next(
+        (
+            one for one in declared
+            if one.positional and one.name == _COMMAND_PARAMETER
         ),
+        None,
+    )
+    if listed and carrier is not None:
+        # Refused rather than resolved by precedence. Which declaration wins is
+        # not something to decide on an application's behalf, and no
+        # application declares both today -- so the first one that does says so
+        # at load rather than quietly losing half its commands.
+        raise ConfigError(
+            f"Application '{application}' declares commands both under "
+            "'cli.commands' and as the values of its positional 'command' "
+            "parameter. One or the other."
+        )
+    if listed:
+        return listed
+    if carrier is None:
+        return ()
+    # The command word is chosen, not filled in: it is what the others belong
+    # to, so it is not one of them.
+    takes = tuple(one for one in declared if one is not carrier)
+    return tuple(
+        ApplicationCommand(name=value, parameters=takes)
+        for value in carrier.possible_values
     )
 
 

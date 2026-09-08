@@ -106,14 +106,50 @@ class TestCommandNames:
 
         assert built[0].command_names == ("load", "sql")
 
-    def test_both_are_offered_without_duplication(self) -> None:
-        built = build_applications(ctx([declaration(
-            commands=[{"name": "load"}],
-            parameters=[{"name": "command", "positional": True,
-                         "possible_values": ["load", "sql"]}],
-        )]))
+    def test_declaring_both_styles_is_refused(self) -> None:
+        # Not resolved by precedence. Which one wins is not this object's to
+        # decide, and no application declares both today -- so the first that
+        # does says so at load rather than quietly losing half its commands.
+        with pytest.raises(ConfigError):
+            build_applications(ctx([declaration(
+                commands=[{"name": "load"}],
+                parameters=[{"name": "command", "positional": True,
+                             "possible_values": ["load", "sql"]}],
+            )]))
 
-        assert built[0].command_names == ("load", "sql")
+    def test_a_positional_command_gives_each_command_the_app_parameters(self) -> None:
+        # The normalization: an offered command carries exactly what that
+        # invocation takes -- the application's own parameters, without the
+        # command word itself, which is chosen rather than filled in.
+        built = build_applications(ctx([declaration(parameters=[
+            {"name": "command", "positional": True,
+             "possible_values": ["load", "sql"]},
+            {"name": "source", "required": True},
+        ])]))[0]
+
+        assert built.command_names == ("load", "sql")
+        assert [p.name for p in built.command("load").parameters] == ["source"]
+        assert [p.name for p in built.command("sql").parameters] == ["source"]
+
+    def test_every_offered_command_has_a_declaration_behind_it(self) -> None:
+        # The invariant. A name being offerable must mean there is a command
+        # object with its parameters -- otherwise a selector offers something
+        # nothing can describe.
+        built = build_applications(ctx([declaration(parameters=[
+            {"name": "command", "positional": True,
+             "possible_values": ["load", "sql"]},
+        ])]))[0]
+
+        assert all(built.command(name) is not None for name in built.command_names)
+
+    def test_an_application_declaring_neither_offers_none(self) -> None:
+        # Invoked with no command word; its own parameters are what that takes.
+        built = build_applications(ctx([declaration(parameters=[
+            {"name": "source"},
+        ])]))[0]
+
+        assert built.command_names == ()
+        assert [p.name for p in built.parameters] == ["source"]
 
     def test_a_non_positional_command_parameter_offers_nothing(self) -> None:
         built = build_applications(ctx([declaration(parameters=[
