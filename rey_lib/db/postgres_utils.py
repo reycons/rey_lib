@@ -330,6 +330,64 @@ def query_rows(
         raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
 
 
+def execute_statements(
+    conn: Any,
+    sql_text: str,
+    *,
+    limit: int = 1_000,
+) -> list[Any]:
+    """Execute SQL text as written and return every result this driver exposes.
+
+    ``exec_driver_sql`` rather than ``text``: ``text`` reads the statement for
+    ``:name`` placeholders, and a definition body or a literal containing a
+    colon fails before it reaches the database. Nothing is bound here -- the
+    text is the reader's own -- so binding has nothing to do and only breaks
+    valid SQL.
+
+    ``returns_rows`` decides whether there are columns to read. Asking the
+    result is not classifying the statement: the driver already knows, and
+    reading ``keys()`` from a result that has none raises.
+
+    **One result.** PostgreSQL returns a response sequence per command, but
+    psycopg2 exposes only the last of them and raises ``NotSupportedError`` from
+    ``nextset``. That is a client limitation, not a property of the server or of
+    this contract, and it is why the answer is still a list: a client that
+    exposes several will return several here without anything above changing.
+    """
+    from rey_lib.db._sqlalchemy import core_connection
+    from rey_lib.db.db_adapter import StatementResult
+
+    try:
+        result = core_connection(conn).exec_driver_sql(sql_text)
+        if not result.returns_rows:
+            return [StatementResult(columns=[], rows=[], row_count=_affected(result))]
+        columns = [str(column) for column in result.keys()]
+        values = result.fetchmany(max(1, int(limit)))
+        return [StatementResult(
+            columns=columns,
+            rows=[dict(zip(columns, row)) for row in values],
+            row_count=_affected(result),
+        )]
+    except Exception as exc:
+        # No rollback: the connection is in AUTOCOMMIT, so a failed statement
+        # leaves no transaction to clear and the next consumer is unaffected.
+        raise DatabaseError(f"postgres_utils: execution failed: {exc}") from exc
+
+
+def _affected(result: Any) -> int | None:
+    """What the statement affected, or None where the driver said nothing real.
+
+    -1 is DBAPI's "unknown", and a SELECT's rowcount is not a promise. Only a
+    meaningful count crosses; the rest is reported as unknown.
+    """
+    count = getattr(result, "rowcount", None)
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        return None
+    return None if count < 0 else count
+
+
 def execute_named_sql(
     conn: Any,
     sql_text: str,

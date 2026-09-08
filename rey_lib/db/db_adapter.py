@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib
 import re
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from rey_lib.db.routine_call import RoutineCall
@@ -45,7 +46,32 @@ from rey_lib.errors.error_utils import (
 # rey_lib.files at module top creates a circular import that breaks any caller
 # that imports db_adapter before rey_lib.files (e.g. control / procedure_map).
 
-__all__ = ["DBAdapter"]
+__all__ = ["DBAdapter", "StatementResult"]
+
+
+@dataclass(frozen=True)
+class StatementResult:
+    """One result a database handed back, normalized across providers.
+
+    A result, not a statement: what a driver exposes and what a person typed are
+    not the same count. A statement that returns nothing still produces one of
+    these -- it ran, and saying so is the answer.
+
+    Attributes:
+        columns: The column names, in the order they were returned. Empty for a
+            statement that returned no rows at all, which is ordinary for DDL
+            and for a call.
+        rows: The rows, each a column-to-value mapping, bounded by the caller's
+            limit.
+        row_count: How many rows the statement affected, or **None where the
+            backend gave no meaningful count**. DBAPI reports -1 for "unknown"
+            and means different things by it for queries and for DML, so that
+            is normalized here rather than escaping as a number that looks real.
+    """
+
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    row_count: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +180,68 @@ def _backend(provider: str) -> Any:
             f"Registered providers: {sorted(_REGISTRY)}."
         )
     return importlib.import_module(path)
+
+
+def _execute_statements_over_dbapi(
+    conn: Any,
+    sql_text: str,
+    *,
+    limit: int,
+) -> list[StatementResult]:
+    """Execute over the DBAPI cursor the generic path already uses.
+
+    The starting implementation for providers already reading through
+    ``cursor.execute`` / ``description`` / ``fetchmany``. It reuses those
+    mechanics; the behaviour is not the same as ``query_rows``, because this
+    normalizes a result that returned nothing and answers with a list.
+
+    **It reads one result and stops.** Advancing through several is a provider's
+    own claim: a driver exposing ``nextset`` is not evidence that it accepts the
+    same batch in one execute, or advances the same way, so a provider that can
+    do it implements ``execute_statements`` and says so.
+    """
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql_text)
+        return [_result_from_cursor(cursor, limit=limit)]
+    except Exception as exc:
+        raise DatabaseError(f"DBAdapter: execution failed: {exc}") from exc
+    finally:
+        if cursor is not None and hasattr(cursor, "close"):
+            cursor.close()
+
+
+def _result_from_cursor(cursor: Any, *, limit: int) -> StatementResult:
+    """One cursor's current result, normalized.
+
+    No description means the statement returned no rows -- which is what DDL and
+    a call do, and is an answer rather than an error.
+    """
+    description = getattr(cursor, "description", None) or []
+    columns = [str(column[0]) for column in description]
+    values = cursor.fetchmany(max(1, int(limit))) if columns else []
+    return StatementResult(
+        columns=columns,
+        rows=[dict(zip(columns, row)) for row in values],
+        row_count=_row_count(cursor),
+    )
+
+
+def _row_count(cursor: Any) -> int | None:
+    """What the driver said it affected, or None where it said nothing useful.
+
+    DBAPI uses -1 for "unknown", and drivers differ on what the number means for
+    a query versus a write. Only a count that is meaningful crosses this
+    boundary; the rest becomes None and is reported as unknown rather than as a
+    number somebody might believe.
+    """
+    count = getattr(cursor, "rowcount", None)
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        return None
+    return None if count < 0 else count
 
 
 class DBAdapter:
@@ -298,6 +386,49 @@ class DBAdapter:
                 "does not support execute_named_sql."
             )
         return backend.execute_named_sql(conn, sql_text, named_params, result_mode)
+
+    def execute_statements(
+        self,
+        conn: Any,
+        sql_text: str,
+        *,
+        limit: int = 1_000,
+    ) -> list[StatementResult]:
+        """Execute SQL text as written and return every result it produced.
+
+        The text is not read, classified or rewritten here. What may be executed
+        is the connected role's answer, not this layer's: nothing counts
+        statements, checks a leading keyword or scans for a forbidden word.
+
+        A statement that returns no rows is an ordinary outcome -- DDL and a
+        procedure call both produce one -- and appears as a result with no
+        columns rather than as a failure.
+
+        **The result is a list from the outset.** A provider that can expose
+        several results returns several; one that exposes a single result
+        returns one. Nothing above has to change when a provider's capability
+        does, and no caller may assume there is exactly one.
+
+        Args:
+            conn: Open connection handle.
+            sql_text: The SQL to execute, exactly as written.
+            limit: The most rows to read from any one result.
+
+        Returns:
+            One :class:`StatementResult` per result the driver exposed.
+
+        Raises:
+            DatabaseError: If execution fails.
+        """
+        provider = self._provider_for_conn(conn)
+        backend = _backend(provider)
+        own = getattr(backend, "execute_statements", None)
+        if callable(own):
+            # A provider whose batch semantics, result advancement or
+            # command-only results differ answers for itself. Which drivers
+            # those are is measured, never assumed from a method existing.
+            return list(own(conn, sql_text, limit=limit))
+        return _execute_statements_over_dbapi(conn, sql_text, limit=limit)
 
     def query_rows(
         self,
