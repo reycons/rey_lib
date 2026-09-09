@@ -65,6 +65,7 @@ rey-format-sql = "rey_lib.artifacts.cli:main"
 rey-format-artifact = "rey_lib.artifacts.cli:main"
 rey-validate-yaml = "rey_lib.artifacts.cli:validate_yaml_main"
 rey-validate-config = "rey_lib.artifacts.cli:validate_config_main"
+rey-regenerate-context-maps = "rey_lib.repository_map.regenerate:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

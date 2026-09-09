@@ -18,7 +18,20 @@ from rey_lib.repository_map.architecture_policy import (
     CompiledArchitecturePolicy,
     compile_architecture_policy,
 )
+from rey_lib.repository_map.architecture_projection import (
+    ARCHITECTURE_ARTIFACT_NAME,
+    ArchitectureProjection,
+    ArchitectureProjectionError,
+    build_architecture_projection,
+    system_membership,
+    validate_architecture_projection,
+    write_architecture_projection,
+)
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
+from rey_lib.repository_map.regenerate import (
+    RegenerationResult,
+    regenerate_context_maps,
+)
 from rey_lib.repository_map.increment_gate import (
     AgentHandoff,
     ArchitectureDiff,
@@ -151,6 +164,7 @@ __all__ = [
     "SymbolRecord",
     "SystemIndex",
     "build_dependency_graph",
+    "build_architecture_projection",
     "build_system_index",
     "ArchitectureRuleSource",
     "CompiledArchitecturePolicy",
@@ -161,6 +175,14 @@ __all__ = [
     "RetirementReport",
     "build_agent_handoff",
     "check_architecture_boundaries",
+    "RegenerationResult",
+    "regenerate_context_maps",
+    "ARCHITECTURE_ARTIFACT_NAME",
+    "ArchitectureProjection",
+    "ArchitectureProjectionError",
+    "system_membership",
+    "validate_architecture_projection",
+    "write_architecture_projection",
     "diff_architecture_violations",
     "load_migration_manifest",
     "validate_map_provenance",

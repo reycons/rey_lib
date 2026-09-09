@@ -71,6 +71,11 @@ RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
 RECORD_TYPE_GLOBAL_CONSUMER = "global_consumer"
 RECORD_TYPE_REACHABILITY = "reachability"
 RECORD_TYPE_ARCHITECTURE_VIOLATION = "architecture_violation"
+
+# The derived architecture projection: authored meaning joined to current
+# structure. Its own artifact, never records inside a repository map.
+RECORD_TYPE_ARCHITECTURE_MAP = "architecture_map"
+RECORD_TYPE_ARCHITECTURE_NODE = "architecture_node"
 RECORD_TYPE_DISPATCHER = "dispatcher"
 
 # System index record types. The index binds repository baselines; it is a
