@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ import pytest
 import yaml
 
 from rey_lib.config.config_context import build_ctx_from_path
-from rey_lib.config.inventory import build_installation_inventory, to_plain_data
+from rey_lib.config.inventory import to_plain_data
 
 PASSWORD_VAR = "REY_TEST_EXPOSURE_PASSWORD"
 KEY_VAR = "REY_TEST_EXPOSURE_API_KEY"
@@ -92,24 +93,15 @@ def test_to_plain_data_returns_the_reference_it_was_given(ctx: Any) -> None:
     assert leaked(plain) == set()
 
 
-def test_the_inventory_dump_carries_no_resolved_value(ctx: Any) -> None:
-    """to_dict() is the whole inventory, walked and flattened."""
-    inventory = build_installation_inventory(ctx)
-    dumped = inventory.to_dict()
+def test_a_whole_context_walked_carries_no_resolved_value(ctx: Any) -> None:
+    """The serializer is asked for everything at once, not one section."""
+    dumped = to_plain_data(
+        {"connections": ctx.connections, "llm_profiles": ctx.llm_profiles}
+    )
 
     assert leaked(dumped) == set()
     connections = {entry["name"]: entry for entry in dumped["connections"]}
     assert connections["primary"]["password"] == f"env.{PASSWORD_VAR}"
-
-
-def test_thawing_the_inventory_carries_no_resolved_value(ctx: Any) -> None:
-    """_thaw is what to_dict is made of; proven in its own right."""
-    from rey_lib.config.inventory import _thaw
-
-    inventory = build_installation_inventory(ctx)
-
-    assert leaked(_thaw(inventory)) == set()
-    assert leaked(_thaw(inventory.llm_profiles)) == set()
 
 
 def test_a_normalized_nested_reference_is_also_only_a_reference(ctx: Any) -> None:
@@ -192,3 +184,39 @@ def test_no_serializer_hides_a_field_by_its_name() -> None:
         and any(mask in path.read_text(encoding="utf-8") for mask in masking)
     ]
     assert offenders == []
+
+
+# -- the surface this module is allowed to have ------------------------------
+
+INVENTORY_MODULE = Path(__file__).resolve().parent.parent / "rey_lib/config/inventory.py"
+
+
+def test_the_module_builds_no_installation_aggregate() -> None:
+    """One runtime model of an installation, and it is the context.
+
+    This module once built an ``InstallationInventory``: apps, workflows,
+    pipelines, contracts, connections and their relationships, in one frozen
+    object with no runtime caller. It was a second apparent answer to what an
+    installation *is*, and it drifted architecture that way.
+
+    The guard is on the shape rather than on two names, because the same
+    architecture returns just as easily as ``RuntimeInventory`` or
+    ``InstallationSnapshot``. An aggregate needs a type to be; this module
+    declares none, so there is nowhere for one to land.
+    """
+    tree = ast.parse(INVENTORY_MODULE.read_text(encoding="utf-8"))
+    classes = [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+
+    assert classes == []
+
+
+def test_the_module_exports_its_two_responsibilities_and_no_others() -> None:
+    """__all__ is the surface, and it is the whole surface.
+
+    A helper that grows a caller outside this module is a decision, not a
+    detail: it either belongs to one of these two responsibilities or it
+    belongs somewhere else.
+    """
+    from rey_lib.config import inventory
+
+    assert inventory.__all__ == ["resolve_workflow_run_action", "to_plain_data"]

@@ -1,97 +1,31 @@
-"""Read-only installation inventory built from a resolved config context."""
+"""The workflow run action, and the one way configuration becomes plain data.
+
+Two responsibilities, and deliberately no third. This module used to also build
+an ``InstallationInventory`` -- a whole-installation aggregate of apps,
+workflows, pipelines, contracts, connections and their derived relationships.
+Nothing in the runtime ever called it. It was removed because a second answer
+to "what is the runtime model of an installation?" is not harmless: the
+canonical answer is the objects on the context, and an unused aggregate beside
+them makes obsolete architecture look supported.
+
+Whatever needs one workflow's run action asks for that one action. Whatever
+needs configuration as plain data asks ``to_plain_data``. Neither reconstructs
+an installation.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from rey_lib.config.config_utils import Namespace
-from rey_lib.config.provenance import get_config_metadata
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
-    "InstallationInventory",
-    "build_installation_inventory",
     "resolve_workflow_run_action",
     "to_plain_data",
 ]
-
-
-@dataclass(frozen=True)
-class InstallationInventory:
-    """Immutable installation inventory derived from an already-loaded ctx."""
-
-    apps: tuple[Mapping[str, Any], ...]
-    workflows: tuple[Mapping[str, Any], ...]
-    pipelines: tuple[Mapping[str, Any], ...]
-    contracts: tuple[Mapping[str, Any], ...]
-    llm_profiles: tuple[Mapping[str, Any], ...]
-    connections: tuple[Mapping[str, Any], ...]
-    tools: tuple[Mapping[str, Any], ...]
-    paths: Mapping[str, str]
-    logging: Mapping[str, Any]
-    artifact_settings: Mapping[str, Any]
-    workflow_run_actions: tuple[Mapping[str, Any], ...]
-    workflows_by_app: Mapping[str, tuple[str, ...]]
-    validation_errors: tuple[Mapping[str, Any], ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-safe plain dict copy of the inventory."""
-        return _thaw(self)
-
-
-def build_installation_inventory(ctx: Any) -> InstallationInventory:
-    """Build an immutable inventory from a context loaded by config_utils."""
-    apps = _named_entries(getattr(ctx, "apps", None))
-    app_names = {str(app.get("name")) for app in apps if app.get("name")}
-    source_config = str(getattr(ctx, "config_path", "") or "")
-    workflows = _workflow_entries(ctx)
-    pipelines = _pipeline_entries(ctx)
-    contracts = _contract_entries(ctx)
-    llm_profiles = _named_entries(
-        getattr(ctx, "llm_profiles", None) or getattr(ctx, "llm_configs", None)
-    )
-    llm_profile_names = {str(profile.get("name")) for profile in llm_profiles if profile.get("name")}
-    connections = _connection_entries(ctx)
-    connection_names = {
-        str(connection.get("name")) for connection in connections if connection.get("name")
-    }
-    tools = _named_entries(getattr(ctx, "tools", None))
-    paths = _path_entries(ctx)
-    logging = to_plain_data(getattr(ctx, "logging", None))
-    artifact_settings = to_plain_data(getattr(ctx, "artifact_processing", None))
-    run_actions = _workflow_run_actions(ctx, apps, workflows)
-    workflows_by_app = _workflows_by_app(workflows)
-
-    errors = _validate_inventory(
-        app_names,
-        workflows,
-        contracts,
-        llm_profile_names,
-        connection_names,
-        source_config,
-    )
-    if errors:
-        details = "; ".join(str(error) for error in errors)
-        raise ConfigError(f"Installation inventory validation failed: {details}")
-
-    return InstallationInventory(
-        apps=_freeze(apps),
-        workflows=_freeze(workflows),
-        pipelines=_freeze(pipelines),
-        contracts=_freeze(contracts),
-        llm_profiles=_freeze(llm_profiles),
-        connections=_freeze(connections),
-        tools=_freeze(tools),
-        paths=_freeze(paths),
-        logging=_freeze(logging),
-        artifact_settings=_freeze(artifact_settings),
-        workflow_run_actions=_freeze(run_actions),
-        workflows_by_app=_freeze(workflows_by_app),
-        validation_errors=(),
-    )
 
 
 def resolve_workflow_run_action(
@@ -101,10 +35,10 @@ def resolve_workflow_run_action(
 ) -> dict[str, Any]:
     """Return the canonical run action for one configured workflow.
 
-    This is the narrow public execution-capability boundary for consumers that
-    need one workflow action. It delegates to the same normalization and
-    capability logic used by :func:`build_installation_inventory` without
-    constructing or attaching the full installation inventory.
+    This is the public execution-capability boundary for consumers that need
+    one workflow action. It delegates to the same normalization and
+    capability logic the workflow rows carry, and it constructs nothing
+    beyond the one action asked for.
     """
     requested_app = str(app_name or "").strip()
     requested_workflow = str(workflow_name or "").strip()
@@ -132,7 +66,6 @@ def resolve_workflow_run_action(
             f"Workflow run action not found: {requested_app}/{requested_workflow}"
         )
     return actions[0]
-
 
 def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
     """Return normalized workflow rows from ctx.workflows."""
@@ -176,42 +109,6 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
         )
 
     return rows
-
-
-def _pipeline_entries(ctx: Any) -> list[dict[str, Any]]:
-    """Return normalized pipeline rows from ctx.pipelines.
-
-    Consumes only the canonical list schema (``pipelines: [{name: ...}]``).
-    """
-    rows: list[dict[str, Any]] = []
-    pipelines = to_plain_data(getattr(ctx, "pipelines", None))
-    if pipelines is None:
-        return rows
-    if not isinstance(pipelines, list):
-        raise ConfigError("Canonical pipeline inventory 'ctx.pipelines' must be a list.")
-
-    for pipeline in pipelines:
-        if not isinstance(pipeline, dict):
-            continue
-        name = str(pipeline.get("name") or "")
-        source = get_config_metadata(ctx, f"pipelines.{name}.name")
-        source_config_file = str(source.source_file or "") if source else ""
-        pipeline_path = (
-            str(Path(source_config_file).expanduser().resolve().parent)
-            if source_config_file
-            else ""
-        )
-        rows.append(
-            {
-                "name": name,
-                "path": pipeline_path,
-                "source_config_file": source_config_file,
-                "steps": pipeline.get("steps") or [],
-                "source_section": "pipelines",
-            }
-        )
-    return rows
-
 
 def _workflow_run_actions(
     ctx: Any,
@@ -282,7 +179,6 @@ def _workflow_run_actions(
 
     return rows
 
-
 def _workflow_execution(workflow: dict[str, Any]) -> dict[str, bool]:
     """Return the normalized execution contract for a workflow (ADR-007).
 
@@ -298,7 +194,6 @@ def _workflow_execution(workflow: dict[str, Any]) -> dict[str, bool]:
         "step": bool(raw.get("step", False)),
         "range": bool(raw.get("range", False)),
     }
-
 
 def _workflow_command(
     app_entry: dict[str, Any],
@@ -326,7 +221,6 @@ def _workflow_command(
         config_path,
     ]
 
-
 def _supports_dry_run(app_entry: dict[str, Any]) -> bool:
     """Return true when app CLI metadata exposes a dry-run flag."""
     cli = app_entry.get("cli")
@@ -344,60 +238,6 @@ def _supports_dry_run(app_entry: dict[str, Any]) -> bool:
                 return True
     return False
 
-
-def _workflows_by_app(workflows: list[dict[str, Any]]) -> dict[str, tuple[str, ...]]:
-    rows: dict[str, list[str]] = {}
-    for workflow in workflows:
-        app = str(workflow.get("app") or "")
-        if not app:
-            continue
-        rows.setdefault(app, []).append(str(workflow["name"]))
-    return {app: tuple(sorted(names)) for app, names in rows.items()}
-
-
-def _contract_entries(ctx: Any) -> list[dict[str, Any]]:
-    """Find explicit contract_file references already present on the ctx."""
-    rows: list[dict[str, Any]] = []
-    source_config = str(getattr(ctx, "config_path", "") or "")
-    _collect_contracts(to_plain_data(getattr(ctx, "workflows", None)), "workflows", rows, source_config)
-    _collect_contracts(
-        to_plain_data(getattr(ctx, "analysis_configs", None)),
-        "analysis_configs",
-        rows,
-        source_config,
-    )
-    _collect_contracts(
-        to_plain_data(getattr(ctx, "data_sources", None)),
-        "data_sources",
-        rows,
-        source_config,
-    )
-    return rows
-
-
-def _collect_contracts(
-    value: Any,
-    section: str,
-    rows: list[dict[str, Any]],
-    source_config: str,
-) -> None:
-    if isinstance(value, dict):
-        if "contract_file" in value:
-            rows.append(
-                {
-                    "config_file": source_config,
-                    "section": section,
-                    "field": "contract_file",
-                    "contract_file": value["contract_file"],
-                }
-            )
-        for child in value.values():
-            _collect_contracts(child, section, rows, source_config)
-    elif isinstance(value, list):
-        for child in value:
-            _collect_contracts(child, section, rows, source_config)
-
-
 def _named_entries(value: Any) -> list[dict[str, Any]]:
     """Return normalized named entries from list or mapping config sections."""
     raw = to_plain_data(value)
@@ -412,220 +252,12 @@ def _named_entries(value: Any) -> list[dict[str, Any]]:
         return rows
     return []
 
-
-def _connection_entries(ctx: Any) -> list[dict[str, Any]]:
-    rows = _named_entries(getattr(ctx, "connections", None))
-    rows.extend(_named_entries(getattr(ctx, "db_connections", None)))
-    return rows
-
-
-def _path_entries(ctx: Any) -> dict[str, str]:
-    paths = getattr(ctx, "paths", None)
-    internal = getattr(paths, "_paths", None)
-    if not isinstance(internal, dict):
-        return {}
-    return {str(name): str(path) for name, path in internal.items()}
-
-
-def _validate_inventory(
-    app_names: set[str],
-    workflows: list[dict[str, Any]],
-    contracts: list[dict[str, Any]],
-    llm_profile_names: set[str],
-    connection_names: set[str],
-    source_config: str,
-) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-    seen_workflows: dict[str, str] = {}
-
-    for workflow in workflows:
-        name = str(workflow.get("name") or "")
-        app = str(workflow.get("app") or "")
-        workflow_source = str(workflow.get("source_config_file") or source_config)
-        if not app:
-            errors.append(
-                _error(workflow_source, "workflows", name, "app", app, "workflow owner app is required")
-            )
-        elif app not in app_names:
-            errors.append(_error(workflow_source, "workflows", name, "app", app, "known app name"))
-
-        previous = seen_workflows.get(name)
-        if previous and previous != app:
-            errors.append(
-                _error(
-                    workflow_source,
-                    "workflows",
-                    name,
-                    "name",
-                    name,
-                    "unique workflow name or explicit app",
-                )
-            )
-        else:
-            seen_workflows[name] = app
-
-        _validate_named_reference(
-            errors,
-            workflow,
-            "llm_profile",
-            llm_profile_names,
-            "known LLM profile name",
-            workflow_source,
-        )
-        _validate_named_reference(
-            errors,
-            workflow,
-            "execution_profile",
-            llm_profile_names,
-            "known execution profile name",
-            workflow_source,
-        )
-        _validate_named_reference(
-            errors,
-            workflow,
-            "connection",
-            connection_names,
-            "known connection name",
-            workflow_source,
-        )
-        _validate_named_reference(
-            errors,
-            workflow,
-            "target_connection",
-            connection_names,
-            "known connection name",
-            workflow_source,
-        )
-        for ref in _collect_references(workflow.get("steps") or []):
-            if ref["field"] in {"llm_profile", "execution_profile"}:
-                _validate_reference_value(
-                    errors,
-                    workflow_source,
-                    "workflows.steps",
-                    name,
-                    ref["field"],
-                    ref["value"],
-                    llm_profile_names,
-                    "known execution profile name",
-                )
-            elif ref["field"] in {"connection", "target_connection", "source_connection"}:
-                _validate_reference_value(
-                    errors,
-                    workflow_source,
-                    "workflows.steps",
-                    name,
-                    ref["field"],
-                    ref["value"],
-                    connection_names,
-                    "known connection name",
-                )
-
-    for contract in contracts:
-        value = contract.get("contract_file")
-        if isinstance(value, str):
-            path = Path(value)
-        elif isinstance(value, Path):
-            path = value
-        else:
-            continue
-        if not path.exists():
-            errors.append(
-                _error(
-                    str(contract.get("config_file") or source_config),
-                    str(contract.get("section") or "contracts"),
-                    "contract_file",
-                    "contract_file",
-                    str(value),
-                    "existing contract file",
-                )
-            )
-
-    return errors
-
-
-def _validate_named_reference(
-    errors: list[dict[str, Any]],
-    item: dict[str, Any],
-    field: str,
-    allowed_names: set[str],
-    expected: str,
-    source_config: str,
-) -> None:
-    _validate_reference_value(
-        errors,
-        source_config,
-        "workflows",
-        str(item.get("name") or ""),
-        field,
-        item.get(field),
-        allowed_names,
-        expected,
-    )
-
-
-def _validate_reference_value(
-    errors: list[dict[str, Any]],
-    config_file: str,
-    section: str,
-    item: str,
-    field: str,
-    value: Any,
-    allowed_names: set[str],
-    expected: str,
-) -> None:
-    if value in (None, ""):
-        return
-    if isinstance(value, Path):
-        value = str(value)
-    if not isinstance(value, str):
-        return
-    if value not in allowed_names:
-        errors.append(_error(config_file, section, item, field, value, expected))
-
-
-def _collect_references(value: Any) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key in {
-                "llm_profile",
-                "execution_profile",
-                "connection",
-                "target_connection",
-                "source_connection",
-            }:
-                rows.append({"field": key, "value": item})
-            rows.extend(_collect_references(item))
-    elif isinstance(value, list):
-        for item in value:
-            rows.extend(_collect_references(item))
-    return rows
-
-
-def _error(
-    config_file: str,
-    section: str,
-    item: str,
-    field: str,
-    value: Any,
-    expected: str,
-) -> dict[str, Any]:
-    return {
-        "config_file": config_file,
-        "section": section,
-        "item": item,
-        "field": field,
-        "bad_value": value,
-        "expected": expected,
-    }
-
-
 def to_plain_data(value: Any) -> Any:
     """Return configuration as plain JSON-safe data.
 
     The one answer to "serialize this config object", for every surface that
     hands configuration to something outside the process -- an API response, a
-    Tree payload, an inventory dump. A second normalizer would be a second
+    Tree payload, a run action. A second normalizer would be a second
     answer, and the two would drift.
 
     The conversion is structural and nothing more. It reads no environment and
@@ -657,38 +289,4 @@ def to_plain_data(value: Any) -> Any:
         return [to_plain_data(item) for item in value]
     if isinstance(value, Path):
         return str(value)
-    return value
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, dict):
-        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, tuple):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _thaw(value: Any) -> Any:
-    if isinstance(value, InstallationInventory):
-        return {
-            "apps": _thaw(value.apps),
-            "workflows": _thaw(value.workflows),
-            "pipelines": _thaw(value.pipelines),
-            "contracts": _thaw(value.contracts),
-            "llm_profiles": _thaw(value.llm_profiles),
-            "connections": _thaw(value.connections),
-            "tools": _thaw(value.tools),
-            "paths": _thaw(value.paths),
-            "logging": _thaw(value.logging),
-            "artifact_settings": _thaw(value.artifact_settings),
-            "workflow_run_actions": _thaw(value.workflow_run_actions),
-            "workflows_by_app": _thaw(value.workflows_by_app),
-            "validation_errors": _thaw(value.validation_errors),
-        }
-    if isinstance(value, MappingProxyType):
-        return {k: _thaw(v) for k, v in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw(item) for item in value]
     return value

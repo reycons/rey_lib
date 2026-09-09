@@ -169,9 +169,9 @@ def test_db_connections_alias_still_reaches_connections(tmp_path: Path) -> None:
 
 def test_serialization_shows_references_not_values(config_path: Path) -> None:
     """What a caller can be handed contains references only."""
-    from rey_lib.config.inventory import _thaw
+    from rey_lib.config.inventory import to_plain_data
 
     ctx = build_ctx_from_path(config_path, app_name="test_app")
-    text = repr(_thaw(_connection(ctx, "rey_apps")))
+    text = repr(to_plain_data(_connection(ctx, "rey_apps")))
     assert f"env.{APPS_VAR}" in text
     assert "resolved-" not in text
