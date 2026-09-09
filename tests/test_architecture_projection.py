@@ -23,8 +23,7 @@ from rey_lib.repository_map import (
 )
 from rey_lib.repository_map.architecture_projection import (
     CONSUMED_OWNERSHIP_SECTIONS,
-    TREE_VIEW_CODE,
-    TREE_VIEW_OBJECT_MAP,
+    NODE_TYPE_IMPLEMENTATION,
     NODE_TYPE_CONCEPT,
     NODE_TYPE_MODULE,
     NODE_TYPE_PACKAGE,
@@ -96,17 +95,18 @@ def _authority(
     return path
 
 
-def _view(projection: Any, tree_view: str) -> list[dict[str, Any]]:
-    """The rows of one presentation."""
-    return [r for r in projection.records if r["tree_view"] == tree_view]
+def _under(projection: Any, node: dict[str, Any]) -> list[dict[str, Any]]:
+    """The rows one node holds."""
+    return [r for r in projection.records if r["parent_id"] == node["record_id"]]
 
 
-def _object_map(projection: Any) -> list[dict[str, Any]]:
-    return _view(projection, TREE_VIEW_OBJECT_MAP)
-
-
-def _code(projection: Any) -> list[dict[str, Any]]:
-    return _view(projection, TREE_VIEW_CODE)
+def _implementation(projection: Any, concept_key: str) -> dict[str, Any]:
+    """The container beneath one concept."""
+    return next(
+        r for r in projection.records
+        if r["node_type"] == NODE_TYPE_IMPLEMENTATION
+        and r["concept_key"] == concept_key
+    )
 
 
 ONE_CONCEPT = (
@@ -150,11 +150,11 @@ class TestTheHierarchy:
         projection = build_architecture_projection(
             path, {"alpha": _map(_file("alpha/core.py"))},
         )
-        roots = [r for r in _object_map(projection) if r["parent_id"] is None]
+        roots = [r for r in projection.records if r["parent_id"] is None]
 
         assert [r["node_type"] for r in roots] == [NODE_TYPE_CONCEPT]
         assert roots[0]["label"] == "Files"
-        assert roots[0]["record_id"] == "architecture_node:object_map:files"
+        assert roots[0]["record_id"] == "architecture_node:files"
 
     def test_concepts_nest_in_declared_order(self, tmp_path: Path) -> None:
         """Declared order is display order, so nothing is sorted."""
@@ -173,11 +173,11 @@ class TestTheHierarchy:
         projection = build_architecture_projection(path, {"alpha": _map()})
         by_id = {r["record_id"]: r for r in projection.records}
 
-        assert [r["label"] for r in _object_map(projection)] == [
+        assert [r["label"] for r in projection.records] == [
             "Rey Console", "Explorer", "Tabs", "Tree",
         ]
-        assert by_id["architecture_node:object_map:console.explorer.tabs"][
-            "parent_id"] == "architecture_node:object_map:console.explorer"
+        assert by_id["architecture_node:console.explorer.tabs"][
+            "parent_id"] == "architecture_node:console.explorer"
 
     def test_a_concept_carries_no_structural_field(self, tmp_path: Path) -> None:
         """A concept is not a file, and inventing a path for one would put
@@ -209,12 +209,13 @@ class TestTheHierarchy:
             "alpha": _map(_file("alpha/core.py")),
             "beta": _map(_file("beta/other.py")),
         })
-        evidence = [r for r in _object_map(projection)
+        evidence = [r for r in projection.records
                     if r["node_type"] == NODE_TYPE_MODULE]
 
         assert {r["repository"] for r in evidence} == {"alpha", "beta"}
+        # Both hang under the one container the concept gained.
         assert {r["parent_id"] for r in evidence} == {
-            "architecture_node:object_map:logging"}
+            "architecture_node:logging:implementation"}
         assert not [r for r in projection.records if r["node_type"] == "repository"]
 
 
@@ -347,15 +348,15 @@ class TestMultiplicity:
             path,
             {"alpha": _map(_file("alpha/core.py"), _symbol("alpha/core.py", "handler"))},
         )
-        occurrences = [r for r in _object_map(projection)
+        occurrences = [r for r in projection.records
                        if r["node_type"] == NODE_TYPE_SYMBOL]
 
         assert len(occurrences) == 2
         # One identity. Two placements, and in this view they are two concepts.
         assert len({r["evidence_id"] for r in occurrences}) == 1
         assert {r["parent_id"] for r in occurrences} == {
-            "architecture_node:object_map:explorer",
-            "architecture_node:object_map:presentation",
+            "architecture_node:explorer:implementation",
+            "architecture_node:presentation:implementation",
         }
 
 
@@ -587,10 +588,10 @@ class TestOpeningANodeUp:
         file browser, and the concept above it is the architecture."""
         path = _authority(tmp_path, PACKAGE)
         projection = build_architecture_projection(path, {"alpha": _package_map()})
-        code = _code(projection)
-        by_id = {r["record_id"]: r for r in code}
-        package = next(r for r in code if r["parent_id"] is None)
-        held = [r for r in code if r["parent_id"] == package["record_id"]]
+        records = projection.records
+        by_id = {r["record_id"]: r for r in records}
+        package = next(r for r in records if r["node_type"] == NODE_TYPE_PACKAGE)
+        held = [r for r in records if r["parent_id"] == package["record_id"]]
 
         assert [(r["node_type"], r["label"]) for r in held] == [
             (NODE_TYPE_MODULE, "alpha/pkg/core.py"),
@@ -599,7 +600,7 @@ class TestOpeningANodeUp:
         # A file two levels down is reached through its own package, never
         # lifted to the top of this one.
         inner = next(r for r in held if r["node_type"] == NODE_TYPE_PACKAGE)
-        assert [r["label"] for r in code
+        assert [r["label"] for r in records
                 if r["parent_id"] == inner["record_id"]] == ["alpha/pkg/inner/deep.py"]
         # And nothing outside the package came along.
         assert "alpha/other.py" not in {r["label"] for r in by_id.values()}
@@ -641,110 +642,74 @@ class TestOpeningANodeUp:
                 assert record["relative_path"] is None
 
 
-# -- two views over one artifact ---------------------------------------------
+# -- implementation is a child, never a peer ---------------------------------
 
-BOTH_VIEWS = (
+WITH_EVIDENCE = (
     "  - key: explorer\n"
     "    label: Explorer\n"
+    "    concepts:\n"
+    "      - key: tabs\n"
+    "        label: Tabs\n"
     "    realized_by:\n"
     "      - alpha/pkg/\n"
-    "      - alpha.loose.helper\n"
 )
 
 
-def _both_views_map() -> RepositoryMap:
-    return _map(
-        _file("alpha/pkg/core.py"),
-        _file("alpha/loose.py"),
-        _symbol("alpha/pkg/core.py", "run", line=10),
-        _symbol("alpha/loose.py", "helper", line=3),
-    )
-
-
-class TestTwoViews:
-    """One artifact, two presentations, and neither pretending to be the other."""
+class TestImplementationContainer:
+    """Code is subordinate to the object it realizes, not a peer of it."""
 
     def _built(self, tmp_path: Path) -> Any:
         return build_architecture_projection(
-            _authority(tmp_path, BOTH_VIEWS), {"alpha": _both_views_map()},
+            _authority(tmp_path, WITH_EVIDENCE),
+            {"alpha": _map(_file("alpha/pkg/core.py"),
+                           _symbol("alpha/pkg/core.py", "run", line=10))},
         )
 
-    def test_every_row_belongs_to_exactly_one_view(self, tmp_path: Path) -> None:
-        projection = self._built(tmp_path)
-
-        assert {r["tree_view"] for r in projection.records} == {
-            TREE_VIEW_OBJECT_MAP, TREE_VIEW_CODE,
-        }
-        assert len(_object_map(projection)) + len(_code(projection)) == len(
-            projection.records)
-
-    def test_the_object_map_expands_no_evidence(self, tmp_path: Path) -> None:
-        """Whatever kind it resolves to. A concept may name a callable as
-        readily as a package, and the object map is about what realizes a
-        concept rather than what that code contains."""
-        evidence = [r for r in _object_map(self._built(tmp_path))
-                    if r["node_type"] != NODE_TYPE_CONCEPT]
-
-        assert {r["node_type"] for r in evidence} == {
-            NODE_TYPE_PACKAGE, NODE_TYPE_SYMBOL,
-        }
-        assert not [r for r in evidence if r["has_children"]]
-        # Nothing the package contains came with it.
-        assert "alpha/pkg/core.py" not in {r["label"] for r in evidence}
-
-    def test_the_code_view_is_the_physical_tree(self, tmp_path: Path) -> None:
-        code = self._built(tmp_path).records
-        code = [r for r in code if r["tree_view"] == TREE_VIEW_CODE]
-        by_id = {r["record_id"]: r for r in code}
-
-        roots = [r for r in code if r["parent_id"] is None]
-        # The referenced package, and the module holding a referenced callable
-        # that no referenced package contains.
-        assert sorted((r["node_type"], r["label"]) for r in roots) == [
-            (NODE_TYPE_MODULE, "alpha/loose.py"),
-            (NODE_TYPE_PACKAGE, "alpha/pkg/"),
-        ]
-        package = next(r for r in roots if r["node_type"] == NODE_TYPE_PACKAGE)
-        module = next(r for r in code if r["parent_id"] == package["record_id"])
-        assert module["label"] == "alpha/pkg/core.py"
-        assert [r["label"] for r in code
-                if r["parent_id"] == module["record_id"]] == ["run"]
-        assert by_id[module["record_id"]]["has_children"] is True
-
-    def test_one_source_object_in_both_views_keeps_one_identity(
+    def test_evidence_hangs_under_the_container_not_beside_a_sub_concept(
         self, tmp_path: Path,
     ) -> None:
-        """Different placement, different children, same underlying thing.
+        """A package among a concept's sub-concepts reads as one of them.
 
-        record_id is the placement and differs; evidence_id is what the thing
-        is and does not.
+        That is what made the tree look like a file listing: frontend/src/… sat
+        at the same level as Explorer.
         """
         projection = self._built(tmp_path)
-        rows = [r for r in projection.records
-                if r["evidence_id"] == "alpha:alpha/loose.py:helper"]
+        concept = next(r for r in projection.records if r["label"] == "Explorer")
+        held = _under(projection, concept)
 
-        assert {r["tree_view"] for r in rows} == {TREE_VIEW_OBJECT_MAP, TREE_VIEW_CODE}
-        assert len({r["record_id"] for r in rows}) == 2
-        assert len({r["parent_id"] for r in rows}) == 2
+        assert [(r["node_type"], r["label"]) for r in held] == [
+            (NODE_TYPE_CONCEPT, "Tabs"),
+            (NODE_TYPE_IMPLEMENTATION, "Implementation"),
+        ]
+        container = _implementation(projection, "explorer")
+        assert [r["label"] for r in _under(projection, container)] == ["alpha/pkg/"]
 
-    def test_a_package_two_concepts_name_appears_once_in_code(
-        self, tmp_path: Path,
-    ) -> None:
-        """Two concepts referencing one package is still one package."""
-        path = _authority(tmp_path, (
-            "  - key: explorer\n"
-            "    label: Explorer\n"
-            "    realized_by:\n"
-            "      - alpha/pkg/\n"
-            "  - key: presentation\n"
-            "    label: Presentation\n"
-            "    realized_by:\n"
-            "      - alpha/pkg/\n"
-        ))
-        projection = build_architecture_projection(path, {"alpha": _both_views_map()})
+    def test_a_concept_naming_nothing_has_no_container(self, tmp_path: Path) -> None:
+        """An empty one would say there is an implementation and offer none."""
+        projection = self._built(tmp_path)
+        tabs = next(r for r in projection.records if r["label"] == "Tabs")
 
-        assert len([r for r in _code(projection)
-                    if r["node_type"] == NODE_TYPE_PACKAGE]) == 1
-        # And it is still named twice in the object map, once per concept.
-        assert len([r for r in _object_map(projection)
-                    if r["node_type"] == NODE_TYPE_PACKAGE]) == 2
+        assert _under(projection, tabs) == []
+
+    def test_the_physical_tree_is_unchanged_beneath_it(self, tmp_path: Path) -> None:
+        """Only the parent moved. package -> module -> callable is as it was."""
+        projection = self._built(tmp_path)
+        container = _implementation(projection, "explorer")
+        package = _under(projection, container)[0]
+        module = _under(projection, package)[0]
+
+        assert package["node_type"] == NODE_TYPE_PACKAGE
+        assert (module["node_type"], module["label"]) == (
+            NODE_TYPE_MODULE, "alpha/pkg/core.py")
+        assert [r["label"] for r in _under(projection, module)] == ["run"]
+
+    def test_only_concepts_are_roots(self, tmp_path: Path) -> None:
+        """The screenshot's defect: a package sitting at the top level."""
+        projection = self._built(tmp_path)
+
+        assert {r["node_type"] for r in projection.records
+                if r["parent_id"] is None} == {NODE_TYPE_CONCEPT}
+
+    def test_no_row_carries_a_view(self, tmp_path: Path) -> None:
+        """tree_view existed to make code a peer presentation. It is gone."""
+        assert not [r for r in self._built(tmp_path).records if "tree_view" in r]

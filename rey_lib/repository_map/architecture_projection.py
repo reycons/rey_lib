@@ -68,8 +68,7 @@ __all__ = [
     "ArchitectureProjectionError",
     "CONSUMED_OWNERSHIP_SECTIONS",
     "CONCEPTS_SECTION",
-    "TREE_VIEW_CODE",
-    "TREE_VIEW_OBJECT_MAP",
+    "NODE_TYPE_IMPLEMENTATION",
     "NODE_TYPE_CONCEPT",
     "NODE_TYPE_MODULE",
     "NODE_TYPE_PACKAGE",
@@ -86,13 +85,11 @@ logger = get_logger(__name__)
 ARCHITECTURE_ARTIFACT_NAME = "03_repository_map.architecture.generated.jsonl"
 ARCHITECTURE_SOURCE_NAME = "01_core_architecture.yaml"
 
-#: Which presentation a row belongs to. The same source object is projected
-#: once per view, because one row cannot carry two parents and two answers to
-#: whether it expands.
-TREE_VIEW_OBJECT_MAP = "object_map"
-TREE_VIEW_CODE = "code"
-
 NODE_TYPE_CONCEPT = "concept"
+#: The one container between a concept and the code that realizes it. Without
+#: it a package sits among a concept's sub-concepts and reads as one of them,
+#: which is source organization wearing an architectural name.
+NODE_TYPE_IMPLEMENTATION = "implementation"
 NODE_TYPE_PACKAGE = "package"
 NODE_TYPE_MODULE = "module"
 NODE_TYPE_SYMBOL = "symbol"
@@ -218,9 +215,7 @@ def build_architecture_projection(
         )
 
     records: list[dict[str, Any]] = []
-    referenced: list[tuple[str, str, Any]] = []
-    _walk_concepts(concepts, None, (), evidence, statements, records, referenced)
-    _emit_code_view(referenced, evidence, statements, records)
+    _walk_concepts(concepts, None, (), evidence, statements, records)
 
     _refuse_duplicate_identity(records)
     _refuse_orphans(records)
@@ -237,20 +232,20 @@ def _walk_concepts(
     evidence: dict[str, "_Evidence"],
     statements: dict[str, str],
     records: list[dict[str, Any]],
-    referenced: list[tuple[str, str, str]],
 ) -> None:
-    """Emit one concept and the evidence it names, in declared order.
+    """Emit one concept, its sub-concepts, and the code that realizes it.
 
-    Declared order is display order, so nothing is sorted here. A concept's
-    children are its own sub-concepts followed by the evidence it names, which
-    keeps the architecture above the code that realizes it.
+    Declared order is display order, so nothing is sorted here.
 
-    Evidence is a **leaf here, whatever kind it resolves to**. A concept may
-    name a callable as readily as a module, and the object map is about what
-    realizes a concept rather than about what that code contains -- expanding
-    one into its package or its declarations would put the physical hierarchy
-    back inside the semantic one. What each reference resolved to is collected
-    for the other view, which is where it is walked into.
+    Code hangs beneath one **implementation** container rather than directly
+    under the concept. A package sitting among a concept's sub-concepts reads
+    as one of them, and the tree stops answering how the system is built and
+    starts listing where files are. The container is the whole of the
+    distinction: everything beneath it is the same package, module and callable
+    it always was.
+
+    A concept that names nothing gets no container. An empty one would say
+    there is an implementation and offer nothing.
 
     Args:
         concepts: The concept declarations at this level.
@@ -259,7 +254,6 @@ def _walk_concepts(
         evidence: Repository name to its structural facts.
         statements: Authored prose for a resolved path or symbol, if any.
         records: Every node so far, appended to.
-        referenced: What each reference resolved to, appended to.
 
     Raises:
         ArchitectureProjectionError: If a concept declares no key, or a
@@ -271,101 +265,83 @@ def _walk_concepts(
                 f"A concept under {'.'.join(path) or CONCEPTS_SECTION} declares no key."
             )
         here = (*path, str(declared["key"]))
-        record_id = _identity(TREE_VIEW_OBJECT_MAP, "", ".".join(here))
+        scope = ".".join(here)
+        record_id = _identity(scope)
         records.append(_concept_node(declared, record_id, parent_id, here))
         _walk_concepts(
             declared.get(CONCEPTS_KEY) or [],
-            record_id, here, evidence, statements, records, referenced,
+            record_id, here, evidence, statements, records,
         )
-        for reference in declared.get("realized_by") or []:
-            repository, kind, resolved = _resolved_reference(str(reference), evidence)
-            referenced.append((repository, kind, resolved))
-            records.append(_evidence_node(
-                str(reference), record_id, TREE_VIEW_OBJECT_MAP, ".".join(here),
-                repository, kind, resolved, statements,
-                evidence[repository].reachability,
-            ))
+        references = declared.get("realized_by") or []
+        if not references:
+            continue
+        container = _implementation_node(record_id, scope)
+        records.append(container)
+        for reference in references:
+            _emit_evidence(
+                str(reference), container["record_id"], scope,
+                evidence, statements, records,
+            )
 
 
-def _emit_code_view(
-    referenced: list[tuple[str, str, Any]],
+def _emit_evidence(
+    reference: str,
+    parent_id: str,
+    scope: str,
     evidence: dict[str, "_Evidence"],
     statements: dict[str, str],
     records: list[dict[str, Any]],
 ) -> None:
-    """Emit the physical tree the concepts reached into.
+    """Emit one realized_by reference, and what can be opened inside it.
 
-    The same source objects the object map names, presented as the source has
-    them: packages holding modules holding public callables. Its roots are the
-    referenced packages, and any referenced module no referenced package
-    contains -- a module named directly by a concept has nowhere else to sit.
-    A referenced callable is carried by the module that declares it, for the
-    same reason.
-
-    Containment is the map's own answer. A module is inside a package when the
-    path the map recorded says so, which is the derivation
-    ``directly_inside`` already makes; nothing here infers packaging any other
-    way.
-
-    Deduplicated, because two concepts referencing one package is one package.
+    A package holds what sits directly inside it, one level, so the source's
+    own hierarchy is kept rather than flattened into a list of every
+    descendant. A module holds the public callables it declares. A callable is
+    where looking inside ends.
     """
-    packages = sorted({
-        (repository, resolved) for repository, kind, resolved in referenced
-        if kind == NODE_TYPE_PACKAGE
-    })
-    # A concept may name a callable, and the code view is where that callable
-    # lives rather than what realizes a concept -- so the file it is declared
-    # in is what the physical tree carries, and the callable appears beneath it
-    # like every other one that file declares.
-    named = {
-        (repository, resolved if kind == NODE_TYPE_MODULE else resolved["source_path"])
-        for repository, kind, resolved in referenced
-        if kind in (NODE_TYPE_MODULE, NODE_TYPE_SYMBOL)
-    }
-    modules = sorted({
-        (repository, path) for repository, path in named
-        if not any(
-            held == repository and path.startswith(package)
-            for held, package in packages
-        )
-    })
-    for repository, path in packages:
-        _emit_code_node(repository, NODE_TYPE_PACKAGE, path, None,
-                        evidence, statements, records)
-    for repository, path in modules:
-        _emit_code_node(repository, NODE_TYPE_MODULE, path, None,
-                        evidence, statements, records)
-
-
-def _emit_code_node(
-    repository: str,
-    kind: str,
-    resolved: str,
-    parent_id: str | None,
-    evidence: dict[str, "_Evidence"],
-    statements: dict[str, str],
-    records: list[dict[str, Any]],
-) -> None:
-    """One node of the physical tree, and everything inside it."""
+    repository, kind, resolved = _resolved_reference(reference, evidence)
     facts = evidence[repository]
     node = _evidence_node(
-        resolved, parent_id, TREE_VIEW_CODE, "", repository, kind, resolved,
+        reference, parent_id, scope, repository, kind, resolved,
         statements, facts.reachability,
     )
     records.append(node)
     if kind == NODE_TYPE_PACKAGE:
         for child in facts.directly_inside(resolved):
-            _emit_code_node(
-                repository,
-                NODE_TYPE_PACKAGE if child.endswith("/") else NODE_TYPE_MODULE,
-                child, node["record_id"], evidence, statements, records,
-            )
+            _emit_evidence(child, node["record_id"], scope, evidence, statements, records)
+        return
+    if kind != NODE_TYPE_MODULE:
         return
     for record in facts.declared_callables(resolved):
         records.append(_symbol_node(
-            record, node["record_id"], TREE_VIEW_CODE, "", repository,
+            record, node["record_id"], scope, repository,
             record.get("qualified_name") or record["name"], statements,
         ))
+
+
+def _implementation_node(parent_id: str, scope: str) -> dict[str, Any]:
+    """The container between one concept and the code that realizes it."""
+    return {
+        "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
+        "record_id": _identity(scope, NODE_TYPE_IMPLEMENTATION),
+        "parent_id": parent_id,
+        "node_type": NODE_TYPE_IMPLEMENTATION,
+        "label": "Implementation",
+        "concept_key": scope,
+        "statement": None,
+        "repository": None,
+        "evidence_id": None,
+        "architecture_key": None,
+        "source_path": None,
+        "relative_path": None,
+        "source_line": None,
+        "symbol_kind": None,
+        "owner": None,
+        "qualified_name": None,
+        "exported": None,
+        "reachability": None,
+        "has_children": False,
+    }
 
 
 def _concept_node(
@@ -384,8 +360,6 @@ def _concept_node(
         "record_id": record_id,
         "parent_id": parent_id,
         "node_type": NODE_TYPE_CONCEPT,
-        # A concept is the architecture, so it exists in the object map alone.
-        "tree_view": TREE_VIEW_OBJECT_MAP,
         "label": str(declared.get("label") or path[-1]),
         "concept_key": ".".join(path),
         "statement": str(declared.get("statement") or "") or None,
@@ -404,31 +378,24 @@ def _concept_node(
     }
 
 
-def _identity(tree_view: str, scope: str, *parts: str) -> str:
+def _identity(scope: str, *parts: str) -> str:
     """One projected row's identity, which is its placement.
 
-    The same source object appears in both views, with a different parent and a
-    different set of children in each, so the view is part of the identity: two
-    rows for one thing, and neither pretending to be the other.
+    ``scope`` is the concept the row sits under, because one module may realize
+    several concepts and each placement is its own occurrence.
 
-    ``scope`` is where within a view. In the object map that is the concept
-    that named it, because one symbol may realize several concepts and each
-    placement is its own occurrence. In the code view the path is unique
-    already, so there is nothing to add.
-
-    What the thing *is* stays in evidence_id, which neither the view nor the
-    scope touches.
+    What the thing *is* stays in evidence_id, which the scope never touches --
+    that is what lets a consumer see that two rows under two concepts are one
+    module.
     """
     return ":".join(
-        part for part in (RECORD_TYPE_ARCHITECTURE_NODE, tree_view, scope, *parts)
-        if part
+        part for part in (RECORD_TYPE_ARCHITECTURE_NODE, scope, *parts) if part
     )
 
 
 def _evidence_node(
     reference: str,
     parent_id: str | None,
-    tree_view: str,
     scope: str,
     repository: str,
     kind: str,
@@ -451,10 +418,9 @@ def _evidence_node(
         evidence_id = f"{repository}:{resolved}"
         return {
             "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
-            "record_id": _identity(tree_view, scope, repository, resolved),
+            "record_id": _identity(scope, repository, resolved),
             "parent_id": parent_id,
             "node_type": kind,
-            "tree_view": tree_view,
             "label": resolved,
             "statement": statements.get(f"{repository}:{resolved}"),
             "repository": repository,
@@ -484,7 +450,7 @@ def _evidence_node(
             "has_children": False,
         }
     return _symbol_node(
-        resolved, parent_id, tree_view, scope, repository,
+        resolved, parent_id, scope, repository,
         resolved.get("qualified_name") or resolved["name"], statements,
         architecture_key=reference,
     )
@@ -493,7 +459,6 @@ def _evidence_node(
 def _symbol_node(
     record: dict[str, Any],
     parent_id: str | None,
-    tree_view: str,
     scope: str,
     repository: str,
     qualified: str,
@@ -512,11 +477,10 @@ def _symbol_node(
     return {
         "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
         "record_id": _identity(
-            tree_view, scope, repository, record["source_path"], qualified,
+            scope, repository, record["source_path"], qualified,
         ),
         "parent_id": parent_id,
         "node_type": NODE_TYPE_SYMBOL,
-        "tree_view": tree_view,
         "label": qualified,
         "statement": statements.get(architecture_key or "")
         or statements.get(dotted_identity(record["source_path"], qualified)),
