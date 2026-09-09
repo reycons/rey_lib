@@ -33,6 +33,7 @@ from rey_lib.repository_map.code_index import (
     IndexedRepository,
     index,
 )
+from rey_lib.repository_map.code_index_database import DatabaseCodeIndexWriter
 from rey_lib.repository_map.snapshot import (
     CodeIndexSnapshot,
     scan,
@@ -183,6 +184,7 @@ __all__ = [
     "check_architecture_boundaries",
     "CodeIndexSnapshot",
     "CodeIndexWriter",
+    "DatabaseCodeIndexWriter",
     "IndexedRepository",
     "index",
     "scan",

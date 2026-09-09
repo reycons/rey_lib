@@ -10,12 +10,16 @@ installations; the application resolves one and passes it down. A library that
 found its own database would make a scan impossible without one, and the
 committed artifact has to stay reproducible from a bare checkout.
 
-**Indexing replaces, it does not merge.** One repository's whole file and
-symbol set is written at once, so a file deleted or renamed in the source
-cannot survive in the model. The replacement is one transaction: a half-written
-repository would claim a revision it does not hold. *How* a provider performs
-that replacement is the provider's business -- the relational model does not
-encode it, and neither does this.
+**Indexing replaces the whole index, it does not merge.** The estate is always
+scanned as one snapshot, so a partial replacement would need someone to decide
+which repositories are still current -- and that is the scan's answer, not a
+caller's. A file deleted or renamed in the source therefore cannot survive.
+
+**Atomicity belongs to the destination, not here.** One call hands over
+everything, and what that call does with it -- a transaction, a promotion, a
+file rewrite -- is the destination's business. This module never sequences a
+wipe and a repopulate, because a caller that has to do that in order can be
+interrupted between them.
 
 Nothing here is authored. Every row is derived from a scan, which is what lets
 a rebuild from source be the recovery path and lets the export prove the model.
@@ -44,11 +48,12 @@ class CodeIndexWriter(Protocol):
     is, which driver is underneath -- is behind it.
     """
 
-    def replace_repository(self, indexed: "IndexedRepository") -> None:
-        """Replace one repository's indexed set, all or nothing.
+    def replace_index(self, indexed: list["IndexedRepository"]) -> None:
+        """Replace the whole index, all or nothing.
 
         Args:
-            indexed: The repository's whole state, as one scan observed it.
+            indexed: Every repository the scan observed. Not a delta and not a
+                subset: what is absent here is absent from the index.
         """
 
 
@@ -81,25 +86,22 @@ class IndexedRepository:
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
-    """Write every repository in one snapshot to one destination.
-
-    Repositories are written one at a time, each replaced whole. A destination
-    that fails partway leaves the repositories it already replaced in place:
-    each is internally consistent, and the next run replaces the rest. Making
-    the whole estate one transaction would mean one unreadable checkout stops
-    every other repository from being indexed at all.
+    """Write one snapshot to one destination, as one replacement.
 
     Args:
         snapshot: What to write.
         writer: Where to write it.
 
     Returns:
-        How many repositories were replaced.
+        How many repositories were handed over.
     """
-    for repository, repository_map in snapshot.maps.items():
-        writer.replace_repository(_indexed(repository, repository_map))
-    logger.info("Indexed %d repositories", len(snapshot.maps))
-    return len(snapshot.maps)
+    indexed = [
+        _indexed(repository, repository_map)
+        for repository, repository_map in snapshot.maps.items()
+    ]
+    writer.replace_index(indexed)
+    logger.info("Indexed %d repositories", len(indexed))
+    return len(indexed)
 
 
 def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepository:

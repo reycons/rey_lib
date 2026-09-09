@@ -18,10 +18,16 @@ class _Recorder:
     """A destination that remembers instead of storing."""
 
     def __init__(self) -> None:
-        self.replaced: list[IndexedRepository] = []
+        self.calls: list[list[IndexedRepository]] = []
 
-    def replace_repository(self, indexed: IndexedRepository) -> None:
-        self.replaced.append(indexed)
+    def replace_index(self, indexed: list[IndexedRepository]) -> None:
+        self.calls.append(indexed)
+
+    @property
+    def replaced(self) -> list[IndexedRepository]:
+        """The one replacement's repositories."""
+        assert len(self.calls) == 1, "the index is replaced in exactly one call"
+        return self.calls[0]
 
 
 def _header(repository: str) -> dict[str, str]:
@@ -112,6 +118,20 @@ class TestTheRowsADestinationReceives:
     def test_a_recorder_satisfies_the_writer_contract(self) -> None:
         """The protocol is one method, so a destination is easy to substitute."""
         assert isinstance(_Recorder(), CodeIndexWriter)
+
+    def test_the_whole_index_is_handed_over_in_one_call(self) -> None:
+        """Not per repository.
+
+        A destination that received repositories one at a time could be
+        interrupted between two of them, and the index would then hold half of
+        one scan and half of the last. What is absent from this call is absent
+        from the index.
+        """
+        recorder = _Recorder()
+        index(_snapshot([_file("app.py")]), recorder)
+
+        assert len(recorder.calls) == 1
+        assert [entry.repository for entry in recorder.calls[0]] == ["rey_loader"]
 
     def test_position_is_carried_but_is_not_identity(self) -> None:
         """Line and column describe a symbol; nothing addresses one by them."""
