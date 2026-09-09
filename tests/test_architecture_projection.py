@@ -25,6 +25,7 @@ from rey_lib.repository_map.architecture_projection import (
     CONSUMED_OWNERSHIP_SECTIONS,
     NODE_TYPE_CONCEPT,
     NODE_TYPE_MODULE,
+    NODE_TYPE_PACKAGE,
     NODE_TYPE_SYMBOL,
     dotted_identity,
 )
@@ -229,8 +230,12 @@ class TestEvidence:
         assert module["evidence_id"] == "alpha:alpha/core.py"
         assert module["owner"] is None
 
-    def test_a_directory_claims_no_file_facts(self, tmp_path: Path) -> None:
-        """Reachability is a fact about a file; a package has none to copy."""
+    def test_a_package_claims_no_file_facts(self, tmp_path: Path) -> None:
+        """Reachability is a fact about a file; a package has none to copy.
+
+        The module inside it does, which is the point of the two being
+        different kinds.
+        """
         path = _authority(tmp_path, (
             "  - key: files\n"
             "    label: Files\n"
@@ -241,10 +246,13 @@ class TestEvidence:
             path, {"alpha": _map(_file("alpha/pkg/thing.py"),
                                  _reachability("alpha/pkg/thing.py", "definitely_reachable"))},
         )
+        package = next(r for r in projection.records if r["node_type"] == NODE_TYPE_PACKAGE)
         module = next(r for r in projection.records if r["node_type"] == NODE_TYPE_MODULE)
 
-        assert module["source_path"] == "alpha/pkg/"
-        assert module["reachability"] is None
+        assert package["source_path"] == "alpha/pkg/"
+        assert package["reachability"] is None
+        assert module["source_path"] == "alpha/pkg/thing.py"
+        assert module["reachability"] == "definitely_reachable"
 
     def test_a_symbol_copies_its_structural_fields_unchanged(
         self, tmp_path: Path,
@@ -527,3 +535,88 @@ def test_the_builder_names_no_concept() -> None:
 
     for named in ("explorer", "workbench", "rey_console", "presentation"):
         assert not [text for text in used if named in text.lower()], named
+
+
+# -- opening a node up -------------------------------------------------------
+
+PACKAGE = (
+    "  - key: explorer\n"
+    "    label: Explorer\n"
+    "    realized_by:\n"
+    "      - alpha/pkg/\n"
+)
+
+
+def _package_map() -> RepositoryMap:
+    """A package with a module, a sub-package, and a module inside that."""
+    return _map(
+        _file("alpha/pkg/core.py"),
+        _file("alpha/pkg/inner/deep.py"),
+        _file("alpha/other.py"),
+        _symbol("alpha/pkg/core.py", "run", line=10),
+        _symbol("alpha/pkg/core.py", "Engine", kind="class", line=20),
+        _symbol("alpha/pkg/core.py", "start", owner="Engine", kind="method", line=30),
+        _symbol("alpha/pkg/core.py", "hidden", line=40, exported=False),
+        _symbol("alpha/pkg/core.py", "LIMIT", kind="variable", line=5),
+    )
+
+
+class TestOpeningANodeUp:
+    """A package and a module are different things, because one opens."""
+
+    def test_a_package_holds_what_sits_directly_inside_it(self, tmp_path: Path) -> None:
+        """One level. Listing every descendant would make a directory into a
+        file browser, and the concept above it is the architecture."""
+        path = _authority(tmp_path, PACKAGE)
+        projection = build_architecture_projection(path, {"alpha": _package_map()})
+        by_id = {r["record_id"]: r for r in projection.records}
+        package = next(r for r in projection.records if r["node_type"] == NODE_TYPE_PACKAGE)
+        held = [r for r in projection.records if r["parent_id"] == package["record_id"]]
+
+        assert [(r["node_type"], r["label"]) for r in held] == [
+            (NODE_TYPE_MODULE, "alpha/pkg/core.py"),
+            (NODE_TYPE_PACKAGE, "alpha/pkg/inner/"),
+        ]
+        # A file two levels down is reached through its own package, never
+        # lifted to the top of this one.
+        inner = next(r for r in held if r["node_type"] == NODE_TYPE_PACKAGE)
+        assert [r["label"] for r in projection.records
+                if r["parent_id"] == inner["record_id"]] == ["alpha/pkg/inner/deep.py"]
+        # And nothing outside the package came along.
+        assert "alpha/other.py" not in {r["label"] for r in by_id.values()}
+
+    def test_a_module_holds_the_public_callables_it_declares(
+        self, tmp_path: Path,
+    ) -> None:
+        """What a reader opening a module is looking for is what it can be
+        asked to do. A class, a constant and a private helper are not that."""
+        path = _authority(tmp_path, PACKAGE)
+        projection = build_architecture_projection(path, {"alpha": _package_map()})
+        module = next(r for r in projection.records
+                      if r["node_type"] == NODE_TYPE_MODULE)
+        declared = [r for r in projection.records if r["parent_id"] == module["record_id"]]
+
+        assert [r["label"] for r in declared] == ["run", "Engine.start"]
+        assert {r["symbol_kind"] for r in declared} == {"function", "method"}
+
+    def test_package_and_module_are_distinct_kinds(self, tmp_path: Path) -> None:
+        """One kind covering both would have to mean openable and not."""
+        path = _authority(tmp_path, PACKAGE)
+        projection = build_architecture_projection(path, {"alpha": _package_map()})
+        kinds = {r["node_type"] for r in projection.records}
+
+        assert NODE_TYPE_PACKAGE in kinds and NODE_TYPE_MODULE in kinds
+
+    def test_only_a_module_carries_an_address(self, tmp_path: Path) -> None:
+        """relative_path is what open_file binds. A package is a container,
+        nothing opens it, and a directory reaching a mapping that expects a
+        file is a failure waiting for whoever declares the next action."""
+        path = _authority(tmp_path, PACKAGE)
+        projection = build_architecture_projection(path, {"alpha": _package_map()})
+
+        for record in projection.records:
+            if record["node_type"] == NODE_TYPE_MODULE:
+                assert record["relative_path"] == f"alpha/{record['source_path']}"
+                assert not record["relative_path"].endswith("/")
+            elif record["node_type"] == NODE_TYPE_PACKAGE:
+                assert record["relative_path"] is None

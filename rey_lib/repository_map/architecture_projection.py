@@ -51,6 +51,8 @@ from rey_lib.files.file_utils import read_text_file
 from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
+    SYMBOL_KIND_FUNCTION,
+    SYMBOL_KIND_METHOD,
     RECORD_TYPE_ARCHITECTURE_MAP,
     RECORD_TYPE_ARCHITECTURE_NODE,
     RECORD_TYPE_FILE,
@@ -68,6 +70,7 @@ __all__ = [
     "CONCEPTS_SECTION",
     "NODE_TYPE_CONCEPT",
     "NODE_TYPE_MODULE",
+    "NODE_TYPE_PACKAGE",
     "NODE_TYPE_SYMBOL",
     "SOURCE_CAPABILITY_ARCHITECTURE",
     "build_architecture_projection",
@@ -82,8 +85,14 @@ ARCHITECTURE_ARTIFACT_NAME = "03_repository_map.architecture.generated.jsonl"
 ARCHITECTURE_SOURCE_NAME = "01_core_architecture.yaml"
 
 NODE_TYPE_CONCEPT = "concept"
+NODE_TYPE_PACKAGE = "package"
 NODE_TYPE_MODULE = "module"
 NODE_TYPE_SYMBOL = "symbol"
+
+#: What a module opens into: the things it can be asked to do. "Public
+#: functions" is the whole of it -- the exported flag alone admits classes,
+#: constants, interfaces and aliases, which is a different question.
+_CALLABLE_KINDS = frozenset({SYMBOL_KIND_FUNCTION, SYMBOL_KIND_METHOD})
 
 #: Where the authored concept tree lives, and the key its children nest under.
 CONCEPTS_SECTION = "architecture_concepts"
@@ -250,9 +259,42 @@ def _walk_concepts(
             record_id, here, evidence, statements, records,
         )
         for reference in declared.get("realized_by") or []:
-            records.append(_evidence_node(
-                str(reference), record_id, here, evidence, statements,
-            ))
+            _emit_evidence(str(reference), record_id, here, evidence, statements, records)
+
+
+def _emit_evidence(
+    reference: str,
+    parent_id: str,
+    path: tuple[str, ...],
+    evidence: dict[str, "_Evidence"],
+    statements: dict[str, str],
+    records: list[dict[str, Any]],
+) -> None:
+    """Emit one realized_by reference, and what can be opened inside it.
+
+    A package and a module are not the same thing, because one can be opened
+    and the other cannot. A package holds what sits directly inside it -- its
+    own sub-packages and modules, one level, so the hierarchy the source has is
+    kept rather than flattened into a list of every descendant. A module holds
+    the public callables it declares. A callable is where looking inside ends.
+    """
+    repository, kind, resolved = _resolved_reference(reference, evidence)
+    node = _evidence_node(
+        reference, parent_id, path, repository, kind, resolved, statements,
+        evidence[repository].reachability,
+    )
+    records.append(node)
+    if kind == NODE_TYPE_PACKAGE:
+        for child in evidence[repository].directly_inside(resolved):
+            _emit_evidence(child, node["record_id"], path, evidence, statements, records)
+        return
+    if kind != NODE_TYPE_MODULE:
+        return
+    for record in evidence[repository].declared_callables(resolved):
+        records.append(_symbol_node(
+            record, node["record_id"], path, repository,
+            record.get("qualified_name") or record["name"], statements,
+        ))
 
 
 def _concept_node(
@@ -278,6 +320,7 @@ def _concept_node(
         "evidence_id": None,
         "architecture_key": None,
         "source_path": None,
+        "relative_path": None,
         "source_line": None,
         "symbol_kind": None,
         "owner": None,
@@ -292,8 +335,11 @@ def _evidence_node(
     reference: str,
     parent_id: str,
     path: tuple[str, ...],
-    evidence: dict[str, "_Evidence"],
+    repository: str,
+    kind: str,
+    resolved: Any,
     statements: dict[str, str],
+    reachability: dict[str, str],
 ) -> dict[str, Any]:
     """One realized_by reference, resolved and placed under its concept.
 
@@ -306,16 +352,14 @@ def _evidence_node(
     symbol under two concepts is two placements of one thing. ``evidence_id``
     carries the identity, and is the same wherever it appears.
     """
-    found = _resolved_reference(reference, evidence)
-    repository, kind, resolved = found
     node_id = f"{RECORD_TYPE_ARCHITECTURE_NODE}:{'.'.join(path)}:{repository}:"
-    if kind == NODE_TYPE_MODULE:
+    if kind in (NODE_TYPE_MODULE, NODE_TYPE_PACKAGE):
         evidence_id = f"{repository}:{resolved}"
         return {
             "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
             "record_id": node_id + resolved,
             "parent_id": parent_id,
-            "node_type": NODE_TYPE_MODULE,
+            "node_type": kind,
             "label": resolved,
             "concept_key": ".".join(path),
             "statement": statements.get(f"{repository}:{resolved}"),
@@ -323,16 +367,53 @@ def _evidence_node(
             "evidence_id": evidence_id,
             "architecture_key": reference,
             "source_path": resolved,
+            # Where the file sits under the checkout root, so a mapping can
+            # address it. Composed from facts the node already carries, and
+            # never an absolute path: where the checkouts are is the
+            # installation's answer, not this artifact's.
+            #
+            # A package carries none. It is a container, nothing opens it, and
+            # a directory reaching a mapping that expects a file is a failure
+            # waiting for whoever declares the next action.
+            "relative_path": (
+                f"{repository}/{resolved}" if kind == NODE_TYPE_MODULE else None
+            ),
             "source_line": None,
             "symbol_kind": None,
             "owner": None,
             "qualified_name": None,
             "exported": None,
-            "reachability": evidence[repository].reachability.get(resolved),
+            # A fact about a file, so a package has none.
+            "reachability": (
+                reachability.get(resolved) if kind == NODE_TYPE_MODULE else None
+            ),
             "has_children": False,
         }
-    record = resolved
-    qualified = record.get("qualified_name") or record["name"]
+    return _symbol_node(
+        resolved, parent_id, path, repository,
+        resolved.get("qualified_name") or resolved["name"], statements,
+        architecture_key=reference,
+    )
+
+
+def _symbol_node(
+    record: dict[str, Any],
+    parent_id: str,
+    path: tuple[str, ...],
+    repository: str,
+    qualified: str,
+    statements: dict[str, str],
+    architecture_key: str | None = None,
+) -> dict[str, Any]:
+    """One declaration, as a node.
+
+    ``label`` is the authored reference when a concept named this symbol
+    directly, because a bare name under a concept says nothing about where it
+    lives -- a reader meeting `composed_objects` beneath Groups cannot tell
+    what it is. Under its own module the file is the parent, so the name alone
+    is enough.
+    """
+    node_id = f"{RECORD_TYPE_ARCHITECTURE_NODE}:{'.'.join(path)}:{repository}:"
     evidence_id = f"{repository}:{record['source_path']}:{qualified}"
     return {
         "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
@@ -341,13 +422,15 @@ def _evidence_node(
         "node_type": NODE_TYPE_SYMBOL,
         "label": qualified,
         "concept_key": ".".join(path),
-        "statement": statements.get(reference),
+        "statement": statements.get(architecture_key or "")
+        or statements.get(dotted_identity(record["source_path"], qualified)),
         "repository": repository,
         "evidence_id": evidence_id,
-        "architecture_key": reference,
+        "architecture_key": architecture_key,
         # Copied from the resolved record, so owner "" keeps meaning a
         # top-level declaration rather than a field that does not apply.
         "source_path": record["source_path"],
+        "relative_path": f"{repository}/{record['source_path']}",
         "source_line": record.get("source_line"),
         "symbol_kind": record.get("symbol_kind"),
         "owner": record.get("owner"),
@@ -381,7 +464,7 @@ def _resolved_reference(
         if reference in facts.files:
             answers.append((repository, NODE_TYPE_MODULE, reference))
         elif reference.endswith("/") and reference[:-1] in facts.directories:
-            answers.append((repository, NODE_TYPE_MODULE, reference))
+            answers.append((repository, NODE_TYPE_PACKAGE, reference))
         for record in facts.symbols.get(reference, []):
             answers.append((repository, NODE_TYPE_SYMBOL, record))
     if not answers:
@@ -505,6 +588,9 @@ class _Evidence:
         # several ways and the rest were dropped", which is precisely the
         # ambiguity this projection exists to refuse.
         self.symbols: dict[str, list[dict[str, Any]]] = {}
+        #: What each file declares, so a module node can be opened up rather
+        #: than being a name a reader cannot look inside.
+        self.by_file: dict[str, list[dict[str, Any]]] = {}
         self.reachability: dict[str, str] = {}
         for record in report.records:
             kind = record.get("record_type")
@@ -516,6 +602,7 @@ class _Evidence:
                     record.get("qualified_name") or record["name"],
                 )
                 self.symbols.setdefault(identity, []).append(record)
+                self.by_file.setdefault(record["source_path"], []).append(record)
             elif kind == RECORD_TYPE_REACHABILITY:
                 target = str(record.get("target", ""))
                 if target.startswith("file:"):
@@ -526,6 +613,45 @@ class _Evidence:
             for parts in [path.split("/")]
             for index in range(len(parts) - 1)
         }
+
+    def directly_inside(self, directory: str) -> list[str]:
+        """What sits immediately inside one package, in path order.
+
+        One level. A package's sub-packages come back with their trailing
+        slash, so they resolve as packages in turn and the source's own
+        hierarchy is kept -- listing every descendant instead would make a
+        directory into a file browser.
+        """
+        depth = directory.count("/")
+        found: set[str] = set()
+        for path in self.files:
+            if not path.startswith(directory):
+                continue
+            if path.count("/") == depth:
+                found.add(path)
+            else:
+                found.add("/".join(path.split("/")[:depth + 1]) + "/")
+        return sorted(found)
+
+    def declared_callables(self, path: str) -> list[dict[str, Any]]:
+        """The public callables one file declares, in source order.
+
+        Callables, because that is what a reader opening a module is looking
+        for: what it can be asked to do. A class, a constant, an interface and
+        a type alias are all published too, and none of them answers that.
+
+        Public, as the map already records it. Nothing else is filtered here --
+        which files the map holds, and what each declares, are its answers and
+        not this projection's to narrow.
+        """
+        return sorted(
+            (
+                record for record in self.by_file.get(path, [])
+                if record.get("exported")
+                and record.get("symbol_kind") in _CALLABLE_KINDS
+            ),
+            key=lambda record: (record.get("source_line") or 0, record["record_id"]),
+        )
 
 
 def dotted_identity(source_path: str, qualified_name: str) -> str:
