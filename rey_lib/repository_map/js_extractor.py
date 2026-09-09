@@ -37,6 +37,7 @@ from rey_lib.repository_map.records import (
     SYMBOL_KIND_FUNCTION,
     SYMBOL_KIND_GLOBAL_PUBLICATION,
     SYMBOL_KIND_INTERFACE,
+    SYMBOL_KIND_METHOD,
     SYMBOL_KIND_RE_EXPORT,
     SYMBOL_KIND_TYPE_ALIAS,
     SYMBOL_KIND_VARIABLE,
@@ -95,6 +96,13 @@ _DECLARATION_KINDS: dict[str, str] = {
     "type_alias_declaration": SYMBOL_KIND_TYPE_ALIAS,
 }
 
+# The declaration forms that own methods.
+_CLASS_DECLARATIONS = frozenset({"class_declaration", "abstract_class_declaration"})
+
+# Class-body members that declare a method. An abstract signature declares one
+# as surely as a body does; what a subclass must implement is addressable.
+_METHOD_MEMBERS = frozenset({"method_definition", "abstract_method_signature"})
+
 # Node types holding one or more variable_declarator children.
 _VARIABLE_STATEMENTS = frozenset({"lexical_declaration", "variable_declaration"})
 
@@ -109,7 +117,12 @@ def extract_js_symbols(
     language: str,
     source_path: str | None = None,
 ) -> SymbolInventory:
-    """Extract top-level declarations from a JS, TS or TSX file.
+    """Extract a JS, TS or TSX file's declarations.
+
+    Top-level declarations, and one level further: the methods a top-level
+    class declares. Nothing inside a function body is recorded, and neither is
+    a class nested inside a class -- the same boundary the Python extractor
+    keeps.
 
     Each declared name yields exactly one symbol record. A name published by an
     export is flagged ``exported`` rather than duplicated as a second record,
@@ -140,6 +153,27 @@ def extract_js_symbols(
                     name,
                     kind,
                     exported=inline_exported or name in exported_names,
+                )
+            )
+
+    for statement, inline_exported in _top_level_statements(root):
+        owner_node = statement.child_by_field_name("name")
+        if statement.type not in _CLASS_DECLARATIONS or owner_node is None:
+            continue
+        owner = _text(owner_node)
+        owner_exported = inline_exported or owner in exported_names
+        for name, node, public in _methods(statement):
+            symbols.append(
+                _symbol(
+                    recorded_path,
+                    node,
+                    name,
+                    SYMBOL_KIND_METHOD,
+                    # Published only when the owner is and the member is part
+                    # of its public surface: a private helper on an exported
+                    # class is not itself exported.
+                    exported=owner_exported and public,
+                    owner=owner,
                 )
             )
 
@@ -360,6 +394,7 @@ def _symbol(
     symbol_kind: str,
     *,
     exported: bool,
+    owner: str = "",
 ) -> SymbolRecord:
     """Build one symbol record located at a syntax node.
 
@@ -368,7 +403,8 @@ def _symbol(
         node: Node giving the declaration position.
         name: Declared name.
         symbol_kind: One of the ``SYMBOL_KIND_*`` constants.
-        exported: Whether the module publishes the name.
+        exported: Whether the name is publicly reachable.
+        owner: The declaring class, empty at top level.
 
     Returns:
         The symbol record.
@@ -381,6 +417,7 @@ def _symbol(
         name=name,
         symbol_kind=symbol_kind,
         exported=exported,
+        owner=owner,
     )
 
 
@@ -464,6 +501,41 @@ def _declarations(statement: Node) -> list[tuple[str, Node, str]]:
                 declarations.append((_text(name_node), name_node, SYMBOL_KIND_VARIABLE))
         return declarations
     return []
+
+
+def _methods(statement: Node) -> list[tuple[str, Node, bool]]:
+    """Return the methods one class declares, with their visibility.
+
+    Args:
+        statement: A class or abstract class declaration.
+
+    Returns:
+        Tuples of method name, locating node, and whether the member is public.
+        TypeScript members are public by default, so a member is non-public
+        only when it says so -- an accessibility modifier of private or
+        protected, or a #-prefixed name, which is private in JavaScript itself.
+    """
+    body = statement.child_by_field_name("body")
+    if body is None:
+        return []
+    members: list[tuple[str, Node, bool]] = []
+    for member in body.named_children:
+        if member.type not in _METHOD_MEMBERS:
+            continue
+        name_node = member.child_by_field_name("name")
+        if name_node is None:
+            continue
+        modifiers = {
+            _text(child)
+            for child in member.children
+            if child.type == "accessibility_modifier"
+        }
+        public = (
+            not (modifiers & {"private", "protected"})
+            and name_node.type != "private_property_identifier"
+        )
+        members.append((_text(name_node), name_node, public))
+    return members
 
 
 def _export_clauses(root: Node) -> list[tuple[Node, Node | None]]:

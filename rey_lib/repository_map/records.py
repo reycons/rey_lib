@@ -37,6 +37,7 @@ __all__ = [
     "SYMBOL_KIND_FUNCTION",
     "SYMBOL_KIND_GLOBAL_PUBLICATION",
     "SYMBOL_KIND_INTERFACE",
+    "SYMBOL_KIND_METHOD",
     "SYMBOL_KIND_RE_EXPORT",
     "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
@@ -118,6 +119,7 @@ ACCESS_KIND_BRACKET_ACCESS = "bracket_access"
 SYMBOL_KIND_FUNCTION = "function"
 SYMBOL_KIND_CLASS = "class"
 SYMBOL_KIND_INTERFACE = "interface"
+SYMBOL_KIND_METHOD = "method"
 SYMBOL_KIND_ENUM = "enum"
 SYMBOL_KIND_TYPE_ALIAS = "type_alias"
 SYMBOL_KIND_VARIABLE = "variable"
@@ -170,18 +172,26 @@ def matches_any_glob(
 
 @dataclass(frozen=True)
 class SymbolRecord:
-    """One syntax-confirmed top-level declaration.
+    """One syntax-confirmed declaration: top-level, or a method of a top-level class.
 
-    A declaration nested inside a function or class body is not a top-level
-    declaration and never reaches this record (REQ-022, AC-003).
+    A declaration nested inside a *function* body is never a declaration this
+    record carries, and neither is a class nested inside another class. One
+    level of class membership is recorded and no more (REQ-022, AC-003, as
+    amended): architecture names a class's behaviour, never a closure's.
 
     Attributes:
         source_path: Path the declaration is written in.
         source_line: 1-indexed declaration line (REQ-023).
         source_column: 0-indexed declaration column.
-        name: Declared name as written in source.
+        name: Declared name as written in source. A method carries its own
+            name, so a consumer matching on ``name`` is unaffected by methods
+            arriving.
         symbol_kind: One of the ``SYMBOL_KIND_*`` constants.
-        exported: True when the module publishes the name.
+        exported: True when the name is publicly reachable. For a top-level
+            declaration that is the module publishing it; for a method it is
+            a public member of a published owner, so a private helper on an
+            exported class is not exported.
+        owner: The declaring class, empty at top level.
     """
 
     source_path: str
@@ -190,6 +200,16 @@ class SymbolRecord:
     name: str
     symbol_kind: str
     exported: bool = False
+    owner: str = ""
+
+    @property
+    def qualified_name(self) -> str:
+        """Return the identity architecture addresses this declaration by.
+
+        ``AI.execute`` rather than ``execute``, so a statement naming a method
+        joins to that method and not to every function sharing its name.
+        """
+        return f"{self.owner}.{self.name}" if self.owner else self.name
 
     @property
     def record_id(self) -> str:
@@ -216,6 +236,8 @@ class SymbolRecord:
             "name": self.name,
             "symbol_kind": self.symbol_kind,
             "exported": self.exported,
+            "owner": self.owner,
+            "qualified_name": self.qualified_name,
         }
 
 

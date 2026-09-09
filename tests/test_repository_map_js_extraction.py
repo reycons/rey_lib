@@ -23,6 +23,7 @@ from rey_lib.repository_map import (
     SYMBOL_KIND_CLASS,
     SYMBOL_KIND_ENUM,
     SYMBOL_KIND_FUNCTION,
+    SYMBOL_KIND_METHOD,
     SYMBOL_KIND_GLOBAL_PUBLICATION,
     SYMBOL_KIND_INTERFACE,
     SYMBOL_KIND_RE_EXPORT,
@@ -140,7 +141,6 @@ def test_nested_and_local_declarations_are_not_top_level(js_path: Path) -> None:
     assert "nestedFunction" not in symbols
     assert "NestedClass" not in symbols
     assert "localValue" not in symbols
-    assert "method" not in symbols
 
 
 def test_a_local_shadowing_a_top_level_name_changes_nothing(tmp_path: Path) -> None:
@@ -335,6 +335,8 @@ def test_records_match_the_jsonl_shapes(tmp_path: Path) -> None:
         "name": "go",
         "symbol_kind": SYMBOL_KIND_FUNCTION,
         "exported": False,
+        "owner": "",
+        "qualified_name": "go",
     }
     assert edge == {
         "record_type": "dependency_edge",
@@ -382,3 +384,67 @@ def test_positions_are_one_indexed_lines_and_zero_indexed_columns(tmp_path: Path
     symbol = extract_symbols(path, "JavaScript").symbols[0]
 
     assert (symbol.source_line, symbol.source_column) == (3, 11)
+
+def test_a_class_method_is_recorded_and_owned(js_path: Path) -> None:
+    """Panel.panelActions is the kind of identity review has to name."""
+    inventory = extract_symbols(js_path, "JavaScript")
+    methods = {symbol.qualified_name: symbol for symbol in inventory.symbols if symbol.owner}
+
+    assert "TopClass.method" in methods
+    recorded = methods["TopClass.method"]
+    assert recorded.name == "method"
+    assert recorded.owner == "TopClass"
+    assert recorded.symbol_kind == SYMBOL_KIND_METHOD
+    assert recorded.exported is True
+
+
+def test_visibility_decides_a_method_exported_not_the_owner(tmp_path: Path) -> None:
+    """A private helper on an exported class is not itself exported.
+
+    Copying the owner's bit would make every member of a published class read
+    as public surface, which is exactly the claim a later 'this symbol is no
+    longer exported' check must be able to trust.
+    """
+    path = tmp_path / "visibility.ts"
+    path.write_text(
+        "export class Surface {\n"
+        "  open(): void {}\n"
+        "  public also(): void {}\n"
+        "  protected helper(): void {}\n"
+        "  private secret(): void {}\n"
+        "  #hidden(): void {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    exported = {
+        symbol.name: symbol.exported
+        for symbol in extract_symbols(path, "TypeScript").symbols
+        if symbol.owner == "Surface"
+    }
+
+    assert exported == {
+        "open": True,
+        "also": True,
+        "helper": False,
+        "secret": False,
+        # The name as written, # and all: source is what this records.
+        "#hidden": False,
+    }
+
+
+def test_an_abstract_signature_is_a_method(tmp_path: Path) -> None:
+    """What a subclass must implement is addressable; it declares no body."""
+    path = tmp_path / "abstract.ts"
+    path.write_text(
+        "export abstract class Base {\n"
+        "  abstract render(): void;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    methods = [s for s in extract_symbols(path, "TypeScript").symbols if s.owner]
+
+    assert [(m.qualified_name, m.symbol_kind) for m in methods] == [
+        ("Base.render", SYMBOL_KIND_METHOD),
+    ]

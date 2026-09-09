@@ -20,6 +20,7 @@ from rey_lib.repository_map import (
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
     SYMBOL_KIND_CLASS,
+    SYMBOL_KIND_METHOD,
     SYMBOL_KIND_FUNCTION,
     SYMBOL_KIND_RE_EXPORT,
     SYMBOL_KIND_VARIABLE,
@@ -104,15 +105,32 @@ def test_top_level_declarations_are_recorded_with_their_kind(module_path: Path) 
     assert symbols["ANNOTATED"] == SYMBOL_KIND_VARIABLE
 
 
-def test_nested_declarations_are_not_top_level(module_path: Path) -> None:
-    """Anything declared inside another body never reaches the inventory."""
+def test_nothing_inside_a_function_body_reaches_the_inventory(module_path: Path) -> None:
+    """A closure is not an addressable identity; a method of a class is.
+
+    The boundary moved by exactly one level when methods were admitted, and
+    this is the half that did not move.
+    """
     symbols = _symbols(module_path)
 
     assert "nested_function" not in symbols
     assert "NestedClass" not in symbols
-    assert "method" not in symbols
-    assert "class_attribute" not in symbols
     assert "local_value" not in symbols
+    # A class attribute is not a declaration form this extractor records.
+    assert "class_attribute" not in symbols
+
+
+def test_a_method_is_recorded_and_owned(module_path: Path) -> None:
+    """Architecture names a class's behaviour, so the map must carry it."""
+    inventory = extract_symbols(module_path, "Python")
+    methods = {symbol.qualified_name: symbol for symbol in inventory.symbols if symbol.owner}
+
+    assert set(methods) == {"TopClass.method", "TopClass.other_method"}
+    recorded = methods["TopClass.method"]
+    assert recorded.name == "method"
+    assert recorded.owner == "TopClass"
+    assert recorded.symbol_kind == SYMBOL_KIND_METHOD
+    assert recorded.source_line > 0
 
 
 def test_local_shadowing_a_top_level_name_changes_nothing(tmp_path: Path) -> None:
@@ -138,7 +156,11 @@ def test_dunder_all_marks_exported_without_duplicating_a_symbol(module_path: Pat
     exported = {symbol.name for symbol in inventory.symbols if symbol.exported}
 
     assert names.count("top_function") == 1
-    assert exported == {"top_function", "TopClass", "aliased_helper"}
+    # TopClass is published, so its public members are reachable through it.
+    assert exported == {
+        "top_function", "TopClass", "aliased_helper",
+        "method", "other_method",
+    }
     assert "__all__" not in names
 
 
@@ -166,6 +188,8 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
         "name": "TopClass",
         "symbol_kind": SYMBOL_KIND_CLASS,
         "exported": True,
+        "owner": "",
+        "qualified_name": "TopClass",
     }
 
 

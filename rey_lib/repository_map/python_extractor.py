@@ -24,6 +24,7 @@ from rey_lib.repository_map.records import (
     SYMBOL_KIND_CLASS,
     SYMBOL_KIND_EXPORT,
     SYMBOL_KIND_FUNCTION,
+    SYMBOL_KIND_METHOD,
     SYMBOL_KIND_RE_EXPORT,
     SYMBOL_KIND_VARIABLE,
     ReferenceEdge,
@@ -81,10 +82,12 @@ def extract_python_symbols(
     language: str,
     source_path: str | None = None,
 ) -> SymbolInventory:
-    """Extract top-level declarations from a Python file.
+    """Extract a Python file's declarations.
 
-    Only ``module.body`` is inspected, so a function, class or variable nested
-    inside another body can never reach the inventory (REQ-022).
+    ``module.body``, and one level further: the methods a top-level class
+    declares. Nothing inside a function body reaches the inventory, and neither
+    does a class nested inside a class (REQ-022, as amended) -- architecture
+    names a class's behaviour, never a closure's.
 
     Each declared name yields exactly one symbol record. A name listed in
     ``__all__`` is marked exported rather than duplicated as a second record;
@@ -125,6 +128,23 @@ def extract_python_symbols(
                     exported=name in exported_names,
                 )
             )
+        if isinstance(node, ast.ClassDef):
+            # A method is published when its owner is and the method is part of
+            # the class's public surface. Copying the owner's bit would say a
+            # private helper is exported because the class it hides in is.
+            owner_exported = node.name in exported_names
+            for member, line, column in _methods(node):
+                symbols.append(
+                    SymbolRecord(
+                        source_path=recorded_path,
+                        source_line=line,
+                        source_column=column,
+                        name=member,
+                        symbol_kind=SYMBOL_KIND_METHOD,
+                        exported=owner_exported and not member.startswith("_"),
+                        owner=node.name,
+                    )
+                )
 
     dunder_all_line, dunder_all_column = _dunder_all_location(tree)
     for name in sorted(exported_names - declared_names):
@@ -260,6 +280,26 @@ def _edge(
         edge_kind=edge_kind,
         evidence=evidence,
     )
+
+
+def _methods(node: ast.ClassDef) -> list[tuple[str, int, int]]:
+    """Return the methods one class declares, in source order.
+
+    Its own body only. A class nested inside this one is not walked: its
+    methods are two levels of ownership away, and a qualified name carrying one
+    owner could not address them without saying something false.
+
+    Args:
+        node: A top-level class definition.
+
+    Returns:
+        Tuples of method name, line and column.
+    """
+    return [
+        (member.name, member.lineno, member.col_offset)
+        for member in node.body
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
 
 
 def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str]]:
