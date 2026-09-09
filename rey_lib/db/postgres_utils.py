@@ -32,6 +32,7 @@ is_truncation_error(exc)
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from rey_lib.config.env_reference import resolve_env_reference
@@ -491,6 +492,100 @@ def execute_named_sql(
         raise DatabaseError(
             f"postgres_utils: execute_named_sql failed: {exc}"
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Bulk load
+# ---------------------------------------------------------------------------
+
+
+def bulk_insert(
+    conn: Any,
+    schema: str,
+    table: str,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> int:
+    """Insert many rows into one table in as few round trips as the driver allows.
+
+    The adapter's bulk contract, answered for PostgreSQL: the caller supplies
+    the table and the column order, and this owns quoting, placeholders and
+    batching. A caller that built its own multi-row statement would be a second
+    implementation of a mechanism that already exists.
+
+    **An empty string is inserted as an empty string.** The MySQL and SQL Server
+    implementations map it to NULL, which they do for their own loading
+    history; PostgreSQL distinguishes the two and so does this estate -- an
+    empty ``owner`` means a symbol declared at top level, and turning it into
+    NULL would both lose that and violate a NOT NULL column. Provider detail,
+    decided in the provider.
+
+    This is one statement, not one per row, and it does not commit -- it takes
+    the same path ``execute_named_sql`` does and inherits the same behaviour.
+
+    Args:
+        conn: Open connection handle.
+        schema: Target schema.
+        table: Target table.
+        rows: Row dicts. Keys must include every entry of ``columns``; anything
+            else is ignored. An empty list inserts nothing and is not an error.
+        columns: Column names defining the insert order.
+
+    Returns:
+        How many rows were inserted.
+
+    Raises:
+        DatabaseError: If an identifier is not a plain name, or the insert
+            fails.
+    """
+    if not rows:
+        _logger.debug("bulk_insert: no rows to insert into %s.%s", schema, table)
+        return 0
+
+    _validate_identifier(schema, "schema")
+    _validate_identifier(table, "table")
+    for name in columns:
+        _validate_identifier(name, "column")
+
+    from rey_lib.db._sqlalchemy import core_connection
+
+    try:
+        from sqlalchemy import column, insert, table as sql_table
+
+        statement = insert(
+            sql_table(table, *(column(name) for name in columns), schema=schema)
+        )
+        # Only the declared columns, in the declared order. A row carrying more
+        # than it was asked for inserts what it was asked for.
+        parameters = [{name: row[name] for name in columns} for row in rows]
+        core_connection(conn).execute(statement, parameters)
+        return len(rows)
+    except KeyError as exc:
+        raise DatabaseError(
+            f"bulk_insert: a row for {schema}.{table} is missing column {exc}."
+        ) from exc
+    except Exception as exc:
+        raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
+
+
+def _validate_identifier(name: str, label: str) -> None:
+    """Refuse anything that is not a plain identifier.
+
+    Args:
+        name: The candidate.
+        label: What it names, for the message.
+
+    Raises:
+        DatabaseError: If it is not word characters alone. Identifiers are
+            composed into SQL text rather than bound, so this is the boundary
+            that keeps them safe -- values are always bound and never
+            interpolated.
+    """
+    if not re.fullmatch(r"\w+", name):
+        raise DatabaseError(
+            f"Invalid PostgreSQL identifier for {label}: '{name}'. "
+            "Only alphanumeric characters and underscores are permitted."
+        )
 
 
 # ---------------------------------------------------------------------------

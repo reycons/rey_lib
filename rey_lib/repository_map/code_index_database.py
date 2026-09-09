@@ -28,7 +28,7 @@ from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.code_index import IndexedRepository
 
-__all__ = ["DatabaseCodeIndexWriter"]
+__all__ = ["CodeIndexDatabaseWriter"]
 
 logger = get_logger(__name__)
 
@@ -52,7 +52,7 @@ _SYMBOL_COLUMNS = (
 )
 
 
-class DatabaseCodeIndexWriter:
+class CodeIndexDatabaseWriter:
     """Writes one snapshot through the code schema's own write API."""
 
     def __init__(self, adapter: DBAdapter, connection: Any) -> None:
