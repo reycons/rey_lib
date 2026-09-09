@@ -28,9 +28,10 @@ from rey_lib.repository_map.architecture_projection import (
     write_architecture_projection,
 )
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
-from rey_lib.repository_map.regenerate import (
-    RegenerationResult,
-    regenerate_context_maps,
+from rey_lib.repository_map.snapshot import (
+    CodeIndexSnapshot,
+    scan,
+    serialize,
 )
 from rey_lib.repository_map.increment_gate import (
     AgentHandoff,
@@ -175,8 +176,9 @@ __all__ = [
     "RetirementReport",
     "build_agent_handoff",
     "check_architecture_boundaries",
-    "RegenerationResult",
-    "regenerate_context_maps",
+    "CodeIndexSnapshot",
+    "scan",
+    "serialize",
     "ARCHITECTURE_ARTIFACT_NAME",
     "ArchitectureProjection",
     "ArchitectureProjectionError",
