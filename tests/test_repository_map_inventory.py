@@ -205,6 +205,12 @@ def test_file_serializes_to_the_jsonl_file_record_shape(repo: Path, rules: ScanR
         "path": "tests/test_app.py",
         "language": "Python",
         "size_bytes": 1,
+        # Named rather than recomputed here: a test that hashes the fixture the
+        # same way the code does would pass even if both were wrong. This is
+        # SHA-256 of a single newline, which is what the fixture file holds.
+        "content_hash": (
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+        ),
         "classification": {"generated": False, "vendor": False, "test": True},
         "entry_point_load_state": ENTRY_POINT_LOAD_UNKNOWN,
     }

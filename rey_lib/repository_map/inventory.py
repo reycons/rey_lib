@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from rey_lib.config.config_utils import parse_yaml
+from rey_lib.encryption import sha256_file
 from rey_lib.files.file_utils import is_hidden_path, read_text_file
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.rule_families import RULE_FAMILIES
@@ -129,9 +130,14 @@ def _build_file_record(
 
     try:
         size_bytes = file_path.stat().st_size
+        # Read through the one owner of plain SHA-256. A file that cannot be
+        # read fails here for the same reason it fails to stat, and is handled
+        # the same way -- reported and omitted, never recorded with an
+        # invented hash.
+        content_hash = sha256_file(file_path)
     except OSError as exc:
-        # A file that cannot be stat'ed is reported and omitted rather than
-        # recorded with an invented size.
+        # A file that cannot be stat'ed or read is reported and omitted rather
+        # than recorded with an invented size.
         logger.warning("Skipping unreadable file %s: %s", relative_path, exc)
         return None
 
@@ -139,6 +145,7 @@ def _build_file_record(
         path=relative_path,
         language=rules.language_by_extension.get(file_path.suffix.lower(), LANGUAGE_UNKNOWN),
         size_bytes=size_bytes,
+        content_hash=content_hash,
         is_generated=matches_any_glob(relative_path, rules.generated_path_globs),
         is_vendor=matches_any_glob(relative_path, rules.vendor_path_globs),
         is_test=matches_any_glob(relative_path, rules.test_path_globs),

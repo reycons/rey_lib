@@ -340,6 +340,9 @@ class FileRecord:
         path: Repository-relative POSIX path. The record identity and sort key.
         language: Configured language name, or ``LANGUAGE_UNKNOWN``.
         size_bytes: File size in bytes as reported by the filesystem.
+        content_hash: SHA-256 of the file's bytes. What was indexed, exactly:
+            a revision plus a working-tree status says whether a checkout is
+            clean, and this says which bytes each file actually held.
         is_generated: True when the path matches a configured generated glob.
         is_vendor: True when the path matches a configured vendor glob.
         is_test: True when the path matches a configured test glob.
@@ -349,6 +352,7 @@ class FileRecord:
     path: str
     language: str
     size_bytes: int
+    content_hash: str
     is_generated: bool
     is_vendor: bool
     is_test: bool
@@ -368,6 +372,7 @@ class FileRecord:
             "path": self.path,
             "language": self.language,
             "size_bytes": self.size_bytes,
+            "content_hash": self.content_hash,
             "classification": {
                 "generated": self.is_generated,
                 "vendor": self.is_vendor,

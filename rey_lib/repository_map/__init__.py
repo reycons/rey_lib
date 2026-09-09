@@ -28,6 +28,11 @@ from rey_lib.repository_map.architecture_projection import (
     write_architecture_projection,
 )
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
+from rey_lib.repository_map.code_index import (
+    CodeIndexWriter,
+    IndexedRepository,
+    index,
+)
 from rey_lib.repository_map.snapshot import (
     CodeIndexSnapshot,
     scan,
@@ -177,6 +182,9 @@ __all__ = [
     "build_agent_handoff",
     "check_architecture_boundaries",
     "CodeIndexSnapshot",
+    "CodeIndexWriter",
+    "IndexedRepository",
+    "index",
     "scan",
     "serialize",
     "ARCHITECTURE_ARTIFACT_NAME",

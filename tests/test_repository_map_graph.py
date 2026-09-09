@@ -33,6 +33,9 @@ def _file(path: str, language: str = "JavaScript") -> FileRecord:
         path=path,
         language=language,
         size_bytes=1,
+        # These fixtures are about structure, not bytes; the hash is a
+        # fixed stand-in so it never becomes an incidental variable.
+        content_hash="0" * 64,
         is_generated=False,
         is_vendor=False,
         is_test=False,
