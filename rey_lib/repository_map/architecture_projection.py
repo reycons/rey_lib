@@ -11,11 +11,25 @@ against a structural record, or a repository the authority declares a member.
 Nothing here decides what architecture is, and nothing here is a place to
 record a fact that has no other home.
 
+**The hierarchy is the application architecture, not source organization.**
+Concepts are authored in ``architecture_concepts`` and nest as a product tree;
+each declares the code that realizes it in ``realized_by``. Repository is a
+fact *on* the evidence, never a level above it -- a concept like Logging spans
+rey_lib, control and every application that uses it, and putting repository in
+the tree would put source organization back into the architecture.
+
 The invariant that gives the artifact its worth:
 
-    every module or symbol node is an authored current-target statement
-    resolved exactly to current structural evidence, and every repository node
-    projects a repository system_membership.repositories declares
+    every concept node is authored, and every evidence node under it is one
+    of that concept's realized_by references resolved exactly to current
+    structural evidence
+
+One module or symbol may realize several concepts. It appears under each, as
+several *occurrences* of one identity: ``record_id`` differs per placement and
+``evidence_id`` is the same everywhere, which is the estate's own rule --
+*"One object reached down two branches is one identity and two occurrences."*
+Nothing is deduplicated, and nothing enforces one concept per symbol; an
+exclusivity rule would be architecture, and none is authored.
 
 So resolution is exact -- zero matches or several is a failure, never a nearest
 guess -- and a statement marked ``role_in_migration:
@@ -51,8 +65,9 @@ __all__ = [
     "ArchitectureProjection",
     "ArchitectureProjectionError",
     "CONSUMED_OWNERSHIP_SECTIONS",
+    "CONCEPTS_SECTION",
+    "NODE_TYPE_CONCEPT",
     "NODE_TYPE_MODULE",
-    "NODE_TYPE_REPOSITORY",
     "NODE_TYPE_SYMBOL",
     "SOURCE_CAPABILITY_ARCHITECTURE",
     "build_architecture_projection",
@@ -66,22 +81,27 @@ logger = get_logger(__name__)
 ARCHITECTURE_ARTIFACT_NAME = "03_repository_map.architecture.generated.jsonl"
 ARCHITECTURE_SOURCE_NAME = "01_core_architecture.yaml"
 
-NODE_TYPE_REPOSITORY = "repository"
+NODE_TYPE_CONCEPT = "concept"
 NODE_TYPE_MODULE = "module"
 NODE_TYPE_SYMBOL = "symbol"
+
+#: Where the authored concept tree lives, and the key its children nest under.
+CONCEPTS_SECTION = "architecture_concepts"
+CONCEPTS_KEY = "concepts"
 
 # The marker a statement carries when it describes a system that was migrated
 # away from. Recognized, then excluded: it is authority about the source, and
 # the projection is about the target.
 SOURCE_CAPABILITY_ARCHITECTURE = "SOURCE_CAPABILITY_ARCHITECTURE"
 
-# The ownership sections this projection consumes, named rather than discovered.
+# Where a module's or symbol's own prose is written. Not the hierarchy any
+# more -- concepts are -- but still the authored meaning of one file or one
+# declaration, carried onto the evidence node that resolves to it.
 #
-# `scripts` is deliberately not among them, and its absence is a decision
-# rather than an oversight. It lists packaging console-script names with no
-# statement beside them, and the name-to-target mapping lives in the
-# repository's pyproject.toml -- so a script node would carry no architecture
-# and would make packaging metadata a third authority in a two-authority join.
+# `scripts` is deliberately not read. It lists packaging console-script names
+# with no statement beside them, and the name-to-target mapping lives in the
+# repository's pyproject.toml, so it would make packaging metadata a third
+# authority in a two-authority join.
 CONSUMED_OWNERSHIP_SECTIONS = ("canonical_modules", "canonical_symbols")
 
 
@@ -152,7 +172,7 @@ def build_architecture_projection(
     architecture_path: Path,
     maps: dict[str, RepositoryMap],
 ) -> ArchitectureProjection:
-    """Join authored architecture to current structural evidence.
+    """Join the authored concept tree to current structural evidence.
 
     Args:
         architecture_path: Path to the architecture context.
@@ -163,26 +183,25 @@ def build_architecture_projection(
 
     Raises:
         ArchitectureProjectionError: If the declared membership and the
-            supplied maps differ, or any statement cannot be resolved exactly.
+            supplied maps differ, or any reference cannot be resolved exactly.
     """
-    # One read. Membership and ownership must come from the same file contents:
-    # two reads would let a document edited between them contribute a member
-    # list from one version and statements from another.
+    # One read. Membership and the concept tree must come from the same file
+    # contents: two reads would let a document edited between them contribute a
+    # member list from one version and concepts from another.
     parsed = _parsed_architecture(architecture_path)
     members = _declared_membership(parsed, architecture_path)
     _refuse_membership_drift(members, maps)
 
-    ownership = (parsed.get("canonical_ownership") or {}).get("repositories") or {}
+    evidence = {name: _Evidence(maps[name]) for name in members}
+    statements = _authored_statements(parsed)
+    concepts = (parsed.get(CONCEPTS_SECTION) or {}).get(CONCEPTS_KEY)
+    if not concepts:
+        raise ArchitectureProjectionError(
+            f"{architecture_path} declares no {CONCEPTS_SECTION}.{CONCEPTS_KEY}."
+        )
 
     records: list[dict[str, Any]] = []
-    for repository in members:
-        records.append(_repository_node(repository))
-        evidence = _Evidence(maps[repository])
-        block = ownership.get(repository) or {}
-        consumed = {name: block.get(name) for name in CONSUMED_OWNERSHIP_SECTIONS}
-        modules = _current_modules(repository, consumed, evidence)
-        records.extend(modules.values())
-        records.extend(_symbol_nodes(repository, consumed, evidence, modules))
+    _walk_concepts(concepts, None, (), evidence, statements, records)
 
     _refuse_duplicate_identity(records)
     _refuse_orphans(records)
@@ -190,6 +209,218 @@ def build_architecture_projection(
 
     header = _header(architecture_path, members, maps, records)
     return ArchitectureProjection(header=header, records=records)
+
+
+def _walk_concepts(
+    concepts: list[Any],
+    parent_id: str | None,
+    path: tuple[str, ...],
+    evidence: dict[str, "_Evidence"],
+    statements: dict[str, str],
+    records: list[dict[str, Any]],
+) -> None:
+    """Emit one concept and everything beneath it, in declared order.
+
+    Declared order is display order, so nothing is sorted here. A concept's
+    children are its own sub-concepts followed by the evidence it names, which
+    keeps the architecture above the code that realizes it.
+
+    Args:
+        concepts: The concept declarations at this level.
+        parent_id: The concept above, or None at the top.
+        path: The keys of the concepts above, for identity.
+        evidence: Repository name to its structural facts.
+        statements: Authored prose for a resolved path or symbol, if any.
+        records: Every node so far, appended to.
+
+    Raises:
+        ArchitectureProjectionError: If a concept declares no key, or a
+            realized_by reference does not resolve exactly.
+    """
+    for declared in concepts:
+        if not isinstance(declared, dict) or not str(declared.get("key") or ""):
+            raise ArchitectureProjectionError(
+                f"A concept under {'.'.join(path) or CONCEPTS_SECTION} declares no key."
+            )
+        here = (*path, str(declared["key"]))
+        record_id = f"{RECORD_TYPE_ARCHITECTURE_NODE}:{'.'.join(here)}"
+        records.append(_concept_node(declared, record_id, parent_id, here))
+        _walk_concepts(
+            declared.get(CONCEPTS_KEY) or [],
+            record_id, here, evidence, statements, records,
+        )
+        for reference in declared.get("realized_by") or []:
+            records.append(_evidence_node(
+                str(reference), record_id, here, evidence, statements,
+            ))
+
+
+def _concept_node(
+    declared: dict[str, Any],
+    record_id: str,
+    parent_id: str | None,
+    path: tuple[str, ...],
+) -> dict[str, Any]:
+    """One authored concept, as a node.
+
+    It carries no structural field: a concept is not a file, and inventing a
+    path for one would put source organization back into the hierarchy.
+    """
+    return {
+        "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
+        "record_id": record_id,
+        "parent_id": parent_id,
+        "node_type": NODE_TYPE_CONCEPT,
+        "label": str(declared.get("label") or path[-1]),
+        "concept_key": ".".join(path),
+        "statement": str(declared.get("statement") or "") or None,
+        "repository": None,
+        "evidence_id": None,
+        "architecture_key": None,
+        "source_path": None,
+        "source_line": None,
+        "symbol_kind": None,
+        "owner": None,
+        "qualified_name": None,
+        "exported": None,
+        "reachability": None,
+        "has_children": False,
+    }
+
+
+def _evidence_node(
+    reference: str,
+    parent_id: str,
+    path: tuple[str, ...],
+    evidence: dict[str, "_Evidence"],
+    statements: dict[str, str],
+) -> dict[str, Any]:
+    """One realized_by reference, resolved and placed under its concept.
+
+    The reference names no repository. Which one holds it is a structural
+    question, so every declared member is asked and exactly one must answer --
+    a name two repositories both hold is ambiguous, and guessing between them
+    would attach a concept to code that does not realize it.
+
+    ``record_id`` carries the concept, because it is an occurrence: the same
+    symbol under two concepts is two placements of one thing. ``evidence_id``
+    carries the identity, and is the same wherever it appears.
+    """
+    found = _resolved_reference(reference, evidence)
+    repository, kind, resolved = found
+    node_id = f"{RECORD_TYPE_ARCHITECTURE_NODE}:{'.'.join(path)}:{repository}:"
+    if kind == NODE_TYPE_MODULE:
+        evidence_id = f"{repository}:{resolved}"
+        return {
+            "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
+            "record_id": node_id + resolved,
+            "parent_id": parent_id,
+            "node_type": NODE_TYPE_MODULE,
+            "label": resolved,
+            "concept_key": ".".join(path),
+            "statement": statements.get(f"{repository}:{resolved}"),
+            "repository": repository,
+            "evidence_id": evidence_id,
+            "architecture_key": reference,
+            "source_path": resolved,
+            "source_line": None,
+            "symbol_kind": None,
+            "owner": None,
+            "qualified_name": None,
+            "exported": None,
+            "reachability": evidence[repository].reachability.get(resolved),
+            "has_children": False,
+        }
+    record = resolved
+    qualified = record.get("qualified_name") or record["name"]
+    evidence_id = f"{repository}:{record['source_path']}:{qualified}"
+    return {
+        "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
+        "record_id": f"{node_id}{record['source_path']}:{qualified}",
+        "parent_id": parent_id,
+        "node_type": NODE_TYPE_SYMBOL,
+        "label": qualified,
+        "concept_key": ".".join(path),
+        "statement": statements.get(reference),
+        "repository": repository,
+        "evidence_id": evidence_id,
+        "architecture_key": reference,
+        # Copied from the resolved record, so owner "" keeps meaning a
+        # top-level declaration rather than a field that does not apply.
+        "source_path": record["source_path"],
+        "source_line": record.get("source_line"),
+        "symbol_kind": record.get("symbol_kind"),
+        "owner": record.get("owner"),
+        "qualified_name": qualified,
+        "exported": record.get("exported"),
+        # Reachability is recorded against a file, never a symbol.
+        "reachability": None,
+        "has_children": False,
+    }
+
+
+def _resolved_reference(
+    reference: str,
+    evidence: dict[str, "_Evidence"],
+) -> tuple[str, str, Any]:
+    """Return which repository answers for one realized_by reference.
+
+    A reference is a path when it names a file or a directory the maps record,
+    and a dotted identity otherwise. Both are exact: zero answers or several is
+    a failure, never a nearest guess.
+
+    Returns:
+        The repository, the node type, and either the resolved path or the
+        resolved symbol record.
+
+    Raises:
+        ArchitectureProjectionError: If nothing answers, or more than one does.
+    """
+    answers: list[tuple[str, str, Any]] = []
+    for repository, facts in evidence.items():
+        if reference in facts.files:
+            answers.append((repository, NODE_TYPE_MODULE, reference))
+        elif reference.endswith("/") and reference[:-1] in facts.directories:
+            answers.append((repository, NODE_TYPE_MODULE, reference))
+        for record in facts.symbols.get(reference, []):
+            answers.append((repository, NODE_TYPE_SYMBOL, record))
+    if not answers:
+        raise ArchitectureProjectionError(
+            f"realized_by '{reference}' names no file, directory or symbol any "
+            f"repository map records."
+        )
+    if len(answers) > 1:
+        where = ", ".join(sorted(repository for repository, _, _ in answers))
+        raise ArchitectureProjectionError(
+            f"realized_by '{reference}' resolves in several places: {where}."
+        )
+    return answers[0]
+
+
+def _authored_statements(parsed: dict[str, Any]) -> dict[str, str]:
+    """Return the prose canonical_ownership holds, keyed by what it describes.
+
+    canonical_ownership is no longer the hierarchy -- concepts are -- but it is
+    still where a module's or a symbol's own meaning is written. An evidence
+    node carries that statement when one exists, so the authored prose is not
+    lost by the tree changing shape.
+
+    Source-capability statements are skipped: they describe a system that was
+    migrated away from, and nothing current realizes them.
+    """
+    found: dict[str, str] = {}
+    for repository, block in (
+        (parsed.get("canonical_ownership") or {}).get("repositories") or {}
+    ).items():
+        for key, value in (block.get("canonical_modules") or {}).items():
+            if not _is_source_evidence(value):
+                found[f"{repository}:{key}"] = _statement_of(value)
+        for entry in block.get("canonical_symbols") or []:
+            if _is_source_evidence(entry):
+                continue
+            for dotted in entry.get("symbols") or []:
+                found[str(dotted)] = _statement_of(entry)
+    return found
 
 
 def validate_architecture_projection(
@@ -322,239 +553,9 @@ def dotted_identity(source_path: str, qualified_name: str) -> str:
     return f"{str(stem).replace('/', '.')}.{qualified_name}"
 
 
-def _current_modules(
-    repository: str,
-    consumed: dict[str, Any],
-    evidence: _Evidence,
-) -> dict[str, dict[str, Any]]:
-    """Return one node per current canonical module, keyed by its resolved path.
-
-    Args:
-        repository: The repository the statements belong to.
-        consumed: The ownership sections this projection consumes.
-        evidence: Its structural facts.
-
-    Returns:
-        Resolved path to node record, in declared order.
-
-    Raises:
-        ArchitectureProjectionError: If a statement resolves to nothing.
-    """
-    nodes: dict[str, dict[str, Any]] = {}
-    for key, value in (consumed.get("canonical_modules") or {}).items():
-        if _is_source_evidence(value):
-            continue
-        path = _resolved_module_path(repository, key, evidence)
-        nodes[path] = {
-            "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
-            "record_id": f"{RECORD_TYPE_ARCHITECTURE_NODE}:{repository}:{path}",
-            "parent_id": f"{RECORD_TYPE_ARCHITECTURE_NODE}:{repository}",
-            "node_type": NODE_TYPE_MODULE,
-            "label": path,
-            "repository": repository,
-            "architecture_key": key,
-            "statement": _statement_of(value),
-            "source_path": path,
-            "source_line": None,
-            "symbol_kind": None,
-            "owner": None,
-            "qualified_name": None,
-            "exported": None,
-            # Supplied for a file and not for a directory: reachability is a
-            # fact about a file, and inventing one for a package would be the
-            # projection deciding something no record says.
-            "reachability": evidence.reachability.get(path),
-            "has_children": False,
-        }
-    return nodes
-
-
-def _resolved_module_path(repository: str, key: str, evidence: _Evidence) -> str:
-    """Return the one path a canonical module key names.
-
-    Args:
-        repository: Repository the statement belongs to.
-        key: The authored module key.
-        evidence: The repository's structural facts.
-
-    Returns:
-        The resolved path. A directory keeps its trailing slash so a consumer
-        can tell a package from a module without consulting the map.
-
-    Raises:
-        ArchitectureProjectionError: If the key names nothing the map records.
-    """
-    if key in evidence.files:
-        return key
-    if key.endswith("/") and key[:-1] in evidence.directories:
-        return key
-    raise ArchitectureProjectionError(
-        f"{repository}: canonical module '{key}' names no file or directory the "
-        f"repository map records. Either the statement is stale or the path moved."
-    )
-
-
-def _symbol_nodes(
-    repository: str,
-    consumed: dict[str, Any],
-    evidence: _Evidence,
-    modules: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Return one node per symbol a current canonical statement names.
-
-    Args:
-        repository: The repository the statements belong to.
-        consumed: The ownership sections this projection consumes.
-        evidence: Its structural facts.
-        modules: The repository's module nodes, for parent selection.
-
-    Returns:
-        The symbol nodes, in declared order.
-
-    Raises:
-        ArchitectureProjectionError: If a symbol does not resolve exactly.
-    """
-    nodes: list[dict[str, Any]] = []
-    for entry in consumed.get("canonical_symbols") or []:
-        if _is_source_evidence(entry):
-            continue
-        statement = _statement_of(entry)
-        for dotted in entry.get("symbols") or []:
-            record = _resolved_symbol(repository, str(dotted), evidence)
-            path = record["source_path"]
-            qualified = record.get("qualified_name", record["name"])
-            parent = _containing_module(repository, path, modules)
-            nodes.append({
-                "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
-                "record_id": f"{RECORD_TYPE_ARCHITECTURE_NODE}:{repository}:{path}:{qualified}",
-                "parent_id": parent,
-                "node_type": NODE_TYPE_SYMBOL,
-                "label": qualified,
-                "repository": repository,
-                "architecture_key": str(dotted),
-                "statement": statement,
-                # Copied from the resolved record, so owner "" keeps meaning a
-                # top-level declaration rather than a field that does not apply.
-                "source_path": path,
-                "source_line": record.get("source_line"),
-                "symbol_kind": record.get("symbol_kind"),
-                "owner": record.get("owner"),
-                "qualified_name": qualified,
-                "exported": record.get("exported"),
-                # Reachability is recorded against a file, never a symbol, so
-                # taking the file's verdict here would state something the map
-                # does not.
-                "reachability": None,
-                "has_children": False,
-            })
-    return nodes
-
-
-def _resolved_symbol(
-    repository: str,
-    dotted: str,
-    evidence: _Evidence,
-) -> dict[str, Any]:
-    """Return the one symbol record an authored dotted reference names.
-
-    An exact lookup against the identity each structural record answers to.
-    Nothing is reconstructed from the reference and nothing is guessed at: a
-    reference either names a declaration the map records or it does not.
-
-    Args:
-        repository: Repository the statement belongs to.
-        dotted: The authored reference, such as ``rey_lib.ai.ai.AI.execute``.
-        evidence: The repository's structural facts.
-
-    Returns:
-        The resolved symbol record.
-
-    Raises:
-        ArchitectureProjectionError: If nothing answers, or more than one does.
-    """
-    found = evidence.symbols.get(dotted, [])
-    if not found:
-        raise ArchitectureProjectionError(
-            f"{repository}: canonical symbol '{dotted}' resolves to no symbol the "
-            f"repository map records."
-        )
-    if len(found) > 1:
-        where = ", ".join(sorted(record["record_id"] for record in found))
-        raise ArchitectureProjectionError(
-            f"{repository}: canonical symbol '{dotted}' resolves to several records: {where}."
-        )
-    return found[0]
-
-
-def _containing_module(
-    repository: str,
-    path: str,
-    modules: dict[str, dict[str, Any]],
-) -> str:
-    """Return the parent id for a symbol defined in ``path``.
-
-    The deepest canonical module containing the defining file, and the
-    repository when none does. Containment is on path boundaries: a file module
-    contains only itself, and a directory module contains a descendant.
-
-    The longest match is unambiguous rather than merely preferred. Two
-    containing keys of equal length are both prefixes of one path, so they are
-    the same string -- and a YAML mapping cannot hold that key twice. There is
-    no tie to break.
-
-    Args:
-        repository: Repository the symbol belongs to.
-        path: The defining file's path.
-        modules: The repository's module nodes, keyed by resolved path.
-
-    Returns:
-        The parent record_id.
-    """
-    containing = [
-        key for key in modules
-        if key == path or (key.endswith("/") and path.startswith(key))
-    ]
-    if not containing:
-        return f"{RECORD_TYPE_ARCHITECTURE_NODE}:{repository}"
-    return modules[max(containing, key=len)]["record_id"]
-
-
 # ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
-
-
-def _repository_node(repository: str) -> dict[str, Any]:
-    """Return the node one declared system member contributes.
-
-    The only node type that is not an authored statement. It exists to project
-    the membership the authority declares, and carries no structural fields
-    because a repository is not a file.
-
-    Args:
-        repository: The declared repository name.
-
-    Returns:
-        The record.
-    """
-    return {
-        "record_type": RECORD_TYPE_ARCHITECTURE_NODE,
-        "record_id": f"{RECORD_TYPE_ARCHITECTURE_NODE}:{repository}",
-        "parent_id": None,
-        "node_type": NODE_TYPE_REPOSITORY,
-        "label": repository,
-        "repository": repository,
-        "architecture_key": None,
-        "statement": None,
-        "source_path": None,
-        "source_line": None,
-        "symbol_kind": None,
-        "owner": None,
-        "qualified_name": None,
-        "exported": None,
-        "reachability": None,
-        "has_children": False,
-    }
 
 
 def _set_has_children(records: list[dict[str, Any]]) -> None:
