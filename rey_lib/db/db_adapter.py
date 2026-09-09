@@ -195,21 +195,60 @@ def _execute_statements_over_dbapi(
     mechanics; the behaviour is not the same as ``query_rows``, because this
     normalizes a result that returned nothing and answers with a list.
 
-    **It reads one result and stops.** Advancing through several is a provider's
-    own claim: a driver exposing ``nextset`` is not evidence that it accepts the
-    same batch in one execute, or advances the same way, so a provider that can
-    do it implements ``execute_statements`` and says so.
+    **One execute, then every result that execution exposes.** The batch already
+    ran; what was missing was reading past the first set, which capped this path
+    at one however capable the driver was.
+
+    A driver that exposes one after the batch returns one, and that is an
+    answer rather than a shortfall.
     """
     cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute(sql_text)
-        return [_result_from_cursor(cursor, limit=limit)]
+        collected: list[StatementResult] = []
+        while _advanced(cursor) if collected else True:
+            collected.append(_result_from_cursor(cursor, limit=limit))
+            if len(collected) >= _MAX_RESULT_SETS:
+                raise DatabaseError(
+                    "DBAdapter: the driver reported more than "
+                    f"{_MAX_RESULT_SETS} result sets from one execution, which "
+                    "is a driver that never says it has finished rather than a "
+                    "batch that large."
+                )
+        return collected
     except Exception as exc:
         raise DatabaseError(f"DBAdapter: execution failed: {exc}") from exc
     finally:
         if cursor is not None and hasattr(cursor, "close"):
             cursor.close()
+
+
+#: How many result sets one execution may expose before this stops believing the
+#: driver.
+#:
+#: Not a limit on a batch. DBAPI says ``nextset`` answers true or None, and a
+#: driver that answers true forever would spin this loop inside a request thread
+#: with nothing to show for it. Reaching this is a broken driver, and it is
+#: reported as one rather than hung on.
+_MAX_RESULT_SETS = 256
+
+
+def _advanced(cursor: Any) -> bool:
+    """Whether the cursor moved to another result set.
+
+    A presence check, and deliberately no ``try``. A driver that has the method
+    and fails while advancing has failed mid-batch, which is an execution error
+    and not the end of the results -- swallowing it would report a truncated
+    batch as a complete one.
+
+    The one driver whose ``nextset`` *raises* rather than answering is psycopg2,
+    and it never arrives here: ``postgres_utils`` implements its own
+    ``execute_statements``. Catching for its sake would blind this path for
+    every driver that does participate.
+    """
+    nextset = getattr(cursor, "nextset", None)
+    return bool(nextset()) if callable(nextset) else False
 
 
 def _result_from_cursor(cursor: Any, *, limit: int) -> StatementResult:

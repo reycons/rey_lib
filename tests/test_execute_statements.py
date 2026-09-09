@@ -44,6 +44,16 @@ class _Cursor:
         self.closed = True
 
 
+class _Advancing(_Cursor):
+    """A cursor that steps through its sets, as a participating driver does."""
+
+    def nextset(self) -> bool | None:
+        if self._at + 1 >= len(self._sets):
+            return None
+        self._at += 1
+        return True
+
+
 class _Conn:
     provider = "duckdb"
 
@@ -141,22 +151,71 @@ class TestTheTextIsNotRead:
 class TestDispatch:
     """One result generically; several only where a provider claims them."""
 
-    def test_the_generic_path_returns_exactly_one_result(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # It does not advance nextset on every provider's behalf: a driver
-        # exposing the method is not evidence its batch semantics match.
-        advanced: list[bool] = []
+    def test_a_cursor_that_cannot_advance_yields_one(self) -> None:
+        # DuckDB's real shape: no nextset on the cursor at all.
+        assert len(_executed(_Cursor([(["a"], [(1,)])]))) == 1
 
-        class _WithNextset(_Cursor):
+    def test_a_cursor_that_will_not_advance_yields_one(self) -> None:
+        class _Done(_Cursor):
+            def nextset(self) -> None:
+                return None
+
+        assert len(_executed(_Done([(["a"], [(1,)])]))) == 1
+
+    def test_every_set_the_cursor_exposes_is_read(self) -> None:
+        # The defect this closes: the batch already ran, and everything past
+        # the first set was discarded by us.
+        cursor = _Advancing([
+            (["a"], [(1,)]),
+            (["b"], [(2,)]),
+            (["c"], [(3,)]),
+        ])
+
+        results = _executed(cursor)
+
+        assert [one.columns for one in results] == [["a"], ["b"], ["c"]]
+        assert [one.rows for one in results] == [
+            [{"a": 1}], [{"b": 2}], [{"c": 3}],
+        ]
+
+    def test_a_command_only_set_between_two_row_sets_is_kept(self) -> None:
+        # A statement returning nothing is a result, not a gap: dropping it
+        # would renumber every result after it.
+        results = _executed(_Advancing([
+            (["a"], [(1,)]), ([], []), (["c"], [(3,)]),
+        ]))
+
+        assert len(results) == 3
+        assert results[1].columns == []
+
+    def test_the_limit_applies_to_each_result_and_not_across_them(self) -> None:
+        rows = [(n,) for n in range(50)]
+        results = _executed(_Advancing([(["a"], rows), (["b"], rows)]))
+
+        assert [len(one.rows) for one in results] == [10, 10]
+
+    def test_a_failure_while_advancing_is_a_failure(self) -> None:
+        # Not the end of the results. Swallowing it would report a truncated
+        # batch as a complete one.
+        class _Breaks(_Advancing):
             def nextset(self) -> bool:
-                advanced.append(True)
+                raise RuntimeError("the connection went away")
+
+        with pytest.raises(DatabaseError):
+            _executed(_Breaks([(["a"], [(1,)])]))
+
+    def test_a_driver_that_never_finishes_is_refused_rather_than_spun_on(
+        self,
+    ) -> None:
+        # DBAPI says nextset answers true or None. One that answers true
+        # forever would spin this loop inside a request thread; it is reported
+        # as the broken driver it is.
+        class _Endless(_Cursor):
+            def nextset(self) -> bool:
                 return True
 
-        results = _executed(_WithNextset([(["a"], [(1,)])]))
-
-        assert len(results) == 1
-        assert advanced == []
+        with pytest.raises(DatabaseError, match="never says it has finished"):
+            _executed(_Endless([(["a"], [(1,)])]))
 
     def test_a_provider_that_claims_several_answers_with_several(
         self, monkeypatch: pytest.MonkeyPatch,
