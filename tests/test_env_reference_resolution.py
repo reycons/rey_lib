@@ -155,7 +155,7 @@ def test_postgres_resolves_the_password_as_it_opens_the_connection(
     from rey_lib.db import postgres_utils
 
     opened: dict[str, Any] = {}
-    monkeypatch.setattr(postgres_utils, "_psycopg2", lambda: None)
+    monkeypatch.setattr(postgres_utils, "_psycopg", lambda: None)
     monkeypatch.setitem(
         __import__("sys").modules, "rey_lib.db._sqlalchemy",
         SimpleNamespace(open_connection=lambda *a, **kw: opened.update(kw) or "connection"),

@@ -100,6 +100,10 @@ _MODULE_PREFIXES: dict[str, str] = {
 	"duckdb":          "duckdb",
 	"_duckdb":         "duckdb",
 	"mysql.connector": "mysql",
+	"psycopg":         "postgres",
+	# Kept while a connection opened by the previous driver can still exist --
+	# a live process, or an environment that has not been reinstalled. It costs
+	# one entry and removes a way for provider inference to answer nothing.
 	"psycopg2":        "postgres",
 }
 

@@ -11,6 +11,7 @@ mean executing one against a real database.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -311,8 +312,137 @@ class TestThePostgresImplementation:
             self._run(core, "SELECT * FROM nothing_here")
 
     def test_it_answers_with_a_list(self) -> None:
-        # One result, because psycopg2 exposes one -- stated as a list so a
-        # client that exposes several needs nothing above to change.
+        # A list even for one, because Psycopg 3 exposes as many as the
+        # execution produced and nothing above had to change to receive them.
         core = self._conn()
 
         assert isinstance(self._run(core, "SELECT 1 AS one"), list)
+
+
+def _postgres(cursor: Any, monkeypatch: pytest.MonkeyPatch) -> list[StatementResult]:
+    """Run the postgres provider against a cursor whose sets are known.
+
+    A controlled cursor rather than a database: what is under test is the
+    traversal, and proving it against a server would mean choosing statements
+    to produce sets -- which is how a "proof row" gets written.
+    """
+    from rey_lib.db import _sqlalchemy, postgres_utils
+
+    monkeypatch.setattr(
+        _sqlalchemy, "raw_dbapi_connection",
+        lambda conn: SimpleNamespace(cursor=lambda: cursor),
+    )
+    return postgres_utils.execute_statements(object(), "any sql", limit=10)
+
+
+class TestPostgresTraversal:
+    """Every set one execution exposes, which is what Psycopg 3 changed."""
+
+    def test_two_sets_come_back_in_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        results = _postgres(
+            _Advancing([(["a"], [(1,)]), (["b"], [(2,)])]), monkeypatch,
+        )
+
+        assert [one.columns for one in results] == [["a"], ["b"]]
+        assert [one.rows for one in results] == [[{"a": 1}], [{"b": 2}]]
+
+    def test_a_command_only_set_between_two_row_sets_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The middle statement returns no rows -- a session command, not a
+        # write. Dropping it would renumber every result after it.
+        results = _postgres(
+            _Advancing([(["a"], [(1,)]), ([], []), (["c"], [(3,)])]), monkeypatch,
+        )
+
+        assert len(results) == 3
+        assert results[1].columns == []
+
+    def test_one_statement_still_yields_one(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert len(_postgres(_Advancing([(["a"], [(1,)])]), monkeypatch)) == 1
+
+    def test_the_limit_applies_to_each_set_and_not_across_them(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rows = [(n,) for n in range(50)]
+        results = _postgres(
+            _Advancing([(["a"], rows), (["b"], rows)]), monkeypatch,
+        )
+
+        assert [len(one.rows) for one in results] == [10, 10]
+
+    def test_a_failure_while_advancing_is_a_failure(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _Breaks(_Advancing):
+            def nextset(self) -> bool:
+                raise RuntimeError("the connection went away")
+
+        with pytest.raises(DatabaseError):
+            _postgres(_Breaks([(["a"], [(1,)])]), monkeypatch)
+
+    def test_a_driver_that_never_finishes_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _Endless(_Cursor):
+            def nextset(self) -> bool:
+                return True
+
+        with pytest.raises(DatabaseError, match="more than"):
+            _postgres(_Endless([(["a"], [(1,)])]), monkeypatch)
+
+    def test_the_cursor_is_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cursor = _Advancing([(["a"], [(1,)])])
+        _postgres(cursor, monkeypatch)
+
+        assert cursor.closed
+
+
+class TestTheDriver:
+    """The connector this provider now speaks through."""
+
+    def test_psycopg_three_is_what_is_installed(self) -> None:
+        import psycopg
+
+        assert psycopg.__version__.startswith("3.")
+
+    def test_the_url_names_the_psycopg_dialect(self) -> None:
+        # Read from the URL rather than by connecting: which driver is spoken
+        # is settled before any server is involved.
+        from sqlalchemy.engine.url import make_url
+
+        assert make_url("postgresql+psycopg://u:p@h/db").get_dialect().driver == "psycopg"
+
+    def test_the_provider_map_answers_for_the_new_module(self) -> None:
+        from rey_lib.db.db_adapter import _MODULE_PREFIXES
+
+        assert _MODULE_PREFIXES["psycopg"] == "postgres"
+
+
+class TestJsonbAdaptation:
+    """What the driver is handed for a jsonb parameter, and why.
+
+    Unit, and deliberately nothing stored: the question is what leaves this
+    module, which is answerable without a database.
+    """
+
+    def test_a_mapping_is_handed_over_as_json_text(self) -> None:
+        from rey_lib.db.postgres_utils import _serialise_jsonb
+
+        assert _serialise_jsonb({"doc": {"a": 1}}) == {"doc": '{"a": 1}'}
+
+    def test_a_list_is_handed_over_as_json_text(self) -> None:
+        # The case Psycopg 3 would otherwise adapt as a PostgreSQL *array*.
+        # It never sees a list, because this serialises first.
+        from rey_lib.db.postgres_utils import _serialise_jsonb
+
+        assert _serialise_jsonb({"doc": [1, 2]}) == {"doc": "[1, 2]"}
+
+    def test_everything_else_is_untouched(self) -> None:
+        from rey_lib.db.postgres_utils import _serialise_jsonb
+
+        assert _serialise_jsonb({"n": 1, "s": "x", "none": None}) == {
+            "n": 1, "s": "x", "none": None,
+        }

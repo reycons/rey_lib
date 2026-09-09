@@ -2,7 +2,7 @@
 PostgreSQL connection and execution layer.
 
 Owns all PostgreSQL connections and control database calls. SQLAlchemy Core
-owns generic execution; raw psycopg2 cursors remain only for approved catalog
+owns generic execution; raw DBAPI cursors remain only for approved catalog
 and DDL fallbacks.
 
 Connection details are passed as a Namespace object resolved from ctx at
@@ -12,8 +12,8 @@ connection is opened, through the one resolver in rey_lib.config; ctx is
 carried for that and is otherwise untouched. Passwords are never read from
 YAML.
 
-psycopg2 is an optional dependency. Install with:
-    pip install psycopg2-binary
+psycopg is an optional dependency. Install with:
+    pip install 'psycopg[binary]'
 
 Function calls (SELECT) and procedure calls (CALL) are kept separate to
 match the PostgreSQL distinction between functions and procedures.
@@ -55,15 +55,15 @@ _logger = get_logger(__name__)
 _TRUNCATION_SQLSTATE = "22001"
 
 
-def _psycopg2() -> Any:
-    """Lazy-import psycopg2 with a clear install hint if absent."""
+def _psycopg() -> Any:
+    """Lazy-import Psycopg with a clear install hint if absent."""
     try:
-        import psycopg2  # noqa: PLC0415
-        return psycopg2
+        import psycopg  # noqa: PLC0415
+        return psycopg
     except ImportError as exc:
         raise ConfigError(
-            "psycopg2 is required for PostgreSQL connections. "
-            "Install it with: pip install psycopg2-binary"
+            "psycopg is required for PostgreSQL connections. "
+            "Install it with: pip install 'psycopg[binary]'"
         ) from exc
 
 
@@ -120,12 +120,12 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
     Raises
     ------
     ConfigError
-        If psycopg2 is not installed, required fields are missing, or a
+        If psycopg is not installed, required fields are missing, or a
         password names an environment variable that cannot be read now.
     DatabaseError
         If the connection attempt fails.
     """
-    _psycopg2()
+    _psycopg()
 
     host     = getattr(db_cfg, "host",     None)
     port     = getattr(db_cfg, "port",     5432)
@@ -147,7 +147,7 @@ def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
 
         return open_connection(
             "postgres",
-            "postgresql+psycopg2",
+            "postgresql+psycopg",
             host=str(host),
             port=int(port),
             database=str(database),
@@ -336,42 +336,77 @@ def execute_statements(
     *,
     limit: int = 1_000,
 ) -> list[Any]:
-    """Execute SQL text as written and return every result this driver exposes.
+    """Execute SQL text as written and return every result set it exposes.
 
-    ``exec_driver_sql`` rather than ``text``: ``text`` reads the statement for
-    ``:name`` placeholders, and a definition body or a literal containing a
-    colon fails before it reaches the database. Nothing is bound here -- the
-    text is the reader's own -- so binding has nothing to do and only breaks
-    valid SQL.
+    A DBAPI cursor rather than ``exec_driver_sql``. Two reasons, and both are
+    about the batch:
 
-    ``returns_rows`` decides whether there are columns to read. Asking the
-    result is not classifying the statement: the driver already knows, and
-    reading ``keys()`` from a result that has none raises.
+    - nothing is bound. The text is the reader's own, so ``text``'s ``:name``
+      scan would break a definition body or any literal containing a colon,
+      and a cursor binds nothing when given no parameters.
+    - a batch has to be **traversed**. SQLAlchemy's result wraps the first set
+      and closes its cursor once that set is exhausted or empty, so there is
+      nothing left to advance; the driver's own cursor is what steps through
+      the sequence PostgreSQL returned.
 
-    **One result.** PostgreSQL returns a response sequence per command, but
-    psycopg2 exposes only the last of them and raises ``NotSupportedError`` from
-    ``nextset``. That is a client limitation, not a property of the server or of
-    this contract, and it is why the answer is still a list: a client that
-    exposes several will return several here without anything above changing.
+    PostgreSQL returns a response sequence per command. Psycopg 3 exposes every
+    one of them through ``nextset``; psycopg2 exposed only the last and raised
+    from ``nextset``, which is the whole of what this migration changed.
     """
-    from rey_lib.db._sqlalchemy import core_connection
+    from rey_lib.db._sqlalchemy import raw_dbapi_connection
     from rey_lib.db.db_adapter import StatementResult
 
+    cursor = None
     try:
-        result = core_connection(conn).exec_driver_sql(sql_text)
-        if not result.returns_rows:
-            return [StatementResult(columns=[], rows=[], row_count=_affected(result))]
-        columns = [str(column) for column in result.keys()]
-        values = result.fetchmany(max(1, int(limit)))
-        return [StatementResult(
-            columns=columns,
-            rows=[dict(zip(columns, row)) for row in values],
-            row_count=_affected(result),
-        )]
+        cursor = raw_dbapi_connection(conn).cursor()
+        cursor.execute(sql_text)
+        collected: list[Any] = []
+        while _advanced(cursor) if collected else True:
+            description = getattr(cursor, "description", None) or []
+            columns = [str(column[0]) for column in description]
+            values = cursor.fetchmany(max(1, int(limit))) if columns else []
+            collected.append(StatementResult(
+                columns=columns,
+                rows=[dict(zip(columns, row)) for row in values],
+                row_count=_affected(cursor),
+            ))
+            if len(collected) >= _MAX_RESULT_SETS:
+                raise DatabaseError(
+                    "postgres_utils: the driver reported more than "
+                    f"{_MAX_RESULT_SETS} result sets from one execution."
+                )
+        return collected
     except Exception as exc:
         # No rollback: the connection is in AUTOCOMMIT, so a failed statement
         # leaves no transaction to clear and the next consumer is unaffected.
         raise DatabaseError(f"postgres_utils: execution failed: {exc}") from exc
+    finally:
+        if cursor is not None and hasattr(cursor, "close"):
+            cursor.close()
+
+
+#: The ceiling on one execution's result sets, as the shared path has.
+#:
+#: DBAPI says ``nextset`` answers true or None. A driver answering true forever
+#: would spin inside a request thread, and that is a broken driver rather than a
+#: batch of that size.
+_MAX_RESULT_SETS = 256
+
+
+def _advanced(cursor: Any) -> bool:
+    """Whether the cursor moved to another result set.
+
+    A presence check, and no ``try``: a driver that *has* the method and fails
+    while advancing has failed mid-batch, which is an execution error and not
+    the end of the results. Swallowing it would report a truncated batch as a
+    complete one.
+
+    Psycopg 3 always has it, so the check never fires there. It is written this
+    way because a cursor without it exposes one set, which is an answer, and a
+    total function is worth more than an assumption about who is calling.
+    """
+    nextset = getattr(cursor, "nextset", None)
+    return bool(nextset()) if callable(nextset) else False
 
 
 def _affected(result: Any) -> int | None:
@@ -1044,8 +1079,10 @@ def _serialise_jsonb(params: dict[str, Any]) -> dict[str, Any]:
     """
     Return a copy of params with dict/list values serialised to JSON strings.
 
-    PostgreSQL jsonb parameters must be passed as JSON strings when using
-    psycopg2 without extras.register_default_jsonb.
+    A jsonb parameter is handed over as JSON text rather than as the Python
+    value, so the driver never adapts it. That matters under Psycopg 3, which
+    would otherwise send a list as a PostgreSQL *array* and refuse a dict
+    outright; serialising here means neither case can arise.
     """
     result: dict[str, Any] = {}
     for k, v in params.items():

@@ -271,7 +271,7 @@ def test_postgres_get_connection_preserves_config_mapping(
     captured: dict[str, Any] = {}
     expected = object()
 
-    monkeypatch.setattr(postgres_utils, "_psycopg2", lambda: object())
+    monkeypatch.setattr(postgres_utils, "_psycopg", lambda: object())
 
     def open_connection(*args: Any, **kwargs: Any) -> object:
         captured["args"] = args
@@ -292,7 +292,7 @@ def test_postgres_get_connection_preserves_config_mapping(
 
     assert postgres_utils.get_connection(cfg) is expected
     assert captured == {
-        "args": ("postgres", "postgresql+psycopg2"),
+        "args": ("postgres", "postgresql+psycopg"),
         "kwargs": {
             "host": "db.internal",
             "port": 5544,
