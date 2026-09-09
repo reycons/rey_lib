@@ -34,6 +34,11 @@ def test_classify_text_language_maps_supported_suffixes() -> None:
     assert classify_text_language("run.jsonl") == "jsonl"
     assert classify_text_language("readme.md") == "markdown"
     assert classify_text_language("script.py") == "python"
+    assert classify_text_language("Panel.ts") == "typescript"
+    assert classify_text_language("Panel.tsx") == "typescript"
+    assert classify_text_language("main.js") == "javascript"
+    assert classify_text_language("main.jsx") == "javascript"
+    assert classify_text_language("main.mjs") == "javascript"
     assert classify_text_language("rows.csv") == "csv"
     assert classify_text_language("app.log") == "log"
     assert classify_text_language("plain.txt") == "text"
@@ -97,3 +102,26 @@ def test_classify_text_language_recognizes_explicit_markdown_fence() -> None:
 ```"""
 
     assert classify_text_language(content=report) == "markdown"
+
+
+def test_a_named_suffix_is_never_guessed_at_from_content() -> None:
+    """TypeScript read as Python until .ts was named.
+
+    Nothing opened a .ts file, so it fell through to content sniffing, and the
+    Python test matches one: imports, exports, functions and indentation. The
+    suffix is the answer whenever there is one, and sniffing is what is left
+    when there is not.
+    """
+    typescript = (
+        "import { Panel } from \"../panel\";\n"
+        "export function mount(host: HTMLElement): void {\n"
+        "  const panel = new Panel();\n"
+        "}\n"
+    )
+
+    assert classify_text_language("Panel.ts", content=typescript) == "typescript"
+    # And the reason it mattered: asked without the name, the sniffer still
+    # answers python. This records that, rather than pretending it is fixed --
+    # a heuristic guessing between two brace-and-keyword languages will be
+    # wrong again, and the suffix is what keeps it from being asked.
+    assert classify_text_language("", content=typescript) == "python"

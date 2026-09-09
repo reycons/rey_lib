@@ -19,6 +19,8 @@ APPROVED_TEXT_LANGUAGES = frozenset({
     "jsonl",
     "markdown",
     "python",
+    "typescript",
+    "javascript",
     "csv",
     "log",
     "text",
@@ -34,6 +36,16 @@ _SUFFIX_LANGUAGES = {
     ".md": "markdown",
     ".markdown": "markdown",
     ".py": "python",
+    # A .ts file read as Python until it was named here: nothing opened one, so
+    # it fell through to content sniffing, and TypeScript looks Python enough
+    # -- imports, exports, functions, indentation. TSX is TypeScript to a
+    # renderer; how a repository is *scanned* separates them, and that is the
+    # scan rules' answer rather than this one's.
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
     ".csv": "csv",
     ".log": "log",
     ".err": "log",
