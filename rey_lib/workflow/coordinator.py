@@ -22,6 +22,7 @@ run_workflow    Stack a workflow's step function calls per its YAML config.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -81,6 +82,26 @@ class WorkflowRun:
     status: str                       # "success" | "failed"
     outcomes: list[StepOutcome] = field(default_factory=list)
     context: Optional[RunContext] = None  # final run context (metadata + data)
+
+
+def _monotonic_ms(started: float) -> int:
+    """Return whole milliseconds elapsed since a monotonic mark.
+
+    Named for its clock, because ``rey_lib.logs.run_summary`` has an
+    ``_elapsed_ms`` that measures between two ISO wall-clock timestamps. They
+    answer the same question from different clocks, and a duration derived from
+    wall time moves when the wall clock is adjusted. This one cannot.
+
+    Milliseconds because that is the unit STEP_END already carries; the
+    coordinator does not get to pick a second unit for the same fact.
+
+    Args:
+        started: The value ``time.monotonic()`` returned when the step began.
+
+    Returns:
+        Elapsed milliseconds, never negative -- monotonic guarantees it.
+    """
+    return int((time.monotonic() - started) * 1000)
 
 
 def _finalize_run(ctx: Any, run_log: Any) -> None:
@@ -430,6 +451,13 @@ def run_workflow(
             step_sequence=sequence,
             workflow_name=name,
         )
+        # One mark, read again at whichever STEP_END this step reaches.
+        # Monotonic, because a duration must not move when the wall clock does.
+        #
+        # It fills duration_ms on STEP_END rather than introducing a field of
+        # its own: the record already accepts it and the results summary
+        # already projects it, so the only thing missing was a producer.
+        step_started = time.monotonic()
         try:
             # Workflow-step semantic boundary -> level 5, one per sequential in-process
             # step dispatch (SGC_Rey_Log_Nest_Level_Hierarchy_Correction). The descent
@@ -442,7 +470,8 @@ def run_workflow(
             run_log.enter()
 
             if not apply and apply_only:
-                log_step_end(run_log, step_name, "skipped", message="dry-run")
+                log_step_end(run_log, step_name, "skipped", message="dry-run",
+                             duration_ms=_monotonic_ms(step_started))
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "skipped", "dry-run")
                 )
@@ -471,7 +500,8 @@ def run_workflow(
                     error_id=failure_id,
                     failed_step_sequence=sequence,
                 )
-                log_step_end(run_log, step_name, "failed", message=failure_message)
+                log_step_end(run_log, step_name, "failed", message=failure_message,
+                             duration_ms=_monotonic_ms(step_started))
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "failed", error=failure_message)
                 )
@@ -493,7 +523,8 @@ def run_workflow(
             status = str(getattr(result, "status", "ok")) if result is not None else "ok"
             detail = str(getattr(result, "detail", "")) if result is not None else ""
             artifacts = list(getattr(result, "artifacts", []) or []) if result is not None else []
-            log_step_end(run_log, step_name, status, message=detail)
+            log_step_end(run_log, step_name, status, message=detail,
+                         duration_ms=_monotonic_ms(step_started))
             run.outcomes.append(StepOutcome(step_id, label, process, status, detail, artifacts))
             if status == "failed":
                 run.status = "failed"

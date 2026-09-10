@@ -16,6 +16,7 @@ invented (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
 
 from __future__ import annotations
 
+import statistics
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
@@ -83,6 +84,10 @@ def build_results_summary(
     counts = _step_counts(execution_records)
     failed_ids = _failed_step_ids(execution_records)
     step_results = _step_results(execution_records, execution_details)
+    # Annotates step_results in place, and returns the run-level facts the
+    # annotation was derived from so a reader can check the classification
+    # rather than take it on trust.
+    step_timing = _step_timing(step_results)
     items = _item_results(records)
     warnings, item_warnings = _partition_warnings(records)
     _attach_item_warnings(items, item_warnings)
@@ -120,6 +125,7 @@ def build_results_summary(
             "partial_success": partial_success,
         },
         "step_results": step_results,
+        "step_timing": step_timing,
         "item_results": items,
         "validations": _validations(records),
         "warnings": warnings,
@@ -188,6 +194,94 @@ def _step_results(
             entry["exit_code"] = detail["exit_code"]
         results.append(entry)
     return results
+
+
+#: How many times the run's median a step must be before its cost is called
+#: material. Relative by design: a 30ms step is the dominant cost of a run whose
+#: other steps take 2ms, and an absolute threshold would call that run fine
+#: while calling a healthy 90-second run alarming.
+_HIGH_COST_MULTIPLE = 3.0
+
+#: The fewest timed steps that constitute a population. Two observations carry
+#: no information about what "typical" is in a run, so below this nothing is
+#: classified rather than something being classified badly.
+_HIGH_COST_MINIMUM_STEPS = 3
+
+
+def _step_timing(step_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Classify where this run's execution cost is concentrated.
+
+    A **high-cost step is materially more expensive than the typical step in
+    the same run** -- not a slow one. Nothing here claims the run took too
+    long: a run of 2ms steps with one 30ms step is fast and still has somewhere
+    worth looking. Dropping any absolute floor is what keeps that true at every
+    scale.
+
+    A deterministic diagnostic classification, not an interpretation. It reports
+    *where* cost sits and never *why*; root cause stays downstream.
+
+    The baseline is the **median**, not the mean, and that is the whole point --
+    one dominant step inflates a mean enough to hide inside it, and the
+    dominant step is exactly what this exists to surface.
+
+    A step with no recorded duration is excluded from the baseline entirely. It
+    is never counted as zero: a step that did not run is not evidence of what a
+    step costs, and treating it as instant would drag the median down and make
+    everything else look expensive.
+
+    Args:
+        step_results: The projected step entries. Annotated in place with
+            ``duration_multiple_of_median`` and ``is_high_cost`` where a
+            duration is present.
+
+    Returns:
+        The run's timing facts -- how many steps were timed, the median, and
+        the ids classified high cost. ``classified`` is False when there was no
+        usable baseline, which is a fact about the run rather than a failure.
+    """
+    durations = [
+        int(entry["duration_ms"])
+        for entry in step_results
+        if isinstance(entry.get("duration_ms"), (int, float))
+    ]
+    if len(durations) < _HIGH_COST_MINIMUM_STEPS:
+        return {
+            "timed_steps": len(durations),
+            "median_duration_ms": None,
+            "high_cost_step_ids": [],
+            "classified": False,
+        }
+
+    median = float(statistics.median(durations))
+    if median <= 0:
+        # At least half the steps registered no measurable time, so a ratio
+        # against the median is division by zero. No constant is invented to
+        # rescue it: the run is reported as unclassified rather than having
+        # every non-zero step declared dominant.
+        return {
+            "timed_steps": len(durations),
+            "median_duration_ms": median,
+            "high_cost_step_ids": [],
+            "classified": False,
+        }
+
+    high_cost: list[str] = []
+    for entry in step_results:
+        duration = entry.get("duration_ms")
+        if not isinstance(duration, (int, float)):
+            continue
+        multiple = float(duration) / median
+        entry["duration_multiple_of_median"] = round(multiple, 2)
+        entry["is_high_cost"] = multiple >= _HIGH_COST_MULTIPLE
+        if entry["is_high_cost"]:
+            high_cost.append(str(entry.get("step_id") or ""))
+
+    return {
+        "timed_steps": len(durations),
+        "median_duration_ms": median,
+        "high_cost_step_ids": high_cost,
+        "classified": True,
+    }
 
 
 def _execution_detail_steps(
