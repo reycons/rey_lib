@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from rey_lib.config.registration import REGISTRATION_GROUP, discover_registrations
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
@@ -99,6 +100,18 @@ class Application:
     #: shape, not a declaration missing its commands.
     parameters: tuple[ApplicationCommandParameter, ...] = field(default=())
     commands: tuple[ApplicationCommand, ...] = field(default=())
+    #: The operations this application allows a workflow to invoke.
+    #:
+    #: The published half of the workflow contract: a declared process names one
+    #: of these, and its step configuration is validated against the parameters
+    #: named here before anything is dispatched. Reuses the command parameter
+    #: vocabulary rather than a second one, because a published parameter is a
+    #: published parameter whichever execution model reads it.
+    #:
+    #: Empty until an application publishes them. Which operations an
+    #: application approves is its own answer, and an empty tuple means it has
+    #: not given one -- never that it approves everything.
+    workflow_operations: tuple[ApplicationCommand, ...] = field(default=())
 
     def command(self, name: str) -> ApplicationCommand | None:
         """The command of that name, or None where this application has none."""
@@ -116,7 +129,10 @@ class Application:
         return tuple(one.name for one in self.commands)
 
 
-def build_applications(ctx: Any) -> tuple[Application, ...]:
+def build_applications(
+    ctx: Any,
+    registrations: dict[str, dict[str, Any]] | None = None,
+) -> tuple[Application, ...]:
     """Return this installation's applications, resolved once.
 
     Built after the collections a parameter's choices may name, because a
@@ -125,6 +141,8 @@ def build_applications(ctx: Any) -> tuple[Application, ...]:
     Args:
         ctx: The loaded context, carrying the ``apps`` declaration and the
             collections a choice may be resolved from.
+        registrations: What the installed applications published. None
+            discovers them from the environment.
 
     Returns:
         One :class:`Application` per enabled declaration, in declared order.
@@ -141,24 +159,149 @@ def build_applications(ctx: Any) -> tuple[Application, ...]:
             "Config section 'apps' must be a canonical list, as 'workflows' and "
             f"'pipelines' are; found {type(declared).__name__}."
         )
+    # Discovery answers before any Application is built, so a duplicate claim
+    # stops the run rather than producing objects that would have to be undone.
+    #
+    # Supplied by the caller where the caller already has them -- bootstrap
+    # discovers once for the process. Not a second source: the same
+    # registrations either way, handed over rather than found again.
+    if registrations is None:
+        registrations = discover_registrations()
     return tuple(
-        _application(entry, ctx)
+        _application(entry, ctx, registrations)
         for entry in (_plain(item) for item in declared)
         if isinstance(entry, dict) and entry.get("enabled", True)
     )
 
 
-def _application(entry: dict[str, Any], ctx: Any) -> Application:
-    """One declaration, as the object."""
-    cli = entry.get("cli")
-    cli = cli if isinstance(cli, dict) else {}
+def _application(
+    entry: dict[str, Any],
+    ctx: Any,
+    registrations: dict[str, dict[str, Any]],
+) -> Application:
+    """One declaration, as the object.
+
+    Two construction paths reach the same object. A Python application takes its
+    identity and published capability from its registration and everything else
+    from the declaration; an external one, which cannot publish a Python entry
+    point, is declared whole.
+
+    Raises:
+        ConfigError: If a Python application has no registration, if a
+            declaration claims ``python`` where the registry path is the only
+            one available to it, or if a Python declaration supplies no
+            ``app_path``.
+    """
     name = str(entry.get("name") or "")
     if not name:
         raise ConfigError("An application in 'apps' is declared without a name.")
+
+    registration = registrations.get(name)
+    declared_type = str(entry.get("type") or entry.get("app_type") or "python")
+
+    if registration is None:
+        if declared_type == "python":
+            # A Python application exists only through its package. Declaring
+            # one the environment does not have would let configuration invent
+            # an application, and the capability half would have nowhere to come
+            # from.
+            raise ConfigError(
+                f"Application '{name}' is declared as python but no installed "
+                f"distribution registers it under '{REGISTRATION_GROUP}'. "
+                "Install it, or declare it as an external application type."
+            )
+        # External: PowerShell, shell, a command. Declared whole, because there
+        # is no package to publish anything.
+        return _from_declaration(entry, ctx, name, declared_type)
+
+    if declared_type != "python":
+        raise ConfigError(
+            f"Application '{name}' registers as a Python application but is "
+            f"declared as '{declared_type}'."
+        )
+    return _from_registration(entry, ctx, name, registration)
+
+
+def _from_registration(
+    entry: dict[str, Any],
+    ctx: Any,
+    name: str,
+    registration: dict[str, Any],
+) -> Application:
+    """A Python application: published capability, declared configuration.
+
+    The published half is taken from the registration and nothing else. What the
+    declaration says about commands is not merged, not a fallback and cannot
+    override -- an entry left behind in the external registry is legacy data,
+    and reading it would keep the authority it lost.
+    """
+    registered_name = str(registration.get("name") or "")
+    if registered_name != name:
+        raise ConfigError(
+            f"Application '{name}' is registered under the name "
+            f"'{registered_name}'. A registration and a declaration cannot "
+            "disagree about which application they describe."
+        )
+
+    app_path = str(entry.get("app_path") or "")
+    if not app_path:
+        # Never recovered from the package. Where importable code lives is not
+        # the same question as where the installation runs the application from,
+        # and one packaging mode answering it would make the other wrong.
+        raise ConfigError(
+            f"Application '{name}' declares no 'app_path'. It is installation "
+            "configuration and is never reconstructed from package metadata."
+        )
+
+    cli = registration.get("cli")
+    cli = cli if isinstance(cli, dict) else {}
     return Application(
         name=name,
         label=str(entry.get("label") or name),
-        app_type=str(entry.get("type") or entry.get("app_type") or "python"),
+        app_type="python",
+        app_path=app_path,
+        entry_point=str(registration.get("entry_point") or "main.py"),
+        shared_parameters=bool(cli.get("shared_parameters")),
+        parameters=tuple(
+            _parameter(one, ctx, name)
+            for one in (_plain(item) for item in (cli.get("parameters") or []))
+            if isinstance(one, dict)
+        ),
+        commands=_commands(cli, ctx, name),
+        workflow_operations=_operations(registration, ctx, name),
+    )
+
+
+def _operations(
+    registration: dict[str, Any],
+    ctx: Any,
+    application: str,
+) -> tuple[ApplicationCommand, ...]:
+    """The operations an application approves for workflow invocation.
+
+    Absent means none approved, which is the safe reading: an application that
+    has published nothing has not approved everything.
+    """
+    return tuple(
+        _command(one, ctx, application)
+        for one in (_plain(item) for item in (registration.get("workflow_operations") or []))
+        if isinstance(one, dict)
+    )
+
+
+def _from_declaration(
+    entry: dict[str, Any],
+    ctx: Any,
+    name: str,
+    declared_type: str,
+) -> Application:
+    """An external application, declared whole in the registry."""
+    cli = entry.get("cli")
+    cli = cli if isinstance(cli, dict) else {}
+    return Application(
+        name=name,
+        label=str(entry.get("label") or name),
+        app_type=declared_type,
         app_path=str(entry.get("app_path") or ""),
         entry_point=str(entry.get("entry_point") or "main.py"),
         shared_parameters=bool(cli.get("shared_parameters")),

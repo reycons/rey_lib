@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support.installed_applications import installed
 from rey_lib.config.config_utils import Namespace, PathResolver, build_ctx_from_path
 from rey_lib.config.inventory import resolve_workflow_run_action
 from rey_lib.errors.error_utils import ConfigError
@@ -23,6 +24,9 @@ def _ctx() -> Namespace:
                 {
                     "name": "rey_loader",
                     "enabled": True,
+                    # Installation-owned and required; never taken from the
+                    # package.
+                    "app_path": "/apps/rey_loader",
                     "entry_point": "main.py",
                     "cli": {
                         "parameters": [
@@ -112,7 +116,7 @@ def test_a_workflow_list_entry_inherits_the_root_app_as_owner() -> None:
     assert action["workflow"] == "load_only"
 
 
-def test_config_utils_appends_workflow_list_entries(tmp_path) -> None:
+def test_config_utils_appends_workflow_list_entries(tmp_path, monkeypatch) -> None:
     """Multiple workflow files merge by appending named workflow entries."""
     workflows_dir = tmp_path / "workflows" / "rey_loader"
     workflows_dir.mkdir(parents=True)
@@ -132,6 +136,7 @@ def test_config_utils_appends_workflow_list_entries(tmp_path) -> None:
                 "apps:",
                 "  - name: rey_loader",
                 "    enabled: true",
+                "    app_path: /apps/rey_loader",
             ]
         ),
         encoding="utf-8",
@@ -159,6 +164,7 @@ def test_config_utils_appends_workflow_list_entries(tmp_path) -> None:
         encoding="utf-8",
     )
 
+    installed(monkeypatch, "rey_loader")
     ctx = build_ctx_from_path(config_path, app_name="rey_loader")
 
     assert [workflow["name"] for workflow in ctx.workflows] == [

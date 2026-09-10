@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from tests.support.installed_applications import installed
 import yaml
 
 from rey_lib.config.config_context import build_ctx_from_path
@@ -44,7 +46,7 @@ def environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def ctx(tmp_path: Path) -> Any:
+def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     config = tmp_path / "config"
     config.mkdir()
     (config / "config.yaml").write_text(yaml.safe_dump({
@@ -55,7 +57,9 @@ def ctx(tmp_path: Path) -> Any:
             {"name": KEY_VAR, "env_var": KEY_VAR},
             {"name": HOST_VAR, "env_var": HOST_VAR},
         ],
-        "apps": [{"name": "test_app"}],
+        # app_path is installation-owned and required: a Python application is
+        # never located from its package metadata.
+        "apps": [{"name": "test_app", "app_path": "/apps/test_app"}],
         "connections": [{
             "name": "primary",
             "provider": "postgres",
@@ -74,6 +78,7 @@ def ctx(tmp_path: Path) -> Any:
         "logging": {"level": "DEBUG", "token": f"env.{KEY_VAR}"},
         "messaging": {"user": "someone", "env": {"password": PASSWORD_VAR}},
     }), encoding="utf-8")
+    installed(monkeypatch, "test_app")
     return build_ctx_from_path(config / "config.yaml", app_name="test_app")
 
 

@@ -20,11 +20,15 @@ from tests.conftest import recorded_run  # noqa: F401  (fixture)
 def _recorded_run(recorded_run) -> None:  # noqa: F811
     """Every test here crosses the launch boundary, which records a run."""
 
+from tests.support.installed_applications import installed
 from rey_lib.config.bootstrap import build_ctx_for_app
 from rey_lib.errors.error_utils import ConfigError
 
 
-def test_build_ctx_for_app_loads_shared_installation_configs(tmp_path: Path) -> None:
+def test_build_ctx_for_app_loads_shared_installation_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project_root = tmp_path / "apps" / "sample_app"
     config_root = tmp_path / "development" / "installations" / "ccc"
     app_dir = config_root / "apps"
@@ -56,10 +60,13 @@ def test_build_ctx_for_app_loads_shared_installation_configs(tmp_path: Path) -> 
     (shared_dir / "app_registry.yaml").write_text(
         "apps:\n"
         "  - name: sample_app\n"
-        "    enabled: true\n",
+        "    enabled: true\n"
+        # Installation-owned and required; never taken from the package.
+        f"    app_path: {project_root}\n",
         encoding="utf-8",
     )
 
+    installed(monkeypatch, "sample_app")
     ctx = build_ctx_for_app(config_root / "config.yaml", "sample_app", project_root)
 
     assert ctx.installation.name == "ccc"
