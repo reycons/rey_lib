@@ -26,13 +26,13 @@ once at its construction.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from rey_lib.encryption import sha256_text
 from rey_lib.ai import (
     AIError,
     AIOutputSpec,
@@ -323,8 +323,13 @@ def _inline_contract(text: str) -> Contract:
 
 
 def _hashed(text: str) -> str:
-    """A stable content hash, as the audit trail records one."""
-    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    """A stable content hash, as the audit trail records one.
+
+    Through the one owner of plain SHA-256. The digest is identical either way;
+    what changes is that there is one place a stored hash can be reproduced
+    from, and the encoding is named there rather than repeated at each caller.
+    """
+    return sha256_text(text or "")
 
 
 def _evaluation_payload(input_text: str) -> Any:
