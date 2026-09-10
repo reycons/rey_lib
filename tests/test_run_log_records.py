@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.workflow_publication import prepared
+
 from tests.conftest import make_db_run_log, start_test_run
 
 from rey_lib.logs import (
@@ -470,7 +472,8 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     def handler(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
         return None
 
-    result = run_workflow(ctx, run_log, workflow, {"p1": handler, "p2": handler})
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler, "p2": handler})
     assert result.status == "success"
 
     records = _read(Path(run_log.path()))
@@ -519,7 +522,8 @@ def test_workflow_declaring_the_retired_restore_key_is_rejected(run_log,
         ),
     ):
         with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
-            run_workflow(ctx, run_log, workflow, {"p1": lambda *_: None})
+            _wf, _ctx = prepared(workflow, ctx)
+            run_workflow(_ctx, run_log, _wf, {"p1": lambda *_: None})
 
 
 
@@ -541,7 +545,8 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
     def handler(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
         seen_steps.append(current_step() or {})
 
-    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "success"
     assert seen_steps == [{
@@ -571,7 +576,8 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
                 _run: object) -> None:
         log_run_record(run_log, "ROW_COUNT", count_name="created", count=2)
 
-    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "success"
     records = _read(Path(run_log.path()))
@@ -606,7 +612,8 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     def handler(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
         raise RuntimeError("load failed password=hunter2 token=abc123")
 
-    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "failed"
     records = _read(Path(run_log.path()))
@@ -657,7 +664,8 @@ def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> 
     def handler(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
         write_file(tmp_path / "ctx.json", {"ok": True}, "JSON")
 
-    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "success"
     records = _read(Path(run_log.path()))
@@ -685,7 +693,8 @@ def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -
     def handler(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> SimpleNamespace:
         return SimpleNamespace(status="failed", detail="validation failed")
 
-    result = run_workflow(ctx, run_log, workflow, {"p1": handler})
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "failed"
     records = _read(Path(run_log.path()))
@@ -872,10 +881,11 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
                            target_path=str(tmp_path / "done.csv"))
         return None
 
-    result = run_workflow(ctx, run_log, {
+    _wf, _ctx = prepared({
         "name": "wf", "processes": {"p1": {}},
         "steps": [{"id": "s1", "label": "One", "process": "p1"}],
-    }, {"p1": handler})
+    }, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
     assert result.status == "success"
 
     records = _read(Path(run_log.path()))

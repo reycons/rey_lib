@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from tests.support.workflow_publication import prepared
+
 from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.workflow import RunContext, StepResult, WorkflowError, run_workflow
@@ -58,7 +60,8 @@ def test_dispatch_by_process_name_reused_across_steps(run_log) -> None:
         ],
     }
 
-    run = run_workflow(object(), run_log, workflow, {"git_commit": git_commit, "export": export})
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, {"git_commit": git_commit, "export": export})
 
     assert run.status == "success"
     assert [o.process for o in run.outcomes] == ["export", "git_commit", "git_commit"]
@@ -81,7 +84,8 @@ def test_dispatch_ignores_labels(run_log) -> None:
             {"id": "b", "label": "Another Human Label", "process": "p"},
         ],
     }
-    run_workflow(object(), run_log, workflow, {"p": handler})
+    _wf, _ctx = prepared(workflow, None)
+    run_workflow(_ctx, run_log, _wf, {"p": handler})
     assert len(hits) == 2
 
 
@@ -103,7 +107,8 @@ def test_effective_config_merges_step_over_process(run_log) -> None:
         "steps": [{"id": "s", "label": "S", "process": "p",
                    "config": {"b": 9, "nested": {"y": 20, "z": 30}}}],
     }
-    run_workflow(object(), run_log, workflow, {"p": handler})
+    _wf, _ctx = prepared(workflow, None)
+    run_workflow(_ctx, run_log, _wf, {"p": handler})
     assert seen == {"a": 1, "b": 9, "nested": {"x": 1, "y": 20, "z": 30}}
 
 
@@ -121,7 +126,8 @@ def test_workflow_tokens_resolve_into_process_config(run_log) -> None:
         "processes": {"p": {"output_root": "{ddl_root}", "repo_root": "{ddl_root}"}},
         "steps": [{"id": "s", "label": "S", "process": "p"}],
     }
-    run_workflow(object(), run_log, workflow, {"p": handler})
+    _wf, _ctx = prepared(workflow, None)
+    run_workflow(_ctx, run_log, _wf, {"p": handler})
     # Local {ddl_root} expanded; global {data} preserved for the ctx path resolver.
     assert seen["output_root"] == "{data}/rey_db_admin/database_ddl"
     assert seen["repo_root"] == "{data}/rey_db_admin/database_ddl"
@@ -146,7 +152,8 @@ def test_dry_run_skips_apply_only_process(run_log) -> None:
         "steps": [{"id": "lint", "label": "L", "process": "lint"},
                   {"id": "recreate", "label": "R", "process": "recreate"}],
     }
-    run = run_workflow(object(), run_log, workflow, {"lint": handler, "recreate": handler},
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, {"lint": handler, "recreate": handler},
                        apply=False)
     assert [o.status for o in run.outcomes] == ["ok", "skipped"]
     assert ran == ["lint"]
@@ -167,7 +174,8 @@ def test_dry_run_skips_apply_only_from_step_override(run_log) -> None:
                   {"id": "after", "label": "A", "process": "export",
                    "config": {"apply_only": True}}],
     }
-    run = run_workflow(object(), run_log, workflow, {"export": handler}, apply=False)
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, {"export": handler}, apply=False)
     assert [o.status for o in run.outcomes] == ["ok", "skipped"]
     assert ran == ["export"]
 
@@ -182,7 +190,8 @@ def test_single_step_only_runs_matching_id(run_log) -> None:
                   {"id": "sb", "label": "B", "process": "b"}],
     }
     registry = {"a": lambda *_: ran.append("a"), "b": lambda *_: ran.append("b")}
-    run = run_workflow(object(), run_log, workflow, registry, only="sb")
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, registry, only="sb")
     assert ran == ["b"]
     assert [o.id for o in run.outcomes] == ["sb"]
 
@@ -196,7 +205,8 @@ def test_step_id_required(run_log) -> None:
     workflow = {"name": "w", "processes": {"p": {}},
                 "steps": [{"label": "S", "process": "p"}]}
     with pytest.raises(WorkflowError, match="missing required 'id'"):
-        run_workflow(object(), run_log, workflow, {"p": lambda *_: None})
+        _wf, _ctx = prepared(workflow, None)
+        run_workflow(_ctx, run_log, _wf, {"p": lambda *_: None})
 
 
 def test_undefined_process_fails_closed(run_log) -> None:
@@ -204,15 +214,22 @@ def test_undefined_process_fails_closed(run_log) -> None:
     workflow = {"name": "w", "processes": {"p": {}},
                 "steps": [{"id": "s", "label": "S", "process": "missing"}]}
     with pytest.raises(WorkflowError, match="undefined process"):
-        run_workflow(object(), run_log, workflow, {"p": lambda *_: None})
+        _wf, _ctx = prepared(workflow, None)
+        run_workflow(_ctx, run_log, _wf, {"p": lambda *_: None})
 
 
 def test_process_without_registered_handler_fails_closed(run_log) -> None:
-    """A process with no handler in this app's registry fails closed."""
+    """A published implementation the app's catalog does not hold fails closed.
+
+    Publication is what an author reads; the catalog is what the application
+    approves for invocation. A gap between them is the application's to close,
+    never something the engine resolves by importing a name.
+    """
     workflow = {"name": "w", "processes": {"p": {}},
                 "steps": [{"id": "s", "label": "S", "process": "p"}]}
-    with pytest.raises(WorkflowError, match="no registered handler"):
-        run_workflow(object(), run_log, workflow, {})
+    with pytest.raises(WorkflowError, match="approved implementation catalog"):
+        _wf, _ctx = prepared(workflow, None)
+        run_workflow(_ctx, run_log, _wf, {})
 
 
 def test_handler_error_stops_run_fail_closed(run_log) -> None:
@@ -232,7 +249,8 @@ def test_handler_error_stops_run_fail_closed(run_log) -> None:
         "steps": [{"id": "s1", "label": "1", "process": "boom"},
                   {"id": "s2", "label": "2", "process": "after"}],
     }
-    run = run_workflow(object(), run_log, workflow, {"boom": boom, "after": after})
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, {"boom": boom, "after": after})
     assert run.status == "failed"
     assert run.outcomes[-1].status == "failed"
     # The outcome carries the safe message, which names the workflow and the
@@ -258,7 +276,8 @@ def test_retired_restore_mappings_key_is_rejected(run_log) -> None:
     }
 
     with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
-        run_workflow(object(), run_log, workflow, {"noop": lambda *_: None})
+        _wf, _ctx = prepared(workflow, None)
+        run_workflow(_ctx, run_log, _wf, {"noop": lambda *_: None})
 
 
 def test_retired_key_is_rejected_before_any_step_runs(run_log) -> None:
@@ -272,7 +291,8 @@ def test_retired_key_is_rejected_before_any_step_runs(run_log) -> None:
     }
 
     with pytest.raises(WorkflowError, match="retired key"):
-        run_workflow(object(), run_log, workflow, {"noop": handler})
+        _wf, _ctx = prepared(workflow, None)
+        run_workflow(_ctx, run_log, _wf, {"noop": handler})
 
     assert calls == []
 
@@ -285,7 +305,8 @@ def test_workflow_without_the_retired_key_runs_normally(run_log) -> None:
         "steps": [{"id": "s1", "label": "S1", "process": "noop"}],
     }
 
-    run = run_workflow(object(), run_log, workflow, {"noop": handler})
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, {"noop": handler})
 
     assert run.status == "success"
     assert len(calls) == 1
@@ -308,7 +329,8 @@ def test_disabled_workflow_is_refused_without_raising(run_log) -> None:
     def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
         calls.append("ran")
 
-    run = run_workflow(object(), run_log, workflow, {"p": handler})
+    _wf, _ctx = prepared(workflow, None)
+    run = run_workflow(_ctx, run_log, _wf, {"p": handler})
 
     assert run.status == "refused"
     assert run.status != "success"
@@ -325,7 +347,8 @@ def test_a_disabled_workflow_is_refused_before_its_definition_is_parsed(run_log)
         "steps": [{"label": "no id here"}],
     }
 
-    assert run_workflow(object(), run_log, workflow, {}).status == "refused"
+    _wf, _ctx = prepared(workflow, None)
+    assert run_workflow(_ctx, run_log, _wf, {}).status == "refused"
 
 
 def test_a_workflow_without_an_enabled_key_still_runs(run_log) -> None:
@@ -340,9 +363,11 @@ def test_a_workflow_without_an_enabled_key_still_runs(run_log) -> None:
         "processes": {"p": {}},
         "steps": [{"id": "s", "process": "p"}],
     }
-    assert run_workflow(object(), run_log, workflow, {"p": handler}).status == "success"
+    _wf, _ctx = prepared(workflow, None)
+    assert run_workflow(_ctx, run_log, _wf, {"p": handler}).status == "success"
     assert calls == ["ran"]
-    assert run_workflow(object(), run_log, {**workflow, "enabled": True}, {"p": handler}
+    _wf, _ctx = prepared({**workflow, "enabled": True}, None)
+    assert run_workflow(_ctx, run_log, _wf, {"p": handler}
     ).status == "success"
 
 
@@ -391,8 +416,9 @@ def test_missing_handler_writes_failure_evidence_before_raising(
         ],
     }
 
-    with pytest.raises(WorkflowError, match="no registered handler"):
-        run_workflow(ctx, run_log, workflow, {})
+    with pytest.raises(WorkflowError, match="approved implementation catalog"):
+        _wf, _ctx = prepared(workflow, ctx)
+        run_workflow(_ctx, run_log, _wf, {})
 
     records = _run_log_records(tmp_path)
     types = [record.get("record_type") for record in records]
@@ -402,13 +428,13 @@ def test_missing_handler_writes_failure_evidence_before_raising(
     complete = next(r for r in records if r.get("record_type") == "RUN_COMPLETE")
     assert complete["status"] == "failed"
     assert complete["failed_step_id"] == "reduce_source_files"
-    assert "no registered handler" in complete["failure_message"]
+    assert "approved implementation catalog" in complete["failure_message"]
 
     failure = next(
         r
         for r in records
         if r.get("record_type") not in {"RUN_START", "RUN_COMPLETE"}
-        and "no registered handler" in json.dumps(r)
+        and "approved implementation catalog" in json.dumps(r)
     )
     assert failure["error_message"]["error_type"] == "WorkflowError"
     assert failure["error_message"]["process"] == "prepare_rule_set_inputs"
@@ -422,7 +448,8 @@ def test_undefined_process_writes_failure_evidence_before_raising(run_log,
     workflow = {"name": "w", "processes": {}, "steps": [{"id": "s", "process": "nope"}]}
 
     with pytest.raises(WorkflowError, match="undefined process"):
-        run_workflow(ctx, run_log, workflow, {"nope": lambda *a: None})
+        _wf, _ctx = prepared(workflow, ctx)
+        run_workflow(_ctx, run_log, _wf, {"nope": lambda *a: None})
 
     complete = next(
         r for r in _run_log_records(tmp_path) if r.get("record_type") == "RUN_COMPLETE"
@@ -437,9 +464,8 @@ def test_disabled_workflow_is_recorded_through_the_normal_run_path(run_log,
     ctx = _log_ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
-    run = run_workflow(
-        ctx,
-        run_log, {"name": "w", "enabled": False, "processes": {}, "steps": []},
+    _wf, _ctx = prepared({"name": "w", "enabled": False, "processes": {}, "steps": []}, ctx)
+    run = run_workflow(_ctx, run_log, _wf,
         {},
     )
 

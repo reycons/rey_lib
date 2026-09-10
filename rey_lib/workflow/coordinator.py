@@ -259,6 +259,7 @@ def run_workflow(
         return _refused_disabled_workflow(ctx, run_log, name, apply=apply, metadata=metadata)
     tokens = _resolve_tokens(_get(workflow, "tokens"))
     processes = _to_mapping(_get(workflow, "processes"))
+    owner = str(_get(workflow, "app", "") or "")
     steps = _as_list(_get(workflow, "steps"))
 
     # Extract and structurally validate every step's identity up front so step
@@ -341,8 +342,9 @@ def run_workflow(
                     f"'{process}'. Define it under workflow.processes."
                 ),
             )
-        handler = registry.get(process)
-        if handler is None:
+        declared = _to_mapping(processes.get(process))
+        implementation = str(declared.get("implementation") or "")
+        if not implementation:
             raise _pre_execution_failure(
                 ctx,
                 run_log, run,
@@ -351,16 +353,70 @@ def run_workflow(
                 process=process,
                 sequence=sequence + 1,
                 message=(
-                    f"workflow '{name}': process '{process}' has no registered "
-                    f"handler in this app."
+                    f"workflow '{name}': process '{process}' names no "
+                    "'implementation'. A process is a declaration binding a "
+                    "name to a published operation."
                 ),
             )
 
-        effective = _expand_config(
-            _deep_merge(_to_mapping(processes.get(process)),
-                        _to_mapping(_get(step_def, "config"))),
-            tokens,
-        )
+        operation = _published_operation(ctx, owner, implementation)
+        if operation is None:
+            raise _pre_execution_failure(
+                ctx,
+                run_log, run,
+                step_id=step_id,
+                label=label,
+                process=process,
+                sequence=sequence + 1,
+                message=(
+                    f"workflow '{name}': process '{process}' names "
+                    f"implementation '{implementation}', which application "
+                    f"'{owner}' does not publish."
+                ),
+            )
+
+        handler = registry.get(implementation)
+        if handler is None:
+            # Published but not approved for invocation. The catalog is the
+            # application's own answer and the publication is what an author
+            # reads; a gap between them is the application's to close, never
+            # something to resolve by importing a name.
+            raise _pre_execution_failure(
+                ctx,
+                run_log, run,
+                step_id=step_id,
+                label=label,
+                process=process,
+                sequence=sequence + 1,
+                message=(
+                    f"workflow '{name}': implementation '{implementation}' is "
+                    f"published by '{owner}' but is not in its approved "
+                    "implementation catalog."
+                ),
+            )
+
+        # The engine's own vocabulary is read from the merged declaration and
+        # then removed. apply_only says how the engine treats a step; it is not
+        # configuration the application asked for, and passing it down would
+        # make every published contract declare it.
+        merged = _deep_merge(_to_mapping(declared),
+                             _to_mapping(_get(step_def, "config")))
+        apply_only = bool(merged.get("apply_only"))
+        effective = _expand_config(_declared_config(merged), tokens)
+
+        # Validation precedes dispatch, so an implementation never receives
+        # configuration its published contract did not declare.
+        refusal = _contract_refusal(operation, effective, name, process)
+        if refusal:
+            raise _pre_execution_failure(
+                ctx,
+                run_log, run,
+                step_id=step_id,
+                label=label,
+                process=process,
+                sequence=sequence + 1,
+                message=refusal,
+            )
 
         sequence += 1
         step_name = label or step_id
@@ -381,7 +437,7 @@ def run_workflow(
             # and result evidence belongs one level beneath that durable record.
             run_log.enter()
 
-            if not apply and bool(effective.get("apply_only")):
+            if not apply and apply_only:
                 log_step_end(run_log, step_name, "skipped", message="dry-run")
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "skipped", "dry-run")
@@ -570,6 +626,113 @@ def _resolve_step_index(
             f"(matches {len(matches)} steps)."
         )
     return matches[0]
+
+
+# ---------------------------------------------------------------------------
+# Published contract
+# ---------------------------------------------------------------------------
+
+#: The key a process binds to a published operation. Declarative membership: a
+#: name, resolved through the application's catalog, and never a callable
+#: reference or an import path.
+_IMPLEMENTATION = "implementation"
+
+#: Engine vocabulary a process may carry, which is not part of any
+#: application's published parameter contract.
+_ENGINE_KEYS = frozenset({_IMPLEMENTATION, "apply_only", "enabled", "name"})
+
+
+def _declared_config(declared: Mapping[str, Any]) -> dict[str, Any]:
+    """The process defaults, without the engine's own vocabulary.
+
+    ``implementation`` and ``apply_only`` say how the engine treats a step. They
+    are not configuration the application asked for, and passing them down would
+    make every published contract declare them.
+    """
+    return {
+        key: value for key, value in declared.items() if key not in _ENGINE_KEYS
+    }
+
+
+def _published_operation(ctx: Any, owner: str, implementation: str) -> Any:
+    """The operation an application publishes under that key, or None.
+
+    Read from ``ctx.applications`` -- the objects the configuration load built
+    from what each installed application published. The engine has no catalogue
+    of its own and asks no application directly.
+    """
+    if not owner:
+        return None
+    for application in getattr(ctx, "applications", None) or ():
+        if getattr(application, "name", None) != owner:
+            continue
+        for operation in getattr(application, "workflow_operations", ()) or ():
+            if getattr(operation, "name", None) == implementation:
+                return operation
+        return None
+    return None
+
+
+def _contract_refusal(
+    operation: Any,
+    effective: Mapping[str, Any],
+    workflow: str,
+    process: str,
+) -> str:
+    """Why this configuration does not satisfy the published contract, or ''.
+
+    Two rules, both fail-closed. Configuration the contract does not declare is
+    refused rather than passed through, because an implementation that silently
+    receives an unknown key is how a typo becomes a setting nobody applied. A
+    declared parameter marked required must be present.
+
+    What a value *means* is not checked here. Publication says a parameter
+    exists, is required and which values are valid; the implementation still
+    owns what a name resolves to.
+    """
+    declared = {
+        str(getattr(parameter, "name", "")): parameter
+        for parameter in getattr(operation, "parameters", ()) or ()
+    }
+    supplied = set(_flattened(effective))
+
+    undeclared = sorted(supplied - set(declared))
+    if undeclared:
+        return (
+            f"workflow '{workflow}': process '{process}' supplies "
+            f"{', '.join(repr(one) for one in undeclared)}, which "
+            f"implementation '{getattr(operation, 'name', '')}' does not "
+            "declare."
+        )
+
+    missing = sorted(
+        name for name, parameter in declared.items()
+        if getattr(parameter, "required", False) and name not in supplied
+    )
+    if missing:
+        return (
+            f"workflow '{workflow}': process '{process}' is missing required "
+            f"{', '.join(repr(one) for one in missing)} for implementation "
+            f"'{getattr(operation, 'name', '')}'."
+        )
+    return ""
+
+
+def _flattened(config: Mapping[str, Any], prefix: str = "") -> list[str]:
+    """Every configured key, nested ones written as ``parent.child``.
+
+    A published parameter names one setting. ``target.connection`` is the name
+    of a setting whose value happens to sit inside a mapping, so a contract can
+    declare it without the declaration having to be flat.
+    """
+    names: list[str] = []
+    for key, value in config.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, Mapping):
+            names.extend(_flattened(value, prefix=f"{name}."))
+        else:
+            names.append(name)
+    return names
 
 
 # ---------------------------------------------------------------------------
