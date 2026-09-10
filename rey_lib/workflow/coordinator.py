@@ -260,6 +260,9 @@ def run_workflow(
     tokens = _resolve_tokens(_get(workflow, "tokens"))
     processes = _to_mapping(_get(workflow, "processes"))
     owner = str(_get(workflow, "app", "") or "")
+    # Read once, and refused here rather than at the first step: a context
+    # without applications is a boundary failure, not a workflow defect.
+    applications = _require_applications(ctx, name)
     steps = _as_list(_get(workflow, "steps"))
 
     # Extract and structurally validate every step's identity up front so step
@@ -359,7 +362,7 @@ def run_workflow(
                 ),
             )
 
-        operation = _published_operation(ctx, owner, implementation)
+        operation = _published_operation(applications, owner, implementation)
         if operation is None:
             raise _pre_execution_failure(
                 ctx,
@@ -654,16 +657,40 @@ def _declared_config(declared: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _published_operation(ctx: Any, owner: str, implementation: str) -> Any:
+def _require_applications(ctx: Any, workflow: str) -> tuple[Any, ...]:
+    """The canonical applications, or a refusal naming the invariant.
+
+    **Any execution path that runs a workflow must have canonical
+    ``ctx.applications`` available.** Workflow capability is resolved from the
+    owning ``Application``; there is no fallback registry and nothing is
+    recovered by inspecting Python.
+
+    Absent is a boundary failure and says so here. Left to fall through it would
+    surface as an application that publishes nothing, which reads as a
+    configuration mistake in the workflow rather than a context that was never
+    built by the configuration load.
+    """
+    applications = getattr(ctx, "applications", None)
+    if applications is None:
+        raise WorkflowError(
+            f"workflow '{workflow}': ctx.applications is missing. A workflow "
+            "resolves its published operations from the canonical "
+            "applications, so a context without them was not built by the "
+            "configuration load."
+        )
+    return tuple(applications)
+
+
+def _published_operation(applications: tuple[Any, ...], owner: str, implementation: str) -> Any:
     """The operation an application publishes under that key, or None.
 
-    Read from ``ctx.applications`` -- the objects the configuration load built
-    from what each installed application published. The engine has no catalogue
-    of its own and asks no application directly.
+    Read from the canonical applications -- the objects the configuration load
+    built from what each installed application published. The engine has no
+    catalogue of its own and asks no application directly.
     """
     if not owner:
         return None
-    for application in getattr(ctx, "applications", None) or ():
+    for application in applications:
         if getattr(application, "name", None) != owner:
             continue
         for operation in getattr(application, "workflow_operations", ()) or ():
@@ -696,7 +723,16 @@ def _contract_refusal(
     }
     supplied = set(_flattened(effective))
 
-    undeclared = sorted(supplied - set(declared))
+    # A declared name covers its own subtree. An application that publishes a
+    # block says it takes that block; requiring every leaf would make the
+    # contract a copy of one installation's current configuration, which is the
+    # drift publication exists to remove.
+    undeclared = sorted(
+        name for name in supplied
+        if not any(
+            name == one or name.startswith(f"{one}.") for one in declared
+        )
+    )
     if undeclared:
         return (
             f"workflow '{workflow}': process '{process}' supplies "
@@ -707,7 +743,10 @@ def _contract_refusal(
 
     missing = sorted(
         name for name, parameter in declared.items()
-        if getattr(parameter, "required", False) and name not in supplied
+        if getattr(parameter, "required", False)
+        and not any(
+            one == name or one.startswith(f"{name}.") for one in supplied
+        )
     )
     if missing:
         return (
@@ -723,7 +762,8 @@ def _flattened(config: Mapping[str, Any], prefix: str = "") -> list[str]:
 
     A published parameter names one setting. ``target.connection`` is the name
     of a setting whose value happens to sit inside a mapping, so a contract can
-    declare it without the declaration having to be flat.
+    declare it without the declaration having to be flat -- and an application
+    that publishes ``target`` instead has declared the whole block.
     """
     names: list[str] = []
     for key, value in config.items():
