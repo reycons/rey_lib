@@ -114,3 +114,57 @@ class TestIdentifiersAreNotValues:
             postgres_utils.bulk_insert(
                 None, "code", "file_stage", [{"a": 1}], ["a); DROP TABLE x --"]
             )
+
+
+class TestBatching:
+    """A six-figure load is handed over in pieces, not one burst.
+
+    An indexing run stages roughly 95,000 rows, 86% of them reference edges.
+    Sent as a single execute they are materialized as one parameter block and
+    pushed at the server uninterrupted, and everything sharing that server
+    waits behind them.
+    """
+
+    def test_a_small_load_still_travels_in_one_batch(self, core: _CoreConnection) -> None:
+        """Ordinary callers behave exactly as they did before batching."""
+        rows = [{"a": index} for index in range(10)]
+
+        inserted = postgres_utils.bulk_insert(None, "s", "t", rows, ["a"])
+
+        assert inserted == 10
+        assert [len(parameters) for _statement, parameters in core.executions] == [10]
+
+    def test_a_large_load_is_split(self, core: _CoreConnection) -> None:
+        """Every row still arrives, and no one execute carries them all."""
+        size = postgres_utils.BULK_INSERT_BATCH_SIZE
+        rows = [{"a": index} for index in range(size * 2 + 1)]
+
+        inserted = postgres_utils.bulk_insert(None, "s", "t", rows, ["a"])
+
+        sizes = [len(parameters) for _statement, parameters in core.executions]
+        assert inserted == size * 2 + 1
+        assert sum(sizes) == size * 2 + 1
+        assert max(sizes) <= size
+        assert len(sizes) == 3
+
+    def test_every_row_arrives_exactly_once_and_in_order(
+        self, core: _CoreConnection
+    ) -> None:
+        """Splitting must not drop, duplicate or reorder a row."""
+        rows = [{"a": index} for index in range(postgres_utils.BULK_INSERT_BATCH_SIZE + 7)]
+
+        postgres_utils.bulk_insert(None, "s", "t", rows, ["a"])
+
+        sent = [
+            row["a"]
+            for _statement, parameters in core.executions
+            for row in parameters
+        ]
+        assert sent == [row["a"] for row in rows]
+
+    def test_a_nonsense_batch_size_is_refused(self, core: _CoreConnection) -> None:
+        """Zero would loop forever rather than insert nothing."""
+        with pytest.raises(DatabaseError, match="batch_size must be positive"):
+            postgres_utils.bulk_insert(None, "s", "t", [{"a": 1}], ["a"], batch_size=0)
+
+        assert core.executions == []

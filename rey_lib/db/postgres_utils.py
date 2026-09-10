@@ -499,12 +499,20 @@ def execute_named_sql(
 # ---------------------------------------------------------------------------
 
 
+#: How many rows one bulk insert sends per execute. Chosen so that an ordinary
+#: load -- every caller in the estate except the code index -- still travels in
+#: one batch, while a six-figure load is handed over in pieces the server can
+#: interleave other work between.
+BULK_INSERT_BATCH_SIZE = 5000
+
+
 def bulk_insert(
     conn: Any,
     schema: str,
     table: str,
     rows: list[dict[str, Any]],
     columns: list[str],
+    batch_size: int = BULK_INSERT_BATCH_SIZE,
 ) -> int:
     """Insert many rows into one table in as few round trips as the driver allows.
 
@@ -520,8 +528,19 @@ def bulk_insert(
     NULL would both lose that and violate a NOT NULL column. Provider detail,
     decided in the provider.
 
-    This is one statement, not one per row, and it does not commit -- it takes
-    the same path ``execute_named_sql`` does and inherits the same behaviour.
+    Sent in batches, not one statement and not one per row. It does not commit
+    -- it takes the same path ``execute_named_sql`` does and inherits the same
+    behaviour.
+
+    **Why a batch size at all.** The estate stages roughly 95,000 rows in one
+    indexing run, 86% of them reference edges. Handed over as a single
+    execute, the whole set is materialized as one parameter block and pushed at
+    the server in one uninterruptible burst; the database is on the same host
+    as everything else here, so the rest of the estate waits on it. Batching
+    bounds the memory a load holds and leaves the server able to answer other
+    callers between batches. The default is generous enough that ordinary
+    loads, which are far smaller, still travel in a single batch and behave
+    exactly as they did.
 
     Args:
         conn: Open connection handle.
@@ -530,6 +549,7 @@ def bulk_insert(
         rows: Row dicts. Keys must include every entry of ``columns``; anything
             else is ignored. An empty list inserts nothing and is not an error.
         columns: Column names defining the insert order.
+        batch_size: How many rows travel per execute. Must be positive.
 
     Returns:
         How many rows were inserted.
@@ -538,6 +558,10 @@ def bulk_insert(
         DatabaseError: If an identifier is not a plain name, or the insert
             fails.
     """
+    if batch_size < 1:
+        raise DatabaseError(
+            f"bulk_insert: batch_size must be positive, got {batch_size}."
+        )
     if not rows:
         _logger.debug("bulk_insert: no rows to insert into %s.%s", schema, table)
         return 0
@@ -558,7 +582,9 @@ def bulk_insert(
         # Only the declared columns, in the declared order. A row carrying more
         # than it was asked for inserts what it was asked for.
         parameters = [{name: row[name] for name in columns} for row in rows]
-        core_connection(conn).execute(statement, parameters)
+        connection = core_connection(conn)
+        for start in range(0, len(parameters), batch_size):
+            connection.execute(statement, parameters[start:start + batch_size])
         return len(rows)
     except KeyError as exc:
         raise DatabaseError(
