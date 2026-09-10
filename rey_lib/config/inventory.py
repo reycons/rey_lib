@@ -56,11 +56,7 @@ def resolve_workflow_run_action(
             f"Workflow run action not found: {requested_app}/{requested_workflow}"
         )
 
-    actions = _workflow_run_actions(
-        ctx,
-        _named_entries(getattr(ctx, "apps", None)),
-        workflows,
-    )
+    actions = _workflow_run_actions(ctx, workflows)
     if not actions:
         raise ConfigError(
             f"Workflow run action not found: {requested_app}/{requested_workflow}"
@@ -112,11 +108,20 @@ def _workflow_entries(ctx: Any) -> list[dict[str, Any]]:
 
 def _workflow_run_actions(
     ctx: Any,
-    apps: list[dict[str, Any]],
     workflows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return normalized executable action metadata for workflows."""
-    app_by_name = {str(app.get("name")): app for app in apps if app.get("name")}
+    """Return normalized executable action metadata for workflows.
+
+    Capability is read from ``ctx.applications`` -- the objects the
+    configuration load built from what each installed application published.
+    The raw ``apps`` declaration carries membership and installation-owned
+    settings and no longer carries a command surface, so an action derived from
+    it would report an application as supporting nothing.
+    """
+    app_by_name = {
+        str(getattr(application, "name", "")): application
+        for application in getattr(ctx, "applications", None) or ()
+    }
     config_path = str(getattr(ctx, "config_path", ""))
     source_config = str(getattr(ctx, "config_path", "") or "")
     rows: list[dict[str, Any]] = []
@@ -164,8 +169,8 @@ def _workflow_run_actions(
                 "copyable_command": " ".join(command),
                 "app_name": app_name,
                 "workflow_name": workflow["name"],
-                "entry_point": str(app_entry.get("entry_point") or "main.py"),
-                "app_path": str(app_entry.get("app_path") or ""),
+                "entry_point": str(getattr(app_entry, "entry_point", "") or "main.py"),
+                "app_path": str(getattr(app_entry, "app_path", "") or ""),
                 "config_path": config_path,
                 "required_arguments": ["workflow"],
                 "optional_arguments": ["dry-run"] if resolved["dry_run"] else [],
@@ -201,7 +206,7 @@ def _workflow_command(
     config_path: str,
 ) -> list[str]:
     """Build the diagnostic CLI command for a workflow action."""
-    app_name = str(app_entry.get("name") or "")
+    app_name = str(getattr(app_entry, "name", "") or "")
     if app_name == "rey_loader":
         return [
             app_name,
@@ -221,22 +226,26 @@ def _workflow_command(
         config_path,
     ]
 
-def _supports_dry_run(app_entry: dict[str, Any]) -> bool:
-    """Return true when app CLI metadata exposes a dry-run flag."""
-    cli = app_entry.get("cli")
-    if not isinstance(cli, dict):
-        return False
+def _supports_dry_run(application: Any) -> bool:
+    """Return true when the application publishes a dry-run flag.
 
-    for parameter in cli.get("parameters") or []:
-        if isinstance(parameter, dict) and parameter.get("name") == "dry-run":
-            return True
-    for command in cli.get("commands") or []:
-        if not isinstance(command, dict):
-            continue
-        for parameter in command.get("parameters") or []:
-            if isinstance(parameter, dict) and parameter.get("name") == "dry-run":
-                return True
-    return False
+    Its own parameters or any command's: an application invoked without a
+    command word takes the first, and one with subcommands declares the flag on
+    the command that honours it.
+    """
+    if _declares_dry_run(getattr(application, "parameters", ()) or ()):
+        return True
+    return any(
+        _declares_dry_run(getattr(command, "parameters", ()) or ())
+        for command in getattr(application, "commands", ()) or ()
+    )
+
+
+def _declares_dry_run(parameters: Any) -> bool:
+    """Return true when one published parameter is the dry-run flag."""
+    return any(
+        str(getattr(parameter, "name", "")) == "dry-run" for parameter in parameters
+    )
 
 def _named_entries(value: Any) -> list[dict[str, Any]]:
     """Return normalized named entries from list or mapping config sections."""

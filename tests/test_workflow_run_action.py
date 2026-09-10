@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tests.support.installed_applications import installed
+from rey_lib.config.applications import build_applications
 from rey_lib.config.config_utils import Namespace, PathResolver, build_ctx_from_path
 from rey_lib.config.inventory import resolve_workflow_run_action
 from rey_lib.errors.error_utils import ConfigError
@@ -61,6 +62,23 @@ def _ctx() -> Namespace:
         }
     )
     ctx.paths = PathResolver({"root": "/tmp/install"})
+    # The command surface is published by the installed application, so the
+    # canonical objects are what a run action reads. The declaration keeps
+    # membership and app_path; its cli block here stands in for what the
+    # distribution registers.
+    object.__setattr__(ctx, "applications", build_applications(
+        ctx,
+        registrations={
+            "rey_loader": {
+                "name": "rey_loader",
+                "entry_point": "main.py",
+                "cli": {"parameters": [
+                    {"name": "workflow", "value_type": "string"},
+                    {"name": "dry-run", "value_type": "flag"},
+                ]},
+            }
+        },
+    ))
     return ctx
 
 
@@ -183,3 +201,39 @@ def test_an_unnamed_workflow_is_refused() -> None:
     """An empty identity is a caller error, not an empty search."""
     with pytest.raises(ConfigError, match="required"):
         resolve_workflow_run_action(_ctx(), "rey_loader", "")
+
+
+def test_capability_comes_from_the_published_application() -> None:
+    """Not from the apps declaration, which no longer carries a command surface.
+
+    The declaration owns membership and app_path; what an application can do is
+    published by its installed distribution. Reading capability from the
+    declaration reported every application as supporting nothing, which showed
+    up as a runner that offered no dry run.
+    """
+    ctx = _ctx()
+    # The declaration keeps its stand-in cli block; the published objects are
+    # replaced with one that declares no dry-run flag.
+    object.__setattr__(ctx, "applications", build_applications(
+        ctx,
+        registrations={"rey_loader": {"name": "rey_loader", "cli": {}}},
+    ))
+
+    action = resolve_workflow_run_action(ctx, "rey_loader", "load_only")
+
+    assert action["execution"]["dry_run"] is False
+
+
+def test_a_dry_run_flag_on_a_command_is_enough() -> None:
+    """An application with subcommands declares the flag where it is honoured."""
+    ctx = _ctx()
+    object.__setattr__(ctx, "applications", build_applications(
+        ctx,
+        registrations={"rey_loader": {"name": "rey_loader", "cli": {"commands": [
+            {"name": "run-workflow", "parameters": [{"name": "dry-run"}]},
+        ]}}},
+    ))
+
+    action = resolve_workflow_run_action(ctx, "rey_loader", "load_only")
+
+    assert action["execution"]["dry_run"] is True
