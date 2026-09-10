@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.config.config_utils import record_config_file_references
+from rey_lib.config.inventory import to_plain_data
 from rey_lib.errors.error_utils import build_safe_error_payload
 from rey_lib.logs import (
     bind_step,
@@ -721,7 +722,11 @@ def _contract_refusal(
         str(getattr(parameter, "name", "")): parameter
         for parameter in getattr(operation, "parameters", ()) or ()
     }
-    supplied = set(_flattened(effective))
+    # Through the one namespace-to-plain-data conversion. A resolved
+    # configuration nests Namespace objects rather than dicts, and a Namespace
+    # is not a Mapping, so walking the structure directly would read every
+    # nested block as a single leaf -- target instead of target.connection.
+    supplied = set(_flattened(to_plain_data(effective)))
 
     # A declared name covers its own subtree. An application that publishes a
     # block says it takes that block; requiring every leaf would make the

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.applications import (
     Application,
     ApplicationCommand,
@@ -245,6 +246,55 @@ class TestValidationPrecedesDispatch:
                 workflow({"ingest": {"implementation": "load",
                                      "file_selections": {"a": 1}}},
                          [{"id": "s", "process": "ingest"}]),
+                catalog([]),
+            )
+
+    def test_a_resolved_configuration_is_walked_to_its_leaves(
+        self, run_log
+    ) -> None:
+        """A loaded configuration nests Namespace objects, not dicts.
+
+        A Namespace is not a Mapping, so walking the structure directly reads
+        every nested block as one leaf -- `target` where the contract declares
+        `target.connection` -- and refuses configuration that is correct. These
+        assertions use the shape the configuration loader actually delivers,
+        which is what the dict-based ones could not show.
+        """
+        calls: list[Any] = []
+        run = run_workflow(
+            published(ApplicationCommand(
+                name="load",
+                parameters=(ApplicationCommandParameter(
+                    name="target.connection", required=True),),
+            )),
+            run_log,
+            workflow(
+                {"ingest": {"implementation": "load",
+                            "target": Namespace({"connection": "rey_apps"})}},
+                [{"id": "s", "process": "ingest"}],
+            ),
+            catalog(calls),
+        )
+
+        assert run.status == "success"
+
+    def test_a_nested_namespace_still_refuses_what_is_undeclared(
+        self, run_log
+    ) -> None:
+        """Reaching the leaves must not become accepting everything."""
+        with pytest.raises(WorkflowError, match=r"target\.typo"):
+            run_workflow(
+                published(ApplicationCommand(
+                    name="load",
+                    parameters=(ApplicationCommandParameter(
+                        name="target.connection"),),
+                )),
+                run_log,
+                workflow(
+                    {"ingest": {"implementation": "load",
+                                "target": Namespace({"typo": "rey_apps"})}},
+                    [{"id": "s", "process": "ingest"}],
+                ),
                 catalog([]),
             )
 
