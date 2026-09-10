@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from rey_lib.config.config_utils import parse_yaml
@@ -58,6 +58,7 @@ from rey_lib.repository_map.records import (
     RECORD_TYPE_FILE,
     RECORD_TYPE_REACHABILITY,
     RECORD_TYPE_SYMBOL,
+    dotted_identity,
 )
 from rey_lib.repository_map.writer import GENERATOR_VERSION, RepositoryMap
 
@@ -714,29 +715,10 @@ class _Evidence:
         )
 
 
-def dotted_identity(source_path: str, qualified_name: str) -> str:
-    """Return the dotted identity one structural record answers to.
-
-    The file's path becomes its dotted module -- its extension dropped and a
-    package ``__init__`` standing for the package itself -- and the symbol's
-    qualified name follows it. ``Owner.member`` is already inside
-    ``qualified_name``, so nothing here knows that a method has an owner.
-
-    One rule for every language. It names no extension and tries no
-    candidates, so a TypeScript identity resolves by the same arithmetic a
-    Python one does and neither has a code path of its own.
-
-    Args:
-        source_path: The path the declaration is written in.
-        qualified_name: The declaration's qualified name.
-
-    Returns:
-        The dotted identity, such as ``rey_lib.ai.ai.AI.execute``.
-    """
-    stem = PurePosixPath(source_path).with_suffix("")
-    if stem.name == "__init__":
-        stem = stem.parent
-    return f"{str(stem).replace('/', '.')}.{qualified_name}"
+# dotted_identity now lives beside the record it identifies, in records.py: the
+# code index stores it on every symbol, so the projection and the database
+# resolve an authored reference by the same arithmetic rather than two.
+# Imported above, and re-exported by that import for existing callers.
 
 
 # ---------------------------------------------------------------------------

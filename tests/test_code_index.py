@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from rey_lib.repository_map.code_index import CodeIndexWriter, IndexedRepository, index
+from rey_lib.repository_map.records import dotted_identity
 from rey_lib.repository_map.snapshot import CodeIndexSnapshot
 from rey_lib.repository_map.writer import RepositoryMap
 
@@ -53,6 +54,7 @@ def _file(path: str, language: str = "Python") -> dict[str, object]:
 
 
 def _symbol(path: str, name: str, owner: str = "") -> dict[str, object]:
+    qualified = f"{owner}.{name}" if owner else name
     return {
         "record_type": "symbol",
         "source_path": path,
@@ -62,7 +64,22 @@ def _symbol(path: str, name: str, owner: str = "") -> dict[str, object]:
         "symbol_kind": "function",
         "exported": True,
         "owner": owner,
-        "qualified_name": f"{owner}.{name}" if owner else name,
+        "qualified_name": qualified,
+        "end_line": 20,
+        "dotted_identity": dotted_identity(path, qualified),
+    }
+
+
+def _edge(path: str, target: str, kind: str = "call") -> dict[str, object]:
+    return {
+        "record_type": "dependency_edge",
+        "source_path": path,
+        "source_line": 12,
+        "source_column": 4,
+        "from": f"file:{path}",
+        "to": target,
+        "edge_kind": kind,
+        "evidence": "ast.Call",
     }
 
 

@@ -4,11 +4,18 @@ One implementation of :class:`CodeIndexWriter`. It fills the schema's staging
 tables and calls the schema's promotion procedure; it holds no privilege on
 storage and could not write a row there if it tried.
 
-**The schema owns atomicity, not this.** ``code.p_index_replace`` empties
+**The schema owns atomicity, not this.** ``code.p_publish`` validates, empties
 storage, repopulates it from staging and empties staging, all inside one call,
 so a failure anywhere leaves the previous index exactly as it was. Sequencing a
 wipe and a repopulate from here would put a visible half-index between two
 statements, and no amount of care in Python closes that window.
+
+**It declares what it is promoting, and promotes only the scan.** The authored
+architecture lives in the same schema under its own lifecycle; this writer
+never stages it and never replaces it. What it does have to answer for is that
+the scan it is publishing still satisfies every authored reference, and
+``p_publish`` refuses the promotion when it does not -- which is why the
+validation is a parameter of the call rather than a check made here.
 
 Staging is filled as ordinary inserts and deliberately needs no transaction:
 nothing reads it, and a half-filled staging table means nothing until a call
@@ -49,6 +56,11 @@ _FILE_COLUMNS = (
 _SYMBOL_COLUMNS = (
     "repository_key", "relative_path", "symbol_kind", "name",
     "qualified_name", "owner", "is_public", "start_line", "start_column",
+    "end_line", "dotted_identity",
+)
+_EDGE_COLUMNS = (
+    "repository_key", "relative_path", "source_line", "source_column",
+    "from_id", "to_reference", "edge_kind", "evidence",
 )
 
 
@@ -101,17 +113,29 @@ class CodeIndexDatabaseWriter:
                         }
                     )
 
+        edges: list[dict[str, Any]] = [
+            {"repository_key": entry.header["repository_key"], **edge}
+            for entry in indexed
+            for edge in entry.edges
+        ]
+
         self._stage("repository_stage", repositories, _REPOSITORY_COLUMNS)
         self._stage("file_stage", files, _FILE_COLUMNS)
         self._stage("symbol_stage", symbols, _SYMBOL_COLUMNS)
+        self._stage("edge_stage", edges, _EDGE_COLUMNS)
 
         logger.info(
-            "Staged %d repositories, %d files, %d symbols",
+            "Staged %d repositories, %d files, %d symbols, %d edges",
             len(repositories),
             len(files),
             len(symbols),
+            len(edges),
         )
-        self._call("p_index_replace")
+        # The scan side only. The authored architecture is not staged here and
+        # is therefore not replaced -- but every surviving realization is
+        # resolved against this scan before it goes live, so a rename that
+        # orphans one refuses the whole promotion.
+        self._call("p_publish", "true, false")
         logger.info("Promoted the staged scan to the live index")
 
     def clear(self) -> None:
@@ -129,7 +153,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("symbol_stage", "file_stage", "repository_stage"):
+        for table in ("edge_stage", "symbol_stage", "file_stage",
+                      "repository_stage"):
             self._adapter.execute_sql(
                 self._connection,
                 f"DELETE FROM {SCHEMA}.{table}",
@@ -157,12 +182,18 @@ class CodeIndexDatabaseWriter:
             self._connection, SCHEMA, table, rows, list(columns)
         )
 
-    def _call(self, procedure: str) -> None:
+    def _call(self, procedure: str, arguments: str = "") -> None:
         """Call one of the schema's write procedures.
 
         Args:
             procedure: The unqualified procedure name.
+            arguments: The argument list, already written as SQL. These are
+                literal declarations of what is being promoted, never values
+                taken from a scan, so there is nothing here to parameterize.
         """
         self._adapter.execute_sql(
-            self._connection, f"CALL {SCHEMA}.{procedure}()", {}, "no_return"
+            self._connection,
+            f"CALL {SCHEMA}.{procedure}({arguments})",
+            {},
+            "no_return",
         )

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from pathlib import PurePosixPath
 from typing import Any
 
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "SYMBOL_KIND_RE_EXPORT",
     "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
+    "dotted_identity",
     "matches_any_glob",
     "FileRecord",
     "ReferenceEdge",
@@ -175,6 +177,36 @@ def matches_any_glob(
     return any(fnmatchcase(value, pattern) for pattern in globs)
 
 
+def dotted_identity(source_path: str, qualified_name: str) -> str:
+    """Return the dotted identity one structural record answers to.
+
+    The file's path becomes its dotted module -- its extension dropped and a
+    package ``__init__`` standing for the package itself -- and the symbol's
+    qualified name follows it. ``Owner.member`` is already inside
+    ``qualified_name``, so nothing here knows that a method has an owner.
+
+    One rule for every language. It names no extension and tries no
+    candidates, so a TypeScript identity resolves by the same arithmetic a
+    Python one does and neither has a code path of its own.
+
+    It lives here, beside the record it identifies, because it is the value an
+    authored architecture reference is matched against -- in the projection,
+    and in the code index's own storage. A second implementation of it would be
+    a second answer to what a symbol is called.
+
+    Args:
+        source_path: The path the declaration is written in.
+        qualified_name: The declaration's qualified name.
+
+    Returns:
+        The dotted identity, such as ``rey_lib.ai.ai.AI.execute``.
+    """
+    stem = PurePosixPath(source_path).with_suffix("")
+    if stem.name == "__init__":
+        stem = stem.parent
+    return f"{str(stem).replace('/', '.')}.{qualified_name}"
+
+
 @dataclass(frozen=True)
 class SymbolRecord:
     """One syntax-confirmed declaration: top-level, or a method of a top-level class.
@@ -197,6 +229,10 @@ class SymbolRecord:
             a public member of a published owner, so a private helper on an
             exported class is not exported.
         owner: The declaring class, empty at top level.
+        end_line: Last line of the declaration, so a symbol is a span rather
+            than a point and can be retrieved without re-parsing its file.
+            Zero where the extractor cannot prove it, which is absent rather
+            than a guess.
     """
 
     source_path: str
@@ -206,6 +242,12 @@ class SymbolRecord:
     symbol_kind: str
     exported: bool = False
     owner: str = ""
+    end_line: int = 0
+
+    @property
+    def dotted_identity(self) -> str:
+        """Return the identity an architecture reference resolves against."""
+        return dotted_identity(self.source_path, self.qualified_name)
 
     @property
     def qualified_name(self) -> str:
@@ -243,6 +285,8 @@ class SymbolRecord:
             "exported": self.exported,
             "owner": self.owner,
             "qualified_name": self.qualified_name,
+            "end_line": self.end_line,
+            "dotted_identity": self.dotted_identity,
         }
 
 

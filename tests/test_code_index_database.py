@@ -74,8 +74,21 @@ def _indexed() -> list[IndexedRepository]:
                             "is_public": True,
                             "start_line": 10,
                             "start_column": 0,
+                            "end_line": 18,
+                            "dotted_identity": "db.connect",
                         }
                     ],
+                }
+            ],
+            edges=[
+                {
+                    "relative_path": "db.py",
+                    "source_line": 12,
+                    "source_column": 4,
+                    "from_id": "file:db.py",
+                    "to_reference": "psycopg.connect",
+                    "edge_kind": "call",
+                    "evidence": "ast.Call",
                 }
             ],
         )
@@ -94,7 +107,9 @@ class TestTheWriteBoundary:
         CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
 
         staged = {table for _schema, table, _count, _columns in adapter.inserts}
-        assert staged <= {"repository_stage", "file_stage", "symbol_stage"}
+        assert staged <= {
+            "repository_stage", "file_stage", "symbol_stage", "edge_stage",
+        }
 
         # Every statement either empties staging or calls a procedure. A
         # storage table named anywhere would mean the writer needs a privilege
@@ -111,7 +126,22 @@ class TestTheWriteBoundary:
         CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
 
         calls = [s for s in adapter.statements if s.startswith("CALL")]
-        assert calls == ["CALL code.p_index_replace()"]
+        assert calls == ["CALL code.p_publish(true, false)"]
+
+    def test_it_promotes_the_scan_and_never_the_architecture(self) -> None:
+        """The authored side is a different lifecycle and is not this writer's.
+
+        Declaring it explicitly is what makes the schema validate the scan
+        against the surviving architecture instead of guessing from whether
+        the authored staging tables happen to be empty.
+        """
+        adapter = _Adapter()
+        CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
+
+        assert "CALL code.p_publish(true, false)" in adapter.statements
+        staged = {table for _schema, table, _count, _columns in adapter.inserts}
+        assert "concept_stage" not in staged
+        assert "realization_stage" not in staged
 
     def test_staging_is_emptied_before_it_is_filled(self) -> None:
         """A previous run that staged and failed to promote must not survive.
@@ -123,20 +153,33 @@ class TestTheWriteBoundary:
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
+            "DELETE FROM code.edge_stage",
             "DELETE FROM code.symbol_stage",
             "DELETE FROM code.file_stage",
             "DELETE FROM code.repository_stage",
         ]
 
     def test_a_symbol_carries_the_keys_that_resolve_it(self) -> None:
-        """Staging holds natural keys; storage identity is minted by the schema."""
+        """Staging holds natural keys; storage identity is minted by the schema.
+
+        Named rather than pattern-matched. ``from_id`` is a scanned fact -- the
+        record id of the file an edge was written in -- and ends in ``_id``
+        without being identity the schema mints. What must never be staged is
+        a surrogate, because a caller that supplies one is choosing storage
+        identity for itself.
+        """
         adapter = _Adapter()
         CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
 
+        minted = {
+            "repository_id", "code_file_id", "code_symbol_id", "code_edge_id",
+            "concept_id", "parent_concept_id", "realization_id",
+        }
         columns = {table: cols for _s, table, _c, cols in adapter.inserts}
         assert columns["symbol_stage"][:2] == ["repository_key", "relative_path"]
+        assert columns["edge_stage"][:2] == ["repository_key", "relative_path"]
         for staged in columns.values():
-            assert not any(name.endswith("_id") for name in staged)
+            assert not minted.intersection(staged)
 
 
 class _FailingAdapter(_Adapter):
@@ -188,5 +231,6 @@ class TestPublicationIsAllOrNothing:
             "repository_stage",
             "file_stage",
             "symbol_stage",
+            "edge_stage",
         ]
-        assert adapter.statements[-1] == "CALL code.p_index_replace()"
+        assert adapter.statements[-1] == "CALL code.p_publish(true, false)"

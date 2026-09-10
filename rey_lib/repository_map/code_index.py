@@ -30,7 +30,11 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from rey_lib.logs.logging_setup import get_logger
-from rey_lib.repository_map.records import RECORD_TYPE_FILE, RECORD_TYPE_SYMBOL
+from rey_lib.repository_map.records import (
+    RECORD_TYPE_DEPENDENCY_EDGE,
+    RECORD_TYPE_FILE,
+    RECORD_TYPE_SYMBOL,
+)
 from rey_lib.repository_map.snapshot import CodeIndexSnapshot
 from rey_lib.repository_map.writer import RepositoryMap
 
@@ -70,19 +74,26 @@ class IndexedRepository:
         header: The repository's observed state -- revision, branch, working
             tree status, hashes.
         files: One entry per file, each carrying its own symbol rows.
+        edges: One entry per proved reference, naming the file it was written
+            in. Kept beside the files rather than under them: an edge is
+            attributed to a file but is not a property of one, and grouping it
+            underneath would suggest the extractor resolved an owner it did
+            not.
     """
 
-    __slots__ = ("repository", "header", "files")
+    __slots__ = ("repository", "header", "files", "edges")
 
     def __init__(
         self,
         repository: str,
         header: dict[str, Any],
         files: list[dict[str, Any]],
+        edges: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
         self.files = files
+        self.edges = edges if edges is not None else []
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -155,6 +166,35 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "is_public": record["exported"],
                 "start_line": record["source_line"],
                 "start_column": record["source_column"],
+                "end_line": record["end_line"],
+                "dotted_identity": record["dotted_identity"],
+            }
+        )
+
+    edges: list[dict[str, Any]] = []
+    for record in repository_map.records:
+        if record["record_type"] != RECORD_TYPE_DEPENDENCY_EDGE:
+            continue
+        if record["source_path"] not in files:
+            logger.warning(
+                "%s: edge at %s:%s names a file the inventory does not carry",
+                repository,
+                record["source_path"],
+                record["source_line"],
+            )
+            continue
+        edges.append(
+            {
+                "relative_path": record["source_path"],
+                "source_line": record["source_line"],
+                # A dependency_edge record drops its column on the way to
+                # JSONL, so the row carries what the record actually holds
+                # rather than a zero dressed up as a position.
+                "source_column": record.get("source_column", 0),
+                "from_id": record["from"],
+                "to_reference": record["to"],
+                "edge_kind": record["edge_kind"],
+                "evidence": record["evidence"],
             }
         )
 
@@ -171,4 +211,5 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
             "rules_hash": header["rules_hash"],
         },
         files=list(files.values()),
+        edges=edges,
     )

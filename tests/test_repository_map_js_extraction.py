@@ -337,6 +337,10 @@ def test_records_match_the_jsonl_shapes(tmp_path: Path) -> None:
         "exported": False,
         "owner": "",
         "qualified_name": "go",
+        # A one-line declaration starts and ends on the same line, which is a
+        # proved span and not a missing one.
+        "end_line": 1,
+        "dotted_identity": "pkg.small.go",
     }
     assert edge == {
         "record_type": "dependency_edge",
@@ -448,3 +452,109 @@ def test_an_abstract_signature_is_a_method(tmp_path: Path) -> None:
     assert [(m.qualified_name, m.symbol_kind) for m in methods] == [
         ("Base.render", SYMBOL_KIND_METHOD),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Spans.
+#
+# A symbol the tree can navigate to must be retrievable, and retrieving it
+# means knowing where it stops. The extractor already parses that -- every
+# tree-sitter node carries end_point beside the start_point the records use --
+# so the only question these ask is whether the *right* node was measured.
+#
+# Measuring the locating node instead of the declaring one is the failure that
+# looks like success: every symbol gets a span, and every span is one word
+# long. Each case below is one where those two nodes differ.
+# ---------------------------------------------------------------------------
+
+
+def test_a_multiline_class_spans_its_body_not_its_name(js_path: Path) -> None:
+    """The span of a class reaches its closing brace.
+
+    The node that locates a class is its identifier, whose own end is the end
+    of the name. A span equal to the start line would mean that node was
+    measured.
+    """
+    inventory = extract_symbols(js_path, "JavaScript")
+    declared = {symbol.name: symbol for symbol in inventory.symbols}
+
+    top = declared["TopClass"]
+    method = declared["method"]
+
+    assert top.end_line > top.source_line
+    # The class contains its own methods, so its span must cover theirs.
+    assert top.source_line <= method.source_line
+    assert method.end_line <= top.end_line
+
+
+def test_a_multiline_named_re_export_spans_its_statement(tmp_path: Path) -> None:
+    """A specifier is a fragment; the declaration is the export statement.
+
+    This is the case that passes by accident when the specifier is measured:
+    'Foo' resolves, carries a span, and that span covers the word 'Foo'. Only a
+    re-export written across several lines tells the two apart.
+    """
+    path = tmp_path / "reexport.ts"
+    path.write_text(
+        "export {\n"
+        "  Foo,\n"
+        "  Bar\n"
+        '} from "./module";\n',
+        encoding="utf-8",
+    )
+
+    declared = {s.name: s for s in extract_symbols(path, "TypeScript").symbols}
+
+    foo = declared["Foo"]
+    assert foo.symbol_kind == SYMBOL_KIND_RE_EXPORT
+    # Located on its own line, spanning to the statement's last.
+    assert foo.source_line == 2
+    assert foo.end_line == 4
+    assert declared["Bar"].source_line == 3
+    assert declared["Bar"].end_line == 4
+
+
+def test_a_global_publication_spans_what_it_publishes(tmp_path: Path) -> None:
+    """The assignment is the declaration; its left-hand side is only the name."""
+    path = tmp_path / "publish.js"
+    path.write_text(
+        "window.ReyThing = {\n"
+        "  run() {},\n"
+        "};\n",
+        encoding="utf-8",
+    )
+
+    published = [
+        symbol
+        for symbol in extract_symbols(path, "JavaScript").symbols
+        if symbol.symbol_kind == SYMBOL_KIND_GLOBAL_PUBLICATION
+    ]
+
+    assert len(published) == 1
+    assert published[0].source_line == 1
+    # Measuring window.ReyThing would stop on line 1.
+    assert published[0].end_line == 3
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "language"),
+    [("js_path", "JavaScript"), ("tsx_path", "TSX")],
+)
+def test_every_symbol_has_a_proven_span(
+    fixture_name: str,
+    language: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    """No symbol is span-less, and no span ends before it starts.
+
+    Swept across the whole fixture rather than a chosen symbol, because the
+    kinds that get missed are the ones nobody thought to assert.
+    """
+    path = request.getfixturevalue(fixture_name)
+    symbols = extract_symbols(path, language).symbols
+
+    assert symbols
+    spanless = [s.name for s in symbols if not s.end_line]
+    assert spanless == []
+    for symbol in symbols:
+        assert symbol.end_line >= symbol.source_line

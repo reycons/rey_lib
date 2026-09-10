@@ -145,11 +145,12 @@ def extract_js_symbols(
 
     symbols: list[SymbolRecord] = []
     for statement, inline_exported in _top_level_statements(root):
-        for name, node, kind in _declarations(statement):
+        for name, node, declaration, kind in _declarations(statement):
             symbols.append(
                 _symbol(
                     recorded_path,
                     node,
+                    declaration,
                     name,
                     kind,
                     exported=inline_exported or name in exported_names,
@@ -162,11 +163,12 @@ def extract_js_symbols(
             continue
         owner = _text(owner_node)
         owner_exported = inline_exported or owner in exported_names
-        for name, node, public in _methods(statement):
+        for name, node, declaration, public in _methods(statement):
             symbols.append(
                 _symbol(
                     recorded_path,
                     node,
+                    declaration,
                     name,
                     SYMBOL_KIND_METHOD,
                     # Published only when the owner is and the member is part
@@ -177,18 +179,26 @@ def extract_js_symbols(
                 )
             )
 
-    for name, node in _re_export_names(root):
-        symbols.append(
-            _symbol(recorded_path, node, name, SYMBOL_KIND_RE_EXPORT, exported=True)
-        )
-
-    # A window publication is a global publication, not an ES export, so
-    # 'exported' stays false unless the same name is also exported.
-    for name, node in _global_publications(root):
+    for name, node, declaration in _re_export_names(root):
         symbols.append(
             _symbol(
                 recorded_path,
                 node,
+                declaration,
+                name,
+                SYMBOL_KIND_RE_EXPORT,
+                exported=True,
+            )
+        )
+
+    # A window publication is a global publication, not an ES export, so
+    # 'exported' stays false unless the same name is also exported.
+    for name, node, declaration in _global_publications(root):
+        symbols.append(
+            _symbol(
+                recorded_path,
+                node,
+                declaration,
                 name,
                 SYMBOL_KIND_GLOBAL_PUBLICATION,
                 exported=name in exported_names,
@@ -239,7 +249,10 @@ def extract_js_references(
         and (callee := node.child_by_field_name("function")) is not None
     }
     # The left-hand side of a window publication is a declaration, not a use.
-    publication_ids = {node.id for _, node in _global_publications(root)}
+    # The locating node is what must be excluded here -- the assignment beside
+    # it is the declaration's extent, and excluding that would swallow the
+    # references written on its right.
+    publication_ids = {node.id for _, node, _declaration in _global_publications(root)}
 
     edges: list[ReferenceEdge] = []
     for node in nodes:
@@ -390,17 +403,33 @@ def _text(node: Node) -> str:
 def _symbol(
     recorded_path: str,
     node: Node,
+    declaration: Node,
     name: str,
     symbol_kind: str,
     *,
     exported: bool,
     owner: str = "",
 ) -> SymbolRecord:
-    """Build one symbol record located at a syntax node.
+    """Build one symbol record located at a syntax node, spanning its declaration.
+
+    Two nodes, because they answer two different questions. ``node`` says where
+    the name is written and is what ``record_id`` is built from, so it must
+    never move: every review decision keys on that id. ``declaration`` says how
+    far the thing itself extends, which is what a reader retrieves.
+
+    They are frequently different. The locating node of a class is its
+    identifier, and that identifier ends where the name ends, not where the
+    class body does. Passing one node for both would record a span one word
+    long and call it a declaration.
+
+    The span is proved from the parse tree and never estimated. This is the one
+    construction point for a JavaScript or TypeScript symbol, so the end line is
+    computed here and call sites only declare which node is the declaration.
 
     Args:
         recorded_path: Path to record on the symbol.
         node: Node giving the declaration position.
+        declaration: The enclosing declaration, giving the extent.
         name: Declared name.
         symbol_kind: One of the ``SYMBOL_KIND_*`` constants.
         exported: Whether the name is publicly reachable.
@@ -410,6 +439,7 @@ def _symbol(
         The symbol record.
     """
     line, column = node.start_point
+    end_line, _end_column = declaration.end_point
     return SymbolRecord(
         source_path=recorded_path,
         source_line=line + 1,
@@ -418,6 +448,7 @@ def _symbol(
         symbol_kind=symbol_kind,
         exported=exported,
         owner=owner,
+        end_line=end_line + 1,
     )
 
 
@@ -475,20 +506,30 @@ def _top_level_statements(root: Node) -> list[tuple[Node, bool]]:
     return statements
 
 
-def _declarations(statement: Node) -> list[tuple[str, Node, str]]:
+def _declarations(statement: Node) -> list[tuple[str, Node, Node, str]]:
     """Return the names one top-level statement declares.
 
     Args:
         statement: A top-level statement node.
 
     Returns:
-        Tuples of name, locating node and symbol kind. Empty when the
-        statement declares nothing.
+        Tuples of name, locating node, declaring node and symbol kind. Empty
+        when the statement declares nothing.
+
+        The locating node is the identifier and the declaring node is what it
+        names -- the statement for a function, class, interface, enum or type
+        alias, and the individual declarator for a variable, so that one
+        binding of a multi-name ``const`` spans its own initializer rather than
+        the whole statement.
     """
     kind = _DECLARATION_KINDS.get(statement.type)
     if kind is not None:
         name_node = statement.child_by_field_name("name")
-        return [(_text(name_node), name_node, kind)] if name_node is not None else []
+        return (
+            [(_text(name_node), name_node, statement, kind)]
+            if name_node is not None
+            else []
+        )
     if statement.type in _VARIABLE_STATEMENTS:
         declarations = []
         for declarator in statement.named_children:
@@ -498,19 +539,24 @@ def _declarations(statement: Node) -> list[tuple[str, Node, str]]:
             # A destructuring pattern binds several names; only a plain
             # identifier is recorded as one named declaration.
             if name_node is not None and name_node.type == "identifier":
-                declarations.append((_text(name_node), name_node, SYMBOL_KIND_VARIABLE))
+                declarations.append(
+                    (_text(name_node), name_node, declarator, SYMBOL_KIND_VARIABLE)
+                )
         return declarations
     return []
 
 
-def _methods(statement: Node) -> list[tuple[str, Node, bool]]:
+def _methods(statement: Node) -> list[tuple[str, Node, Node, bool]]:
     """Return the methods one class declares, with their visibility.
 
     Args:
         statement: A class or abstract class declaration.
 
     Returns:
-        Tuples of method name, locating node, and whether the member is public.
+        Tuples of method name, locating node, declaring node, and whether the
+        member is public. The declaring node is the member itself, so a
+        method's span is its own body rather than the class's.
+
         TypeScript members are public by default, so a member is non-public
         only when it says so -- an accessibility modifier of private or
         protected, or a #-prefixed name, which is private in JavaScript itself.
@@ -518,7 +564,7 @@ def _methods(statement: Node) -> list[tuple[str, Node, bool]]:
     body = statement.child_by_field_name("body")
     if body is None:
         return []
-    members: list[tuple[str, Node, bool]] = []
+    members: list[tuple[str, Node, Node, bool]] = []
     for member in body.named_children:
         if member.type not in _METHOD_MEMBERS:
             continue
@@ -534,7 +580,7 @@ def _methods(statement: Node) -> list[tuple[str, Node, bool]]:
             not (modifiers & {"private", "protected"})
             and name_node.type != "private_property_identifier"
         )
-        members.append((_text(name_node), name_node, public))
+        members.append((_text(name_node), name_node, member, public))
     return members
 
 
@@ -595,30 +641,43 @@ def _export_specifiers(statement: Node) -> list[Node]:
     return specifiers
 
 
-def _re_export_names(root: Node) -> list[tuple[str, Node]]:
+def _re_export_names(root: Node) -> list[tuple[str, Node, Node]]:
     """Return names this module republishes from another module.
 
     Args:
         root: The ``program`` node.
 
     Returns:
-        Pairs of published name and locating node. A star re-export is
-        recorded under the name '*'.
+        Triples of published name, locating node and declaring node. A star
+        re-export is recorded under the name '*'.
+
+        The declaring node is the whole ``export_statement``, never the
+        specifier. A specifier is a fragment of a declaration: in a re-export
+        written across several lines, the specifier for one name spans that
+        name alone, so a span taken from it would describe the identifier
+        instead of the statement that republishes it. The specifier stays the
+        locating node, because ``record_id`` is built from it.
     """
-    results: list[tuple[str, Node]] = []
+    results: list[tuple[str, Node, Node]] = []
     for statement, source in _export_clauses(root):
         if source is None:
             continue
         specifiers = _export_specifiers(statement)
         if not specifiers:
             # export * from "mod" republishes everything under one fact.
-            results.append(("*", statement))
+            results.append(("*", statement, statement))
             continue
         for specifier in specifiers:
             alias = specifier.child_by_field_name("alias")
             name = specifier.child_by_field_name("name")
             if name is not None:
-                results.append((_text(alias if alias is not None else name), specifier))
+                results.append(
+                    (
+                        _text(alias if alias is not None else name),
+                        specifier,
+                        statement,
+                    )
+                )
     return results
 
 
@@ -695,17 +754,21 @@ def _reexported_members(statement: Node) -> list[str]:
     return members
 
 
-def _global_publications(root: Node) -> list[tuple[str, Node]]:
+def _global_publications(root: Node) -> list[tuple[str, Node, Node]]:
     """Return every assignment that publishes onto the global object.
 
     Args:
         root: The ``program`` node.
 
     Returns:
-        Pairs of published name, such as window.ReyX, and the assigned
-        member expression node.
+        Triples of published name, such as window.ReyX, the assigned member
+        expression node, and the whole assignment.
+
+        The assignment is the declaring node because what is published is the
+        expression on its right: a span taken from the member expression would
+        cover ``window.ReyX`` and stop before the implementation it names.
     """
-    results: list[tuple[str, Node]] = []
+    results: list[tuple[str, Node, Node]] = []
     for node in _walk(root):
         if node.type != "assignment_expression":
             continue
@@ -714,7 +777,7 @@ def _global_publications(root: Node) -> list[tuple[str, Node]]:
             continue
         target = _dotted_name(left)
         if target is not None and js_is_global_rooted(target):
-            results.append((target, left))
+            results.append((target, left, node))
     return results
 
 

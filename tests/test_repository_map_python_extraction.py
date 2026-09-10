@@ -188,6 +188,8 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
         "name": "TopClass",
         "symbol_kind": SYMBOL_KIND_CLASS,
         "exported": True,
+        "end_line": 43,
+        "dotted_identity": "pkg.sample.TopClass",
         "owner": "",
         "qualified_name": "TopClass",
     }
@@ -386,3 +388,65 @@ def test_unparseable_python_names_the_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="broken.py"):
         extract_symbols(path, "Python")
+
+
+# ---------------------------------------------------------------------------
+# Spans.
+#
+# The same invariant the JS/TS extractor answers to: a symbol the tree can
+# navigate to has a proven span, and no span is guessed. Python's declarations
+# and methods come straight from ast end_lineno; the names published only
+# through __all__ have no declaration site of their own, so they span the
+# syntax that establishes them -- the import, or the __all__ assignment.
+# ---------------------------------------------------------------------------
+
+
+def test_every_symbol_has_a_proven_span(module_path: Path) -> None:
+    """No symbol is span-less, and no span ends before it starts.
+
+    Swept across the whole fixture rather than a chosen symbol. The kinds that
+    get missed are the ones nobody thought to assert -- export and re_export
+    were exactly that until spans were required of every language.
+    """
+    symbols = extract_symbols(module_path, "Python").symbols
+
+    assert symbols
+    assert [symbol.name for symbol in symbols if not symbol.end_line] == []
+    for symbol in symbols:
+        assert symbol.end_line >= symbol.source_line
+
+
+def test_a_multiline_declaration_spans_its_body(module_path: Path) -> None:
+    """A class reaches its last line, and contains the methods it declares."""
+    declared = {symbol.name: symbol for symbol in
+                extract_symbols(module_path, "Python").symbols}
+
+    top = declared["TopClass"]
+    assert top.end_line > top.source_line
+
+    methods = [s for s in declared.values() if s.owner == "TopClass"]
+    assert methods
+    for method in methods:
+        assert top.source_line <= method.source_line
+        assert method.end_line <= top.end_line
+
+
+def test_a_republished_import_spans_its_import_statement(tmp_path: Path) -> None:
+    """A re_export has no declaration here, so it spans what establishes it."""
+    path = tmp_path / "republish.py"
+    path.write_text(
+        "from .origin import (\n"
+        "    thing,\n"
+        ")\n"
+        "\n"
+        '__all__ = ["thing"]\n',
+        encoding="utf-8",
+    )
+
+    declared = {s.name: s for s in extract_symbols(path, "Python").symbols}
+
+    thing = declared["thing"]
+    assert thing.symbol_kind == SYMBOL_KIND_RE_EXPORT
+    assert thing.source_line == 1
+    # The whole parenthesised import, not just its first line.
+    assert thing.end_line == 3
