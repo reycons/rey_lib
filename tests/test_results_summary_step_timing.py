@@ -22,9 +22,14 @@ from rey_lib.logs.results_summary import (
 def _steps(*durations: Any) -> list[dict[str, Any]]:
     """Step entries with the given durations; None means the step was untimed."""
     return [
-        {"step_id": f"s{index}", "duration_ms": duration}
+        {"step_id": f"s{index}", "duration_ms": duration, "status": "ok"}
         for index, duration in enumerate(durations)
     ]
+
+
+def _skipped(step_id: str, duration_ms: int = 0) -> dict[str, Any]:
+    """One step that did not execute, but was still measured."""
+    return {"step_id": step_id, "duration_ms": duration_ms, "status": "skipped"}
 
 
 class TestTheBaseline:
@@ -169,5 +174,63 @@ def test_the_classification_never_says_why() -> None:
         "timed_steps", "median_duration_ms", "high_cost_step_ids", "classified",
     }
     assert set(steps[3]) == {
-        "step_id", "duration_ms", "duration_multiple_of_median", "is_high_cost",
+        "step_id", "duration_ms", "status",
+        "duration_multiple_of_median", "is_high_cost",
     }
+
+
+class TestSkippedStepsAreNotCostEvidence:
+    """A skipped step did not execute, so it is not a sample of execution cost.
+
+    Its duration stays on the entry as lifecycle evidence. What it must not do
+    is drag the baseline toward zero -- a dry run skips most of its steps, and
+    including them would declare everything that actually ran dominant.
+    """
+
+    def test_a_skipped_step_is_not_in_the_population(self) -> None:
+        steps = _steps(100, 100, 100) + [_skipped("s3")]
+
+        timing = _step_timing(steps)
+
+        assert timing["timed_steps"] == 3
+        assert timing["median_duration_ms"] == 100.0
+
+    def test_a_skipped_step_is_never_classified(self) -> None:
+        steps = _steps(100, 100, 100) + [_skipped("s3")]
+
+        _step_timing(steps)
+
+        assert "is_high_cost" not in steps[3]
+        assert "duration_multiple_of_median" not in steps[3]
+        assert steps[3]["duration_ms"] == 0
+
+    def test_skips_do_not_drag_the_median_to_zero(self) -> None:
+        """The pathological case: a dry run that skips most of its steps.
+
+        Were the skips counted, the median would be 0, the run would be
+        unclassifiable, and the one step that ran would go unreported.
+        """
+        steps = [_skipped(f"k{index}") for index in range(5)] + _steps(10, 12, 900)
+
+        timing = _step_timing(steps)
+
+        assert timing["timed_steps"] == 3
+        assert timing["median_duration_ms"] == 12.0
+        assert timing["high_cost_step_ids"] == ["s2"]
+
+    def test_a_step_that_really_ran_in_no_time_still_counts(self) -> None:
+        """Zero because it was fast is evidence; zero because it was skipped is not."""
+        steps = _steps(0, 0, 0, 40)
+
+        timing = _step_timing(steps)
+
+        assert timing["timed_steps"] == 4
+
+    def test_too_few_once_skips_are_removed(self) -> None:
+        """Four steps, two of them skipped, is not a population."""
+        steps = _steps(10, 5000) + [_skipped("k0"), _skipped("k1")]
+
+        timing = _step_timing(steps)
+
+        assert timing["classified"] is False
+        assert timing["timed_steps"] == 2

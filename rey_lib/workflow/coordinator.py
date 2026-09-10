@@ -42,6 +42,7 @@ from rey_lib.logs import (
     log_step_failure,
     log_step_end,
     log_step_start,
+    monotonic_ms,
 )
 from rey_lib.workflow.engine import RunContext, WorkflowError
 
@@ -82,26 +83,6 @@ class WorkflowRun:
     status: str                       # "success" | "failed"
     outcomes: list[StepOutcome] = field(default_factory=list)
     context: Optional[RunContext] = None  # final run context (metadata + data)
-
-
-def _monotonic_ms(started: float) -> int:
-    """Return whole milliseconds elapsed since a monotonic mark.
-
-    Named for its clock, because ``rey_lib.logs.run_summary`` has an
-    ``_elapsed_ms`` that measures between two ISO wall-clock timestamps. They
-    answer the same question from different clocks, and a duration derived from
-    wall time moves when the wall clock is adjusted. This one cannot.
-
-    Milliseconds because that is the unit STEP_END already carries; the
-    coordinator does not get to pick a second unit for the same fact.
-
-    Args:
-        started: The value ``time.monotonic()`` returned when the step began.
-
-    Returns:
-        Elapsed milliseconds, never negative -- monotonic guarantees it.
-    """
-    return int((time.monotonic() - started) * 1000)
 
 
 def _finalize_run(ctx: Any, run_log: Any) -> None:
@@ -471,7 +452,7 @@ def run_workflow(
 
             if not apply and apply_only:
                 log_step_end(run_log, step_name, "skipped", message="dry-run",
-                             duration_ms=_monotonic_ms(step_started))
+                             duration_ms=monotonic_ms(step_started))
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "skipped", "dry-run")
                 )
@@ -501,7 +482,7 @@ def run_workflow(
                     failed_step_sequence=sequence,
                 )
                 log_step_end(run_log, step_name, "failed", message=failure_message,
-                             duration_ms=_monotonic_ms(step_started))
+                             duration_ms=monotonic_ms(step_started))
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "failed", error=failure_message)
                 )
@@ -524,7 +505,7 @@ def run_workflow(
             detail = str(getattr(result, "detail", "")) if result is not None else ""
             artifacts = list(getattr(result, "artifacts", []) or []) if result is not None else []
             log_step_end(run_log, step_name, status, message=detail,
-                         duration_ms=_monotonic_ms(step_started))
+                         duration_ms=monotonic_ms(step_started))
             run.outcomes.append(StepOutcome(step_id, label, process, status, detail, artifacts))
             if status == "failed":
                 run.status = "failed"

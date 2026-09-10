@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from rey_lib.logs.run_summary import (
+    _SKIPPED,
     _elapsed_ms,
     _failed_step_ids,
     _rtype,
@@ -208,6 +209,23 @@ _HIGH_COST_MULTIPLE = 3.0
 _HIGH_COST_MINIMUM_STEPS = 3
 
 
+def _is_cost_sample(entry: dict[str, Any]) -> bool:
+    """Return whether one step entry is evidence of what execution costs.
+
+    A timed step that actually ran. Not one that was skipped, and not one with
+    no duration at all.
+
+    Args:
+        entry: A projected step entry.
+
+    Returns:
+        True when the entry belongs in the baseline population.
+    """
+    if not isinstance(entry.get("duration_ms"), (int, float)):
+        return False
+    return str(entry.get("status") or "").strip().lower() not in _SKIPPED
+
+
 def _step_timing(step_results: list[dict[str, Any]]) -> dict[str, Any]:
     """Classify where this run's execution cost is concentrated.
 
@@ -224,10 +242,18 @@ def _step_timing(step_results: list[dict[str, Any]]) -> dict[str, Any]:
     one dominant step inflates a mean enough to hide inside it, and the
     dominant step is exactly what this exists to surface.
 
-    A step with no recorded duration is excluded from the baseline entirely. It
-    is never counted as zero: a step that did not run is not evidence of what a
-    step costs, and treating it as instant would drag the median down and make
+    Two kinds of step are excluded from the sample, for the same reason: they
+    are not evidence of what executing a step costs.
+
+    A step with **no recorded duration** never ran, and is never counted as
+    zero -- treating it as instant would drag the median down and make
     everything else look expensive.
+
+    A **skipped** step did not execute either. Its duration is real lifecycle
+    evidence and stays on the entry, but a dry run that skips most of its steps
+    would otherwise pull the median to nearly nothing and declare every step
+    that did run dominant. A step that genuinely executed in ~0ms is a
+    different thing and does count.
 
     Args:
         step_results: The projected step entries. Annotated in place with
@@ -239,11 +265,8 @@ def _step_timing(step_results: list[dict[str, Any]]) -> dict[str, Any]:
         the ids classified high cost. ``classified`` is False when there was no
         usable baseline, which is a fact about the run rather than a failure.
     """
-    durations = [
-        int(entry["duration_ms"])
-        for entry in step_results
-        if isinstance(entry.get("duration_ms"), (int, float))
-    ]
+    sample = [entry for entry in step_results if _is_cost_sample(entry)]
+    durations = [int(entry["duration_ms"]) for entry in sample]
     if len(durations) < _HIGH_COST_MINIMUM_STEPS:
         return {
             "timed_steps": len(durations),
@@ -266,10 +289,8 @@ def _step_timing(step_results: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
     high_cost: list[str] = []
-    for entry in step_results:
-        duration = entry.get("duration_ms")
-        if not isinstance(duration, (int, float)):
-            continue
+    for entry in sample:
+        duration = entry["duration_ms"]
         multiple = float(duration) / median
         entry["duration_multiple_of_median"] = round(multiple, 2)
         entry["is_high_cost"] = multiple >= _HIGH_COST_MULTIPLE

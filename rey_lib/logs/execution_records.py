@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import uuid
 from typing import Any
 
@@ -47,6 +49,27 @@ def log_step_start(run_log: 'RunLog', step_name: str, step_sequence: int,
         **fields,
     ), "STEP_START")
     run_log.open_step(step_name, step_sequence, step_type)
+
+
+def monotonic_ms(started: float) -> int:
+    """Return whole milliseconds elapsed since a ``time.monotonic()`` mark.
+
+    Here because this module defines ``duration_ms``, so the unit that field is
+    written in is decided once, beside the field, rather than separately by
+    each caller that fills it.
+
+    Monotonic, never wall clock. ``rey_lib.logs.run_summary`` derives a duration
+    between two ISO timestamps, which is the right answer for a record that
+    only carries timestamps -- but a duration measured while the work runs must
+    not move when the clock is adjusted.
+
+    Args:
+        started: What ``time.monotonic()`` returned when the work began.
+
+    Returns:
+        Elapsed milliseconds, never negative.
+    """
+    return int((time.monotonic() - started) * 1000)
 
 
 def log_step_end(run_log: 'RunLog', step_name: str, status: str, *,
