@@ -32,6 +32,17 @@ from rey_lib.repository_map.records import (
     PARAMETER_KIND_POSITIONAL_ONLY,
     PARAMETER_KIND_VAR_KEYWORD,
     PARAMETER_KIND_VAR_POSITIONAL,
+    ACCESS_KIND_METHOD_CALL,
+    ACCESS_KIND_SUBSCRIPT,
+    ARGUMENT_KIND_EXPRESSION,
+    ARGUMENT_KIND_OTHER_LITERAL,
+    ARGUMENT_KIND_STRING_LITERAL,
+    INDEXED_ACCESS_METHODS,
+    TARGET_KIND_ATTRIBUTE,
+    TARGET_KIND_NAME,
+    TARGET_KIND_SUBSCRIPT,
+    AccessRecord,
+    AssignmentRecord,
     ParameterRecord,
     ReferenceEdge,
     SymbolInventory,
@@ -40,6 +51,7 @@ from rey_lib.repository_map.records import (
 
 __all__ = [
     "extract_python_parameters",
+    "extract_python_writes_and_accesses",
     "extract_python_references",
     "extract_python_symbols",
 ]
@@ -531,6 +543,221 @@ def _parameters_of(
         )
         for ordinal, (argument, kind, has_default) in enumerate(written)
     ]
+
+
+def extract_python_writes_and_accesses(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> tuple[list[AssignmentRecord], list[AccessRecord]]:
+    """Extract the writes and indexed access forms inside recorded declarations.
+
+    The inventory's boundary again: module-level functions and one level of
+    methods. A closure's writes are not an addressable identity.
+
+    Both are produced from one walk because both are found in the same bodies,
+    and walking twice would parse the same tree for the same facts.
+
+    Args:
+        path: Python file to read and parse.
+        language: Language name. Accepted for registry symmetry; unused.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The writes and the accesses, in source order.
+
+    Raises:
+        ValueError: If the file is not parseable Python.
+    """
+    tree = _parse(path)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    writes: list[AssignmentRecord] = []
+    accesses: list[AccessRecord] = []
+    for owner, qualified_name in _recorded_bodies(tree):
+        for node in ast.walk(owner):
+            writes.extend(_writes_of(recorded_path, node, owner, qualified_name))
+            access = _access_of(recorded_path, node, owner, qualified_name)
+            if access is not None:
+                accesses.append(access)
+    return writes, accesses
+
+
+def _recorded_bodies(
+    tree: ast.Module,
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]]:
+    """Return the declarations whose insides are recorded, with their names."""
+    bodies: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bodies.append((node, node.name))
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    bodies.append((member, f"{node.name}.{member.name}"))
+    return bodies
+
+
+def _target_facts(target: ast.expr) -> tuple[str, str | None, str | None, str | None] | None:
+    """Return what a write target proves, or None when it is not a target shape.
+
+    Nothing here stores the expression. ``target_chain`` is the proven dotted
+    chain and is None the moment the expression stops being one, which is what
+    keeps ``factory().state`` out of the index as text.
+
+    Args:
+        target: The assignment target node.
+
+    Returns:
+        Kind, dotted chain, final attribute and literal key -- each None where
+        the parser does not prove it.
+    """
+    if isinstance(target, ast.Name):
+        return TARGET_KIND_NAME, target.id, None, None
+    if isinstance(target, ast.Attribute):
+        return (TARGET_KIND_ATTRIBUTE, _dotted_name(target), target.attr, None)
+    if isinstance(target, ast.Subscript):
+        key = (target.slice.value
+               if isinstance(target.slice, ast.Constant)
+               and isinstance(target.slice.value, str) else None)
+        base = target.value
+        return (
+            TARGET_KIND_SUBSCRIPT,
+            _dotted_name(base),
+            base.attr if isinstance(base, ast.Attribute) else None,
+            key,
+        )
+    return None
+
+
+def _writes_of(
+    recorded_path: str,
+    node: ast.AST,
+    owner: ast.FunctionDef | ast.AsyncFunctionDef,
+    qualified_name: str,
+) -> list[AssignmentRecord]:
+    """Return the writes one statement performs.
+
+    Args:
+        recorded_path: Path to record.
+        node: Any node inside a recorded declaration.
+        owner: The declaration containing it.
+        qualified_name: How that declaration is addressed.
+
+    Returns:
+        One record per written target.
+    """
+    if isinstance(node, ast.Assign):
+        targets, augmented = node.targets, False
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+        targets, augmented = [node.target], isinstance(node, ast.AugAssign)
+    else:
+        return []
+
+    records: list[AssignmentRecord] = []
+    for target in targets:
+        facts = _target_facts(target)
+        if facts is None:
+            continue
+        kind, chain, attribute, key = facts
+        records.append(AssignmentRecord(
+            source_path=recorded_path,
+            owner_qualified_name=qualified_name,
+            owner_line=owner.lineno,
+            owner_column=owner.col_offset,
+            source_line=target.lineno,
+            source_column=target.col_offset,
+            target_kind=kind,
+            target_chain=chain,
+            attribute_name=attribute,
+            key=key,
+            is_augmented=augmented,
+        ))
+    return records
+
+
+def _argument_facts(argument: ast.expr | None) -> tuple[bool, str | None, str | None]:
+    """Return what a selecting argument proves.
+
+    Three states the parser distinguishes and one nullable literal would not:
+    a string literal, some other literal, and an expression. Absence is a
+    fourth.
+
+    Args:
+        argument: The argument node, or None when none is written.
+
+    Returns:
+        Whether one is present, its kind, and the string literal where it is
+        one.
+    """
+    if argument is None:
+        return False, None, None
+    if isinstance(argument, ast.Constant):
+        if isinstance(argument.value, str):
+            return True, ARGUMENT_KIND_STRING_LITERAL, argument.value
+        return True, ARGUMENT_KIND_OTHER_LITERAL, None
+    return True, ARGUMENT_KIND_EXPRESSION, None
+
+
+def _access_of(
+    recorded_path: str,
+    node: ast.AST,
+    owner: ast.FunctionDef | ast.AsyncFunctionDef,
+    qualified_name: str,
+) -> AccessRecord | None:
+    """Return the access form one node is, or None.
+
+    A subscript in load position, or a call to one of the indexed method names.
+    The call record says a call was written with this argument -- never that it
+    read anything.
+
+    Args:
+        recorded_path: Path to record.
+        node: Any node inside a recorded declaration.
+        owner: The declaration containing it.
+        qualified_name: How that declaration is addressed.
+
+    Returns:
+        The access, or None when the node is neither form.
+    """
+    common = {
+        "source_path": recorded_path,
+        "owner_qualified_name": qualified_name,
+        "owner_line": owner.lineno,
+        "owner_column": owner.col_offset,
+        "source_line": getattr(node, "lineno", 0),
+        "source_column": getattr(node, "col_offset", 0),
+    }
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        present, kind, literal = _argument_facts(node.slice)
+        base = node.value
+        return AccessRecord(
+            **common,
+            access_kind=ACCESS_KIND_SUBSCRIPT,
+            object_chain=_dotted_name(base),
+            attribute_name=base.attr if isinstance(base, ast.Attribute) else None,
+            # A subscript always writes a key expression; only its identity
+            # can be unknown.
+            argument_present=True,
+            argument_kind=kind,
+            literal_argument=literal,
+        )
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in INDEXED_ACCESS_METHODS):
+        present, kind, literal = _argument_facts(node.args[0] if node.args else None)
+        receiver = node.func.value
+        return AccessRecord(
+            **common,
+            access_kind=ACCESS_KIND_METHOD_CALL,
+            object_chain=_dotted_name(receiver),
+            attribute_name=(receiver.attr
+                            if isinstance(receiver, ast.Attribute) else None),
+            method_name=node.func.attr,
+            argument_present=present,
+            argument_kind=kind,
+            literal_argument=literal,
+        )
+    return None
 
 
 def _parse(path: Path) -> ast.Module:

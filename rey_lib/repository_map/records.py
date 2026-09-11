@@ -31,6 +31,8 @@ __all__ = [
     "LANGUAGE_UNKNOWN",
     "RECORD_TYPE_DEPENDENCY_EDGE",
     "RECORD_TYPE_FILE",
+    "RECORD_TYPE_ACCESS",
+    "RECORD_TYPE_ASSIGNMENT",
     "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
     "SYMBOL_KIND_CLASS",
@@ -47,6 +49,8 @@ __all__ = [
     "dotted_identity",
     "matches_any_glob",
     "FileRecord",
+    "AccessRecord",
+    "AssignmentRecord",
     "ParameterRecord",
     "ReferenceEdge",
     "ScanRules",
@@ -71,6 +75,8 @@ RECORD_TYPE_FILE = "file"
 RECORD_TYPE_SYMBOL = "symbol"
 RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
 RECORD_TYPE_PARAMETER = "parameter"
+RECORD_TYPE_ASSIGNMENT = "assignment"
+RECORD_TYPE_ACCESS = "access"
 RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
@@ -160,6 +166,29 @@ PARAMETER_KIND_POSITIONAL = "positional"
 PARAMETER_KIND_KEYWORD_ONLY = "keyword_only"
 PARAMETER_KIND_VAR_POSITIONAL = "var_positional"
 PARAMETER_KIND_VAR_KEYWORD = "var_keyword"
+
+
+# What an assignment writes to. Shape of the target and nothing else.
+TARGET_KIND_NAME = "name"
+TARGET_KIND_ATTRIBUTE = "attribute"
+TARGET_KIND_SUBSCRIPT = "subscript"
+
+# The access forms the index records. Syntax, never meaning: a method_call row
+# says a call was written, not that the call reads anything.
+ACCESS_KIND_SUBSCRIPT = "subscript"
+ACCESS_KIND_METHOD_CALL = "method_call"
+
+# Which method names are recorded as an access form. A scope decision about
+# what to record, named here so adding one is a list entry -- never a claim
+# about what these methods do.
+INDEXED_ACCESS_METHODS = frozenset({"get"})
+
+# What a selecting argument is, where one is written. Distinguishing these is
+# the point: obj.get(name), obj.get(123) and obj.get() are three proven facts,
+# and one nullable literal would collapse them into a single silence.
+ARGUMENT_KIND_STRING_LITERAL = "string_literal"
+ARGUMENT_KIND_OTHER_LITERAL = "other_literal"
+ARGUMENT_KIND_EXPRESSION = "expression"
 
 
 def matches_any_glob(
@@ -584,6 +613,142 @@ class ParameterRecord:
             "has_default": self.has_default,
             "is_optional": self.is_optional,
             "annotation": self.annotation,
+        }
+
+
+@dataclass(frozen=True)
+class AssignmentRecord:
+    """One syntactic write inside a recorded declaration.
+
+    Writes only. What a call does to its receiver is not here: ``items.append``
+    mutates and ``obj.get`` may not, and neither is provable from syntax.
+
+    Attributes:
+        source_path: Path the write is written in.
+        owner_qualified_name: The declaration containing it, and
+        owner_line / owner_column: its start position, because a qualified
+            name is not unique within a file.
+        source_line / source_column: Where the write is.
+        target_kind: One of the ``TARGET_KIND_*`` constants.
+        target_chain: The proven dotted chain the target is rooted in, or None
+            when the expression is not a pure Name/Attribute chain. **Not the
+            source as written** -- ``factory().state`` answers None rather than
+            surrendering its text.
+        attribute_name: The final attribute of an attribute target, kept
+            because it survives an impure chain.
+        key: A subscript target's key when it is a string literal, else None.
+            None means the key exists and is not provably a literal.
+        is_augmented: Whether the write is an augmented assignment.
+    """
+
+    source_path: str
+    owner_qualified_name: str
+    owner_line: int
+    owner_column: int
+    source_line: int
+    source_column: int
+    target_kind: str
+    target_chain: Optional[str] = None
+    attribute_name: Optional[str] = None
+    key: Optional[str] = None
+    is_augmented: bool = False
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this write."""
+        return (
+            f"{RECORD_TYPE_ASSIGNMENT}:{self.source_path}"
+            f":{self.source_line}:{self.source_column}:{self.target_kind}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this write as a JSONL 'assignment' record."""
+        return {
+            "record_type": RECORD_TYPE_ASSIGNMENT,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "owner_qualified_name": self.owner_qualified_name,
+            "owner_line": self.owner_line,
+            "owner_column": self.owner_column,
+            "source_line": self.source_line,
+            "source_column": self.source_column,
+            "target_kind": self.target_kind,
+            "target_chain": self.target_chain,
+            "attribute_name": self.attribute_name,
+            "key": self.key,
+            "is_augmented": self.is_augmented,
+        }
+
+
+@dataclass(frozen=True)
+class AccessRecord:
+    """One indexed access-form occurrence.
+
+    Deliberately *not* "a read". A subscript read is one; a ``.get`` call is a
+    call to an attribute named ``get``, and whether it reads anything is the
+    receiver's business. Naming this a key read would put an interpretation in
+    a column name, which is the line this record exists to hold.
+
+    Attributes:
+        source_path: Path the access is written in.
+        owner_qualified_name: The declaration containing it, and
+        owner_line / owner_column: its start position.
+        source_line / source_column: Where the access is.
+        access_kind: One of the ``ACCESS_KIND_*`` constants.
+        object_chain: The receiver's proven dotted chain, or None when impure.
+        attribute_name: The receiver's final attribute, kept when the chain is
+            impure.
+        method_name: The method called, for a method_call; None for a
+            subscript.
+        argument_present: Whether a selecting argument is written at all. Always
+            true for a subscript, where the syntax guarantees one; a call may
+            have none.
+        argument_kind: One of the ``ARGUMENT_KIND_*`` constants, or None when
+            no argument is written.
+        literal_argument: The string literal itself, or None. The expression is
+            never stored -- only that one was written.
+    """
+
+    source_path: str
+    owner_qualified_name: str
+    owner_line: int
+    owner_column: int
+    source_line: int
+    source_column: int
+    access_kind: str
+    object_chain: Optional[str] = None
+    attribute_name: Optional[str] = None
+    method_name: Optional[str] = None
+    argument_present: bool = True
+    argument_kind: Optional[str] = None
+    literal_argument: Optional[str] = None
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this access."""
+        return (
+            f"{RECORD_TYPE_ACCESS}:{self.source_path}"
+            f":{self.source_line}:{self.source_column}:{self.access_kind}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this access as a JSONL 'access' record."""
+        return {
+            "record_type": RECORD_TYPE_ACCESS,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "owner_qualified_name": self.owner_qualified_name,
+            "owner_line": self.owner_line,
+            "owner_column": self.owner_column,
+            "source_line": self.source_line,
+            "source_column": self.source_column,
+            "access_kind": self.access_kind,
+            "object_chain": self.object_chain,
+            "attribute_name": self.attribute_name,
+            "method_name": self.method_name,
+            "argument_present": self.argument_present,
+            "argument_kind": self.argument_kind,
+            "literal_argument": self.literal_argument,
         }
 
 

@@ -63,6 +63,17 @@ _PARAMETER_COLUMNS = (
     "owner_column", "name", "ordinal", "parameter_kind", "has_default",
     "is_optional", "annotation",
 )
+_ASSIGNMENT_COLUMNS = (
+    "repository_key", "relative_path", "owner_qualified_name", "owner_line",
+    "owner_column", "source_line", "source_column", "target_kind",
+    "target_chain", "attribute_name", "key", "is_augmented",
+)
+_ACCESS_COLUMNS = (
+    "repository_key", "relative_path", "owner_qualified_name", "owner_line",
+    "owner_column", "source_line", "source_column", "access_kind",
+    "object_chain", "attribute_name", "method_name", "argument_present",
+    "argument_kind", "literal_argument",
+)
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
     "from_id", "from_symbol", "from_symbol_line", "from_symbol_column",
@@ -137,14 +148,27 @@ class CodeIndexDatabaseWriter:
         ]
         self._stage("parameter_stage", parameters, _PARAMETER_COLUMNS)
 
+        writes = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.writes
+        ]
+        accesses = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.accesses
+        ]
+        self._stage("assignment_stage", writes, _ASSIGNMENT_COLUMNS)
+        self._stage("access_stage", accesses, _ACCESS_COLUMNS)
+
         logger.info(
             "Staged %d repositories, %d files, %d symbols, %d edges, "
-            "%d parameters",
+            "%d parameters, %d writes, %d accesses",
             len(repositories),
             len(files),
             len(symbols),
             len(edges),
             len(parameters),
+            len(writes),
+            len(accesses),
         )
         # The scan side only. The authored architecture is not staged here and
         # is therefore not replaced -- but every surviving realization is
@@ -168,8 +192,9 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("parameter_stage", "edge_stage", "symbol_stage",
-                      "file_stage", "repository_stage"):
+        for table in ("access_stage", "assignment_stage", "parameter_stage",
+                      "edge_stage", "symbol_stage", "file_stage",
+                      "repository_stage"):
             self._adapter.execute_sql(
                 self._connection,
                 f"DELETE FROM {SCHEMA}.{table}",

@@ -43,6 +43,17 @@ from rey_lib.repository_map.records import (
     SYMBOL_KIND_VARIABLE,
     PARAMETER_KIND_POSITIONAL,
     PARAMETER_KIND_VAR_POSITIONAL,
+    ACCESS_KIND_METHOD_CALL,
+    ACCESS_KIND_SUBSCRIPT,
+    ARGUMENT_KIND_EXPRESSION,
+    ARGUMENT_KIND_OTHER_LITERAL,
+    ARGUMENT_KIND_STRING_LITERAL,
+    INDEXED_ACCESS_METHODS,
+    TARGET_KIND_ATTRIBUTE,
+    TARGET_KIND_NAME,
+    TARGET_KIND_SUBSCRIPT,
+    AccessRecord,
+    AssignmentRecord,
     ParameterRecord,
     ReferenceEdge,
     SymbolInventory,
@@ -51,6 +62,7 @@ from rey_lib.repository_map.records import (
 
 __all__ = [
     "extract_js_parameters",
+    "extract_js_writes_and_accesses",
     "extract_js_references",
     "extract_js_symbols",
     "JS_GLOBAL_ROOT",
@@ -532,6 +544,224 @@ def _js_first_identifier(node: Node) -> Node | None:
         if found is not None:
             return found
     return None
+
+
+def extract_js_writes_and_accesses(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> tuple[list[AssignmentRecord], list[AccessRecord]]:
+    """Extract the writes and indexed access forms inside recorded declarations.
+
+    The same boundary and the same vocabulary the Python extractor uses. A
+    ``variable_declarator`` with a value is a write; a declaration without one
+    binds nothing and is not.
+
+    A subscript in a write position is reached through its assignment and is
+    not also recorded as an access -- the split between the two records is by
+    direction, and recording it twice would be two facts for one syntax.
+
+    Args:
+        path: Source file to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The writes and the accesses, in source order.
+    """
+    root = _parse(path, language)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    writes: list[AssignmentRecord] = []
+    accesses: list[AccessRecord] = []
+    for owner, qualified_name in _js_recorded_bodies(root):
+        written_subscripts: set[int] = set()
+        for node in _walk(owner):
+            record = _js_write_of(recorded_path, node, owner, qualified_name)
+            if record is not None:
+                writes.append(record)
+                target = (node.child_by_field_name("left")
+                          or node.child_by_field_name("name"))
+                if target is not None and target.type == "subscript_expression":
+                    written_subscripts.add(target.id)
+        for node in _walk(owner):
+            if node.id in written_subscripts:
+                continue
+            access = _js_access_of(recorded_path, node, owner, qualified_name)
+            if access is not None:
+                accesses.append(access)
+    return writes, accesses
+
+
+def _js_recorded_bodies(root: Node) -> list[tuple[Node, str]]:
+    """Return the declarations whose insides are recorded, with their names."""
+    bodies: list[tuple[Node, str]] = []
+    for statement, _exported in _top_level_statements(root):
+        name_node = statement.child_by_field_name("name")
+        if name_node is None:
+            continue
+        if statement.type in _CLASS_DECLARATIONS:
+            body = statement.child_by_field_name("body")
+            for member in (body.named_children if body is not None else ()):
+                member_name = member.child_by_field_name("name")
+                if member.type in _METHOD_MEMBERS and member_name is not None:
+                    bodies.append(
+                        (member, f"{_text(name_node)}.{_text(member_name)}")
+                    )
+            continue
+        bodies.append((statement, _text(name_node)))
+    return bodies
+
+
+def _js_target_facts(target: Node) -> tuple[str, str | None, str | None, str | None] | None:
+    """Return what a write target proves, or None when it is not a target shape.
+
+    ``object_chain`` is the proven dotted chain and is None the moment the
+    expression stops being one. No source text is stored.
+    """
+    if target.type == "identifier":
+        return TARGET_KIND_NAME, _text(target), None, None
+    if target.type == "member_expression":
+        property_node = target.child_by_field_name("property")
+        return (
+            TARGET_KIND_ATTRIBUTE,
+            js_dotted_name(target),
+            _text(property_node) if property_node is not None else None,
+            None,
+        )
+    if target.type == "subscript_expression":
+        index = target.child_by_field_name("index")
+        base = target.child_by_field_name("object")
+        key = (_js_string_value(index)
+               if index is not None and index.type == "string" else None)
+        return (
+            TARGET_KIND_SUBSCRIPT,
+            js_dotted_name(base) if base is not None else None,
+            None,
+            key,
+        )
+    return None
+
+
+def _js_string_value(node: Node) -> str:
+    """Return a string literal's value, without its quotes."""
+    fragment = next(
+        (child for child in node.named_children
+         if child.type == "string_fragment"), None
+    )
+    return _text(fragment) if fragment is not None else ""
+
+
+def _js_write_of(
+    recorded_path: str, node: Node, owner: Node, qualified_name: str
+) -> AssignmentRecord | None:
+    """Return the write one node performs, or None."""
+    if node.type in {"assignment_expression", "augmented_assignment_expression"}:
+        target = node.child_by_field_name("left")
+        augmented = node.type == "augmented_assignment_expression"
+    elif node.type == "variable_declarator":
+        # A declaration with no value binds nothing.
+        if node.child_by_field_name("value") is None:
+            return None
+        target, augmented = node.child_by_field_name("name"), False
+    else:
+        return None
+    if target is None:
+        return None
+
+    facts = _js_target_facts(target)
+    if facts is None:
+        return None
+    kind, chain, attribute, key = facts
+    line, column = target.start_point
+    owner_line, owner_column = _js_owner_position(owner)
+    return AssignmentRecord(
+        source_path=recorded_path,
+        owner_qualified_name=qualified_name,
+        owner_line=owner_line,
+        owner_column=owner_column,
+        source_line=line + 1,
+        source_column=column,
+        target_kind=kind,
+        target_chain=chain,
+        attribute_name=attribute,
+        key=key,
+        is_augmented=augmented,
+    )
+
+
+def _js_access_of(
+    recorded_path: str, node: Node, owner: Node, qualified_name: str
+) -> AccessRecord | None:
+    """Return the access form one node is, or None."""
+    owner_line, owner_column = _js_owner_position(owner)
+    line, column = node.start_point
+    common = {
+        "source_path": recorded_path,
+        "owner_qualified_name": qualified_name,
+        "owner_line": owner_line,
+        "owner_column": owner_column,
+        "source_line": line + 1,
+        "source_column": column,
+    }
+    if node.type == "subscript_expression":
+        index = node.child_by_field_name("index")
+        base = node.child_by_field_name("object")
+        present, kind, literal = _js_argument_facts(index)
+        return AccessRecord(
+            **common,
+            access_kind=ACCESS_KIND_SUBSCRIPT,
+            object_chain=js_dotted_name(base) if base is not None else None,
+            argument_present=True,
+            argument_kind=kind,
+            literal_argument=literal,
+        )
+    if node.type == "call_expression":
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            return None
+        property_node = callee.child_by_field_name("property")
+        if property_node is None or _text(property_node) not in INDEXED_ACCESS_METHODS:
+            return None
+        arguments = node.child_by_field_name("arguments")
+        first = next(
+            (child for child in (arguments.named_children if arguments else ())
+             if child.type != "comment"), None
+        )
+        present, kind, literal = _js_argument_facts(first)
+        receiver = callee.child_by_field_name("object")
+        return AccessRecord(
+            **common,
+            access_kind=ACCESS_KIND_METHOD_CALL,
+            object_chain=js_dotted_name(receiver) if receiver is not None else None,
+            method_name=_text(property_node),
+            argument_present=present,
+            argument_kind=kind,
+            literal_argument=literal,
+        )
+    return None
+
+
+def _js_argument_facts(argument: Node | None) -> tuple[bool, str | None, str | None]:
+    """Return what a selecting argument proves, in the shared vocabulary."""
+    if argument is None:
+        return False, None, None
+    if argument.type == "string":
+        return True, ARGUMENT_KIND_STRING_LITERAL, _js_string_value(argument)
+    if argument.type in {"number", "true", "false", "null", "undefined"}:
+        return True, ARGUMENT_KIND_OTHER_LITERAL, None
+    return True, ARGUMENT_KIND_EXPRESSION, None
+
+
+def _js_owner_position(owner: Node) -> tuple[int, int]:
+    """Return the owning declaration's recorded start position.
+
+    The symbol inventory locates a declaration at its *name*, so the owner
+    reference has to use the same point or it would not join.
+    """
+    name_node = owner.child_by_field_name("name")
+    line, column = (name_node or owner).start_point
+    return line + 1, column
 
 
 def _symbol(

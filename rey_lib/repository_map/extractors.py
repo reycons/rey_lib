@@ -15,12 +15,14 @@ from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
     extract_js_parameters,
+    extract_js_writes_and_accesses,
     extract_js_references,
     extract_js_symbols,
     supported_js_languages,
 )
 from rey_lib.repository_map.python_extractor import (
     extract_python_parameters,
+    extract_python_writes_and_accesses,
     extract_python_references,
     extract_python_symbols,
 )
@@ -30,6 +32,7 @@ __all__ = [
     "LANGUAGE_EXTRACTORS",
     "LanguageExtractor",
     "extract_declared_parameters",
+    "extract_writes_and_accesses",
     "extract_executable_references",
     "extract_symbols",
     "supported_languages",
@@ -45,12 +48,18 @@ class LanguageExtractor:
         symbols: Callable returning the file's top-level symbol inventory.
         references: Callable returning the file's executable reference edges.
         parameters: Callable returning the parameters its declarations declare.
+        writes_and_accesses: Callable returning the writes and indexed access
+            forms inside those declarations, from one walk.
     """
 
     language: str
     symbols: Callable[[Path, str, str | None], SymbolInventory]
     references: Callable[[Path, str, str | None], list[ReferenceEdge]]
     parameters: Callable[[Path, str, str | None], list[ParameterRecord]]
+    writes_and_accesses: Callable[
+        [Path, str, str | None],
+        tuple[list[AssignmentRecord], list[AccessRecord]],
+    ]
 
 
 # The registry is data: language name to the object that owns that language.
@@ -61,6 +70,7 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         symbols=extract_python_symbols,
         references=extract_python_references,
         parameters=extract_python_parameters,
+        writes_and_accesses=extract_python_writes_and_accesses,
     ),
 }
 
@@ -73,6 +83,7 @@ LANGUAGE_EXTRACTORS.update(
             symbols=extract_js_symbols,
             references=extract_js_references,
             parameters=extract_js_parameters,
+            writes_and_accesses=extract_js_writes_and_accesses,
         )
         for language in supported_js_languages()
     }
@@ -104,6 +115,28 @@ def extract_symbols(
             file cannot be parsed.
     """
     return _extractor_for(language).symbols(path, language, source_path)
+
+
+def extract_writes_and_accesses(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> tuple[list[AssignmentRecord], list[AccessRecord]]:
+    """Return one file's syntactic writes and indexed access forms.
+
+    Args:
+        path: Source file to read and parse.
+        language: Language name as the inventory recorded it.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The writes and the accesses, both empty for a language with no
+        registered extractor.
+    """
+    extractor = LANGUAGE_EXTRACTORS.get(language)
+    if extractor is None:
+        return [], []
+    return extractor.writes_and_accesses(path, language, source_path)
 
 
 def extract_declared_parameters(

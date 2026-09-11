@@ -31,6 +31,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
+    RECORD_TYPE_ACCESS,
+    RECORD_TYPE_ASSIGNMENT,
     RECORD_TYPE_DEPENDENCY_EDGE,
     RECORD_TYPE_PARAMETER,
     RECORD_TYPE_FILE,
@@ -75,6 +77,9 @@ class IndexedRepository:
         header: The repository's observed state -- revision, branch, working
             tree status, hashes.
         files: One entry per file, each carrying its own symbol rows.
+        writes: One entry per syntactic write, and
+        accesses: One entry per indexed access form, both naming their owning
+            symbol the way parameters do.
         parameters: One entry per declared parameter, naming the symbol that
             declares it by name and position. Beside the files for the reason
             edges are: a parameter belongs to a declaration, and the promotion
@@ -86,7 +91,8 @@ class IndexedRepository:
             not.
     """
 
-    __slots__ = ("repository", "header", "files", "edges", "parameters")
+    __slots__ = ("repository", "header", "files", "edges", "parameters",
+                 "writes", "accesses")
 
     def __init__(
         self,
@@ -95,12 +101,16 @@ class IndexedRepository:
         files: list[dict[str, Any]],
         edges: list[dict[str, Any]] | None = None,
         parameters: list[dict[str, Any]] | None = None,
+        writes: list[dict[str, Any]] | None = None,
+        accesses: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
         self.files = files
         self.edges = edges if edges is not None else []
         self.parameters = parameters if parameters is not None else []
+        self.writes = writes if writes is not None else []
+        self.accesses = accesses if accesses is not None else []
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -120,6 +130,59 @@ def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
     writer.replace_index(indexed)
     logger.info("Indexed %d repositories", len(indexed))
     return len(indexed)
+
+
+#: The fields each owned fact carries into its staging row, beside the
+#: repository and path. Named rather than derived from a record, so a field
+#: added to one side without the other fails at the insert instead of being
+#: silently dropped -- the defect end_column suffered.
+_ASSIGNMENT_FIELDS = (
+    "owner_qualified_name", "owner_line", "owner_column", "source_line",
+    "source_column", "target_kind", "target_chain", "attribute_name", "key",
+    "is_augmented",
+)
+_ACCESS_FIELDS = (
+    "owner_qualified_name", "owner_line", "owner_column", "source_line",
+    "source_column", "access_kind", "object_chain", "attribute_name",
+    "method_name", "argument_present", "argument_kind", "literal_argument",
+)
+
+
+def _owned_rows(
+    repository: str,
+    repository_map: RepositoryMap,
+    files: dict[str, dict[str, Any]],
+    record_type: str,
+    fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Return one record type as destination rows, dropping orphans loudly.
+
+    Args:
+        repository: The declared member name.
+        repository_map: The map this scan produced.
+        files: The inventory, keyed by path.
+        record_type: Which records to project.
+        fields: The fields each row carries.
+
+    Returns:
+        One row per record whose file the inventory carries.
+    """
+    rows: list[dict[str, Any]] = []
+    for record in repository_map.records:
+        if record["record_type"] != record_type:
+            continue
+        if record["source_path"] not in files:
+            logger.warning(
+                "%s: %s at %s:%s names a file the inventory does not carry",
+                repository, record_type, record["source_path"],
+                record["source_line"],
+            )
+            continue
+        rows.append({
+            "relative_path": record["source_path"],
+            **{field: record[field] for field in fields},
+        })
+    return rows
 
 
 def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepository:
@@ -248,4 +311,8 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
         files=list(files.values()),
         edges=edges,
         parameters=parameters,
+        writes=_owned_rows(repository, repository_map, files,
+                           RECORD_TYPE_ASSIGNMENT, _ASSIGNMENT_FIELDS),
+        accesses=_owned_rows(repository, repository_map, files,
+                             RECORD_TYPE_ACCESS, _ACCESS_FIELDS),
     )
