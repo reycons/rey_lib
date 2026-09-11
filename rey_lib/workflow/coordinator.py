@@ -330,6 +330,10 @@ def run_workflow(
     # (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
     record_config_file_references(ctx, run_log)
 
+    # The steps begin here, so resolve ends here -- one timestamp closing
+    # bootstrap-and-resolve and opening the work itself.
+    run_log.enter_phase("steps")
+
     sequence = 0
     for index, step_def in enumerate(steps):
         if index not in selected:
@@ -536,7 +540,11 @@ def run_workflow(
 
     run_log.set_nest_level("workflow")
     log_run_complete(run_log, "success")
+    # _finalize_run enters summarize / package / interpret from inside; what is
+    # left when it returns is this function's own teardown. Nothing closes the
+    # timeline here -- app_runtime's finally owns that, for every exit.
     _finalize_run(ctx, run_log)
+    run_log.enter_phase("close")
     clear_run()
     return run
 

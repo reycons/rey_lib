@@ -31,6 +31,8 @@ Public API
 
 from __future__ import annotations
 
+import time
+
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -39,7 +41,7 @@ from typing import Optional
 
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
 from rey_lib.errors.error_utils import ConfigError, install_process_error_boundary
-from rey_lib.logs import get_logger, setup_logging
+from rey_lib.logs import finalize_run_phases, get_logger, setup_logging
 from rey_lib.db.connection import build_connections, connection_owner
 from rey_lib.run import Run, establish_run_identity
 from rey_lib.runtime import collect_runtime, register_runtime_object
@@ -705,7 +707,7 @@ def _entry_field(entry: Any, name: str, default: Any) -> Any:
     return default if value is None else value
 
 
-def open_run_log(ctx: Namespace) -> Any:
+def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
     """Construct the one run log this process writes through, and what it needs.
 
     Named for the run log because that is what it returns and what the caller
@@ -757,6 +759,7 @@ def open_run_log(ctx: Namespace) -> Any:
             lineage[field] = found
 
     run_log = RunLog(
+        phase_started=phase_started,
         app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
                 or getattr(ctx, "name", "") or ""),
         run_id=ctx.run_id,
@@ -842,8 +845,16 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     the block is already failing, the failure is reported and the original
     exception continues -- cleanup never replaces the error that ended the run.
     """
+    # The runtime boundary. Captured before context composition so the first
+    # phase covers that work, and carried into the run log rather than taken
+    # again there -- the timeline must start where the run started, not where
+    # the object recording it happened to be built.
+    #
+    # Not the process boundary: argument pre-parsing and imports precede this,
+    # and claiming to cover them would overstate what the mark measures.
+    phase_started = time.monotonic()
     ctx = build_ctx_for_app(*args, **kwargs)
-    run_log = open_run_log(ctx)
+    run_log = open_run_log(ctx, phase_started=phase_started)
     register_runtime_object(ctx, run_log)
 
     # Optional: present only when this installation configures AI. Absent is an
@@ -863,6 +874,11 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         failed = True
         raise
     finally:
+        # The run's timeline closes here and nowhere else. A finally is what
+        # makes it every termination path rather than the four returns anyone
+        # thought to annotate -- an unplanned exception ends a run too, and is
+        # the run whose phases are worth the most.
+        finalize_run_phases(run_log)
         # Terminal status first, before anything this run owns is collected.
         # A poll that arrives after the process is gone is answered from the
         # manifest, so the row has to say how the run ended before the run

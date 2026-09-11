@@ -7,7 +7,12 @@ import time
 import uuid
 from typing import Any
 
+from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.phase_timeline import PhaseTimeline
 from rey_lib.logs.record_enrichment import log_run_record
+
+#: Where a diagnostic that could not be persisted is reported instead.
+_logger = get_logger(__name__)
 
 
 def log_run_start(run_log: 'RunLog', **fields: Any) -> None:
@@ -49,6 +54,56 @@ def log_step_start(run_log: 'RunLog', step_name: str, step_sequence: int,
         **fields,
     ), "STEP_START")
     run_log.open_step(step_name, step_sequence, step_type)
+
+
+def finalize_run_phases(run_log: 'RunLog') -> None:
+    """Close the run's timeline and persist it as RUN_PHASES. Never raises.
+
+    The single termination owner. Every way a run can end -- returning,
+    refusing, failing, or raising something nobody predicted -- arrives here
+    exactly once, because the caller invokes it from a ``finally`` rather than
+    beside each return. A sweep of known return sites misses the unplanned
+    exception, which is the run whose timing is worth the most.
+
+    **The record is written after the timeline closes, and is therefore outside
+    the partition it describes.** That is not an oversight: serializing the
+    final phase needs the final mark, so persistence necessarily follows it. It
+    is stated rather than hidden, and what lies outside is this write alone.
+
+    **It never masks the failure that ended the run.** If persistence fails
+    there is, by construction, no RUN_PHASES record to report that through, so
+    it goes to this module's logger and nowhere else. A diagnostic that
+    replaces the fault it was meant to explain is worse than no diagnostic.
+
+    Args:
+        run_log: The run log carrying the timeline.
+    """
+    phases = getattr(run_log, "phases", None)
+    # A real timeline or nothing. Test stubs answer every attribute with a
+    # callable, so "present" is not the same as "is one", and treating a stub's
+    # placeholder as a timeline would report a warning for every such run.
+    if not isinstance(phases, PhaseTimeline):
+        return
+    try:
+        if not phases.finish():
+            # Already terminated, and already recorded by whoever terminated
+            # it. Writing again would give one run two records each claiming
+            # to be its complete partition.
+            return
+        # Nothing durable to write to is an ordinary state, not a failure --
+        # the same fact _finalize_run consults before finalizing.
+        run_log.path()
+        run_log.append(
+            "RUN_PHASES",
+            phases=phases.phases(),
+            total_ms=phases.total_ms(),
+            unattributed_ms=phases.unattributed_ms(),
+        )
+    except Exception as exc:  # noqa: BLE001 -- diagnostics never end a run
+        _logger.warning(
+            "Could not record run phases for run %s: %s",
+            getattr(run_log, "run_id", "?"), exc,
+        )
 
 
 def monotonic_ms(started: float) -> int:

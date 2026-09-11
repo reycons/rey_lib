@@ -32,6 +32,10 @@ would be a behaviour change hidden in a refactor. The recorded xfail in
 
 from __future__ import annotations
 
+import time
+
+from rey_lib.logs.phase_timeline import PhaseTimeline
+
 from contextlib import contextmanager
 
 from datetime import datetime, timezone
@@ -147,6 +151,7 @@ class RunLog:
     def __init__(
         self,
         *,
+        phase_started: float | None = None,
         app: str,
         run_id: str,
         run_timestamp: str,
@@ -231,6 +236,24 @@ class RunLog:
         #: Whether any record has been written, for the rebind guard alone.
         self._has_records = False
         self._closed = False
+        #: The run's phases, as a contiguous partition of its elapsed time.
+        #:
+        #: Built once, here, and never replaced: every participant already
+        #: holds this object -- the coordinator that runs the steps, and the
+        #: log processing that follows them -- so one run has one timeline for
+        #: its whole life. A second, even briefly, would make correctness
+        #: depend on nobody marking in the gap between them.
+        #:
+        #: ``phase_started`` is the runtime boundary, captured before context
+        #: composition and carried in. Without it the partition would begin
+        #: wherever this object happened to be built, which is after the work
+        #: it is meant to account for. The launch path always supplies it; a
+        #: caller that does not is measuring from construction and says so by
+        #: omission.
+        self.phases = PhaseTimeline(
+            started=time.monotonic() if phase_started is None else phase_started,
+            phase="bootstrap",
+        )
 
     def __repr__(self) -> str:
         return f"<RunLog {self.app} {self.run_id} {self._path or 'unopened'}>"
@@ -347,6 +370,21 @@ class RunLog:
         self._on_level_set(level)
         self._current_nest_level = level
         return level
+
+    def enter_phase(self, phase: str) -> None:
+        """Close the run's active phase and open ``phase`` at the same instant.
+
+        A method rather than reaching through to the timeline, for the reason
+        every other run-log capability is one: callers hold a run log, not its
+        internals, and a caller that walked into ``run_log.phases`` would be
+        coupled to how this object records time rather than to the fact that it
+        does. It also keeps the estate's test stubs working -- they absorb
+        method calls, and an attribute holding an object is not one.
+
+        Args:
+            phase: The phase being entered.
+        """
+        self.phases.enter(phase)
 
     def nest_level(self) -> int:
         """The nesting level records are currently written at."""

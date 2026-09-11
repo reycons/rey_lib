@@ -65,9 +65,11 @@ def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     """
     from rey_lib.logs.llm_package import create_llm_package, run_configured_log_analysis
 
+    run_log.enter_phase("summarize")
     result = create_results_summary(run_log)
     if result.get("summary") is None:
         return {**result, "package": None, "analysis": None}
+    run_log.enter_phase("package")
     try:
         package = create_llm_package(
             run_log,
@@ -80,6 +82,10 @@ def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     # Names what this stage is for and no profile. Which model interprets a log
     # is task policy, and it moved to the runtime's AI settings: the analysis
     # entry still supplies the contract, and the task supplies the engine.
+    # The one synchronous LLM call every run makes. Its own phase because it
+    # runs after the work it describes has finished, so time spent here is
+    # invisible in every step's duration.
+    run_log.enter_phase("interpret")
     analysis = run_configured_log_analysis(
         run_log, ai=ai, package_record_type="LLM_PACKAGE",
         task=LOG_INTERPRETATION_TASK,
