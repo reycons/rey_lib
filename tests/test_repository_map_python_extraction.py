@@ -189,6 +189,7 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
         "symbol_kind": SYMBOL_KIND_CLASS,
         "exported": True,
         "end_line": 43,
+        "end_column": 19,
         "dotted_identity": "pkg.sample.TopClass",
         "owner": "",
         "qualified_name": "TopClass",
@@ -306,6 +307,9 @@ def test_edge_serializes_to_the_jsonl_dependency_edge_shape(tmp_path: Path) -> N
             "record_id": "edge:pkg/call.py:2:4:call:handler",
             "source_path": "pkg/call.py",
             "source_line": 2,
+            # Carried, not dropped: record_id has always embedded it, and
+            # two references on one line are only distinguishable by it.
+            "source_column": 4,
             "from": "file:pkg/call.py",
             "to": "handler",
             "edge_kind": EDGE_KIND_CALL,

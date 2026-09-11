@@ -167,6 +167,7 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "start_line": record["source_line"],
                 "start_column": record["source_column"],
                 "end_line": record["end_line"],
+                "end_column": record["end_column"],
                 "dotted_identity": record["dotted_identity"],
             }
         )
@@ -187,10 +188,7 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
             {
                 "relative_path": record["source_path"],
                 "source_line": record["source_line"],
-                # A dependency_edge record drops its column on the way to
-                # JSONL, so the row carries what the record actually holds
-                # rather than a zero dressed up as a position.
-                "source_column": record.get("source_column", 0),
+                "source_column": record["source_column"],
                 "from_id": record["from"],
                 "to_reference": record["to"],
                 "edge_kind": record["edge_kind"],

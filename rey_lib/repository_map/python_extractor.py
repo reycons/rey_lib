@@ -56,6 +56,8 @@ class _Import:
         end_line: Last line of the import statement. A republished import
             becomes a re_export symbol located here, and that symbol needs a
             proven span like any other.
+        end_column: Exclusive end column of that statement, completing the
+            span to a half-open range.
     """
 
     module: str
@@ -64,6 +66,7 @@ class _Import:
     line: int
     column: int
     end_line: int = 0
+    end_column: int = 0
 
     @property
     def local_name(self) -> str:
@@ -120,7 +123,7 @@ def extract_python_symbols(
     declared_names: set[str] = set()
 
     for node in tree.body:
-        for name, line, column, kind, end_line in _declarations(node):
+        for name, line, column, kind, end_position in _declarations(node):
             declared_names.add(name)
             symbols.append(
                 SymbolRecord(
@@ -130,7 +133,8 @@ def extract_python_symbols(
                     name=name,
                     symbol_kind=kind,
                     exported=name in exported_names,
-                    end_line=end_line,
+                    end_line=end_position[0],
+                    end_column=end_position[1],
                 )
             )
         if isinstance(node, ast.ClassDef):
@@ -138,7 +142,7 @@ def extract_python_symbols(
             # the class's public surface. Copying the owner's bit would say a
             # private helper is exported because the class it hides in is.
             owner_exported = node.name in exported_names
-            for member, line, column, end_line in _methods(node):
+            for member, line, column, end_position in _methods(node):
                 symbols.append(
                     SymbolRecord(
                         source_path=recorded_path,
@@ -148,7 +152,8 @@ def extract_python_symbols(
                         symbol_kind=SYMBOL_KIND_METHOD,
                         exported=owner_exported and not member.startswith("_"),
                         owner=node.name,
-                        end_line=end_line,
+                        end_line=end_position[0],
+                    end_column=end_position[1],
                     )
                 )
 
@@ -168,7 +173,8 @@ def extract_python_symbols(
                 name=name,
                 symbol_kind=SYMBOL_KIND_RE_EXPORT if imported else SYMBOL_KIND_EXPORT,
                 exported=True,
-                end_line=imported.end_line if imported else dunder_all_end,
+                end_line=(imported.end_line if imported else dunder_all_end[0]),
+                end_column=(imported.end_column if imported else dunder_all_end[1]),
             )
         )
 
@@ -294,7 +300,7 @@ def _edge(
     )
 
 
-def _methods(node: ast.ClassDef) -> list[tuple[str, int, int, int]]:
+def _methods(node: ast.ClassDef) -> list[tuple[str, int, int, tuple[int, int]]]:
     """Return the methods one class declares, in source order.
 
     Its own body only. A class nested inside this one is not walked: its
@@ -305,39 +311,48 @@ def _methods(node: ast.ClassDef) -> list[tuple[str, int, int, int]]:
         node: A top-level class definition.
 
     Returns:
-        Tuples of method name, line, column and last line.
+        Tuples of method name, line, column and end position.
     """
     return [
-        (member.name, member.lineno, member.col_offset, _end_line(member))
+        (member.name, member.lineno, member.col_offset, _end_position(member))
         for member in node.body
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
 
 
-def _end_line(node: ast.AST) -> int:
-    """Return the last line a node occupies.
+def _end_position(node: ast.AST) -> tuple[int, int]:
+    """Return the position a node ends at.
 
-    ``end_lineno`` is optional on the AST, so a node without one answers zero
+    Both values are optional on the AST, so a node without them answers zeros
     rather than a computed guess: a span that was not proved is absent, and a
     reader can tell the difference.
+
+    The column is **exclusive** -- ``end_col_offset`` is one past the last
+    character, so ``(end_line, end_column)`` is the open end of a half-open
+    span. That is what lets a position on a boundary belong to exactly one
+    declaration when two share a line.
 
     Args:
         node: Any parsed node.
 
     Returns:
-        The last line, or zero when the parse did not record one.
+        Last line and exclusive end column, or zeros when the parse recorded
+        neither.
     """
-    return int(getattr(node, "end_lineno", 0) or 0)
+    return (
+        int(getattr(node, "end_lineno", 0) or 0),
+        int(getattr(node, "end_col_offset", 0) or 0),
+    )
 
 
-def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str, int]]:
+def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str, tuple[int, int]]]:
     """Return the top-level declarations one module-body statement makes.
 
     Args:
         node: A statement from ``module.body``.
 
     Returns:
-        Tuples of name, line, column, symbol kind and last line. Empty for
+        Tuples of name, line, column, symbol kind and end position. Empty for
         statements that declare nothing. Assignment targets carry their own
         position, so two names bound on one line stay distinguishable.
 
@@ -349,21 +364,21 @@ def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str, int]]:
         return [
             (
                 node.name, node.lineno, node.col_offset,
-                SYMBOL_KIND_FUNCTION, _end_line(node),
+                SYMBOL_KIND_FUNCTION, _end_position(node),
             )
         ]
     if isinstance(node, ast.ClassDef):
         return [
             (
                 node.name, node.lineno, node.col_offset,
-                SYMBOL_KIND_CLASS, _end_line(node),
+                SYMBOL_KIND_CLASS, _end_position(node),
             )
         ]
     if isinstance(node, ast.Assign):
         return [
             (
                 target.id, target.lineno, target.col_offset,
-                SYMBOL_KIND_VARIABLE, _end_line(node),
+                SYMBOL_KIND_VARIABLE, _end_position(node),
             )
             for target in node.targets
             if isinstance(target, ast.Name) and target.id != "__all__"
@@ -375,7 +390,7 @@ def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str, int]]:
                 node.target.lineno,
                 node.target.col_offset,
                 SYMBOL_KIND_VARIABLE,
-                _end_line(node),
+                _end_position(node),
             )
         ]
     return []
@@ -417,22 +432,22 @@ def _dunder_all_node(tree: ast.Module) -> ast.Assign | None:
     return None
 
 
-def _dunder_all_location(tree: ast.Module) -> tuple[int, int, int]:
+def _dunder_all_location(tree: ast.Module) -> tuple[int, int, tuple[int, int]]:
     """Return the position and extent of the ``__all__`` assignment.
 
     Args:
         tree: Parsed module.
 
     Returns:
-        Line, column and last line, defaulting to the start of file when
+        Line, column and end position, defaulting to the start of file when
         ``__all__`` is absent. Only names published without a declaration site
         use this, and the extent is the assignment's own: it is the syntax that
         establishes such a name, so it is the syntax the name spans.
     """
     node = _dunder_all_node(tree)
     if node is None:
-        return 1, 0, 1
-    return node.lineno, node.col_offset, _end_line(node)
+        return 1, 0, (1, 0)
+    return node.lineno, node.col_offset, _end_position(node)
 
 
 def _collect_dunder_all(tree: ast.Module) -> frozenset[str]:
@@ -488,7 +503,8 @@ def _import_records(node: ast.Import | ast.ImportFrom) -> list[_Import]:
                 alias=alias.asname,
                 line=node.lineno,
                 column=node.col_offset,
-                end_line=_end_line(node),
+                end_line=_end_position(node)[0],
+                end_column=_end_position(node)[1],
             )
             for alias in node.names
         ]
@@ -502,7 +518,8 @@ def _import_records(node: ast.Import | ast.ImportFrom) -> list[_Import]:
             alias=alias.asname,
             line=node.lineno,
             column=node.col_offset,
-            end_line=_end_line(node),
+            end_line=_end_position(node)[0],
+            end_column=_end_position(node)[1],
         )
         for alias in node.names
     ]

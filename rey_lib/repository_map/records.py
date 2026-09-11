@@ -233,6 +233,13 @@ class SymbolRecord:
             than a point and can be retrieved without re-parsing its file.
             Zero where the extractor cannot prove it, which is absent rather
             than a guess.
+        end_column: Column the declaration ends at, **exclusive** -- both
+            parsers report one position past the last character. With
+            ``end_line`` it completes the span to a half-open
+            ``[start, end)`` range, which is what lets one position be tested
+            for containment. Line alone cannot separate two declarations
+            sharing a line, and ``end_line`` used by itself is an inclusive
+            line number: the difference is whether the column is present.
     """
 
     source_path: str
@@ -243,6 +250,7 @@ class SymbolRecord:
     exported: bool = False
     owner: str = ""
     end_line: int = 0
+    end_column: int = 0
 
     @property
     def dotted_identity(self) -> str:
@@ -286,6 +294,7 @@ class SymbolRecord:
             "owner": self.owner,
             "qualified_name": self.qualified_name,
             "end_line": self.end_line,
+            "end_column": self.end_column,
             "dotted_identity": self.dotted_identity,
         }
 
@@ -369,6 +378,11 @@ class ReferenceEdge:
             "record_id": self.record_id,
             "source_path": self.source_path,
             "source_line": self.source_line,
+            # Carried, not dropped. record_id has always embedded it, so an
+            # edge that reached a consumer without it was identified by a
+            # position the consumer could not see -- and every edge sharing a
+            # line became indistinguishable from its neighbours.
+            "source_column": self.source_column,
             "from": self.from_id,
             "to": self.to,
             "edge_kind": self.edge_kind,

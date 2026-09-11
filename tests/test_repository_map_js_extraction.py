@@ -340,6 +340,7 @@ def test_records_match_the_jsonl_shapes(tmp_path: Path) -> None:
         # A one-line declaration starts and ends on the same line, which is a
         # proved span and not a missing one.
         "end_line": 1,
+        "end_column": 24,
         "dotted_identity": "pkg.small.go",
     }
     assert edge == {
@@ -347,6 +348,7 @@ def test_records_match_the_jsonl_shapes(tmp_path: Path) -> None:
         "record_id": "edge:pkg/small.js:1:16:call:run",
         "source_path": "pkg/small.js",
         "source_line": 1,
+        "source_column": 16,
         "from": "file:pkg/small.js",
         "to": "run",
         "edge_kind": EDGE_KIND_CALL,

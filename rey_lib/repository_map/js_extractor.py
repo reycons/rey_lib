@@ -439,7 +439,7 @@ def _symbol(
         The symbol record.
     """
     line, column = node.start_point
-    end_line, _end_column = declaration.end_point
+    end_line, end_column = declaration.end_point
     return SymbolRecord(
         source_path=recorded_path,
         source_line=line + 1,
@@ -449,6 +449,11 @@ def _symbol(
         exported=exported,
         owner=owner,
         end_line=end_line + 1,
+        # Exclusive, as tree-sitter reports it: 'const x=1;const y=2;' parses
+        # as [0,10) and [10,20), so column 10 ends the first and starts the
+        # second. Keeping it exclusive is what lets a position on that boundary
+        # belong to exactly one of them.
+        end_column=end_column,
     )
 
 

@@ -56,7 +56,7 @@ _FILE_COLUMNS = (
 _SYMBOL_COLUMNS = (
     "repository_key", "relative_path", "symbol_kind", "name",
     "qualified_name", "owner", "is_public", "start_line", "start_column",
-    "end_line", "dotted_identity",
+    "end_line", "end_column", "dotted_identity",
 )
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
