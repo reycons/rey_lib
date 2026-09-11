@@ -112,8 +112,3 @@ def collect_runtime(ctx: Any, *, suppress: bool = False) -> list[str]:
             "runtime cleanup failed for " + "; ".join(failures)
         )
     return failures
-
-
-def collected_cleanly(ctx: Any) -> bool:
-    """Whether nothing remains registered for this launch."""
-    return not registered_runtime_objects(ctx)

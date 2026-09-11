@@ -875,23 +875,6 @@ def _validate_recorded_paths(
                 )
 
 
-def _validate_mutation_record(record: Mapping[str, Any]) -> None:
-    """Reject malformed authoritative mutations before planning any work."""
-    _positive_int(record.get("record_id"), "source_file_mutation.record_id")
-    _non_empty(record.get("action"), "source_file_mutation.action")
-    _non_empty(record.get("status"), "source_file_mutation.status")
-    _validate_recorded_paths(record, MUTATION_RECORD_TYPE)
-    evidence = record.get("evidence")
-    if not isinstance(evidence, Mapping):
-        raise LogRunRollbackError(
-            "source_file_mutation.evidence must be an object."
-        )
-    _positive_int(
-        evidence.get("run_log_id"),
-        "source_file_mutation.evidence.run_log_id",
-    )
-
-
 def _validate_move(record: Mapping[str, Any]) -> str | None:
     return _require_paths(record, "original_path", "current_path")
 

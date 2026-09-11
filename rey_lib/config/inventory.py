@@ -247,20 +247,6 @@ def _declares_dry_run(parameters: Any) -> bool:
         str(getattr(parameter, "name", "")) == "dry-run" for parameter in parameters
     )
 
-def _named_entries(value: Any) -> list[dict[str, Any]]:
-    """Return normalized named entries from list or mapping config sections."""
-    raw = to_plain_data(value)
-    if isinstance(raw, list):
-        return [item for item in raw if isinstance(item, dict)]
-    if isinstance(raw, dict):
-        rows: list[dict[str, Any]] = []
-        for name, item in raw.items():
-            if isinstance(item, dict):
-                item.setdefault("name", str(name))
-                rows.append(item)
-        return rows
-    return []
-
 def to_plain_data(value: Any) -> Any:
     """Return configuration as plain JSON-safe data.
 

@@ -375,22 +375,6 @@ def _validations(records: list[dict[str, Any]]) -> dict[str, Any]:
         "warnings": warnings,
     }
 
-def _warnings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project WARNING records (retry/extraction history), in log order."""
-    out: list[dict[str, Any]] = []
-    for record in records:
-        if _rtype(record) != _WARNING:
-            continue
-        entry: dict[str, Any] = {"message": str(record.get("message") or "")}
-        source = record.get("source_file") or record.get("current_file")
-        if source:
-            entry["source_file"] = str(source)
-        if record.get("attempt") is not None:
-            entry["attempt"] = record["attempt"]
-        out.append(entry)
-    return out
-
-
 # Explicit marker appended by error_utils._diagnostic_summary when it bounds text.
 _TRUNCATION_MARKER = "...[truncated]"
 

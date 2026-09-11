@@ -549,48 +549,6 @@ def run_workflow(
     return run
 
 
-def _workflow_execution_details(
-    run: "WorkflowRun",
-    *,
-    apply: bool,
-    only: Optional[str],
-    step: Optional[str],
-    from_step: Optional[str],
-    to_step: Optional[str],
-) -> dict[str, Any]:
-    """Build workflow execution_details (domain facts only) for the shared summary.
-
-    Contributes only workflow-specific facts — execution mode, step selection, and
-    per-step outcomes — namespaced under ``workflow``. Common fields (status, counts,
-    timestamps) are derived by rey_lib.logs from the completed log, not repeated here
-    (SGC_Rey_Lib_Log_Summary_Framework_And_Run_Summary).
-    """
-    steps: list[dict[str, Any]] = []
-    for outcome in run.outcomes:
-        entry: dict[str, Any] = {
-            "id": outcome.id,
-            "label": outcome.label,
-            "process": outcome.process,
-            "status": outcome.status,
-        }
-        if outcome.detail:
-            entry["detail"] = outcome.detail
-        steps.append(entry)
-    return {
-        "kind": "workflow",
-        "workflow": {
-            "mode": "apply" if apply else "dry_run",
-            "selection": {
-                "only": only,
-                "step": step,
-                "from_step": from_step,
-                "to_step": to_step,
-            },
-            "steps": steps,
-        },
-    }
-
-
 def _select_steps(
     step_views: list[tuple[str, str, str]],
     name: str,

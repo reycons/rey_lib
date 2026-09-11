@@ -654,59 +654,6 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
     )
 
 
-def _contract_label(identity: str, contract: str) -> str:
-    """What a reader sees for one declared contract: its own name and version.
-
-    Read from the contract itself rather than taken from the declaration, so the
-    list says what a prompt *is* rather than what an installation happened to
-    call the entry pointing at it.
-    """
-    # The sanctioned pair, as parse_yaml's own contract states: read the file
-    # with rey_lib.files, parse the text here. Nothing imports yaml.
-    from rey_lib.config.config_loader import parse_yaml
-    from rey_lib.files import read_text_file
-
-    try:
-        parsed = parse_yaml(read_text_file(contract))
-    except Exception as exc:  # noqa: BLE001 -- any unreadable declaration is one refusal
-        raise ConfigError(
-            f"ai_instructions['{identity}'] names a contract that could not be "
-            f"read: {contract} ({exc})"
-        ) from exc
-    declared = (parsed or {}).get("contract") or {}
-    if not isinstance(declared, dict):
-        declared = {}
-
-    name = str(declared.get("name") or "").strip()
-    version = str(declared.get("version") or "").strip()
-    if not name or not version:
-        raise ConfigError(
-            f"ai_instructions['{identity}'] names a contract declaring no "
-            f"{'name' if not name else 'version'}: {contract}. A reader is "
-            "shown the contract's name and version, so both must exist."
-        )
-    return f"{name} {version}"
-
-
-def _named_entries(section: Any) -> list[tuple[str, Any]]:
-    """A configured section as ``(name, entry)``, mapping or namespace alike."""
-    if section is None:
-        return []
-    if isinstance(section, (list, tuple)):
-        return [(str(getattr(e, "name", "") or ""), e) for e in section]
-    if hasattr(section, "keys"):
-        return [(str(k), section[k]) for k in section.keys()]
-    return [(k, v) for k, v in vars(section).items() if not str(k).startswith("_")]
-
-
-def _entry_field(entry: Any, name: str, default: Any) -> Any:
-    """One configured field, mapping or namespace alike."""
-    if entry is None:
-        return default
-    value = entry.get(name, default) if hasattr(entry, "get") else getattr(entry, name, default)
-    return default if value is None else value
-
-
 def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
     """Construct the one run log this process writes through, and what it needs.
 

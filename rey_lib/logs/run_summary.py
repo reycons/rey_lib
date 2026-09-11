@@ -34,54 +34,6 @@ def _status(record: dict[str, Any]) -> str:
     return str(record.get("status") or "").strip().lower()
 
 
-def build_common_run_summary(
-    sections: dict[str, Any],
-    identity: dict[str, Any],
-    records: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Return the common (execution-neutral) RUN_SUMMARY fields from log evidence.
-
-    Parameters
-    ----------
-    sections : dict[str, Any]
-        The ``read_run_log_sections`` projection (execution/files/results groups).
-    identity : dict[str, Any]
-        The ``_run_log_identity`` projection (ids, status, counts, timestamps).
-    records : list[dict[str, Any]]
-        All parsed run-log records (for step/terminal derivation).
-
-    Returns
-    -------
-    dict[str, Any]
-        The common summary fields. Missing evidence yields zero/empty/None per the
-        existing schema behavior — never invented values.
-    """
-    execution_records = sections.get("execution", {}).get("records", [])
-    steps = _step_counts(execution_records)
-    return {
-        "run_id": identity["run_id"],
-        "run_timestamp": identity["run_timestamp"],
-        "execution_kind": _execution_kind(identity),
-        "app": identity["app"],
-        "workflow": identity["workflow"],
-        "pipeline": identity["pipeline"],
-        "status": identity["status"],
-        "started_at": identity["run_started_at"],
-        "ended_at": identity["run_completed_at"],
-        "elapsed_ms": _elapsed_ms(identity["run_started_at"], identity["run_completed_at"]),
-        "steps_total": steps["total"],
-        "steps_succeeded": steps["succeeded"],
-        "steps_failed": steps["failed"],
-        "steps_skipped": steps["skipped"],
-        "warning_count": identity["warning_count"],
-        "error_count": identity["error_count"],
-        "artifact_count": identity["artifact_count"],
-        "file_operation_count": identity["file_operation_count"],
-        "failed_step_ids": _failed_step_ids(execution_records),
-        "terminal_outcome": _terminal_outcome(records),
-    }
-
-
 def _execution_kind(identity: dict[str, Any]) -> str:
     """Classify the run as pipeline, workflow, or app from the log identity only."""
     if identity.get("pipeline"):

@@ -957,28 +957,6 @@ def _is_truncation_error(exc: Exception, error_code: int) -> bool:
     return str(error_code) in str(exc)
 
 
-def _split_database_schema(schema: str) -> tuple[str, str]:
-    """
-    Split a 'database.schema' string into its two parts.
-
-    Returns ('', schema) when no dot is present — single-part schema
-    with no database prefix.
-
-    Parameters
-    ----------
-    schema : str
-        Schema string — either 'schema_name' or 'database.schema_name'.
-
-    Returns
-    -------
-    tuple[str, str]
-        (database_name, schema_name)
-    """
-    parts = schema.split(".", 1)
-    if len(parts) == 2:
-        return parts[0], parts[1]
-    return "", schema
-
 def _normalize_db_nulls(value: Any) -> Any:
 	if value == "":
 		return None
