@@ -11,6 +11,7 @@ hand them to us as executable nodes in the first place.
 from __future__ import annotations
 
 import ast
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -708,12 +709,57 @@ def extract_python_writes_and_accesses(
     writes: list[AssignmentRecord] = []
     accesses: list[AccessRecord] = []
     for owner, qualified_name in _recorded_bodies(tree):
-        for node in ast.walk(owner):
+        for node in _own_nodes(owner):
             writes.extend(_writes_of(recorded_path, node, owner, qualified_name))
             access = _access_of(recorded_path, node, owner, qualified_name)
             if access is not None:
                 accesses.append(access)
     return writes, accesses
+
+
+#: Declarations that own their own insides. A node inside one of these belongs
+#: to it, not to whatever encloses it, so a traversal that is looking for one
+#: declaration's facts stops here.
+_NESTED_DECLARATIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _own_nodes(owner: ast.AST) -> list[ast.AST]:
+    """Return the nodes belonging to one declaration, stopping at nested ones.
+
+    ``ast.walk`` descends into nested functions and lambdas, which makes a
+    closure's statements look like the enclosing declaration's::
+
+        def outer():
+            def inner():
+                d["x"] = 1      # ast.walk(outer) yields this
+
+    Owner means *the indexed declaration containing this occurrence*, and that
+    is false positional ownership. Since a closure is not itself an addressable
+    symbol, the truthful answer is to leave its facts out rather than file them
+    under a declaration that does not contain them -- an acknowledged gap over
+    a false fact.
+
+    The nested declaration node itself is returned, because ``def inner():`` is
+    genuinely a statement of the enclosing body; only its insides are pruned.
+
+    Breadth-first like ``ast.walk``, so record order is unchanged for
+    everything that was already correctly owned.
+
+    Args:
+        owner: The declaration whose own nodes are wanted.
+
+    Returns:
+        The owner and every descendant not inside a nested declaration.
+    """
+    nodes: list[ast.AST] = []
+    todo = deque([owner])
+    while todo:
+        node = todo.popleft()
+        nodes.append(node)
+        if node is not owner and isinstance(node, _NESTED_DECLARATIONS):
+            continue
+        todo.extend(ast.iter_child_nodes(node))
+    return nodes
 
 
 def _recorded_bodies(

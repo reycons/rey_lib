@@ -701,8 +701,9 @@ def extract_js_writes_and_accesses(
     writes: list[AssignmentRecord] = []
     accesses: list[AccessRecord] = []
     for owner, qualified_name in _js_recorded_bodies(root):
+        own = _own_nodes(owner)
         written_subscripts: set[int] = set()
-        for node in _walk(owner):
+        for node in own:
             record = _js_write_of(recorded_path, node, owner, qualified_name)
             if record is not None:
                 writes.append(record)
@@ -710,13 +711,58 @@ def extract_js_writes_and_accesses(
                           or node.child_by_field_name("name"))
                 if target is not None and target.type == "subscript_expression":
                     written_subscripts.add(target.id)
-        for node in _walk(owner):
+        for node in own:
             if node.id in written_subscripts:
                 continue
             access = _js_access_of(recorded_path, node, owner, qualified_name)
             if access is not None:
                 accesses.append(access)
     return writes, accesses
+
+
+#: Declarations that own their own insides. A node inside one of these belongs
+#: to it, not to whatever encloses it, so a traversal looking for one
+#: declaration's facts stops here. The Python extractor keeps the same rule.
+_NESTED_DECLARATIONS = frozenset({
+    "function_declaration", "function_expression", "arrow_function",
+    "generator_function_declaration", "generator_function", "method_definition",
+})
+
+
+def _own_nodes(owner: Node) -> list[Node]:
+    """Return the nodes belonging to one declaration, stopping at nested ones.
+
+    ``_walk`` descends into nested functions and arrows, which makes a
+    closure's statements look like the enclosing declaration's::
+
+        function outer() {
+            const inner = () => { d["x"] = 1; };   // _walk(outer) yields this
+        }
+
+    Owner means *the indexed declaration containing this occurrence*, and that
+    is false positional ownership. A closure is not an addressable symbol, so
+    its facts are left out rather than filed under a declaration that does not
+    contain them.
+
+    The nested declaration node itself is returned; only its insides are
+    pruned. Source order, like ``_walk``, so record order is unchanged for
+    everything already correctly owned.
+
+    Args:
+        owner: The declaration whose own nodes are wanted.
+
+    Returns:
+        The owner and every named descendant not inside a nested declaration.
+    """
+    nodes: list[Node] = []
+    stack = [owner]
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if node is not owner and node.type in _NESTED_DECLARATIONS:
+            continue
+        stack.extend(reversed(node.named_children))
+    return nodes
 
 
 def _js_recorded_bodies(root: Node) -> list[tuple[Node, str]]:

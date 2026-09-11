@@ -225,3 +225,140 @@ class TestTypeScriptMatchesPython:
             ("method_call", "expression", None),
             ("subscript", "string_literal", "TOKEN"),
         ]
+
+
+class TestOwnershipStopsAtNestedDeclarations:
+    """Owner means the indexed declaration *containing* the occurrence.
+
+    Before this, ``ast.walk`` and ``_walk`` descended into nested functions,
+    lambdas and arrows, so a closure's statements were filed under whatever
+    enclosed them -- roughly 1,746 rows across the estate's Python. A closure
+    is not an addressable symbol, so those facts are left out rather than
+    attributed to a declaration that does not contain them.
+
+    Each test uses syntax the language can actually represent. A Python lambda
+    body is a single expression: it can hold neither an assignment nor a
+    return, so none is invented here.
+    """
+
+    def test_a_nested_function_keeps_its_own_writes_and_accesses(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "nested.py"
+        path.write_text(
+            "def outer(d):\n"
+            "    kept = 1\n"
+            "    outer_read = d['own']\n"
+            "    def inner():\n"
+            "        leaked = 2\n"
+            "        return d['closure']\n"
+            "    return inner\n",
+            encoding="utf-8",
+        )
+
+        writes, accesses = _facts(path, "Python")
+
+        assert [w.target_chain for w in writes] == ["kept", "outer_read"]
+        assert [a.literal_argument for a in accesses] == ["own"]
+
+    async_source = (
+        "async def outer(d):\n"
+        "    kept = 1\n"
+        "    async def inner():\n"
+        "        leaked = 2\n"
+        "    return inner\n"
+    )
+
+    def test_a_nested_async_function_is_the_same_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "nested_async.py"
+        path.write_text(self.async_source, encoding="utf-8")
+
+        writes, _ = _facts(path, "Python")
+
+        assert [w.target_chain for w in writes] == ["kept"]
+
+    def test_a_lambda_keeps_its_own_accesses(self, tmp_path: Path) -> None:
+        """Accesses are the facts a lambda can hold.
+
+        Its body is one expression, so there is no assignment or return to
+        test, and C2 records only Assign/AugAssign/AnnAssign -- never
+        NamedExpr -- so a walrus is not a write fact either.
+        """
+        path = tmp_path / "lam.py"
+        path.write_text(
+            "def outer(d):\n"
+            "    outer_read = d['own']\n"
+            "    pick = lambda k: d[k]\n"
+            "    fetch = lambda k: d.get('closure')\n"
+            "    return pick, fetch\n",
+            encoding="utf-8",
+        )
+
+        _, accesses = _facts(path, "Python")
+
+        assert [a.literal_argument for a in accesses] == ["own"]
+
+    def test_a_nested_arrow_keeps_its_own_writes_and_accesses(
+        self, tmp_path: Path
+    ) -> None:
+        """TypeScript arrows can hold both, so both are asserted here."""
+        path = tmp_path / "nested.ts"
+        path.write_text(
+            "export function outer(d) {\n"
+            "  const kept = 1;\n"
+            "  const outerRead = d['own'];\n"
+            "  const inner = () => {\n"
+            "    const leaked = 2;\n"
+            "    return d['closure'];\n"
+            "  };\n"
+            "  return inner;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        writes, accesses = _facts(path, "TypeScript")
+
+        # `inner` itself is a binding the outer body performs; only the
+        # closure's insides are pruned. `leaked` is gone, which is the point.
+        assert [w.target_chain for w in writes] == ["kept", "outerRead", "inner"]
+        assert [a.literal_argument for a in accesses] == ["own"]
+
+    def test_a_nested_function_expression_is_the_same_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "expr.ts"
+        path.write_text(
+            "export function outer() {\n"
+            "  const kept = 1;\n"
+            "  const inner = function () { const leaked = 2; };\n"
+            "  return inner;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        writes, _ = _facts(path, "TypeScript")
+
+        assert [w.target_chain for w in writes] == ["kept", "inner"]
+
+    def test_the_nested_declaration_statement_itself_still_belongs_outward(
+        self, tmp_path: Path
+    ) -> None:
+        """``const inner = () => {...}`` is a write the outer body performs.
+
+        Only the closure's *insides* are pruned. Losing the binding itself
+        would trade one false fact for a missing true one.
+        """
+        path = tmp_path / "binding.ts"
+        path.write_text(
+            "export function outer() {\n"
+            "  const inner = () => 1;\n"
+            "  return inner;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        writes, _ = _facts(path, "TypeScript")
+
+        assert [w.target_chain for w in writes] == ["inner"]
