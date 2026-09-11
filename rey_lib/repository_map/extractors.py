@@ -14,11 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
+    extract_js_parameters,
     extract_js_references,
     extract_js_symbols,
     supported_js_languages,
 )
 from rey_lib.repository_map.python_extractor import (
+    extract_python_parameters,
     extract_python_references,
     extract_python_symbols,
 )
@@ -27,6 +29,7 @@ from rey_lib.repository_map.records import ReferenceEdge, SymbolInventory
 __all__ = [
     "LANGUAGE_EXTRACTORS",
     "LanguageExtractor",
+    "extract_declared_parameters",
     "extract_executable_references",
     "extract_symbols",
     "supported_languages",
@@ -41,11 +44,13 @@ class LanguageExtractor:
         language: Language name as recorded by the file inventory.
         symbols: Callable returning the file's top-level symbol inventory.
         references: Callable returning the file's executable reference edges.
+        parameters: Callable returning the parameters its declarations declare.
     """
 
     language: str
     symbols: Callable[[Path, str, str | None], SymbolInventory]
     references: Callable[[Path, str, str | None], list[ReferenceEdge]]
+    parameters: Callable[[Path, str, str | None], list[ParameterRecord]]
 
 
 # The registry is data: language name to the object that owns that language.
@@ -55,6 +60,7 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         language="Python",
         symbols=extract_python_symbols,
         references=extract_python_references,
+        parameters=extract_python_parameters,
     ),
 }
 
@@ -66,6 +72,7 @@ LANGUAGE_EXTRACTORS.update(
             language=language,
             symbols=extract_js_symbols,
             references=extract_js_references,
+            parameters=extract_js_parameters,
         )
         for language in supported_js_languages()
     }
@@ -97,6 +104,30 @@ def extract_symbols(
             file cannot be parsed.
     """
     return _extractor_for(language).symbols(path, language, source_path)
+
+
+def extract_declared_parameters(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ParameterRecord]:
+    """Return the parameters one file's declarations declare.
+
+    Declared, not inferred: what the signature says, never what a caller may
+    pass.
+
+    Args:
+        path: Source file to read and parse.
+        language: Language name as the inventory recorded it.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The parameters, empty for a language with no registered extractor.
+    """
+    extractor = LANGUAGE_EXTRACTORS.get(language)
+    if extractor is None:
+        return []
+    return extractor.parameters(path, language, source_path)
 
 
 def extract_executable_references(

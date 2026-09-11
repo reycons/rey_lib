@@ -32,6 +32,7 @@ from typing import Any, Protocol, runtime_checkable
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
     RECORD_TYPE_DEPENDENCY_EDGE,
+    RECORD_TYPE_PARAMETER,
     RECORD_TYPE_FILE,
     RECORD_TYPE_SYMBOL,
 )
@@ -74,6 +75,10 @@ class IndexedRepository:
         header: The repository's observed state -- revision, branch, working
             tree status, hashes.
         files: One entry per file, each carrying its own symbol rows.
+        parameters: One entry per declared parameter, naming the symbol that
+            declares it by name and position. Beside the files for the reason
+            edges are: a parameter belongs to a declaration, and the promotion
+            resolves that from the natural key rather than from storage ids.
         edges: One entry per proved reference, naming the file it was written
             in. Kept beside the files rather than under them: an edge is
             attributed to a file but is not a property of one, and grouping it
@@ -81,7 +86,7 @@ class IndexedRepository:
             not.
     """
 
-    __slots__ = ("repository", "header", "files", "edges")
+    __slots__ = ("repository", "header", "files", "edges", "parameters")
 
     def __init__(
         self,
@@ -89,11 +94,13 @@ class IndexedRepository:
         header: dict[str, Any],
         files: list[dict[str, Any]],
         edges: list[dict[str, Any]] | None = None,
+        parameters: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
         self.files = files
         self.edges = edges if edges is not None else []
+        self.parameters = parameters if parameters is not None else []
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -168,6 +175,7 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "start_column": record["source_column"],
                 "end_line": record["end_line"],
                 "end_column": record["end_column"],
+                "returns_annotation": record["returns_annotation"],
                 "dotted_identity": record["dotted_identity"],
             }
         )
@@ -199,6 +207,32 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
             }
         )
 
+    parameters: list[dict[str, Any]] = []
+    for record in repository_map.records:
+        if record["record_type"] != RECORD_TYPE_PARAMETER:
+            continue
+        if record["source_path"] not in files:
+            logger.warning(
+                "%s: parameter %s names a file the inventory does not carry",
+                repository,
+                record["owner_qualified_name"],
+            )
+            continue
+        parameters.append(
+            {
+                "relative_path": record["source_path"],
+                "owner_qualified_name": record["owner_qualified_name"],
+                "owner_line": record["owner_line"],
+                "owner_column": record["owner_column"],
+                "name": record["name"],
+                "ordinal": record["ordinal"],
+                "parameter_kind": record["parameter_kind"],
+                "has_default": record["has_default"],
+                "is_optional": record["is_optional"],
+                "annotation": record["annotation"],
+            }
+        )
+
     header = repository_map.header
     return IndexedRepository(
         repository=repository,
@@ -213,4 +247,5 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
         },
         files=list(files.values()),
         edges=edges,
+        parameters=parameters,
     )

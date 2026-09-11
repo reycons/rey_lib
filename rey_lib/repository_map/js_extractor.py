@@ -41,12 +41,16 @@ from rey_lib.repository_map.records import (
     SYMBOL_KIND_RE_EXPORT,
     SYMBOL_KIND_TYPE_ALIAS,
     SYMBOL_KIND_VARIABLE,
+    PARAMETER_KIND_POSITIONAL,
+    PARAMETER_KIND_VAR_POSITIONAL,
+    ParameterRecord,
     ReferenceEdge,
     SymbolInventory,
     SymbolRecord,
 )
 
 __all__ = [
+    "extract_js_parameters",
     "extract_js_references",
     "extract_js_symbols",
     "JS_GLOBAL_ROOT",
@@ -400,6 +404,136 @@ def _text(node: Node) -> str:
     return node.text.decode("utf-8", errors="replace") if node.text is not None else ""
 
 
+def extract_js_parameters(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ParameterRecord]:
+    """Extract every parameter declared by a top-level function or method.
+
+    The same boundary the symbol inventory keeps.
+
+    Two independent facts, which this grammar makes easy to confuse. A default
+    is written ``b = 2`` and tree-sitter still reports the node as a
+    ``required_parameter``, so a default is detected by the presence of a value
+    child, never by the node type. Optionality is written ``b?: T`` and appears
+    as an ``optional_parameter``. Neither implies the other.
+
+    Args:
+        path: Source file to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The parameters, in declaration order within each declaration.
+    """
+    root = _parse(path, language)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    parameters: list[ParameterRecord] = []
+    for statement, _exported in _top_level_statements(root):
+        name_node = statement.child_by_field_name("name")
+        if name_node is None:
+            continue
+        if statement.type in _CLASS_DECLARATIONS:
+            body = statement.child_by_field_name("body")
+            for member in (body.named_children if body is not None else ()):
+                if member.type not in _METHOD_MEMBERS:
+                    continue
+                member_name = member.child_by_field_name("name")
+                if member_name is None:
+                    continue
+                parameters.extend(_js_parameters_of(
+                    recorded_path, member, member_name,
+                    f"{_text(name_node)}.{_text(member_name)}",
+                ))
+            continue
+        parameters.extend(_js_parameters_of(
+            recorded_path, statement, name_node, _text(name_node)
+        ))
+    return parameters
+
+
+def _js_parameters_of(
+    recorded_path: str,
+    declaration: Node,
+    locating: Node,
+    qualified_name: str,
+) -> list[ParameterRecord]:
+    """Return one declaration's parameters, in written order.
+
+    Args:
+        recorded_path: Path to record.
+        declaration: The function, method or signature node.
+        locating: The node the owning symbol is located at, so the owner
+            reference matches the symbol record exactly.
+        qualified_name: How the owning declaration is addressed.
+
+    Returns:
+        The parameter records.
+    """
+    formal = declaration.child_by_field_name("parameters")
+    if formal is None:
+        return []
+    line, column = locating.start_point
+
+    records: list[ParameterRecord] = []
+    for ordinal, node in enumerate(
+        child for child in formal.named_children if child.type != "comment"
+    ):
+        name_node = node.child_by_field_name("pattern") or _js_first_identifier(node)
+        if name_node is None:
+            continue
+        rest = node.type == "rest_pattern" or name_node.type == "rest_pattern"
+        annotation = node.child_by_field_name("type")
+        records.append(ParameterRecord(
+            source_path=recorded_path,
+            owner_qualified_name=qualified_name,
+            owner_line=line + 1,
+            owner_column=column,
+            name=_text(_js_first_identifier(name_node) or name_node),
+            ordinal=ordinal,
+            parameter_kind=(PARAMETER_KIND_VAR_POSITIONAL if rest
+                            else PARAMETER_KIND_POSITIONAL),
+            # A value child, not the node type: 'b = 2' is a required_parameter
+            # that carries one.
+            has_default=node.child_by_field_name("value") is not None,
+            # The syntactic '?', written or not. Not an inference about what a
+            # caller may omit.
+            is_optional=node.type == "optional_parameter",
+            annotation=(_text(annotation).lstrip(": ").strip()
+                        if annotation is not None else None),
+        ))
+    return records
+
+
+def _js_return_annotation(declaration: Node) -> str | None:
+    """Return a declaration's written return type, or None.
+
+    Args:
+        declaration: The node the symbol spans.
+
+    Returns:
+        The annotation without its leading colon, or None where none is
+        written.
+    """
+    annotation = declaration.child_by_field_name("return_type")
+    if annotation is None:
+        return None
+    return _text(annotation).lstrip(": ").strip() or None
+
+
+def _js_first_identifier(node: Node) -> Node | None:
+    """Return the first identifier at or beneath a node, or None."""
+    if node.type in {"identifier", "shorthand_property_identifier_pattern"}:
+        return node
+    for child in node.named_children:
+        found = _js_first_identifier(child)
+        if found is not None:
+            return found
+    return None
+
+
 def _symbol(
     recorded_path: str,
     node: Node,
@@ -448,6 +582,9 @@ def _symbol(
         symbol_kind=symbol_kind,
         exported=exported,
         owner=owner,
+        # The declared return, where the grammar carries one. A class has none
+        # and answers None, which is absence rather than a claim.
+        returns_annotation=_js_return_annotation(declaration),
         end_line=end_line + 1,
         # Exclusive, as tree-sitter reports it: 'const x=1;const y=2;' parses
         # as [0,10) and [10,20), so column 10 ends the first and starts the

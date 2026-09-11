@@ -56,7 +56,12 @@ _FILE_COLUMNS = (
 _SYMBOL_COLUMNS = (
     "repository_key", "relative_path", "symbol_kind", "name",
     "qualified_name", "owner", "is_public", "start_line", "start_column",
-    "end_line", "end_column", "dotted_identity",
+    "end_line", "end_column", "returns_annotation", "dotted_identity",
+)
+_PARAMETER_COLUMNS = (
+    "repository_key", "relative_path", "owner_qualified_name", "owner_line",
+    "owner_column", "name", "ordinal", "parameter_kind", "has_default",
+    "is_optional", "annotation",
 )
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
@@ -125,12 +130,21 @@ class CodeIndexDatabaseWriter:
         self._stage("symbol_stage", symbols, _SYMBOL_COLUMNS)
         self._stage("edge_stage", edges, _EDGE_COLUMNS)
 
+        parameters: list[dict[str, Any]] = [
+            {"repository_key": entry.header["repository_key"], **parameter}
+            for entry in indexed
+            for parameter in entry.parameters
+        ]
+        self._stage("parameter_stage", parameters, _PARAMETER_COLUMNS)
+
         logger.info(
-            "Staged %d repositories, %d files, %d symbols, %d edges",
+            "Staged %d repositories, %d files, %d symbols, %d edges, "
+            "%d parameters",
             len(repositories),
             len(files),
             len(symbols),
             len(edges),
+            len(parameters),
         )
         # The scan side only. The authored architecture is not staged here and
         # is therefore not replaced -- but every surviving realization is
@@ -154,8 +168,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("edge_stage", "symbol_stage", "file_stage",
-                      "repository_stage"):
+        for table in ("parameter_stage", "edge_stage", "symbol_stage",
+                      "file_stage", "repository_stage"):
             self._adapter.execute_sql(
                 self._connection,
                 f"DELETE FROM {SCHEMA}.{table}",

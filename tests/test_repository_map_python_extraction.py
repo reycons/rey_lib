@@ -190,6 +190,8 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
         "exported": True,
         "end_line": 43,
         "end_column": 19,
+        # A class declares no return type. None is absence, not a claim.
+        "returns_annotation": None,
         "dotted_identity": "pkg.sample.TopClass",
         "owner": "",
         "qualified_name": "TopClass",

@@ -28,6 +28,7 @@ from rey_lib.repository_map.boundaries import check_architecture_boundaries
 from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
+    extract_declared_parameters,
     LANGUAGE_EXTRACTORS,
     extract_executable_references,
     extract_symbols,
@@ -89,8 +90,10 @@ class ScanContext:
         return inventory_files(self.repo_root, self.rules)
 
     @cached_property
-    def _extraction(self) -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any]]]:
-        """Return references, symbol records and edge records from one pass.
+    def _extraction(self) -> tuple[
+        list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+    ]:
+        """Return references, symbols, edges and parameters from one pass.
 
         Symbols and references come from the same parse of the same file, so
         they are acquired together rather than parsing twice.
@@ -98,6 +101,7 @@ class ScanContext:
         references: list[Any] = []
         symbols: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
+        parameters: list[dict[str, Any]] = []
         for file_record in self.files:
             if file_record.language not in LANGUAGE_EXTRACTORS:
                 continue
@@ -116,7 +120,12 @@ class ScanContext:
             references.extend(file_references)
             symbols.extend(inventory.to_records())
             edges.extend(edge.to_dict() for edge in file_references)
-        return references, symbols, edges
+            parameters.extend(
+                parameter.to_dict() for parameter in extract_declared_parameters(
+                    path, file_record.language, file_record.path
+                )
+            )
+        return references, symbols, edges, parameters
 
     @property
     def references(self) -> list[Any]:
@@ -188,6 +197,7 @@ RECORD_EMITTERS: tuple[RecordEmitter, ...] = (
     RecordEmitter("file", lambda ctx: [r.to_dict() for r in ctx.files]),
     RecordEmitter("symbol", lambda ctx: list(ctx._extraction[1])),
     RecordEmitter("dependency_edge", lambda ctx: list(ctx._extraction[2])),
+    RecordEmitter("parameter", lambda ctx: list(ctx._extraction[3])),
     RecordEmitter("registration", lambda ctx: [r.to_dict() for r in ctx.registrations]),
     RecordEmitter("entry_point", lambda ctx: [r.to_dict() for r in ctx.entry_points]),
     RecordEmitter(

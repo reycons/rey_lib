@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Optional
 
 __all__ = [
     "EDGE_KIND_BACKEND_STRING_REFERENCE",
@@ -31,6 +31,7 @@ __all__ = [
     "LANGUAGE_UNKNOWN",
     "RECORD_TYPE_DEPENDENCY_EDGE",
     "RECORD_TYPE_FILE",
+    "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
     "SYMBOL_KIND_CLASS",
     "SYMBOL_KIND_ENUM",
@@ -46,6 +47,7 @@ __all__ = [
     "dotted_identity",
     "matches_any_glob",
     "FileRecord",
+    "ParameterRecord",
     "ReferenceEdge",
     "ScanRules",
     "SymbolInventory",
@@ -68,6 +70,7 @@ RECORD_TYPE_REPOSITORY_MAP = "repository_map"
 RECORD_TYPE_FILE = "file"
 RECORD_TYPE_SYMBOL = "symbol"
 RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
+RECORD_TYPE_PARAMETER = "parameter"
 RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
@@ -146,6 +149,17 @@ EDGE_KIND_GLOBAL_REFERENCE = "global_reference"
 EDGE_KIND_REGISTRATION = "registration"
 EDGE_KIND_TEMPLATE_LOAD = "template_load"
 EDGE_KIND_BACKEND_STRING_REFERENCE = "backend_string_reference"
+
+
+# parameter_kind vocabulary. Position in the signature and nothing else.
+# Optionality is not a kind: a TypeScript ``b?: T`` is a positional parameter
+# that happens to be omissible, and encoding that as a sixth kind would make a
+# property into a position.
+PARAMETER_KIND_POSITIONAL_ONLY = "positional_only"
+PARAMETER_KIND_POSITIONAL = "positional"
+PARAMETER_KIND_KEYWORD_ONLY = "keyword_only"
+PARAMETER_KIND_VAR_POSITIONAL = "var_positional"
+PARAMETER_KIND_VAR_KEYWORD = "var_keyword"
 
 
 def matches_any_glob(
@@ -234,6 +248,12 @@ class SymbolRecord:
             than a point and can be retrieved without re-parsing its file.
             Zero where the extractor cannot prove it, which is absent rather
             than a guess.
+        returns_annotation: The declared return type as written, or None
+            where none is declared. A *declaration*, never what the symbol
+            returns: ``def f() -> int: return "x"`` declares ``int`` and
+            returns a string, and only the first is a parser-proven fact.
+            None rather than empty, so absence stays distinguishable from a
+            declaration of nothing.
         end_column: Column the declaration ends at, **exclusive** -- both
             parsers report one position past the last character. With
             ``end_line`` it completes the span to a half-open
@@ -252,6 +272,7 @@ class SymbolRecord:
     owner: str = ""
     end_line: int = 0
     end_column: int = 0
+    returns_annotation: Optional[str] = None
 
     @property
     def dotted_identity(self) -> str:
@@ -296,6 +317,7 @@ class SymbolRecord:
             "qualified_name": self.qualified_name,
             "end_line": self.end_line,
             "end_column": self.end_column,
+            "returns_annotation": self.returns_annotation,
             "dotted_identity": self.dotted_identity,
         }
 
@@ -494,6 +516,75 @@ def _attributed(
         from_symbol_line=winner.source_line,
         from_symbol_column=winner.source_column,
     )
+
+
+@dataclass(frozen=True)
+class ParameterRecord:
+    """One parameter a declaration declares.
+
+    Declared, not inferred. What a caller may pass is a language-level
+    question; what the signature says is a syntactic one, and only the second
+    is recorded here.
+
+    Attributes:
+        source_path: Path the owning declaration is written in.
+        owner_line: The owning symbol's start line, and
+        owner_column: its start column. A qualified name is not unique within
+            a file, so the owner is addressed by name **and** position.
+        owner_qualified_name: The owning declaration.
+        name: The parameter as written.
+        ordinal: Its position in the signature, from zero, in declaration
+            order. Kept even though names exist, because order is itself a
+            parser-proven fact and a caller passing positionally depends on it.
+        parameter_kind: One of the ``PARAMETER_KIND_*`` constants.
+        has_default: Whether the declaration carries a default expression.
+            The expression itself is not stored -- that is source, and storing
+            its text would blur the boundary this index keeps.
+        is_optional: Whether the declaration explicitly permits omission --
+            the syntactic ``?``, written or not. Independent of
+            ``has_default``: TypeScript ``b?: T`` has one and not the other,
+            and ``b = 2`` has the reverse.
+        annotation: The declared type as written, or None where none is
+            declared. None rather than empty, because an empty string is a
+            value and absence must stay distinguishable from it.
+    """
+
+    source_path: str
+    owner_qualified_name: str
+    owner_line: int
+    owner_column: int
+    name: str
+    ordinal: int
+    parameter_kind: str
+    has_default: bool = False
+    is_optional: bool = False
+    annotation: Optional[str] = None
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this parameter fact."""
+        return (
+            f"{RECORD_TYPE_PARAMETER}:{self.source_path}"
+            f":{self.owner_qualified_name}:{self.owner_line}:{self.owner_column}"
+            f":{self.ordinal}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this parameter as a JSONL 'parameter' record."""
+        return {
+            "record_type": RECORD_TYPE_PARAMETER,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "owner_qualified_name": self.owner_qualified_name,
+            "owner_line": self.owner_line,
+            "owner_column": self.owner_column,
+            "name": self.name,
+            "ordinal": self.ordinal,
+            "parameter_kind": self.parameter_kind,
+            "has_default": self.has_default,
+            "is_optional": self.is_optional,
+            "annotation": self.annotation,
+        }
 
 
 @dataclass(frozen=True)

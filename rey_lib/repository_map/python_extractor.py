@@ -27,12 +27,22 @@ from rey_lib.repository_map.records import (
     SYMBOL_KIND_METHOD,
     SYMBOL_KIND_RE_EXPORT,
     SYMBOL_KIND_VARIABLE,
+    PARAMETER_KIND_KEYWORD_ONLY,
+    PARAMETER_KIND_POSITIONAL,
+    PARAMETER_KIND_POSITIONAL_ONLY,
+    PARAMETER_KIND_VAR_KEYWORD,
+    PARAMETER_KIND_VAR_POSITIONAL,
+    ParameterRecord,
     ReferenceEdge,
     SymbolInventory,
     SymbolRecord,
 )
 
-__all__ = ["extract_python_references", "extract_python_symbols"]
+__all__ = [
+    "extract_python_parameters",
+    "extract_python_references",
+    "extract_python_symbols",
+]
 
 # Chains rooted at these names describe an object's own internals and never
 # cross a file boundary, so neither self.attr nor self.method() is recorded.
@@ -133,6 +143,11 @@ def extract_python_symbols(
                     name=name,
                     symbol_kind=kind,
                     exported=name in exported_names,
+                    returns_annotation=(
+                        ast.unparse(node.returns)
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.returns is not None else None
+                    ),
                     end_line=end_position[0],
                     end_column=end_position[1],
                 )
@@ -152,6 +167,7 @@ def extract_python_symbols(
                         symbol_kind=SYMBOL_KIND_METHOD,
                         exported=owner_exported and not member.startswith("_"),
                         owner=node.name,
+                        returns_annotation=_member_return(node, member),
                         end_line=end_position[0],
                     end_column=end_position[1],
                     )
@@ -320,6 +336,23 @@ def _methods(node: ast.ClassDef) -> list[tuple[str, int, int, tuple[int, int]]]:
     ]
 
 
+def _member_return(owner: ast.ClassDef, member: str) -> str | None:
+    """Return one method's declared return annotation, or None.
+
+    Args:
+        owner: The declaring class.
+        member: The method name.
+
+    Returns:
+        The annotation as written, or None where none is declared.
+    """
+    for node in owner.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == member and node.returns is not None):
+            return ast.unparse(node.returns)
+    return None
+
+
 def _end_position(node: ast.AST) -> tuple[int, int]:
     """Return the position a node ends at.
 
@@ -394,6 +427,110 @@ def _declarations(node: ast.stmt) -> list[tuple[str, int, int, str, tuple[int, i
             )
         ]
     return []
+
+
+def extract_python_parameters(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ParameterRecord]:
+    """Extract every parameter declared by a top-level function or method.
+
+    The same boundary the symbol inventory keeps: module-level declarations and
+    one level of methods. A closure's parameters are not an addressable
+    identity, so they are not recorded.
+
+    Declaration order is preserved across all five forms, which is what
+    ``ordinal`` means. Python writes them positional-only, positional,
+    ``*args``, keyword-only, ``**kwargs``, and that is the order a caller sees.
+
+    Args:
+        path: Python file to read and parse.
+        language: Language name. Accepted for registry symmetry; unused.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The parameters, in declaration order within each declaration.
+
+    Raises:
+        ValueError: If the file is not parseable Python.
+    """
+    tree = _parse(path)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    parameters: list[ParameterRecord] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parameters.extend(_parameters_of(recorded_path, node, node.name))
+        elif isinstance(node, ast.ClassDef):
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    parameters.extend(
+                        _parameters_of(
+                            recorded_path, member, f"{node.name}.{member.name}"
+                        )
+                    )
+    return parameters
+
+
+def _parameters_of(
+    recorded_path: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    qualified_name: str,
+) -> list[ParameterRecord]:
+    """Return one declaration's parameters, in the order they are written.
+
+    Args:
+        recorded_path: Path to record.
+        node: The function or method.
+        qualified_name: How the owning declaration is addressed.
+
+    Returns:
+        The parameter records.
+    """
+    arguments = node.args
+    # Defaults are right-aligned against positional parameters: the last N
+    # positional forms carry them. Keyword-only defaults are positional in
+    # their own list, with None where a parameter has none.
+    positional = arguments.posonlyargs + arguments.args
+    defaulted_from = len(positional) - len(arguments.defaults)
+    keyword_defaults = {
+        argument.arg: default is not None
+        for argument, default in zip(arguments.kwonlyargs, arguments.kw_defaults)
+    }
+
+    written: list[tuple[ast.arg, str, bool]] = []
+    for index, argument in enumerate(arguments.posonlyargs):
+        written.append((argument, PARAMETER_KIND_POSITIONAL_ONLY,
+                        index >= defaulted_from))
+    for index, argument in enumerate(arguments.args, start=len(arguments.posonlyargs)):
+        written.append((argument, PARAMETER_KIND_POSITIONAL, index >= defaulted_from))
+    if arguments.vararg is not None:
+        written.append((arguments.vararg, PARAMETER_KIND_VAR_POSITIONAL, False))
+    for argument in arguments.kwonlyargs:
+        written.append((argument, PARAMETER_KIND_KEYWORD_ONLY,
+                        keyword_defaults.get(argument.arg, False)))
+    if arguments.kwarg is not None:
+        written.append((arguments.kwarg, PARAMETER_KIND_VAR_KEYWORD, False))
+
+    return [
+        ParameterRecord(
+            source_path=recorded_path,
+            owner_qualified_name=qualified_name,
+            owner_line=node.lineno,
+            owner_column=node.col_offset,
+            name=argument.arg,
+            ordinal=ordinal,
+            parameter_kind=kind,
+            has_default=has_default,
+            # Python has no syntactic optional marker; a default is the only
+            # way a parameter may be omitted, and that is has_default's fact.
+            is_optional=False,
+            annotation=(ast.unparse(argument.annotation)
+                        if argument.annotation is not None else None),
+        )
+        for ordinal, (argument, kind, has_default) in enumerate(written)
+    ]
 
 
 def _parse(path: Path) -> ast.Module:
