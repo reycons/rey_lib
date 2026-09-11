@@ -15,6 +15,7 @@ from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
     extract_js_class_attributes,
+    extract_js_return_sites,
     extract_js_parameters,
     extract_js_writes_and_accesses,
     extract_js_references,
@@ -23,6 +24,7 @@ from rey_lib.repository_map.js_extractor import (
 )
 from rey_lib.repository_map.python_extractor import (
     extract_python_class_attributes,
+    extract_python_return_sites,
     extract_python_parameters,
     extract_python_writes_and_accesses,
     extract_python_references,
@@ -34,6 +36,7 @@ __all__ = [
     "LANGUAGE_EXTRACTORS",
     "LanguageExtractor",
     "extract_class_attributes",
+    "extract_return_sites",
     "extract_declared_parameters",
     "extract_writes_and_accesses",
     "extract_executable_references",
@@ -53,6 +56,8 @@ class LanguageExtractor:
         parameters: Callable returning the parameters its declarations declare.
         class_attributes: Callable returning the names bound directly in its
             class bodies.
+        return_sites: Callable returning the returns written inside its
+            declarations.
         writes_and_accesses: Callable returning the writes and indexed access
             forms inside those declarations, from one walk.
     """
@@ -62,6 +67,7 @@ class LanguageExtractor:
     references: Callable[[Path, str, str | None], list[ReferenceEdge]]
     parameters: Callable[[Path, str, str | None], list[ParameterRecord]]
     class_attributes: Callable[[Path, str, str | None], list[ClassAttributeRecord]]
+    return_sites: Callable[[Path, str, str | None], list[ReturnSiteRecord]]
     writes_and_accesses: Callable[
         [Path, str, str | None],
         tuple[list[AssignmentRecord], list[AccessRecord]],
@@ -77,6 +83,7 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         references=extract_python_references,
         parameters=extract_python_parameters,
         class_attributes=extract_python_class_attributes,
+        return_sites=extract_python_return_sites,
         writes_and_accesses=extract_python_writes_and_accesses,
     ),
 }
@@ -91,6 +98,7 @@ LANGUAGE_EXTRACTORS.update(
             references=extract_js_references,
             parameters=extract_js_parameters,
             class_attributes=extract_js_class_attributes,
+            return_sites=extract_js_return_sites,
             writes_and_accesses=extract_js_writes_and_accesses,
         )
         for language in supported_js_languages()
@@ -193,6 +201,30 @@ def extract_class_attributes(
     if extractor is None:
         return []
     return extractor.class_attributes(path, language, source_path)
+
+
+def extract_return_sites(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ReturnSiteRecord]:
+    """Return the returns written inside one file's declarations.
+
+    Shape, never value: a returned call is recorded as a call, and what it
+    evaluates to is not a parser-proven fact.
+
+    Args:
+        path: Source file to read and parse.
+        language: Language name as the inventory recorded it.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The return sites, empty for a language with no registered extractor.
+    """
+    extractor = LANGUAGE_EXTRACTORS.get(language)
+    if extractor is None:
+        return []
+    return extractor.return_sites(path, language, source_path)
 
 
 def extract_executable_references(

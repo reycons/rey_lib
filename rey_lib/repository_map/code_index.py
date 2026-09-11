@@ -34,6 +34,7 @@ from rey_lib.repository_map.records import (
     RECORD_TYPE_ACCESS,
     RECORD_TYPE_ASSIGNMENT,
     RECORD_TYPE_CLASS_ATTRIBUTE,
+    RECORD_TYPE_RETURN_SITE,
     RECORD_TYPE_DEPENDENCY_EDGE,
     RECORD_TYPE_PARAMETER,
     RECORD_TYPE_FILE,
@@ -78,6 +79,8 @@ class IndexedRepository:
         header: The repository's observed state -- revision, branch, working
             tree status, hashes.
         files: One entry per file, each carrying its own symbol rows.
+        return_sites: One entry per return written inside a declaration, named
+            by the declaration that contains it -- never by one enclosing that.
         class_attributes: One entry per name bound directly in a class body,
             naming its owning class the way parameters name their declaration.
         writes: One entry per syntactic write, and
@@ -95,7 +98,7 @@ class IndexedRepository:
     """
 
     __slots__ = ("repository", "header", "files", "edges", "parameters",
-                 "writes", "accesses", "class_attributes")
+                 "writes", "accesses", "class_attributes", "return_sites")
 
     def __init__(
         self,
@@ -107,6 +110,7 @@ class IndexedRepository:
         writes: list[dict[str, Any]] | None = None,
         accesses: list[dict[str, Any]] | None = None,
         class_attributes: list[dict[str, Any]] | None = None,
+        return_sites: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
@@ -118,6 +122,7 @@ class IndexedRepository:
         self.class_attributes = (
             class_attributes if class_attributes is not None else []
         )
+        self.return_sites = return_sites if return_sites is not None else []
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -152,6 +157,10 @@ _CLASS_ATTRIBUTE_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "name", "ordinal",
     "declaration_form", "is_annotated", "has_default", "is_optional",
     "annotation", "modifiers",
+)
+_RETURN_SITE_FIELDS = (
+    "owner_qualified_name", "owner_line", "owner_column", "source_line",
+    "source_column", "ordinal", "has_value", "value_kind", "value_chain",
 )
 _ACCESS_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "source_line",
@@ -252,6 +261,7 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "end_column": record["end_column"],
                 "returns_annotation": record["returns_annotation"],
                 "dotted_identity": record["dotted_identity"],
+                "is_generator": record["is_generator"],
             }
         )
 
@@ -330,5 +340,9 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
         class_attributes=_owned_rows(
             repository, repository_map, files,
             RECORD_TYPE_CLASS_ATTRIBUTE, _CLASS_ATTRIBUTE_FIELDS,
+        ),
+        return_sites=_owned_rows(
+            repository, repository_map, files,
+            RECORD_TYPE_RETURN_SITE, _RETURN_SITE_FIELDS,
         ),
     )

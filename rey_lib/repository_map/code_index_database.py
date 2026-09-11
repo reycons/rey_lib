@@ -57,6 +57,7 @@ _SYMBOL_COLUMNS = (
     "repository_key", "relative_path", "symbol_kind", "name",
     "qualified_name", "owner", "is_public", "start_line", "start_column",
     "end_line", "end_column", "returns_annotation", "dotted_identity",
+    "is_generator",
 )
 _PARAMETER_COLUMNS = (
     "repository_key", "relative_path", "owner_qualified_name", "owner_line",
@@ -78,6 +79,11 @@ _CLASS_ATTRIBUTE_COLUMNS = (
     "repository_key", "relative_path", "owner_qualified_name", "owner_line",
     "owner_column", "name", "ordinal", "declaration_form", "is_annotated",
     "has_default", "is_optional", "annotation", "modifiers",
+)
+_RETURN_SITE_COLUMNS = (
+    "repository_key", "relative_path", "owner_qualified_name", "owner_line",
+    "owner_column", "source_line", "source_column", "ordinal", "has_value",
+    "value_kind", "value_chain",
 )
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
@@ -169,10 +175,16 @@ class CodeIndexDatabaseWriter:
         self._stage("access_stage", accesses, _ACCESS_COLUMNS)
         self._stage("class_attribute_stage", class_attributes,
                     _CLASS_ATTRIBUTE_COLUMNS)
+        return_sites = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.return_sites
+        ]
+        self._stage("return_site_stage", return_sites, _RETURN_SITE_COLUMNS)
 
         logger.info(
             "Staged %d repositories, %d files, %d symbols, %d edges, "
-            "%d parameters, %d writes, %d accesses, %d class attributes",
+            "%d parameters, %d writes, %d accesses, %d class attributes, "
+            "%d return sites",
             len(repositories),
             len(files),
             len(symbols),
@@ -181,6 +193,7 @@ class CodeIndexDatabaseWriter:
             len(writes),
             len(accesses),
             len(class_attributes),
+            len(return_sites),
         )
         # The scan side only. The authored architecture is not staged here and
         # is therefore not replaced -- but every surviving realization is
@@ -204,7 +217,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("class_attribute_stage", "access_stage",
+        for table in ("return_site_stage", "class_attribute_stage",
+                      "access_stage",
                       "assignment_stage", "parameter_stage",
                       "edge_stage", "symbol_stage", "file_stage",
                       "repository_stage"):

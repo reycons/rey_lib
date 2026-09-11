@@ -53,10 +53,23 @@ from rey_lib.repository_map.records import (
     TARGET_KIND_NAME,
     TARGET_KIND_SUBSCRIPT,
     DECLARATION_FORM_FIELD_DEFINITION,
+    VALUE_KIND_ATTRIBUTE,
+    VALUE_KIND_AWAIT,
+    VALUE_KIND_CALL,
+    VALUE_KIND_COLLECTION_LITERAL,
+    VALUE_KIND_CONDITIONAL,
+    VALUE_KIND_LITERAL,
+    VALUE_KIND_NAME_CHAIN,
+    VALUE_KIND_NONE_LITERAL,
+    VALUE_KIND_OPERATION,
+    VALUE_KIND_OTHER,
+    VALUE_KIND_SUBSCRIPT,
+    VALUE_KIND_F_STRING,
     AccessRecord,
     AssignmentRecord,
     ClassAttributeRecord,
     ParameterRecord,
+    ReturnSiteRecord,
     ReferenceEdge,
     SymbolInventory,
     SymbolRecord,
@@ -64,6 +77,7 @@ from rey_lib.repository_map.records import (
 
 __all__ = [
     "extract_js_class_attributes",
+    "extract_js_return_sites",
     "extract_js_parameters",
     "extract_js_writes_and_accesses",
     "extract_js_references",
@@ -765,6 +779,101 @@ def _own_nodes(owner: Node) -> list[Node]:
     return nodes
 
 
+def extract_js_return_sites(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ReturnSiteRecord]:
+    """Extract every return written inside a recorded declaration.
+
+    The ownership boundary again: a return inside a nested function or arrow
+    belongs to that one. A concise-body arrow (``() => x``) is not reached,
+    because an arrow bound to a const is not a declaration this inventory
+    records -- the same gap that leaves it without parameters.
+
+    Args:
+        path: Source file to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The return sites, in source order within each declaration.
+    """
+    root = _parse(path, language)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    sites: list[ReturnSiteRecord] = []
+    for owner, qualified_name in _js_recorded_bodies(root):
+        owner_line, owner_column = _js_owner_position(owner)
+        own = [node for node in _own_nodes(owner)
+               if node.type == "return_statement"]
+        own.sort(key=lambda node: node.start_point)
+        for ordinal, node in enumerate(own):
+            value = node.named_children[0] if node.named_children else None
+            kind, chain = _js_returned_facts(value)
+            line, column = node.start_point
+            sites.append(
+                ReturnSiteRecord(
+                    source_path=recorded_path,
+                    owner_qualified_name=qualified_name,
+                    owner_line=owner_line,
+                    owner_column=owner_column,
+                    source_line=line + 1,
+                    source_column=column,
+                    ordinal=ordinal,
+                    has_value=value is not None,
+                    value_kind=kind,
+                    value_chain=chain,
+                )
+            )
+    return sites
+
+
+#: Returned expression node types whose shape the vocabulary names directly.
+_RETURNED_KINDS = {
+    "null": VALUE_KIND_NONE_LITERAL,
+    "string": VALUE_KIND_LITERAL,
+    "number": VALUE_KIND_LITERAL,
+    "true": VALUE_KIND_LITERAL,
+    "false": VALUE_KIND_LITERAL,
+    "regex": VALUE_KIND_LITERAL,
+    "template_string": VALUE_KIND_F_STRING,
+    "call_expression": VALUE_KIND_CALL,
+    "await_expression": VALUE_KIND_AWAIT,
+    "subscript_expression": VALUE_KIND_SUBSCRIPT,
+    "array": VALUE_KIND_COLLECTION_LITERAL,
+    "object": VALUE_KIND_COLLECTION_LITERAL,
+    "ternary_expression": VALUE_KIND_CONDITIONAL,
+    "binary_expression": VALUE_KIND_OPERATION,
+    "unary_expression": VALUE_KIND_OPERATION,
+}
+
+
+def _js_returned_facts(value: Node | None) -> tuple[str | None, str | None]:
+    """Return the shape of a returned expression, and its chain where proved.
+
+    ``undefined`` has its own node type here -- it is neither an identifier nor
+    ``null`` -- so it falls to ``other`` rather than being folded into
+    ``none_literal``, which would erase a distinction TypeScript makes.
+
+    Args:
+        value: The returned expression, or None for a bare ``return``.
+
+    Returns:
+        The value kind and the proven dotted chain, each None where absent.
+    """
+    if value is None:
+        return None, None
+    if value.type == "identifier":
+        return VALUE_KIND_NAME_CHAIN, _text(value)
+    if value.type == "member_expression":
+        chain = js_dotted_name(value)
+        if chain is None:
+            return VALUE_KIND_ATTRIBUTE, None
+        return VALUE_KIND_NAME_CHAIN, chain
+    return _RETURNED_KINDS.get(value.type, VALUE_KIND_OTHER), None
+
+
 def _js_recorded_bodies(root: Node) -> list[tuple[Node, str]]:
     """Return the declarations whose insides are recorded, with their names."""
     bodies: list[tuple[Node, str]] = []
@@ -993,6 +1102,37 @@ def _symbol(
         # second. Keeping it exclusive is what lets a position on that boundary
         # belong to exactly one of them.
         end_column=end_column,
+        # A generator form, or a body that yields. Both are needed: `function*`
+        # with no yield is still a generator, and a `*` method carries the star
+        # rather than a distinct node type.
+        is_generator=_js_is_generator(declaration),
+    )
+
+
+#: Declaration node types that are generators by their own grammar.
+_GENERATOR_DECLARATIONS = frozenset({
+    "generator_function_declaration", "generator_function",
+})
+
+
+def _js_is_generator(declaration: Node) -> bool:
+    """Return whether a declaration is a generator.
+
+    Args:
+        declaration: The declaring node.
+
+    Returns:
+        True for a generator node type, for a ``*``-marked member, or for a
+        declaration whose own body yields. The body check uses the ownership
+        boundary, so a ``yield`` inside a nested declaration makes *that* one a
+        generator and not this.
+    """
+    if declaration.type in _GENERATOR_DECLARATIONS:
+        return True
+    if any(child.type == "*" for child in declaration.children):
+        return True
+    return any(
+        node.type == "yield_expression" for node in _own_nodes(declaration)
     )
 
 

@@ -33,6 +33,7 @@ __all__ = [
     "RECORD_TYPE_FILE",
     "RECORD_TYPE_ACCESS",
     "RECORD_TYPE_CLASS_ATTRIBUTE",
+    "RECORD_TYPE_RETURN_SITE",
     "RECORD_TYPE_ASSIGNMENT",
     "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
@@ -54,6 +55,7 @@ __all__ = [
     "FileRecord",
     "AccessRecord",
     "ClassAttributeRecord",
+    "ReturnSiteRecord",
     "AssignmentRecord",
     "ParameterRecord",
     "ReferenceEdge",
@@ -82,6 +84,7 @@ RECORD_TYPE_PARAMETER = "parameter"
 RECORD_TYPE_ASSIGNMENT = "assignment"
 RECORD_TYPE_ACCESS = "access"
 RECORD_TYPE_CLASS_ATTRIBUTE = "class_attribute"
+RECORD_TYPE_RETURN_SITE = "return_site"
 RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
@@ -206,6 +209,46 @@ DECLARATION_FORM_CLASS_ATTRIBUTE = "class_attribute"
 DECLARATION_FORM_FIELD_DEFINITION = "field_definition"
 
 
+# The syntactic shape of a returned expression. Shape, never value: the index
+# says a call was written, not what the call evaluates to.
+#
+# ``attribute`` is separate from ``name_chain`` because they are different
+# proofs. If the dotted-chain helper refuses an expression, the parser has not
+# proved a name chain -- it has proved an attribute access whose receiver is
+# something else:
+#
+#     return self.a.b          name_chain   value_chain 'self.a.b'
+#     return factory().state   attribute    value_chain None
+#
+# Collapsing them would put a known grammar form in the wrong category to keep
+# the list short. ``value_chain`` may be None on either, the way C2's
+# object_chain may be, but the kind still records what syntax occurred.
+#
+# ``none_literal`` is split from ``literal`` because "does it return None" is a
+# question people actually ask. Python ``None`` and TypeScript ``null`` only.
+# TypeScript ``undefined`` is its own grammar node -- not an identifier and not
+# ``null`` -- and folding it in would erase a distinction TypeScript makes, so
+# it stays in ``other`` until it has its own reason to exist.
+VALUE_KIND_NONE_LITERAL = "none_literal"
+VALUE_KIND_LITERAL = "literal"
+VALUE_KIND_F_STRING = "f_string"
+VALUE_KIND_NAME_CHAIN = "name_chain"
+VALUE_KIND_ATTRIBUTE = "attribute"
+VALUE_KIND_SUBSCRIPT = "subscript"
+VALUE_KIND_CALL = "call"
+VALUE_KIND_AWAIT = "await"
+VALUE_KIND_COLLECTION_LITERAL = "collection_literal"
+VALUE_KIND_COMPREHENSION = "comprehension"
+VALUE_KIND_CONDITIONAL = "conditional"
+VALUE_KIND_OPERATION = "operation"
+
+# What the enumerated kinds do not name. Measured at 27 of 14,924 Python return
+# sites (0.18%) -- 24 `return (yield x)` and 3 returned lambdas -- and left as
+# a residue on purpose. Adding a kind per rarity would grow the vocabulary
+# without making an answer available.
+VALUE_KIND_OTHER = "other"
+
+
 def matches_any_glob(
     value: str,
     globs: Sequence[str],
@@ -305,6 +348,12 @@ class SymbolRecord:
             for containment. Line alone cannot separate two declarations
             sharing a line, and ``end_line`` used by itself is an inclusive
             line number: the difference is whether the column is present.
+        is_generator: True when the declaration's **own** body yields -- a
+            ``yield`` or ``yield from`` outside any nested declaration. It does
+            not correct a return site; a generator really does contain
+            ``return 2``. It is what lets a reader tell a return site in a
+            generator from one in an ordinary declaration, which otherwise
+            costs reopening the source.
     """
 
     source_path: str
@@ -317,6 +366,7 @@ class SymbolRecord:
     end_line: int = 0
     end_column: int = 0
     returns_annotation: Optional[str] = None
+    is_generator: bool = False
 
     @property
     def dotted_identity(self) -> str:
@@ -363,6 +413,7 @@ class SymbolRecord:
             "end_column": self.end_column,
             "returns_annotation": self.returns_annotation,
             "dotted_identity": self.dotted_identity,
+            "is_generator": self.is_generator,
         }
 
 
@@ -851,6 +902,82 @@ class ClassAttributeRecord:
             "is_optional": self.is_optional,
             "annotation": self.annotation,
             "modifiers": list(self.modifiers),
+        }
+
+
+@dataclass(frozen=True)
+class ReturnSiteRecord:
+    """One return written inside a declaration.
+
+    Syntax, never value. ``return compute()`` proves a call was written, not
+    what the call evaluates to, and no expression text is stored -- an f-string
+    is ``f_string`` and never its contents.
+
+    **Owned by the declaration that contains it.** A return inside a nested
+    function belongs to that function, not to whatever encloses it, so the
+    extractor stops at nested declarations. Attributing a closure's return
+    outward would say the enclosing declaration returns something it does not.
+
+    **A generator is a separate question.** ``return 2`` in a generator is the
+    StopIteration value; the callable returns a generator. The site is recorded
+    as written, and ``SymbolRecord.is_generator`` is what lets a reader tell
+    the two situations apart without reopening source.
+
+    Attributes:
+        source_path: Path the return is written in.
+        owner_qualified_name: The declaration containing it.
+        owner_line: The owning declaration's start line, and
+        owner_column: its start column. A qualified name is not unique within
+            a file, so the owner is addressed by name **and** position.
+        source_line: Where the return is written, and
+        source_column: its column.
+        ordinal: Position among the declaration's own return sites, from zero,
+            in source order.
+        has_value: Whether an expression was written. False for a bare
+            ``return``, where ``value_kind`` and ``value_chain`` are both None
+            -- absence of a value is a fact, not a missing one.
+        value_kind: One of the ``VALUE_KIND_*`` constants, or None when
+            ``has_value`` is False.
+        value_chain: The proven dotted chain where the expression is one, and
+            None otherwise. None on an ``attribute`` kind is expected: the kind
+            records the syntax, the chain records only what was proved.
+    """
+
+    source_path: str
+    owner_qualified_name: str
+    owner_line: int
+    owner_column: int
+    source_line: int
+    source_column: int
+    ordinal: int
+    has_value: bool = False
+    value_kind: Optional[str] = None
+    value_chain: Optional[str] = None
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this return site."""
+        return (
+            f"{RECORD_TYPE_RETURN_SITE}:{self.source_path}"
+            f":{self.owner_qualified_name}:{self.owner_line}:{self.owner_column}"
+            f":{self.ordinal}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this site as a JSONL 'return_site' record."""
+        return {
+            "record_type": RECORD_TYPE_RETURN_SITE,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "owner_qualified_name": self.owner_qualified_name,
+            "owner_line": self.owner_line,
+            "owner_column": self.owner_column,
+            "source_line": self.source_line,
+            "source_column": self.source_column,
+            "ordinal": self.ordinal,
+            "has_value": self.has_value,
+            "value_kind": self.value_kind,
+            "value_chain": self.value_chain,
         }
 
 

@@ -43,10 +43,24 @@ from rey_lib.repository_map.records import (
     TARGET_KIND_NAME,
     TARGET_KIND_SUBSCRIPT,
     DECLARATION_FORM_CLASS_ATTRIBUTE,
+    VALUE_KIND_ATTRIBUTE,
+    VALUE_KIND_AWAIT,
+    VALUE_KIND_CALL,
+    VALUE_KIND_COLLECTION_LITERAL,
+    VALUE_KIND_COMPREHENSION,
+    VALUE_KIND_CONDITIONAL,
+    VALUE_KIND_F_STRING,
+    VALUE_KIND_LITERAL,
+    VALUE_KIND_NAME_CHAIN,
+    VALUE_KIND_NONE_LITERAL,
+    VALUE_KIND_OPERATION,
+    VALUE_KIND_OTHER,
+    VALUE_KIND_SUBSCRIPT,
     AccessRecord,
     AssignmentRecord,
     ClassAttributeRecord,
     ParameterRecord,
+    ReturnSiteRecord,
     ReferenceEdge,
     SymbolInventory,
     SymbolRecord,
@@ -54,6 +68,7 @@ from rey_lib.repository_map.records import (
 
 __all__ = [
     "extract_python_class_attributes",
+    "extract_python_return_sites",
     "extract_python_parameters",
     "extract_python_writes_and_accesses",
     "extract_python_references",
@@ -166,6 +181,11 @@ def extract_python_symbols(
                     ),
                     end_line=end_position[0],
                     end_column=end_position[1],
+                    is_generator=(
+                        _is_generator(node)
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        else False
+                    ),
                 )
             )
         if isinstance(node, ast.ClassDef):
@@ -185,7 +205,8 @@ def extract_python_symbols(
                         owner=node.name,
                         returns_annotation=_member_return(node, member),
                         end_line=end_position[0],
-                    end_column=end_position[1],
+                        end_column=end_position[1],
+                        is_generator=_member_is_generator(node, member),
                     )
                 )
 
@@ -367,6 +388,24 @@ def _member_return(owner: ast.ClassDef, member: str) -> str | None:
                 and node.name == member and node.returns is not None):
             return ast.unparse(node.returns)
     return None
+
+
+def _member_is_generator(owner: ast.ClassDef, member: str) -> bool:
+    """Return whether one method's own body yields.
+
+    Args:
+        owner: The declaring class.
+        member: The method name.
+
+    Returns:
+        True when the method contains ``yield`` or ``yield from`` outside any
+        nested declaration.
+    """
+    for node in owner.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == member):
+            return _is_generator(node)
+    return False
 
 
 def _end_position(node: ast.AST) -> tuple[int, int]:
@@ -760,6 +799,122 @@ def _own_nodes(owner: ast.AST) -> list[ast.AST]:
             continue
         todo.extend(ast.iter_child_nodes(node))
     return nodes
+
+
+def extract_python_return_sites(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ReturnSiteRecord]:
+    """Extract every return written inside a recorded declaration.
+
+    The inventory's boundary, and the ownership boundary beneath it: a return
+    inside a nested function belongs to that function. Attributing it outward
+    would say the enclosing declaration returns something it does not.
+
+    Args:
+        path: Python file to read and parse.
+        language: Language name. Accepted for registry symmetry; unused.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The return sites, in source order within each declaration.
+
+    Raises:
+        ValueError: If the file is not parseable Python.
+    """
+    tree = _parse(path)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    sites: list[ReturnSiteRecord] = []
+    for owner, qualified_name in _recorded_bodies(tree):
+        own = [node for node in _own_nodes(owner) if isinstance(node, ast.Return)]
+        own.sort(key=lambda node: (node.lineno, node.col_offset))
+        for ordinal, node in enumerate(own):
+            kind, chain = _returned_facts(node.value)
+            sites.append(
+                ReturnSiteRecord(
+                    source_path=recorded_path,
+                    owner_qualified_name=qualified_name,
+                    owner_line=owner.lineno,
+                    owner_column=owner.col_offset,
+                    source_line=node.lineno,
+                    source_column=node.col_offset,
+                    ordinal=ordinal,
+                    has_value=node.value is not None,
+                    value_kind=kind,
+                    value_chain=chain,
+                )
+            )
+    return sites
+
+
+def _returned_facts(value: ast.expr | None) -> tuple[str | None, str | None]:
+    """Return the shape of a returned expression, and its chain where proved.
+
+    Shape, never value. A call is recorded as a call; what it evaluates to is
+    not a parser-proven fact, and no expression text is stored.
+
+    ``attribute`` is distinct from ``name_chain``: when the chain helper
+    refuses an expression the parser has not proved a name chain, only an
+    attribute access whose receiver is something else.
+
+    Args:
+        value: The returned expression, or None for a bare ``return``.
+
+    Returns:
+        The value kind and the proven dotted chain, each None where absent.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, ast.Constant):
+        kind = (VALUE_KIND_NONE_LITERAL if value.value is None
+                else VALUE_KIND_LITERAL)
+        return kind, None
+    if isinstance(value, ast.JoinedStr):
+        return VALUE_KIND_F_STRING, None
+    if isinstance(value, ast.Name):
+        return VALUE_KIND_NAME_CHAIN, value.id
+    if isinstance(value, ast.Attribute):
+        chain = _dotted_name(value)
+        if chain is None:
+            return VALUE_KIND_ATTRIBUTE, None
+        return VALUE_KIND_NAME_CHAIN, chain
+    if isinstance(value, ast.Subscript):
+        return VALUE_KIND_SUBSCRIPT, None
+    if isinstance(value, ast.Call):
+        return VALUE_KIND_CALL, None
+    if isinstance(value, ast.Await):
+        return VALUE_KIND_AWAIT, None
+    if isinstance(value, (ast.Tuple, ast.List, ast.Dict, ast.Set)):
+        return VALUE_KIND_COLLECTION_LITERAL, None
+    if isinstance(value, (ast.ListComp, ast.DictComp, ast.SetComp,
+                          ast.GeneratorExp)):
+        return VALUE_KIND_COMPREHENSION, None
+    if isinstance(value, ast.IfExp):
+        return VALUE_KIND_CONDITIONAL, None
+    if isinstance(value, (ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare)):
+        return VALUE_KIND_OPERATION, None
+    return VALUE_KIND_OTHER, None
+
+
+def _is_generator(owner: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Return whether a declaration's own body yields.
+
+    The same ownership boundary: a ``yield`` inside a nested function makes
+    *that* function a generator, never its enclosing declaration.
+
+    Args:
+        owner: The declaration to judge.
+
+    Returns:
+        True when the declaration's own body contains ``yield`` or
+        ``yield from``.
+    """
+    return any(
+        isinstance(node, (ast.Yield, ast.YieldFrom))
+        for node in _own_nodes(owner)
+    )
 
 
 def _recorded_bodies(

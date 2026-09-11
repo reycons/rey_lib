@@ -68,6 +68,7 @@ def _symbol(path: str, name: str, owner: str = "") -> dict[str, object]:
         "end_line": 20,
         "end_column": 0,
         "returns_annotation": None,
+        "is_generator": False,
         "dotted_identity": dotted_identity(path, qualified),
     }
 

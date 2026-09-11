@@ -195,6 +195,8 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
         "dotted_identity": "pkg.sample.TopClass",
         "owner": "",
         "qualified_name": "TopClass",
+        # A class does not yield. The flag is a declaration's own body fact.
+        "is_generator": False,
     }
 
 

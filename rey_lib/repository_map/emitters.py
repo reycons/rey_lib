@@ -29,6 +29,7 @@ from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switche
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
     extract_class_attributes,
+    extract_return_sites,
     extract_declared_parameters,
     extract_writes_and_accesses,
     LANGUAGE_EXTRACTORS,
@@ -95,7 +96,7 @@ class ScanContext:
     def _extraction(self) -> tuple[
         list[Any], list[dict[str, Any]], list[dict[str, Any]],
         list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
-        list[dict[str, Any]],
+        list[dict[str, Any]], list[dict[str, Any]],
     ]:
         """Return references, symbols, edges and parameters from one pass.
 
@@ -109,6 +110,7 @@ class ScanContext:
         writes: list[dict[str, Any]] = []
         accesses: list[dict[str, Any]] = []
         class_attributes: list[dict[str, Any]] = []
+        return_sites: list[dict[str, Any]] = []
         for file_record in self.files:
             if file_record.language not in LANGUAGE_EXTRACTORS:
                 continue
@@ -142,8 +144,13 @@ class ScanContext:
                     path, file_record.language, file_record.path
                 )
             )
+            return_sites.extend(
+                record.to_dict() for record in extract_return_sites(
+                    path, file_record.language, file_record.path
+                )
+            )
         return (references, symbols, edges, parameters, writes, accesses,
-                class_attributes)
+                class_attributes, return_sites)
 
     @property
     def references(self) -> list[Any]:
@@ -219,6 +226,7 @@ RECORD_EMITTERS: tuple[RecordEmitter, ...] = (
     RecordEmitter("assignment", lambda ctx: list(ctx._extraction[4])),
     RecordEmitter("access", lambda ctx: list(ctx._extraction[5])),
     RecordEmitter("class_attribute", lambda ctx: list(ctx._extraction[6])),
+    RecordEmitter("return_site", lambda ctx: list(ctx._extraction[7])),
     RecordEmitter("registration", lambda ctx: [r.to_dict() for r in ctx.registrations]),
     RecordEmitter("entry_point", lambda ctx: [r.to_dict() for r in ctx.entry_points]),
     RecordEmitter(
