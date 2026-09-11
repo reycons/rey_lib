@@ -89,7 +89,6 @@ def _edge(path: str, target: str, kind: str = "call") -> dict[str, object]:
 def _snapshot(records: list[dict[str, object]]) -> CodeIndexSnapshot:
     return CodeIndexSnapshot(
         maps={"rey_loader": RepositoryMap(header=_header("rey_loader"), records=records)},
-        index=None,
         projection=None,
     )
 

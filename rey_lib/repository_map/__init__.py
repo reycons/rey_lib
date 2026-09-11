@@ -35,7 +35,6 @@ from rey_lib.repository_map.code_index_database import CodeIndexDatabaseWriter
 from rey_lib.repository_map.snapshot import (
     CodeIndexSnapshot,
     scan,
-    serialize,
 )
 from rey_lib.repository_map.increment_gate import (
     AgentHandoff,
@@ -79,20 +78,11 @@ from rey_lib.repository_map.review import (
     validate_review,
     verify_generated_map_unedited,
 )
-from rey_lib.repository_map.system_index import (
-    SystemIndex,
-    build_system_index,
-    load_repository_baselines,
-    validate_system_index,
-    write_system_index,
-)
 from rey_lib.repository_map.writer import (
     GENERATOR_VERSION,
     MapDiff,
     RepositoryMap,
     compare_repository_maps,
-    generate_repository_map,
-    write_repository_map,
 )
 from rey_lib.repository_map.records import (
     EDGE_KIND_BACKEND_STRING_REFERENCE,
@@ -167,10 +157,8 @@ __all__ = [
     "ScanRules",
     "SymbolInventory",
     "SymbolRecord",
-    "SystemIndex",
     "build_dependency_graph",
     "build_architecture_projection",
-    "build_system_index",
     "ArchitectureRuleSource",
     "CompiledArchitecturePolicy",
     "AgentHandoff",
@@ -186,7 +174,6 @@ __all__ = [
     "IndexedRepository",
     "index",
     "scan",
-    "serialize",
     "ArchitectureProjection",
     "ArchitectureProjectionError",
     "system_membership",
@@ -204,16 +191,11 @@ __all__ = [
     "extract_registrations",
     "extract_runtime_entry_points",
     "extract_symbols",
-    "generate_repository_map",
     "inventory_dispatchers_and_switches",
     "inventory_files",
-    "load_repository_baselines",
     "load_review",
     "load_scan_rules",
     "supported_languages",
     "validate_review",
-    "validate_system_index",
     "verify_generated_map_unedited",
-    "write_repository_map",
-    "write_system_index",
 ]

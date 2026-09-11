@@ -122,44 +122,6 @@ class MapDiff:
         return not (self.added or self.removed or self.changed)
 
 
-def generate_repository_map(
-    repo_root: Path,
-    output_path: Path,
-    rules_path: Path | None = None,
-    architecture_path: Path | None = None,
-) -> RepositoryMap:
-    """Run the complete scan and write the deterministic JSONL fact stream.
-
-    Shared code names no repository's policy file. Where a repository keeps its
-    rules — or whether it has any — is the caller's to supply, so a repository
-    with a different layout needs no change here and no repository-name
-    conditional exists.
-
-    Args:
-        repo_root: Repository to scan.
-        output_path: Where to write the generated map.
-        rules_path: The repository's scan rules. None means the repository
-            declares none, which is a supported state: it still produces a file
-            inventory and reports architecture_policy_status not_configured.
-        architecture_path: The architecture context carrying enforcement
-            annotations. None means architecture policy does not participate,
-            so the effective policy is the repository's own rules alone.
-
-    Returns:
-        The generated map.
-
-    Raises:
-        FileNotFoundError: If a rules path is supplied and does not exist.
-            Declaring a path that is not there is an error; declaring none is
-            not.
-    """
-    rules = load_scan_rules(rules_path) if rules_path is not None else ScanRules.unconfigured()
-    policy = effective_policy_for(repo_root.name, rules, architecture_path)
-    report = build_repository_map(repo_root, policy.rules, rules_path)
-    write_repository_map(report, output_path)
-    return report
-
-
 def effective_policy_for(
     repository: str,
     rules: ScanRules,
@@ -322,21 +284,6 @@ def content_hash_of(records: list[dict[str, Any]]) -> str:
         second serialization that could drift from them.
     """
     return sha256_text("\n".join(render_jsonl_line(record) for record in records))
-
-
-def write_repository_map(report: RepositoryMap, output_path: Path) -> None:
-    """Write a generated map as deterministic JSONL.
-
-    Serialization and the atomic whole-file write are owned by
-    ``rey_lib.files.jsonl``; this only decides record order. A reader therefore
-    never observes a partially written map.
-
-    Args:
-        report: The map to write.
-        output_path: Destination file.
-    """
-    write_jsonl_file(output_path, [report.header, *report.records])
-    logger.info("Wrote %d records to %s", len(report.records) + 1, output_path)
 
 
 def compare_repository_maps(old: RepositoryMap, new: RepositoryMap) -> MapDiff:
