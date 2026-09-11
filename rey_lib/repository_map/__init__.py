@@ -19,13 +19,11 @@ from rey_lib.repository_map.architecture_policy import (
     compile_architecture_policy,
 )
 from rey_lib.repository_map.architecture_projection import (
-    ARCHITECTURE_ARTIFACT_NAME,
     ArchitectureProjection,
     ArchitectureProjectionError,
     build_architecture_projection,
     system_membership,
     validate_architecture_projection,
-    write_architecture_projection,
 )
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
 from rey_lib.repository_map.code_index import (
@@ -189,12 +187,10 @@ __all__ = [
     "index",
     "scan",
     "serialize",
-    "ARCHITECTURE_ARTIFACT_NAME",
     "ArchitectureProjection",
     "ArchitectureProjectionError",
     "system_membership",
     "validate_architecture_projection",
-    "write_architecture_projection",
     "diff_architecture_violations",
     "load_migration_manifest",
     "validate_map_provenance",

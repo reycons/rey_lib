@@ -36,13 +36,11 @@ from pathlib import Path
 
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.architecture_projection import (
-    ARCHITECTURE_ARTIFACT_NAME,
     ARCHITECTURE_SOURCE_NAME,
     ArchitectureProjection,
     build_architecture_projection,
     system_membership,
     validate_architecture_projection,
-    write_architecture_projection,
 )
 from rey_lib.repository_map.system_index import (
     SystemIndex,
@@ -149,6 +147,13 @@ def serialize(snapshot: CodeIndexSnapshot, context_root: Path) -> list[Path]:
     index is written by this same function, so the two paths to JSONL can
     differ only where the round trip differs -- never in formatting.
 
+    **The architecture projection is not among them.** It is still built and
+    still validated -- ``scan`` refuses a snapshot whose projection does not
+    describe its own inputs -- but it is no longer written to disk. Its only
+    reader was the JSONL-backed Architecture tree, retired in
+    tree_retire_jsonl_architecture_root.applied.sql, and the database code
+    index is where that reading lives now.
+
     Args:
         snapshot: What to write.
         context_root: Directory the artifacts belong in.
@@ -165,10 +170,6 @@ def serialize(snapshot: CodeIndexSnapshot, context_root: Path) -> list[Path]:
     index_path = context_root / SYSTEM_INDEX_NAME
     write_system_index(snapshot.index, index_path)
     written.append(index_path)
-
-    projection_path = context_root / ARCHITECTURE_ARTIFACT_NAME
-    write_architecture_projection(snapshot.projection, projection_path)
-    written.append(projection_path)
 
     logger.info("Wrote %d artifacts to %s", len(written), context_root)
     return written

@@ -48,7 +48,7 @@ from typing import Any
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.encryption import sha256_text
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
+from rey_lib.files.jsonl import render_jsonl_line
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
     SYMBOL_KIND_FUNCTION,
@@ -63,7 +63,6 @@ from rey_lib.repository_map.records import (
 from rey_lib.repository_map.writer import GENERATOR_VERSION, RepositoryMap
 
 __all__ = [
-    "ARCHITECTURE_ARTIFACT_NAME",
     "ARCHITECTURE_SOURCE_NAME",
     "ArchitectureProjection",
     "ArchitectureProjectionError",
@@ -78,12 +77,10 @@ __all__ = [
     "build_architecture_projection",
     "system_membership",
     "validate_architecture_projection",
-    "write_architecture_projection",
 ]
 
 logger = get_logger(__name__)
 
-ARCHITECTURE_ARTIFACT_NAME = "03_repository_map.architecture.generated.jsonl"
 ARCHITECTURE_SOURCE_NAME = "01_core_architecture.yaml"
 
 NODE_TYPE_CONCEPT = "concept"
@@ -609,24 +606,6 @@ def validate_architecture_projection(
         if recorded[repository].get("content_hash") != current:
             reasons.append(f"{repository}: map has been regenerated since the projection")
     return reasons
-
-
-def write_architecture_projection(
-    projection: ArchitectureProjection,
-    output_path: Path,
-) -> None:
-    """Write the projection as deterministic JSONL.
-
-    Args:
-        projection: The projection to write.
-        output_path: Destination file.
-    """
-    write_jsonl_file(output_path, [projection.header, *projection.records])
-    logger.info(
-        "Wrote architecture projection with %d nodes to %s",
-        len(projection.records),
-        output_path,
-    )
 
 
 # ---------------------------------------------------------------------------
