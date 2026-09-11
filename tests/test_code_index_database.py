@@ -240,3 +240,114 @@ class TestPublicationIsAllOrNothing:
             "edge_stage",
         ]
         assert adapter.statements[-1] == "CALL code.p_publish(true, false)"
+
+
+class TestTheAuthoredSideIsItsOwnLifecycle:
+    """The other half of the schema's two lifecycles.
+
+    ``replace_index`` promotes the scan and never touches the authored rows;
+    ``replace_architecture`` promotes the authored rows and never touches the
+    scan. That separation is why a scan can run without republishing
+    architecture, and the reverse.
+    """
+
+    @staticmethod
+    def _rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        concepts = [
+            {"concept_key": "console", "parent_concept_key": "", "label": "Console",
+             "statement": "", "sort_order": 0},
+            {"concept_key": "console.explorer", "parent_concept_key": "console",
+             "label": "Explorer", "statement": "How a reader navigates.",
+             "sort_order": 0},
+        ]
+        realizations = [
+            {"concept_key": "console", "reference": "rey_console/routes.py",
+             "sort_order": 0},
+        ]
+        return concepts, realizations
+
+    def test_it_promotes_the_architecture_and_never_the_scan(self) -> None:
+        """Declared explicitly, so the schema validates against the live scan
+        rather than guessing from whether staging happens to be empty."""
+        adapter = _Adapter()
+        concepts, realizations = self._rows()
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture(
+            concepts, realizations
+        )
+
+        assert "CALL code.p_publish(false, true)" in adapter.statements
+        staged = {table for _s, table, _c, _cols in adapter.inserts}
+        assert staged == {"concept_stage", "realization_stage"}
+
+    def test_no_scan_staging_is_touched(self) -> None:
+        adapter = _Adapter()
+        concepts, realizations = self._rows()
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture(
+            concepts, realizations
+        )
+
+        staged = {table for _s, table, _c, _cols in adapter.inserts}
+        assert not staged & {
+            "repository_stage", "file_stage", "symbol_stage", "edge_stage",
+            "parameter_stage", "assignment_stage", "access_stage",
+            "class_attribute_stage", "return_site_stage", "raise_site_stage",
+        }
+
+    def test_staging_is_emptied_before_it_is_filled(self) -> None:
+        """Realizations first: they name the concepts.
+
+        A previous run that staged and failed to promote must not survive into
+        the next promotion.
+        """
+        adapter = _Adapter()
+        concepts, realizations = self._rows()
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture(
+            concepts, realizations
+        )
+
+        deletes = [s for s in adapter.statements if s.startswith("DELETE")]
+        assert deletes == [
+            "DELETE FROM code.realization_stage",
+            "DELETE FROM code.concept_stage",
+        ]
+
+    def test_a_concept_carries_its_parent_by_key_not_by_id(self) -> None:
+        """``concept_id`` is regenerated on every publication.
+
+        Staging a surrogate would be the caller choosing storage identity for
+        itself, which is exactly what the natural-key carriage exists to avoid.
+        """
+        adapter = _Adapter()
+        concepts, realizations = self._rows()
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture(
+            concepts, realizations
+        )
+
+        columns = {table: cols for _s, table, _c, cols in adapter.inserts}
+        assert "parent_concept_key" in columns["concept_stage"]
+        assert not {"concept_id", "parent_concept_id", "realization_id"}.intersection(
+            columns["concept_stage"] + columns["realization_stage"]
+        )
+
+    def test_nothing_is_resolved_before_staging(self) -> None:
+        """A reference is staged as authored.
+
+        ``code.f_realization_resolution`` decides what it names and
+        ``code.p_publish`` refuses anything resolving other than exactly once.
+        A match kind computed here would be that rule stated twice.
+        """
+        adapter = _Adapter()
+        concepts, realizations = self._rows()
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture(
+            concepts, realizations
+        )
+
+        columns = {table: cols for _s, table, _c, cols in adapter.inserts}
+        assert columns["realization_stage"] == [
+            "concept_key", "reference", "sort_order",
+        ]

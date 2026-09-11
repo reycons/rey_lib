@@ -10,9 +10,9 @@ so a failure anywhere leaves the previous index exactly as it was. Sequencing a
 wipe and a repopulate from here would put a visible half-index between two
 statements, and no amount of care in Python closes that window.
 
-**It declares what it is promoting, and promotes only the scan.** The authored
-architecture lives in the same schema under its own lifecycle; this writer
-never stages it and never replaces it. What it does have to answer for is that
+**It declares what it is promoting.** The two lifecycles are separate calls:
+``replace_index`` promotes the scan, ``replace_architecture`` promotes the
+authored architecture, and neither touches the other's rows. What it does have to answer for is that
 the scan it is publishing still satisfies every authored reference, and
 ``p_publish`` refuses the promotion when it does not -- which is why the
 validation is a parameter of the call rather than a check made here.
@@ -75,6 +75,10 @@ _ACCESS_COLUMNS = (
     "object_chain", "attribute_name", "method_name", "argument_present",
     "argument_kind", "literal_argument",
 )
+_CONCEPT_COLUMNS = (
+    "concept_key", "parent_concept_key", "label", "statement", "sort_order",
+)
+_REALIZATION_COLUMNS = ("concept_key", "reference", "sort_order")
 _CLASS_ATTRIBUTE_COLUMNS = (
     "repository_key", "relative_path", "owner_qualified_name", "owner_line",
     "owner_column", "name", "ordinal", "declaration_form", "is_annotated",
@@ -212,6 +216,55 @@ class CodeIndexDatabaseWriter:
         # orphans one refuses the whole promotion.
         self._call("p_publish", "true, false")
         logger.info("Promoted the staged scan to the live index")
+
+    def replace_architecture(
+        self,
+        concepts: list[dict[str, Any]],
+        realizations: list[dict[str, Any]],
+    ) -> None:
+        """Replace the authored architecture, all or nothing.
+
+        The other half of the schema's two lifecycles. ``replace_index``
+        promotes the scan and never touches this side; this promotes the
+        authored side and never touches the scan, which is what lets a scan run
+        without republishing architecture and the reverse.
+
+        **Nothing is resolved here.** A ``realized_by`` reference is staged as
+        authored, and ``code.p_publish`` refuses the promotion unless every one
+        of them resolves to exactly one place against the scan already
+        published. That check is the schema's and must not be anticipated in
+        Python: two implementations of one rule are two answers waiting to
+        disagree.
+
+        Args:
+            concepts: One row per concept, naming its parent by
+                ``concept_key``. A domain names the empty string.
+            realizations: One row per authored reference.
+        """
+        self._clear_architecture_staging()
+        self._stage("concept_stage", concepts, _CONCEPT_COLUMNS)
+        self._stage("realization_stage", realizations, _REALIZATION_COLUMNS)
+        logger.info(
+            "Staged %d concepts and %d realizations",
+            len(concepts), len(realizations),
+        )
+        self._call("p_publish", "false, true")
+        logger.info("Promoted the staged architecture to the live index")
+
+    def _clear_architecture_staging(self) -> None:
+        """Empty the authored staging before filling it.
+
+        A promotion empties it itself, so this only matters after a run that
+        staged and then failed to promote -- exactly as the scan side does it.
+        Realizations first: they name the concepts.
+        """
+        for table in ("realization_stage", "concept_stage"):
+            self._adapter.execute_sql(
+                self._connection,
+                f"DELETE FROM {SCHEMA}.{table}",
+                {},
+                "no_return",
+            )
 
     def clear(self) -> None:
         """Empty the index and its staging.
