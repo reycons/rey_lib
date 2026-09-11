@@ -119,6 +119,7 @@ TYPE_PAYLOAD_COLUMNS: dict[str, str] = {
     "RESULTS_SUMMARY": "results_summary",
     "ROW_COUNT": "row_count",
     "RUN_COMPLETE": "run_complete",
+    "RUN_PHASES": "run_phases",
     "RUN_START": "run_start",
     "RUN_SUMMARY": "run_summary",
     "SOURCE_FILE_CLASSIFICATION": "source_file_classification",
