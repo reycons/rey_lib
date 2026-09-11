@@ -569,7 +569,7 @@ def run_workflow(
         # already recorded itself; the run still reports why normal execution
         # stopped.
         log_run_complete(run_log, "failed", **first_failure)
-    # _finalize_run enters summarize / package from inside; what is left when it
+    # _finalize_run enters summarize / package / interpret from inside; what is left when it
     # returns is this function's own teardown. Nothing closes the timeline here
     # -- app_runtime's finally owns that, for every exit.
     _finalize_run(ctx, run_log)

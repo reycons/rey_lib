@@ -26,7 +26,6 @@ from rey_lib.logs import (
     run_configured_record_analysis,
     run_workbench_input_stream,
 )
-from rey_lib.logs.summary import LOG_INTERPRETATION_TASK
 from rey_lib.logs.record_enrichment import log_run_record
 
 
@@ -301,130 +300,50 @@ def _stage_direct_ask(monkeypatch) -> None:
 # finalize_run_log lifecycle
 # ---------------------------------------------------------------------------
 
-def _refuse_any_ask(monkeypatch) -> None:
-    """The AI entry point, rigged to fail the test if anything reaches it.
+def test_finalize_runs_one_llm_stage_producing_one_result_record(
+    tmp_path, monkeypatch,
+) -> None:
+    """Finalization is a single LLM stage; the interpretation is the final record.
 
-    Finalization must not invoke a provider at all. A recording spy would prove
-    only that the count was zero; refusing outright names the violation at the
-    moment it happens, in the stage that made the call.
-    """
-    def never(_ctx, _prompt, _execution_profile, **_kwargs):
-        raise AssertionError(
-            "finalize_run_log reached the AI. Finalization packages the run and "
-            "stops; interpretation is invoked deliberately, afterwards."
-        )
-    monkeypatch.setattr("rey_lib.logs.llm_package._ask", never)
-
-
-def test_finalization_never_invokes_the_provider(tmp_path, monkeypatch) -> None:
-    """The defect, as an assertion.
-
-    finalize_run_log used to make the one synchronous LLM call every run made,
-    holding the calling process open for model latency at the moment it was
-    trying to exit -- for all six top-level callers, whether or not anyone
-    wanted an interpretation.
+    The configured contract renders the subject, html, and text in the same
+    response as the structured interpretation, so no second email-generation stage
+    exists to duplicate that work.
     """
     log_path, _contract_path = _unfinalized_run(tmp_path)
-    _refuse_any_ask(monkeypatch)
+    _stage_direct_ask(monkeypatch)
 
     finalize_run_log(_log(log_path))
 
+    assert _result_types(log_path) == [
+        "RESULTS_SUMMARY",
+        "LLM_PACKAGE",
+        "LLM_INTERPRETATION",
+    ]
+    interpretation = _records(log_path)[-1]
+    assert interpretation["record_type"] == "LLM_INTERPRETATION"
+    # One authoritative record carries the structured interpretation and the
+    # rendered presentation together, at the top level.
+    assert interpretation["verdict"] == "ok"
+    assert interpretation["subject"] == "Run report"
+    assert interpretation["html"] == "<p>ok</p>"
+    assert interpretation["text"] == "ok"
 
-def test_finalization_persists_the_summary_and_the_package(
-    tmp_path, monkeypatch,
-) -> None:
-    """Both durable records survive, and the package is the handoff.
 
-    Its survival is the guarantee rather than a side effect: it is the complete,
-    self-contained input the interpretation stage reads later, from disk.
-    """
+def test_finalize_produces_no_email_stage_records(tmp_path, monkeypatch) -> None:
+    """The duplicate email stage is gone: it leaves no records behind."""
     log_path, _contract_path = _unfinalized_run(tmp_path)
-    _refuse_any_ask(monkeypatch)
-
-    result = finalize_run_log(_log(log_path))
-
-    assert _result_types(log_path) == ["RESULTS_SUMMARY", "LLM_PACKAGE"]
-    assert result["package"] is not None
-    package = next(
-        record for record in _records(log_path)
-        if record["record_type"] == "LLM_PACKAGE"
-    )
-    # Self-contained: it carries the source record itself, which is what lets
-    # the interpretation stage read it from disk with nothing else in hand.
-    assert package["source_record_type"] == "RESULTS_SUMMARY"
-    assert package["source"]["record_type"] == "RESULTS_SUMMARY"
-
-
-def test_finalization_produces_no_interpretation(tmp_path, monkeypatch) -> None:
-    """Nothing in the finalization path appends one, and the key says so."""
-    log_path, _contract_path = _unfinalized_run(tmp_path)
-    _refuse_any_ask(monkeypatch)
+    _stage_direct_ask(monkeypatch)
 
     result = finalize_run_log(_log(log_path))
 
     types = [record["record_type"] for record in _records(log_path)]
-    assert "LLM_INTERPRETATION" not in types
-    assert "LLM_ANALYSIS_FAILURE" not in types
-    # Present and empty, so a reader sees "no interpretation" rather than a
-    # missing key.
-    assert "analysis" in result
-    assert result["analysis"] is None
+    assert "LLM_EMAIL_PACKAGE" not in types
+    assert "LLM_EMAIL_RESULT" not in types
+    # The removed stage leaves no vestigial keys on the result either.
+    assert "email_package" not in result
+    assert "email_analysis" not in result
+    assert "email_failures" not in result
 
-
-def test_interpretation_still_runs_independently_against_the_run_log(
-    tmp_path, monkeypatch,
-) -> None:
-    """The capability survived being detached from finalization.
-
-    Finalize first, then interpret as a separate act against the same durable
-    log -- which is what a later explicit caller does. The package is read from
-    disk, so the two need share nothing but the run log itself.
-    """
-    log_path, _contract_path = _unfinalized_run(tmp_path)
-    _refuse_any_ask(monkeypatch)
-    finalize_run_log(_log(log_path))
-
-    calls: list[str] = []
-
-    def once(_ctx, _prompt, _execution_profile, **_kwargs):
-        calls.append(_execution_profile)
-        return _envelope({
-            "verdict": "ok", "subject": "Run report",
-            "html": "<p>ok</p>", "text": "ok",
-        })
-
-    monkeypatch.setattr("rey_lib.logs.llm_package._ask", once)
-
-    result = run_configured_log_analysis(
-        _log(log_path), ai=None, package_record_type="LLM_PACKAGE",
-        task=LOG_INTERPRETATION_TASK,
-    )
-
-    assert len(calls) == 1
-    assert _result_types(log_path) == [
-        "RESULTS_SUMMARY", "LLM_PACKAGE", "LLM_INTERPRETATION",
-    ]
-    assert result["action"] != "existing"
-    interpretation = _records(log_path)[-1]
-    assert interpretation["record_type"] == "LLM_INTERPRETATION"
-    assert interpretation["verdict"] == "ok"
-
-
-def test_interpretation_refuses_a_log_with_no_package(tmp_path, monkeypatch) -> None:
-    """A missing package is refused, never silently skipped.
-
-    Unchanged behaviour, asserted here because the package is now the contract
-    between two separately invoked stages rather than an input to the call on
-    the next line.
-    """
-    log_path, _contract_path = _unfinalized_run(tmp_path)
-    _refuse_any_ask(monkeypatch)
-
-    with pytest.raises(ValueError, match="does not contain package record"):
-        run_configured_log_analysis(
-            _log(log_path), ai=None, package_record_type="LLM_PACKAGE",
-            task=LOG_INTERPRETATION_TASK,
-        )
 
 
 def test_summary_failure_prevents_package_creation(
