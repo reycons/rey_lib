@@ -60,7 +60,8 @@ _SYMBOL_COLUMNS = (
 )
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
-    "from_id", "to_reference", "edge_kind", "evidence",
+    "from_id", "from_symbol", "from_symbol_line", "from_symbol_column",
+    "to_reference", "edge_kind", "evidence",
 )
 
 

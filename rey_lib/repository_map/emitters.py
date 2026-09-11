@@ -35,6 +35,7 @@ from rey_lib.repository_map.extractors import (
 from rey_lib.repository_map.globals_scan import extract_global_publications_and_consumers
 from rey_lib.repository_map.graph import build_dependency_graph, compute_reachability
 from rey_lib.repository_map.inventory import inventory_files
+from rey_lib.repository_map.records import attributed_edges
 from rey_lib.repository_map.records import ScanRules
 from rey_lib.repository_map.registrations import extract_registrations
 
@@ -107,6 +108,11 @@ class ScanContext:
             file_references = extract_executable_references(
                 path, file_record.language, file_record.path
             )
+            # Both facts are in hand here, for every language, which is why
+            # attribution happens once at this point rather than inside each
+            # extractor. The extractors prove positions; this places one inside
+            # another, and neither has to know how the other does it.
+            file_references = attributed_edges(inventory.symbols, file_references)
             references.extend(file_references)
             symbols.extend(inventory.to_records())
             edges.extend(edge.to_dict() for edge in file_references)

@@ -11,7 +11,7 @@ commit. The generated factual map is JSONL, never a YAML document.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 from typing import Any
@@ -42,6 +42,7 @@ __all__ = [
     "SYMBOL_KIND_RE_EXPORT",
     "SYMBOL_KIND_TYPE_ALIAS",
     "SYMBOL_KIND_VARIABLE",
+    "attributed_edges",
     "dotted_identity",
     "matches_any_glob",
     "FileRecord",
@@ -344,6 +345,18 @@ class ReferenceEdge:
         source_line: 1-indexed line of the referencing expression.
         source_column: 0-indexed column, used to keep record_id unique when one
             line carries several references.
+        from_symbol: Qualified name of the narrowest symbol positionally
+            containing this reference, or empty. Empty means nothing contains
+            it -- a module-level statement -- or that two candidates were
+            equally narrow and neither was chosen. It never means the edge
+            belongs to the file by some rule about its kind: attribution is
+            positional, and an import written inside a function is inside that
+            function like any other statement.
+        from_symbol_line: That symbol's start line, and
+        from_symbol_column: its start column. Carried because a qualified name
+            is not unique within a file -- two declarations may share one --
+            so the join to a symbol row is the whole tuple rather than the
+            name alone.
         from_id: record_id of the fact making the reference.
         to: Referenced name as written, dotted for member expressions. It stays
             unresolved here; resolving it to a record_id is graph work.
@@ -358,6 +371,9 @@ class ReferenceEdge:
     to: str
     edge_kind: str
     evidence: str
+    from_symbol: str = ""
+    from_symbol_line: int = 0
+    from_symbol_column: int = 0
 
     @property
     def record_id(self) -> str:
@@ -384,10 +400,100 @@ class ReferenceEdge:
             # line became indistinguishable from its neighbours.
             "source_column": self.source_column,
             "from": self.from_id,
+            "from_symbol": self.from_symbol,
+            "from_symbol_line": self.from_symbol_line,
+            "from_symbol_column": self.from_symbol_column,
             "to": self.to,
             "edge_kind": self.edge_kind,
             "evidence": self.evidence,
         }
+
+
+def attributed_edges(
+    symbols: Sequence["SymbolRecord"],
+    edges: Sequence["ReferenceEdge"],
+) -> list["ReferenceEdge"]:
+    """Return each edge carrying the narrowest symbol that positionally contains it.
+
+    One rule for every language, applied once where both facts are in hand,
+    rather than in each extractor. The extractors already prove the positions;
+    nothing new is parsed here.
+
+    **Containment is half-open**: ``start <= position < end``. Both parsers
+    report an exclusive end column, so ``const x=1;const y=2;`` parses as
+    ``[0,10)`` and ``[10,20)`` -- column 10 ends the first declaration and
+    starts the second. An inclusive test would place a position there inside
+    both, and choosing between two equally valid matches is a guess.
+
+    **Narrowest** is the candidate that starts latest and ends earliest. Where
+    no single candidate satisfies both, or where several share that exact span,
+    the edge is left unattributed. Ties are refused rather than broken by
+    iteration order: an answer that looks deterministic and depends on
+    traversal is worse than no answer, because it is stable enough to be
+    trusted and arbitrary enough to be wrong.
+
+    **Nothing is excluded by edge kind.** A module-level import is unattributed
+    because no symbol contains it; an import inside a function is attributed to
+    that function, like any other statement written there.
+
+    Args:
+        symbols: The file's declarations, with proven spans.
+        edges: The file's references.
+
+    Returns:
+        The edges, in order, each with its attribution filled where one exists.
+    """
+    spans = [
+        (
+            (symbol.source_line, symbol.source_column),
+            (symbol.end_line, symbol.end_column),
+            symbol,
+        )
+        for symbol in symbols
+    ]
+    return [_attributed(spans, edge) for edge in edges]
+
+
+def _attributed(
+    spans: Sequence[tuple[tuple[int, int], tuple[int, int], "SymbolRecord"]],
+    edge: "ReferenceEdge",
+) -> "ReferenceEdge":
+    """Return one edge with its containing symbol, or unchanged when it has none.
+
+    Args:
+        spans: Every symbol's half-open span, with the symbol.
+        edge: The reference to place.
+
+    Returns:
+        The edge, attributed where exactly one symbol is innermost.
+    """
+    position = (edge.source_line, edge.source_column)
+    containing = [
+        (opens, closes, symbol)
+        for opens, closes, symbol in spans
+        if opens <= position < closes
+    ]
+    if not containing:
+        return edge
+
+    innermost_opens = max(opens for opens, _closes, _symbol in containing)
+    innermost_closes = min(closes for _opens, closes, _symbol in containing)
+    winners = [
+        symbol for opens, closes, symbol in containing
+        if opens == innermost_opens and closes == innermost_closes
+    ]
+    if len(winners) != 1:
+        # Either no candidate is innermost on both ends -- overlapping spans
+        # that do not nest -- or several share one span. Neither is a fact.
+        return edge
+
+    winner = winners[0]
+    return replace(
+        edge,
+        from_symbol=winner.qualified_name,
+        from_symbol_line=winner.source_line,
+        from_symbol_column=winner.source_column,
+    )
 
 
 @dataclass(frozen=True)

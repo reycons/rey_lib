@@ -311,6 +311,11 @@ def test_edge_serializes_to_the_jsonl_dependency_edge_shape(tmp_path: Path) -> N
             # two references on one line are only distinguishable by it.
             "source_column": 4,
             "from": "file:pkg/call.py",
+            # Attribution is applied where symbols and edges meet, not
+            # in the extractor, so a direct call leaves it empty.
+            "from_symbol": "",
+            "from_symbol_line": 0,
+            "from_symbol_column": 0,
             "to": "handler",
             "edge_kind": EDGE_KIND_CALL,
             "evidence": "ast.Call",
