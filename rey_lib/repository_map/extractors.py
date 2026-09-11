@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
+    extract_js_class_attributes,
     extract_js_parameters,
     extract_js_writes_and_accesses,
     extract_js_references,
@@ -21,6 +22,7 @@ from rey_lib.repository_map.js_extractor import (
     supported_js_languages,
 )
 from rey_lib.repository_map.python_extractor import (
+    extract_python_class_attributes,
     extract_python_parameters,
     extract_python_writes_and_accesses,
     extract_python_references,
@@ -31,6 +33,7 @@ from rey_lib.repository_map.records import ReferenceEdge, SymbolInventory
 __all__ = [
     "LANGUAGE_EXTRACTORS",
     "LanguageExtractor",
+    "extract_class_attributes",
     "extract_declared_parameters",
     "extract_writes_and_accesses",
     "extract_executable_references",
@@ -48,6 +51,8 @@ class LanguageExtractor:
         symbols: Callable returning the file's top-level symbol inventory.
         references: Callable returning the file's executable reference edges.
         parameters: Callable returning the parameters its declarations declare.
+        class_attributes: Callable returning the names bound directly in its
+            class bodies.
         writes_and_accesses: Callable returning the writes and indexed access
             forms inside those declarations, from one walk.
     """
@@ -56,6 +61,7 @@ class LanguageExtractor:
     symbols: Callable[[Path, str, str | None], SymbolInventory]
     references: Callable[[Path, str, str | None], list[ReferenceEdge]]
     parameters: Callable[[Path, str, str | None], list[ParameterRecord]]
+    class_attributes: Callable[[Path, str, str | None], list[ClassAttributeRecord]]
     writes_and_accesses: Callable[
         [Path, str, str | None],
         tuple[list[AssignmentRecord], list[AccessRecord]],
@@ -70,6 +76,7 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         symbols=extract_python_symbols,
         references=extract_python_references,
         parameters=extract_python_parameters,
+        class_attributes=extract_python_class_attributes,
         writes_and_accesses=extract_python_writes_and_accesses,
     ),
 }
@@ -83,6 +90,7 @@ LANGUAGE_EXTRACTORS.update(
             symbols=extract_js_symbols,
             references=extract_js_references,
             parameters=extract_js_parameters,
+            class_attributes=extract_js_class_attributes,
             writes_and_accesses=extract_js_writes_and_accesses,
         )
         for language in supported_js_languages()
@@ -161,6 +169,30 @@ def extract_declared_parameters(
     if extractor is None:
         return []
     return extractor.parameters(path, language, source_path)
+
+
+def extract_class_attributes(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ClassAttributeRecord]:
+    """Return the names one file's class bodies bind directly.
+
+    Syntax, never meaning: what the class body binds, not which of those a
+    decorator elsewhere later turns into something else.
+
+    Args:
+        path: Source file to read and parse.
+        language: Language name as the inventory recorded it.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The attributes, empty for a language with no registered extractor.
+    """
+    extractor = LANGUAGE_EXTRACTORS.get(language)
+    if extractor is None:
+        return []
+    return extractor.class_attributes(path, language, source_path)
 
 
 def extract_executable_references(

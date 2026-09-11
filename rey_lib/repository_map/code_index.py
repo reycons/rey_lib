@@ -33,6 +33,7 @@ from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
     RECORD_TYPE_ACCESS,
     RECORD_TYPE_ASSIGNMENT,
+    RECORD_TYPE_CLASS_ATTRIBUTE,
     RECORD_TYPE_DEPENDENCY_EDGE,
     RECORD_TYPE_PARAMETER,
     RECORD_TYPE_FILE,
@@ -77,6 +78,8 @@ class IndexedRepository:
         header: The repository's observed state -- revision, branch, working
             tree status, hashes.
         files: One entry per file, each carrying its own symbol rows.
+        class_attributes: One entry per name bound directly in a class body,
+            naming its owning class the way parameters name their declaration.
         writes: One entry per syntactic write, and
         accesses: One entry per indexed access form, both naming their owning
             symbol the way parameters do.
@@ -92,7 +95,7 @@ class IndexedRepository:
     """
 
     __slots__ = ("repository", "header", "files", "edges", "parameters",
-                 "writes", "accesses")
+                 "writes", "accesses", "class_attributes")
 
     def __init__(
         self,
@@ -103,6 +106,7 @@ class IndexedRepository:
         parameters: list[dict[str, Any]] | None = None,
         writes: list[dict[str, Any]] | None = None,
         accesses: list[dict[str, Any]] | None = None,
+        class_attributes: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
@@ -111,6 +115,9 @@ class IndexedRepository:
         self.parameters = parameters if parameters is not None else []
         self.writes = writes if writes is not None else []
         self.accesses = accesses if accesses is not None else []
+        self.class_attributes = (
+            class_attributes if class_attributes is not None else []
+        )
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -140,6 +147,11 @@ _ASSIGNMENT_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "source_line",
     "source_column", "target_kind", "target_chain", "attribute_name", "key",
     "is_augmented",
+)
+_CLASS_ATTRIBUTE_FIELDS = (
+    "owner_qualified_name", "owner_line", "owner_column", "name", "ordinal",
+    "declaration_form", "is_annotated", "has_default", "is_optional",
+    "annotation", "modifiers",
 )
 _ACCESS_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "source_line",
@@ -315,4 +327,8 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                            RECORD_TYPE_ASSIGNMENT, _ASSIGNMENT_FIELDS),
         accesses=_owned_rows(repository, repository_map, files,
                              RECORD_TYPE_ACCESS, _ACCESS_FIELDS),
+        class_attributes=_owned_rows(
+            repository, repository_map, files,
+            RECORD_TYPE_CLASS_ATTRIBUTE, _CLASS_ATTRIBUTE_FIELDS,
+        ),
     )

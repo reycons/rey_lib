@@ -28,6 +28,7 @@ from rey_lib.repository_map.boundaries import check_architecture_boundaries
 from rey_lib.repository_map.dispatchers import inventory_dispatchers_and_switches
 from rey_lib.repository_map.entry_points import extract_runtime_entry_points
 from rey_lib.repository_map.extractors import (
+    extract_class_attributes,
     extract_declared_parameters,
     extract_writes_and_accesses,
     LANGUAGE_EXTRACTORS,
@@ -94,6 +95,7 @@ class ScanContext:
     def _extraction(self) -> tuple[
         list[Any], list[dict[str, Any]], list[dict[str, Any]],
         list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]],
+        list[dict[str, Any]],
     ]:
         """Return references, symbols, edges and parameters from one pass.
 
@@ -106,6 +108,7 @@ class ScanContext:
         parameters: list[dict[str, Any]] = []
         writes: list[dict[str, Any]] = []
         accesses: list[dict[str, Any]] = []
+        class_attributes: list[dict[str, Any]] = []
         for file_record in self.files:
             if file_record.language not in LANGUAGE_EXTRACTORS:
                 continue
@@ -134,7 +137,13 @@ class ScanContext:
             )
             writes.extend(record.to_dict() for record in file_writes)
             accesses.extend(record.to_dict() for record in file_accesses)
-        return references, symbols, edges, parameters, writes, accesses
+            class_attributes.extend(
+                record.to_dict() for record in extract_class_attributes(
+                    path, file_record.language, file_record.path
+                )
+            )
+        return (references, symbols, edges, parameters, writes, accesses,
+                class_attributes)
 
     @property
     def references(self) -> list[Any]:
@@ -209,6 +218,7 @@ RECORD_EMITTERS: tuple[RecordEmitter, ...] = (
     RecordEmitter("parameter", lambda ctx: list(ctx._extraction[3])),
     RecordEmitter("assignment", lambda ctx: list(ctx._extraction[4])),
     RecordEmitter("access", lambda ctx: list(ctx._extraction[5])),
+    RecordEmitter("class_attribute", lambda ctx: list(ctx._extraction[6])),
     RecordEmitter("registration", lambda ctx: [r.to_dict() for r in ctx.registrations]),
     RecordEmitter("entry_point", lambda ctx: [r.to_dict() for r in ctx.entry_points]),
     RecordEmitter(

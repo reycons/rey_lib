@@ -52,8 +52,10 @@ from rey_lib.repository_map.records import (
     TARGET_KIND_ATTRIBUTE,
     TARGET_KIND_NAME,
     TARGET_KIND_SUBSCRIPT,
+    DECLARATION_FORM_FIELD_DEFINITION,
     AccessRecord,
     AssignmentRecord,
+    ClassAttributeRecord,
     ParameterRecord,
     ReferenceEdge,
     SymbolInventory,
@@ -61,6 +63,7 @@ from rey_lib.repository_map.records import (
 )
 
 __all__ = [
+    "extract_js_class_attributes",
     "extract_js_parameters",
     "extract_js_writes_and_accesses",
     "extract_js_references",
@@ -121,6 +124,22 @@ _METHOD_MEMBERS = frozenset({"method_definition", "abstract_method_signature"})
 
 # Node types holding one or more variable_declarator children.
 _VARIABLE_STATEMENTS = frozenset({"lexical_declaration", "variable_declaration"})
+
+# Class-body members that bind a named attribute. An index_signature is not
+# one: [key: string]: unknown declares no name, so there is nothing to record
+# it under. Interface and type members are absent on purpose -- an interface
+# property is not a class attribute, and this surface is class-scoped.
+_FIELD_MEMBERS = frozenset({"public_field_definition"})
+
+# Modifier keywords a field definition may carry, as the grammar spells them.
+# All are unnamed children except accessibility_modifier, which is named and
+# holds public/private/protected. Recorded as written: `declare` and `abstract`
+# say a field allocates nothing, and that is the reader's inference to draw,
+# not a column's claim.
+_FIELD_MODIFIERS = frozenset({
+    "static", "readonly", "abstract", "declare", "accessor",
+    "accessibility_modifier",
+})
 
 
 def supported_js_languages() -> list[str]:
@@ -464,6 +483,113 @@ def extract_js_parameters(
             recorded_path, statement, name_node, _text(name_node)
         ))
     return parameters
+
+
+def extract_js_class_attributes(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ClassAttributeRecord]:
+    """Extract every named attribute bound in a top-level class body.
+
+    Class-scoped on purpose. An interface's ``property_signature`` is adjacent
+    syntax the grammar exposes cheaply, and an interface property is not a
+    class attribute; it gets its own fact when it has its own reason to exist.
+    An ``index_signature`` declares no name and is not recordable at all.
+
+    Modifiers are kept as written rather than normalized into booleans. A
+    ``declare`` or ``abstract`` field allocates nothing, but the parser proves
+    only the keyword -- so the keyword is what is stored, and what it implies
+    is the reader's to decide.
+
+    Args:
+        path: Source file to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The attributes, in declaration order within each class body.
+    """
+    root = _parse(path, language)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    attributes: list[ClassAttributeRecord] = []
+    for statement, _exported in _top_level_statements(root):
+        if statement.type not in _CLASS_DECLARATIONS:
+            continue
+        name_node = statement.child_by_field_name("name")
+        body = statement.child_by_field_name("body")
+        if name_node is None or body is None:
+            continue
+        owner_line, owner_column = _js_owner_position(statement)
+        for member in body.named_children:
+            if member.type not in _FIELD_MEMBERS:
+                continue
+            attribute = _js_class_attribute(
+                recorded_path, member, _text(name_node),
+                owner_line, owner_column, len(attributes),
+            )
+            if attribute is not None:
+                attributes.append(attribute)
+    return attributes
+
+
+def _js_class_attribute(
+    recorded_path: str,
+    member: Node,
+    owner: str,
+    owner_line: int,
+    owner_column: int,
+    ordinal: int,
+) -> ClassAttributeRecord | None:
+    """Return one field definition as a record, or None when it has no name.
+
+    Args:
+        recorded_path: Path to record.
+        member: The ``public_field_definition`` node.
+        owner: The owning class's name.
+        owner_line: The owning class's recorded line, and
+        owner_column: its recorded column.
+        ordinal: Position among the recorded attributes of this body.
+
+    Returns:
+        The record, or None.
+    """
+    name_node = member.child_by_field_name("name")
+    if name_node is None:
+        return None
+
+    # A private name arrives as private_property_identifier with the '#' inside
+    # the token, so storing the name verbatim is all ECMAScript-private needs.
+    # TypeScript's `private` is a different thing and travels as a modifier.
+    modifiers = tuple(
+        _text(child) for child in member.children
+        if child.type in _FIELD_MODIFIERS
+    )
+    annotation_node = next(
+        (child for child in member.children if child.type == "type_annotation"),
+        None,
+    )
+    annotation = (
+        _text(annotation_node).lstrip(":").strip()
+        if annotation_node is not None else None
+    )
+    return ClassAttributeRecord(
+        source_path=recorded_path,
+        owner_qualified_name=owner,
+        owner_line=owner_line,
+        owner_column=owner_column,
+        name=_text(name_node),
+        ordinal=ordinal,
+        declaration_form=DECLARATION_FORM_FIELD_DEFINITION,
+        is_annotated=annotation_node is not None,
+        # A default is written `b = 2` and the node stays a field definition,
+        # so presence of a value child is the fact -- never the node type.
+        has_default=member.child_by_field_name("value") is not None,
+        is_optional=any(child.type == "?" for child in member.children),
+        annotation=annotation,
+        modifiers=modifiers,
+    )
 
 
 def _js_parameters_of(

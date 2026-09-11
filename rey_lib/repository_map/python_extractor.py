@@ -41,8 +41,10 @@ from rey_lib.repository_map.records import (
     TARGET_KIND_ATTRIBUTE,
     TARGET_KIND_NAME,
     TARGET_KIND_SUBSCRIPT,
+    DECLARATION_FORM_CLASS_ATTRIBUTE,
     AccessRecord,
     AssignmentRecord,
+    ClassAttributeRecord,
     ParameterRecord,
     ReferenceEdge,
     SymbolInventory,
@@ -50,6 +52,7 @@ from rey_lib.repository_map.records import (
 )
 
 __all__ = [
+    "extract_python_class_attributes",
     "extract_python_parameters",
     "extract_python_writes_and_accesses",
     "extract_python_references",
@@ -483,6 +486,136 @@ def extract_python_parameters(
                         )
                     )
     return parameters
+
+
+def extract_python_class_attributes(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[ClassAttributeRecord]:
+    """Extract every name bound directly in a top-level class body.
+
+    The same boundary the symbol inventory keeps. It records top-level classes
+    and one level of methods, so a nested class is not an addressable identity
+    and an attribute owned by one would name an owner the index does not hold.
+    Nested class bodies are therefore not walked.
+
+    **The immediate body only.** A binding under ``if`` / ``try`` / ``with``,
+    ``if TYPE_CHECKING:`` included, is conditional, and "declares" would not be
+    proven. Tuple targets are refused for the same reason: ``a, b = 1, 2`` does
+    not prove which name receives which value, so ``has_default`` would be a
+    claim about unpacking rather than about syntax.
+
+    ``__slots__`` is an ordinary row. It is a class-body assignment, and
+    deciding it is not really an attribute would be interpretation.
+
+    Args:
+        path: Python file to read and parse.
+        language: Language name. Accepted for registry symmetry; unused.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The attributes, in declaration order within each class body.
+
+    Raises:
+        ValueError: If the file is not parseable Python.
+    """
+    tree = _parse(path)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    attributes: list[ClassAttributeRecord] = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            attributes.extend(_class_attributes_of(recorded_path, node))
+    return attributes
+
+
+def _class_attributes_of(
+    recorded_path: str,
+    node: ast.ClassDef,
+) -> list[ClassAttributeRecord]:
+    """Return one class body's bound names, in the order they are written.
+
+    Args:
+        recorded_path: Path to record.
+        node: The class whose immediate body is read.
+
+    Returns:
+        The attribute records. Statements that bind nothing, and targets the
+        parser does not resolve to a single name, produce none.
+    """
+    attributes: list[ClassAttributeRecord] = []
+    for statement in node.body:
+        if isinstance(statement, ast.AnnAssign):
+            if not isinstance(statement.target, ast.Name):
+                continue
+            attributes.append(
+                _class_attribute(
+                    recorded_path, node, statement.target.id, len(attributes),
+                    is_annotated=True,
+                    has_default=statement.value is not None,
+                    annotation=ast.unparse(statement.annotation),
+                )
+            )
+        elif isinstance(statement, ast.Assign):
+            # Chained bare names each bind, so each is a row: a = b = 1 binds
+            # both. A tuple or attribute target binds something this concept
+            # does not cover and is passed over.
+            for target in statement.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                attributes.append(
+                    _class_attribute(
+                        recorded_path, node, target.id, len(attributes),
+                        is_annotated=False,
+                        has_default=True,
+                        annotation=None,
+                    )
+                )
+    return attributes
+
+
+def _class_attribute(
+    recorded_path: str,
+    node: ast.ClassDef,
+    name: str,
+    ordinal: int,
+    *,
+    is_annotated: bool,
+    has_default: bool,
+    annotation: str | None,
+) -> ClassAttributeRecord:
+    """Return one class attribute record, owned by the class that binds it.
+
+    Args:
+        recorded_path: Path to record.
+        node: The owning class.
+        name: The attribute as written.
+        ordinal: Its position among the recorded attributes of this body.
+        is_annotated: Whether a type was written.
+        has_default: Whether a value expression was written.
+        annotation: The declared type as written, or None.
+
+    Returns:
+        The record.
+    """
+    return ClassAttributeRecord(
+        source_path=recorded_path,
+        owner_qualified_name=node.name,
+        owner_line=node.lineno,
+        owner_column=node.col_offset,
+        name=name,
+        ordinal=ordinal,
+        declaration_form=DECLARATION_FORM_CLASS_ATTRIBUTE,
+        is_annotated=is_annotated,
+        has_default=has_default,
+        # Python has no syntactic optional marker on a class attribute.
+        is_optional=False,
+        annotation=annotation,
+        # Python has no field modifiers. ClassVar and Final are annotation
+        # text and stay in `annotation` rather than being decomposed here.
+        modifiers=(),
+    )
 
 
 def _parameters_of(

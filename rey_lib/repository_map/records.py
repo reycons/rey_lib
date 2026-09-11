@@ -32,6 +32,7 @@ __all__ = [
     "RECORD_TYPE_DEPENDENCY_EDGE",
     "RECORD_TYPE_FILE",
     "RECORD_TYPE_ACCESS",
+    "RECORD_TYPE_CLASS_ATTRIBUTE",
     "RECORD_TYPE_ASSIGNMENT",
     "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
@@ -47,9 +48,12 @@ __all__ = [
     "SYMBOL_KIND_VARIABLE",
     "attributed_edges",
     "dotted_identity",
+    "DECLARATION_FORM_CLASS_ATTRIBUTE",
+    "DECLARATION_FORM_FIELD_DEFINITION",
     "matches_any_glob",
     "FileRecord",
     "AccessRecord",
+    "ClassAttributeRecord",
     "AssignmentRecord",
     "ParameterRecord",
     "ReferenceEdge",
@@ -77,6 +81,7 @@ RECORD_TYPE_DEPENDENCY_EDGE = "dependency_edge"
 RECORD_TYPE_PARAMETER = "parameter"
 RECORD_TYPE_ASSIGNMENT = "assignment"
 RECORD_TYPE_ACCESS = "access"
+RECORD_TYPE_CLASS_ATTRIBUTE = "class_attribute"
 RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
@@ -189,6 +194,16 @@ INDEXED_ACCESS_METHODS = frozenset({"get"})
 ARGUMENT_KIND_STRING_LITERAL = "string_literal"
 ARGUMENT_KIND_OTHER_LITERAL = "other_literal"
 ARGUMENT_KIND_EXPRESSION = "expression"
+
+
+# Which grammar produced a class attribute row, and nothing else. It does not
+# say whether storage exists: TypeScript's ``declare x: number`` and
+# ``abstract y: string`` are field definitions that allocate nothing, and what
+# the parser proves about them travels in ``modifiers`` for a reader to
+# interpret. A form meaning "declares storage" would be an inference wearing a
+# syntactic name.
+DECLARATION_FORM_CLASS_ATTRIBUTE = "class_attribute"
+DECLARATION_FORM_FIELD_DEFINITION = "field_definition"
 
 
 def matches_any_glob(
@@ -749,6 +764,93 @@ class AccessRecord:
             "argument_present": self.argument_present,
             "argument_kind": self.argument_kind,
             "literal_argument": self.literal_argument,
+        }
+
+
+@dataclass(frozen=True)
+class ClassAttributeRecord:
+    """One name bound directly in a class body.
+
+    Syntax, never meaning. Python has no field construct -- a dataclass field,
+    a ``ClassVar``, a plain class attribute and ``__slots__`` are the same
+    statement, and only a decorator elsewhere in the file separates them -- so
+    this records what the class body binds and leaves the interpreting to a
+    reader. ``__slots__`` needs no exception here; it is a class attribute.
+
+    **The immediate body only.** A name bound under ``if`` / ``try`` / ``with``
+    inside a class body, ``if TYPE_CHECKING:`` included, is conditionally
+    bound, and "declares" would not be proven. Those are outside this surface,
+    which the table and view say in their own comments so a consumer does not
+    read absence as proof of absence.
+
+    Attributes:
+        source_path: Path the owning class is written in.
+        owner_qualified_name: The class the attribute is bound in. The
+            innermost one, where classes nest.
+        owner_line: The owning class's start line, and
+        owner_column: its start column. A qualified name is not unique within
+            a file, so the owner is addressed by name **and** position.
+        name: The attribute as written. TypeScript's ``#priv`` keeps its
+            ``#``, which is part of the identifier token rather than a
+            modifier, so ECMAScript-private needs no flag of its own.
+        ordinal: Position in the class body, from zero, in declaration order.
+        declaration_form: One of the ``DECLARATION_FORM_*`` constants. Grammar
+            provenance only.
+        is_annotated: Whether a type was written. Kept independent of
+            ``annotation`` being present for the reason C1 kept ``has_default``
+            independent of ``is_optional``: ``x: int`` and ``x = 1`` are
+            different declarations, and one nullable column would blur them.
+        has_default: Whether a value expression was written. The expression is
+            not stored -- that is source.
+        is_optional: The syntactic ``?``, written or not. False throughout
+            Python, which has no such syntax.
+        modifiers: The modifier keywords as written, in source order --
+            ``static``, ``readonly``, ``abstract``, ``declare``, ``accessor``
+            and the accessibility keywords. Empty for Python rather than a row
+            of falses: Python has no ``readonly``, and ``is_readonly = False``
+            would assert a distinction the language does not make, where an
+            empty tuple says only that nothing applies.
+    """
+
+    source_path: str
+    owner_qualified_name: str
+    owner_line: int
+    owner_column: int
+    name: str
+    ordinal: int
+    declaration_form: str
+    is_annotated: bool = False
+    has_default: bool = False
+    is_optional: bool = False
+    annotation: Optional[str] = None
+    modifiers: tuple[str, ...] = ()
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this class attribute fact."""
+        return (
+            f"{RECORD_TYPE_CLASS_ATTRIBUTE}:{self.source_path}"
+            f":{self.owner_qualified_name}:{self.owner_line}:{self.owner_column}"
+            f":{self.ordinal}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this attribute as a JSONL 'class_attribute' record."""
+        return {
+            "record_type": RECORD_TYPE_CLASS_ATTRIBUTE,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "owner_qualified_name": self.owner_qualified_name,
+            "owner_line": self.owner_line,
+            "owner_column": self.owner_column,
+            "name": self.name,
+            "ordinal": self.ordinal,
+            "declaration_form": self.declaration_form,
+            "is_annotated": self.is_annotated,
+            "has_default": self.has_default,
+            "is_optional": self.is_optional,
+            "annotation": self.annotation,
+            "modifiers": list(self.modifiers),
         }
 
 
