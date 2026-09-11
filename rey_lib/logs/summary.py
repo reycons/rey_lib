@@ -32,38 +32,49 @@ _MAX_EMBEDDED_STEPS = 250
 _RUN_COMPLETE = "RUN_COMPLETE"
 _RESULTS_SUMMARY = "RESULTS_SUMMARY"
 
-#: What the post-run stage is asking the AI to do.
+#: What the log-interpretation stage asks the AI to do.
 #:
 #: The consumer owns the semantic task it performs, so this is code rather than
 #: configuration. It is the only selection the stage makes: AI settings answer
 #: it with a profile and an instruction, and there is no analysis entry left to
 #: name either.
+#:
+#: **Permanent, and unused in this module on purpose.** ``finalize_run_log``
+#: stopped interpreting run logs on 2026-09-11, so nothing here names this
+#: constant any more -- but it is half of a standing invariant, not dead code.
+#: The other half is the ``log_interpretation`` task declared in the AI settings
+#: this resolves against; renaming or deleting either breaks the pairing that
+#: gives LLM_PACKAGE -> LLM_INTERPRETATION a stable semantic owner. Whatever
+#: publishes run-log interpretation must resolve through this name rather than
+#: inventing a second log-analysis semantic beside it.
 LOG_INTERPRETATION_TASK = "log_interpretation"
 
 
 def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     """Run the canonical post-run log processing sequence.
 
-    ``ai`` is the runtime's one AI -- the installation's, built by bootstrap for
-    the run that is executing. It is passed down rather than discovered, because
-    an AI belongs to a runtime. ``None`` means this runtime configures none,
-    which the interpretation stage records as a failure rather than raising.
+    Order: RESULTS_SUMMARY, then LLM_PACKAGE. Both are deterministic and local,
+    so finalization costs what the run's own records cost and nothing more.
 
-    Order: RESULTS_SUMMARY, then the log interpreter
-    (RESULTS_SUMMARY -> LLM_PACKAGE -> LLM_INTERPRETATION).
+    **Finalization does not interpret the log.** It once called the log
+    interpreter here -- the one synchronous LLM call every run made -- which held
+    every application's process open for model latency at the moment it was
+    trying to exit, whether or not anyone wanted an interpretation. The stage
+    itself is unchanged and still available: ``run_configured_log_analysis``
+    reads the LLM_PACKAGE this writes, so anything holding the run log can
+    interpret it afterwards, deliberately. LLM_PACKAGE is the durable handoff
+    between the two, and ``log_interpretation`` remains the permanent AI task
+    that knows how to read it.
 
-    The interpretation stage is unconditional and never fails the run. It runs
-    after the run it describes has finished, so a stage that could not interpret
-    the log must not be the thing that fails it. There is no installation-level
-    switch: that was an analysis-entry setting, and the entry was removed rather
-    than reproduced.
+    ``ai`` is accepted and unused. It stays in the signature because all six
+    top-level callers pass it and because the parameter states what a run log's
+    finalization is entitled to reach; removing it is a caller change, not this
+    one.
 
-    One LLM call produces one authoritative result record. LLM_INTERPRETATION
-    carries the structured interpretation together with the rendered subject, html,
-    and text, because the configured contract renders them in the same response —
-    so no second email-generation stage exists to duplicate that work.
+    ``analysis`` is always ``None`` in the returned mapping. The key remains so
+    a caller reading it sees "no interpretation" rather than a missing key.
     """
-    from rey_lib.logs.llm_package import create_llm_package, run_configured_log_analysis
+    from rey_lib.logs.llm_package import create_llm_package
 
     run_log.enter_phase("summarize")
     result = create_results_summary(run_log)
@@ -79,19 +90,7 @@ def finalize_run_log(run_log: Any, *, ai: Any = None) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — post-run processing must preserve the run
         return {**result, "package": None, "package_failures": [str(exc)],
                 "analysis": None}
-    # Names what this stage is for and no profile. Which model interprets a log
-    # is task policy, and it moved to the runtime's AI settings: the analysis
-    # entry still supplies the contract, and the task supplies the engine.
-    # The one synchronous LLM call every run makes. Its own phase because it
-    # runs after the work it describes has finished, so time spent here is
-    # invisible in every step's duration.
-    run_log.enter_phase("interpret")
-    analysis = run_configured_log_analysis(
-        run_log, ai=ai, package_record_type="LLM_PACKAGE",
-        task=LOG_INTERPRETATION_TASK,
-    )
-
-    return {**result, "package": package, "package_failures": [], "analysis": analysis}
+    return {**result, "package": package, "package_failures": [], "analysis": None}
 
 
 def create_results_summary(

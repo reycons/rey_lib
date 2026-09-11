@@ -481,12 +481,12 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     assert types[0] == "RUN_START"
     assert types.count("STEP_START") == 2
     assert types.count("STEP_END") == 2
-    # The summary is the last deterministic record. Finalization then attempts
-    # log interpretation unconditionally, so the interpreter's own records
-    # follow it -- an outcome here, since this run has no AI.
-    assert types[types.index("RESULTS_SUMMARY") + 1:] == [
-        "LLM_PACKAGE", "LLM_ANALYSIS_FAILURE",
-    ]
+    # Finalization is deterministic end to end: the summary, then the package
+    # it hands off. It no longer attempts interpretation, so a run with no AI
+    # records no analysis failure -- there is no analysis to fail.
+    assert types[types.index("RESULTS_SUMMARY") + 1:] == ["LLM_PACKAGE"]
+    assert "LLM_ANALYSIS_FAILURE" not in types
+    assert "LLM_INTERPRETATION" not in types
     assert types.count("ARTIFACT_MANIFEST") == 0
     assert "RUN_SUMMARY" not in types
     assert types.count("RESULTS_SUMMARY") == 1
@@ -889,12 +889,10 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     assert result.status == "success"
 
     records = _read(Path(run_log.path()))
-    # Finalization appends the interpreter's records after the summary, so the
-    # summary is the last deterministic one rather than the last outright.
+    # Finalization appends the package after the summary and stops there.
     types = [record["record_type"] for record in records]
-    assert types[types.index("RESULTS_SUMMARY") + 1:] == [
-        "LLM_PACKAGE", "LLM_ANALYSIS_FAILURE",
-    ]
+    assert types[types.index("RESULTS_SUMMARY") + 1:] == ["LLM_PACKAGE"]
+    assert "LLM_ANALYSIS_FAILURE" not in types
     assert not any(record["record_type"] == "ARTIFACT_MANIFEST" for record in records)
     declared = next(record for record in records if record["record_type"] == "ARTIFACT_REFERENCE")
     assert Path(declared["path"]).name == "report.json"
