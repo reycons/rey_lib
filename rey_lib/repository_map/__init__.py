@@ -71,13 +71,6 @@ from rey_lib.repository_map.graph import (
 )
 from rey_lib.repository_map.inventory import inventory_files, load_scan_rules
 from rey_lib.repository_map.registrations import extract_registrations
-from rey_lib.repository_map.review import (
-    ReviewDecision,
-    ReviewDocument,
-    load_review,
-    validate_review,
-    verify_generated_map_unedited,
-)
 from rey_lib.repository_map.writer import (
     GENERATOR_VERSION,
     MapDiff,
@@ -152,8 +145,6 @@ __all__ = [
     "ReferenceEdge",
     "RepositoryGraph",
     "RepositoryMap",
-    "ReviewDecision",
-    "ReviewDocument",
     "ScanRules",
     "SymbolInventory",
     "SymbolRecord",
@@ -193,9 +184,6 @@ __all__ = [
     "extract_symbols",
     "inventory_dispatchers_and_switches",
     "inventory_files",
-    "load_review",
     "load_scan_rules",
     "supported_languages",
-    "validate_review",
-    "verify_generated_map_unedited",
 ]
