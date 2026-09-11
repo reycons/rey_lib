@@ -15,6 +15,7 @@ from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
     extract_js_class_attributes,
+    extract_js_raise_sites,
     extract_js_return_sites,
     extract_js_parameters,
     extract_js_writes_and_accesses,
@@ -24,6 +25,7 @@ from rey_lib.repository_map.js_extractor import (
 )
 from rey_lib.repository_map.python_extractor import (
     extract_python_class_attributes,
+    extract_python_raise_sites,
     extract_python_return_sites,
     extract_python_parameters,
     extract_python_writes_and_accesses,
@@ -36,6 +38,7 @@ __all__ = [
     "LANGUAGE_EXTRACTORS",
     "LanguageExtractor",
     "extract_class_attributes",
+    "extract_raise_sites",
     "extract_return_sites",
     "extract_declared_parameters",
     "extract_writes_and_accesses",
@@ -58,6 +61,7 @@ class LanguageExtractor:
             class bodies.
         return_sites: Callable returning the returns written inside its
             declarations.
+        raise_sites: Callable returning the raises written inside them.
         writes_and_accesses: Callable returning the writes and indexed access
             forms inside those declarations, from one walk.
     """
@@ -68,6 +72,7 @@ class LanguageExtractor:
     parameters: Callable[[Path, str, str | None], list[ParameterRecord]]
     class_attributes: Callable[[Path, str, str | None], list[ClassAttributeRecord]]
     return_sites: Callable[[Path, str, str | None], list[ReturnSiteRecord]]
+    raise_sites: Callable[[Path, str, str | None], list[RaiseSiteRecord]]
     writes_and_accesses: Callable[
         [Path, str, str | None],
         tuple[list[AssignmentRecord], list[AccessRecord]],
@@ -84,6 +89,7 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         parameters=extract_python_parameters,
         class_attributes=extract_python_class_attributes,
         return_sites=extract_python_return_sites,
+        raise_sites=extract_python_raise_sites,
         writes_and_accesses=extract_python_writes_and_accesses,
     ),
 }
@@ -99,6 +105,7 @@ LANGUAGE_EXTRACTORS.update(
             parameters=extract_js_parameters,
             class_attributes=extract_js_class_attributes,
             return_sites=extract_js_return_sites,
+            raise_sites=extract_js_raise_sites,
             writes_and_accesses=extract_js_writes_and_accesses,
         )
         for language in supported_js_languages()
@@ -225,6 +232,30 @@ def extract_return_sites(
     if extractor is None:
         return []
     return extractor.return_sites(path, language, source_path)
+
+
+def extract_raise_sites(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[RaiseSiteRecord]:
+    """Return the raises written inside one file's declarations.
+
+    A name, never a type: the callee is what the parser proves, and it does not
+    prove the name is an exception class.
+
+    Args:
+        path: Source file to read and parse.
+        language: Language name as the inventory recorded it.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The raise sites, empty for a language with no registered extractor.
+    """
+    extractor = LANGUAGE_EXTRACTORS.get(language)
+    if extractor is None:
+        return []
+    return extractor.raise_sites(path, language, source_path)
 
 
 def extract_executable_references(

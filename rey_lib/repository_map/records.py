@@ -34,6 +34,7 @@ __all__ = [
     "RECORD_TYPE_ACCESS",
     "RECORD_TYPE_CLASS_ATTRIBUTE",
     "RECORD_TYPE_RETURN_SITE",
+    "RECORD_TYPE_RAISE_SITE",
     "RECORD_TYPE_ASSIGNMENT",
     "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
@@ -56,6 +57,7 @@ __all__ = [
     "AccessRecord",
     "ClassAttributeRecord",
     "ReturnSiteRecord",
+    "RaiseSiteRecord",
     "AssignmentRecord",
     "ParameterRecord",
     "ReferenceEdge",
@@ -85,6 +87,7 @@ RECORD_TYPE_ASSIGNMENT = "assignment"
 RECORD_TYPE_ACCESS = "access"
 RECORD_TYPE_CLASS_ATTRIBUTE = "class_attribute"
 RECORD_TYPE_RETURN_SITE = "return_site"
+RECORD_TYPE_RAISE_SITE = "raise_site"
 RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
@@ -236,6 +239,11 @@ VALUE_KIND_NAME_CHAIN = "name_chain"
 VALUE_KIND_ATTRIBUTE = "attribute"
 VALUE_KIND_SUBSCRIPT = "subscript"
 VALUE_KIND_CALL = "call"
+# TypeScript's ``new X()``. A distinct grammar form, and 87% of the estate's
+# throws, so folding it into ``other`` would make the vocabulary opaque exactly
+# where TypeScript uses it most. Python has no ``new``, so the kind is
+# language-specific in the way this vocabulary already tolerates.
+VALUE_KIND_CONSTRUCTION = "construction"
 VALUE_KIND_AWAIT = "await"
 VALUE_KIND_COLLECTION_LITERAL = "collection_literal"
 VALUE_KIND_COMPREHENSION = "comprehension"
@@ -978,6 +986,94 @@ class ReturnSiteRecord:
             "has_value": self.has_value,
             "value_kind": self.value_kind,
             "value_chain": self.value_chain,
+        }
+
+
+@dataclass(frozen=True)
+class RaiseSiteRecord:
+    """One raise or throw written inside a declaration.
+
+    **A name, never a type.** 97% of the estate's raises are calls, so the
+    callee's name is what makes this table answer anything -- but the parser
+    proves only that a name was called. It does not prove the name is an
+    exception class, and in the benchmark's own subject five of eight sites are
+    ``raise _pre_execution_failure(...)``, an ordinary factory function. Hence
+    ``callee_chain`` and not ``exception_type``.
+
+    **Owned by the declaration that contains it**, on the same boundary as
+    returns: a raise inside a nested function belongs to that function.
+
+    Attributes:
+        source_path: Path the raise is written in.
+        owner_qualified_name: The declaration containing it.
+        owner_line: The owning declaration's start line, and
+        owner_column: its start column. A qualified name is not unique within
+            a file, so the owner is addressed by name **and** position.
+        source_line: Where the raise is written, and
+        source_column: its column.
+        ordinal: Position among the declaration's own raise sites, from zero,
+            in source order.
+        is_bare: Whether the raise was written with no expression. Syntax
+            only: Python gives that form re-raise semantics, and a reader may
+            conclude it, but this column does not say so. Always False in
+            TypeScript, which has no bare ``throw``.
+        value_kind: One of the ``VALUE_KIND_*`` constants -- the same
+            vocabulary a return site uses, because the shape of a raised
+            expression is the same kind of content as the shape of a returned
+            one. None when ``is_bare``.
+        value_chain: The proven dotted chain of the raised expression itself,
+            where it is one. ``raise err`` proves ``err``; ``raise Error("x")``
+            proves nothing here, because the expression is a call.
+        callee_chain: The proven dotted name of what is called or constructed,
+            where the expression is a call or a ``new``. ``raise mod.Error(..)``
+            proves ``mod.Error``; ``raise factory().Error(..)`` proves nothing,
+            because the chain is impure. None rather than text: an unproven
+            chain is absent, never source.
+        has_cause: Whether ``from`` was written. Python-only syntax, the way a
+            written ``?`` is TypeScript-only. This estate's contract requires
+            ``raise X from original`` when re-raising, so the absence of a
+            cause is itself a reviewable fact.
+    """
+
+    source_path: str
+    owner_qualified_name: str
+    owner_line: int
+    owner_column: int
+    source_line: int
+    source_column: int
+    ordinal: int
+    is_bare: bool = False
+    value_kind: Optional[str] = None
+    value_chain: Optional[str] = None
+    callee_chain: Optional[str] = None
+    has_cause: bool = False
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this raise site."""
+        return (
+            f"{RECORD_TYPE_RAISE_SITE}:{self.source_path}"
+            f":{self.owner_qualified_name}:{self.owner_line}:{self.owner_column}"
+            f":{self.ordinal}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this site as a JSONL 'raise_site' record."""
+        return {
+            "record_type": RECORD_TYPE_RAISE_SITE,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "owner_qualified_name": self.owner_qualified_name,
+            "owner_line": self.owner_line,
+            "owner_column": self.owner_column,
+            "source_line": self.source_line,
+            "source_column": self.source_column,
+            "ordinal": self.ordinal,
+            "is_bare": self.is_bare,
+            "value_kind": self.value_kind,
+            "value_chain": self.value_chain,
+            "callee_chain": self.callee_chain,
+            "has_cause": self.has_cause,
         }
 
 

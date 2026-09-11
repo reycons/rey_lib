@@ -85,6 +85,11 @@ _RETURN_SITE_COLUMNS = (
     "owner_column", "source_line", "source_column", "ordinal", "has_value",
     "value_kind", "value_chain",
 )
+_RAISE_SITE_COLUMNS = (
+    "repository_key", "relative_path", "owner_qualified_name", "owner_line",
+    "owner_column", "source_line", "source_column", "ordinal", "is_bare",
+    "value_kind", "value_chain", "callee_chain", "has_cause",
+)
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
     "from_id", "from_symbol", "from_symbol_line", "from_symbol_column",
@@ -180,11 +185,16 @@ class CodeIndexDatabaseWriter:
             for entry in indexed for row in entry.return_sites
         ]
         self._stage("return_site_stage", return_sites, _RETURN_SITE_COLUMNS)
+        raise_sites = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.raise_sites
+        ]
+        self._stage("raise_site_stage", raise_sites, _RAISE_SITE_COLUMNS)
 
         logger.info(
             "Staged %d repositories, %d files, %d symbols, %d edges, "
             "%d parameters, %d writes, %d accesses, %d class attributes, "
-            "%d return sites",
+            "%d return sites, %d raise sites",
             len(repositories),
             len(files),
             len(symbols),
@@ -194,6 +204,7 @@ class CodeIndexDatabaseWriter:
             len(accesses),
             len(class_attributes),
             len(return_sites),
+            len(raise_sites),
         )
         # The scan side only. The authored architecture is not staged here and
         # is therefore not replaced -- but every surviving realization is
@@ -217,7 +228,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("return_site_stage", "class_attribute_stage",
+        for table in ("raise_site_stage", "return_site_stage",
+                      "class_attribute_stage",
                       "access_stage",
                       "assignment_stage", "parameter_stage",
                       "edge_stage", "symbol_stage", "file_stage",

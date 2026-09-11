@@ -46,6 +46,7 @@ from rey_lib.repository_map.records import (
     VALUE_KIND_ATTRIBUTE,
     VALUE_KIND_AWAIT,
     VALUE_KIND_CALL,
+    VALUE_KIND_CONSTRUCTION,
     VALUE_KIND_COLLECTION_LITERAL,
     VALUE_KIND_COMPREHENSION,
     VALUE_KIND_CONDITIONAL,
@@ -60,6 +61,7 @@ from rey_lib.repository_map.records import (
     AssignmentRecord,
     ClassAttributeRecord,
     ParameterRecord,
+    RaiseSiteRecord,
     ReturnSiteRecord,
     ReferenceEdge,
     SymbolInventory,
@@ -68,6 +70,7 @@ from rey_lib.repository_map.records import (
 
 __all__ = [
     "extract_python_class_attributes",
+    "extract_python_raise_sites",
     "extract_python_return_sites",
     "extract_python_parameters",
     "extract_python_writes_and_accesses",
@@ -847,6 +850,76 @@ def extract_python_return_sites(
                 )
             )
     return sites
+
+
+def extract_python_raise_sites(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[RaiseSiteRecord]:
+    """Extract every raise written inside a recorded declaration.
+
+    The ownership boundary again: a raise inside a nested function belongs to
+    that function, not to whatever encloses it.
+
+    Args:
+        path: Python file to read and parse.
+        language: Language name. Accepted for registry symmetry; unused.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The raise sites, in source order within each declaration.
+
+    Raises:
+        ValueError: If the file is not parseable Python.
+    """
+    tree = _parse(path)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    sites: list[RaiseSiteRecord] = []
+    for owner, qualified_name in _recorded_bodies(tree):
+        own = [node for node in _own_nodes(owner) if isinstance(node, ast.Raise)]
+        own.sort(key=lambda node: (node.lineno, node.col_offset))
+        for ordinal, node in enumerate(own):
+            kind, chain = _returned_facts(node.exc)
+            sites.append(
+                RaiseSiteRecord(
+                    source_path=recorded_path,
+                    owner_qualified_name=qualified_name,
+                    owner_line=owner.lineno,
+                    owner_column=owner.col_offset,
+                    source_line=node.lineno,
+                    source_column=node.col_offset,
+                    ordinal=ordinal,
+                    # Syntax only. Python's re-raise semantics for this form
+                    # are a reader's conclusion, not this column's claim.
+                    is_bare=node.exc is None,
+                    value_kind=kind,
+                    value_chain=chain,
+                    callee_chain=_called_name(node.exc),
+                    has_cause=node.cause is not None,
+                )
+            )
+    return sites
+
+
+def _called_name(value: ast.expr | None) -> str | None:
+    """Return the proven dotted name a call invokes, or None.
+
+    The identity of a raised thing usually lives here: ``raise mod.Error("x")``
+    proves ``mod.Error``. An impure chain -- ``raise factory().Error("x")`` --
+    proves nothing, and absence is recorded rather than source text.
+
+    Args:
+        value: The raised expression, or None for a bare ``raise``.
+
+    Returns:
+        The callee's dotted name, or None where the expression is not a call
+        or the chain is not proved.
+    """
+    if not isinstance(value, ast.Call):
+        return None
+    return _dotted_name(value.func)
 
 
 def _returned_facts(value: ast.expr | None) -> tuple[str | None, str | None]:

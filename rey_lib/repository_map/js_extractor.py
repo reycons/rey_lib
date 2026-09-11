@@ -56,6 +56,7 @@ from rey_lib.repository_map.records import (
     VALUE_KIND_ATTRIBUTE,
     VALUE_KIND_AWAIT,
     VALUE_KIND_CALL,
+    VALUE_KIND_CONSTRUCTION,
     VALUE_KIND_COLLECTION_LITERAL,
     VALUE_KIND_CONDITIONAL,
     VALUE_KIND_LITERAL,
@@ -69,6 +70,7 @@ from rey_lib.repository_map.records import (
     AssignmentRecord,
     ClassAttributeRecord,
     ParameterRecord,
+    RaiseSiteRecord,
     ReturnSiteRecord,
     ReferenceEdge,
     SymbolInventory,
@@ -77,6 +79,7 @@ from rey_lib.repository_map.records import (
 
 __all__ = [
     "extract_js_class_attributes",
+    "extract_js_raise_sites",
     "extract_js_return_sites",
     "extract_js_parameters",
     "extract_js_writes_and_accesses",
@@ -841,12 +844,88 @@ _RETURNED_KINDS = {
     "call_expression": VALUE_KIND_CALL,
     "await_expression": VALUE_KIND_AWAIT,
     "subscript_expression": VALUE_KIND_SUBSCRIPT,
+    "new_expression": VALUE_KIND_CONSTRUCTION,
     "array": VALUE_KIND_COLLECTION_LITERAL,
     "object": VALUE_KIND_COLLECTION_LITERAL,
     "ternary_expression": VALUE_KIND_CONDITIONAL,
     "binary_expression": VALUE_KIND_OPERATION,
     "unary_expression": VALUE_KIND_OPERATION,
 }
+
+
+def extract_js_raise_sites(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[RaiseSiteRecord]:
+    """Extract every throw written inside a recorded declaration.
+
+    ``is_bare`` is always False here: TypeScript has no bare ``throw``, and the
+    column exists because Python does rather than being invented for symmetry.
+    ``has_cause`` is likewise always False -- a cause passed to an Error
+    constructor is an argument, not the syntax the column names.
+
+    Args:
+        path: Source file to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The throw sites, in source order within each declaration.
+    """
+    root = _parse(path, language)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    sites: list[RaiseSiteRecord] = []
+    for owner, qualified_name in _js_recorded_bodies(root):
+        owner_line, owner_column = _js_owner_position(owner)
+        own = [node for node in _own_nodes(owner)
+               if node.type == "throw_statement"]
+        own.sort(key=lambda node: node.start_point)
+        for ordinal, node in enumerate(own):
+            value = node.named_children[0] if node.named_children else None
+            kind, chain = _js_returned_facts(value)
+            line, column = node.start_point
+            sites.append(
+                RaiseSiteRecord(
+                    source_path=recorded_path,
+                    owner_qualified_name=qualified_name,
+                    owner_line=owner_line,
+                    owner_column=owner_column,
+                    source_line=line + 1,
+                    source_column=column,
+                    ordinal=ordinal,
+                    is_bare=False,
+                    value_kind=kind,
+                    value_chain=chain,
+                    callee_chain=_js_called_name(value),
+                    has_cause=False,
+                )
+            )
+    return sites
+
+
+def _js_called_name(value: Node | None) -> str | None:
+    """Return the proven dotted name a call or ``new`` invokes, or None.
+
+    ``throw new Error("x")`` proves ``Error``; ``throw factory().Error(..)``
+    proves nothing, and absence is recorded rather than source text.
+
+    Args:
+        value: The thrown expression, or None.
+
+    Returns:
+        The callee or constructor's dotted name, or None.
+    """
+    if value is None or value.type not in ("call_expression", "new_expression"):
+        return None
+    callee = value.child_by_field_name("constructor" if value.type == "new_expression"
+                                       else "function")
+    if callee is None:
+        return None
+    if callee.type == "identifier":
+        return _text(callee)
+    return js_dotted_name(callee)
 
 
 def _js_returned_facts(value: Node | None) -> tuple[str | None, str | None]:
