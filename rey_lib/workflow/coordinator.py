@@ -335,6 +335,12 @@ def run_workflow(
     run_log.enter_phase("steps")
 
     sequence = 0
+    # The first failure, captured once. A failure stops ordinary steps from
+    # running; it does not stop the walk, because a step may declare
+    # always_run. What is kept is the *first* failure's identity: it is the
+    # reason normal execution stopped, and a later always_run failure records
+    # itself without replacing it.
+    first_failure: dict[str, Any] | None = None
     for index, step_def in enumerate(steps):
         if index not in selected:
             continue
@@ -412,6 +418,23 @@ def run_workflow(
         merged = _deep_merge(_to_mapping(declared),
                              _to_mapping(_get(step_def, "config")))
         apply_only = bool(merged.get("apply_only"))
+        # Eligible after an earlier step failed, and nothing more: the step keeps
+        # its declared position, and every other reason it might not run still
+        # applies.
+        always_run = bool(merged.get("always_run"))
+
+        # A prior failure makes ordinary steps ineligible. always_run steps stay
+        # eligible and keep their declared position -- nothing is reordered and
+        # nothing is deferred to a final group.
+        if first_failure is not None and not always_run:
+            _logger.info(
+                "workflow '%s' step '%s' skipped: an earlier step failed.",
+                name, step_id,
+            )
+            run.outcomes.append(
+                StepOutcome(step_id, label, process, "skipped", "earlier step failed")
+            )
+            continue
         effective = _expand_config(_declared_config(merged), tokens)
 
         # Validation precedes dispatch, so an implementation never receives
@@ -492,18 +515,18 @@ def run_workflow(
                 )
                 run.status = "failed"
                 _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
-                run_log.set_nest_level("workflow")
-                log_run_complete(run_log,
-                    "failed",
-                    message=failure_message,
-                    failure_record_id=failure_id,
-                    failed_step_id=step_id,
-                    failed_step_name=step_name,
-                    failure_message=failure_message,
-                )
-                _finalize_run(ctx, run_log)
-                clear_run()
-                return run
+                # Recorded once. A later always_run step that also fails writes
+                # its own ERROR, STEP_FAILURE and STEP_END at its own step; what
+                # it must not do is replace the reason normal execution stopped.
+                if first_failure is None:
+                    first_failure = {
+                        "message": failure_message,
+                        "failure_record_id": failure_id,
+                        "failed_step_id": step_id,
+                        "failed_step_name": step_name,
+                        "failure_message": failure_message,
+                    }
+                continue
 
             status = str(getattr(result, "status", "ok")) if result is not None else "ok"
             detail = str(getattr(result, "detail", "")) if result is not None else ""
@@ -523,26 +546,32 @@ def run_workflow(
                     sanitized_exception=failure_message,
                     failed_step_sequence=sequence,
                 )
-                run_log.set_nest_level("workflow")
-                log_run_complete(run_log,
-                    "failed",
-                    message=failure_message,
-                    failure_record_id=failure_id,
-                    failed_step_id=step_id,
-                    failed_step_name=step_name,
-                    failure_message=failure_message,
-                )
-                _finalize_run(ctx, run_log)
-                clear_run()
-                return run
+                if first_failure is None:
+                    first_failure = {
+                        "message": failure_message,
+                        "failure_record_id": failure_id,
+                        "failed_step_id": step_id,
+                        "failed_step_name": step_name,
+                        "failure_message": failure_message,
+                    }
         finally:
             clear_step()
 
+    # One completion, after the whole declared order has been walked. A failed
+    # run is not complete while always_run steps are still executing, so
+    # RUN_COMPLETE and finalization wait for them -- which is also what puts
+    # their records inside the RESULTS_SUMMARY and LLM_PACKAGE that follow.
     run_log.set_nest_level("workflow")
-    log_run_complete(run_log, "success")
-    # _finalize_run enters summarize / package / interpret from inside; what is
-    # left when it returns is this function's own teardown. Nothing closes the
-    # timeline here -- app_runtime's finally owns that, for every exit.
+    if first_failure is None:
+        log_run_complete(run_log, "success")
+    else:
+        # The first failure, not the last. A later always_run failure has
+        # already recorded itself; the run still reports why normal execution
+        # stopped.
+        log_run_complete(run_log, "failed", **first_failure)
+    # _finalize_run enters summarize / package from inside; what is left when it
+    # returns is this function's own teardown. Nothing closes the timeline here
+    # -- app_runtime's finally owns that, for every exit.
     _finalize_run(ctx, run_log)
     run_log.enter_phase("close")
     clear_run()
@@ -621,15 +650,15 @@ _IMPLEMENTATION = "implementation"
 
 #: Engine vocabulary a process may carry, which is not part of any
 #: application's published parameter contract.
-_ENGINE_KEYS = frozenset({_IMPLEMENTATION, "apply_only", "enabled", "name"})
+_ENGINE_KEYS = frozenset({_IMPLEMENTATION, "apply_only", "always_run", "enabled", "name"})
 
 
 def _declared_config(declared: Mapping[str, Any]) -> dict[str, Any]:
     """The process defaults, without the engine's own vocabulary.
 
-    ``implementation`` and ``apply_only`` say how the engine treats a step. They
-    are not configuration the application asked for, and passing them down would
-    make every published contract declare them.
+    ``implementation``, ``apply_only`` and ``always_run`` say how the engine
+    treats a step. They are not configuration the application asked for, and
+    passing them down would make every published contract declare them.
     """
     return {
         key: value for key, value in declared.items() if key not in _ENGINE_KEYS

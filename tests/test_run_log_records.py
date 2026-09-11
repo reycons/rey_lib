@@ -1071,3 +1071,81 @@ def test_nested_app_operation_does_not_emit_restore_policy(tmp_path: Path) -> No
     records = _read(Path(run_log.path()))
     assert records  # lifecycle records were written
     assert not any(r["record_type"] == "RUN_RESTORE_POLICY" for r in records)
+
+
+def test_always_run_step_completes_before_the_run_does(tmp_path: Path) -> None:
+    """RUN_COMPLETE and finalization wait for always_run work.
+
+    A failed run is not complete while an always_run step is still executing, so
+    its STEP_START/STEP_END land before RUN_COMPLETE -- and its records are
+    therefore inside the RESULTS_SUMMARY and LLM_PACKAGE that follow.
+    """
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    start_test_run(ctx)
+    run_log = _log(ctx, tmp_path)
+    workflow = {
+        "name": "wf",
+        "processes": {"boom": {}, "last": {"always_run": True}},
+        "steps": [
+            {"id": "s1", "label": "One", "process": "boom"},
+            {"id": "s2", "label": "Two", "process": "last"},
+        ],
+    }
+
+    def boom(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
+        raise RuntimeError("nope")
+
+    def last(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
+        return None
+
+    _wf, _ctx = prepared(workflow, ctx)
+    result = run_workflow(_ctx, run_log, _wf, {"boom": boom, "last": last})
+    assert result.status == "failed"
+
+    types = [r["record_type"] for r in _read(Path(run_log.path()))]
+    complete = types.index("RUN_COMPLETE")
+    # Both steps reached STEP_END before the run was completed.
+    assert types.count("STEP_END") == 2
+    assert types.index("RESULTS_SUMMARY") > complete
+    for index, record_type in enumerate(types):
+        if record_type == "STEP_END":
+            assert index < complete, "a step ended after the run completed"
+    # One completion, and the package still follows it.
+    assert types.count("RUN_COMPLETE") == 1
+    assert types[types.index("RESULTS_SUMMARY") + 1:] == ["LLM_PACKAGE"]
+
+
+def test_the_run_reports_the_first_failure_not_the_always_run_one(tmp_path: Path) -> None:
+    """RUN_COMPLETE names the step that stopped normal execution."""
+    from rey_lib.workflow import RunContext, run_workflow
+
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    start_test_run(ctx)
+    run_log = _log(ctx, tmp_path)
+    workflow = {
+        "name": "wf",
+        "processes": {"boom": {}, "last": {"always_run": True}},
+        "steps": [
+            {"id": "s1", "label": "One", "process": "boom"},
+            {"id": "s2", "label": "Two", "process": "last"},
+        ],
+    }
+
+    def boom(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
+        raise RuntimeError("first")
+
+    def also_boom(_ctx: object, _run_log: object, _config: dict, _run: RunContext) -> None:
+        raise RuntimeError("second")
+
+    _wf, _ctx = prepared(workflow, ctx)
+    run_workflow(_ctx, run_log, _wf, {"boom": boom, "last": also_boom})
+
+    records = _read(Path(run_log.path()))
+    complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
+    payload = complete.get("run_complete") or complete
+    assert payload.get("failed_step_id") == "s1"
+    # Both failures left their own evidence; the second did not replace the first.
+    failures = [r for r in records if r["record_type"] == "STEP_FAILURE"]
+    assert [str(r.get("step_id") or "") for r in failures] == ["s1", "s2"]

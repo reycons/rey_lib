@@ -233,7 +233,13 @@ def test_process_without_registered_handler_fails_closed(run_log) -> None:
 
 
 def test_handler_error_stops_run_fail_closed(run_log) -> None:
-    """A handler exception records a failed outcome and stops the run."""
+    """A handler exception fails the run and stops ordinary steps running.
+
+    The walk continues to the end of the declared order so an always_run step
+    can still be reached, so the later ordinary step is recorded as skipped
+    rather than absent -- but it does not run, and the failure is still the
+    reason the run stopped.
+    """
     ran: list[str] = []
 
     def boom(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
@@ -252,15 +258,20 @@ def test_handler_error_stops_run_fail_closed(run_log) -> None:
     _wf, _ctx = prepared(workflow, None)
     run = run_workflow(_ctx, run_log, _wf, {"boom": boom, "after": after})
     assert run.status == "failed"
-    assert run.outcomes[-1].status == "failed"
+    failed = next(o for o in run.outcomes if o.status == "failed")
+    assert failed.id == "s1"
+    # The ordinary step after the failure is recorded as skipped, and its
+    # handler is never called.
+    assert [o.status for o in run.outcomes] == ["failed", "skipped"]
+    assert run.outcomes[-1].id == "s2"
+    assert ran == []
     # The outcome carries the safe message, which names the workflow and the
     # step. The exception's own text is evidence and lives in the ERROR
     # record's sanitized payload, so a raw message never reaches a surface that
     # may be shown or serialized.
-    outcome_error = run.outcomes[-1].error or ""
+    outcome_error = failed.error or ""
     assert "w" in outcome_error and "s1" in outcome_error
     assert "nope" not in outcome_error
-    assert ran == []
 
 # ---------------------------------------------------------------------------
 # Retired configuration (SGC_Log_Run_Rollback)
@@ -478,3 +489,126 @@ def test_disabled_workflow_is_recorded_through_the_normal_run_path(run_log,
     complete = next(r for r in records if r.get("record_type") == "RUN_COMPLETE")
     assert complete["status"] == "refused"
     assert "is disabled and was not executed" in complete["message"]
+
+
+# ---------------------------------------------------------------------------
+# always_run: a step stays eligible after an earlier failure
+# ---------------------------------------------------------------------------
+
+def _boom(message: str = "nope"):
+    """A handler that raises."""
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> None:
+        raise RuntimeError(message)
+    return handler
+
+
+def _records(ran: list[str], step: str, status: str = "ok"):
+    """A handler that records that it ran and reports ``status``."""
+    def handler(ctx: Any, run_log: Any, config: dict[str, Any], run: RunContext) -> StepResult:
+        ran.append(step)
+        return StepResult(step, status)
+    return handler
+
+
+def _three_step(always_run: bool) -> dict[str, Any]:
+    """Fail first, an ordinary step, then a last step declaring always_run."""
+    return {
+        "name": "w",
+        "processes": {"boom": {}, "middle": {}, "last": {"always_run": always_run}},
+        "steps": [{"id": "s1", "label": "1", "process": "boom"},
+                  {"id": "s2", "label": "2", "process": "middle"},
+                  {"id": "s3", "label": "3", "process": "last"}],
+    }
+
+
+def test_always_run_step_runs_after_an_earlier_failure(run_log) -> None:
+    """The declared order is walked to the end; only always_run steps run."""
+    ran: list[str] = []
+    _wf, _ctx = prepared(_three_step(always_run=True), None)
+
+    run = run_workflow(_ctx, run_log, _wf, {
+        "boom": _boom(), "middle": _records(ran, "s2"), "last": _records(ran, "s3"),
+    })
+
+    assert run.status == "failed"
+    assert ran == ["s3"]
+    assert [(o.id, o.status) for o in run.outcomes] == [
+        ("s1", "failed"), ("s2", "skipped"), ("s3", "ok"),
+    ]
+
+
+def test_without_always_run_the_later_step_is_skipped(run_log) -> None:
+    """The flag is what changes eligibility -- nothing else does."""
+    ran: list[str] = []
+    _wf, _ctx = prepared(_three_step(always_run=False), None)
+
+    run = run_workflow(_ctx, run_log, _wf, {
+        "boom": _boom(), "middle": _records(ran, "s2"), "last": _records(ran, "s3"),
+    })
+
+    assert run.status == "failed"
+    assert ran == []
+    assert [o.status for o in run.outcomes] == ["failed", "skipped", "skipped"]
+
+
+def test_always_run_changes_nothing_when_no_step_fails(run_log) -> None:
+    """With no failure every step runs, in declared order."""
+    ran: list[str] = []
+    workflow = {
+        "name": "w",
+        "processes": {"first": {}, "last": {"always_run": True}},
+        "steps": [{"id": "s1", "label": "1", "process": "first"},
+                  {"id": "s2", "label": "2", "process": "last"}],
+    }
+    _wf, _ctx = prepared(workflow, None)
+
+    run = run_workflow(_ctx, run_log, _wf, {
+        "first": _records(ran, "s1"), "last": _records(ran, "s2"),
+    })
+
+    assert run.status == "success"
+    assert ran == ["s1", "s2"]
+
+
+def test_a_failing_always_run_step_does_not_replace_the_first_failure(run_log) -> None:
+    """Both failures are recorded; the first stays the reason the run stopped.
+
+    A later failure is additional evidence, never a replacement -- otherwise the
+    run would report the cleanup step as the cause of its own failure.
+    """
+    _wf, _ctx = prepared(_three_step(always_run=True), None)
+
+    run = run_workflow(_ctx, run_log, _wf, {
+        "boom": _boom("first"), "middle": _records([], "s2"),
+        "last": _boom("second"),
+    })
+
+    assert run.status == "failed"
+    failed = [o for o in run.outcomes if o.status == "failed"]
+    assert [o.id for o in failed] == ["s1", "s3"]
+    # The first failure names its own step, not the always_run step's.
+    assert "s1" in (failed[0].error or "")
+    assert "s3" in (failed[1].error or "")
+
+
+def test_always_run_does_not_bypass_apply_only_in_dry_run(run_log) -> None:
+    """always_run answers one question only: eligibility after a failure.
+
+    Every other reason a step might not run still applies -- apply_only in
+    dry-run is the only other in-walk skip, so it is the one to prove.
+    """
+    ran: list[str] = []
+    workflow = {
+        "name": "w",
+        "processes": {"boom": {}, "last": {"always_run": True, "apply_only": True}},
+        "steps": [{"id": "s1", "label": "1", "process": "boom"},
+                  {"id": "s2", "label": "2", "process": "last"}],
+    }
+    _wf, _ctx = prepared(workflow, None)
+
+    run = run_workflow(_ctx, run_log, _wf,
+                       {"boom": _boom(), "last": _records(ran, "s2")}, apply=False)
+
+    assert run.status == "failed"
+    assert ran == []
+    assert run.outcomes[-1].status == "skipped"
