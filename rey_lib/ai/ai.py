@@ -44,6 +44,7 @@ from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.requests import AIRequest, AIRequestOptions, ResolvedAIRequest
 from rey_lib.ai.results import AIResult
 from rey_lib.ai.policies import DEFAULT_EXECUTION_POLICY, AIExecutionPolicy
+from rey_lib.ai.objects import AIObject
 from rey_lib.ai.sessions import AISession
 from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
@@ -108,6 +109,11 @@ class AI:
         )
         self._observers: list[Callable[[AISettings], None]] = []
         self._settings = self._validated(settings or AISettings())
+        # The asks composed against this runtime. Held here because this object
+        # owns domain state and an ask is domain state -- a surface holding
+        # them would be a second answer to what a reader is composing, and a
+        # second one per open panel.
+        self._objects: dict[str, AIObject] = {}
 
     # -- what is available -------------------------------------------------
 
@@ -278,6 +284,59 @@ class AI:
     def stream(self, request: AIRequest, *, session_id: str = "") -> Iterator[AIEvent]:
         """Resolve this request and run it, reporting canonical events."""
         return self._executor.stream(self.resolve(request, session_id=session_id))
+
+    # -- composed asks -----------------------------------------------------
+
+    def create_object(
+        self, *, subject: str = "", subject_kind: str = "",
+        subject_id: str = "", task: str = "",
+    ) -> AIObject:
+        """Compose one ask against this runtime, and remember it.
+
+        **Seeded, not resolved.** The object carries no engine or instruction of
+        its own: absent means the task's, then the defaults', which is what
+        every override already means. So creating an ask cannot pin a model that
+        configuration would later have changed.
+
+        Args:
+            subject: What is being asked about, already trusted by the caller.
+                This runtime does not check it and never re-reads its source.
+            subject_kind: What that subject is, for whatever draws it.
+            subject_id: How the caller addresses that subject, if it has an
+                identity apart from its text. Carried, never read here.
+            task: Which configured task this ask is.
+
+        Returns:
+            The composed ask, addressable by its id.
+        """
+        composed = AIObject(
+            subject=subject, subject_kind=subject_kind,
+            # Where it began and what it is about start as the same thing, and
+            # part company the moment a reader points it somewhere else.
+            subject_id=subject_id, origin_id=subject_id, task=task,
+        )
+        self._objects[composed.id] = composed
+        return composed
+
+    def ai_object(self, object_id: str) -> AIObject | None:
+        """The ask one id addresses, or nothing.
+
+        Nothing is an ordinary answer -- an id from a page that has since been
+        replaced addresses no ask -- and is not a failure here.
+        """
+        return self._objects.get(str(object_id or ""))
+
+    def replace_object(self, composed: AIObject) -> AIObject:
+        """Hold a changed ask under the id it already had.
+
+        Every change is a new value, so this is how one becomes current. An ask
+        this runtime never composed is refused rather than adopted: an id it
+        does not know is a caller naming something that does not exist.
+        """
+        if composed.id not in self._objects:
+            raise AISelectionError(f"This runtime composed no AI object '{composed.id}'.")
+        self._objects[composed.id] = composed
+        return composed
 
     def session(self, session_id: str = "") -> AISession:
         """A conversation against this runtime."""

@@ -37,6 +37,19 @@ class AISettingsTask:
     empty string for an identity and ``None`` for a value, which is how the
     defaults already spell absence. A task overriding one field keeps inheriting
     the rest, so a caller changing a temperature does not silently pin a model.
+
+``composed_first`` is the one field that does **not** inherit, and it is
+    stated here rather than quietly: it says this task is **composed before it
+    is run** -- an application offers the ask to be edited and executes it when
+    somebody says so, rather than sending it the moment it is asked for.
+
+    That is a property of the task, not an override of anything, so there is
+    nothing to inherit from and false is a value rather than an absence: a
+    default scope composing first must not make every configured task do so.
+
+    **What an application does with it is the application's.** This says when
+    an ask is executed relative to being composed, and nothing about what
+    composes it or where.
     """
 
     name: str
@@ -44,6 +57,7 @@ class AISettingsTask:
     instruction_id: str = ""
     temperature: float | None = None
     representation: str = ""
+    composed_first: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.name or "").strip():
@@ -65,6 +79,9 @@ class AISettings:
     instruction_id: str = ""
     temperature: float | None = None
     representation: str = ""
+    #: Whether an ask on the default scope is composed before it is run. Tasks
+    #: do not inherit it -- see ``AISettingsTask``.
+    composed_first: bool = False
     tasks: tuple[AISettingsTask, ...] = field(default_factory=tuple)
 
     def task(self, name: str) -> AISettingsTask | None:

@@ -621,6 +621,17 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
         value = row.get("temperature")
         return None if value is None else float(value)
 
+    def _composed_first(row: Any) -> bool:
+        # Not an override: the view reads each row's own column and coalesces
+        # nothing, so a scope that is silent is false rather than inheriting. A
+        # runtime reading an older view without the column gets false, which is
+        # the behaviour that existed before it.
+        #
+        # The column is named for what the Console does with it; the domain is
+        # told only when an ask is executed relative to being composed, which
+        # is the boundary rey_lib.ai is held to.
+        return bool(row.get("opens_workbench") or False)
+
     group = next((row for row in rows if str(row.get("row_type")) == "group"), None)
     settings = AISettings(
         profile_id=_selection(group or {}, "profile_key", profile_ids,
@@ -629,6 +640,7 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
                                   instruction_ids, "instruction", ".default"),
         temperature=_temperature(group or {}),
         representation=str((group or {}).get("representation") or "").strip(),
+        composed_first=_composed_first(group or {}),
     )
 
     tasks: list[Any] = []
@@ -644,12 +656,14 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
                                       "instruction", where),
             temperature=_temperature(row),
             representation=str(row.get("representation") or "").strip(),
+            composed_first=_composed_first(row),
         ))
     return AISettings(
         profile_id=settings.profile_id,
         instruction_id=settings.instruction_id,
         temperature=settings.temperature,
         representation=settings.representation,
+        composed_first=settings.composed_first,
         tasks=tuple(tasks),
     )
 
