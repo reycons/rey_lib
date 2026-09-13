@@ -214,7 +214,13 @@ def build_ctx_from_path(
     object.__setattr__(ctx, "config_path", str(config_path))
     if app_name:
         object.__setattr__(ctx, "app_name", app_name)
-    object.__setattr__(ctx, "log_level", "INFO")
+    # The declared level survives. This wrote "INFO" unconditionally, after the
+    # configuration had been read -- so an installation that declared
+    # `log_level: DEBUG` had it destroyed here before anything could act on it,
+    # and the level was settable nowhere. The default applies only where the
+    # configuration states nothing.
+    if getattr(ctx, "log_level", None) is None:
+        object.__setattr__(ctx, "log_level", "INFO")
     object.__setattr__(ctx, "log_depth", 0)
     # Provenance is stored separately under a private attribute so it never
     # appears in ctx.keys() and never shadows a real config value.

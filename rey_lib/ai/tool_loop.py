@@ -39,6 +39,9 @@ from rey_lib.ai.requests import ResolvedAIRequest
 from rey_lib.ai.state import ExecutionState
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.tools import AIToolCall, AIToolResult
+from rey_lib.logs.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ["CanonicalToolLoop", "TakeTurn", "ToolLoop", "ToolRunner"]
 
@@ -125,11 +128,26 @@ class CanonicalToolLoop(ToolLoop):
         while current.tool_calls:
             state.requested_tools(current.tool_calls)
             for call in current.tool_calls:
+                # Whole, unlike the glimpse a watching surface is given. What
+                # a reader needs while a run is alive and what a reader needs
+                # afterwards are not the same amount.
+                logger.debug(
+                    "tool requested %s id=%s arguments=%s",
+                    call.name, call.id, call.arguments,
+                )
                 emit(AIEvent.tool_requested(state.execution_id, call))
 
             results = self._carry_out(current.tool_calls, runner)
             state.accepted_tool_results(results)
             for result in results:
+                if result.failed:
+                    logger.debug(
+                        "tool failed id=%s: %s", result.call_id, result.message,
+                    )
+                else:
+                    logger.debug(
+                        "tool answered id=%s value=%s", result.call_id, result.value,
+                    )
                 emit(AIEvent.tool_accepted(state.execution_id, result))
 
             if any(result.failed for result in results):

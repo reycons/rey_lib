@@ -22,12 +22,21 @@ for what actually ran.
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from rey_lib.ai.capabilities import AICapability, capabilities_for_content
-from rey_lib.ai.content import AIContent, AIMessage, AIRole, structured, text
+from rey_lib.ai.content import (
+    AIContent,
+    AIContentKind,
+    AIMessage,
+    AIRole,
+    structured,
+    text,
+)
 from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.errors import (
     AICancelled,
@@ -55,6 +64,9 @@ from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.tool_loop import CanonicalToolLoop, ToolLoop
 from rey_lib.ai.turn_strategy import NativeTurnStrategy, TurnStrategy
 from rey_lib.ai.turns import TurnExecutor
+from rey_lib.logs.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ["AIExecutor"]
 
@@ -182,12 +194,14 @@ class AIExecutor:
 
             deltas: list[str] = []
             sending = strategy.shape(self._call_for(request, state))
+            _log_call(state, sending)
             outcome = self._turns.take(
                 request, state, sending, emit=emit, on_text=deltas.append,
             )
             if not outcome.succeeded:
                 raise outcome.failure or AIExecutionError("Execution failed.")
 
+            _log_reply(state, outcome.reply)
             state.add_usage(outcome.reply.usage)
 
             try:
@@ -197,6 +211,10 @@ class AIExecutor:
                 # telling the model what was wrong and asking again -- never
                 # repeating the identical call, which would ask the same
                 # question and pay twice.
+                logger.debug(
+                    "AI turn %s/%s reply could not be read: %s",
+                    state.execution_id, state.turns_taken, invalid,
+                )
                 if allowance.exhausted(state.validation_corrections):
                     raise
                 # Said where the run is watched. A mechanism that buffers
@@ -450,3 +468,56 @@ def _mechanism_of(request: ResolvedAIRequest) -> TurnStrategy:
     mechanism = request.tool_mechanism
     return mechanism.strategy if mechanism is not None else NativeTurnStrategy()
 
+
+def _log_call(state: ExecutionState, call: ProviderCall) -> None:
+    """Exactly what is going to the provider, when someone asked to see it.
+
+    Whole, not summarized. The questions this exists to answer -- which
+    instruction was bound, where the protocol was stated, what shape was
+    demanded -- are all questions about content, and a line saying how many
+    messages were sent answers none of them.
+
+    Guarded on the level because rendering every message is not free, and a
+    run that is not being debugged must not pay for it.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    logger.debug(
+        "AI turn %s/%s -> model=%s json=%s schema=%s tools=%s",
+        state.execution_id, state.turns_taken, call.model, call.json_output,
+        json.dumps(call.schema) if call.schema else "(none)",
+        [tool.get("name") for tool in call.tools] or "(none)",
+    )
+    for index, message in enumerate(call.messages):
+        logger.debug(
+            "AI turn %s/%s   [%s] %s: %s",
+            state.execution_id, state.turns_taken, index, message.role.value,
+            _rendered(message),
+        )
+
+
+def _log_reply(state: ExecutionState, reply: ProviderReply) -> None:
+    """Exactly what came back, before anything interpreted it."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    logger.debug(
+        "AI turn %s/%s <- text=%r value=%s tool_calls=%s",
+        state.execution_id, state.turns_taken, reply.text,
+        json.dumps(reply.value, default=str) if reply.value is not None else "(none)",
+        [(call.name, call.arguments) for call in reply.tool_calls] or "(none)",
+    )
+
+
+def _rendered(message: AIMessage) -> str:
+    """One message's content as text, for the log and for nothing else."""
+    parts: list[str] = []
+    for part in message.content:
+        if part.kind is AIContentKind.TEXT:
+            parts.append(str(part.value))
+        else:
+            parts.append(f"<{part.kind.value}> {json.dumps(part.value, default=str)}")
+    if message.tool_calls:
+        parts.append(
+            f"tool_calls={[(c.name, c.arguments) for c in message.tool_calls]}"
+        )
+    return "\n".join(parts) or "(empty)"

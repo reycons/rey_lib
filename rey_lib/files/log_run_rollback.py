@@ -23,6 +23,7 @@ from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_fil
 from rey_lib.run import establish_run_identity
 from rey_lib.logs import (
     FileManifestError,
+    get_logger,
     ProfileLibraryError,
     bind_run,
     bound_run_log,
@@ -553,9 +554,21 @@ def rollback_log_run(
             if problem is not None:
                 failed.append(_failed_result(row, problem))
                 continue
+            # A reversal about to touch the filesystem. Said before it is
+            # attempted, because a rollback that half-completes is the case
+            # where the record of what was being undone matters most.
+            _logger.debug(
+                "attempting reversal kind=%s file_manifest_id=%s path=%s",
+                type(compensation).__name__,
+                row.get("file_manifest_id"),
+                _record_path(row, "current_path") if row else "",
+            )
             try:
                 outcome = compensation.execute(candidate)
             except OSError as exc:
+                _logger.debug(
+                    "reversal failed file_manifest_id=%s", row.get("file_manifest_id"),
+                )
                 failed.append(_failed_result(row, str(exc)))
                 continue
 
@@ -757,6 +770,9 @@ _RECORDED_PATHS: dict[str, tuple[str, str]] = {
 }
 
 
+_logger = get_logger(__name__)
+
+
 def _record_path(record: Mapping[str, Any], name: str) -> str:
     """Resolve one recorded location from its canonical object."""
     object_name, field = _RECORDED_PATHS[name]
@@ -899,6 +915,7 @@ def _execute_create(record: Mapping[str, Any]) -> dict[str, Any]:
     if not created.is_file():
         # The point of reversing a create is that the file is gone. It is.
         return {"deleted_path": str(created), "outcome": "already_absent"}
+    _logger.debug("attempting delete of created file path=%s", created)
     created.unlink()
     return {"deleted_path": str(created), "outcome": "deleted"}
 
@@ -917,7 +934,13 @@ def _move_exact(source: Path, destination: Path) -> str:
     if not source.is_file():
         if destination.is_file():
             return "already_restored"
+        _logger.debug(
+            "recovery source absent and destination not restored source=%s "
+            "destination=%s", source, destination,
+        )
         raise FileNotFoundError(f"Recovery source is missing: {source}")
+    _logger.debug("attempting restore move source=%s destination=%s",
+                  source, destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(destination))
     return "restored"

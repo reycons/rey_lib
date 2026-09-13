@@ -35,6 +35,9 @@ from rey_lib.ai.errors import AIOutputError
 from rey_lib.ai.policies import ValidationCorrectionPolicy
 from rey_lib.ai.providers.base import ProviderCall, ProviderReply
 from rey_lib.ai.tools import AITool, AIToolCall
+from rey_lib.logs.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = [
     "EmulatedTurnStrategy",
@@ -146,6 +149,7 @@ class EmulatedTurnStrategy(TurnStrategy):
         """One decision, as either a tool call or an answer."""
         decided = _decoded(reply.text, reply.value)
         kind = decided.get("kind")
+        logger.debug("emulated decision read as kind=%s", kind)
 
         if kind == TOOL_CALL:
             name = str(decided.get("tool") or "")
@@ -176,6 +180,10 @@ class EmulatedTurnStrategy(TurnStrategy):
                 tool_calls=(),
             )
 
+        # The text is carried because this is the one moment it exists as the
+        # engine produced it. What reaches the correction turn is a summary,
+        # and what reaches the error boundary is neither.
+        logger.debug("emulated decision was unreadable: %r", reply.text)
         raise AIOutputError(
             f"A decision must state kind '{TOOL_CALL}' or '{ANSWER}', not "
             f"{kind!r}."
@@ -230,6 +238,10 @@ def resolve_tool_mechanism(
         return ToolMechanism(strategy=NativeTurnStrategy())
 
     if capability.has(AICapability.STRUCTURED_OUTPUT):
+        logger.debug(
+            "no native tool calling; carrying %s as structured decisions",
+            [tool.name for tool in tools],
+        )
         unrepresentable = tuple(
             tool.name for tool in tools if not tool.input_schema
         )

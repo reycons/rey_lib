@@ -142,6 +142,17 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
     )
 
     parser.add_argument(
+        "--log-level",
+        dest="log_level",
+        default=None,
+        help=(
+            "How much this run records: DEBUG, INFO, WARNING or ERROR. "
+            "Overrides log_level in the installation configuration for this "
+            "run only."
+        ),
+    )
+
+    parser.add_argument(
         "--log-file",
         dest="log_file",
         default=None,
@@ -251,6 +262,7 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
             object.__setattr__(ctx, "log_file", resolved_log_file)
             object.__setattr__(ctx, "jsonl_path", resolved_log_file)
             object.__setattr__(ctx, "run_log_path", resolved_log_file)
+        _apply_log_level(ctx, args)
         pipeline_name = getattr(args, "pipeline_name", None)
         if pipeline_name:
             object.__setattr__(ctx, "pipeline_name", pipeline_name)
@@ -267,6 +279,7 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
         )
     except (ConfigError, OSError) as exc:
         raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
+    _apply_log_level(ctx, args)
     _adopt_run_id(ctx, args)
     return ctx
 
@@ -309,3 +322,19 @@ def apply_env_overrides(overrides: list[str]) -> None:
         key, _, value = item.partition("=")
 
         os.environ[key.strip()] = value
+
+
+def _apply_log_level(ctx: "Namespace", args: "Namespace") -> None:
+    """Let this run's ``--log-level`` override what configuration declared.
+
+    Applied in both arrival paths -- a context resolved from a config path and
+    one restored from a pipeline step snapshot -- because a level that stopped
+    at the coordinator would mean turning a pipeline up did nothing to the step
+    that actually failed.
+
+    Only what was asked for is written. Absent, the configured level stands and
+    the default behind it is unchanged.
+    """
+    asked = getattr(args, "log_level", None)
+    if asked:
+        object.__setattr__(ctx, "log_level", str(asked))

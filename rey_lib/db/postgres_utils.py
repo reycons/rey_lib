@@ -424,6 +424,18 @@ def _affected(result: Any) -> int | None:
     return None if count < 0 else count
 
 
+#: How much of a statement identifies it in a log. Enough to recognise which
+#: query was running; not the whole text, which can be long and can carry
+#: literals a caller inlined.
+_STATEMENT_GLIMPSE = 160
+
+
+def _statement_glimpse(sql_text: str) -> str:
+    """One statement, shortened to what identifies it."""
+    said = " ".join(str(sql_text or "").split())
+    return said if len(said) <= _STATEMENT_GLIMPSE else f"{said[:_STATEMENT_GLIMPSE]}..."
+
+
 def execute_named_sql(
     conn: Any,
     sql_text: str,
@@ -465,6 +477,18 @@ def execute_named_sql(
     try:
         from sqlalchemy import text
 
+        # The estate's database boundary. Stated before control crosses it,
+        # because what the driver raises says what went wrong and never what
+        # was being attempted -- and the error boundary that finally catches it
+        # is further still from knowing.
+        #
+        # Identify and locate, not replay: the statement's opening and the
+        # names of its binds. Bound values are deliberately absent; they are
+        # the literals this is careful not to write to disk.
+        _logger.debug(
+            "attempting database execute mode=%s binds=%s statement=%s",
+            result_mode, sorted(serialised), _statement_glimpse(sql_text),
+        )
         result = core_connection(conn).execute(text(sql_text), serialised)
         if result_mode == "no_return":
             return None

@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from rey_lib.db.routine_call import RoutineCall
+from rey_lib.logs import get_logger
 from rey_lib.errors.error_utils import (
     ConfigError,
     DatabaseError,
@@ -175,10 +176,28 @@ _TYPE_ALIASES: dict[str, str] = {
     "triggers": "triggers",
 }
 
+_logger = get_logger(__name__)
+
+#: How much of a statement identifies it in a log. Enough to recognise which
+#: query was running, and never the whole text -- which is long and can carry
+#: literals a caller inlined.
+_STATEMENT_GLIMPSE = 160
+
+
+def _glimpse(sql_text: str) -> str:
+    """One statement, shortened to what identifies it."""
+    said = " ".join(str(sql_text or "").split())
+    return said if len(said) <= _STATEMENT_GLIMPSE else f"{said[:_STATEMENT_GLIMPSE]}..."
+
+
 def _backend(provider: str) -> Any:
     """Return the backend module for provider, importing lazily on first use."""
     path = _REGISTRY.get(provider)
     if path is None:
+        _logger.debug(
+            "no backend registered for provider %r; registered: %s",
+            provider, sorted(_REGISTRY),
+        )
         raise ConfigError(
             f"DBAdapter: unsupported provider '{provider}'. "
             f"Registered providers: {sorted(_REGISTRY)}."
@@ -208,12 +227,23 @@ def _execute_statements_over_dbapi(
     """
     cursor = None
     try:
+        # Control leaves Rey here. What the driver raises says what went wrong
+        # and never what was being attempted, and the error boundary that
+        # finally catches it is further still from knowing.
+        _logger.debug(
+            "attempting dbapi statement execution limit=%s statement=%s",
+            limit, _glimpse(sql_text),
+        )
         cursor = conn.cursor()
         cursor.execute(sql_text)
         collected: list[StatementResult] = []
         while _advanced(cursor) if collected else True:
             collected.append(_result_from_cursor(cursor, limit=limit))
             if len(collected) >= _MAX_RESULT_SETS:
+                _logger.debug(
+                    "driver reported more than %s result sets for statement=%s",
+                    _MAX_RESULT_SETS, _glimpse(sql_text),
+                )
                 raise DatabaseError(
                     "DBAdapter: the driver reported more than "
                     f"{_MAX_RESULT_SETS} result sets from one execution, which "
@@ -222,6 +252,9 @@ def _execute_statements_over_dbapi(
                 )
         return collected
     except Exception as exc:
+        _logger.debug(
+            "dbapi statement execution failed for statement=%s", _glimpse(sql_text),
+        )
         raise DatabaseError(f"DBAdapter: execution failed: {exc}") from exc
     finally:
         if cursor is not None and hasattr(cursor, "close"):
@@ -492,12 +525,19 @@ class DBAdapter:
 
         cursor = None
         try:
+            _logger.debug(
+                "attempting dbapi read provider=%s limit=%s statement=%s",
+                provider or "(unresolved)", limit, _glimpse(sql_text),
+            )
             cursor = conn.cursor()
             cursor.execute(sql_text)
             columns = [str(column[0]) for column in (cursor.description or [])]
             values = cursor.fetchmany(max(1, int(limit))) if columns else []
             return columns, [dict(zip(columns, row)) for row in values]
         except Exception as exc:
+            _logger.debug(
+                "dbapi read failed for statement=%s", _glimpse(sql_text),
+            )
             raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
         finally:
             if cursor is not None and hasattr(cursor, "close"):

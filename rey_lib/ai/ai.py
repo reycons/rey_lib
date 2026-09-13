@@ -50,6 +50,9 @@ from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.tools import AITool
 from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
+from rey_lib.logs.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ["AI", "AISnapshot"]
 
@@ -299,6 +302,15 @@ class AI:
             # -- stated here, because resolution is where this runtime's
             # posture and the chosen mechanism meet.
             max_tool_calls=max(0, self._policy.budget.max_turns - 1),
+        )
+        logger.debug(
+            "AI resolved: profile=%s model=%s provider=%s instruction=%s(%s) "
+            "tools=%s mechanism=%s corrections=%s",
+            profile.id, profile.model, profile.provider,
+            instruction.id or "(none)", instruction.kind.value,
+            [tool.name for tool in resolved.tools] or "(none)",
+            type(mechanism.strategy).__name__,
+            getattr(mechanism.validation_correction, "max_corrections", "(runtime)"),
         )
         return replace(resolved, tool_mechanism=mechanism)
 

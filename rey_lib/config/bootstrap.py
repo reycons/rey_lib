@@ -176,9 +176,44 @@ def build_ctx_for_app(
     # Display and filing only; the identity above is already settled.
     establish_run_identity(ctx)
 
+    _settle_log_level(ctx)
     setup_logging(ctx, operation=operation)
     install_process_error_boundary(ctx)
     return ctx
+
+
+#: What a level may be. Read from the one map that applies it, so this cannot
+#: drift from what ``setup_logging`` actually honours.
+def _levels() -> tuple[str, ...]:
+    from rey_lib.logs.logging_setup import _LEVEL_MAP
+
+    return tuple(sorted(_LEVEL_MAP))
+
+
+def _settle_log_level(ctx: Namespace) -> None:
+    """Settle the level this process logs at, and refuse a name that is not one.
+
+    The level arrives from configuration or from ``--log-level``; by here it is
+    whatever those left behind. What this adds is the refusal.
+
+    ``setup_logging`` maps an unrecognised name to INFO silently, so a typo in
+    an installation's YAML produces a run that looks entirely normal and
+    records the wrong amount. That is worth failing on, and failing here rather
+    than there: this is the one place a process starts logging, and stating the
+    rule in both would be the same rule twice.
+
+    Raises:
+        ConfigError: when a level is declared that nothing can honour.
+    """
+    declared = getattr(ctx, "log_level", None)
+    if declared is None:
+        return
+    if str(declared).upper() not in _levels():
+        raise ConfigError(
+            f"log_level '{declared}' is not a level this runtime knows. "
+            f"Valid levels are {', '.join(_levels())}."
+        )
+    object.__setattr__(ctx, "log_level", str(declared).upper())
 
 
 def _resolve_ctx(
