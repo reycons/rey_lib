@@ -35,6 +35,13 @@ encrypt = [
 control = [
     "psycopg[binary]>=3.1",
 ]
+# PostgreSQL routine-body reference analysis for the database object index.
+# libpg_query is PostgreSQL's own parser, chosen over SQLGlot by measurement
+# rather than preference: SQLGlot accepts malformed input silently and rejects
+# ordinary PL/pgSQL. See development_contracts/verification/parser_benchmark.
+db_references = [
+    "pglast>=8.4",
+]
 mysql = [
     "mysql-connector-python>=9.0.0",
 ]
