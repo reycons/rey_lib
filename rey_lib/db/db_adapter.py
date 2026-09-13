@@ -194,10 +194,6 @@ def _backend(provider: str) -> Any:
     """Return the backend module for provider, importing lazily on first use."""
     path = _REGISTRY.get(provider)
     if path is None:
-        _logger.debug(
-            "no backend registered for provider %r; registered: %s",
-            provider, sorted(_REGISTRY),
-        )
         raise ConfigError(
             f"DBAdapter: unsupported provider '{provider}'. "
             f"Registered providers: {sorted(_REGISTRY)}."
