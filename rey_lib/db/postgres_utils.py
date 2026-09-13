@@ -970,7 +970,7 @@ def list_routines(
             ) call ON true
             WHERE p.prokind = %s
                 AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-                AND (%s IS NULL OR n.nspname = %s)
+                AND (%s::text IS NULL OR n.nspname = %s::text)
             ORDER BY n.nspname, p.proname
             """,
             [prokind, schema, schema],
@@ -1233,6 +1233,511 @@ def _serialise_jsonb(params: dict[str, Any]) -> dict[str, Any]:
     for k, v in params.items():
         result[k] = json.dumps(v) if isinstance(v, (dict, list)) else v
     return result
+
+
+def inspect_database_references(
+    conn: Any,
+    schema: str | None = None,
+) -> dict[str, Any]:
+    """Everything the database index needs about one PostgreSQL database.
+
+    One capability rather than a menu of getters. A caller receives normalized
+    objects, members and reference *observations*; it never learns whether a
+    fact came from the catalog, from ``pg_depend``, from ``pg_trigger`` or from
+    a parse tree. That is what keeps the index provider-independent.
+
+    Three rules govern the composition, and all three exist to stop catalog
+    metadata overstating or understating what is known:
+
+    **The catalog never weakens an analyzer fact.** ``pg_depend`` says a routine
+    *depends on* a relation; it cannot say whether the routine reads or writes
+    it. Where body analysis established ``write``, the catalog dependency for
+    that same pair becomes corroborating evidence on the typed edge -- a second
+    ``fact_source`` -- never a competing generic ``reference`` edge and never a
+    downgrade.
+
+    **Status is owned by analysis, not by resolution.** A routine analyzed
+    completely stays ``complete`` even when what it names lies outside the
+    indexed scope. Unresolved evidence qualifies a *negative query*; it does not
+    retroactively make the analysis incomplete.
+
+    **Catalog certainty does not override snapshot scope.** ``tgfoid`` may name
+    the invoked function exactly, but if that function was not enumerated here
+    there is no node to point at: the observation is recorded ``unresolved``
+    with the authoritative identity preserved, and no edge is claimed.
+
+    Args:
+        conn: An open PostgreSQL connection.
+        schema: One schema to confine the scan to, or ``None`` for all
+            non-system schemas.
+
+    Returns:
+        ``{"objects": [...], "members": [...], "observations": [...]}`` in the
+        database index's own vocabulary.
+
+    Raises:
+        DatabaseError: When a definition cannot be retrieved for an object the
+            provider claims to support. That is an infrastructure failure and
+            must stop the run -- publishing it as ``unsupported`` would launder
+            a permissions or connection defect into a capability statement.
+    """
+    from rey_lib.db.postgres_references import ANALYZABLE_LANGUAGES, analyse_routine
+
+    objects: list[dict[str, Any]] = []
+    members: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    #: Where body analysis established a typed relationship, so a later catalog
+    #: dependency for the same pair corroborates rather than competes.
+    typed: dict[tuple[str, str, str, str], str] = {}
+
+    routines = _reference_routines(conn, schema)
+    relations = _reference_relations(conn, schema)
+    triggers = _reference_triggers(conn, schema)
+    # (schema, name) -> every object of that name. A list rather than a set
+    # because identity includes object_type and signature: a body names
+    # `control.f_x` and the snapshot must supply the rest, or say it cannot.
+    in_scope: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for candidate in (*relations, *routines, *triggers):
+        in_scope.setdefault(
+            (candidate["schema"], candidate["name"]), []
+        ).append({
+            "schema": candidate["schema"], "name": candidate["name"],
+            "object_type": candidate["object_type"],
+            "signature": candidate.get("signature", ""),
+        })
+
+    for trigger in triggers:
+        objects.append({
+            "schema_name": trigger["schema"], "object_name": trigger["name"],
+            "object_type": "trigger", "signature": "",
+            "provider_object_id": str(trigger["oid"]),
+            "definition_hash": trigger["definition_hash"],
+            # Both of a trigger's relationships come from the catalog, so
+            # analysis is complete by construction. It is enumerated as an
+            # object because its edges originate from it -- an observation
+            # whose source is not in the snapshot has nowhere to hang.
+            "reference_analysis_status": "complete",
+        })
+
+    for rel in relations:
+        objects.append({
+            "schema_name": rel["schema"], "object_name": rel["name"],
+            "object_type": rel["object_type"], "signature": "",
+            "provider_object_id": str(rel["oid"]),
+            "definition_hash": rel["definition_hash"],
+            # A relation has no body to analyze, and its outgoing kinds come
+            # from the catalog, so analysis is complete by construction.
+            "reference_analysis_status": "complete",
+        })
+        for column in rel["columns"]:
+            members.append({
+                "schema_name": rel["schema"], "object_name": rel["name"],
+                "object_type": rel["object_type"], "signature": "",
+                "member_kind": "column", "member_name": column["name"],
+                "ordinal": column["ordinal"], "data_type": column["data_type"],
+                "member_mode": "", "provider_member_id": "",
+            })
+
+    for routine in routines:
+        language = str(routine["language"]).lower()
+        analysis = (
+            analyse_routine(routine["definition"], language)
+            if language in ANALYZABLE_LANGUAGES
+            else _unsupported()
+        )
+        objects.append({
+            "schema_name": routine["schema"], "object_name": routine["name"],
+            "object_type": routine["object_type"], "signature": routine["signature"],
+            "provider_object_id": str(routine["oid"]),
+            "definition_hash": routine["definition_hash"],
+            "reference_analysis_status": analysis.status,
+        })
+        origin = (routine["schema"], routine["name"], routine["object_type"],
+                  routine["signature"])
+        for kind, names in (("read", analysis.reads), ("write", analysis.writes),
+                            ("call", analysis.calls)):
+            for written in sorted(names):
+                target = _target(written, in_scope, kind)
+                if target is None:
+                    continue
+                typed[(origin[0], origin[1], target["schema"], target["name"])] = kind
+                observations.append(_observation(
+                    origin, target, kind, routine["definition_hash"],
+                    fact_source="parsed", evidence="routine_definition",
+                    observed_target=written,
+                ))
+        for gap in analysis.gaps:
+            observations.append(_observation(
+                origin, None, "call", routine["definition_hash"],
+                fact_source="parsed", evidence="analysis_gap",
+                observed_target=gap,
+            ))
+
+    observations.extend(
+        _catalog_observations(conn, schema, in_scope, typed, relations,
+                              routines, triggers)
+    )
+    return {"objects": objects, "members": members, "observations": observations}
+
+
+def _unsupported() -> Any:
+    from rey_lib.db.postgres_references import RoutineAnalysis
+
+    return RoutineAnalysis(status="unsupported")
+
+
+_UNRESOLVED = {"schema": "", "name": "", "object_type": "", "signature": "",
+               "resolution": "unresolved"}
+
+
+def _target(
+    written: str, in_scope: dict[tuple[str, str], list[dict[str, str]]], kind: str,
+) -> dict[str, Any]:
+    """One name as written, resolved against this scan's own object set.
+
+    **An unqualified name never resolves.** "Unique in what we happened to
+    index" is not proof that PostgreSQL bound the reference there -- resolution
+    is ``search_path`` dependent, and this scan has no authoritative binding
+    information. It is recorded unresolved with the name preserved.
+
+    A qualified name resolves only when it names exactly one object. Two
+    objects of that name -- overloaded routines -- is ``ambiguous``, not a
+    coin toss: binding to the wrong one would be worse than admitting the
+    uncertainty, and an ambiguous observation still records what was seen.
+
+    Resolution also supplies the ``object_type`` and ``signature`` the body
+    never stated. Identity includes both, so an observation carrying only a
+    name cannot be joined to anything.
+    """
+    if "." not in written:
+        return dict(_UNRESOLVED)
+    schema, _, name = written.rpartition(".")
+    candidates = in_scope.get((schema, name), ())
+    if len(candidates) == 1:
+        return {**candidates[0], "resolution": "exact"}
+    if len(candidates) > 1:
+        return {**dict(_UNRESOLVED), "resolution": "ambiguous"}
+    return dict(_UNRESOLVED)
+
+
+def _observation(
+    origin: tuple[str, str, str, str],
+    target: dict[str, Any] | None,
+    kind: str,
+    definition_hash: str,
+    *,
+    fact_source: str,
+    evidence: str,
+    observed_target: str,
+    statement_ordinal: int = 0,
+) -> dict[str, Any]:
+    """One staged observation, in the index's own vocabulary."""
+    resolved = bool(target and target["resolution"] == "exact")
+    return {
+        "from_schema_name": origin[0], "from_object_name": origin[1],
+        "from_object_type": origin[2], "from_signature": origin[3],
+        "from_member_kind": "", "from_member_name": "", "from_ordinal": 0,
+        "to_schema_name": target["schema"] if resolved else "",
+        "to_object_name": target["name"] if resolved else "",
+        "to_object_type": target["object_type"] if resolved else "",
+        "to_signature": target["signature"] if resolved else "",
+        "to_member_kind": "", "to_member_name": "", "to_ordinal": 0,
+        "reference_kind": kind,
+        "observed_target": observed_target,
+        "resolution": (
+            target["resolution"] if target else "unresolved"
+        ) if not resolved else "exact",
+        "observed_definition_hash": definition_hash,
+        "statement_ordinal": statement_ordinal,
+        "source_line": 0, "source_column": 0,
+        "fact_source": fact_source, "evidence": evidence,
+    }
+
+#: Relation kinds the index admits as objects. Indexes and constraints are
+#: deliberately absent: a foreign key is already an edge between members, an
+#: index answers none of the questions the graph exists for, and admitting them
+#: would add nodes nothing traverses.
+_RELKIND_TO_OBJECT_TYPE = {
+    "r": "table", "p": "table", "v": "view", "m": "materialized_view",
+    "S": "sequence",
+}
+_PROKIND_TO_OBJECT_TYPE = {"f": "function", "p": "procedure", "a": "function",
+                           "w": "function"}
+
+
+def _reference_relations(conn: Any, schema: str | None) -> list[dict[str, Any]]:
+    """Relations in scope, with their columns and a definition hash.
+
+    A table has no definition, so its hash is empty -- the freshness anchor for
+    a relation is its catalog identity, and inventing a hash would imply an
+    analysis that never happened.
+    """
+    import hashlib
+
+    rows = _reference_rows(conn, """
+        SELECT c.oid, n.nspname, c.relname, c.relkind,
+               CASE WHEN c.relkind IN ('v','m')
+                    THEN pg_get_viewdef(c.oid, true) ELSE '' END AS definition
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = ANY(%s)
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND n.nspname NOT LIKE 'pg_%%'
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+        ORDER BY n.nspname, c.relname
+    """, [list(_RELKIND_TO_OBJECT_TYPE), schema, schema])
+
+    relations = []
+    for oid, nsp, name, relkind, definition in rows:
+        columns = _reference_rows(conn, """
+            SELECT a.attname, a.attnum, format_type(a.atttypid, a.atttypmod)
+            FROM pg_attribute a
+            WHERE a.attrelid = %s AND a.attnum > 0 AND NOT a.attisdropped
+            ORDER BY a.attnum
+        """, [oid])
+        relations.append({
+            "oid": oid, "schema": nsp, "name": name,
+            "object_type": _RELKIND_TO_OBJECT_TYPE[relkind],
+            "definition_hash": (
+                hashlib.sha256(definition.encode("utf-8")).hexdigest()
+                if definition else ""
+            ),
+            "columns": [
+                {"name": c[0], "ordinal": int(c[1]), "data_type": str(c[2])}
+                for c in columns
+            ],
+        })
+    return relations
+
+
+def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
+    """Routines in scope, with the whole definition their analysis needs.
+
+    The definition is retrieved, not the body: PL/pgSQL is parsed against its
+    declared return type, so a body lifted out and re-wrapped makes an ordinary
+    ``RETURN expr`` unparseable.
+
+    Raises:
+        DatabaseError: when a definition cannot be retrieved. The provider
+            supports these routines, so a failure here is infrastructure, not a
+            capability limit, and it must stop the run rather than be published
+            as ``unsupported``.
+    """
+    import hashlib
+
+    rows = _reference_rows(conn, """
+        SELECT p.oid, n.nspname, p.proname, p.prokind, l.lanname,
+               pg_get_function_identity_arguments(p.oid)
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        JOIN pg_language l ON l.oid = p.prolang
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+          AND n.nspname NOT LIKE 'pg_%%'
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+        ORDER BY n.nspname, p.proname
+    """, [schema, schema])
+
+    routines = []
+    for oid, nsp, name, prokind, language, signature in rows:
+        try:
+            definition = _reference_rows(
+                conn, "SELECT pg_get_functiondef(%s)", [oid])[0][0]
+        except Exception as exc:
+            raise DatabaseError(
+                f"postgres_utils: the definition of {nsp}.{name} could not be "
+                f"retrieved, so this scan cannot state what it references: "
+                f"{exc}"
+            ) from exc
+        routines.append({
+            "oid": oid, "schema": nsp, "name": name,
+            "object_type": _PROKIND_TO_OBJECT_TYPE.get(prokind, "function"),
+            "signature": str(signature or ""),
+            "language": language, "definition": definition,
+            "definition_hash": hashlib.sha256(
+                definition.encode("utf-8")).hexdigest(),
+        })
+    return routines
+
+
+def _reference_triggers(conn: Any, schema: str | None) -> list[dict[str, Any]]:
+    """Triggers in scope.
+
+    Enumerated separately because a trigger is not a ``pg_class`` row, and
+    omitted for a long time without anyone noticing: this estate has none, so
+    the gap was latent. It matters because a trigger's two relationships
+    ORIGINATE from it, and an observation whose source object is absent from
+    the snapshot has nothing to attach to.
+    """
+    import hashlib
+
+    rows = _reference_rows(conn, """
+        SELECT t.oid, n.nspname, t.tgname, pg_get_triggerdef(t.oid)
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE NOT t.tgisinternal
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+        ORDER BY n.nspname, t.tgname
+    """, [schema, schema])
+    return [
+        {
+            "oid": oid, "schema": nsp, "name": name, "object_type": "trigger",
+            "definition_hash": hashlib.sha256(
+                str(definition or "").encode("utf-8")).hexdigest(),
+        }
+        for oid, nsp, name, definition in rows
+    ]
+
+
+def _catalog_observations(
+    conn: Any,
+    schema: str | None,
+    in_scope: set,
+    typed: dict,
+    relations: list[dict[str, Any]],
+    routines: list[dict[str, Any]],
+    triggers: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """What the catalog knows, without overstating it.
+
+    A view dependency and a foreign key are authoritative. A routine's
+    ``pg_depend`` row on a relation is **not** typed: it says the definition
+    depends on the relation and nothing about access direction, so it publishes
+    as ``reference`` -- unless body analysis already established a typed
+    relationship for that pair, in which case it corroborates that edge instead
+    of competing with a weaker one.
+    """
+    out: list[dict[str, Any]] = []
+    by_oid = {r["oid"]: r for r in relations}
+    by_oid.update({r["oid"]: r for r in routines})
+
+    def origin_of(row: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (row["schema"], row["name"], row["object_type"],
+                row.get("signature", ""))
+
+    # Views: pg_rewrite/pg_depend is authoritative for what a view references.
+    for oid, dep_oid in _reference_rows(conn, """
+        SELECT DISTINCT v.oid, t.oid
+        FROM pg_class v
+        JOIN pg_namespace n ON n.oid = v.relnamespace
+        JOIN pg_rewrite rw ON rw.ev_class = v.oid
+        JOIN pg_depend d ON d.objid = rw.oid
+        JOIN pg_class t ON t.oid = d.refobjid
+        WHERE v.relkind IN ('v','m') AND t.relkind IN ('r','p','v','m')
+          AND v.oid <> t.oid
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+    """, [schema, schema]):
+        view, target = by_oid.get(oid), by_oid.get(dep_oid)
+        if view is None:
+            continue
+        out.append(_catalog_edge(origin_of(view), target, "reference",
+                                 view["definition_hash"], "view_definition"))
+
+    # Triggers: BOTH relationships. tgrelid is the relation it is attached to;
+    # tgfoid is the function it invokes -- the edge that makes
+    # "table write -> trigger -> function" reachable at all.
+    known_triggers = {(t["schema"], t["name"]) for t in (triggers or ())}
+    for tgname, nsp, rel_oid, fn_oid in _reference_rows(conn, """
+        SELECT t.tgname, n.nspname, t.tgrelid, t.tgfoid
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE NOT t.tgisinternal
+          AND n.nspname NOT IN ('pg_catalog','information_schema')
+          AND (%s::text IS NULL OR n.nspname = %s::text)
+    """, [schema, schema]):
+        if (nsp, tgname) not in known_triggers:
+            # Its source object is not in this snapshot, so the observation has
+            # nowhere to originate. Emitting it would be silently discarded by
+            # publication's join, which is the failure mode this whole design
+            # refuses.
+            continue
+        origin = (nsp, tgname, "trigger", "")
+        out.append(_catalog_edge(origin, by_oid.get(rel_oid), "trigger", "",
+                                 "pg_trigger"))
+        out.append(_catalog_edge(origin, by_oid.get(fn_oid), "call", "",
+                                 "pg_trigger"))
+
+    # Foreign keys, member to member.
+    for row in _reference_rows(conn, """
+        SELECT sn.nspname, st.relname, sa.attname,  -- noqa: fk source
+               tn.nspname, tt.relname, ta.attname
+        FROM pg_constraint k
+        JOIN pg_class st ON st.oid = k.conrelid
+        JOIN pg_namespace sn ON sn.oid = st.relnamespace
+        JOIN pg_class tt ON tt.oid = k.confrelid
+        JOIN pg_namespace tn ON tn.oid = tt.relnamespace
+        JOIN unnest(k.conkey) WITH ORDINALITY AS sk(attnum, ord) ON true
+        JOIN unnest(k.confkey) WITH ORDINALITY AS tk(attnum, ord)
+             ON tk.ord = sk.ord
+        JOIN pg_attribute sa ON sa.attrelid = st.oid AND sa.attnum = sk.attnum
+        JOIN pg_attribute ta ON ta.attrelid = tt.oid AND ta.attnum = tk.attnum
+        WHERE k.contype = 'f'
+          AND sn.nspname NOT IN ('pg_catalog','information_schema')
+          AND (%s::text IS NULL OR sn.nspname = %s::text)
+    """, [schema, schema]):
+        s_nsp, s_rel, s_col, t_nsp, t_rel, t_col = row
+        resolved = (t_nsp, t_rel) in in_scope
+        out.append({
+            "from_schema_name": s_nsp, "from_object_name": s_rel,
+            "from_object_type": "table", "from_signature": "",
+            "from_member_kind": "column", "from_member_name": s_col,
+            "from_ordinal": 0,
+            "to_schema_name": t_nsp if resolved else "",
+            "to_object_name": t_rel if resolved else "",
+            "to_object_type": "table" if resolved else "",
+            "to_signature": "",
+            "to_member_kind": "column" if resolved else "",
+            "to_member_name": t_col if resolved else "", "to_ordinal": 0,
+            "reference_kind": "foreign_key",
+            "observed_target": f"{t_nsp}.{t_rel}.{t_col}",
+            "resolution": "exact" if resolved else "unresolved",
+            "observed_definition_hash": "", "statement_ordinal": 0,
+            "source_line": 0, "source_column": 0,
+            "fact_source": "catalog", "evidence": "foreign_key",
+        })
+    return out
+
+
+def _catalog_edge(
+    origin: tuple[str, str, str, str],
+    target: dict[str, Any] | None,
+    kind: str,
+    definition_hash: str,
+    evidence: str,
+) -> dict[str, Any]:
+    """One catalog fact, unresolved where its target is out of scope."""
+    resolved = target is not None
+    return {
+        "from_schema_name": origin[0], "from_object_name": origin[1],
+        "from_object_type": origin[2], "from_signature": origin[3],
+        "from_member_kind": "", "from_member_name": "", "from_ordinal": 0,
+        "to_schema_name": target["schema"] if resolved else "",
+        "to_object_name": target["name"] if resolved else "",
+        "to_object_type": target["object_type"] if resolved else "",
+        "to_signature": target.get("signature", "") if resolved else "",
+        "to_member_kind": "", "to_member_name": "", "to_ordinal": 0,
+        "reference_kind": kind,
+        "observed_target": (
+            f"{target['schema']}.{target['name']}" if resolved
+            else "(outside indexed scope)"
+        ),
+        "resolution": "exact" if resolved else "unresolved",
+        "observed_definition_hash": definition_hash,
+        "statement_ordinal": 0, "source_line": 0, "source_column": 0,
+        "fact_source": "catalog", "evidence": evidence,
+    }
+
+
+def _reference_rows(conn: Any, sql: str, params: list[Any]) -> list[tuple]:
+    """One catalog query, through the connection the caller already owns."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql, params)
+        return list(cursor.fetchall())
+    finally:
+        cursor.close()
 
 
 def _postgres_dependencies(
