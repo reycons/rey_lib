@@ -48,6 +48,8 @@ from rey_lib.ai.objects import AIObject
 from rey_lib.ai.sessions import AISession
 from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
+from rey_lib.ai.tools import AITool
+from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
 
 __all__ = ["AI", "AISnapshot"]
 
@@ -101,6 +103,10 @@ class AI:
         executor: AIExecutor | None = None,
     ) -> None:
         self._registry = registry
+        # Kept, not only passed on. Resolution states a correction allowance
+        # for the mechanism it chooses, which it can only do against the
+        # posture this runtime was built with.
+        self._policy = policy
         self._executor = executor or AIExecutor(
             registry=registry,
             contracts=contracts,
@@ -264,7 +270,7 @@ class AI:
         effective = self._settings.task(request.task)
         profile = self._profile_for(request.profile_id, effective)
         instruction = self._instruction_for(request, effective)
-        return ResolvedAIRequest(
+        resolved = ResolvedAIRequest(
             input=request.input,
             profile=profile,
             instruction=instruction,
@@ -275,6 +281,43 @@ class AI:
             cancelled=request.cancelled,
             tool_runner=request.tool_runner,
             session_id=session_id,
+        )
+        # How the selected engine can carry this ask's tools. Decided here,
+        # where the engine is chosen, rather than inside execution: an ask that
+        # nothing can carry is refused before there is an execution to refuse,
+        # and execution obeys the answer instead of reaching a second one.
+        #
+        # Asked after the request is built because the answer branch of an
+        # emulated decision is the ask's own output shape, and ``schema``
+        # resolves where that shape comes from.
+        mechanism = resolve_tool_mechanism(
+            self._registry.effective_capability(profile),
+            resolved.tools,
+            answer_schema=resolved.schema,
+            # Every tool call spends a turn, and the last turn has to be the
+            # answer. So what the ask can afford is one fewer than the budget
+            # -- stated here, because resolution is where this runtime's
+            # posture and the chosen mechanism meet.
+            max_tool_calls=max(0, self._policy.budget.max_turns - 1),
+        )
+        return replace(resolved, tool_mechanism=mechanism)
+
+    def tool_mechanism(
+        self, profile_id: str, tools: tuple[AITool, ...],
+    ) -> ToolMechanism:
+        """How a profile would carry these tools, without resolving an ask.
+
+        The same question ``resolve`` asks, answered by the same function, so a
+        surface saying whether a run is possible cannot drift from the rule
+        that admits one. It builds no request: painting a banner is not an
+        execution.
+
+        Raises:
+            AICapabilityError: when no mechanism can carry them.
+        """
+        return resolve_tool_mechanism(
+            self._registry.effective_capability(self._profile_for(profile_id)),
+            tuple(tools),
         )
 
     def execute(self, request: AIRequest, *, session_id: str = "") -> AIResult:

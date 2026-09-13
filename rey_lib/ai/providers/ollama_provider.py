@@ -41,10 +41,15 @@ DEFAULT_ENDPOINT = "http://localhost:11434"
 
 #: What this adapter implements. Tools and images are absent because the old
 #: adapter declared them false and nothing here implements either.
-#: ``STRUCTURED_OUTPUT`` is present because this one does: ``call.json_output``
-#: sets Ollama's ``format: json`` below. It was omitted while the comment above
-#: reasoned only about tools and images, so the capability check refused
-#: structured requests this adapter could serve.
+#: ``STRUCTURED_OUTPUT`` is present because this one does: a stated schema
+#: becomes Ollama's ``format`` below, and ``call.json_output`` alone becomes
+#: ``format: json``. It was omitted while the comment above reasoned only about
+#: tools and images, so the capability check refused structured requests this
+#: adapter could serve.
+#:
+#: It stays absent of every tool capability. Rey can carry tools over this
+#: engine as structured decisions, and that is Rey's capability rather than a
+#: claim this adapter is entitled to make.
 _CAPABILITY = AICapabilitySet.of(
     AICapability.TEXT,
     AICapability.STREAMING,
@@ -122,7 +127,13 @@ class OllamaProvider(AIProvider):
         }
         if options:
             payload["options"] = options
-        if call.json_output:
+        # A schema, where one was stated, so the server constrains generation
+        # to the shape rather than merely to "some JSON". Falling back to
+        # ``json`` keeps a schemaless structured request working exactly as it
+        # did.
+        if call.schema is not None:
+            payload["format"] = call.schema
+        elif call.json_output:
             payload["format"] = "json"
 
         request = urllib.request.Request(

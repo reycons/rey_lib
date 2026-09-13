@@ -507,8 +507,10 @@ def test_the_ollama_adapter_declares_the_structured_output_it_implements() -> No
     adapter = OllamaProvider(ConfiguredProvider(id="local", provider="ollama", model="m"))
 
     assert AICapability.STRUCTURED_OUTPUT in adapter.capability_for("m")
-    # Still absent, because neither is implemented here.
-    assert AICapability.TOOLS not in adapter.capability_for("m")
+    # Still absent, because the adapter implements no tool protocol. Rey can
+    # carry tools over this engine as structured decisions, and that is Rey's
+    # capability rather than a claim the adapter is entitled to make.
+    assert AICapability.NATIVE_TOOLS not in adapter.capability_for("m")
 
 
 # -- the cutover: configuration comes from the database ----------------------

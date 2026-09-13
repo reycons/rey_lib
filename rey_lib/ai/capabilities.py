@@ -33,7 +33,11 @@ class AICapability(str, Enum):
     TEXT = "text"
     STRUCTURED_OUTPUT = "structured_output"
     STREAMING = "streaming"
-    TOOLS = "tools"
+    #: The provider emits tool calls itself. Raw provider capability, and
+    #: named for it: a provider that cannot do this may still carry tools
+    #: through Rey's own emulation, which is not something an adapter
+    #: implements and so is not stated here.
+    NATIVE_TOOLS = "native_tools"
     VISION = "vision"
     DOCUMENTS = "documents"
     AUDIO = "audio"

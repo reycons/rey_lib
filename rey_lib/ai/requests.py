@@ -20,6 +20,7 @@ from rey_lib.ai.content import AIInput
 from rey_lib.ai.instructions import AIInstruction
 from rey_lib.ai.profiles import AIProfile
 from rey_lib.ai.tools import AITool, AIToolCall, AIToolResult
+from rey_lib.ai.turn_strategy import ToolMechanism
 
 __all__ = ["AIOutputSpec", "AIOutputKind", "AIRequest", "AIRequestOptions", "ResolvedAIRequest"]
 
@@ -159,6 +160,14 @@ class ResolvedAIRequest:
     tool_runner: Callable[[AIToolCall], AIToolResult] | None = None
     session_id: str = ""
     envelope_key: str = ""
+    #: How this ask's tools are to be carried, decided at resolution.
+    #:
+    #: A fact like ``profile`` and ``instruction``: execution obeys it and
+    #: never re-derives it, because re-deriving would be a second decision able
+    #: to disagree with the one that admitted the request. ``None`` is a
+    #: request nothing resolved -- execution treats it as the native
+    #: mechanism, which is what every existing caller already gets.
+    tool_mechanism: ToolMechanism | None = None
 
     @property
     def schema(self) -> dict[str, Any] | None:

@@ -30,7 +30,7 @@ _CAPABILITY = AICapabilitySet.of(
     AICapability.TEXT,
     AICapability.STRUCTURED_OUTPUT,
     AICapability.STREAMING,
-    AICapability.TOOLS,
+    AICapability.NATIVE_TOOLS,
     AICapability.VISION,
     AICapability.DOCUMENTS,
     AICapability.AUDIO,

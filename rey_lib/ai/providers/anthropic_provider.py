@@ -37,7 +37,7 @@ __all__ = ["AnthropicProvider"]
 _CAPABILITY = AICapabilitySet.of(
     AICapability.TEXT,
     AICapability.STREAMING,
-    AICapability.TOOLS,
+    AICapability.NATIVE_TOOLS,
     AICapability.VISION,
 )
 

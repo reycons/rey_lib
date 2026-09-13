@@ -53,6 +53,7 @@ from rey_lib.ai.results import (
 from rey_lib.ai.state import ExecutionState
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.tool_loop import CanonicalToolLoop, ToolLoop
+from rey_lib.ai.turn_strategy import NativeTurnStrategy, TurnStrategy
 from rey_lib.ai.turns import TurnExecutor
 
 __all__ = ["AIExecutor"]
@@ -168,27 +169,92 @@ class AIExecutor:
         and fallback transitions happen inside and cost no turn, because they
         are the machinery of asking once rather than asking again.
         """
-        if self._policy.budget.exhausted(state.turns_taken):
-            raise AIExecutionError(
-                "The execution budget of "
-                f"{self._policy.budget.max_turns} turns is spent."
+        strategy = _mechanism_of(request)
+        allowance = self._allowance(request)
+
+        while True:
+            if self._policy.budget.exhausted(state.turns_taken):
+                raise AIExecutionError(
+                    "The execution budget of "
+                    f"{self._policy.budget.max_turns} turns is spent."
+                )
+            state.began_turn()
+
+            deltas: list[str] = []
+            sending = strategy.shape(self._call_for(request, state))
+            outcome = self._turns.take(
+                request, state, sending, emit=emit, on_text=deltas.append,
             )
-        state.began_turn()
+            if not outcome.succeeded:
+                raise outcome.failure or AIExecutionError("Execution failed.")
 
-        deltas: list[str] = []
-        outcome = self._turns.take(
-            request, state, self._call_for(request, state),
-            emit=emit, on_text=deltas.append,
-        )
-        if not outcome.succeeded:
-            raise outcome.failure or AIExecutionError("Execution failed.")
+            state.add_usage(outcome.reply.usage)
 
-        for delta in deltas:
-            emit(AIEvent.content(state.execution_id, delta))
+            try:
+                reply = strategy.read(outcome.reply)
+            except AIOutputError as invalid:
+                # The mechanism could not read what came back. Correcting is
+                # telling the model what was wrong and asking again -- never
+                # repeating the identical call, which would ask the same
+                # question and pay twice.
+                if allowance.exhausted(state.validation_corrections):
+                    raise
+                # Said where the run is watched. A mechanism that buffers
+                # reports nothing while a turn arrives, so an unreadable one
+                # and the correction that followed it were invisible -- and a
+                # run correcting its way to a spent budget looked like a run
+                # doing nothing at all.
+                if strategy.buffers:
+                    emit(AIEvent.content(
+                        state.execution_id,
+                        f"!! unreadable reply: {outcome.reply.text}\n"
+                        f"!! correcting: {invalid}\n",
+                    ))
+                state.corrected_validation()
+                state.turns.append(
+                    AIMessage(
+                        role=AIRole.ASSISTANT,
+                        content=(text(outcome.reply.text),),
+                    ),
+                )
+                state.correction(
+                    AIMessage(
+                        role=AIRole.USER,
+                        content=(
+                            text(
+                                f"That reply could not be read: {invalid} "
+                                "Answer again with one JSON object in the "
+                                "required shape, and nothing else."
+                            ),
+                        ),
+                    ),
+                )
+                continue
 
-        reply = outcome.reply
-        state.add_usage(reply.usage)
-        return reply
+            if strategy.buffers:
+                # Nothing was reported while it arrived, because until the
+                # structure was complete nothing knew whether any of it was
+                # content. The answer is reported once, whole.
+                if not reply.tool_calls and reply.text:
+                    emit(AIEvent.content(state.execution_id, reply.text))
+            else:
+                for delta in deltas:
+                    emit(AIEvent.content(state.execution_id, delta))
+
+            return reply
+
+    def _allowance(self, request: ResolvedAIRequest) -> Any:
+        """How often this request's output may be corrected.
+
+        What resolution stated for the mechanism it chose, where it stated
+        anything, and this runtime's own posture otherwise. Resolution speaks
+        for one execution; the policy speaks for every execution that did not
+        ask for something else.
+        """
+        mechanism = request.tool_mechanism
+        if mechanism is not None and mechanism.validation_correction is not None:
+            return mechanism.validation_correction
+        return self._policy.validation_correction
 
     # -- refusals that come before a provider -----------------------------
 
@@ -202,8 +268,10 @@ class AIExecutor:
         required = set(capabilities_for_content(request.input.kinds()))
         if request.output.is_structured():
             required.add(AICapability.STRUCTURED_OUTPUT)
-        if request.tools:
-            required.add(AICapability.TOOLS)
+        # Tools are deliberately absent. Whether this engine can carry them is
+        # resolution's answer -- ``resolve_tool_mechanism`` -- and it is
+        # already recorded on the request. Asking it again here would be a
+        # second decision free to disagree with the one that admitted this.
         if request.options.stream:
             required.add(AICapability.STREAMING)
 
@@ -230,7 +298,7 @@ class AIExecutor:
         exactly this failure. It spends a validation correction and a turn, and
         no transport attempt.
         """
-        policy = self._policy.validation_correction
+        policy = self._allowance(request)
         while True:
             try:
                 return self._parser.parse(request, reply.text, reply.value), reply
@@ -370,3 +438,15 @@ def _drain(pending: list[AIEvent]) -> Iterator[AIEvent]:
     """
     while pending:
         yield pending.pop(0)
+
+
+def _mechanism_of(request: ResolvedAIRequest) -> TurnStrategy:
+    """How this request's turns are performed.
+
+    Obeyed, never re-derived: the mechanism is resolution's decision and this
+    only reads it. A request that resolved nothing is native, which is what
+    every caller that predates the seam already had.
+    """
+    mechanism = request.tool_mechanism
+    return mechanism.strategy if mechanism is not None else NativeTurnStrategy()
+
