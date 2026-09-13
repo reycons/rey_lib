@@ -608,6 +608,42 @@ class DBAdapter:
 
         return metadata_get_columns(conn, catalog, schema, table)
 
+    def inspect_database_references(
+        self,
+        conn: Any,
+        schema: str | None = None,
+    ) -> dict[str, Any]:
+        """Return everything a database index needs about this database.
+
+        One capability rather than a menu of getters, and the reason it is here
+        rather than imported directly: which provider answers is the adapter's
+        to know. A caller that imported a provider module would name a database
+        server in a layer that must not know one.
+
+        Args:
+            conn: An open connection.
+            schema: One schema to confine the inspection to, or None for every
+                non-system schema.
+
+        Returns:
+            ``{"objects": [...], "members": [...], "observations": [...]}`` in
+            the database index's vocabulary.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If this provider cannot answer.
+                Reported rather than returning an empty inspection, which would
+                publish "this database has nothing" as though it were a fact.
+        """
+        provider = self._provider_for_conn(conn)
+        backend = _backend(provider)
+        inspect = getattr(backend, "inspect_database_references", None)
+        if inspect is None:
+            raise UnsupportedDatabaseCapabilityError(
+                f"DBAdapter: provider '{provider}' cannot inspect database "
+                f"references."
+            )
+        return inspect(conn, schema)
+
     def get_primary_key(
         self,
         conn: Any,
