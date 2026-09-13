@@ -33,6 +33,9 @@ _SOURCE_COLUMNS = ("source_key", "provider", "catalog_name", "generator_version"
 _OBJECT_COLUMNS = (
     "source_key", "schema_name", "object_name", "object_type", "signature",
     "provider_object_id", "definition_hash", "reference_analysis_status",
+    # The text, not only its hash. A reader opening the object needs what it
+    # says; the hash only says whether it changed.
+    "definition",
 )
 _MEMBER_COLUMNS = (
     "source_key", "schema_name", "object_name", "object_type", "signature",

@@ -1312,6 +1312,7 @@ def inspect_database_references(
             "object_type": "trigger", "signature": "",
             "provider_object_id": str(trigger["oid"]),
             "definition_hash": trigger["definition_hash"],
+            "definition": trigger.get("definition", ""),
             # Both of a trigger's relationships come from the catalog, so
             # analysis is complete by construction. It is enumerated as an
             # object because its edges originate from it -- an observation
@@ -1328,6 +1329,7 @@ def inspect_database_references(
             # A relation has no body to analyze, and its outgoing kinds come
             # from the catalog, so analysis is complete by construction.
             "reference_analysis_status": "complete",
+            "definition": rel.get("definition", ""),
         })
         for column in rel["columns"]:
             members.append({
@@ -1351,6 +1353,7 @@ def inspect_database_references(
             "provider_object_id": str(routine["oid"]),
             "definition_hash": routine["definition_hash"],
             "reference_analysis_status": analysis.status,
+            "definition": routine["definition"],
         })
         origin = (routine["schema"], routine["name"], routine["object_type"],
                   routine["signature"])
@@ -1501,6 +1504,10 @@ def _reference_relations(conn: Any, schema: str | None) -> list[dict[str, Any]]:
                 hashlib.sha256(definition.encode("utf-8")).hexdigest()
                 if definition else ""
             ),
+            # Kept as well as hashed. The hash answers whether this changed;
+            # the text answers what it says, which is what a reader opening the
+            # object needs. Blank for a table, which has no definition.
+            "definition": definition,
             "columns": [
                 {"name": c[0], "ordinal": int(c[1]), "data_type": str(c[2])}
                 for c in columns
