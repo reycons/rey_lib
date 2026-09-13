@@ -130,10 +130,13 @@ def _seam_observations(
         return [], "failed"
 
     tree = ast.parse(source.read_text(encoding="utf-8"))
+    # DOTTED, not bare. The code index keys a symbol by
+    # (repository_key, relative_path, qualified_name) and calls this method
+    # 'Control.end_step'. A bare 'end_step' joins to nothing, which is how a
+    # bridge fact becomes unreachable from the code it names.
     owners = [
-        (node.lineno, node.end_lineno or node.lineno, node.name)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        (node.lineno, node.end_lineno or node.lineno, dotted)
+        for node, dotted in _qualified(tree)
     ]
     found: list[dict[str, Any]] = []
     complete = True
@@ -173,6 +176,30 @@ def _seam_observations(
             "resolution": "exact" if literal else "unresolved",
         })
     return found, ("complete" if complete else "partial")
+
+
+def _qualified(tree: ast.Module) -> list[tuple[ast.AST, str]]:
+    """Every function in a module, with the dotted name the code index uses.
+
+    A method is Class.method, a nested function Outer.inner, a module-level
+    function its own name -- the same composition ``code.symbol.qualified_name``
+    carries, so a bridge fact joins to the symbol it names.
+    """
+    found: list[tuple[ast.AST, str]] = []
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                dotted = f"{prefix}{child.name}"
+                found.append((child, dotted))
+                walk(child, f"{dotted}.")
+            elif isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return found
 
 
 def _seen(node: ast.expr) -> str:
