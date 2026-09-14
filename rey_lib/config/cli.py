@@ -98,6 +98,22 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
         help="Override a .env variable for this run (repeatable).",
     )
 
+    parser.add_argument(
+        "--connection-alias",
+        action="append",
+        metavar="CONFIGURED=RUNTIME",
+        dest="connection_aliases",
+        default=[],
+        help=(
+            "Reach the connection configured as CONFIGURED through the connection "
+            "named RUNTIME, for this run only (repeatable). Both must already be "
+            "declared in the installation's connections; nothing in the "
+            "configuration is changed. Anything resolving the configured name -- "
+            "including the control database every run records itself in -- gets the "
+            "replacement."
+        ),
+    )
+
     # ---------------------------------------------------------------------
     # Pipeline coordinator arguments
     # ---------------------------------------------------------------------
@@ -263,6 +279,7 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
             object.__setattr__(ctx, "jsonl_path", resolved_log_file)
             object.__setattr__(ctx, "run_log_path", resolved_log_file)
         _apply_log_level(ctx, args)
+        _apply_connection_aliases(ctx, args)
         pipeline_name = getattr(args, "pipeline_name", None)
         if pipeline_name:
             object.__setattr__(ctx, "pipeline_name", pipeline_name)
@@ -280,6 +297,7 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
     except (ConfigError, OSError) as exc:
         raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
     _apply_log_level(ctx, args)
+    _apply_connection_aliases(ctx, args)
     _adopt_run_id(ctx, args)
     return ctx
 
@@ -322,6 +340,54 @@ def apply_env_overrides(overrides: list[str]) -> None:
         key, _, value = item.partition("=")
 
         os.environ[key.strip()] = value
+
+
+def _apply_connection_aliases(ctx: "Namespace", args: "Namespace") -> None:
+    """Record this run's connection aliases on the context, and prove them usable.
+
+    Applied in both arrival paths -- a context resolved from a config path and
+    one restored from a pipeline step snapshot. A snapshot already carries the
+    launcher's aliases, because the coordinator deep-copies the whole context
+    into each step; those are the base, and an alias this process was given
+    merges over them. A child overriding one alias keeps the rest.
+
+    Validated here rather than at first use: a run that cannot route its
+    connections should fail at launch, not part-way through, having already done
+    work it cannot record.
+
+    Raises
+    ------
+    SystemExit
+        When an alias is not in CONFIGURED=RUNTIME form.
+    ConfigError
+        When the resulting map is unusable -- an unknown name on either side, a
+        self-alias, or a chain.
+    """
+    from rey_lib.db.connection import (
+        CONNECTION_ALIASES_ATTR,
+        validate_connection_aliases,
+    )
+
+    asked = getattr(args, "connection_aliases", None) or []
+    inherited = getattr(ctx, CONNECTION_ALIASES_ATTR, None)
+    aliases: dict[str, str] = dict(inherited.items()) if inherited else {}
+
+    for item in asked:
+        if "=" not in item:
+            raise SystemExit(
+                f"--connection-alias requires CONFIGURED=RUNTIME format, got: {item!r}"
+            )
+        configured, _, runtime = item.partition("=")
+        configured, runtime = configured.strip(), runtime.strip()
+        if not configured or not runtime:
+            raise SystemExit(
+                f"--connection-alias requires a name on both sides, got: {item!r}"
+            )
+        aliases[configured] = runtime
+
+    if aliases:
+        object.__setattr__(ctx, CONNECTION_ALIASES_ATTR, aliases)
+        validate_connection_aliases(ctx)
 
 
 def _apply_log_level(ctx: "Namespace", args: "Namespace") -> None:

@@ -59,11 +59,19 @@ from rey_lib.errors.error_utils import ConfigError
 __all__ = [
     "Connection",
     "ConnectionOwner",
+    "CONNECTION_ALIASES_ATTR",
     "build_connections",
     "connection_owner",
     "call_routine",
     "shared_connection",
+    "validate_connection_aliases",
 ]
+
+# Where a run's connection aliases live on the context. An ordinary ctx
+# attribute, deliberately: the pipeline coordinator deep-copies the whole
+# context into each step's snapshot, so a map kept here crosses the process
+# boundary with the run and a module global would not.
+CONNECTION_ALIASES_ATTR = "connection_aliases"
 
 _db = DBAdapter()
 
@@ -309,6 +317,13 @@ class ConnectionOwner:
         if not name:
             raise ConfigError("connection: no connection name was given.")
 
+        # Translate BEFORE the cache key is built. The contract above is that
+        # naming a connection yields the object every other consumer of that
+        # name already holds; keying on the requested name would build a second
+        # Connection over one definition, and two handles where the estate
+        # guarantees one.
+        name = _effective_connection_name(ctx, name)
+
         key = (_config_identity(ctx), str(name))
         held = self._owned.get(key)
         if held is not None:
@@ -379,6 +394,84 @@ def _connection_definitions(ctx: Any) -> dict[str, Any]:
             )
         found[str(name)] = record
     return found
+
+
+def _alias_map(ctx: Any) -> dict[str, str]:
+    """Return this run's connection aliases, keyed by configured name.
+
+    Absent or empty is the ordinary case and answers an empty mapping: a run
+    that declared no alias routes exactly as the installation says.
+    """
+    aliases = getattr(ctx, CONNECTION_ALIASES_ATTR, None)
+    if not aliases:
+        return {}
+    if hasattr(aliases, "items"):
+        return {str(key): str(value) for key, value in aliases.items()}
+    return {}
+
+
+def _effective_connection_name(ctx: Any, name: str) -> str:
+    """Return the connection this run actually uses for ``name``.
+
+    One hop, never a chain. ``validate_connection_aliases`` refuses an alias
+    whose target is itself aliased, so a single lookup here is the whole
+    translation and there is no order-dependent second hop to reason about.
+
+    The configured name is not altered anywhere -- ``ctx.control.connection``
+    still reads what the YAML declared. Configuration says what is configured;
+    this says what this run reaches.
+    """
+    return _alias_map(ctx).get(str(name), str(name))
+
+
+def validate_connection_aliases(ctx: Any) -> None:
+    """Refuse an unusable alias map before any application work starts.
+
+    Called once as the context is built rather than at first use. An alias that
+    cannot be honoured is a routing error for the whole run, and discovering it
+    at the first query means discovering it after work has been done that the
+    run cannot record.
+
+    Raises
+    ------
+    ConfigError
+        When an alias names an unconfigured connection on either side, when a
+        connection is aliased to itself, or when aliases form a chain.
+    """
+    aliases = _alias_map(ctx)
+    if not aliases:
+        return
+
+    definitions = _connection_definitions(ctx)
+    known = ", ".join(sorted(definitions)) or "none"
+
+    for configured, runtime in aliases.items():
+        if configured not in definitions:
+            raise ConfigError(
+                f"connection alias '{configured}={runtime}': '{configured}' is not a "
+                f"configured connection, so nothing resolves it. Known connections: {known}."
+            )
+        if runtime not in definitions:
+            raise ConfigError(
+                f"connection alias '{configured}={runtime}': '{runtime}' is not a "
+                f"configured connection. Known connections: {known}."
+            )
+        if configured == runtime:
+            raise ConfigError(
+                f"connection alias '{configured}={runtime}' aliases a connection to "
+                "itself, which states nothing. Remove it."
+            )
+
+    # A chain is refused rather than resolved one hop: which name a run reached
+    # would otherwise depend on evaluation order, and a quietly unreached target
+    # is exactly the silent wrong answer this mechanism must not introduce.
+    for configured, runtime in sorted(aliases.items()):
+        if runtime in aliases:
+            raise ConfigError(
+                f"connection aliases form a chain: '{configured}={runtime}' and "
+                f"'{runtime}={aliases[runtime]}'. An alias is one hop -- name the "
+                f"connection each configured name should reach directly."
+            )
 
 
 def build_connections(ctx: Any) -> dict[str, Connection]:

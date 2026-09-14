@@ -91,9 +91,18 @@ class TestConnectionIsTheRuntimePath:
         # call_routine joins them as the connector's routine entry: it is where
         # a procedure-map binding is normalized into one provider-neutral call,
         # so nothing below this module reads a binding or a result mode.
+        #
+        # The two alias names are the per-run routing surface. They are here
+        # rather than private because the CLI must record a run's aliases on the
+        # context and prove them usable at launch, and reaching into a private
+        # name from another package would be the worse coupling. What stays
+        # private is the translation itself -- _effective_connection_name is
+        # called by resolve() alone, so aliasing cannot be applied anywhere but
+        # the single resolution point.
         assert set(connection.__all__) == {
-            "Connection", "ConnectionOwner", "build_connections",
-            "call_routine", "connection_owner", "shared_connection"}
+            "Connection", "ConnectionOwner", "CONNECTION_ALIASES_ATTR",
+            "build_connections", "call_routine", "connection_owner",
+            "shared_connection", "validate_connection_aliases"}
 
     def test_composition_checks_the_configuration_and_holds_nothing(self) -> None:
         """The boundary validates and registers; it does not become the holder.
