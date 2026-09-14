@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
 from rey_lib.logs.record_enrichment import log_run_record
 
 
@@ -43,6 +44,13 @@ def log_sql_execution(run_log: 'RunLog', *, connection_name: str = "", database:
     }
     if duration_ms is not None:
         payload["duration_ms"] = duration_ms
+    # Every SQL_EXECUTION record, with no parameter for a caller to unset.
+    #
+    # The flag describes the record's content, not the feature that wrote it:
+    # the same SQL must not be sensitive in one path and ordinary in another.
+    # It classifies and nothing more -- the record is written whole, and stays
+    # whole for a reader authorized to read it.
+    payload[SENSITIVE_FIELD] = True
     if safe_to_preview is not None:
         payload["safe_to_preview"] = bool(safe_to_preview)
     run_log.append("SQL_EXECUTION", **payload)

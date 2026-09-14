@@ -41,7 +41,9 @@ from typing import Optional
 
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
 from rey_lib.errors.error_utils import ConfigError, install_process_error_boundary
-from rey_lib.logs import finalize_run_phases, get_logger, setup_logging
+from rey_lib.logs import (
+    classified, finalize_run_phases, get_logger, setup_logging,
+)
 from rey_lib.db.connection import build_connections, connection_owner
 from rey_lib.run import Run, establish_run_identity
 from rey_lib.runtime import collect_runtime, register_runtime_object
@@ -326,6 +328,38 @@ def open_shared_control(ctx: Namespace) -> Namespace:
     return ctx
 
 
+def _ai_connections(ctx: Any) -> tuple[str, ...]:
+    """The connections this installation lets a language model query through.
+
+    Read here because this is what composes both halves: the connections are the
+    database layer's and whether a model may use one is each connection's own
+    declaration, so the answer is resolved on this side and the names alone are
+    handed over. The AI never sees a Connection.
+
+    A configuration that declares none is the ordinary state -- most
+    installations give a model no database at all.
+    """
+    from rey_lib.db.connection import build_connections  # noqa: PLC0415
+
+    try:
+        built = build_connections(ctx)
+    except Exception:  # noqa: BLE001 - no usable connections is "none offered"
+        _logger.debug("No connections could be built for AI use")
+        return ()
+    permitted = tuple(sorted(
+        name for name, connection in built.items() if connection.llm
+    ))
+    # Said at startup, because the alternative is discovering it from a model
+    # that answers without querying and never says why. Both halves: what was
+    # configured, and what of it a model may use.
+    _logger.info(
+        "AI may query %d of %d configured connection(s): %s",
+        len(permitted), len(built), ", ".join(permitted) or "none",
+        extra=classified(False),
+    )
+    return permitted
+
+
 def open_shared_ai(ctx: Namespace) -> Namespace:
     """Make a resolved context into a runtime by giving it its one AI.
 
@@ -390,6 +424,7 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
             profiles=profiles,
             instructions=instructions,
             configured=engines,
+            connections=_ai_connections(ctx),
             settings=_ai_settings(
                 ctx, profiles=profiles, instructions=instructions,
             ),
@@ -675,6 +710,7 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
                                   instruction_ids, "instruction", ".default"),
         temperature=_temperature(group or {}),
         representation=str((group or {}).get("representation") or "").strip(),
+        connection=str((group or {}).get("connection_name") or "").strip(),
         composed_first=_composed_first(group or {}),
     )
 
@@ -691,6 +727,7 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
                                       "instruction", where),
             temperature=_temperature(row),
             representation=str(row.get("representation") or "").strip(),
+            connection=str(row.get("connection_name") or "").strip(),
             composed_first=_composed_first(row),
         ))
     return AISettings(
@@ -698,6 +735,7 @@ def _ai_settings(ctx: Namespace, *, profiles: tuple[Any, ...],
         instruction_id=settings.instruction_id,
         temperature=settings.temperature,
         representation=settings.representation,
+        connection=settings.connection,
         composed_first=settings.composed_first,
         tasks=tuple(tasks),
     )

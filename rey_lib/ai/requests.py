@@ -118,6 +118,10 @@ class AIRequest:
     input: AIInput
     task: str = ""
     profile_id: str = ""
+    #: The connection this request queries through, or empty for none.
+    #: A name the runtime validates against what it was told is permitted; this
+    #: object opens nothing.
+    connection: str = ""
     instruction_id: str = ""
     instruction: AIInstruction | None = None
     output: AIOutputSpec = field(default_factory=AIOutputSpec)

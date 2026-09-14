@@ -1,4 +1,9 @@
-from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.jsonl_handler import (
+    SENSITIVE_FIELD,
+    JsonlHandler,
+    classified,
+    sensitive,
+)
 from rey_lib.logs.file_manifest import (
     FileManifestError,
     FileManifestSession,
@@ -107,6 +112,9 @@ from rey_lib.logs.log_utils import (
 )
 
 __all__ = [
+    "SENSITIVE_FIELD",
+    "classified",
+    "sensitive",
     "JsonlHandler",
     "FileManifestError",
     "FileManifestSession",

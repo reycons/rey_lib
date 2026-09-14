@@ -33,7 +33,40 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-__all__ = ["JsonlHandler"]
+__all__ = ["JsonlHandler", "SENSITIVE_FIELD", "classified", "sensitive"]
+
+#: What a record says about its own content.
+#:
+#: **Classification, not suppression.** A record carrying this is written whole
+#: and read whole by anyone authorized to read it; the flag exists so an access
+#: control can decide who that is. Nothing here removes, trims or rewrites a
+#: record because of it -- marked secret, not emptied.
+#:
+#: Stated by the code that writes the record, because that is the only place
+#: that knows. Nothing infers it later from a message.
+SENSITIVE_FIELD = "contains_sensitive_data"
+
+
+def classified(is_sensitive: bool, **fields: Any) -> dict[str, Any]:
+    """Fields for one log record, saying whether its content is sensitive.
+
+    One spelling of the name, so two callers cannot disagree about it.
+
+    Args:
+        is_sensitive: Whether this record's content is sensitive -- generated
+            SQL, database error detail, returned or derived values, or a count
+            that discloses something.
+        **fields: The record's own structured fields, carried unchanged.
+
+    Returns:
+        What to pass as ``extra``.
+    """
+    return {SENSITIVE_FIELD: bool(is_sensitive), **fields}
+
+
+def sensitive(**fields: Any) -> dict[str, Any]:
+    """Fields for a record whose content is sensitive."""
+    return classified(True, **fields)
 
 # LogRecord attributes that are always present — excluded from per-event extras
 # so we don't duplicate envelope fields or emit internal Python logging noise.

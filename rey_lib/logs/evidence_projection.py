@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
 from rey_lib.logs.record_enrichment import (
     EXECUTION_RECORD_TYPES,
     FILES_RECORD_SUBGROUP,
@@ -536,6 +537,11 @@ def _merge_artifact(into: dict[str, Any], other: dict[str, Any]) -> None:
             into[field] = other[field]
     if other.get("safe_to_preview") is False:
         into["safe_to_preview"] = False
+    # Sensitivity narrows the other way: a record combined with a sensitive one
+    # is sensitive. Classification can only ever become more restrictive, so a
+    # merge cannot lose the fact that something in here must be protected.
+    if other.get(SENSITIVE_FIELD) is True:
+        into[SENSITIVE_FIELD] = True
     for field in ("related_log_record_ids", "related_source_lines"):
         merged = list(dict.fromkeys(into[field] + other[field]))
         into[field] = merged

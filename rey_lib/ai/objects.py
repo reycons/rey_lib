@@ -86,6 +86,9 @@ class AIObject:
     instruction_id: str = ""
     temperature: float | None = None
     representation: str = ""
+    #: The connection this ask queries through, or empty to take the task's.
+    #: An override like the others: a name, never a handle.
+    connection: str = ""
     status: str = AIObjectStatus.IDLE
     #: The execution now under way, as whoever launched it addresses one.
     #: Carried so a surface can watch it; this object neither creates nor
@@ -103,7 +106,7 @@ class AIObject:
         """
         allowed = {
             "prompt", "task", "profile_id", "instruction_id",
-            "temperature", "representation",
+            "temperature", "representation", "connection",
         }
         unknown = set(changes) - allowed
         if unknown:

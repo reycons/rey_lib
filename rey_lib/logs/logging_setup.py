@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD, JsonlHandler
 from rey_lib.logs.record_enrichment import require_run_id
 
 
@@ -473,7 +473,17 @@ def log_row_values(
 	row: dict[str, Any],
 	column_types: dict[str, str],
 ) -> None:
-	logger.error("%s row=%d", message, row_num)
+	# Every record this writes carries an actual database value, so the
+	# classification is intrinsic: there is no argument for a caller to unset,
+	# because there is no call of this that is not data.
+	#
+	# Classification only. The value stays exactly as it was, readable by
+	# whoever is authorized to read it -- the flag decides who that is, and
+	# removes nothing.
+	logger.error(
+		"%s row=%d", message, row_num,
+		extra={SENSITIVE_FIELD: True},
+	)
 
 	for col, value in row.items():
 		logger.error(
@@ -481,4 +491,5 @@ def log_row_values(
 			col,
 			column_types.get(col, "UNKNOWN"),
 			value,
+			extra={SENSITIVE_FIELD: True},
 		)

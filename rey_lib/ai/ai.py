@@ -31,7 +31,7 @@ retry, tool, validation and normalization code is not here, and no
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from rey_lib.ai.capabilities import AICapabilitySet
 from rey_lib.ai.contracts import ContractResolver
@@ -104,8 +104,19 @@ class AI:
         parser: OutputParser | None = None,
         policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
         executor: AIExecutor | None = None,
+        connections: Iterable[str] = (),
     ) -> None:
         self._registry = registry
+        # Which connections a task here may query through, as **names**.
+        #
+        # Whether a connection may be used by a language model is the
+        # connection's own declaration, and connections are the database
+        # layer's. So what crosses into this one is the answer rather than the
+        # objects: a set of permitted names, supplied by whatever composed both.
+        # Nothing here opens, holds or imports a connection.
+        self._connections = frozenset(
+            str(name).strip() for name in connections if str(name).strip()
+        )
         # Kept, not only passed on. Resolution states a correction allowance
         # for the mechanism it chooses, which it can only do against the
         # posture this runtime was built with.
@@ -417,6 +428,31 @@ class AI:
             )
         return self._registry.profile(wanted)
 
+    def connections(self) -> tuple[str, ...]:
+        """Every connection a task here may be pointed at, in name order.
+
+        What a surface offers a reader to choose from. Names only: which of them
+        reads what, and under whose authority, is not this object's to know.
+        """
+        return tuple(sorted(self._connections))
+
+    def connection_for(self, connection: str = "", task: str = "") -> str:
+        """The connection an ask queries through: its own, its task's, the default.
+
+        Empty is an ordinary answer and means this ask queries nothing. The same
+        precedence the profile follows, so a reader overriding one setting is not
+        surprised by the other.
+
+        Named by task key rather than by a settings object, because that is what
+        an ask carries and the settings are this object's to look in.
+        """
+        configured = self._settings.task(task) if task else None
+        return (
+            str(connection or "")
+            or (configured.connection if configured else "")
+            or self._settings.connection
+        )
+
     def _instruction_for(
         self, request: AIRequest, task: AISettingsTask | None = None,
     ) -> AIInstruction:
@@ -466,15 +502,31 @@ class AI:
         the other would let a task be configured into a state that only fails
         when that task next runs.
         """
-        self._offered(settings.profile_id, settings.instruction_id, "")
+        self._offered(
+            settings.profile_id, settings.instruction_id, "", settings.connection,
+        )
         for task in settings.tasks:
             self._offered(
-                task.profile_id, task.instruction_id, f" for task '{task.name}'",
+                task.profile_id, task.instruction_id,
+                f" for task '{task.name}'", task.connection,
             )
         return settings
 
-    def _offered(self, profile_id: str, instruction_id: str, where: str) -> None:
-        """Refuse a profile or instruction this runtime does not offer."""
+    def _offered(
+        self,
+        profile_id: str,
+        instruction_id: str,
+        where: str,
+        connection: str = "",
+    ) -> None:
+        """Refuse a profile, instruction or connection this runtime does not offer."""
+        if connection and connection not in self._connections:
+            # Not "no such connection": one may well exist. It has not said a
+            # language model may use it, which is a different refusal and the
+            # one a reader needs to hear.
+            raise AISelectionError(
+                f"No connection is offered to AI as '{connection}'{where}."
+            )
         if profile_id and not self._registry.has_profile(profile_id):
             raise AISelectionError(
                 f"No AI profile is configured as '{profile_id}'{where}."

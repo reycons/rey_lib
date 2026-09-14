@@ -573,6 +573,7 @@ class Control:
         checksum_sha256: Optional[str] = None, size_bytes: Optional[int] = None,
         exists: Optional[bool] = None, modified_at: Optional[str] = None,
         error_message: Optional[dict[str, Any]] = None,
+        contains_sensitive_data: Optional[bool] = None,
         payloads: Optional[dict[str, Any]] = None,
         required: bool = False,
     ) -> Optional[int]:
@@ -595,6 +596,11 @@ class Control:
 
         ``created_ts`` is not a parameter. The database stamps it, so a writer
         cannot backdate a log record.
+
+        ``contains_sensitive_data`` classifies the record's content and nothing
+        more: the row is written whole either way. None means unclassified,
+        which a reader must treat conservatively rather than as "not
+        sensitive".
 
         The row's id is returned because a governed record points at it: the
         log record is written first, and the file mutation carries its id.
@@ -630,6 +636,9 @@ class Control:
             "exists":                exists,
             "modified_at":           modified_at,
             "error_message":         error_message,
+            # None is unclassified, and is written as NULL. A record that never
+            # said is not a record that said no.
+            "contains_sensitive_data": contains_sensitive_data,
             "batch_step_id":         self.batch_step_id,
             **dict(payloads or {}),
         }, required=required)

@@ -33,7 +33,7 @@ application context: ``AI(registry=...)`` needs nothing here.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from rey_lib.ai.ai import AI
 from rey_lib.ai.contracts import ContractResolver
@@ -114,6 +114,7 @@ def ai_from_ctx(
     settings: AISettings | None = None,
     policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
     configured: tuple[ConfiguredProvider, ...] = (),
+    connections: Iterable[str] = (),
 ) -> AI:
     """Build one runtime's ``AI`` from installation context, then let ctx go.
 
@@ -164,6 +165,10 @@ def ai_from_ctx(
         settings=settings,
         policy=policy,
         contracts=ContractResolver(loader=_contract_loader),
+        # Names, decided by whoever composed this runtime. Which connections a
+        # model may be given is the connection's own declaration and the
+        # database layer's to read; this library is told the answer.
+        connections=connections,
     )
 
 

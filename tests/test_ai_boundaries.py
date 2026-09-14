@@ -215,3 +215,69 @@ def test_no_provider_sdk_is_imported_above_the_adapter_boundary() -> None:
                     offenders.append(f"{path.name}:{node.lineno} imports {name}")
 
     assert not offenders, "external model leaked inward: " + "; ".join(offenders)
+
+
+class TestAConnectionIsAName:
+    """The AI carries which connection an ask queries through, and no more.
+
+    Whether a connection may be used by a language model is the connection's own
+    declaration, and connections belong to the database layer. What crosses into
+    this one is the answer rather than the objects: a set of permitted names.
+    """
+
+    @staticmethod
+    def _ai(connections=()):
+        from rey_lib.ai.ai import AI
+        from rey_lib.ai.registry import AIRegistry
+
+        return AI(registry=AIRegistry(profiles=(), instructions=()),
+                  connections=connections)
+
+    def test_it_holds_names_and_opens_nothing(self) -> None:
+        offered = self._ai(("code_index", "warehouse")).connections()
+
+        assert offered == ("code_index", "warehouse")
+        assert all(isinstance(name, str) for name in offered)
+
+    def test_a_connection_nothing_offered_is_refused(self) -> None:
+        """Not "no such connection" -- one may well exist. It has not said a
+        model may use it, which is the refusal a reader needs."""
+        from rey_lib.ai.errors import AISelectionError
+        from rey_lib.ai.settings import AISettings
+
+        ai = self._ai(("code_index",))
+
+        with pytest.raises(AISelectionError, match="offered to AI"):
+            ai.update_settings(AISettings(connection="rey_apps"))
+
+    def test_a_task_naming_an_unoffered_connection_is_refused(self) -> None:
+        """Every level, as for a profile. A task configured into a state that
+        only fails when that task next runs is a state nobody sees."""
+        from rey_lib.ai.errors import AISelectionError
+        from rey_lib.ai.settings import AISettings, AISettingsTask
+
+        ai = self._ai(("code_index",))
+
+        with pytest.raises(AISelectionError, match="for task 'search'"):
+            ai.update_settings(AISettings(
+                tasks=(AISettingsTask(name="search", connection="rey_apps"),),
+            ))
+
+    def test_no_connection_is_an_ordinary_answer(self) -> None:
+        """Empty means this ask queries nothing, which is most asks."""
+        ai = self._ai(("code_index",))
+
+        assert ai.connection_for("", "") == ""
+
+    def test_an_ask_overrides_its_task_which_overrides_the_default(self) -> None:
+        from rey_lib.ai.settings import AISettings, AISettingsTask
+
+        ai = self._ai(("code_index", "warehouse"))
+        ai.update_settings(AISettings(
+            connection="code_index",
+            tasks=(AISettingsTask(name="search", connection="warehouse"),),
+        ))
+
+        assert ai.connection_for("", "") == "code_index"
+        assert ai.connection_for("", "search") == "warehouse"
+        assert ai.connection_for("code_index", "search") == "code_index"

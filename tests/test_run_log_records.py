@@ -1154,3 +1154,152 @@ def test_the_run_reports_the_first_failure_not_the_always_run_one(tmp_path: Path
     # Both failures left their own evidence; the second did not replace the first.
     failures = [r for r in records if r["record_type"] == "STEP_FAILURE"]
     assert [str(r.get("step_id") or "") for r in failures] == ["s1", "s2"]
+
+
+# -- classification ---------------------------------------------------------
+#
+# The flag says what a record contains. It removes nothing: a marked record is
+# written whole, and stays whole for a reader authorized to read it.
+
+
+def test_sql_execution_records_are_marked_sensitive(tmp_path: Path) -> None:
+    """Every SQL_EXECUTION record, with no parameter for a caller to unset.
+
+    The flag describes content, not the feature that wrote it -- the same SQL
+    must not be sensitive in one path and ordinary in another.
+    """
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+    from rey_lib.logs.sql_records import log_sql_execution
+
+    ctx = _ctx(tmp_path)
+    run_log = _log(ctx, tmp_path)
+    log_run_start(run_log)
+    log_sql_execution(
+        run_log, connection_name="warehouse", operation="select",
+        status="succeeded", sql_label="a label",
+    )
+
+    written = [r for r in _read(Path(run_log.path()))
+               if r["record_type"] == "SQL_EXECUTION"]
+    assert len(written) == 1
+    assert written[0][SENSITIVE_FIELD] is True
+
+
+def test_the_marked_record_is_written_whole(tmp_path: Path) -> None:
+    """Classification, not suppression. Marking removes nothing."""
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+    from rey_lib.logs.sql_records import log_sql_execution
+
+    ctx = _ctx(tmp_path)
+    run_log = _log(ctx, tmp_path)
+    log_run_start(run_log)
+    log_sql_execution(
+        run_log, connection_name="warehouse", operation="select",
+        status="failed", error_message='column "salary" does not exist',
+    )
+
+    record = [r for r in _read(Path(run_log.path()))
+              if r["record_type"] == "SQL_EXECUTION"][0]
+    assert record[SENSITIVE_FIELD] is True
+    # The driver's own wording is still there, for whoever may read it.
+    assert "salary" in json.dumps(record)
+
+
+def test_an_unmarked_record_type_says_nothing(tmp_path: Path) -> None:
+    """A second record type, and the absence that matters.
+
+    Unclassified is not "not sensitive": a record that never said carries no
+    flag at all, and a reader must treat that conservatively.
+    """
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+
+    ctx = _ctx(tmp_path)
+    run_log = _log(ctx, tmp_path)
+    log_run_start(run_log)
+    log_execution_plan(run_log, total_steps=1, steps=[
+        {"sequence": 1, "step_id": "a", "step_name": "a", "app": "tool"},
+    ])
+
+    plan = [r for r in _read(Path(run_log.path()))
+            if r["record_type"] == "EXECUTION_PLAN"][0]
+    assert SENSITIVE_FIELD not in plan
+
+
+def test_the_flag_is_a_shared_fact_not_a_payload_key(tmp_path: Path) -> None:
+    """It is queried across record types, so it cannot live inside whichever
+    jsonb column a type happens to use."""
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+    from rey_lib.logs.run_log import _SHARED_FIELDS, TYPE_PAYLOAD_COLUMNS
+
+    assert SENSITIVE_FIELD in _SHARED_FIELDS
+    assert SENSITIVE_FIELD not in TYPE_PAYLOAD_COLUMNS.values()
+
+
+def test_a_caller_may_classify_any_record(tmp_path: Path) -> None:
+    """The second record type of the round trip, marked by its writer."""
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+
+    ctx = _ctx(tmp_path)
+    run_log = _log(ctx, tmp_path)
+    log_run_start(run_log)
+    run_log.append("INFO", message="a note", info={"note": "x"},
+                   **{SENSITIVE_FIELD: True})
+
+    note = [r for r in _read(Path(run_log.path()))
+            if r["record_type"] == "INFO"][0]
+    assert note[SENSITIVE_FIELD] is True
+    assert note["info"] == {"note": "x"}
+
+
+def test_row_values_are_marked_and_kept_whole(tmp_path: Path) -> None:
+    """log_row_values classifies intrinsically, and suppresses nothing.
+
+    Every record it can emit carries an actual database value, so there is no
+    argument for a caller to unset. Dormant today -- nothing calls it -- which
+    is why the classification belongs in the helper rather than in a caller
+    somebody writes later.
+    """
+    import logging
+
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+    from rey_lib.logs.logging_setup import log_row_values
+
+    emitted: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            emitted.append(record)
+
+    logger = logging.getLogger("test_row_values")
+    logger.setLevel(logging.ERROR)
+    logger.addHandler(_Capture())
+    try:
+        log_row_values(
+            logger, "rejected", 7,
+            {"surname": "Okonkwo", "salary": 91000},
+            {"surname": "text", "salary": "integer"},
+        )
+    finally:
+        logger.handlers.clear()
+
+    # One header plus one per column, and every one classified.
+    assert len(emitted) == 3
+    assert all(getattr(r, SENSITIVE_FIELD) is True for r in emitted)
+
+    # The values are still there. Marked secret, not removed.
+    rendered = " ".join(r.getMessage() for r in emitted)
+    assert "Okonkwo" in rendered
+    assert "91000" in rendered
+
+
+def test_row_value_records_route_to_the_shared_column(tmp_path: Path) -> None:
+    """Not into a payload blob: an access control asks every record type at
+    once, which it cannot do if the answer is inside a per-type jsonb key."""
+    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+    from rey_lib.logs.run_log import _ENVELOPE_FIELDS, _SHARED_FIELDS, TYPE_PAYLOAD_COLUMNS
+
+    assert SENSITIVE_FIELD in _SHARED_FIELDS
+    assert SENSITIVE_FIELD not in _ENVELOPE_FIELDS
+    assert SENSITIVE_FIELD not in TYPE_PAYLOAD_COLUMNS.values()
+    # And the column exists to route to, named exactly as the field is.
+    assert SENSITIVE_FIELD == "contains_sensitive_data"

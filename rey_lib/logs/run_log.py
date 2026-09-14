@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import time
 
+from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
 from rey_lib.logs.phase_timeline import PhaseTimeline
 
 from contextlib import contextmanager
@@ -81,6 +82,11 @@ _SHARED_FIELDS: frozenset[str] = frozenset({
     "size_bytes", "exists", "modified_at",
     # The failure object. A failure is the one thing a reader queries for.
     "error_message",
+    # What a record says about its own content. A shared fact rather than a
+    # payload key: an access control asks it of every record type at once, and
+    # a key buried in whichever jsonb column a type happens to use could not be
+    # asked that way.
+    SENSITIVE_FIELD,
 })
 
 #: record type -> the one jsonb column that may carry its structure.
@@ -806,6 +812,9 @@ class RunLog:
             exists=record.get("exists"),
             modified_at=record.get("modified_at"),
             error_message=record.get("error_message"),
+            # Absent means unclassified, which is not the same as non-sensitive
+            # and is written as NULL rather than as false.
+            contains_sensitive_data=record.get(SENSITIVE_FIELD),
             payloads={column: (payload or None) if column == payload_column
                       else None
                       for column in TYPE_PAYLOAD_COLUMNS.values()},

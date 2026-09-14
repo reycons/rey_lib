@@ -113,6 +113,23 @@ class Connection:
         return str(value) if value else None
 
     @property
+    def llm(self) -> bool:
+        """Whether a language model may be given this connection to query.
+
+        Declared by the connection, because what a connection reaches and under
+        whose role is the connection's own fact. Absent means no: a connection
+        that has not said an LLM may use it has not said so, and is offered
+        nowhere.
+
+        Read the same way ``provider`` is -- the config record travels whole,
+        and this asks it one more question.
+        """
+        value = getattr(self._config, "llm", None)
+        if value is None and isinstance(self._config, dict):
+            value = self._config.get("llm")
+        return bool(value)
+
+    @property
     def config(self) -> Any:
         """The resolved configuration this connection was built from."""
         return self._config

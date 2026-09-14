@@ -54,6 +54,12 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
         "lookup_profile_record",
         "read_profile_records",
         "resolve_profile_presentation",
+        # What a record says about its own content, and the helpers that write
+        # it. Part of the record envelope rather than the log_utils facade: a
+        # caller classifies a record where it builds one.
+        "SENSITIVE_FIELD",
+        "classified",
+        "sensitive",
     }
     missing = [
         name for name in logs.__all__

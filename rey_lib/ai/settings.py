@@ -57,6 +57,12 @@ class AISettingsTask:
     instruction_id: str = ""
     temperature: float | None = None
     representation: str = ""
+    #: The connection this task queries through, or empty to inherit.
+    #:
+    #: A name and nothing more. What it reaches, and under whose authority, is
+    #: the connection's own business and is never decided here. Empty means this
+    #: task asks no database anything.
+    connection: str = ""
     composed_first: bool = False
 
     def __post_init__(self) -> None:
@@ -79,6 +85,8 @@ class AISettings:
     instruction_id: str = ""
     temperature: float | None = None
     representation: str = ""
+    #: The connection asks query through by default, or empty for none.
+    connection: str = ""
     #: Whether an ask on the default scope is composed before it is run. Tasks
     #: do not inherit it -- see ``AISettingsTask``.
     composed_first: bool = False
