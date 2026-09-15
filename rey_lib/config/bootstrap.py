@@ -192,30 +192,92 @@ def _levels() -> tuple[str, ...]:
     return tuple(sorted(_LEVEL_MAP))
 
 
+#: What a process records when nothing declares otherwise.
+#:
+#: ERROR rather than INFO: a run should be quiet unless something asks it not to
+#: be, and an application that operationally needs more says so in its own
+#: declaration.
+DEFAULT_LOG_LEVEL = "ERROR"
+
+
+def _application_level(ctx: Namespace) -> Optional[str]:
+    """The level the running application declares for itself, or None.
+
+    Read from ``ctx.applications`` -- the canonical collection built once at the
+    end of the config load -- by ``ctx.app_name``. Nothing here re-reads the
+    installation's declaration: a second reader of application configuration is
+    a second answer waiting to disagree with the first.
+
+    Raises:
+        ConfigError: when this context names an application and carries
+            applications, but none of them is it. That is a broken context
+            rather than an absent declaration, and reading it as "inherit"
+            would hide the breakage behind a plausible level.
+    """
+    app_name = str(getattr(ctx, "app_name", "") or "")
+    applications = getattr(ctx, "applications", None) or ()
+    if not app_name or not applications:
+        return None
+
+    running = next(
+        (one for one in applications if str(getattr(one, "name", "")) == app_name),
+        None,
+    )
+    if running is None:
+        known = ", ".join(sorted(str(getattr(one, "name", "")) for one in applications))
+        raise ConfigError(
+            f"This context runs as '{app_name}', which is not one of the "
+            f"applications it carries: {known or 'none'}. An application cannot "
+            "resolve its own configuration when it is not in it."
+        )
+    return str(getattr(running, "log_level", "") or "") or None
+
+
 def _settle_log_level(ctx: Namespace) -> None:
-    """Settle the level this process logs at, and refuse a name that is not one.
+    """Resolve the level this process logs at, once, and refuse an unknown name.
 
-    The level arrives from configuration or from ``--log-level``; by here it is
-    whatever those left behind. What this adds is the refusal.
+    THE ONE PLACE THE PRECEDENCE CHAIN IS APPLIED::
 
-    ``setup_logging`` maps an unrecognised name to INFO silently, so a typo in
-    an installation's YAML produces a run that looks entirely normal and
-    records the wrong amount. That is worth failing on, and failing here rather
-    than there: this is the one place a process starts logging, and stating the
-    rule in both would be the same rule twice.
+        --log-level  >  the application's own declaration
+                     >  the installation's log_level  >  ERROR
+
+    Each term is only reachable because the one before it can be absent, which
+    is why ``--log-level`` is recorded on its own attribute rather than onto
+    ``ctx.log_level``: sharing one attribute with configuration would make the
+    first term win whenever either had spoken.
+
+    What leaves here is a single settled ``ctx.log_level``. ``setup_logging``
+    reads that and nothing else -- it learns nothing about command lines,
+    applications or installations, and the chain is not partly resolved anywhere
+    upstream.
+
+    Case is normalized at this boundary, so ``debug`` from YAML and ``DEBUG``
+    from a command line are the same level. An unrecognised name is still
+    refused: ``setup_logging`` maps one it does not know to a default silently,
+    so a typo in an installation's YAML would otherwise produce a run that looks
+    entirely normal and records the wrong amount.
 
     Raises:
         ConfigError: when a level is declared that nothing can honour.
     """
-    declared = getattr(ctx, "log_level", None)
-    if declared is None:
+    from rey_lib.config.cli import REQUESTED_LOG_LEVEL_ATTR
+
+    for value, source in (
+        (getattr(ctx, REQUESTED_LOG_LEVEL_ATTR, None), "--log-level"),
+        (_application_level(ctx), f"application '{getattr(ctx, 'app_name', '')}'"),
+        (getattr(ctx, "log_level", None), "the installation's log_level"),
+    ):
+        if value is None or str(value).strip() == "":
+            continue
+        if str(value).upper() not in _levels():
+            raise ConfigError(
+                f"log_level '{value}', declared by {source}, is not a level this "
+                f"runtime knows. Valid levels are {', '.join(_levels())}."
+            )
+        object.__setattr__(ctx, "log_level", str(value).upper())
         return
-    if str(declared).upper() not in _levels():
-        raise ConfigError(
-            f"log_level '{declared}' is not a level this runtime knows. "
-            f"Valid levels are {', '.join(_levels())}."
-        )
-    object.__setattr__(ctx, "log_level", str(declared).upper())
+
+    object.__setattr__(ctx, "log_level", DEFAULT_LOG_LEVEL)
 
 
 def _resolve_ctx(

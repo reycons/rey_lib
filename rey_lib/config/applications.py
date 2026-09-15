@@ -91,6 +91,19 @@ class Application:
     app_path: str = ""
     entry_point: str = "main.py"
     shared_parameters: bool = False
+    #: How much this application records, when it overrides the installation.
+    #:
+    #: Installation-owned: how loud an application runs is an operational
+    #: decision about this installation, not something the distribution
+    #: publishes about itself.
+    #:
+    #: EMPTY MEANS INHERIT, and is left empty rather than defaulted here. The
+    #: precedence chain is resolved once, at settlement, and it can only
+    #: distinguish "this application asked for a level" from "this application
+    #: said nothing" while absence is still absence. Normalizing it to a level
+    #: here would silently make every application an override and leave the
+    #: installation term with nothing to answer.
+    log_level: str = ""
     #: The application's own parameters, declared under ``cli.parameters``.
     #:
     #: Not every application has commands. Several declare parameters at this
@@ -262,6 +275,9 @@ def _from_registration(
         app_path=app_path,
         entry_point=str(registration.get("entry_point") or "main.py"),
         shared_parameters=bool(cli.get("shared_parameters")),
+        # From the installation entry, not the registration: how loud this
+        # application runs here is this installation's decision.
+        log_level=str(entry.get("log_level") or ""),
         parameters=tuple(
             _parameter(one, ctx, name)
             for one in (_plain(item) for item in (cli.get("parameters") or []))
@@ -305,6 +321,7 @@ def _from_declaration(
         app_path=str(entry.get("app_path") or ""),
         entry_point=str(entry.get("entry_point") or "main.py"),
         shared_parameters=bool(cli.get("shared_parameters")),
+        log_level=str(entry.get("log_level") or ""),
         parameters=tuple(
             _parameter(one, ctx, name)
             for one in (_plain(item) for item in (cli.get("parameters") or []))

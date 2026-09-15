@@ -133,8 +133,12 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     """
     global _current_depth
 
-    level_name = getattr(ctx, "log_level", None) or "INFO"
-    level      = _LEVEL_MAP.get(level_name.upper(), logging.INFO)
+    # Read, never resolved. _settle_log_level owns the precedence chain --
+    # command line, application declaration, installation, default -- and hands
+    # this one settled value over. The fallbacks here are for a context that
+    # never went through settlement at all, not a second opinion about it.
+    level_name = getattr(ctx, "log_level", None) or "ERROR"
+    level      = _LEVEL_MAP.get(level_name.upper(), logging.ERROR)
 
     fmt     = "%(asctime)s  %(levelname)-8s  %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"

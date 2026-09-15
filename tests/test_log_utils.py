@@ -280,15 +280,22 @@ def test_setup_logging_works_without_env_attribute(run_log, tmp_path) -> None:
     assert next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8")
 
 
-def test_setup_logging_defaults_to_info_without_env(run_log, tmp_path) -> None:
-    """When neither .env nor .log_level is set, INFO is the fallback."""
+def test_setup_logging_defaults_to_error_without_a_settled_level(run_log, tmp_path) -> None:
+    """A context that never went through settlement records errors only.
+
+    ERROR rather than the INFO this asserted before: a run is quiet unless
+    something asks it not to be, and what asks is the precedence chain in
+    _settle_log_level -- command line, the application's own declaration, the
+    installation. This fallback is for a context that reached logging without
+    passing through any of that, not a second opinion about the default.
+    """
     ctx = SimpleNamespace(
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_ctx_fields=(),
     )
     start_test_run(ctx)
     setup_logging(ctx, operation="run")
-    assert ctx.log_level == "INFO"
+    assert ctx.log_level == "ERROR"
 
 
 def test_setup_logging_accepts_path_object_for_log_path(run_log, tmp_path) -> None:

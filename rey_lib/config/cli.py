@@ -25,12 +25,21 @@ if TYPE_CHECKING:
     from rey_lib.config.config_utils import Namespace
 
 __all__ = [
+    "REQUESTED_LOG_LEVEL_ATTR",
     "preparse_config_args",
     "add_config_args",
     "apply_env_overrides",
     "build_ctx_from_args",
     "load_ctx_snapshot",
 ]
+
+#: Where an operator's ``--log-level`` is recorded on the context.
+#:
+#: Separate from ``ctx.log_level``, which configuration may declare. Keeping the
+#: two apart is what lets settlement order them; sharing one attribute would
+#: make the first term of the precedence chain win every time and leave an
+#: application's own declaration unreachable.
+REQUESTED_LOG_LEVEL_ATTR = "requested_log_level"
 
 def preparse_config_args() -> None:
     """Pre-parse --config-path/--config-dir from sys.argv and load the declared env file.
@@ -417,16 +426,23 @@ def _apply_connection_aliases(ctx: "Namespace", args: "Namespace") -> None:
 
 
 def _apply_log_level(ctx: "Namespace", args: "Namespace") -> None:
-    """Let this run's ``--log-level`` override what configuration declared.
+    """Record the level this run's operator asked for, and resolve nothing.
 
     Applied in both arrival paths -- a context resolved from a config path and
     one restored from a pipeline step snapshot -- because a level that stopped
     at the coordinator would mean turning a pipeline up did nothing to the step
     that actually failed.
 
-    Only what was asked for is written. Absent, the configured level stands and
-    the default behind it is unchanged.
+    WRITTEN TO ITS OWN ATTRIBUTE, not to ``ctx.log_level``. Configuration may
+    also declare a level, and both landing on one attribute is exactly what
+    makes an operator's explicit choice indistinguishable from an installation's
+    -- which would leave an application's own declaration with nothing to win
+    against. ``_settle_log_level`` is the one place the precedence chain is
+    applied; this only says what was asked for.
+
+    Only what was asked for is written. Absent, the attribute stays unset, and
+    unset is the signal settlement depends on.
     """
     asked = getattr(args, "log_level", None)
     if asked:
-        object.__setattr__(ctx, "log_level", str(asked))
+        object.__setattr__(ctx, REQUESTED_LOG_LEVEL_ATTR, str(asked))
