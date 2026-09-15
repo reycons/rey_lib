@@ -33,18 +33,28 @@ __all__ = [
 ]
 
 def preparse_config_args() -> None:
-    """Pre-parse --config-path/--config-dir from sys.argv and call load_dotenv.
+    """Pre-parse --config-path/--config-dir from sys.argv and load the declared env file.
 
     Must be called at module level in each app entry point, before any
     imports that depend on environment variables being set.
 
-    .env resolution priority
-    ------------------------
-    1. Parent directory of --config-path
-    2. --config-dir value
-    3. APP_CONFIG_DIR environment variable
-    4. load_dotenv default (searches upward from cwd)
+    THE ROOT CONFIG DECLARES THE FILE, here as everywhere. ``security.env_file``
+    is read from whichever root config the command line identifies, and that
+    declaration is loaded -- no directory is joined to it, no ``.env`` filename
+    is assumed, and nothing is probed when an installation declares none. This
+    runs before the config is built, so it reads the declaration itself rather
+    than applying a convention the context build would then contradict.
+
+    Which root config
+    -----------------
+    1. --config-path
+    2. --config-dir, which names the directory holding it
+    3. APP_CONFIG_DIR, the same
+    Without any of them nothing is loaded: there is no config to read a
+    declaration from, and guessing one is what this replaced.
     """
+    from rey_lib.config.config_loader import declared_env_file
+
     pre = argparse.ArgumentParser(add_help=False)
 
     pre.add_argument("--config-path", dest="config_path", default=None)
@@ -52,18 +62,34 @@ def preparse_config_args() -> None:
 
     pre_args, _ = pre.parse_known_args()
 
-    config_dir_str: Optional[str] = (
-        str(Path(pre_args.config_path).expanduser().parent)
-        if pre_args.config_path
-        else pre_args.config_dir
-        or os.environ.get("APP_CONFIG_DIR")
-    )
+    if pre_args.config_path:
+        config_path: Optional[Path] = Path(pre_args.config_path).expanduser()
+    else:
+        config_dir = pre_args.config_dir or os.environ.get("APP_CONFIG_DIR")
+        config_path = _root_config_in(Path(config_dir).expanduser()) if config_dir else None
 
-    load_dotenv(
-        Path(config_dir_str).expanduser() / ".env"
-        if config_dir_str
-        else None
-    )
+    if config_path is None or not config_path.is_file():
+        return
+
+    env_file = declared_env_file(config_path)
+    if env_file is not None and env_file.exists():
+        load_dotenv(dotenv_path=env_file, override=False)
+
+
+def _root_config_in(config_dir: Path) -> Optional[Path]:
+    """Return the root config in a directory named without a file, or None.
+
+    ``--config-dir`` and ``APP_CONFIG_DIR`` name a directory; the declaration
+    lives in the config inside it. Only these two names are looked for, and a
+    directory holding neither simply has no declaration to read -- that is a
+    smaller assumption than the one this replaced, which read a file named
+    ``.env`` from a directory nothing had declared.
+    """
+    for name in ("installation.yaml", "config.yaml"):
+        candidate = config_dir / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def add_config_args(parser: argparse.ArgumentParser) -> None:

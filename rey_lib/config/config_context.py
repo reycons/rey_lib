@@ -18,7 +18,6 @@ from typing import Any
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.applications import build_applications
 from rey_lib.config.config_loader import (
-    _ENV_FILE_NAME,
     _deep_merge,
     _find_parent_install_raw,
     _load_env_file,
@@ -26,6 +25,7 @@ from rey_lib.config.config_loader import (
     _merge_compatible_collection,
     _merge_compatible_mapping,
     _yaml_files_in_folder,
+    declared_env_file,
 )
 from rey_lib.config.config_paths import (
     _SafePathFormat,
@@ -43,10 +43,6 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import get_logger, log_config_file_reference
 
 _logger = get_logger(__name__)
-
-# Named path an installation declares to say where it begins. It locates the
-# installation's .env; every other path stays resolved as before.
-_INSTALLATION_ROOT_PATH = "installation_root"
 
 # Config precedence layers map to human-facing configuration roles. Roles come
 # from recorded provenance (the layer a file contributed at), never from the
@@ -145,9 +141,13 @@ def build_ctx_from_path(
         k: str(v) for k, v in prelim_resolver._paths.items()
     })
 
-    # Step 3 — the installation's own .env, read after the root config because
-    # the root config is what says where the installation begins.
-    _load_env_file(_env_directory(prelim_resolver, config_dir) / _ENV_FILE_NAME)
+    # Step 3 — the environment file this installation declares, read after the
+    # root config because the root config is what declares it. The declaration
+    # is the whole answer: nothing is joined to it, no filename is assumed, and
+    # an installation declaring none has none.
+    declared_env = declared_env_file(config_path)
+    if declared_env is not None:
+        _load_env_file(declared_env)
 
     # Step 4 — determine the ordered list of include folders.
     include_folders = _resolve_include_folders(
@@ -432,47 +432,6 @@ def print_ctx(ctx: Namespace) -> None:
 # ---------------------------------------------------------------------------
 # Private — loading and merging
 # ---------------------------------------------------------------------------
-def _env_directory(prelim_resolver: Any, config_dir: Path) -> Path:
-    """Return the directory holding this installation's ``.env``.
-
-    An installation declares where it begins by naming an
-    ``installation_root`` path; the ``.env`` is read from there. Installations
-    lay their configuration out differently — one keeps it at the installation
-    root, another nests it under ``config/install`` — so the root is declared
-    rather than derived. Counting parent directories or matching directory
-    names would be a guess that happens to hold for today's layouts.
-
-    Without that declaration the file is read from the directory holding the
-    root config, which is the long-standing behaviour and stays the default.
-
-    Parameters
-    ----------
-    prelim_resolver : Any
-        Preliminary PathResolver built from the root config's ``paths``.
-    config_dir : Path
-        Directory holding the root config file.
-
-    Returns
-    -------
-    Path
-        Directory to read ``.env`` from. Never leaves the installation: an
-        undeclared or unusable root falls back to ``config_dir`` rather than
-        searching upward, so one installation can never read another's file.
-    """
-    declared = getattr(prelim_resolver, "_paths", {}).get(_INSTALLATION_ROOT_PATH)
-    if declared is None:
-        return config_dir
-
-    root = Path(str(declared)).expanduser()
-    if not root.is_dir():
-        _logger.warning(
-            "installation_root '%s' is not a directory; reading .env from %s.",
-            root, config_dir,
-        )
-        return config_dir
-    return root
-
-
 def _assemble_ctx_data(raw: dict[str, Any], config_dir: Path) -> dict[str, Any]:
     """Apply the non-file transformations needed before Namespace wrapping."""
     # Checked first, against what the author wrote: the nested form names its

@@ -14,7 +14,7 @@ import os
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -24,8 +24,6 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import get_logger
 
 _logger = get_logger(__name__)
-
-_ENV_FILE_NAME   = ".env"
 
 # Matches ${VAR_NAME} and $VAR_NAME patterns in YAML string values.
 _ENV_VAR_PATTERN = re.compile(
@@ -367,10 +365,78 @@ def _find_yaml_env_refs(value: Any) -> set[str]:
                 found.add(env_name)
     return found
 
+def declared_env_file(config_path: Path) -> Optional[Path]:
+    """Return the environment file a root config declares, or None.
+
+    ``security.env_file`` is the single authority for where an installation's
+    environment file lives. It is read here, from the root config alone, so the
+    pre-parse and the context build resolve the same declaration rather than
+    each applying a convention of its own.
+
+    THE VALUE IS A PATH, NOT A CONVENTION. It is not joined to anything, no
+    filename is assumed, and nothing is probed when it is absent -- an
+    installation that declares no environment file has none. That is what lets
+    the file live wherever an operator puts it, including outside the
+    installation entirely.
+
+    Parameters
+    ----------
+    config_path : Path
+        The root config file to read the declaration from.
+
+    Returns
+    -------
+    Optional[Path]
+        The declared file, or None when the config declares none.
+
+    Raises
+    ------
+    ConfigError
+        When the declared value is relative. An absolute path is required
+        because a relative one would have to be resolved against something, and
+        every candidate -- the config file, the installation root, the working
+        directory -- is a convention this declaration exists to remove.
+    """
+    try:
+        raw = _load_yaml(config_path)
+    except (ConfigError, OSError):
+        # The caller loads and reports this file properly; a pre-parse peek is
+        # not where a malformed config should be announced.
+        return None
+
+    security = raw.get("security") or {}
+    declared = security.get("env_file") if isinstance(security, dict) else None
+    if not declared:
+        return None
+
+    env_file = Path(str(declared)).expanduser()
+    if not env_file.is_absolute():
+        raise ConfigError(
+            f"security.env_file must be an absolute path, got '{declared}' in "
+            f"'{config_path}'. A relative value has to be resolved against "
+            "something, and the declaration exists so that nothing has to guess "
+            "which directory that is."
+        )
+    return env_file
+
+
 def _load_env_file(env_file: Path) -> None:
-    """Load the .env file into os.environ if it exists."""
-    if env_file.exists():
-        load_dotenv(dotenv_path=env_file, override=False)
+    """Load a declared environment file into os.environ.
+
+    Raises
+    ------
+    ConfigError
+        When the declared file is not there. Declaring it and finding nothing is
+        a configuration error, not an absence: the run would otherwise proceed
+        without the values it was told exist and fail later as an unresolved
+        reference naming a variable rather than the file that should hold it.
+    """
+    if not env_file.exists():
+        raise ConfigError(
+            f"security.env_file names '{env_file}', which does not exist. "
+            "Point it at the environment file or remove the declaration."
+        )
+    load_dotenv(dotenv_path=env_file, override=False)
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     """Validate then read a YAML file, returning an empty dict on blank files."""

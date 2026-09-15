@@ -119,79 +119,97 @@ def test_an_undeclared_reference_fails_loudly(
         build_ctx_from_path(_write(tmp_path, undeclared), app_name="fixture_app")
 
 
-_WITH_ROOT = _INSTALLATION.replace(
-    """paths:
-  - name: root
-    path: '{config_dir}'
-""",
-    """paths:
-  - name: root
-    path: '{config_dir}'
-  - name: installation_root
-    path: '{config_dir}'
-""",
-)
+def _with_env_file(declared: str) -> str:
+    """The fixture installation, declaring ``declared`` as its environment file."""
+    return _INSTALLATION.replace(
+        "installation:\n  name: fixture",
+        f"installation:\n  name: fixture\n\nsecurity:\n  env_file: \"{declared}\"",
+    )
 
 
-def test_the_env_file_is_read_from_the_declared_installation_root(
+def test_the_declared_file_is_read_wherever_it_is(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A declared installation_root is where the installation's .env lives.
+    """security.env_file is the whole answer, and it may be anywhere.
 
-    Installations lay their configuration out differently, so the root is
-    declared rather than derived from the config file's position.
+    The file here is outside the installation entirely and is not named .env,
+    which is the point: an operator moves the environment file without the
+    loader knowing anything about the installation's layout.
     """
     monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("FIXTURE_GEMINI_API_KEY", raising=False)
 
-    config_path = _write(tmp_path, _WITH_ROOT)
-    # The root is tmp_path; the config lives a directory below it.
-    (tmp_path / ".env").write_text(
-        "FIXTURE_OPENAI_API_KEY=from-installation-root\n"
-        "FIXTURE_GEMINI_API_KEY=gemini-from-root\n",
+    secrets = tmp_path.parent / f"{tmp_path.name}-secrets"
+    secrets.mkdir(exist_ok=True)
+    env_file = secrets / "runtime.env"
+    env_file.write_text(
+        "FIXTURE_OPENAI_API_KEY=from-the-declared-file\n"
+        "FIXTURE_GEMINI_API_KEY=gemini-from-the-declared-file\n",
         encoding="utf-8",
     )
 
-    build_ctx_from_path(config_path, app_name="fixture_app")
+    build_ctx_from_path(_write(tmp_path, _with_env_file(str(env_file))), app_name="fixture_app")
 
-    # Into the process environment, for a consumer to read later; the context
-    # itself holds the reference.
-    assert os.environ["FIXTURE_OPENAI_API_KEY"] == "from-installation-root"
-    assert os.environ["FIXTURE_GEMINI_API_KEY"] == "gemini-from-root"
+    assert os.environ["FIXTURE_OPENAI_API_KEY"] == "from-the-declared-file"
+    assert os.environ["FIXTURE_GEMINI_API_KEY"] == "gemini-from-the-declared-file"
 
 
-def test_without_a_declared_root_the_config_directory_is_still_used(
+def test_an_undeclared_installation_reads_no_environment_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The long-standing location stays the default for undeclared installations."""
+    """Nothing is probed. An installation declaring no file has none.
+
+    Both directories the old lookup used are seeded here -- the installation
+    root and the directory holding the config -- and neither is read. That is
+    the hidden convention being gone, stated as a test rather than assumed.
+    """
     monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
-
-    config_path = _write(tmp_path, _INSTALLATION)
-    (config_path.parent / ".env").write_text(
-        "FIXTURE_OPENAI_API_KEY=beside-the-config\n", encoding="utf-8"
-    )
-
-    build_ctx_from_path(config_path, app_name="fixture_app")
-
-    assert os.environ["FIXTURE_OPENAI_API_KEY"] == "beside-the-config"
-
-
-def test_a_root_env_file_is_not_read_when_no_root_is_declared(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No upward search: an undeclared installation never reaches outside itself."""
-    monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
+    monkeypatch.delenv("FIXTURE_GEMINI_API_KEY", raising=False)
 
     config_path = _write(tmp_path, _INSTALLATION)
     (tmp_path / ".env").write_text(
-        "FIXTURE_OPENAI_API_KEY=should-not-be-read\n", encoding="utf-8"
+        "FIXTURE_OPENAI_API_KEY=root-should-not-be-read\n", encoding="utf-8"
+    )
+    (config_path.parent / ".env").write_text(
+        "FIXTURE_GEMINI_API_KEY=config-dir-should-not-be-read\n", encoding="utf-8"
     )
 
     build_ctx_from_path(config_path, app_name="fixture_app")
 
     assert "FIXTURE_OPENAI_API_KEY" not in os.environ
+    assert "FIXTURE_GEMINI_API_KEY" not in os.environ
+
+
+def test_a_relative_declaration_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative path would have to be resolved against something.
+
+    Every candidate base -- the config file, the installation root, the working
+    directory -- is a convention this declaration exists to remove, so the
+    ambiguity is refused rather than resolved.
+    """
+    monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
+    (tmp_path / "install" / ".env").parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ConfigError, match="must be an absolute path"):
+        build_ctx_from_path(_write(tmp_path, _with_env_file(".env")), app_name="fixture_app")
+
+
+def test_a_declared_file_that_is_not_there_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Declaring a file and finding nothing is an error, not an absence.
+
+    Skipping it silently would let the run proceed without values it was told
+    exist, and fail later as an unresolved reference naming a variable rather
+    than the file that should have held it.
+    """
+    monkeypatch.delenv("FIXTURE_OPENAI_API_KEY", raising=False)
+    absent = str(tmp_path / "nowhere" / "runtime.env")
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        build_ctx_from_path(_write(tmp_path, _with_env_file(absent)), app_name="fixture_app")
 
 
 def test_a_real_environment_value_still_wins_over_the_file(
@@ -201,12 +219,12 @@ def test_a_real_environment_value_still_wins_over_the_file(
     monkeypatch.setenv("FIXTURE_OPENAI_API_KEY", "from-the-process")
     monkeypatch.setenv("FIXTURE_GEMINI_API_KEY", "dummy-gemini")
 
-    config_path = _write(tmp_path, _WITH_ROOT)
-    (tmp_path / ".env").write_text(
-        "FIXTURE_OPENAI_API_KEY=from-the-file\n", encoding="utf-8"
-    )
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text("FIXTURE_OPENAI_API_KEY=from-the-file\n", encoding="utf-8")
 
-    build_ctx_from_path(config_path, app_name="fixture_app")
+    build_ctx_from_path(
+        _write(tmp_path, _with_env_file(str(env_file))), app_name="fixture_app"
+    )
 
     assert os.environ["FIXTURE_OPENAI_API_KEY"] == "from-the-process"
 
