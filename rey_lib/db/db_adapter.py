@@ -68,18 +68,27 @@ class PageResult:
         rows: This page's rows, each a column-to-value mapping. At most
             ``limit`` of them.
         total_row_count: How many rows the whole query returns, **not** how many
-            are on this page. Counted by executing the same filtered query, so
-            it describes that query and never the loaded slice.
+            are on this page -- or **None where the provider does not count**.
+
+            None means *unknown*, and never zero. A provider counts only where
+            counting is an operation it can afford: over a table it is cheap,
+            and over a file it is a full parse of that file, which is not a
+            price to pay on every page. A reader of this field must say
+            "unknown" rather than draw "no rows" over rows that plainly exist.
         offset: Where this page starts in the whole result.
         limit: The most rows this page may hold.
         next_offset: Where the following page starts, or None when this page
-            reaches the end. Carried so a caller is not left deriving "is there
-            more" from arithmetic.
+            reaches the end.
+
+            **This is the continuation signal, not a convenience.** Where
+            ``total_row_count`` is None, nothing else says whether another page
+            exists -- there is no total to do arithmetic against -- so this must
+            survive every crossing between here and whatever draws the page.
     """
 
     columns: list[str]
     rows: list[dict[str, Any]]
-    total_row_count: int
+    total_row_count: int | None
     offset: int
     limit: int
     next_offset: int | None = None

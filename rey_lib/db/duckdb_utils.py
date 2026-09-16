@@ -1084,14 +1084,22 @@ def execute_page(
     order_by: Optional[list[dict[str, Any]]] = None,
     filters: Optional[list[dict[str, Any]]] = None,
 ) -> Any:
-    """Return one page of a query, and the size of the whole result.
+    """Return one page of a query. **No total: this provider does not count.**
 
-    **What the total means here.** The count and the page are two reads. Where
-    the query reads an external file -- which is what a CSV opened in the
-    workbench is -- no transaction owns that file, so the total is an exact
-    count of the query at the moment it was counted and not a snapshot the page
-    is guaranteed to share. Said plainly rather than inherited from the
-    PostgreSQL provider, which has a transaction to offer and does.
+    Counting rows in a file means parsing the file. This used to run a
+    ``count(*)`` beside every page, so opening a large JSON meant parsing it
+    twice per page and the Console stopped responding. A total is worth having
+    where it is cheap; here it is the most expensive thing on the path.
+
+    So ``total_row_count`` is None -- unknown, never zero -- and continuation is
+    answered by reading one row past the page. If that row is there, another
+    page follows.
+
+    **This bounds what is returned, not what is read.** ``LIMIT`` caps result
+    rows; how much of the file DuckDB must inspect to produce them is its own
+    affair, and a filter, an ordering or schema inference can still make it read
+    far more, up to all of it. What is removed here is the guaranteed whole-file
+    parse, not the cost of the read itself.
 
     Both statements run on a handle from ``conn.cursor()``: DuckDB's own way to
     get a second handle on the same database, catalog and registered relations
@@ -1109,7 +1117,8 @@ def execute_page(
         filters: Column/operator/value mappings, or None.
 
     Returns:
-        One ``PageResult``.
+        One ``PageResult`` whose ``total_row_count`` is None and whose
+        ``next_offset`` is set when a further page exists.
 
     Raises:
         UnsupportedDatabaseCapabilityError: If this statement cannot be paged.
@@ -1129,33 +1138,36 @@ def execute_page(
         # UnsupportedDatabaseCapabilityError.
         _refuse_unpageable(handle, wrapped)
         try:
-            counted = handle.execute(
-                f"SELECT count(*) FROM {wrapped}{where}", bound or None,
-            ).fetchone()
-            total = int((counted or [0])[0] or 0)
-
-            # offset and limit are written in rather than bound: they are
+            # One row beyond the page. Its existence is the whole continuation
+            # signal: it says another page follows without anyone counting the
+            # rows that make it up.
+            #
+            # offset and limit are written in rather than bound -- they are
             # integers this module validated, so there is nothing to bind
-            # against, and a page with no filter then carries no parameters
-            # at all.
+            # against, and a page with no filter then carries no parameters.
             paged = handle.execute(
                 f"SELECT * FROM {wrapped}{where}{order}"
-                f"\nLIMIT {limit:d} OFFSET {offset:d}",
+                f"\nLIMIT {limit + 1:d} OFFSET {offset:d}",
                 bound or None,
             )
             columns = [column[0] for column in paged.description or []]
-            rows = [dict(zip(columns, row)) for row in paged.fetchall()]
+            fetched = paged.fetchall()
         except duckdb.Error as exc:
             raise DatabaseError(f"The page could not be read: {exc}") from exc
     finally:
         handle.close()
 
-    consumed = offset + len(rows)
+    has_more = len(fetched) > limit
+    rows = [dict(zip(columns, row)) for row in fetched[:limit]]
     return PageResult(
         columns=columns,
         rows=rows,
-        total_row_count=total,
+        # Not counted. Over a file that is a full parse, and it would be paid on
+        # every page -- which is what made opening a large one hang. None is
+        # unknown, and the surfaces above say so rather than showing a number
+        # they would have had to invent.
+        total_row_count=None,
         offset=offset,
         limit=limit,
-        next_offset=consumed if consumed < total else None,
+        next_offset=offset + limit if has_more else None,
     )
