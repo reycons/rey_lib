@@ -932,3 +932,230 @@ def _duckdb_dependencies(conn: duckdb.DuckDBPyConnection) -> dict[str, list[dict
         uniq = {(d["object_type"], d["schema"], d["name"]): d for d in deps}
         result[key] = [uniq[k] for k in sorted(uniq)]
     return result
+
+
+# ---------------------------------------------------------------------------
+# Paging
+#
+# One page of a reader's own query, with the size of the whole result beside
+# it. Everything dialect-specific lives here; DBAdapter only dispatches.
+#
+# This is the same capability postgres_utils offers and deliberately not the
+# same implementation. Two provider facts decide that:
+#
+#   * a DuckDB handle is a raw duckdb.DuckDBPyConnection, not a SQLAlchemy one,
+#     so the borrowed-connection helper the PostgreSQL path uses does not apply;
+#   * a file-querying connection is ':memory:', and a second connect(':memory:')
+#     opens a DIFFERENT, EMPTY database. Opening one here would page a database
+#     that has never seen the file.
+#
+# DuckDB's own way to get a second handle on the SAME database is cursor(),
+# which shares the catalog and any registered relation. That is what this uses.
+# ---------------------------------------------------------------------------
+
+#: The page a caller gets when it names no size, and the largest it may name.
+#: The rule is the estate's -- rey_lib.logs.file_hierarchy established it and
+#: postgres_utils follows it -- because a page size taken on trust from a caller
+#: is an unbounded read wearing a parameter.
+_DEFAULT_PAGE_ROWS = 100
+_MAX_PAGE_ROWS = 500
+
+#: What the wrapped query is called, so a filter or an order naming a column is
+#: unambiguous.
+_PAGE_ALIAS = "rey_page"
+
+#: Filter operators, by the name a caller uses. The operator and the identifier
+#: are written; every value is bound.
+_PAGE_FILTER_OPERATORS: dict[str, str] = {
+    "equals": "{column} = ?",
+    "notEquals": "{column} <> ?",
+    "contains": "CAST({column} AS VARCHAR) ILIKE '%' || ? || '%'",
+    "notContains": "CAST({column} AS VARCHAR) NOT ILIKE '%' || ? || '%'",
+    "startsWith": "CAST({column} AS VARCHAR) ILIKE ? || '%'",
+    "endsWith": "CAST({column} AS VARCHAR) ILIKE '%' || ?",
+    "gt": "{column} > ?",
+    "gte": "{column} >= ?",
+    "lt": "{column} < ?",
+    "lte": "{column} <= ?",
+}
+
+
+def _page_identifier(name: str) -> str:
+    """Return one identifier, quoted so any column name is safe to write.
+
+    A CSV's header decides these names, so they may contain anything a
+    spreadsheet allowed -- a space, a keyword, a quotation mark. Doubling the
+    quote makes this total, where a pattern would refuse legitimate headers.
+    """
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _validated_page_bounds(offset: int, limit: int) -> tuple[int, int]:
+    """Return the page bounds, refused rather than clamped when out of range."""
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise DatabaseError("offset must be a nonnegative integer.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise DatabaseError("limit must be a positive integer.")
+    if limit > _MAX_PAGE_ROWS:
+        raise DatabaseError(f"limit must not exceed {_MAX_PAGE_ROWS}.")
+    return offset, limit
+
+
+def _page_wrapped(sql_text: str) -> str:
+    """Return the reader's query as a subquery this module can build on."""
+    inner = str(sql_text or "").strip().rstrip(";").strip()
+    if not inner:
+        raise DatabaseError("SQL text is required.")
+    return f"({inner}) AS {_PAGE_ALIAS}"
+
+
+def _page_filters(
+    filters: Optional[list[dict[str, Any]]],
+) -> tuple[str, list[Any]]:
+    """Return the WHERE clause and the values it binds."""
+    if not filters:
+        return "", []
+    clauses: list[str] = []
+    values: list[Any] = []
+    for one in filters:
+        column = str(one.get("column") or "").strip()
+        operator = str(one.get("operator") or "equals").strip()
+        if not column:
+            raise DatabaseError("A filter must name a column.")
+        template = _PAGE_FILTER_OPERATORS.get(operator)
+        if template is None:
+            raise DatabaseError(
+                f"Unknown filter operator '{operator}'. "
+                f"Known operators: {sorted(_PAGE_FILTER_OPERATORS)}."
+            )
+        clauses.append(template.format(column=_page_identifier(column)))
+        values.append(one.get("value"))
+    return "\nWHERE  " + "\n   AND ".join(clauses), values
+
+
+def _page_order(order_by: Optional[list[dict[str, Any]]]) -> str:
+    """Return the ORDER BY clause, or nothing when no order was named.
+
+    No order is left alone rather than invented: imposing one would discard an
+    ORDER BY the reader's own query already carried.
+    """
+    if not order_by:
+        return ""
+    terms: list[str] = []
+    for one in order_by:
+        column = str(one.get("column") or "").strip()
+        if not column:
+            raise DatabaseError("An ordering must name a column.")
+        descending = str(one.get("direction") or "asc").lower() == "desc"
+        terms.append(f"{_page_identifier(column)} {'DESC' if descending else 'ASC'}")
+    return "\nORDER BY " + ", ".join(terms)
+
+
+def _refuse_unpageable(handle: duckdb.DuckDBPyConnection, wrapped: str) -> None:
+    """Decline here, before the reader's statement has been executed.
+
+    DuckDB decides, not a keyword scan: EXPLAIN plans the wrapped query and
+    executes none of it, so a statement that cannot be read as a subquery -- a
+    batch, a definition, a call -- fails to parse and is declined without
+    having run.
+
+    The ordering is the contract, not a preference. A declination is answered
+    by executing the same statement again on the eager path, and the statement
+    is the reader's own, so one raised after execution had begun would apply it
+    twice.
+    """
+    from rey_lib.errors.error_utils import UnsupportedDatabaseCapabilityError
+
+    try:
+        handle.execute(f"EXPLAIN SELECT 1 FROM {wrapped}")
+    except duckdb.Error as exc:
+        raise UnsupportedDatabaseCapabilityError(
+            "This statement cannot be paged: it is not a query that can be "
+            f"read as a subquery. {exc}"
+        ) from exc
+
+
+def execute_page(
+    conn: duckdb.DuckDBPyConnection,
+    sql_text: str,
+    *,
+    offset: int,
+    limit: int,
+    order_by: Optional[list[dict[str, Any]]] = None,
+    filters: Optional[list[dict[str, Any]]] = None,
+) -> Any:
+    """Return one page of a query, and the size of the whole result.
+
+    **What the total means here.** The count and the page are two reads. Where
+    the query reads an external file -- which is what a CSV opened in the
+    workbench is -- no transaction owns that file, so the total is an exact
+    count of the query at the moment it was counted and not a snapshot the page
+    is guaranteed to share. Said plainly rather than inherited from the
+    PostgreSQL provider, which has a transaction to offer and does.
+
+    Both statements run on a handle from ``conn.cursor()``: DuckDB's own way to
+    get a second handle on the same database, catalog and registered relations
+    included. Opening another connection would be wrong rather than merely
+    wasteful, because a file-querying connection is ``:memory:`` and a second
+    one of those is a different, empty database.
+
+    Args:
+        conn: Open DuckDB connection.
+        sql_text: The query to page, exactly as the reader wrote it.
+        offset: Where the page starts.
+        limit: The most rows the page may hold.
+        order_by: Column/direction mappings, or None to leave the query's own
+            ordering alone.
+        filters: Column/operator/value mappings, or None.
+
+    Returns:
+        One ``PageResult``.
+
+    Raises:
+        UnsupportedDatabaseCapabilityError: If this statement cannot be paged.
+            Raised before the statement is executed, never after.
+        DatabaseError: If the bounds are invalid, or execution failed.
+    """
+    from rey_lib.db.db_adapter import PageResult
+
+    offset, limit = _validated_page_bounds(offset, limit)
+    wrapped = _page_wrapped(sql_text)
+    where, bound = _page_filters(filters)
+    order = _page_order(order_by)
+
+    handle = conn.cursor()
+    try:
+        # Declined here or not at all. Nothing below this line may raise
+        # UnsupportedDatabaseCapabilityError.
+        _refuse_unpageable(handle, wrapped)
+        try:
+            counted = handle.execute(
+                f"SELECT count(*) FROM {wrapped}{where}", bound or None,
+            ).fetchone()
+            total = int((counted or [0])[0] or 0)
+
+            # offset and limit are written in rather than bound: they are
+            # integers this module validated, so there is nothing to bind
+            # against, and a page with no filter then carries no parameters
+            # at all.
+            paged = handle.execute(
+                f"SELECT * FROM {wrapped}{where}{order}"
+                f"\nLIMIT {limit:d} OFFSET {offset:d}",
+                bound or None,
+            )
+            columns = [column[0] for column in paged.description or []]
+            rows = [dict(zip(columns, row)) for row in paged.fetchall()]
+        except duckdb.Error as exc:
+            raise DatabaseError(f"The page could not be read: {exc}") from exc
+    finally:
+        handle.close()
+
+    consumed = offset + len(rows)
+    return PageResult(
+        columns=columns,
+        rows=rows,
+        total_row_count=total,
+        offset=offset,
+        limit=limit,
+        next_offset=consumed if consumed < total else None,
+    )
