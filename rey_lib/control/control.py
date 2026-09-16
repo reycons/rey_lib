@@ -1257,6 +1257,21 @@ class Control:
                                required=required)
         return rows[0] if rows else None
 
+    def development_recipe(self, subject: str,
+                           required: bool = True) -> Optional[dict[str, Any]]:
+        """Return one recipe node as the document it reads as.
+
+        The subject is the node's own, as the projection composed it: a recipe,
+        or one of its sections. Which of those it names is the routine's to
+        read, not this object's to parse -- and the routine assembles the
+        document whole, so nothing is composed here. A second assembly would be
+        a second answer to what a recipe looks like.
+        """
+        rows = self._call_rows("find_development_recipe",
+                               {"subject": subject},
+                               required=required)
+        return rows[0] if rows else None
+
     def file_tree_nodes(self, parent_key: Optional[str] = None,
                         required: bool = True) -> list[dict[str, Any]]:
         """Return the children of one node in the File Manifest tree.
