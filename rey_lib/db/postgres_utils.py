@@ -2059,6 +2059,11 @@ _PAGE_ISOLATION = "REPEATABLE READ"
 #: reference in a filter or an order is unambiguous.
 _PAGE_ALIAS = "rey_page"
 
+#: The page's weight ceiling. Restated rather than imported at module level:
+#: db_adapter reaches this module through the registry, so importing it back
+#: here at import time would close the circle.
+_MAX_PAGE_BYTES = 8 * 1024 * 1024
+
 #: Filter operators, by the name the caller uses. A value is always bound; only
 #: the operator and the identifier are written into the statement, and the
 #: operator can only be one of these.
@@ -2175,6 +2180,35 @@ def _rendered_order(order_by: Optional[list[dict[str, Any]]]) -> str:
     return "\nORDER BY " + ", ".join(terms)
 
 
+def _weighed(
+    result: Any,
+    columns: list[str],
+    max_bytes: int,
+) -> list[dict[str, Any]]:
+    """Take rows until the next one would not fit the page's weight budget.
+
+    A row count bounds the wrong thing on its own. Fifty rows each holding a
+    five-megabyte text column are fifty rows to LIMIT and a quarter of a
+    gigabyte to whatever carries them.
+
+    **Nothing is clipped.** A row is taken whole or left for the next page, and
+    the first row is always taken however large -- returning it intact is the
+    answer, and trimming it would be inventing data.
+    """
+    from rey_lib.db.db_adapter import row_transport_size
+
+    rows: list[dict[str, Any]] = []
+    used = 0
+    for record in result:
+        mapped = dict(zip(columns, record))
+        weight = row_transport_size(mapped)
+        if rows and used + weight > max_bytes:
+            break
+        rows.append(mapped)
+        used += weight
+    return rows
+
+
 def _refuse_if_not_pageable(core: Any, wrapped: str) -> None:
     """Decline here, before the reader's statement has been executed.
 
@@ -2212,8 +2246,14 @@ def execute_page(
     limit: int,
     order_by: Optional[list[dict[str, Any]]] = None,
     filters: Optional[list[dict[str, Any]]] = None,
+    max_bytes: int = _MAX_PAGE_BYTES,
 ) -> Any:
     """Return one page of a query, and the exact size of the whole result.
+
+    **A page is bounded twice: by rows and by weight.** ``limit`` is a ceiling,
+    not a promise -- rows stop being taken once the next would push the page
+    past ``max_bytes``, so a query whose rows carry large text returns fewer of
+    them. Values are never clipped to fit.
 
     Both statements run inside one REPEATABLE READ transaction on a connection
     this operation owns, so the count and the rows describe one state. The
@@ -2287,7 +2327,7 @@ def execute_page(
                         f"SELECT * FROM {wrapped}{order}{bounds}"
                     )
                 columns = list(paged.keys())
-                rows = [dict(zip(columns, row)) for row in paged.fetchall()]
+                rows = _weighed(paged, columns, max_bytes)
             except Exception as exc:
                 raise DatabaseError(
                     f"The page could not be read: {_reason(exc)}"
@@ -2300,5 +2340,8 @@ def execute_page(
         total_row_count=total,
         offset=offset,
         limit=limit,
+        # Counted from the rows actually returned, never from the limit asked
+        # for: a page stopped short by the byte budget returns fewer, and
+        # offset + limit would step over the rows it did not send.
         next_offset=consumed if consumed < total else None,
     )

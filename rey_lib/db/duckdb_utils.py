@@ -964,6 +964,11 @@ _MAX_PAGE_ROWS = 500
 #: unambiguous.
 _PAGE_ALIAS = "rey_page"
 
+#: The page's weight ceiling. Restated from db_adapter rather than imported at
+#: module level, because importing it there would close the circle -- db_adapter
+#: imports this module through the registry.
+_MAX_PAGE_BYTES = 8 * 1024 * 1024
+
 #: Filter operators, by the name a caller uses. The operator and the identifier
 #: are written; every value is bound.
 _PAGE_FILTER_OPERATORS: dict[str, str] = {
@@ -1075,6 +1080,44 @@ def _refuse_unpageable(handle: duckdb.DuckDBPyConnection, wrapped: str) -> None:
         ) from exc
 
 
+def _weighed(
+    cursor: Any,
+    columns: list[str],
+    limit: int,
+    max_bytes: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Take rows until the next one would not fit, and say whether more remain.
+
+    Row by row rather than ``fetchall``: the budget exists to stop a page
+    weighing more than its carrier can hold, and materialising every row first
+    to discard most of them would pay that cost before avoiding it.
+
+    **Nothing is clipped.** A row is taken whole or not taken. The first row is
+    always taken, however large, because returning it intact is the answer and
+    trimming it would be inventing data.
+    """
+    from rey_lib.db.db_adapter import row_transport_size
+
+    rows: list[dict[str, Any]] = []
+    used = 0
+    while True:
+        record = cursor.fetchone()
+        if record is None:
+            return rows, False
+        if len(rows) >= limit:
+            # The row read past the page. Its existence is the whole
+            # continuation signal.
+            return rows, True
+        mapped = dict(zip(columns, record))
+        weight = row_transport_size(mapped)
+        if rows and used + weight > max_bytes:
+            # Stopped short. The rows already taken are whole, and this one
+            # begins the next page.
+            return rows, True
+        rows.append(mapped)
+        used += weight
+
+
 def execute_page(
     conn: duckdb.DuckDBPyConnection,
     sql_text: str,
@@ -1083,6 +1126,7 @@ def execute_page(
     limit: int,
     order_by: Optional[list[dict[str, Any]]] = None,
     filters: Optional[list[dict[str, Any]]] = None,
+    max_bytes: int = _MAX_PAGE_BYTES,
 ) -> Any:
     """Return one page of a query. **No total: this provider does not count.**
 
@@ -1101,6 +1145,14 @@ def execute_page(
     far more, up to all of it. What is removed here is the guaranteed whole-file
     parse, not the cost of the read itself.
 
+    **A page is bounded twice: by rows and by weight.** ``limit`` is a ceiling,
+    not a promise. Rows stop being taken once the next would push the page past
+    ``max_bytes``, so a query whose rows are five megabytes each returns one or
+    two of them rather than fifty -- measured at 243 MB for a fifty-row page,
+    which is the payload that took the Console down. Values are never clipped to
+    fit: a row is taken whole or left for the next page, and a row larger than
+    the budget on its own is returned whole and alone.
+
     Both statements run on a handle from ``conn.cursor()``: DuckDB's own way to
     get a second handle on the same database, catalog and registered relations
     included. Opening another connection would be wrong rather than merely
@@ -1115,6 +1167,8 @@ def execute_page(
         order_by: Column/direction mappings, or None to leave the query's own
             ordering alone.
         filters: Column/operator/value mappings, or None.
+        max_bytes: The most the page may weigh. A ceiling on the page, never a
+            limit applied to any single value.
 
     Returns:
         One ``PageResult`` whose ``total_row_count`` is None and whose
@@ -1151,14 +1205,11 @@ def execute_page(
                 bound or None,
             )
             columns = [column[0] for column in paged.description or []]
-            fetched = paged.fetchall()
+            rows, has_more = _weighed(paged, columns, limit, max_bytes)
         except duckdb.Error as exc:
             raise DatabaseError(f"The page could not be read: {exc}") from exc
     finally:
         handle.close()
-
-    has_more = len(fetched) > limit
-    rows = [dict(zip(columns, row)) for row in fetched[:limit]]
     return PageResult(
         columns=columns,
         rows=rows,
@@ -1169,5 +1220,9 @@ def execute_page(
         total_row_count=None,
         offset=offset,
         limit=limit,
-        next_offset=offset + limit if has_more else None,
+        # Where the next unreturned row is -- counted from the rows actually
+        # returned, never from the limit asked for. A page stopped short by the
+        # byte budget returns fewer than `limit`, and `offset + limit` would
+        # step straight over the rows it did not send.
+        next_offset=offset + len(rows) if has_more else None,
     )
