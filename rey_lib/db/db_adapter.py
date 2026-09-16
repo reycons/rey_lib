@@ -47,7 +47,42 @@ from rey_lib.errors.error_utils import (
 # rey_lib.files at module top creates a circular import that breaks any caller
 # that imports db_adapter before rey_lib.files (e.g. control / procedure_map).
 
-__all__ = ["DBAdapter", "StatementResult"]
+__all__ = ["DBAdapter", "PageResult", "StatementResult"]
+
+
+@dataclass(frozen=True)
+class PageResult:
+    """One bounded page of a result, and the size of the whole result.
+
+    A success type only. There is no "could not page" state to read here:
+    a provider that cannot page says so by raising, because an empty page with
+    a zero total would publish "this query has no rows" as though it were the
+    answer.
+
+    Shaped on the page models this estate already uses -- ``FileHierarchyPage``
+    in ``rey_lib.logs.file_hierarchy`` carries the same offset/limit/total/
+    next_offset -- so a reader who knows one knows this.
+
+    Attributes:
+        columns: The column names, in the order they were returned.
+        rows: This page's rows, each a column-to-value mapping. At most
+            ``limit`` of them.
+        total_row_count: How many rows the whole query returns, **not** how many
+            are on this page. Counted by executing the same filtered query, so
+            it describes that query and never the loaded slice.
+        offset: Where this page starts in the whole result.
+        limit: The most rows this page may hold.
+        next_offset: Where the following page starts, or None when this page
+            reaches the end. Carried so a caller is not left deriving "is there
+            more" from arithmetic.
+    """
+
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    total_row_count: int
+    offset: int
+    limit: int
+    next_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -501,6 +536,77 @@ class DBAdapter:
             # those are is measured, never assumed from a method existing.
             return list(own(conn, sql_text, limit=limit))
         return _execute_statements_over_dbapi(conn, sql_text, limit=limit)
+
+    def execute_page(
+        self,
+        conn: Any,
+        sql_text: str,
+        *,
+        offset: int,
+        limit: int,
+        order_by: Optional[list[dict[str, Any]]] = None,
+        filters: Optional[list[dict[str, Any]]] = None,
+    ) -> PageResult:
+        """Return one page of a query's result, and the size of the whole.
+
+        **This dispatches and builds nothing.** Paging syntax, the count, and
+        the judgement of whether a statement can be paged at all are dialect
+        facts, so they live in the provider. There is deliberately no generic
+        DBAPI implementation: DBAPI gives execution mechanics, not paging or
+        count semantics, and writing one here would put SQL rendering back into
+        the shared layer this is keeping it out of.
+
+        A provider that declares no paging capability does not have one, and
+        that is an answer rather than a shortfall -- reported, never softened
+        into an empty page, which would publish "this query has no rows" as
+        though it were a fact.
+
+        **The invariant a caller depends on:** a provider may decline *only
+        before it has executed the submitted statement*. A declination is
+        answered by executing that statement again on the eager path, and the
+        statement is the reader's own -- ``execute_statements`` exists to serve
+        DDL and calls -- so a declination raised after execution began would
+        apply an insert, a delete or a definition twice. Once execution starts,
+        every outcome is an execution outcome: this result, or a DatabaseError
+        that propagates.
+
+        Args:
+            conn: Open connection handle.
+            sql_text: The query to page, exactly as written.
+            offset: Where the page starts. Validated by the provider.
+            limit: The most rows the page may hold. Validated by the provider
+                against its own maximum, so a caller cannot ask for the whole
+                table by naming a large enough number.
+            order_by: The ordering to apply, as column/direction mappings, or
+                None to leave the statement's own ordering alone.
+            filters: The filters to apply, as column/operator/value mappings,
+                or None for an unfiltered read.
+
+        Returns:
+            One :class:`PageResult`.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If this provider cannot page at
+                all, or cannot page this statement. Raised before the statement
+                is executed, never after.
+            DatabaseError: If execution failed. A refusal is not a declination
+                and must not be reported as one.
+        """
+        provider = self._provider_for_conn(conn)
+        backend = _backend(provider)
+        own = getattr(backend, "execute_page", None)
+        if not callable(own):
+            raise UnsupportedDatabaseCapabilityError(
+                f"DBAdapter: provider '{provider}' cannot page a query result."
+            )
+        return own(
+            conn,
+            sql_text,
+            offset=offset,
+            limit=limit,
+            order_by=order_by,
+            filters=filters,
+        )
 
     def query_rows(
         self,

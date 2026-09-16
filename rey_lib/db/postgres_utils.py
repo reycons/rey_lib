@@ -2032,3 +2032,273 @@ def _postgres_type_ddl(conn: Any, schema: str, type_name: str) -> str:
         return f"-- Unsupported PostgreSQL type kind '{typtype}' for {schema}.{type_name}."
     finally:
         cursor.close()
+
+
+# ---------------------------------------------------------------------------
+# Paging
+#
+# A page of a reader's own query, with the size of the whole result beside it.
+# Everything dialect-specific about that lives here: whether a statement can be
+# paged at all, how a page is cut, how the count is taken, and the snapshot the
+# two share. DBAdapter only dispatches.
+# ---------------------------------------------------------------------------
+
+#: The page a caller gets when it names no size, and the largest it may name.
+#: Bounds follow rey_lib.logs.file_hierarchy, which established this shape: a
+#: page size taken on trust is an unbounded read wearing a parameter.
+_DEFAULT_PAGE_ROWS = 100
+_MAX_PAGE_ROWS = 500
+
+#: The count and the page must describe one state. READ COMMITTED takes a fresh
+#: snapshot per statement, so a transaction at that level would buy nothing --
+#: the two statements would still see different data. REPEATABLE READ fixes the
+#: snapshot for the whole transaction, which is the guarantee being offered.
+_PAGE_ISOLATION = "REPEATABLE READ"
+
+#: What the wrapped query is called. Named rather than anonymous so a column
+#: reference in a filter or an order is unambiguous.
+_PAGE_ALIAS = "rey_page"
+
+#: Filter operators, by the name the caller uses. A value is always bound; only
+#: the operator and the identifier are written into the statement, and the
+#: operator can only be one of these.
+_FILTER_OPERATORS: dict[str, str] = {
+    "equals": "{column} = %s",
+    "notEquals": "{column} <> %s",
+    "contains": "{column}::text ILIKE '%%' || %s || '%%'",
+    "notContains": "{column}::text NOT ILIKE '%%' || %s || '%%'",
+    "startsWith": "{column}::text ILIKE %s || '%%'",
+    "endsWith": "{column}::text ILIKE '%%' || %s",
+    "gt": "{column} > %s",
+    "gte": "{column} >= %s",
+    "lt": "{column} < %s",
+    "lte": "{column} <= %s",
+}
+
+
+def _quoted_identifier(name: str) -> str:
+    """Return one identifier, quoted so any column name is safe to write.
+
+    A result column may be called anything a query chose to call it, including
+    a keyword or a name with a quote in it. Doubling the quote is what makes
+    this total rather than a pattern that rejects legitimate names.
+    """
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _validated_page(offset: int, limit: int) -> tuple[int, int]:
+    """Return the page bounds, refused rather than clamped when out of range.
+
+    The same rule ``rey_lib.logs.file_hierarchy`` applies to its pages. A
+    refusal, not a silent clamp: a caller that asked for a million rows and
+    quietly received five hundred has been told something untrue about what it
+    is looking at.
+    """
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise DatabaseError("offset must be a nonnegative integer.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise DatabaseError("limit must be a positive integer.")
+    if limit > _MAX_PAGE_ROWS:
+        raise DatabaseError(f"limit must not exceed {_MAX_PAGE_ROWS}.")
+    return offset, limit
+
+
+def _wrapped(sql_text: str) -> str:
+    """Return the reader's query as a subquery this module can build on."""
+    inner = str(sql_text or "").strip().rstrip(";").strip()
+    if not inner:
+        raise DatabaseError("SQL text is required.")
+    return f"({inner}) AS {_PAGE_ALIAS}"
+
+
+def _for_binding(wrapped: str) -> str:
+    """Return the wrapped query safe to execute with bound parameters.
+
+    The driver's placeholder is ``%s``, so in a statement that carries
+    parameters every literal percent means itself only when doubled. The
+    reader's SQL is their own and may well contain one -- ``LIKE '%2024%'`` is
+    an ordinary thing to type -- and without this the driver would read it as a
+    malformed placeholder and refuse a query that is perfectly valid.
+
+    Only for statements executed *with* parameters. A statement executed
+    without them is passed through untouched, because the driver does no
+    placeholder scanning there and doubling would leave the percents doubled.
+    """
+    return wrapped.replace("%", "%%")
+
+
+def _rendered_filters(
+    filters: Optional[list[dict[str, Any]]],
+) -> tuple[str, list[Any]]:
+    """Return the WHERE clause and the values it binds.
+
+    Only the column name and a chosen operator are written. Every value is
+    bound, so nothing a reader typed into a filter box reaches the statement as
+    text.
+    """
+    if not filters:
+        return "", []
+    clauses: list[str] = []
+    values: list[Any] = []
+    for one in filters:
+        column = str(one.get("column") or "").strip()
+        operator = str(one.get("operator") or "equals").strip()
+        if not column:
+            raise DatabaseError("A filter must name a column.")
+        template = _FILTER_OPERATORS.get(operator)
+        if template is None:
+            raise DatabaseError(
+                f"Unknown filter operator '{operator}'. "
+                f"Known operators: {sorted(_FILTER_OPERATORS)}."
+            )
+        clauses.append(template.format(column=_quoted_identifier(column)))
+        values.append(one.get("value"))
+    return "\nWHERE  " + "\n   AND ".join(clauses), values
+
+
+def _rendered_order(order_by: Optional[list[dict[str, Any]]]) -> str:
+    """Return the ORDER BY clause, or nothing when the caller named no order.
+
+    No order is a legitimate answer and is left alone: imposing one would
+    silently discard an ORDER BY the reader's own query already carried.
+    """
+    if not order_by:
+        return ""
+    terms: list[str] = []
+    for one in order_by:
+        column = str(one.get("column") or "").strip()
+        if not column:
+            raise DatabaseError("An ordering must name a column.")
+        descending = str(one.get("direction") or "asc").lower() == "desc"
+        direction = "DESC" if descending else "ASC"
+        terms.append(f"{_quoted_identifier(column)} {direction}")
+    return "\nORDER BY " + ", ".join(terms)
+
+
+def _refuse_if_not_pageable(core: Any, wrapped: str) -> None:
+    """Decline here, before the reader's statement has been executed.
+
+    PostgreSQL decides, not a keyword scan: ``EXPLAIN`` plans the wrapped query
+    and runs none of it, so a statement that cannot be a subquery -- a batch, a
+    definition, a call, a data-modifying CTE -- fails to parse and is declined
+    without having run.
+
+    This ordering is the contract. A declination is answered by executing the
+    same statement again on the eager path, so one raised after execution had
+    begun would apply an insert or a definition twice.
+    """
+    from rey_lib.errors.error_utils import UnsupportedDatabaseCapabilityError
+
+    try:
+        core.exec_driver_sql(f"EXPLAIN SELECT 1 FROM {wrapped}")
+    except Exception as exc:
+        raise UnsupportedDatabaseCapabilityError(
+            "This statement cannot be paged: it is not a query that can be "
+            f"read as a subquery. {_reason(exc)}"
+        ) from exc
+
+
+def _reason(exc: Exception) -> str:
+    """One line of a driver failure, for an operator to act on."""
+    detail = " ".join(str(exc).split())
+    return detail[:200] if detail else exc.__class__.__name__
+
+
+def execute_page(
+    conn: Any,
+    sql_text: str,
+    *,
+    offset: int,
+    limit: int,
+    order_by: Optional[list[dict[str, Any]]] = None,
+    filters: Optional[list[dict[str, Any]]] = None,
+) -> Any:
+    """Return one page of a query, and the exact size of the whole result.
+
+    Both statements run inside one REPEATABLE READ transaction on a connection
+    this operation owns, so the count and the rows describe one state. The
+    shared handle is used only to reach the Engine: it is AUTOCOMMIT by
+    deliberate choice, because every consumer of a configured name holds the
+    same object, and opening a transaction on it would suspend all of them.
+
+    Consistency is per response, not per browse. A later page is a new
+    transaction and therefore a new snapshot, so a total may change between
+    pages as the data does.
+
+    Args:
+        conn: Open Rey connection handle, for its Engine.
+        sql_text: The query to page, exactly as the reader wrote it.
+        offset: Where the page starts.
+        limit: The most rows the page may hold.
+        order_by: Column/direction mappings, or None to leave the query's own
+            ordering alone.
+        filters: Column/operator/value mappings, or None.
+
+    Returns:
+        One ``PageResult``.
+
+    Raises:
+        UnsupportedDatabaseCapabilityError: If this statement cannot be paged.
+            Raised before the statement is executed.
+        DatabaseError: If the bounds are invalid, or execution failed.
+    """
+    from rey_lib.db._sqlalchemy import own_connection
+    from rey_lib.db.db_adapter import PageResult
+
+    offset, limit = _validated_page(offset, limit)
+    wrapped = _wrapped(sql_text)
+    bindable = _for_binding(wrapped)
+    where, bound = _rendered_filters(filters)
+    order = _rendered_order(order_by)
+
+    with own_connection(conn, isolation_level=_PAGE_ISOLATION) as core:
+        with core.begin():
+            # Declined here or not at all. Nothing below this line may raise
+            # UnsupportedDatabaseCapabilityError.
+            _refuse_if_not_pageable(core, wrapped)
+            try:
+                # Counted with parameters only when a filter supplied one.
+                # Which form of the subquery is used follows from that, and
+                # from nothing else.
+                if bound:
+                    counted = core.exec_driver_sql(
+                        f"SELECT count(*) FROM {bindable}{where}",
+                        tuple(bound),
+                    )
+                else:
+                    counted = core.exec_driver_sql(
+                        f"SELECT count(*) FROM {wrapped}"
+                    )
+                total = int(counted.scalar() or 0)
+
+                # offset and limit are written in rather than bound. They are
+                # integers this module validated, so there is nothing to bind
+                # against -- and a page with no filter then carries no
+                # parameters at all, which keeps the reader's own percent signs
+                # out of the driver's placeholder scan.
+                bounds = f"\nOFFSET {offset:d} LIMIT {limit:d}"
+                if bound:
+                    paged = core.exec_driver_sql(
+                        f"SELECT * FROM {bindable}{where}{order}{bounds}",
+                        tuple(bound),
+                    )
+                else:
+                    paged = core.exec_driver_sql(
+                        f"SELECT * FROM {wrapped}{order}{bounds}"
+                    )
+                columns = list(paged.keys())
+                rows = [dict(zip(columns, row)) for row in paged.fetchall()]
+            except Exception as exc:
+                raise DatabaseError(
+                    f"The page could not be read: {_reason(exc)}"
+                ) from exc
+
+    consumed = offset + len(rows)
+    return PageResult(
+        columns=columns,
+        rows=rows,
+        total_row_count=total,
+        offset=offset,
+        limit=limit,
+        next_offset=consumed if consumed < total else None,
+    )

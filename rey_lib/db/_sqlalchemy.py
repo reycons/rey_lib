@@ -7,6 +7,8 @@ use while provider implementations use the helpers in this module.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from rey_lib.errors.error_utils import ConfigError
@@ -111,6 +113,46 @@ def core_connection(conn: Any) -> Any:
     if not isinstance(conn, ReyConnection):
         raise TypeError("connection is not SQLAlchemy-backed")
     return conn._connection
+
+
+@contextmanager
+def own_connection(conn: Any, *, isolation_level: str = "") -> Iterator[Any]:
+    """Check out a connection of this operation's own, from the same Engine.
+
+    For the operation that needs a transaction. The handle a caller holds is
+    **shared** -- ``Connection.handle()`` returns one object to every consumer
+    of a configured name, and the Console serves requests concurrently -- and
+    PostgreSQL handles are opened AUTOCOMMIT precisely so that no consumer can
+    leave a transaction open across another's work. Beginning one on the shared
+    connection would recreate the failure that decision was made to end.
+
+    So this borrows a second connection from the Engine the handle already
+    carries, applies the isolation level to that connection alone, and closes
+    it on the way out. The shared connection's state is never read or changed.
+
+    Args:
+        conn: A Rey handle, used only to reach its Engine.
+        isolation_level: The level to execute under, or "" for the Engine's.
+
+    Yields:
+        A SQLAlchemy Connection owned by this operation.
+
+    Raises:
+        TypeError: If the handle is not SQLAlchemy-backed.
+    """
+    if not isinstance(conn, ReyConnection):
+        raise TypeError("connection is not SQLAlchemy-backed")
+    borrowed = conn._engine.connect()
+    try:
+        if isolation_level:
+            borrowed = borrowed.execution_options(
+                isolation_level=isolation_level,
+            )
+        yield borrowed
+    finally:
+        # Returned to the pool whatever happened. A borrowed connection left
+        # checked out is the leak this whole change is about.
+        borrowed.close()
 
 
 def raw_dbapi_connection(conn: Any) -> Any:
