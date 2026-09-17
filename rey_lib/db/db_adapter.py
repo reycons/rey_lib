@@ -47,13 +47,7 @@ from rey_lib.errors.error_utils import (
 # rey_lib.files at module top creates a circular import that breaks any caller
 # that imports db_adapter before rey_lib.files (e.g. control / procedure_map).
 
-__all__ = [
-    "DBAdapter",
-    "MAX_PAGE_BYTES",
-    "PageResult",
-    "StatementResult",
-    "row_transport_size",
-]
+__all__ = ["DBAdapter", "PageResult", "StatementResult"]
 
 
 @dataclass(frozen=True)
@@ -98,32 +92,6 @@ class PageResult:
     offset: int
     limit: int
     next_offset: int | None = None
-
-
-#: The most a page may weigh before it stops taking rows.
-#:
-#: A page is bounded twice, because a row count bounds the wrong thing on its
-#: own: fifty small rows and fifty five-megabyte rows are the same number to
-#: LIMIT and nothing like the same thing to whatever has to carry them. Measured
-#: at 243 MB for a fifty-row page of five-megabyte rows, which no browser
-#: survives.
-#:
-#: **The row count is a ceiling, not a promise.** A page returns up to the rows
-#: asked for, subject to this. Values are never clipped, summarised or rewritten
-#: to fit -- a row too large for the budget is returned whole and alone.
-MAX_PAGE_BYTES = 8 * 1024 * 1024
-
-
-def row_transport_size(row: dict[str, Any]) -> int:
-    """Return roughly what one row will weigh in transit.
-
-    An approximation on purpose. The exact encoding belongs to whoever puts the
-    page on a wire, and this is a guard rather than an accounting: what it has
-    to get right is the difference between a kilobyte and a megabyte, which it
-    does, and not the difference between 1,024 and 1,031 bytes, which nothing
-    here depends on.
-    """
-    return sum(len(str(value)) for value in row.values())
 
 
 @dataclass(frozen=True)
@@ -587,7 +555,6 @@ class DBAdapter:
         limit: int,
         order_by: Optional[list[dict[str, Any]]] = None,
         filters: Optional[list[dict[str, Any]]] = None,
-        max_bytes: int = MAX_PAGE_BYTES,
     ) -> PageResult:
         """Return one page of a query's result, and the size of the whole.
 
@@ -623,10 +590,6 @@ class DBAdapter:
                 None to leave the statement's own ordering alone.
             filters: The filters to apply, as column/operator/value mappings,
                 or None for an unfiltered read.
-            max_bytes: The most the page may weigh. Rows stop being added once
-                the next one would exceed it, so a page of large rows returns
-                fewer than ``limit``. A row larger than this on its own is
-                returned whole rather than trimmed to fit.
 
         Returns:
             One :class:`PageResult`.
@@ -652,7 +615,6 @@ class DBAdapter:
             limit=limit,
             order_by=order_by,
             filters=filters,
-            max_bytes=max_bytes,
         )
 
     def query_rows(
