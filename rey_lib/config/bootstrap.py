@@ -541,14 +541,18 @@ def _required_ai_control(ctx: Namespace) -> Any:
 def _ai_installation(ctx: Namespace) -> str:
     """Which installation's AI configuration this runtime is asking for.
 
-    ``ctx.installation`` finalizes into a namespace carrying its name rather
-    than a bare string, so the name is read from it. Stringifying the namespace
-    produced a value no group matches, and the runtime resolved to no tasks at
-    all -- silently, because an installation with no AI configuration is an
-    ordinary state.
+    ``ctx.installation`` is an :class:`~rey_lib.installation.installation.Installation`
+    and its name is read from it. This used to normalize the shape itself,
+    because there was no object to ask: stringifying the namespace produced a
+    value no group matches, and the runtime resolved to no tasks at all --
+    silently, because an installation with no AI configuration is an ordinary
+    state.
+
+    An installation-less context reaches here only if something asked for AI
+    configuration without an installation to hold it, which is reported rather
+    than guessed at.
     """
-    declared = getattr(ctx, "installation", None)
-    installation = str(getattr(declared, "name", None) or declared or "").strip()
+    installation = str(getattr(getattr(ctx, "installation", None), "name", "") or "").strip()
     if not installation:
         raise ConfigError(
             "AI configuration is held per installation, and this context names "

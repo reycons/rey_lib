@@ -85,7 +85,11 @@ def inspect_bridge(apps_root: Path, ctx: Any) -> dict[str, list[dict[str, Any]]]
     Returns:
         ``{"code": [...], "bindings": [...], "coverage": [...]}``.
     """
-    installation = str(getattr(getattr(ctx, "installation", None), "name", "") or "")
+    # Read from the object. The nested getattr this replaces existed only
+    # because the shape was uncertain; an installation-backed context carries an
+    # Installation, and a context without one names no installation at all.
+    declared = getattr(ctx, "installation", None)
+    installation = declared.name if declared is not None else ""
     control_map = str(
         getattr(getattr(ctx, "control", None), "procedure_map", "") or ""
     )

@@ -98,6 +98,7 @@ class ContextBuilder:
         ctx = Namespace(raw)
 
         self._resolve_paths_onto(ctx)
+        self._install_identity_onto(ctx)
 
         # Applications last of the collections: a parameter may resolve its
         # choices from workflows, pipelines or tools, and those are on ctx by
@@ -160,6 +161,57 @@ class ContextBuilder:
         self._metadata.resolve_values(resolver_strs)
         for name, resolved in path_resolver._paths.items():
             self._metadata.set_resolved(f"paths.{name}", str(resolved))
+
+    def _install_identity_onto(self, ctx: Namespace) -> None:
+        """Replace the declared ``installation`` block with the object.
+
+        The invariant is **not** that every context has an installation. It is
+        that every *installation-backed* context has exactly one canonical
+        ``Installation``, while an installation-less context stays valid:
+
+        - a context built from an installation's configuration carries the
+          object, and ``ctx.installation`` is the one answer to "which
+          installation is this", so no consumer re-derives it and none can
+          stringify a namespace into ``"namespace(name='local')"`` again;
+        - a standalone CLI context declares no ``installation:`` block, and
+          ``ctx.installation`` stays absent exactly as it is today.
+
+        Nothing is synthesized to make the type universal. A default or
+        placeholder installation would be an identity nobody declared, attached
+        to governed records that would then look attributed and not be.
+
+        A block that *is* declared must be valid, though: it names an
+        installation or it is a configuration error. Absent and broken are
+        different states and are not collapsed.
+
+        The declaration is read here and the object receives plain values: the
+        object never sees a configuration shape, so it can never grow a branch
+        for one.
+
+        Args:
+            ctx: The wrapped context, mutated in place.
+
+        Raises:
+            ConfigError: If an ``installation:`` block is declared but names no
+                installation.
+        """
+        # Deferred deliberately, not by oversight. rey_lib.installation's package
+        # __init__ imports folder_maker, which imports config_utils, which
+        # imports this module -- so a module-level import here closes a cycle and
+        # fails with a partially initialized config_utils. Importing the
+        # submodule directly does not avoid it, because the package __init__ runs
+        # either way. Restructuring those exports is a public-surface change and
+        # is logged rather than made here.
+        from rey_lib.installation.installation import Installation
+
+        declared = getattr(ctx, "installation", None)
+        if declared is None:
+            return
+
+        object.__setattr__(ctx, "installation", Installation(
+            name=getattr(declared, "name", None),
+            type=getattr(declared, "type", None),
+        ))
 
     def _path_resolver(self, ctx: Namespace) -> PathResolver | None:
         """Return the resolver for this context, or None when there is no path state.
