@@ -40,6 +40,11 @@ def test_ctx_file_args_apply_child_app_log_context(tmp_path: Path) -> None:
             "ctx_schema_version": "1.0",
             "ctx": {
                 "app_name": "pipeline_coordinator",
+                # The installation the transported state came from. A real
+                # snapshot always carries it, because every context the builder
+                # finishes records its own config_path; the child needs it to
+                # resolve against the same installation as its parent.
+                "config_path": str(tmp_path / "config.yaml"),
                 "paths": {"state": str(tmp_path / "state")},
             },
         }),

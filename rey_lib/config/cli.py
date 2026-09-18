@@ -219,13 +219,17 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
 
 
 def load_ctx_snapshot(ctx_file: str) -> "Namespace":
-    """Load a pipeline step ctx snapshot from a JSON file.
+    """Build the child context from transported pipeline state.
 
-    Plain JSON deserializer — does not read YAML, call config-loading
-    machinery, discover config folders, or apply pipeline overrides.
+    Transport, not construction. This reads the snapshot the coordinator wrote,
+    checks the schema version it declares, and hands the plain state to
+    :class:`~rey_lib.config.context_builder.ContextBuilder` -- the one authority
+    that finishes a context.
 
-    Validates ctx_schema_version == "1.0" and reconstructs a PathResolver
-    from the serialized paths dict so apps can call ctx.paths.resolve().
+    It used to assemble a context itself, and the two builders drifted: this one
+    constructed its own ``PathResolver`` and ran none of the rest, so every
+    pipeline child received ``ctx.applications`` as repr strings rather than
+    ``Application`` objects and nothing compared them.
 
     Parameters
     ----------
@@ -235,17 +239,18 @@ def load_ctx_snapshot(ctx_file: str) -> "Namespace":
     Returns
     -------
     Namespace
-        Context object equivalent to the one produced by build_ctx_from_path,
-        with ctx.paths as a PathResolver over pre-resolved path strings.
+        The completed child context, built by the same sequence that builds one
+        from installation files.
 
     Raises
     ------
     RuntimeError
-        If the file is missing, malformed, or has an unsupported schema version.
+        If the file is missing, malformed, has an unsupported schema version, or
+        carries no ``config_path`` to resolve relative references against.
     """
     import json
 
-    from rey_lib.config.config_utils import Namespace, PathResolver
+    from rey_lib.config.context_builder import ContextBuilder
 
     path = Path(ctx_file).expanduser().resolve()
     try:
@@ -258,13 +263,28 @@ def load_ctx_snapshot(ctx_file: str) -> "Namespace":
         raise RuntimeError(f"Unsupported ctx snapshot version: {version!r}")
 
     ctx_data: dict = data["ctx"]
-    ctx = Namespace(ctx_data)
 
-    paths_raw: dict = ctx_data.get("paths") or {}
-    path_resolver = PathResolver({k: Path(v) for k, v in paths_raw.items()})
-    object.__setattr__(ctx, "paths", path_resolver)
+    # The installation this state came from. Carried rather than rediscovered:
+    # a child resolving its own config file could pick a different one from the
+    # parent's, which is the divergence this whole seam exists to remove.
+    config_path_raw = ctx_data.get("config_path")
+    if not config_path_raw:
+        raise RuntimeError(
+            f"Ctx snapshot {ctx_file!r} names no config_path, so the installation it "
+            "came from cannot be established. The coordinator writes this; a snapshot "
+            "without it was not written by a complete context."
+        )
+    config_path = Path(str(config_path_raw)).expanduser()
 
-    return ctx
+    return ContextBuilder(
+        ctx_data,
+        config_dir=config_path.parent,
+        config_path=config_path,
+        runtime_path_tokens={},
+        resolved_paths={
+            name: str(value) for name, value in (ctx_data.get("paths") or {}).items()
+        },
+    ).build()
 
 
 def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":

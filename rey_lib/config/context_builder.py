@@ -26,6 +26,7 @@ from rey_lib.config.applications import build_applications
 from rey_lib.config.config_loader import _merge_compatible_collection
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_paths import (
+    PathResolver,
     _apply_path_resolver,
     _build_path_resolver,
     _resolve_paths,
@@ -53,8 +54,9 @@ class ContextBuilder:
         config_dir: Path,
         config_path: Path,
         runtime_path_tokens: dict[str, str],
-        metadata: ConfigMetadata,
+        metadata: ConfigMetadata | None = None,
         app_name: str | None = None,
+        resolved_paths: dict[str, str] | None = None,
     ) -> None:
         """Hold the inputs one context is assembled from.
 
@@ -63,8 +65,13 @@ class ContextBuilder:
             config_dir: The directory relative file references resolve against.
             config_path: The installation root config file, recorded on the ctx.
             runtime_path_tokens: Date tokens a path template may reference.
-            metadata: Provenance recorded while the state was sourced.
+            metadata: Provenance recorded while the state was sourced. A source
+                that performed no merge has none to record, and passes None.
             app_name: The requesting app's identity, recorded when supplied.
+            resolved_paths: Already-resolved ``name -> path`` state, supplied by
+                a source that transports resolved values rather than the
+                declared ``paths:`` list. The resolver is built here either way;
+                this only says which form the path state arrived in.
         """
         self._raw = raw
         self._config_dir = config_dir
@@ -72,6 +79,7 @@ class ContextBuilder:
         self._runtime_path_tokens = runtime_path_tokens
         self._metadata = metadata
         self._app_name = app_name
+        self._resolved_paths = resolved_paths
 
     def build(self) -> Namespace:
         """Return the completed context.
@@ -109,8 +117,12 @@ class ContextBuilder:
             object.__setattr__(ctx, "log_level", "INFO")
         object.__setattr__(ctx, "log_depth", 0)
         # Provenance is stored separately under a private attribute so it never
-        # appears in ctx.keys() and never shadows a real config value.
-        object.__setattr__(ctx, "_config_metadata", self._metadata)
+        # appears in ctx.keys() and never shadows a real config value. A source
+        # that merged nothing has no provenance to attach, and attaching an
+        # empty record would claim the configuration came from nowhere rather
+        # than that this context never read it.
+        if self._metadata is not None:
+            object.__setattr__(ctx, "_config_metadata", self._metadata)
 
         _logger.info(
             "config_loader complete top_level_keys=%s",
@@ -119,22 +131,26 @@ class ContextBuilder:
         return ctx
 
     def _resolve_paths_onto(self, ctx: Namespace) -> None:
-        """Replace the declared ``paths`` list with the resolver built from it.
+        """Replace the path state with the one resolver built from it.
 
         The resolver is built once and exposed as ``ctx.paths``; every logical
         ``{name}`` reference elsewhere on the context is substituted from it, so
-        there is one resolution and nothing left to resolve a second way.
+        there is one resolution and nothing left to resolve a second way. Which
+        form the path state arrived in decides how the resolver is built and
+        nothing else -- that is the whole difference between the sources.
 
         Args:
             ctx: The wrapped context, mutated in place.
         """
-        raw_paths = getattr(ctx, "paths", None)
-        if not isinstance(raw_paths, list):
+        path_resolver = self._path_resolver(ctx)
+        if path_resolver is None:
             return
 
-        path_resolver = _build_path_resolver(raw_paths, self._runtime_path_tokens)
         object.__setattr__(ctx, "paths", path_resolver)
         _apply_path_resolver(ctx, path_resolver)
+
+        if self._metadata is None:
+            return
 
         # Record final resolved values for provenance (runtime values unchanged).
         resolver_strs = dict(self._runtime_path_tokens)
@@ -144,6 +160,28 @@ class ContextBuilder:
         self._metadata.resolve_values(resolver_strs)
         for name, resolved in path_resolver._paths.items():
             self._metadata.set_resolved(f"paths.{name}", str(resolved))
+
+    def _path_resolver(self, ctx: Namespace) -> PathResolver | None:
+        """Return the resolver for this context, or None when there is no path state.
+
+        Args:
+            ctx: The wrapped context, read for its declared ``paths`` list.
+
+        Returns:
+            The built resolver, or None when the configuration declared no
+            canonical ``paths:`` list and nothing was transported either.
+        """
+        if self._resolved_paths is not None:
+            # Already-resolved state: the values are the answer, so there is
+            # nothing to expand and no token to expand it with.
+            return PathResolver({
+                name: Path(value) for name, value in self._resolved_paths.items()
+            })
+
+        declared = getattr(ctx, "paths", None)
+        if not isinstance(declared, list):
+            return None
+        return _build_path_resolver(declared, self._runtime_path_tokens)
 
 
 def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:
