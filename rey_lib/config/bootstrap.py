@@ -157,6 +157,7 @@ def build_ctx_for_app(
     # run_id already set and does not start a second run.
     if not getattr(ctx, "run_id", None):
         ctx.shared_control = _open_control(ctx)
+        _settle_installation_id(ctx)
         ctx.run = Run.start(
             ctx.shared_control,
             subject_type=subject_type or "app",
@@ -174,6 +175,7 @@ def build_ctx_for_app(
         # inherited the identity and no way to reach the database -- every
         # manifest write refused with "this context exposes no shared Control".
         ctx.shared_control = _open_control(ctx)
+        _settle_installation_id(ctx)
 
     # Display and filing only; the identity above is already settled.
     establish_run_identity(ctx)
@@ -186,6 +188,58 @@ def build_ctx_for_app(
 
 #: What a level may be. Read from the one map that applies it, so this cannot
 #: drift from what ``setup_logging`` actually honours.
+def _settle_installation_id(ctx: Namespace) -> None:
+    """Give this context's installation the id the registry holds for it.
+
+    Resolved here because here is where it is knowable: the installation comes
+    from the configuration the context was built from, and the registry comes
+    from Control, which exists by this point and not before it. Done before the
+    run is created, because the run manifest row is what records it.
+
+    Three conditions, all of which must hold:
+
+    - the context is installation-backed. A standalone CLI context declares no
+      installation and does not acquire one here.
+    - this installation reaches a control database. Not every one does -- the
+      Console's own does not -- and there is no registry to ask without one.
+    - the id is not already known. **A child arrives with its parent's id
+      already transported, and must not look it up a second time.** Attaching
+      the same value would succeed, so this is the only thing standing between
+      one resolution and two; the object's idempotence is a guard against a
+      contradiction, not a licence to resolve again.
+
+    Args:
+        ctx: The bootstrapping context, whose installation is settled in place.
+
+    Raises:
+        ConfigError: If the installation names a registration that does not
+            exist. Reported rather than created: an installation minted by a
+            typo silently partitions every row written under it.
+    """
+    installation = getattr(ctx, "installation", None)
+    control = getattr(ctx, "shared_control", None)
+    if installation is None or control is None:
+        return
+    if installation.installation_id is not None:
+        return
+
+    resolved = control.resolve_installation(installation.name)
+    if resolved is None:
+        # The routine raises on an unknown or blank key, so reaching here means
+        # the call returned nothing at all -- a binding that names the wrong
+        # routine, or one whose result_mode does not read an OUT parameter. A
+        # binding is not checked against the catalog, so this is where that
+        # shows. Reported as the configuration fault it is rather than becoming
+        # a TypeError one frame later.
+        raise ConfigError(
+            f"Resolving installation {installation.name!r} returned no id. The "
+            "control procedure map's 'resolve_installation' binding must name a "
+            "routine that returns the id through an OUT parameter, bound "
+            "result_mode: scalar_result."
+        )
+    installation.attach_installation_id(resolved)
+
+
 def _levels() -> tuple[str, ...]:
     from rey_lib.logs.logging_setup import _LEVEL_MAP
 

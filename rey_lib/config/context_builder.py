@@ -208,9 +208,14 @@ class ContextBuilder:
         if declared is None:
             return
 
+        # installation_id is present only when the declaration was transported
+        # from a parent that had already resolved it. Built from files it is
+        # absent, and stays absent until bootstrap resolves it -- configuration
+        # does not reach a database.
         object.__setattr__(ctx, "installation", Installation(
             name=getattr(declared, "name", None),
             type=getattr(declared, "type", None),
+            installation_id=getattr(declared, "installation_id", None),
         ))
 
     def _path_resolver(self, ctx: Namespace) -> PathResolver | None:

@@ -29,7 +29,13 @@ class Installation:
     lifecycle to close, and this holds configuration and owns nothing.
     """
 
-    def __init__(self, *, name: Any, type: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        name: Any,
+        type: Any = None,
+        installation_id: int | None = None,
+    ) -> None:
         """Normalize the declared identity, once.
 
         Args:
@@ -40,6 +46,11 @@ class Installation:
                 configuration declares none. Neither defaulted nor validated
                 here: what a type *means* is the consuming application's
                 vocabulary, not this object's.
+            installation_id: The registry id, where it is already known --
+                a child process receives its parent's rather than resolving a
+                second time. None where it has not been resolved yet, which is
+                every context at construction: the id comes from the control
+                database, and configuration does not reach a database.
 
         Raises:
             ConfigError: If ``name`` is absent or blank.
@@ -59,10 +70,59 @@ class Installation:
         declared_type = str(type or "").strip()
         self._type: str | None = declared_type or None
 
+        self._installation_id: int | None = (
+            int(installation_id) if installation_id is not None else None
+        )
+
     @property
     def name(self) -> str:
         """Return the installation's name."""
         return self._name
+
+    @property
+    def installation_id(self) -> int | None:
+        """Return the registry id, or None where it has not been resolved.
+
+        None is an ordinary state rather than a failure. Not every installation
+        configures a control database -- the Console's own does not -- and there
+        is no registry to resolve against without one. A consumer that needs the
+        id refuses at the point of use, naming what is missing.
+        """
+        return self._installation_id
+
+    def attach_installation_id(self, installation_id: int) -> None:
+        """Record the resolved registry id, once.
+
+        The one transition this object has. It is resolved at bootstrap, from
+        the control database, and handed here -- this object holds identity and
+        does not go to a database for it.
+
+        Re-attaching the SAME value is accepted, because a re-entered bootstrap
+        or an adopting child is not an error. A DIFFERENT value raises: two
+        answers to one identity is the defect this whole line of work exists to
+        remove, and silently keeping either one would be choosing which records
+        get misattributed.
+
+        Idempotence here is a guard against contradiction, not a licence to
+        resolve twice -- the caller is expected to skip resolution entirely when
+        the id is already known.
+
+        Args:
+            installation_id: The id ``control.installation`` holds for this key.
+
+        Raises:
+            ConfigError: If a different id is already attached.
+        """
+        resolved = int(installation_id)
+        if self._installation_id is not None and self._installation_id != resolved:
+            raise ConfigError(
+                f"Installation {self._name!r} is already attached to id "
+                f"{self._installation_id} and cannot be reattached to {resolved}. "
+                "One installation has one registry id; two answers means two "
+                "control databases, or a registry that moved underneath a "
+                "running process."
+            )
+        self._installation_id = resolved
 
     @property
     def type(self) -> str | None:
@@ -87,10 +147,19 @@ class Installation:
         to contain. A key added under ``installation:`` becomes part of it by a
         deliberate change here, and not before.
 
+        ``installation_id`` travels so a child inherits the id its parent
+        resolved rather than resolving it again. Two resolutions of one identity
+        is the defect; the lookup is not.
+
         Returns:
-            ``name`` and ``type``, with ``type`` None where none was declared.
+            ``name``, ``type`` and ``installation_id``, each None where not
+            declared or not yet resolved.
         """
-        return {"name": self._name, "type": self._type}
+        return {
+            "name": self._name,
+            "type": self._type,
+            "installation_id": self._installation_id,
+        }
 
     def __str__(self) -> str:
         """Return the installation's name.
@@ -104,14 +173,27 @@ class Installation:
 
     def __repr__(self) -> str:
         """Return an unambiguous form, for a log line or a traceback."""
-        return f"Installation(name={self._name!r}, type={self._type!r})"
+        return (
+            f"Installation(name={self._name!r}, type={self._type!r}, "
+            f"installation_id={self._installation_id!r})"
+        )
 
     def __eq__(self, other: object) -> bool:
-        """Compare by declared identity."""
+        """Compare by declared identity.
+
+        The resolved id is deliberately excluded. Two objects naming the same
+        installation ARE the same installation, whether or not one of them has
+        been to the database yet -- the id is what the registry calls it, not
+        what it is.
+        """
         if not isinstance(other, Installation):
             return NotImplemented
         return self._name == other._name and self._type == other._type
 
     def __hash__(self) -> int:
-        """Hash by declared identity, so the object may key a mapping."""
+        """Hash by declared identity, so the object may key a mapping.
+
+        Excluding the resolved id is what keeps this stable: attaching one
+        must not move an object already used as a key.
+        """
         return hash((self._name, self._type))

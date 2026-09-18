@@ -819,6 +819,24 @@ class Control:
 
     # -- run manifest -------------------------------------------------------
 
+    def resolve_installation(self, installation_key: str) -> Optional[int]:
+        """Return the registry id for an installation key.
+
+        Resolve, never create. An installation is a deliberate registration, so
+        an unknown key raises inside the routine rather than minting one -- an
+        installation created by a typo would silently partition every row
+        written under it, which is the failure this whole line of work exists to
+        prevent.
+
+        ``required=True``: a context that names an installation and reaches a
+        control database must be able to say which registration it is. Failing
+        quietly would put the run back to being unattributable, which is what
+        this replaced.
+        """
+        return self._call("resolve_installation", {
+            "installation_key": installation_key,
+        }, required=True)
+
     def create_run_manifest(self, subject_type: Optional[str] = None,
                             subject_id: Optional[str] = None,
                             subject_name: Optional[str] = None,
@@ -849,6 +867,14 @@ class Control:
             "app_name":      app_name or getattr(self._ctx, "app_name", None),
             "parent_run_id": parent_run_id,
             "settings":      settings,
+            # Read off the context exactly as app_name above is, so every caller
+            # records its installation without a new argument at each launch
+            # site. The routine used to lift this out of p_settings instead, and
+            # a routine can only lift what it is given -- 470 of 538 runs were
+            # written with no installation because their callers put none there.
+            "installation_id": getattr(
+                getattr(self._ctx, "installation", None), "installation_id", None
+            ),
         }, required=required)
 
     def finish_run_manifest(self, run_id: int, status: str,

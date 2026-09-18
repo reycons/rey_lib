@@ -11,6 +11,9 @@ Covers:
 - an installation-less context stays valid and nothing is synthesized
 - the string form is the name, so the mistake is no longer expressible
 - ctx.paths remains the single path authority
+- the registry id is attached once, and excluded from what the object *is*
+- the bootstrap seam resolves exactly once, and only where there is something
+  to resolve
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from rey_lib.config.bootstrap import _settle_installation_id
+from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_utils import PathResolver, build_ctx_from_path
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.installation.installation import Installation
@@ -183,8 +188,154 @@ class TestTheMistakeIsNoLongerExpressible:
 
     def test_to_dict_is_the_identity_surface(self) -> None:
         """to_dict states what the object models, not what the YAML held."""
-        assert Installation(name="ccc", type="explorer_only").to_dict() == {
+        assert Installation(
+            name="ccc", type="explorer_only", installation_id=2,
+        ).to_dict() == {
             "name": "ccc",
             "type": "explorer_only",
+            "installation_id": 2,
         }
-        assert Installation(name="ccc").to_dict() == {"name": "ccc", "type": None}
+        assert Installation(name="ccc").to_dict() == {
+            "name": "ccc",
+            "type": None,
+            "installation_id": None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# The resolved id
+# ---------------------------------------------------------------------------
+
+class TestTheResolvedId:
+    """One transition, guarded, and excluded from what the object *is*."""
+
+    def test_it_is_unresolved_at_construction(
+        self, installation_config: Path
+    ) -> None:
+        """Configuration does not reach a database, so there is no id yet."""
+        assert build_ctx_from_path(installation_config).installation.installation_id is None
+
+    def test_attaching_the_same_id_twice_is_accepted(self) -> None:
+        """A re-entered bootstrap or an adopting child is not an error."""
+        installation = Installation(name="ccc")
+        installation.attach_installation_id(7)
+        installation.attach_installation_id(7)
+
+        assert installation.installation_id == 7
+
+    def test_attaching_a_different_id_raises(self) -> None:
+        """Two answers to one identity is the defect, so neither is kept."""
+        installation = Installation(name="ccc")
+        installation.attach_installation_id(7)
+
+        with pytest.raises(ConfigError, match="already attached"):
+            installation.attach_installation_id(8)
+
+    def test_the_id_is_not_part_of_what_the_installation_is(self) -> None:
+        """Equality and hash read the declaration, not the registry.
+
+        Two objects naming one installation are the same installation whether or
+        not one has been to the database. Including the id would also move an
+        object's hash when it resolved, which would strand it if it were already
+        a key somewhere.
+        """
+        declared = Installation(name="ccc")
+        before = hash(declared)
+        declared.attach_installation_id(7)
+
+        assert hash(declared) == before
+        assert declared == Installation(name="ccc")
+
+
+# ---------------------------------------------------------------------------
+# The bootstrap seam
+# ---------------------------------------------------------------------------
+
+class _CountingControl:
+    """A Control that records how many times it was asked to resolve."""
+
+    def __init__(self, installation_id: int = 4) -> None:
+        self.installation_id = installation_id
+        self.calls: list[str] = []
+
+    def resolve_installation(self, installation_key: str) -> int:
+        """Answer, and remember having been asked."""
+        self.calls.append(installation_key)
+        return self.installation_id
+
+
+class _SilentControl:
+    """A Control whose binding returns nothing, as a misbound one would."""
+
+    def resolve_installation(self, installation_key: str) -> None:
+        """Return nothing at all."""
+        return None
+
+
+def _ctx(installation: Installation | None, control: object | None) -> Namespace:
+    """A context carrying only what the seam reads."""
+    ctx = Namespace({})
+    object.__setattr__(ctx, "installation", installation)
+    object.__setattr__(ctx, "shared_control", control)
+    return ctx
+
+
+class TestTheBootstrapSeam:
+    """Resolve once, and only where there is something to resolve."""
+
+    def test_it_resolves_and_attaches(self) -> None:
+        """The ordinary case: installation-backed, control open, id unknown."""
+        installation = Installation(name="ccc")
+        control = _CountingControl(installation_id=4)
+
+        _settle_installation_id(_ctx(installation, control))
+
+        assert installation.installation_id == 4
+        assert control.calls == ["ccc"]
+
+    def test_an_already_known_id_is_not_resolved_again(self) -> None:
+        """The invariant: one resolution per identity, not one per bootstrap.
+
+        A child arrives carrying its parent's id. Attaching the same value would
+        succeed, so a correct end state proves nothing -- the call count is what
+        distinguishes inheriting an answer from asking the question twice.
+        """
+        installation = Installation(name="ccc", installation_id=4)
+        control = _CountingControl(installation_id=4)
+
+        _settle_installation_id(_ctx(installation, control))
+
+        assert control.calls == []
+        assert installation.installation_id == 4
+
+    def test_an_installation_less_context_resolves_nothing(self) -> None:
+        """A standalone CLI context does not acquire an installation here."""
+        control = _CountingControl()
+
+        _settle_installation_id(_ctx(None, control))
+
+        assert control.calls == []
+
+    def test_no_control_means_no_resolution_and_no_failure(self) -> None:
+        """An installation with no control database still boots.
+
+        The Console's own is this case. There is no registry to ask, which is an
+        ordinary state rather than a reason to refuse.
+        """
+        installation = Installation(name="ccc")
+
+        _settle_installation_id(_ctx(installation, None))
+
+        assert installation.installation_id is None
+
+    def test_a_binding_that_returns_nothing_is_reported(self) -> None:
+        """A misbound resolver is a configuration fault, named as one.
+
+        The routine raises on an unknown or blank key, so returning None means
+        the binding names the wrong routine or reads no OUT parameter -- and a
+        binding is never checked against the catalog.
+        """
+        installation = Installation(name="ccc")
+
+        with pytest.raises(ConfigError, match="returned no id"):
+            _settle_installation_id(_ctx(installation, _SilentControl()))
