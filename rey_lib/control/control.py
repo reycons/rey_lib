@@ -287,6 +287,32 @@ class Control:
     # -- identity (read, never minted) --------------------------------------
 
     @property
+    def installation_id(self) -> Optional[int]:
+        """Which installation's rows this control database is being asked for.
+
+        A property for the same reason ``run_id`` below is one: a procedure-map
+        binding resolves an unsupplied input by attribute, so
+        ``input: {p_installation_id: installation_id}`` reads it off this object
+        and no call site has to pass it. That matters here more than it does for
+        ``run_id``: the selectors are reached through ``call_rows``, which six
+        production call sites in file_operator invoke with a *configured*
+        binding name and -- in four of the six -- no values at all. Which
+        binding answers and what it takes belongs to the procedure map, not to
+        the caller, so the id cannot come from there without undoing that.
+
+        Supplying it once here rather than at each call site is also what keeps
+        it to one rule: six copies of the same lookup is the mechanism missing.
+
+        Unlike ``run_id`` this does **not** raise when absent. A context with no
+        installation is an ordinary state -- a standalone CLI run has none -- and
+        the routines themselves refuse a NULL, which is the one place the
+        refusal cannot be bypassed by whatever binds to them.
+        """
+        return getattr(
+            getattr(self._ctx, "installation", None), "installation_id", None
+        )
+
+    @property
     def run_id(self) -> Any:
         """Return the execution's run identity, refusing when absent.
 
@@ -867,14 +893,13 @@ class Control:
             "app_name":      app_name or getattr(self._ctx, "app_name", None),
             "parent_run_id": parent_run_id,
             "settings":      settings,
-            # Read off the context exactly as app_name above is, so every caller
-            # records its installation without a new argument at each launch
-            # site. The routine used to lift this out of p_settings instead, and
+            # installation_id is deliberately absent: the binding declares
+            # `p_installation_id: installation_id` and the map resolves it from
+            # this object's property, as it does for run_id. Passing it here too
+            # would be the same value supplied two ways, which is how the two
+            # drift. The routine used to lift it out of p_settings instead, and
             # a routine can only lift what it is given -- 470 of 538 runs were
             # written with no installation because their callers put none there.
-            "installation_id": getattr(
-                getattr(self._ctx, "installation", None), "installation_id", None
-            ),
         }, required=required)
 
     def finish_run_manifest(self, run_id: int, status: str,
