@@ -1094,14 +1094,22 @@ class Control:
 
     def insert_data_profile(self, data_profile_key: str, field_count: int,
                             header_definition: str, row_count: int,
+                            file_manifest_id: int,
                             source_hash: Optional[str] = None,
                             profile_schema_version: Optional[int] = None,
                             profile_method: Optional[str] = None,
                             profile_method_version: Optional[str] = None,
                             size_bytes: Optional[int] = None,
                             distribution: Optional[dict[str, Any]] = None,
-                            required: bool = True) -> Optional[int]:
-        """Resolve this group's profile, creating it only if it is absent.
+                            required: bool = True) -> dict[str, Any]:
+        """Tie one file to its profile and its type, in one transaction.
+
+        Three writes that are ONE RESPONSIBILITY and must not commit partially:
+        resolve or create the profile, resolve or create the file type that
+        links to it, and stamp ``file_manifest.file_type_id``. Each Control call
+        is its own transaction, so they cannot be separate calls -- a profile
+        without its type, or a type without its stamp, is a half-done unit of
+        work that every reader sees and that the run which wrote it calls done.
 
         Idempotent by identity: profiling the same group again resolves the
         profile that exists rather than making a second one, and creation
@@ -1121,6 +1129,10 @@ class Control:
         ``header_definition`` is the header TEXT -- the line the file carried --
         not a JSON wrapper around it.
 
+        ``file_manifest_id`` is THE FILE, and it is required. Without it the
+        routine resolves a profile, returns an id and records nothing about
+        which file it describes.
+
         installation_id is deliberately absent from this signature. The
         procedure map declares it and resolves it off the Control property, as
         it does run_id. A parameter here would be a second source for a value
@@ -1128,12 +1140,17 @@ class Control:
 
         Values, never an object. What the profiler produced is taken apart where
         it is understood, and each fact arrives here under its own name.
+
+        Returns:
+            ``o_data_profile_id`` and ``o_file_type_id``, or an empty mapping
+            when control is unavailable and the call was not required.
         """
-        return self._call("insert_data_profile", {
+        rows = self._call_rows("insert_data_profile", {
             "data_profile_key":       str(data_profile_key),
             "field_count":            int(field_count),
             "header_definition":      str(header_definition),
             "row_count":              int(row_count),
+            "file_manifest_id":       int(file_manifest_id),
             "source_hash":            source_hash,
             "profile_schema_version": profile_schema_version,
             "profile_method":         profile_method,
@@ -1141,6 +1158,7 @@ class Control:
             "size_bytes":             size_bytes,
             "distribution":           distribution,
         }, required=required)
+        return dict(rows[0]) if rows else {}
 
     #: The field columns a reading carries, in the order the routine takes them.
     #: Named here so the caller states each one rather than handing over a row.
