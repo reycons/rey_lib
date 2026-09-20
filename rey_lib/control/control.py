@@ -1167,6 +1167,29 @@ class Control:
             **{name: values.get(name) for name in self.DATA_PROFILE_FIELD_COLUMNS},
         }, required=required)
 
+    def data_profile_fields_complete(self, data_profile_id: int,
+                                     required: bool = True) -> bool:
+        """Whether this profile's field rows are all there.
+
+        Complete means COUNTED, not present: clear and redacted are each
+        counted against the profile's own field_count. A half-written set is a
+        state the system can genuinely be in --
+        ``p_data_profile_field_ins`` carries ON CONFLICT DO NOTHING, and each
+        control call is its own transaction, so the profile row commits before
+        its fields. An existence test would call such a profile finished and
+        nothing would ever complete it.
+
+        False when the profile does not exist. A profile that is not there
+        certainly has no fields, and the caller's next move is the same either
+        way.
+        """
+        rows = self._call_rows("get_data_profile_field_status", {
+            "data_profile_id": int(data_profile_id),
+        }, required=required)
+        if not rows:
+            return False
+        return bool(dict(rows[0]).get("is_complete"))
+
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
                              action: str, status: Optional[str] = None,
                              source_record_id: Optional[int] = None,
