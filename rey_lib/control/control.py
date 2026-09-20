@@ -1093,7 +1093,7 @@ class Control:
         }, required=required)
 
     def insert_data_profile(self, data_profile_key: str, row_count: int,
-                            header_definition: dict[str, Any],
+                            header_definition: str,
                             source_hash: Optional[str] = None,
                             profile_schema_version: Optional[int] = None,
                             profile_method: Optional[str] = None,
@@ -1114,6 +1114,9 @@ class Control:
         and they take part in the match -- an omitted one would be refused by
         the routine, not defaulted.
 
+        ``header_definition`` is the header TEXT -- the line the file carried --
+        not a JSON wrapper around it.
+
         installation_id is deliberately absent from this signature. The
         procedure map declares it and resolves it off the Control property, as
         it does run_id. A parameter here would be a second source for a value
@@ -1127,7 +1130,7 @@ class Control:
         return self._call("insert_data_profile", {
             "data_profile_key":       str(data_profile_key),
             "row_count":              int(row_count),
-            "header_definition":      header_definition,
+            "header_definition":      str(header_definition),
             "source_hash":            source_hash,
             "profile_schema_version": profile_schema_version,
             "profile_method":         profile_method,
