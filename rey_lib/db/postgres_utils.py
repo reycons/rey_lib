@@ -32,7 +32,9 @@ is_truncation_error(exc)
 from __future__ import annotations
 
 import json
+import math
 import re
+from decimal import Decimal
 from typing import Any, Optional
 
 from rey_lib.config.env_reference import resolve_env_reference
@@ -213,7 +215,7 @@ def render_and_execute(conn: Any, call: RoutineCall) -> Any:
     from rey_lib.db._sqlalchemy import core_connection
     from sqlalchemy import text
 
-    serialised = _serialise_jsonb(call.arguments)
+    serialised = _adapt_parameters(call.arguments)
     arguments = ", ".join(f"{key} => :{key}" for key in serialised)
     sql = _STATEMENT[call.shape].format(routine=call.routine, arguments=arguments)
     try:
@@ -471,7 +473,7 @@ def execute_named_sql(
         On execution failure, an unsupported result_mode, or a scalar_result
         that returns no row / more than one value.
     """
-    serialised = _serialise_jsonb(named_params or {})
+    serialised = _adapt_parameters(named_params or {})
     from rey_lib.db._sqlalchemy import core_connection
 
     try:
@@ -1220,18 +1222,39 @@ def get_object_ddl(conn: Any, obj: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _serialise_jsonb(params: dict[str, Any]) -> dict[str, Any]:
+def _adapt_parameters(params: dict[str, Any]) -> dict[str, Any]:
     """
-    Return a copy of params with dict/list values serialised to JSON strings.
+    Return a copy of params in types a stored routine can actually be matched on.
 
-    A jsonb parameter is handed over as JSON text rather than as the Python
-    value, so the driver never adapts it. That matters under Psycopg 3, which
-    would otherwise send a list as a PostgreSQL *array* and refuse a dict
-    outright; serialising here means neither case can arise.
+    Two rules, both about what the DRIVER would otherwise send.
+
+    dict and list become JSON TEXT. A jsonb parameter is handed over as text
+    rather than as the Python value, so the driver never adapts it. Under
+    Psycopg 3 a list would otherwise be sent as a PostgreSQL *array* and a dict
+    refused outright.
+
+    float becomes Decimal. Psycopg sends a Python float as ``double
+    precision``, and PostgreSQL resolves a routine call using IMPLICIT casts
+    only -- ``float8 -> numeric`` is an ASSIGNMENT cast, so a numeric parameter
+    given a float makes the routine unresolvable and the call fails with
+    "procedure ... does not exist" naming types that look perfectly reasonable.
+    Going the other way is safe: ``numeric -> float8`` IS implicit, so a
+    routine that genuinely takes a float still resolves.
+
+    Non-finite floats are passed through untouched. NaN and infinity are not
+    what this rule is for, and converting them would decide a question about
+    numeric's own limits that no caller has asked.
     """
     result: dict[str, Any] = {}
     for k, v in params.items():
-        result[k] = json.dumps(v) if isinstance(v, (dict, list)) else v
+        if isinstance(v, (dict, list)):
+            result[k] = json.dumps(v)
+        elif isinstance(v, float) and math.isfinite(v):
+            # str() first: Decimal(float) would carry the binary
+            # representation's full error, Decimal(str(0.1)) is Decimal('0.1').
+            result[k] = Decimal(str(v))
+        else:
+            result[k] = v
     return result
 
 

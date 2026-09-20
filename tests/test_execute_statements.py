@@ -422,27 +422,58 @@ class TestTheDriver:
 
 
 class TestJsonbAdaptation:
-    """What the driver is handed for a jsonb parameter, and why.
+    """What the driver is handed for each parameter, and why.
 
     Unit, and deliberately nothing stored: the question is what leaves this
     module, which is answerable without a database.
     """
 
     def test_a_mapping_is_handed_over_as_json_text(self) -> None:
-        from rey_lib.db.postgres_utils import _serialise_jsonb
+        from rey_lib.db.postgres_utils import _adapt_parameters
 
-        assert _serialise_jsonb({"doc": {"a": 1}}) == {"doc": '{"a": 1}'}
+        assert _adapt_parameters({"doc": {"a": 1}}) == {"doc": '{"a": 1}'}
 
     def test_a_list_is_handed_over_as_json_text(self) -> None:
         # The case Psycopg 3 would otherwise adapt as a PostgreSQL *array*.
         # It never sees a list, because this serialises first.
-        from rey_lib.db.postgres_utils import _serialise_jsonb
+        from rey_lib.db.postgres_utils import _adapt_parameters
 
-        assert _serialise_jsonb({"doc": [1, 2]}) == {"doc": "[1, 2]"}
+        assert _adapt_parameters({"doc": [1, 2]}) == {"doc": "[1, 2]"}
+
+    def test_a_float_is_handed_over_as_a_decimal(self) -> None:
+        # PostgreSQL resolves a routine call using IMPLICIT casts only, and
+        # float8 -> numeric is an ASSIGNMENT cast. A numeric parameter given a
+        # float makes the routine unresolvable -- "procedure ... does not
+        # exist", naming types that look perfectly reasonable.
+        from decimal import Decimal
+
+        from rey_lib.db.postgres_utils import _adapt_parameters
+
+        assert _adapt_parameters({"n": 1.5}) == {"n": Decimal("1.5")}
+
+    def test_a_float_carries_no_binary_representation_error(self) -> None:
+        # Decimal(0.1) is 0.1000000000000000055511151231257827, which would be
+        # stored. str() first, so what lands is what the profiler measured.
+        from decimal import Decimal
+
+        from rey_lib.db.postgres_utils import _adapt_parameters
+
+        assert _adapt_parameters({"n": 0.1}) == {"n": Decimal("0.1")}
+
+    def test_a_non_finite_float_is_left_alone(self) -> None:
+        # NaN and infinity are not what the rule is for, and converting them
+        # would decide a question about numeric's own limits nobody asked.
+        import math
+
+        from rey_lib.db.postgres_utils import _adapt_parameters
+
+        assert math.isnan(_adapt_parameters({"n": float("nan")})["n"])
 
     def test_everything_else_is_untouched(self) -> None:
-        from rey_lib.db.postgres_utils import _serialise_jsonb
+        from rey_lib.db.postgres_utils import _adapt_parameters
 
-        assert _serialise_jsonb({"n": 1, "s": "x", "none": None}) == {
-            "n": 1, "s": "x", "none": None,
+        # bool included deliberately: it is not a float subclass, and adapting
+        # it would be a silent type change on every boolean parameter.
+        assert _adapt_parameters({"n": 1, "s": "x", "none": None, "b": True}) == {
+            "n": 1, "s": "x", "none": None, "b": True,
         }
