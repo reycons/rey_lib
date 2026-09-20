@@ -1162,15 +1162,14 @@ class Control:
             "distribution":           distribution,
         }, required=required)
 
-    def insert_data_profile(self, data_profile_key: str,
+    def insert_data_profile(self, data_profile_key: str, row_count: int,
+                            header_definition: dict[str, Any],
                             source_hash: Optional[str] = None,
                             profile_schema_version: Optional[int] = None,
                             profile_method: Optional[str] = None,
                             profile_method_version: Optional[str] = None,
-                            row_count: Optional[int] = None,
                             field_count: Optional[int] = None,
                             size_bytes: Optional[int] = None,
-                            header_definition: Optional[dict[str, Any]] = None,
                             distribution: Optional[dict[str, Any]] = None,
                             required: bool = True) -> Optional[int]:
         """Resolve this group's profile, creating it only if it is absent.
@@ -1179,19 +1178,32 @@ class Control:
         profile that exists rather than making a second one, and creation
         provenance is stamped only on the insert that created it.
 
+        The natural key is installation_id, row_count, data_profile_key and
+        header_definition. ``row_count`` and ``header_definition`` are required
+        arguments rather than optional ones because their columns are NOT NULL
+        and they take part in the match -- an omitted one would be refused by
+        the routine, not defaulted.
+
+        installation_id is deliberately absent from this signature. The
+        procedure map declares it and resolves it off the Control property, as
+        it does run_id. A parameter here would be a second source for a value
+        the binding already supplies.
+
+        field_count is an attribute, not identity, so it stays optional.
+
         Values, never an object. What the profiler produced is taken apart where
         it is understood, and each fact arrives here under its own name.
         """
         return self._call("insert_data_profile", {
             "data_profile_key":       str(data_profile_key),
+            "row_count":              int(row_count),
+            "header_definition":      header_definition,
             "source_hash":            source_hash,
             "profile_schema_version": profile_schema_version,
             "profile_method":         profile_method,
             "profile_method_version": profile_method_version,
-            "row_count":              row_count,
             "field_count":            field_count,
             "size_bytes":             size_bytes,
-            "header_definition":      header_definition,
             "distribution":           distribution,
         }, required=required)
 
