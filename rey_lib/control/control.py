@@ -1092,13 +1092,12 @@ class Control:
             "distribution":           distribution,
         }, required=required)
 
-    def insert_data_profile(self, data_profile_key: str, row_count: int,
-                            header_definition: str,
+    def insert_data_profile(self, data_profile_key: str, field_count: int,
+                            header_definition: str, row_count: int,
                             source_hash: Optional[str] = None,
                             profile_schema_version: Optional[int] = None,
                             profile_method: Optional[str] = None,
                             profile_method_version: Optional[str] = None,
-                            field_count: Optional[int] = None,
                             size_bytes: Optional[int] = None,
                             distribution: Optional[dict[str, Any]] = None,
                             required: bool = True) -> Optional[int]:
@@ -1108,11 +1107,16 @@ class Control:
         profile that exists rather than making a second one, and creation
         provenance is stamped only on the insert that created it.
 
-        The natural key is installation_id, row_count, data_profile_key and
-        header_definition. ``row_count`` and ``header_definition`` are required
-        arguments rather than optional ones because their columns are NOT NULL
-        and they take part in the match -- an omitted one would be refused by
-        the routine, not defaulted.
+        The natural key is installation_id, field_count, data_profile_key and
+        header_definition. Those are required arguments rather than optional
+        ones because their columns are NOT NULL and they take part in the
+        match -- an omitted one would be refused by the routine, not defaulted.
+
+        ``field_count`` is the number of COLUMNS. It varies with the layout,
+        which is what a profile is identified by, and is constant across
+        deliveries of the same feed. ``row_count`` is the number of ROWS one
+        delivery carried -- an attribute, not identity, and required only
+        because its column is NOT NULL and the profiler always measures it.
 
         ``header_definition`` is the header TEXT -- the line the file carried --
         not a JSON wrapper around it.
@@ -1122,20 +1126,18 @@ class Control:
         it does run_id. A parameter here would be a second source for a value
         the binding already supplies.
 
-        field_count is an attribute, not identity, so it stays optional.
-
         Values, never an object. What the profiler produced is taken apart where
         it is understood, and each fact arrives here under its own name.
         """
         return self._call("insert_data_profile", {
             "data_profile_key":       str(data_profile_key),
-            "row_count":              int(row_count),
+            "field_count":            int(field_count),
             "header_definition":      str(header_definition),
+            "row_count":              int(row_count),
             "source_hash":            source_hash,
             "profile_schema_version": profile_schema_version,
             "profile_method":         profile_method,
             "profile_method_version": profile_method_version,
-            "field_count":            field_count,
             "size_bytes":             size_bytes,
             "distribution":           distribution,
         }, required=required)
