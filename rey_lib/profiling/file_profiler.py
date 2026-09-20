@@ -31,12 +31,31 @@ _logger = get_logger(__name__)
 _EXCLUDED_PROFILE_COLUMNS = frozenset({"source_line_number"})
 
 
-def is_profile_excluded_column(value: Any) -> bool:
-    """Return whether an operational column is excluded from all profiling."""
-    return (
-        isinstance(value, str)
-        and value.strip().casefold() in _EXCLUDED_PROFILE_COLUMNS
-    )
+def is_profile_excluded_column(value: Any, line_number: int | None = None) -> bool:
+    """Return whether an operational column is excluded from all profiling.
+
+    ``source_line_number`` is prepended to every record by sanitization, and it
+    is not data. Excluding it by name covers most of it -- but the name is only
+    written on PHYSICAL LINE 1. ``_start_numbered_record`` chooses the prefix
+    with ``if state.physical_line == 1``, so a file whose header sits below a
+    preamble gets the literal on a preamble line and a NUMBER on the real
+    header. Nothing named it, so nothing excluded it, and the line number
+    reached the profile as a column.
+
+    ``line_number`` is that row's own physical line number. Supplied, the cell
+    is also recognised when it simply IS that number -- an equality, not a
+    heuristic: a genuine first column whose header text is the header's own
+    line number does not occur.
+
+    Optional so the existing name-only callers are unchanged. They are correct
+    wherever the column carries its name.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if text.casefold() in _EXCLUDED_PROFILE_COLUMNS:
+        return True
+    return line_number is not None and text == str(line_number)
 
 
 def infer_sql_type(values: list[str]) -> str | None:
