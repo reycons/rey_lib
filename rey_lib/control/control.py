@@ -1043,74 +1043,6 @@ class Control:
             return int(dict(row)["data_profile_id"])
         return None
 
-    def resolve_file_type(self, data_profile_key: str, field_count: int,
-                          header_definition: dict[str, Any], signature: str,
-                          file_type_key: str, key_fields: Sequence[str],
-                          file_manifest_id: int,
-                          required: bool = True) -> dict[str, Any]:
-        """Settle this file's structural identity and stamp it on the manifest.
-
-        One call and one transaction: the data profile, the file type that gives
-        it governed meaning, and the manifest stamp that binds the file to both.
-        Split across three calls they could half-succeed, and a file whose type
-        exists but was never stamped is indistinguishable from one never
-        profiled.
-
-        Self-healing by construction. A profile or a file type that already
-        matches is resolved rather than duplicated, so a run that settled
-        identity and then stopped is completed by the next one rather than
-        refused.
-
-        installation_id is deliberately absent from this signature. The
-        procedure map declares it and resolves it off the Control property, as
-        it does for run_id. A parameter here would be a second source for a
-        value the binding already supplies, and the two could disagree.
-
-        Returns the four values the routine reports: o_data_profile_id,
-        o_file_type_id, o_profile_created and o_file_type_created. The booleans
-        say which of the two were minted by this call rather than matched, which
-        is the only way a caller can tell a new layout from a known one.
-
-        Args:
-            data_profile_key: What this file groups as, as classification
-                established it.
-            field_count: How many columns the sanitized representation has.
-            header_definition: The header as profiled -- its row number and its
-                ordered columns.
-            signature: The hash of the normalized ordered columns.
-            file_type_key: The stable name derived from that signature.
-            key_fields: Which classified values decided the grouping, in the
-                order configuration declared them.
-            file_manifest_id: The governed file to stamp.
-            required: Raise on failure rather than marking control unavailable.
-
-        Returns:
-            The routine's four output values, keyed by their column names.
-
-        Raises:
-            DatabaseError: If the routine returns no row. It reports its outcome
-                through INOUT parameters, so an empty result means the call did
-                not complete and the ids a caller would go on to use are absent.
-        """
-        rows = self._call_rows("resolve_file_type", {
-            "data_profile_key":  str(data_profile_key),
-            "field_count":       int(field_count),
-            "header_definition": header_definition,
-            "signature":         str(signature),
-            "file_type_key":     str(file_type_key),
-            # list(), not tuple(): _serialise_jsonb converts dict and list to
-            # JSON text and leaves everything else alone, so a tuple would reach
-            # the driver as a PostgreSQL array and be refused by a jsonb column.
-            "key_fields":        list(key_fields),
-            "file_manifest_id":  int(file_manifest_id),
-        }, required=required)
-        if not rows:
-            raise DatabaseError(
-                "control: resolve_file_type returned no row, so no file type "
-                f"was resolved for file_manifest_id {file_manifest_id}."
-            )
-        return dict(rows[0])
-
     def enrich_data_profile(self, data_profile_id: int,
                             source_hash: Optional[str] = None,
                             profile_schema_version: Optional[int] = None,
@@ -1122,26 +1054,24 @@ class Control:
                             required: bool = True) -> None:
         """Fill in what a profile is missing, without overwriting what it has.
 
-        Called after :meth:`resolve_file_type` and unconditionally -- never
-        gated on whether that call created the profile. A profile that already
-        existed may be incomplete, which is exactly the state a run that settled
-        identity and then stopped leaves behind, and the only pass that can
-        complete it is one that has just read the file.
+        NOTHING CALLS THIS. It exists for a profile that was resolved without
+        its attributes and needs completing afterwards.
+        :meth:`insert_data_profile` writes the whole row in one call, so the
+        profiling path has nothing left for this to fill.
 
         Every column is filled through COALESCE, so a value already stored is
-        kept. A matched profile matched on structure, so what is there came from
-        a real earlier reading of a file with that layout; replacing it would
-        churn the row on every run and make the stored value mean "the last file
-        profiled" rather than "what this structure was measured as".
+        kept. A matched profile matched on its natural key, so what is there
+        came from a real earlier reading of a file with that layout; replacing
+        it would churn the row on every run and make the stored value mean "the
+        last file profiled" rather than "what this structure was measured as".
 
-        The identity columns -- data_profile_key, field_count and
-        header_definition -- are not arguments. They are what the profile was
-        matched on, and assigning one would move the profile out from under the
-        file types that reference it.
+        The identity columns -- installation_id, row_count, data_profile_key
+        and header_definition -- are not arguments. They are what the profile
+        was matched on, and assigning one would move the profile out from under
+        anything referencing it.
 
         Args:
-            data_profile_id: The profile to complete, as resolve_file_type
-                reported it.
+            data_profile_id: The profile to complete.
             source_hash: Digest of the representation that was read.
             profile_schema_version: Version of the profile record's own shape.
             profile_method: How the profile was produced.
