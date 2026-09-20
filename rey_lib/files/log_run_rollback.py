@@ -629,6 +629,16 @@ def rollback_log_run(
         reversed_ids = [int(row["file_mutation_id"]) for row in succeeded] + removed
         if reversed_ids:
             control.complete_file_rollback(reversed_ids, required=True)
+
+        # What this run's profiling wrote. Reversed AFTER the mutations close,
+        # because it is the profile of a file as some mutation left it -- and
+        # unconditionally, because profiles are written per run rather than per
+        # mutation, so a run whose reversals all failed may still have profiled.
+        #
+        # Inside the try, so it is governed by the batch above and a failure
+        # here closes the batch FAILED like any other.
+        profiles = control.rollback_data_profiles_by_run(
+            int(run_id), required=True)
     except Exception as exc:
         # The batch closes on every exit. A root step left open is offered as
         # the parent of the next batch's work, so an operation that died
@@ -658,6 +668,13 @@ def rollback_log_run(
         # nothing failed, and a reader shown only those two saw a rollback that
         # appeared to do nothing.
         "records_removed": len(removed),
+        # What the run's profiling left behind, removed. Reported separately
+        # from the mutation counts: a rollback can reverse no files and still
+        # remove profiles, and a reader shown only the mutation counts saw a
+        # rollback that appeared to do nothing.
+        "manifests_cleared": int(profiles.get("o_manifests_cleared") or 0),
+        "file_types_removed": int(profiles.get("o_file_types_deleted") or 0),
+        "profiles_removed": int(profiles.get("o_profiles_deleted") or 0),
         "failures": failed,
         # The rollback records themselves, as they now stand. The reader was
         # shown this set before executing and is shown the same set after, so

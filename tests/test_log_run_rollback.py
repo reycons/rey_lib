@@ -513,6 +513,13 @@ class _BatchRecordingControl:
     def complete_file_rollback(self, *_: Any, **__: Any) -> None:
         self.calls.append("complete")
 
+    def rollback_data_profiles_by_run(self, *_: Any, **__: Any) -> dict[str, Any]:
+        # Recorded like the others, because WHERE it falls in the sequence is
+        # the point: it must run inside the batch and after the mutations
+        # close.
+        self.calls.append("rollback_profiles")
+        return {}
+
 
 def test_a_standalone_rollback_opens_its_own_batch_and_closes_it() -> None:
     """Nothing above it owns one, so the execution opens one at the work.
@@ -525,7 +532,12 @@ def test_a_standalone_rollback_opens_its_own_batch_and_closes_it() -> None:
     control = _BatchRecordingControl()
     rollback_log_run(SimpleNamespace(shared_control=control), 330)
 
-    assert control.calls == ["start:rollback_run_330", "request", "end:SUCCEEDED"]
+    # rollback_profiles runs unconditionally: profiles are written per RUN,
+    # not per mutation, so a run whose reversals all failed -- or which had
+    # none -- may still have profiled. It sits inside the batch.
+    assert control.calls == [
+        "start:rollback_run_330", "request", "rollback_profiles", "end:SUCCEEDED",
+    ]
 
 
 def test_the_batch_closes_on_the_failure_path_too() -> None:

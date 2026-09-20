@@ -1503,6 +1503,35 @@ class Control:
             "rollback_execution_run_id":  self._execution_run_id(),
         }, required=required)
 
+    def rollback_data_profiles_by_run(self, run_id: int,
+                                      required: bool = True) -> dict[str, Any]:
+        """Remove what one run's profiling wrote, and say how much.
+
+        Rolling back a run reverses its file mutations. Without this the
+        profiles, the file types built on them and the manifest stamps pointing
+        at those types all survive, so a reversed run leaves the profile store
+        describing work that no longer happened.
+
+        ``run_id`` is the run BEING reversed. The run PERFORMING the rollback
+        travels separately as ``rollback_execution_run_id``, exactly as it does
+        for :meth:`complete_file_rollback` -- confusing the two would remove the
+        profiles the rollback is itself writing.
+
+        The counts come back because the rollback summary is the only account a
+        rollback gives of itself, and removing nothing has to be legible as
+        such rather than as silence.
+
+        Returns:
+            ``o_manifests_cleared``, ``o_file_types_deleted`` and
+            ``o_profiles_deleted``, or an empty mapping when control is
+            unavailable and the call was not required.
+        """
+        rows = self._call_rows("rollback_data_profiles_by_run", {
+            "rollback_run_id":           int(run_id),
+            "rollback_execution_run_id": self._execution_run_id(),
+        }, required=required)
+        return dict(rows[0]) if rows else {}
+
     def _execution_run_id(self) -> Optional[int]:
         """The run performing a rollback, or None when there is not one.
 
