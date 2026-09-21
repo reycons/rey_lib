@@ -195,6 +195,50 @@ class Control:
         self.run_log = None
         self.connection = None
 
+    def __del__(self) -> None:
+        """Close the batch when this object is destroyed.
+
+        The other half of the rule construction states: a Control that exists
+        has a batch, and a Control that stops existing closes it. Nothing has
+        to remember to -- ``close()`` had exactly one production caller,
+        ``app_runtime`` through ``collect_runtime``, so the four sites that
+        build a Control outside the launch boundary left a batch and its root
+        step RUNNING for ever.
+
+        WHAT THIS PROMISES, AND WHAT IT DOES NOT:
+
+        - any owning Control that reaches destruction closes its batch,
+          wherever it was built
+        - a registered Control still closes deterministically through
+          ``collect_runtime``; that path is unchanged and is still the ordered
+          one
+        - an unregistered Control no longer depends on its caller remembering
+        - timing is ordinary Python object lifetime. It is NOT a lifecycle
+          guarantee, and nothing should be written as though it were. A
+          hard-killed process runs no destructor and leaves its batch RUNNING,
+          which is the accurate record of a process that vanished.
+
+        Delegates rather than duplicating: ``close()`` remains the single
+        implementation of batch shutdown, and is safe to call twice because it
+        clears ``batch_id`` and ``finish_batch`` returns early without one.
+        """
+        # THE ONE PLACE AN ERROR HAS NOWHERE TO GO. An exception leaving
+        # __del__ cannot be handled by a caller -- there is none -- so Python
+        # prints and discards it, and during interpreter shutdown it obscures
+        # whatever actually ended the run. Two cases reach here and neither is
+        # hypothetical: __init__ now raises (ConfigError, StateError), and
+        # __del__ still runs on the half-built object; and at shutdown the
+        # module globals close() reads may already be None.
+        #
+        # This is not a general swallow. close() goes on recording ordinary
+        # close failures through the run log, in _record_close_failure. What
+        # is caught here is only what that path could not route anywhere --
+        # including the case where the run log itself is already gone.
+        try:
+            self.close()
+        except BaseException:  # noqa: BLE001
+            pass
+
     def _record_close_failure(self, exc: BaseException) -> None:
         """Record a batch that would not close, then let teardown continue.
 

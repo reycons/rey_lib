@@ -51,9 +51,17 @@ def _built(ctx: Any) -> Control:
     would otherwise have to reach a database to get an object at all. The stub
     returns what ``p_batch_start`` returns; ``TestConstructionStartsTheBatch``
     is the one place that exercises the real path.
+
+    It is given a recording run log because destruction closes the batch, and
+    a stub batch cannot be closed against a connection that was never opened.
+    ``_record_close_failure`` writes that to the run log when there is one and
+    to the module logger when there is not, so without this every test using
+    the helper prints a real teardown error it is not about.
     """
     with patch.object(Control, "_call_rows", return_value=list(_BATCH_ROWS)):
-        return Control(ctx)
+        control = Control(ctx)
+    control.run_log = SimpleNamespace(append=lambda *args, **kwargs: None)
+    return control
 
 
 def _ctx(**extra: Any) -> SimpleNamespace:
@@ -237,6 +245,87 @@ class TestDestructionClosesTheBatchItOwns:
         control.close()
 
         assert control.calls == calls_after_first
+
+
+class TestObjectDestructionClosesTheBatch:
+    """Nothing has to remember. Destroying the object is what closes it.
+
+    close() had one production caller -- app_runtime, through collect_runtime
+    -- so the four sites that build a Control outside the launch boundary left
+    a batch and its root step RUNNING for ever. __del__ delegates to close()
+    rather than duplicating it.
+
+    Timing is ordinary Python object lifetime, not a lifecycle guarantee: a
+    hard-killed process runs no destructor at all.
+    """
+
+    def test_deleting_an_owning_control_closes_its_batch(self) -> None:
+        """Deleted, never close()d -- the child step, the root, then the batch."""
+        calls: list[tuple[str, Any]] = []
+        control = _built(_ctx())
+        control.batch_id = 5
+        control.batch_root_step_id = 50
+        control.batch_step_id = 77          # a child is still open
+        control.owns_batch = True
+        control.run_outcome = "success"
+        control._call = lambda name, values, required=False: (
+            calls.append((name, values.get("status"))))
+
+        del control
+
+        assert [name for name, _ in calls] == ["end_step", "end_step", "end_batch"]
+        assert {status for _, status in calls} == {"success"}
+
+    def test_deleting_an_already_closed_control_closes_nothing_twice(self) -> None:
+        calls: list[tuple[str, Any]] = []
+        control = _built(_ctx())
+        control.batch_id = 5
+        control.batch_root_step_id = 50
+        control.batch_step_id = 50
+        control.owns_batch = True
+        control.run_outcome = "success"
+        control._call = lambda name, values, required=False: (
+            calls.append((name, values.get("status"))))
+
+        control.close()
+        after_close = list(calls)
+        del control
+
+        assert calls == after_close
+
+    def test_a_control_whose_construction_failed_destructs_silently(self) -> None:
+        """__init__ raises now, and __del__ still runs on the half-built object.
+
+        ConfigError here, from a context naming no procedure map: the batch
+        attributes exist but the connection and map do not. Nothing may escape.
+        """
+        ctx = _ctx()
+        ctx.control = SimpleNamespace(enabled=True)
+
+        with pytest.raises(ConfigError):
+            Control(ctx)
+        # The failed instance is unreferenced now; its destructor already ran.
+        # Reaching here at all is the assertion.
+
+    def test_an_exception_escaping_del_cannot_be_handled_so_it_is_not_raised(
+            self) -> None:
+        """The whole reason for the BaseException catch, stated as a test.
+
+        There is no caller to handle it: Python prints and discards whatever
+        leaves __del__, and at interpreter shutdown it would obscure the error
+        that ended the run. close() still records ORDINARY close failures
+        through the run log; this is only what that path could not route.
+        """
+        control = _built(_ctx())
+        control.batch_id = 5
+        control.owns_batch = True
+
+        def _unclosable() -> None:
+            raise RuntimeError("even the run log is gone")
+
+        control.close = _unclosable
+
+        del control     # must not raise, and must not print a handled error
 
 
 class TestBatchResultPlacement:
