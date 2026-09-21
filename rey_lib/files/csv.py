@@ -519,8 +519,19 @@ def _locate_header(
         if not following:
             continue
         matching_width = [row for row in following if len(row) == len(fields)]
-        if not matching_width:
-            continue
+        # Counted, not required. A row SHORTER than the header is ragged data --
+        # an export that stopped emitting its trailing columns -- and a table
+        # where every row is shorter still has the header it declares. Demanding
+        # one row of the header's own width threw those files away and reported
+        # them as having no header at all.
+        #
+        # Consistency carries it instead: it is one term of the score below, and
+        # a ragged candidate simply scores 0 there. The divisor is `following`,
+        # guarded non-empty above.
+        #
+        # This says nothing about rows WIDER than the header. Nothing here
+        # refuses one, and that validation is not this function's -- it belongs
+        # to whoever consumes the rows.
         consistency = (len(matching_width) * 1000) // len(following)
         lexical = sum(_looks_like_header_name(field) for field in fields)
         # A row of plausible words is not yet a header. What separates one from
