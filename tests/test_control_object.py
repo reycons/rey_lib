@@ -23,7 +23,7 @@ import pytest
 
 import rey_lib.control as control_package
 from rey_lib.control import Control
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import ConfigError, StateError
 
 
 def _map(name: str = "control", sql_bindings: Any = None) -> SimpleNamespace:
@@ -38,6 +38,22 @@ def _map(name: str = "control", sql_bindings: Any = None) -> SimpleNamespace:
         )],
         sql_bindings=sql_bindings,
     )
+
+
+#: What ``p_batch_start`` hands back, as the map's dataset_result yields it.
+_BATCH_ROWS = [{"o_batch_id": 1, "o_batch_step_id": 10}]
+
+
+def _built(ctx: Any) -> Control:
+    """Construct a Control with its batch start stubbed.
+
+    Construction starts the batch, so every test that is about something else
+    would otherwise have to reach a database to get an object at all. The stub
+    returns what ``p_batch_start`` returns; ``TestConstructionStartsTheBatch``
+    is the one place that exercises the real path.
+    """
+    with patch.object(Control, "_call_rows", return_value=list(_BATCH_ROWS)):
+        return Control(ctx)
 
 
 def _ctx(**extra: Any) -> SimpleNamespace:
@@ -62,7 +78,7 @@ class TestMapOwnership:
         ctx = _ctx()
         original = ctx.procedure_maps[0]
 
-        control = Control(ctx)
+        control = _built(ctx)
 
         assert control.procedure_map is original
         assert control.procedure_map_name == "control"
@@ -70,7 +86,7 @@ class TestMapOwnership:
     def test_the_control_map_is_removed_from_ctx(self) -> None:
         ctx = _ctx()
 
-        Control(ctx)
+        _built(ctx)
 
         assert [m.name for m in ctx.procedure_maps] == ["rey_loader"]
 
@@ -78,14 +94,14 @@ class TestMapOwnership:
         # Other maps have their own owners and are none of Control's business.
         ctx = _ctx()
 
-        Control(ctx)
+        _built(ctx)
 
         assert any(m.name == "rey_loader" for m in ctx.procedure_maps)
 
     def test_the_map_cannot_be_taken_twice(self) -> None:
         """Proof the removal is real: a second Control finds nothing to take."""
         ctx = _ctx()
-        Control(ctx)
+        _built(ctx)
 
         with pytest.raises(ConfigError, match="not found"):
             Control(ctx)
@@ -109,24 +125,26 @@ class TestBatchStateLivesOnControl:
     """Runtime state moved off the context."""
 
     def test_batch_ids_are_control_attributes(self) -> None:
-        control = Control(_ctx())
+        control = _built(_ctx())
 
-        assert control.batch_step_id is None
         control.batch_id = 5
         control.batch_step_id = 50
         assert (control.batch_id, control.batch_step_id) == (5, 50)
+        assert not hasattr(_ctx(), "batch_step_id")
 
-    def test_a_bound_batch_is_reused_and_not_owned(self) -> None:
-        """A Control continuing someone else's batch starts no second one."""
+    def test_a_batch_id_on_the_context_is_not_adopted(self) -> None:
+        """A Control starts its own batch; it never continues someone else's.
+
+        Adopting one was how a Control came to hold a batch_id with no root
+        step of its own, which is the state a workflow step cannot hang from.
+        Parent and child are related through parent_batch_step_id.
+        """
         ctx = _ctx()
         ctx.batch_id = 99
-        control = Control(ctx)
+        control = _built(ctx)
 
-        with patch("rey_lib.control.control.execute_mapped_routine") as executed:
-            assert control.start_batch(batch_name="nightly") == 99
-
-        executed.assert_not_called()
-        assert control.owns_batch is False
+        assert control.batch_id == 1            # its own, from p_batch_start
+        assert control.owns_batch is True
 
 
 class TestDestructionClosesTheBatchItOwns:
@@ -139,7 +157,7 @@ class TestDestructionClosesTheBatchItOwns:
     @staticmethod
     def _owning(**outcome: Any) -> Any:
         """A Control holding an open batch it started, with calls recorded."""
-        control = Control(_ctx())
+        control = _built(_ctx())
         control.batch_id = 5
         control.batch_root_step_id = 50
         control.batch_step_id = 50
@@ -227,7 +245,7 @@ class TestBatchResultPlacement:
     def test_a_routine_result_is_placed_on_control_by_the_map(self) -> None:
         """load_to_ctx targets Control, because Control is the binding target."""
         ctx = _ctx()
-        control = Control(ctx)
+        control = _built(ctx)
         captured: dict[str, Any] = {}
 
         def _execute(**kwargs: Any) -> dict:
@@ -249,7 +267,7 @@ class TestBatchResultPlacement:
         # The map is no longer on ctx, so a lookup there would fail; Control
         # hands over the one it owns.
         ctx = _ctx()
-        control = Control(ctx)
+        control = _built(ctx)
         captured: dict[str, Any] = {}
 
         def _execute(**kwargs: Any) -> dict:
@@ -269,14 +287,14 @@ class TestControlDoesNotOwnIdentity:
     """run_id is read from the context, never held or created here."""
 
     def test_run_id_is_read_from_the_context(self) -> None:
-        control = Control(_ctx())
+        control = _built(_ctx())
 
         assert control.run_id == "R1"
 
     def test_a_missing_run_id_is_refused_not_minted(self) -> None:
         ctx = _ctx()
         del ctx.run_id
-        control = Control(ctx)
+        control = _built(ctx)
 
         with pytest.raises(ConfigError, match="no run identity"):
             control.run_id
@@ -287,16 +305,17 @@ class TestUnheldValuesFallThrough:
 
     def test_an_unheld_attribute_resolves_on_the_context(self) -> None:
         ctx = _ctx(pipeline_name="daily")
-        control = Control(ctx)
+        control = _built(ctx)
 
         assert control.pipeline_name == "daily"
 
     def test_batch_state_is_not_shadowed_by_the_context(self) -> None:
         ctx = _ctx(batch_step_id=999)
-        control = Control(ctx)
+        control = _built(ctx)
 
-        # Control answers for its own state rather than deferring.
-        assert control.batch_step_id is None
+        # Control answers for its own state rather than deferring: the step it
+        # bound at construction, not the one the context happens to carry.
+        assert control.batch_step_id == 10
 
 
 class TestNoProceduralSurfaceRemains:
@@ -337,6 +356,69 @@ class TestNoProceduralSurfaceRemains:
             assert "ctx" not in inspect.signature(getattr(Control, name)).parameters
 
 
+class TestConstructionStartsTheBatch:
+    """A Control that exists has a batch. The one place this is not stubbed.
+
+    It was a separate call the caller made afterwards, and a workflow step
+    reached f_batch_step_start with a null batch_id because that call was
+    vetoed by control.enabled and nothing noticed until the insert refused.
+    """
+
+    @staticmethod
+    def _real(ctx: Any) -> tuple[Control, list[str]]:
+        """Construct through the real batch start, recording what it called."""
+        reached: list[str] = []
+
+        def _execute(**kwargs: Any) -> dict:
+            reached.append(kwargs["routine_name"])
+            return {"rows": list(_BATCH_ROWS)}
+
+        with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
+             patch.object(Control, "_handle",
+                          return_value=SimpleNamespace(close=lambda: None)):
+            return Control(ctx), reached
+
+    def test_the_batch_is_bound_when_construction_returns(self) -> None:
+        control, reached = self._real(_ctx())
+
+        assert reached == ["start_batch"]
+        assert control.batch_id is not None
+        assert control.batch_root_step_id is not None
+        assert control.batch_step_id == control.batch_root_step_id
+
+    def test_control_enabled_false_does_not_veto_it(self) -> None:
+        """The flag governs the optional capabilities, and the batch is not one.
+
+        This is the regression. `enabled` is false in every installation, and
+        the batch start took the optional path, so `_call_rows` returned before
+        any SQL was sent and left every id None.
+        """
+        ctx = _ctx()
+        ctx.control = SimpleNamespace(procedure_map="control",
+                                      connection="control", enabled=False)
+        control, reached = self._real(ctx)
+
+        assert reached == ["start_batch"]
+        assert control.batch_id is not None
+        assert control.batch_root_step_id is not None
+        assert control.batch_step_id == control.batch_root_step_id
+
+    def test_construction_fails_when_the_batch_does_not_start(self) -> None:
+        """No Control is handed back without one, rather than one that fails later."""
+        with patch("rey_lib.control.control.execute_mapped_routine",
+                   return_value={"rows": []}), \
+             patch.object(Control, "_handle",
+                          return_value=SimpleNamespace(close=lambda: None)), \
+             pytest.raises(StateError, match="the batch was not started"):
+            Control(_ctx())
+
+    def test_start_batch_cannot_be_made_optional(self) -> None:
+        """No `required` parameter: there is nothing for a caller to decide."""
+        assert "required" not in inspect.signature(Control.start_batch).parameters
+        assert "required" not in inspect.signature(Control.finish_batch).parameters
+        assert "required" not in inspect.signature(Control.end_batch).parameters
+
+
 class TestControlEnabledDoesNotVetoRunLogging:
     """One switch decides where run logs go, and it is not this one.
 
@@ -350,7 +432,7 @@ class TestControlEnabledDoesNotVetoRunLogging:
     def test_a_required_call_proceeds_with_control_disabled(self) -> None:
         ctx = _ctx()
         ctx.control = SimpleNamespace(procedure_map="control", enabled=False)
-        control = Control(ctx)
+        control = _built(ctx)
         reached: list[str] = []
 
         with patch("rey_lib.control.control.execute_mapped_routine",
@@ -358,7 +440,7 @@ class TestControlEnabledDoesNotVetoRunLogging:
                    or {"outputs": {"batch_id": 1}}), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
-            control.start_batch(batch_name="nightly", required=True)
+            control.start_batch(batch_name="nightly")
 
         assert reached == ["start_batch"]
 
@@ -366,7 +448,7 @@ class TestControlEnabledDoesNotVetoRunLogging:
         """The flag keeps its meaning for everything it does govern."""
         ctx = _ctx()
         ctx.control = SimpleNamespace(procedure_map="control", enabled=False)
-        control = Control(ctx)
+        control = _built(ctx)
         reached: list[str] = []
 
         with patch("rey_lib.control.control.execute_mapped_routine",

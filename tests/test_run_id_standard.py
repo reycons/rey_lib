@@ -17,11 +17,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from tests.conftest import make_run_log, start_test_run
 
+from rey_lib.control import Control
 from rey_lib.run import establish_run_identity
 
 from rey_lib.files.file_utils import run_artifact_path
@@ -30,6 +33,19 @@ from rey_lib.logs.logging_setup import setup_logging
 
 # Filename-safe run timestamp pattern: YYYYMMDD_HHMMSS.
 _TIMESTAMP_RE = re.compile(r"^\d{8}_\d{6}$")
+
+
+
+def _control(ctx: Any) -> Control:
+    """Build a Control with its batch start stubbed.
+
+    Constructing one starts its batch, which these tests are not about and
+    which would need a live database. tests/test_control_object.py is where
+    that is exercised for real.
+    """
+    with patch.object(Control, "_call_rows",
+                      return_value=[{"o_batch_id": 1, "o_batch_step_id": 10}]):
+        return Control(ctx)
 
 
 def test_establish_run_identity_sets_timestamps_only() -> None:
@@ -114,7 +130,7 @@ def test_ensure_helpers_share_one_identity() -> None:
         procedure_maps=[SimpleNamespace(name="control", routine_bindings=[])],
     )
     start_test_run(ctx)
-    control = Control(ctx)
+    control = _control(ctx)
     assert control.run_id == ctx.run_id
     assert control.run_timestamp() == ctx.run_timestamp
 

@@ -11,8 +11,7 @@ Usage
 -----
 from rey_lib.control import Control
 
-control = Control(ctx)
-control.start_batch(batch_name="my_run")
+control = Control(ctx)          # the batch is started by this line
 control.start_step(step_name="extract", step_sequence=1)
 """
 

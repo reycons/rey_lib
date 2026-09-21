@@ -112,13 +112,13 @@ class MintingControl:
     # The batch surface a run log opens and closes around its work. Held as
     # state rather than recorded as calls: what these tests assert on is the
     # identity a record was given, not the batch machinery around it.
-    def start_batch(self, batch_name: Any = None, required: bool = False,
+    def start_batch(self, batch_name: Any = None,
                     **kw: Any) -> int:
         self.batch_id = 1
         self.owns_batch = True
         return self.batch_id
 
-    def end_batch(self, status: Any = None, required: bool = False,
+    def end_batch(self, status: Any = None,
                   **kw: Any) -> None:
         self.owns_batch = False
 
@@ -339,7 +339,7 @@ def recorded_run(monkeypatch: pytest.MonkeyPatch) -> None:
             """Return a stable id for any key, as the registry would."""
             return _TEST_INSTALLATION_ID
 
-        def start_batch(self, batch_name=None, required=False, **kw):
+        def start_batch(self, batch_name=None, **kw):
             """Bind a batch and its root step, as p_batch_start returns both.
 
             The batch belongs to this boundary: it is where the run-starting

@@ -156,21 +156,17 @@ def build_ctx_for_app(
     # carries that value as run_id. A child process arrives with the parent's
     # run_id already set and does not start a second run.
     if not getattr(ctx, "run_id", None):
+        # What the batch is called. Read off the context by Control, because
+        # `operation` is a parameter here and Control is built from the context
+        # alone -- without this the batch takes the app's name and the run's
+        # purpose is lost from the record.
+        ctx.operation = operation
+        # Building it starts its batch. The batch is not started here: it was
+        # once, as a second call after this line, and a setting vetoed it
+        # silently and left a Control whose batch_id was None until a workflow
+        # step hit the NOT NULL on control.batch_step.
         ctx.shared_control = _open_control(ctx)
         _settle_installation_id(ctx)
-        # THE BATCH BELONGS TO THIS BOUNDARY, not to the run log. Every governed
-        # routine opens a step beneath a parent, and control.f_batch_step_begin
-        # refuses when it is given neither a batch nor a parent step, so work
-        # done without one does not go unattributed -- it fails. Starting the
-        # batch where the run-starting Control is created is what makes the
-        # parent exist before anything can ask for it.
-        #
-        # Only this path. A Control built elsewhere does not start a batch: this
-        # is the boundary that starts the run, and the batch is that run's.
-        ctx.shared_control.start_batch(
-            batch_name=operation or app_name or "run",
-            required=False,
-        )
         ctx.run = Run.start(
             ctx.shared_control,
             subject_type=subject_type or "app",

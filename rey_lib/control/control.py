@@ -38,7 +38,7 @@ from rey_lib.db.connection import shared_connection
 from rey_lib.db.procedure_map import (
     execute_mapped_routine, get_procedure_map, resolve_routine_binding,
 )
-from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
 from rey_lib.logs import get_logger
 
 __all__ = ["Control"]
@@ -64,24 +64,36 @@ class Control:
     """Runtime access to the control database through its procedure map."""
 
     def __init__(self, ctx: Any) -> None:
-        """Take ownership of the control procedure map.
+        """Take ownership of the control procedure map, and start the batch.
 
         The map is resolved once, retained here, and removed from
         ``ctx.procedure_maps``. Removing it is the point: while it stayed on the
         context, anything holding the context could reach control routines
         without going through this object.
 
+        **A Control that exists has a batch.** Starting it is the last thing
+        construction does, so there is no moment at which a caller holds one of
+        these with no batch bound. Making it a separate call afterwards is what
+        let a workflow step reach ``f_batch_step_start`` with a null batch_id:
+        the caller that was meant to make the call did make it, and it was
+        vetoed by a setting, and nothing noticed until the insert refused.
+
         Raises
         ------
         ConfigError
             When no control procedure map is named or it declares SQL bindings.
+        StateError
+            When the batch could not be started. Construction does not complete
+            without one.
         """
         self._ctx = ctx
-        # Seeded from the launch input, owned here afterwards. A run continuing
-        # someone else's batch has to learn that id from somewhere, and launch
-        # is the only place it can come from; every later write lands on this
-        # object, never back onto the context.
-        self.batch_id: Optional[int] = getattr(ctx, "batch_id", None)
+        # Bound by the batch this constructor starts, and by nothing else. It
+        # was seeded from ``ctx.batch_id`` so a Control could continue someone
+        # else's batch; that cannot coexist with the rule above, because a
+        # borrowed batch_id comes with no root step and leaves construction
+        # unable to bind one. Parent and child are related through
+        # parent_batch_step_id, which is the mechanism for it.
+        self.batch_id: Optional[int] = None
         # The root step p_batch_start returned, retained until the batch ends.
         # Held separately from the open step because closing a step clears that
         # one, and an application step still has to know what it hangs from --
@@ -121,6 +133,21 @@ class Control:
         # Only the named map is taken; other maps stay for their own owners.
         maps = list(getattr(ctx, "procedure_maps", None) or [])
         ctx.procedure_maps = [m for m in maps if _name_of(m) != self._map_name]
+
+        # LAST, because it needs everything above: the connection to run on and
+        # the map to find p_batch_start in.
+        self.start_batch(
+            batch_name=str(getattr(ctx, "operation", None)
+                           or getattr(ctx, "app_name", None) or "run"),
+        )
+        if self.batch_id is None or self.batch_step_id is None:
+            raise StateError(
+                "control: the batch was not started, so this Control has "
+                "nothing for governed work to hang from. Every governed "
+                "routine opens a step beneath a parent and f_batch_step_start "
+                "refuses without one, so failing here is the difference "
+                "between naming the cause and a null batch_id four calls away."
+            )
 
     def close(self) -> None:
         """Release this object's references at runtime collection.
@@ -526,8 +553,7 @@ class Control:
     # -- batch --------------------------------------------------------------
 
     def start_batch(self, batch_name: str, owner_app_name: Optional[str] = None,
-                    context_jsonb: Optional[dict[str, Any]] = None,
-                    required: bool = False) -> Optional[int]:
+                    context_jsonb: Optional[dict[str, Any]] = None) -> Optional[int]:
         """Start a batch and its root step, binding both. Returns ``batch_id``.
 
         A batch is a grouping identity: it contains runs and is not one of them.
@@ -539,21 +565,17 @@ class Control:
         Starting a batch creates its root step in the same operation, so a
         batch never exists without one. That step becomes the parent for work
         performed under the batch, which is why both ids are bound here.
-        """
-        # REUSE, NEVER MANUFACTURE A SECOND. A Control that arrives with a
-        # batch already bound is continuing one -- __init__ seeds batch_id from
-        # ctx.batch_id, which is how a child process inherits its parent's.
-        # Starting another here would fragment the record it was meant to join.
-        #
-        # This is where RunLog's `new_batch` intent went. That flag had no
-        # caller and no configuration key by the time it moved: the default was
-        # always True, so the reuse branch was unreachable. What was worth
-        # keeping is the rule underneath it, which is this -- and it is decided
-        # from state that is actually true rather than from a flag nobody set.
-        if self.batch_id is not None:
-            self.owns_batch = False
-            return self.batch_id
 
+        **No ``required`` parameter, because there is nothing to decide.** This
+        is what construction does, not a capability a configuration may switch
+        off; it goes to the database. It took the optional path once, and
+        ``control.enabled`` -- which is false in every installation and governs
+        artifacts, contracts and config snapshots -- silently returned before
+        any SQL was sent.
+        """
+        # CALLED ONCE, BY __init__. There is no reuse branch: a Control that
+        # found a batch already bound used to adopt it and start none, which is
+        # the shape that let one exist with no root step of its own.
         rows = self._call_rows("start_batch", {
             "batch_name":      batch_name,
             "owner_app_name":  owner_app_name or getattr(self._ctx, "app_name", None),
@@ -561,7 +583,7 @@ class Control:
             # Explicit: resolving this from the context would find Control's own
             # run_id method and bind the method object as a parameter.
             "run_id":          getattr(self._ctx, "run_id", None),
-        }, required=required)
+        }, required=True)
         if not rows:
             return None
         self.batch_id = rows[0].get("o_batch_id")
@@ -573,8 +595,7 @@ class Control:
         self.owns_batch = True
         return self.batch_id
 
-    def finish_batch(self, status: str, message: Optional[str] = None,
-                     required: bool = False) -> None:
+    def finish_batch(self, status: str, message: Optional[str] = None) -> None:
         """Close what is open, innermost first, then end the batch.
 
         The shutdown half of the lifecycle whose startup is :meth:`start_batch`.
@@ -595,23 +616,26 @@ class Control:
         the one that is -- a batch may group several runs, and ending it because
         one of them finished would close it under the others. Calling it twice
         is safe.
+
+        **No ``required`` parameter, for the reason :meth:`start_batch` has
+        none.** Construction always opens a batch, so teardown always closes
+        one; a setting able to veto only this half would leave every batch and
+        every root step RUNNING for the life of the database.
         """
         if self.batch_id is None or not self.owns_batch:
             return
         if self.batch_step_id is not None and self.batch_step_id != self.batch_root_step_id:
-            self.end_step(status=status, message=message, required=required)
+            self.end_step(status=status, message=message, required=True)
         if self.batch_root_step_id is not None:
             self.batch_step_id = self.batch_root_step_id
-            self.end_step(status=status, message=message, required=required)
+            self.end_step(status=status, message=message, required=True)
         self.end_batch(
             status=status,
             error_message=None if status == "success" else (message or status),
-            required=required,
         )
 
     def end_batch(self, status: str, error_message: Optional[str] = None,
-                  context_jsonb: Optional[dict[str, Any]] = None,
-                  required: bool = False) -> None:
+                  context_jsonb: Optional[dict[str, Any]] = None) -> None:
         """Mark the current batch complete and release its state.
 
         All three go together. A root left behind would be offered as the parent
@@ -626,7 +650,7 @@ class Control:
             "status":        status,
             "error_message": error_message,
             "context_jsonb": context_jsonb,
-        }, required=required)
+        }, required=True)
         self.batch_id = None
         self.batch_root_step_id = None
         self.batch_step_id = None

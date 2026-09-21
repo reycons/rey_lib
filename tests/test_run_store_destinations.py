@@ -72,14 +72,14 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
             # rather than blanking it, so work between steps still has a parent.
             self.batch_root_step_id = None
 
-        def start_batch(self, batch_name=None, required=False, **kw):
+        def start_batch(self, batch_name=None, **kw):
             self.batch_id = 7
             self.batch_root_step_id = 7000
             self.batch_step_id = 7000
             _CONTROL_CALLS.append(("start_batch", {"batch_name": batch_name}, required))
             return 7
 
-        def end_batch(self, status=None, error_message=None, required=False, **kw):
+        def end_batch(self, status=None, error_message=None, **kw):
             _CONTROL_CALLS.append(("end_batch", {"status": status}, required))
 
         def start_step(self, step_name=None, step_sequence=None, step_type=None,

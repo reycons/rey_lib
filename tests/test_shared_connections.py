@@ -47,6 +47,19 @@ def _ctx(**extra: Any) -> SimpleNamespace:
     return ctx
 
 
+
+def _control(ctx: Any) -> Control:
+    """Build a Control with its batch start stubbed.
+
+    Constructing one starts its batch, which these tests are not about and
+    which would need a live database. tests/test_control_object.py is where
+    that is exercised for real.
+    """
+    with patch.object(Control, "_call_rows",
+                      return_value=[{"o_batch_id": 1, "o_batch_step_id": 10}]):
+        return Control(ctx)
+
+
 class TestOneObjectPerConfiguredConnection:
     """Construction, and what it produces."""
 
@@ -87,7 +100,7 @@ class TestTwoConsumersShareOneObject:
     def test_control_holds_the_shared_object(self) -> None:
         ctx = _ctx()
 
-        control = Control(ctx)
+        control = _control(ctx)
 
         assert control.connection is ctx.shared_connections["control"]
 
@@ -96,14 +109,14 @@ class TestTwoConsumersShareOneObject:
         ctx = _ctx()
 
         with patch.object(connection_module, "_db") as adapter:
-            control = Control(ctx)
+            control = _control(ctx)
 
         assert control.connection is ctx.shared_connections["control"]
         adapter.get_connection.assert_not_called()
 
     def test_another_consumer_sees_the_handle_control_opened(self) -> None:
         ctx = _ctx()
-        control = Control(ctx)
+        control = _control(ctx)
 
         with patch.object(connection_module, "_db") as adapter:
             adapter.get_connection.return_value = "live-handle"
@@ -171,7 +184,7 @@ class TestLifetime:
     def test_a_control_call_does_not_close_the_shared_connection(self) -> None:
         """A consumer must not pull the handle from under other holders."""
         ctx = _ctx()
-        control = Control(ctx)
+        control = _control(ctx)
         handle = SimpleNamespace(closed=0)
         handle.close = lambda: setattr(handle, "closed", handle.closed + 1)
 
@@ -249,7 +262,7 @@ class TestProcedureMapsStayConnectionAgnostic:
 
     def test_control_selects_the_connection_not_the_map(self) -> None:
         ctx = _ctx()
-        control = Control(ctx)
+        control = _control(ctx)
 
         # The name came from logging.db_connection, never from the map.
         assert control.connection.name == "control"
