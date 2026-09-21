@@ -68,9 +68,14 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
             self.owns_batch = False
             self.batch_id = None
             self.batch_step_id = None
+            # The permanent anchor. close_step restores the current step to it
+            # rather than blanking it, so work between steps still has a parent.
+            self.batch_root_step_id = None
 
         def start_batch(self, batch_name=None, required=False, **kw):
             self.batch_id = 7
+            self.batch_root_step_id = 7000
+            self.batch_step_id = 7000
             _CONTROL_CALLS.append(("start_batch", {"batch_name": batch_name}, required))
             return 7
 
@@ -136,7 +141,16 @@ def _actions(calls: list) -> list[str]:
 class TestJsonlMode:
     """The historical behaviour, preserved exactly."""
 
-    def test_jsonl_never_invokes_control_logging(self, tmp_path, control_calls) -> None:
+    def test_jsonl_writes_no_control_RECORDS_but_still_forwards_steps(
+        self, tmp_path, control_calls,
+    ) -> None:
+        """run_store routes RECORDS. It does not decide what is attributed.
+
+        This asserted `control_calls == []` -- that choosing jsonl meant the
+        control database was never touched at all. It is what made the batch
+        depend on a logging setting, and it left four of six installations
+        doing database work with nothing to attribute it to.
+        """
         run_log = _ctx(tmp_path, "jsonl")
 
         log_run_start(run_log, operation="scan")
@@ -144,7 +158,12 @@ class TestJsonlMode:
         log_step_end(run_log, "extract", "success")
         log_run_complete(run_log, "success")
 
-        assert control_calls == []
+        # No run-log RECORD reaches the database: that is what jsonl means.
+        assert "write_run_log_record" not in _actions(control_calls)
+        # The steps still do, because a step is attribution, not a record.
+        assert _actions(control_calls) == ["start_step", "end_step"]
+        # And no batch: the run log never starts one now, whatever the mode.
+        assert "start_batch" not in _actions(control_calls)
 
     def test_jsonl_writes_the_run_log(self, tmp_path, control_calls) -> None:
         run_log = _ctx(tmp_path, "jsonl")
@@ -173,9 +192,9 @@ class TestDbMode:
 
         log_run_start(run_log, operation="scan")
 
-        # The batch is opened first, then the record itself is persisted as an
-        # event: every record reaches the database, not only the lifecycle ones.
-        assert _actions(control_calls) == ["start_batch", "write_run_log_record"]
+        # No start_batch. The batch was opened where the run-starting Control
+        # was created, before this run log existed.
+        assert _actions(control_calls) == ["write_run_log_record"]
         assert _records(run_log) == []
 
     def test_the_full_lifecycle_reaches_control(self, tmp_path, control_calls) -> None:
@@ -186,11 +205,13 @@ class TestDbMode:
         log_step_end(run_log, "extract", "success")
         log_run_complete(run_log, "success")
 
+        # Neither start_batch nor end_batch: the batch lifecycle belongs to
+        # the Control that owns the run, not to the log that describes it.
         assert _actions(control_calls) == [
-            "start_batch", "write_run_log_record",     # RUN_START record
+            "write_run_log_record",                    # RUN_START record
             "write_run_log_record", "start_step",      # STEP_START record, then the step
             "write_run_log_record", "end_step",        # STEP_END record, then step close
-            "write_run_log_record", "end_batch",       # RUN_COMPLETE record, then close
+            "write_run_log_record",                    # RUN_COMPLETE record
         ]
 
     def test_every_run_log_control_call_is_required(self, tmp_path, control_calls) -> None:
@@ -212,22 +233,35 @@ class TestBothMode:
 
         log_run_start(run_log, operation="scan")
 
-        assert _actions(control_calls) == ["start_batch", "write_run_log_record"]
+        assert _actions(control_calls) == ["write_run_log_record"]
         assert [r["record_type"] for r in _records(run_log)] == ["RUN_START"]
 
     def test_a_db_failure_under_both_is_surfaced(self, tmp_path) -> None:
-        """The run log holds its Control, so the failure comes from there."""
+        """The run log holds its Control, so the failure comes from there.
+
+        The break moved with the ownership: the run log no longer calls
+        start_batch, so a batch that cannot be opened is not its failure to
+        surface. Writing the RECORD is, and that is what breaks here.
+
+        It surfaces as StateError rather than the DatabaseError underneath it,
+        and that is the more accurate answer: under `both` the fault is not
+        that a call failed but that the run is now described in one destination
+        and not the other. The point the test holds is unchanged -- the failure
+        is surfaced, not swallowed.
+        """
         class _Broken:
             owns_batch = False
             batch_id = None
+            batch_step_id = None
+            batch_root_step_id = None
 
-            def start_batch(self, **kw):
+            def write_run_log_record(self, **kw):
                 raise DatabaseError("control unreachable")
 
         run_log = _ctx(tmp_path, "both")
         run_log.control = _Broken()
 
-        with pytest.raises(DatabaseError):
+        with pytest.raises(StateError, match="not committed to every destination"):
             log_run_start(run_log, operation="scan")
 
     def test_a_jsonl_failure_under_both_is_surfaced(self, tmp_path, control_calls,
@@ -253,49 +287,48 @@ class TestBothMode:
         log_run_start(run_log, operation="scan")  # must not raise
 
 
-class TestBatchIntent:
-    """Launch declares it; logging honours it and never infers it."""
+class TestBatchIntentIsNotTheRunLogs:
+    """Launch declares it, and the Control lifecycle honours it.
 
-    def test_default_launch_creates_a_batch(self, tmp_path, control_calls) -> None:
+    REVERSED DELIBERATELY. This class asserted that the run log created a batch
+    when `new_batch` was true and refused when it was false with none bound.
+    That authority moved: the batch is started where the run-starting Control
+    is created, because a governed routine needs a parent to exist before it
+    runs, and `control.f_batch_step_begin` refuses outright when given neither
+    a batch nor a parent step.
+
+    What is left here is the negative, which is worth holding: the run log
+    starts no batch under ANY intent or destination.
+    """
+
+    def test_the_run_log_starts_no_batch_whatever_the_intent(
+        self, tmp_path, control_calls,
+    ) -> None:
+        for extra in ({}, {"new_batch": True}, {"new_batch": False, "batch_id": 99}):
+            control_calls.clear()
+            run_log = _ctx(tmp_path, "db", **extra)
+
+            log_run_start(run_log, operation="scan")
+
+            assert "start_batch" not in _actions(control_calls), extra
+
+    def test_the_run_log_ends_no_batch(self, tmp_path, control_calls) -> None:
         run_log = _ctx(tmp_path, "db")
 
         log_run_start(run_log, operation="scan")
+        log_run_complete(run_log, "success")
 
-        assert "start_batch" in _actions(control_calls)
-        assert run_log.control.batch_id == 7
+        assert "end_batch" not in _actions(control_calls)
 
-    def test_explicit_new_batch_creates_a_batch(self, tmp_path, control_calls) -> None:
-        run_log = _ctx(tmp_path, "db", new_batch=True)
-
-        log_run_start(run_log, operation="scan")
-
-        assert "start_batch" in _actions(control_calls)
-
-    def test_new_batch_false_reuses_the_bound_batch(self, tmp_path, control_calls) -> None:
-        run_log = _ctx(tmp_path, "db", new_batch=False, batch_id=99)
-
-        log_run_start(run_log, operation="scan")
-
-        assert "start_batch" not in _actions(control_calls)
-        assert run_log.control.batch_id == 99
-
-    def test_new_batch_false_without_a_batch_is_rejected(self, tmp_path,
-                                                         control_calls) -> None:
-        run_log = _ctx(tmp_path, "db", new_batch=False)
-
-        with pytest.raises(ConfigError, match="never manufactured"):
-            log_run_start(run_log, operation="scan")
-
-        assert control_calls == []
-
-    def test_a_leftover_batch_id_does_not_imply_reuse(self, tmp_path,
-                                                      control_calls) -> None:
-        """Intent is declared, never inferred from batch_id being set."""
+    def test_a_bound_batch_id_is_left_exactly_as_it_was(
+        self, tmp_path, control_calls,
+    ) -> None:
+        """A run log neither manufactures a batch nor disturbs one."""
         run_log = _ctx(tmp_path, "db", batch_id=1234)
 
         log_run_start(run_log, operation="scan")
 
-        assert "start_batch" in _actions(control_calls)
+        assert run_log.control.batch_id == 1234
 
 
 class TestOneBatchManyRuns:
@@ -303,11 +336,13 @@ class TestOneBatchManyRuns:
 
     def test_two_runs_share_a_batch_and_stay_distinguishable(self, tmp_path,
                                                              control_calls) -> None:
-        first = _ctx(tmp_path, "db")
+        # The batch is bound by the Control lifecycle before either run log
+        # exists, so both are handed the same one.
+        first = _ctx(tmp_path, "db", batch_id=7)
         log_run_start(first, operation="scan")
         log_step_start(first, "extract", 1)
 
-        second = _ctx(tmp_path, "db", new_batch=False,
+        second = _ctx(tmp_path, "db",
                       batch_id=first.control.batch_id,
                       run_id="00000000-0000-4000-8000-000000000002")
         log_run_start(second, operation="scan")
@@ -342,30 +377,32 @@ class TestOneBatchManyRuns:
 class TestIdsArriveThroughTheMap:
     """Result placement is the procedure map's, not Python's."""
 
-    def test_batch_and_step_ids_are_not_written_by_control(self, tmp_path,
-                                                                 monkeypatch) -> None:
-        """With load_to_ctx not emulated, nothing else writes the ids."""
-        seen: list[str] = []
+    def test_the_run_log_does_not_write_the_ids_either(self, tmp_path) -> None:
+        """Nothing outside the map binds batch_id or batch_step_id.
 
+        This used to prove it by having start_batch return a scalar the map
+        never bound, and asserting the run log refused. The run log no longer
+        calls start_batch, so the proof moves: it must leave both ids exactly
+        as it found them.
+        """
         class _NoPlacement:
-            """Returns a scalar but never binds it, as an unmapped output would."""
+            """Records nothing and binds nothing, as an unmapped output would."""
 
             owns_batch = False
             batch_id = None
+            batch_step_id = None
+            batch_root_step_id = None
 
-            def start_batch(self, **kw):
-                seen.append("start_batch")
-                return 7
+            def write_run_log_record(self, **kw):
+                return 1
 
         run_log = _ctx(tmp_path, "db")
         run_log.control = _NoPlacement()
 
-        # start_batch returning a scalar without the map binding it is a run
-        # store that cannot record steps, and it says so rather than continuing.
-        with pytest.raises(StateError, match="no batch_id"):
-            log_run_start(run_log, operation="scan")
+        log_run_start(run_log, operation="scan")
 
-        assert seen == ["start_batch"]
+        assert run_log.control.batch_id is None
+        assert run_log.control.batch_step_id is None
 
 
 class TestEveryRecordHonoursTheDestination:

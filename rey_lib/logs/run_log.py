@@ -636,64 +636,38 @@ class RunLog:
         )
 
     def open_batch(self, batch_name: str) -> None:
-        """Establish the control batch this run belongs to.
+        """No longer starts a batch. Kept so existing callers do not break.
 
-        Honours the declared intent and nothing else. ``new_batch`` true starts
-        one and records that this execution owns it; false requires an existing
-        ``batch_id`` to continue and starts none -- a batch is never
-        manufactured to satisfy a reuse request.
+        THE BATCH BELONGS TO THE CONTROL LIFECYCLE. It is started where the
+        run-starting Control is created, because every governed routine opens
+        a step beneath a parent and needs one to exist before it runs. Deciding
+        that here made the batch depend on ``run_store``, which answers a
+        different question -- where run-log RECORDS go -- and left four of six
+        installations doing database work with no batch at all.
 
-        Called before the first record, because every persisted record carries
-        ``batch_id`` and the column is NOT NULL.
+        ``new_batch`` reuse is honoured in the same place now: a Control that
+        arrives with a ``batch_id`` already bound continues that batch.
         """
-        if not self.writes_db:
-            return
-        from rey_lib.errors.error_utils import ConfigError, StateError
-
-        control = self._require_control()
-        if self.new_batch:
-            with self._persistence():
-                control.start_batch(batch_name=batch_name or self.app or "run",
-                                    required=True)
-            if not control.batch_id:
-                raise StateError(
-                    "control start_batch returned no batch_id. The run store "
-                    "cannot record steps or events without the batch that "
-                    "groups them."
-                )
-            control.owns_batch = True
-        else:
-            if not control.batch_id:
-                raise ConfigError(
-                    "newBatch is false but no batch_id is bound to reuse. A "
-                    "batch is never manufactured to satisfy a reuse request."
-                )
-            control.owns_batch = False
+        del batch_name
 
     def close_batch(self, status: str, message: str = "") -> None:
-        """End the control batch, but only if this run began it.
+        """No longer ends the batch. Kept so existing callers do not break.
 
-        A batch may contain several runs. Ending it because one of them
-        finished would close it under the others.
-
-        Called after the completion record, so the record lands before the
-        batch it belongs to is closed.
+        Ending it belongs with starting it, in the Control lifecycle, after the
+        steps beneath it are closed.
         """
-        if not self.writes_db:
-            return
-        control = self._require_control()
-        if control.owns_batch:
-            with self._persistence():
-                control.end_batch(
-                    status=status,
-                    error_message=None if status == "success" else (message or status),
-                    required=True,
-                )
+        del status, message
 
     def open_step(self, step_name: str, step_sequence: int,
                   step_type: str = "") -> None:
-        """Open a control step for this run."""
-        if not self.writes_db:
+        """Forward the step-start event to Control.
+
+        Not gated on the destination. A step is opened because there is a
+        Control to open it on, not because this log writes its records to the
+        database -- those are different questions, and conflating them is what
+        left work unattributed.
+        """
+        if self.control is None:
             return
         with self._persistence():
             self._require_control().start_step(
@@ -702,13 +676,22 @@ class RunLog:
             )
 
     def close_step(self, status: str, message: str = "") -> None:
-        """Close the open control step; later events belong to the run."""
-        if not self.writes_db:
+        """Forward the step-end event to Control; later events belong to the run.
+
+        Gated on having a Control, not on the destination, for the same reason
+        as :meth:`open_step`.
+        """
+        if self.control is None:
             return
         control = self._require_control()
         with self._persistence():
             control.end_step(status=status, message=message or None, required=True)
-        control.batch_step_id = None
+        # REALIGN TO THE ROOT, do not blank it. batch_root_step_id is the
+        # permanent anchor for the life of the batch; between steps, work still
+        # has somewhere to hang. Nulling it left governed routines called
+        # outside a step with no parent at all, and f_batch_step_begin refuses
+        # when it is given neither a batch nor a parent.
+        control.batch_step_id = control.batch_root_step_id
 
     @contextmanager
     def _persistence(self) -> Any:

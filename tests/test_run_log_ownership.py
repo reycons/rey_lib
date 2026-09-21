@@ -493,35 +493,55 @@ class TestAdoptionIsAMove:
 # The database destination
 # ---------------------------------------------------------------------------
 
-class TestControlIsSubordinateToRunLog:
-    """Control is the run log's DB mechanism, not a second logging owner."""
+class TestTheControlLifecycleOwnsTheBatch:
+    """The batch belongs to the run-starting Control, not to the run log.
 
-    def test_only_the_run_log_drives_the_control_lifecycle(self) -> None:
-        """No caller opens a batch, a step or an event except through RunLog.
+    REVERSED DELIBERATELY. This class asserted the opposite -- that Control was
+    the run log's DB mechanism and only RunLog drove its lifecycle. That made
+    the batch depend on ``run_store``, which answers a different question:
+    where run-log RECORDS go. Four of six installations default to ``jsonl``
+    and so created no batch at all, while still writing manifests, mutations
+    and profiles into the control database -- work that
+    ``control.f_batch_step_begin`` refuses outright when it is given neither a
+    batch nor a parent step.
 
-        The rule holds for every module with a RunLog above it, which is nearly
-        all of them: the run log owns the batch its work is governed under, and
-        a module opening its own would be a second owner beside it.
+    The ownership now:
 
-        A standalone governed execution is the exception, and it is admitted on
-        that criterion rather than by name. Such an execution has no RunLog and
-        no caller-owned batch above it, so there is no owner to defer to and the
-        marking it must do is a governed write with nothing to hang under. It
-        may own its batch. It may not own its Control, which arrives from the
-        runtime -- ``test_control_is_reached_only_through_logs`` is what holds
-        that half, and the two are separate questions.
+    - the run-starting Control lifecycle owns the batch
+    - ``start_batch`` / ``end_batch`` may be called from the run-starting
+      bootstrap path
+    - RunLog owns neither creation nor closure; it forwards workflow-step
+      lifecycle events to Control
+    - ``run_store`` controls the run-log record destination and nothing else
+    - ``batch_root_step_id`` is the permanent anchor from ``start_batch``
+      through ``end_batch``
+    """
+
+    def test_batch_lifecycle_calls_come_only_from_owners(self) -> None:
+        """Who may drive the control lifecycle, and on what criterion.
 
         Read the allowance as the criterion, not the filename. Reading it the
         other way round is what removed a working batch from the rollback: two
         guards named one module, the second was taken to follow from the first,
         and the mechanism was deleted to make it green.
+
+        The criterion is now: a module may drive the lifecycle when it OWNS the
+        execution the batch belongs to. That is the bootstrap path that starts
+        the run, and a standalone governed execution that has no run above it.
+        Everything else is handed a parent and hangs beneath it.
         """
         import ast
 
         methods = {"log_event", "start_batch", "end_batch", "start_step", "end_step"}
         allowed = {
-            "rey_lib/logs/run_log.py",
+            # The run-starting boundary. It creates the Control the run is
+            # governed through, so it is where the batch that run belongs to
+            # begins -- before anything can ask for a parent step.
+            "rey_lib/config/bootstrap.py",
             "rey_lib/control/control.py",
+            # Still forwards step lifecycle events, and still may: a step is
+            # not a batch, and forwarding is not owning.
+            "rey_lib/logs/run_log.py",
             # Standalone governed execution: rollback_log_run is reached with
             # only the id of the run being reversed, and nothing above it owns
             # a batch. It opens one and closes it on every exit; its Control
@@ -542,8 +562,8 @@ class TestControlIsSubordinateToRunLog:
                         and node.func.attr in methods):
                     offenders.append(f"{name}:{node.lineno}")
         assert offenders == [], (
-            "these reach the control database for run records without going "
-            f"through the run log: {', '.join(offenders)}"
+            "these drive the control batch lifecycle without owning the "
+            f"execution it belongs to: {', '.join(offenders)}"
         )
 
     def test_the_run_store_module_holds_no_persistence_authority(self) -> None:

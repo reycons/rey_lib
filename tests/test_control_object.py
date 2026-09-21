@@ -116,6 +116,114 @@ class TestBatchStateLivesOnControl:
         control.batch_step_id = 50
         assert (control.batch_id, control.batch_step_id) == (5, 50)
 
+    def test_a_bound_batch_is_reused_and_not_owned(self) -> None:
+        """A Control continuing someone else's batch starts no second one."""
+        ctx = _ctx()
+        ctx.batch_id = 99
+        control = Control(ctx)
+
+        with patch("rey_lib.control.control.execute_mapped_routine") as executed:
+            assert control.start_batch(batch_name="nightly") == 99
+
+        executed.assert_not_called()
+        assert control.owns_batch is False
+
+
+class TestDestructionClosesTheBatchItOwns:
+    """Control.close is the shutdown path, and the only one.
+
+    finish_batch has exactly one caller. Nothing in the run boundary ends a
+    batch; it sets the outcome and lets collection do the rest.
+    """
+
+    @staticmethod
+    def _owning(**outcome: Any) -> Any:
+        """A Control holding an open batch it started, with calls recorded."""
+        control = Control(_ctx())
+        control.batch_id = 5
+        control.batch_root_step_id = 50
+        control.batch_step_id = 50
+        control.owns_batch = True
+        for key, value in outcome.items():
+            setattr(control, key, value)
+        control.calls = []
+        control._call = lambda name, values, required=False: (
+            control.calls.append((name, values.get("status"))))
+        return control
+
+    def test_it_closes_the_root_then_the_batch(self) -> None:
+        control = self._owning(run_outcome="success")
+
+        control.close()
+
+        assert [name for name, _ in control.calls] == ["end_step", "end_batch"]
+        assert all(status == "success" for _, status in control.calls)
+        assert control.batch_id is None
+        assert control.owns_batch is False
+
+    def test_an_open_child_step_is_closed_before_the_root(self) -> None:
+        control = self._owning(run_outcome="success")
+        control.batch_step_id = 77          # a child, not the root
+
+        control.close()
+
+        # Two end_step calls: the child, then the root. A parent closed first
+        # would carry a completed_at earlier than the step beneath it.
+        assert [name for name, _ in control.calls] == [
+            "end_step", "end_step", "end_batch"]
+
+    def test_no_outcome_closes_as_unknown(self) -> None:
+        """Collected without being told, the batch says so rather than guessing."""
+        control = self._owning()
+
+        control.close()
+
+        assert {status for _, status in control.calls} == {"unknown"}
+
+    def test_a_batch_it_does_not_own_is_left_alone(self) -> None:
+        """A batch may group several runs; one Control being collected ends none."""
+        control = self._owning(run_outcome="success")
+        control.owns_batch = False
+
+        control.close()
+
+        assert control.calls == []
+
+    def test_a_close_failure_is_recorded_and_teardown_continues(self) -> None:
+        """Recorded through the run log, not raised out of destruction."""
+        recorded: list[dict] = []
+
+        control = self._owning(run_outcome="success")
+        control.run_log = SimpleNamespace(
+            append=lambda record_type, **fields: recorded.append(
+                {"record_type": record_type, **fields}))
+
+        def _boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("control unreachable")
+
+        control._call = _boom
+
+        control.close()          # must not raise
+
+        assert [r["record_type"] for r in recorded] == ["ERROR"]
+        assert "could not be closed" in recorded[0]["message"]
+        # Teardown still released everything.
+        assert control.batch_id is None
+        assert control.run_log is None
+
+    def test_closing_twice_is_safe(self) -> None:
+        control = self._owning(run_outcome="success")
+
+        control.close()
+        calls_after_first = list(control.calls)
+        control.close()
+
+        assert control.calls == calls_after_first
+
+
+class TestBatchResultPlacement:
+    """Kept beside the state tests: the map is what binds a routine's ids."""
+
     def test_a_routine_result_is_placed_on_control_by_the_map(self) -> None:
         """load_to_ctx targets Control, because Control is the binding target."""
         ctx = _ctx()

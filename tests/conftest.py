@@ -102,6 +102,10 @@ class MintingControl:
         self.owns_batch = False
         self.batch_id: Any = None
         self.batch_step_id: Any = None
+        # The permanent anchor for the batch's life. close_step restores
+        # the current step to it rather than blanking it, so work between
+        # steps still has a parent to hang under.
+        self.batch_root_step_id: Any = None
         self.run_log: Any = None
         self.rows: list[dict[str, Any]] = []
 
@@ -320,16 +324,33 @@ def recorded_run(monkeypatch: pytest.MonkeyPatch) -> None:
     class _ResolvingControl:
         """The Control surface the launch boundary uses before the run exists.
 
-        It resolves an installation, because bootstrap does that between opening
-        control and creating the run. A double with no method there would make
-        production code that legitimately calls one look broken, or push a
-        defensive getattr into the boundary that would then hide a Control whose
-        binding really is missing.
+        It resolves an installation and starts a batch, because bootstrap does
+        both between opening control and creating the run. A double with no
+        method there would make production code that legitimately calls one
+        look broken, or push a defensive getattr into the boundary that would
+        then hide a Control whose binding really is missing.
         """
+
+        batch_id = None
+        batch_step_id = None
+        batch_root_step_id = None
 
         def resolve_installation(self, installation_key: str) -> int:
             """Return a stable id for any key, as the registry would."""
             return _TEST_INSTALLATION_ID
+
+        def start_batch(self, batch_name=None, required=False, **kw):
+            """Bind a batch and its root step, as p_batch_start returns both.
+
+            The batch belongs to this boundary: it is where the run-starting
+            Control is created, so it is where the batch that run is governed
+            under begins.
+            """
+            del batch_name, required, kw
+            self.batch_id = 1
+            self.batch_root_step_id = 10
+            self.batch_step_id = 10
+            return self.batch_id
 
     monkeypatch.setattr(bootstrap, "_open_control", lambda ctx: _ResolvingControl())
     monkeypatch.setattr(bootstrap.Run, "start", staticmethod(_start))

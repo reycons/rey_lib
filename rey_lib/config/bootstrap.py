@@ -158,6 +158,19 @@ def build_ctx_for_app(
     if not getattr(ctx, "run_id", None):
         ctx.shared_control = _open_control(ctx)
         _settle_installation_id(ctx)
+        # THE BATCH BELONGS TO THIS BOUNDARY, not to the run log. Every governed
+        # routine opens a step beneath a parent, and control.f_batch_step_begin
+        # refuses when it is given neither a batch nor a parent step, so work
+        # done without one does not go unattributed -- it fails. Starting the
+        # batch where the run-starting Control is created is what makes the
+        # parent exist before anything can ask for it.
+        #
+        # Only this path. A Control built elsewhere does not start a batch: this
+        # is the boundary that starts the run, and the batch is that run's.
+        ctx.shared_control.start_batch(
+            batch_name=operation or app_name or "run",
+            required=False,
+        )
         ctx.run = Run.start(
             ctx.shared_control,
             subject_type=subject_type or "app",
@@ -895,16 +908,16 @@ def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
     from rey_lib.logs.run_store import run_store_mode
 
     destination = run_store_mode(ctx)
-    control = None
-    if destination in ("db", "both"):
-        # Reused, not rebuilt: the run was created through this Control before
-        # logging opened. A second one would open a second connection to the
-        # same database and the two would disagree about which batch is open.
-        #
-        # Still gated on the destination. The run log needs Control only when
-        # it writes records to the database; the run needed it to exist at all,
-        # which is a different requirement and is met at the launch boundary.
-        control = getattr(ctx, "shared_control", None) or _open_control(ctx)
+    # REUSED, NEVER BUILT. The run was created through this Control before
+    # logging opened, and it is the Control holding the open batch. Building a
+    # second one here would open a second connection to the same database and
+    # the two would disagree about which batch is open.
+    #
+    # Not gated on the destination any more. The destination says where run-log
+    # RECORDS go; it does not decide whether this run log can reach the Control
+    # that already exists. An installation writing JSONL still does database
+    # work, and that work belongs to the batch this Control opened.
+    control = getattr(ctx, "shared_control", None)
 
     lineage = {}
     for field in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):
@@ -1052,6 +1065,18 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
                 # be closed. The run still happened.
                 _logger.error("Could not record terminal status for run %s: %s",
                               getattr(run, "run_id", "?"), exc)
+
+        # THE OUTCOME, AS A FACT -- not a shutdown instruction. Control closes
+        # its own batch when it is collected, a few lines below; what it cannot
+        # work out for itself is how the run ended. This is the only thing that
+        # knows, so it says so and nothing more.
+        #
+        # Set outside the `run is not None` block: a process that opened a
+        # Control and failed before creating a run still has an outcome, and
+        # Control decides for itself whether it owns a batch to apply it to.
+        control = getattr(ctx, "shared_control", None)
+        if control is not None:
+            control.run_outcome = "failed" if failed else "success"
 
         # The ambient run binding is process state, not a registered object:
         # a collected run log must not stay bound for whatever runs next.

@@ -45,6 +45,12 @@ __all__ = ["Control"]
 
 _logger = get_logger(__name__)
 
+#: The batch status recorded when nobody said how the run ended. Distinct from
+#: success and from failure on purpose: a process that was collected without
+#: reporting an outcome did not succeed and did not fail, and calling it either
+#: would be inventing the answer.
+_UNKNOWN_OUTCOME = "unknown"
+
 
 def _name_of(record: Any) -> str:
     """Return a config record's name, namespace or mapping."""
@@ -93,6 +99,11 @@ class Control:
         # ending it is its business. A batch may hold several runs; closing one
         # because a single run finished would close it under the others.
         self.owns_batch: bool = False
+        #: How the run ended, set by the run boundary just before collection.
+        #: A fact, not an instruction -- Control closes its own batch and this
+        #: is the only thing it cannot work out for itself. None means nobody
+        #: said, which is what a process that vanished looks like.
+        self.run_outcome: Optional[str] = None
         # A reference to the shared object, not a config or a raw handle.
         self.connection = self._resolve_connection()
 
@@ -121,11 +132,65 @@ class Control:
         collected in its own right, and closing a shared handle here would take
         it from every other consumer. What ends here is this object's part --
         the batch state it held and the run log it served.
+
+        THIS IS THE BATCH SHUTDOWN PATH, and the only one. A Control that owns
+        an open batch closes it here: the open child step, then the root that
+        ``p_batch_start`` left RUNNING and nothing else closes, then the batch
+        itself. Nothing in the run boundary ends a batch -- it sets
+        ``run_outcome`` and lets collection do the rest, so there is one place
+        a batch can be closed rather than two that must agree.
+
+        The outcome is a fact this object cannot work out for itself. Without
+        one the batch closes as ``unknown``, which is neither success nor
+        failure because a Control collected without being told is neither.
+
+        A Control that does NOT own the batch ends nothing. ``finish_batch``
+        holds that rule; a batch grouping several runs must not be closed
+        because one of their Controls was collected.
+
+        Teardown is not a guarantee. A hard-killed process runs no cleanup at
+        all, and the batch stays RUNNING -- which is the accurate record of a
+        process that vanished.
         """
+        if self.batch_id is not None and self.owns_batch:
+            try:
+                self.finish_batch(
+                    self.run_outcome or _UNKNOWN_OUTCOME,
+                    message=None if self.run_outcome else
+                            "the run boundary recorded no outcome",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._record_close_failure(exc)
+        self.batch_id = None
         self.batch_step_id = None
         self.batch_root_step_id = None
+        self.owns_batch = False
         self.run_log = None
         self.connection = None
+
+    def _record_close_failure(self, exc: BaseException) -> None:
+        """Record a batch that would not close, then let teardown continue.
+
+        Through the run log, because that is where this estate's failures are
+        recorded and a batch left open is a fact about the run. Not re-raised:
+        destruction raising would fail a collection that is releasing
+        everything else correctly, and would replace whatever error ended the
+        run with one about bookkeeping.
+
+        The module logger is the fallback. A run log that cannot take the
+        record is exactly the case where the message must still reach
+        somewhere.
+        """
+        message = f"Batch {self.batch_id} could not be closed at teardown: {exc}"
+        run_log = self.run_log
+        if run_log is not None:
+            try:
+                run_log.append("ERROR", message=message,
+                               error_message={"failure_reason": str(exc)})
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        _logger.error("%s", message)
 
     def __getattr__(self, name: str) -> Any:
         """Fall through to the context for anything Control does not hold.
@@ -475,6 +540,20 @@ class Control:
         batch never exists without one. That step becomes the parent for work
         performed under the batch, which is why both ids are bound here.
         """
+        # REUSE, NEVER MANUFACTURE A SECOND. A Control that arrives with a
+        # batch already bound is continuing one -- __init__ seeds batch_id from
+        # ctx.batch_id, which is how a child process inherits its parent's.
+        # Starting another here would fragment the record it was meant to join.
+        #
+        # This is where RunLog's `new_batch` intent went. That flag had no
+        # caller and no configuration key by the time it moved: the default was
+        # always True, so the reuse branch was unreachable. What was worth
+        # keeping is the rule underneath it, which is this -- and it is decided
+        # from state that is actually true rather than from a flag nobody set.
+        if self.batch_id is not None:
+            self.owns_batch = False
+            return self.batch_id
+
         rows = self._call_rows("start_batch", {
             "batch_name":      batch_name,
             "owner_app_name":  owner_app_name or getattr(self._ctx, "app_name", None),
@@ -488,7 +567,47 @@ class Control:
         self.batch_id = rows[0].get("o_batch_id")
         self.batch_root_step_id = rows[0].get("o_batch_step_id")
         self.batch_step_id = self.batch_root_step_id
+        # This Control started it, so this Control closes it. Ownership is
+        # recorded here rather than inferred later from whether a run object
+        # happens to exist.
+        self.owns_batch = True
         return self.batch_id
+
+    def finish_batch(self, status: str, message: Optional[str] = None,
+                     required: bool = False) -> None:
+        """Close what is open, innermost first, then end the batch.
+
+        The shutdown half of the lifecycle whose startup is :meth:`start_batch`.
+        Three things in order, because a parent cannot be closed before its
+        children:
+
+        1. any step still open beneath the root
+        2. the ROOT step, which nothing else closes -- ``p_batch_start`` creates
+           it ``RUNNING`` and leaves it that way for the life of the batch
+        3. the batch
+
+        Step 2 is the one that is easy to miss. The root is not a marker that
+        closes itself; it stays open deliberately, because a parent carrying a
+        completed_at earlier than the steps beneath it would read as finished
+        while work was still running under it.
+
+        Does nothing when no batch is open, or when this Control did not start
+        the one that is -- a batch may group several runs, and ending it because
+        one of them finished would close it under the others. Calling it twice
+        is safe.
+        """
+        if self.batch_id is None or not self.owns_batch:
+            return
+        if self.batch_step_id is not None and self.batch_step_id != self.batch_root_step_id:
+            self.end_step(status=status, message=message, required=required)
+        if self.batch_root_step_id is not None:
+            self.batch_step_id = self.batch_root_step_id
+            self.end_step(status=status, message=message, required=required)
+        self.end_batch(
+            status=status,
+            error_message=None if status == "success" else (message or status),
+            required=required,
+        )
 
     def end_batch(self, status: str, error_message: Optional[str] = None,
                   context_jsonb: Optional[dict[str, Any]] = None,
@@ -498,6 +617,9 @@ class Control:
         All three go together. A root left behind would be offered as the parent
         for the next batch's steps, putting them under a step belonging to a
         batch that has already ended.
+
+        Ends the batch alone. :meth:`finish_batch` is what closes the steps
+        beneath it first, and is what a shutdown calls.
         """
         self._call("end_batch", {
             "batch_id":      self.batch_id,

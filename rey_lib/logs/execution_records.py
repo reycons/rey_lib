@@ -23,11 +23,10 @@ def log_run_start(run_log: 'RunLog', **fields: Any) -> None:
     batch this execution belongs to before anything else is recorded, because
     steps and events are persisted against it.
     """
-    # Batch first: every persisted record carries batch_id, and the column is
-    # NOT NULL, so the batch this run belongs to must exist before the first
-    # record is written. Whether that means touching a database at all is the
-    # run log's decision, not this writer's.
-    run_log.open_batch(str(fields.get("operation") or ""))
+    # The batch already exists. It is started where the run-starting Control is
+    # created, which is before anything can ask for a parent step -- so this
+    # writer records that the run started and does not establish what it runs
+    # under.
     run_log.require_structural_record(run_log.append("RUN_START", **fields), "RUN_START")
 
 
@@ -138,12 +137,13 @@ def log_step_end(run_log: 'RunLog', step_name: str, status: str, *,
 
 def log_run_complete(run_log: 'RunLog', status: str, *, message: str = "", **fields: Any) -> None:
     """Append a RUN_COMPLETE execution record with the final run status."""
-    # Record first, then close the batch: the completion record must land
-    # before the batch it belongs to is ended.
+    # The completion record lands before the batch it belongs to is ended, and
+    # ending it is the Control lifecycle's: Control closes its own batch when
+    # it is collected, and closes the steps beneath it first -- neither of
+    # which this writer has any way to do.
     run_log.require_structural_record(
         run_log.append("RUN_COMPLETE", status=status, message=message, **fields),
         "RUN_COMPLETE")
-    run_log.close_batch(status, message)
 
 
 def log_run_summary(run_log: 'RunLog', summary: dict[str, Any]) -> None:
