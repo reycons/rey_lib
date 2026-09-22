@@ -32,6 +32,7 @@ merely unique in one snapshot impersonate PostgreSQL's own resolution.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -115,9 +116,14 @@ def analyse_routine(definition: str, language: str) -> RoutineAnalysis:
             return RoutineAnalysis(status="unparsed")
         return found.as_analysis()
 
-    try:
-        tree = parse_plpgsql(definition)
-    except Exception:
+    tree = None
+    for attempt in _definition_readings(definition):
+        try:
+            tree = parse_plpgsql(attempt)
+            break
+        except Exception:
+            continue
+    if tree is None:
         return RoutineAnalysis(status="unparsed")
 
     if "PLpgSQL_stmt_dynexecute" in json.dumps(tree):
@@ -179,6 +185,62 @@ class _Found:
             calls=set(self.calls),
             gaps=list(self.gaps),
         )
+
+
+#: A routine returning a set of a composite from a schema libpg_query cannot
+#: look up. Anchored on RETURNS, and only ever applied to the signature.
+_QUALIFIED_SETOF_RETURN = re.compile(
+    r"\bRETURNS\s+SETOF\s+[A-Za-z_][\w$]*\s*\.\s*[A-Za-z_][\w$]*",
+    re.IGNORECASE,
+)
+
+#: Where the signature stops and the body starts. pg_get_functiondef emits the
+#: body dollar-quoted; the single-quoted form is accepted because a definition
+#: may arrive from somewhere else.
+_BODY_DELIMITER = re.compile(r"\bAS\s+(\$[\w$]*\$|')", re.IGNORECASE)
+
+
+def _definition_readings(definition: str) -> tuple[str, ...]:
+    """The ways this whole definition might be parsed, best first.
+
+    The definition as written is always tried first, so nothing that parses
+    today takes a different route.
+
+    THE SECOND READING EXISTS FOR ONE LIBPG_QUERY LIMIT. ``parse_plpgsql``
+    resolves the routine's RETURN TYPE, and the library -- parsing outside a
+    running server -- refuses any schema but ``pg_catalog`` and ``public``:
+
+        Not implemented (LookupExplicitNamespace only supports pg_catalog
+        and public)
+
+    So ``RETURNS SETOF control.file_manifest`` cannot be read, while the body
+    beneath it is perfectly ordinary. The return type is not something this
+    module reports on -- it collects what a body READS, WRITES and CALLS -- so
+    substituting a type the parser can resolve removes an obstacle without
+    touching the answer. Only the RETURNS clause is rewritten; the body is
+    never altered.
+
+    ``SETOF record`` and not ``record``: plpgsql validates the body against the
+    declared return, and a body using ``RETURN QUERY`` is rejected outright by
+    a non-SETOF signature. Set-ness has to survive the substitution.
+
+    Routines in ``LANGUAGE sql`` never hit this -- ``parse_sql`` does not
+    resolve the return type -- which is why nine sibling routines returning the
+    same composite parse today and the one converted to plpgsql does not.
+    """
+    # THE SIGNATURE ONLY. Split at the body delimiter and substitute in the head,
+    # so a routine whose body happens to contain this text -- a literal that
+    # builds DDL, say -- cannot have that literal rewritten. A first-match
+    # substitution over the whole definition would reach it.
+    body = _BODY_DELIMITER.search(definition)
+    head, tail = ((definition[:body.start()], definition[body.start():])
+                  if body else (definition, ""))
+    if not _QUALIFIED_SETOF_RETURN.search(head):
+        return (definition,)
+    return (
+        definition,
+        _QUALIFIED_SETOF_RETURN.sub("RETURNS SETOF record", head, count=1) + tail,
+    )
 
 
 def _readings(fragment: str, mode: int | None) -> tuple[str, ...]:
