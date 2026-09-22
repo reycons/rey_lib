@@ -184,6 +184,32 @@ _PROVIDER_METADATA_CAPABILITIES: dict[str, frozenset[str]] = {
     "sqlserver": frozenset(),
 }
 
+# The provider contract: the methods this adapter publishes and fulfils by
+# calling a function of the SAME NAME on the provider module. Declared here so
+# that a provider which does not implement one REFUSES BY NAME instead of
+# raising AttributeError from inside a dispatch -- the adapter was presenting a
+# contract its providers do not uniformly satisfy, and could not detect it.
+#
+# Support is RESOLVED from the module, not listed beside it. A second
+# hand-maintained table of which provider implements what would drift from the
+# modules it describes, which is this same defect one level up. ``call_routine``
+# already refuses this way: look the function up, and name the provider when it
+# is absent.
+#
+# ``is_truncation_error`` is deliberately NOT here. It takes no connection, so
+# there is no provider to refuse for; it asks every backend in turn and a
+# missing implementation is already absorbed by that loop.
+_PROVIDER_CONTRACT_CAPABILITIES = frozenset(
+    {
+        "fetch_dicts",
+        "call_proc",
+        "call_proc_with_output",
+        "get_table_columns",
+        "create_staging_table_if_not_exists",
+        "bulk_insert",
+    }
+)
+
 _DEFAULT_BUILD_ORDER: list[str] = [
     "schemas",
     "types",
@@ -434,8 +460,14 @@ class DBAdapter:
         -------
         list[dict[str, Any]]
             All result rows as column → value dicts.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider does not implement ``fetch_dicts``.
         """
-        return _backend(self._provider_for_conn(conn)).fetch_dicts(conn, sql_name, params)
+        fetch = self._require_provider_capability(conn, "fetch_dicts")
+        return fetch(conn, sql_name, params)
 
     def run_sql(
         self,
@@ -668,6 +700,37 @@ class DBAdapter:
             )
         provider = self._provider_for_conn(conn)
         return normalized in _PROVIDER_METADATA_CAPABILITIES.get(provider, frozenset())
+
+    def supports_provider_capability(self, conn: Any, capability: str) -> bool:
+        """Return whether ``conn``'s provider implements a declared contract method.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        capability : str
+            One of the declared provider-contract method names.
+
+        Returns
+        -------
+        bool
+            ``True`` if this provider implements it.
+
+        Raises
+        ------
+        ConfigError
+            If ``capability`` is not a declared name. An undeclared name can
+            only be a typo, and answering ``False`` for it would read as
+            "unsupported" and hide the mistake.
+        """
+        normalized = str(capability).strip().lower()
+        if normalized not in _PROVIDER_CONTRACT_CAPABILITIES:
+            raise ConfigError(
+                f"DBAdapter: unknown provider capability '{capability}'. "
+                f"Known capabilities: {sorted(_PROVIDER_CONTRACT_CAPABILITIES)}."
+            )
+        provider = self._provider_for_conn(conn)
+        return getattr(_backend(provider), normalized, None) is not None
 
     def list_catalogs(self, conn: Any) -> list[dict[str, str]]:
         """Return the catalog/database to which ``conn`` is attached."""
@@ -933,6 +996,22 @@ class DBAdapter:
             )
         return provider
 
+    def _require_provider_capability(self, conn: Any, capability: str) -> Any:
+        """Return the provider's function for ``capability``, or refuse by name.
+
+        Every provider-contract dispatch goes through here. Declaring the gap
+        would not be enough on its own: while the call still reached
+        ``_backend(provider).method(...)`` it would raise AttributeError
+        exactly as before, with a correct declaration sitting beside it unread.
+        """
+        provider = self._provider_for_conn(conn)
+        if not self.supports_provider_capability(conn, capability):
+            raise UnsupportedDatabaseCapabilityError(
+                f"DBAdapter: provider '{provider}' does not implement provider "
+                f"capability '{capability}'."
+            )
+        return getattr(_backend(provider), capability)
+
     def _metadata_catalog(self, conn: Any, provider: str) -> str:
         return str(_backend(provider).get_current_database(conn))
 
@@ -1071,12 +1150,11 @@ class DBAdapter:
 
         Raises
         ------
-        NotImplementedError
+        UnsupportedDatabaseCapabilityError
             If the connection's provider has no stored-procedure support.
         """
-        return _backend(self._provider_for_conn(conn)).call_proc(
-            conn, proc_name, params
-        )
+        call = self._require_provider_capability(conn, "call_proc")
+        return call(conn, proc_name, params)
 
     def call_proc_with_output(
         self,
@@ -1106,12 +1184,11 @@ class DBAdapter:
 
         Raises
         ------
-        NotImplementedError
+        UnsupportedDatabaseCapabilityError
             If the connection's provider has no stored-procedure support.
         """
-        return _backend(self._provider_for_conn(conn)).call_proc_with_output(
-            conn, proc_name, named_inputs, output_specs
-        )
+        call = self._require_provider_capability(conn, "call_proc_with_output")
+        return call(conn, proc_name, named_inputs, output_specs)
 
     # ------------------------------------------------------------------
     # Function and procedure execution (PostgreSQL control database)
@@ -1144,10 +1221,18 @@ class DBAdapter:
         schema: str,
         table: str,
     ) -> list[str]:
-        """Return table columns in ordinal order for the connection backend."""
-        return _backend(self._provider_for_conn(conn)).get_table_columns(
-            conn, schema, table
-        )
+        """Return table columns in ordinal order for the connection backend.
+
+        An empty list means the table does not exist -- a table that exists
+        always has at least one column.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot describe a table.
+        """
+        describe = self._require_provider_capability(conn, "get_table_columns")
+        return describe(conn, schema, table)
 
     def create_staging_table_if_not_exists(
         self,
@@ -1178,10 +1263,16 @@ class DBAdapter:
         bool
             ``True`` if the table was created on this call; ``False`` if it
             already existed.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot create a staging table.
         """
-        return _backend(self._provider_for_conn(conn)).create_staging_table_if_not_exists(
-            conn, schema, table, column_defs
+        create = self._require_provider_capability(
+            conn, "create_staging_table_if_not_exists"
         )
+        return create(conn, schema, table, column_defs)
 
     def bulk_insert(
         self,
@@ -1212,10 +1303,14 @@ class DBAdapter:
         -------
         int
             Number of rows inserted.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot bulk insert.
         """
-        return _backend(self._provider_for_conn(conn)).bulk_insert(
-            conn, schema, table, rows, columns
-        )
+        insert_rows = self._require_provider_capability(conn, "bulk_insert")
+        return insert_rows(conn, schema, table, rows, columns)
 
     def is_truncation_error(self, exc: Exception) -> bool:
         """

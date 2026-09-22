@@ -621,6 +621,154 @@ def bulk_insert(
         raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
 
 
+def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
+    """Return one table's column names in ordinal order.
+
+    The adapter's describe contract, answered for PostgreSQL. It asks the
+    shared inspector for ONE table rather than for the schema: ``inspect_schema``
+    builds every table's columns, primary key, foreign keys, indexes and unique
+    constraints, which is a large amount of catalog work to answer a question
+    about one table. ``metadata_get_columns`` is the same inspector the rest of
+    the estate reads columns through, so this does not become a second source
+    of truth about what a table holds.
+
+    Args:
+        conn: Open connection handle.
+        schema: The table's schema.
+        table: The table.
+
+    Returns:
+        Column names in ordinal order. An empty list means the table does not
+        exist -- a table that does exist always has at least one column, so
+        the empty list carries no other meaning.
+
+    Raises:
+        DatabaseError: If an identifier is not a plain name, or the catalog
+            read fails.
+    """
+    _validate_identifier(schema, "schema")
+    _validate_identifier(table, "table")
+
+    from sqlalchemy.exc import NoSuchTableError
+
+    from rey_lib.db._sqlalchemy import metadata_get_columns
+
+    try:
+        # The catalog argument only labels the rows that come back, and only
+        # the names are wanted here -- reading the current database to fill a
+        # field this discards would be a round trip for nothing.
+        columns = metadata_get_columns(conn, "", schema, table)
+    except NoSuchTableError:
+        return []
+    except Exception as exc:
+        raise DatabaseError(
+            f"get_table_columns failed for {schema}.{table}: {exc}"
+        ) from exc
+
+    return [str(item["name"]) for item in columns]
+
+
+def create_staging_table_if_not_exists(
+    conn: Any,
+    schema: str,
+    table: str,
+    column_defs: list[tuple[str, str]],
+) -> bool:
+    """Create a staging table when it is not already there.
+
+    The adapter's staging contract, answered for PostgreSQL. Three things are
+    decided here rather than carried over from another provider:
+
+    **The neutral types need no mapping.** The adapter's vocabulary --
+    VARCHAR(n), INTEGER, DECIMAL(p,s), DATE, TEXT, TIMESTAMP -- is PostgreSQL's
+    own spelling, so a translation table would map every entry to itself. They
+    are still validated: a type is composed into DDL text rather than bound, so
+    it takes the same boundary an identifier takes.
+
+    **It does not commit.** ``bulk_insert`` does not either, and both run
+    inside one load. PostgreSQL DDL is transactional, so a staging table made
+    for a load that then fails goes away with it; committing here would leave
+    the table behind and make a failed load partly durable. The other providers
+    commit because their DDL is not transactional -- provider detail, decided
+    in the provider.
+
+    **The answer is established, not assumed.** The contract distinguishes
+    "created on this call" from "already existed", so existence is read first
+    rather than reporting ``True`` for both.
+
+    Args:
+        conn: Open connection handle.
+        schema: Target schema.
+        table: Target table.
+        column_defs: ``(column_name, sql_type)`` pairs in column order.
+
+    Returns:
+        ``True`` if this call created the table, ``False`` if it was already
+        there.
+
+    Raises:
+        DatabaseError: If an identifier or a type is not well formed, if no
+            columns were given, or if the DDL fails.
+    """
+    if not column_defs:
+        raise DatabaseError(
+            f"create_staging_table_if_not_exists: no columns given for "
+            f"{schema}.{table}."
+        )
+
+    _validate_identifier(schema, "schema")
+    _validate_identifier(table, "table")
+    for name, sql_type in column_defs:
+        _validate_identifier(name, "column")
+        _validate_column_type(sql_type)
+
+    if get_table_columns(conn, schema, table):
+        _logger.debug("Staging table already present: %s.%s", schema, table)
+        return False
+
+    columns_sql = ",\n\t".join(
+        f"{_quoted_identifier(name)} {sql_type.strip()} NULL"
+        for name, sql_type in column_defs
+    )
+    ddl = (
+        f"CREATE TABLE IF NOT EXISTS "
+        f"{_quoted_identifier(schema)}.{_quoted_identifier(table)} (\n"
+        f"\t{columns_sql}\n"
+        f")"
+    )
+
+    from rey_lib.db._sqlalchemy import core_connection
+
+    _logger.info("Creating staging table %s.%s", schema, table)
+    try:
+        core_connection(conn).exec_driver_sql(ddl)
+    except Exception as exc:
+        raise DatabaseError(
+            f"Failed to create staging table '{schema}.{table}': {exc}"
+        ) from exc
+    return True
+
+
+def _validate_column_type(sql_type: str) -> None:
+    """Refuse a column type that is not a bare type name with optional bounds.
+
+    Args:
+        sql_type: The candidate, e.g. ``VARCHAR(40)`` or ``DECIMAL(12,2)``.
+
+    Raises:
+        DatabaseError: If it is anything else. Types are composed into DDL
+            text rather than bound, so this is the boundary that keeps them
+            safe -- the same reason ``_validate_identifier`` exists.
+    """
+    if not re.fullmatch(
+        r"[A-Za-z][A-Za-z0-9 ]*(\(\s*\d+\s*(,\s*\d+\s*)?\))?", sql_type.strip()
+    ):
+        raise DatabaseError(
+            f"Invalid PostgreSQL column type: '{sql_type}'. A type name, "
+            "optionally followed by a length or a precision and scale."
+        )
+
+
 def _validate_identifier(name: str, label: str) -> None:
     """Refuse anything that is not a plain identifier.
 
