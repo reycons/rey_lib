@@ -1964,11 +1964,17 @@ def _load_one_file(
             source = data_file_for(file_path, file_type=file_type,
                                    encoding=encoding)
             try:
-                # Validated against the destination only when there IS one.
-                # An absent destination is about to be created FROM this file,
-                # so there is nothing to check it against yet.
-                rows = (source.read_validated(expected_columns) if exists
-                        else source.read())
+                # ALWAYS VALIDATED, but against different things.
+                #
+                #   a destination  -> does this file match the table?
+                #   None (absent)  -> is this file coherent with ITSELF?
+                #
+                # The second is what the create path never had. An absent
+                # destination used to mean no check at all, so an
+                # inconsistent file had its table created from the first
+                # record and then failed inside the insert -- a database
+                # error for what is a file defect, raised after DDL.
+                rows = source.read_validated(expected_columns)
             except DataFileStructureError as structure_exc:
                 _logger.error("%s — file rejected: %s",
                               structure_exc, file_path.name)

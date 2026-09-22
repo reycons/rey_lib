@@ -69,17 +69,17 @@ def _csv(tmp_path: Path) -> Path:
     return path
 
 
-def _jsonl(tmp_path: Path) -> Path:
+def _jsonl(tmp_path: Path, records=({"a": 1, "b": "x"},)) -> Path:
     path = tmp_path / "source.jsonl"
     path.write_text(
-        "".join(json.dumps(r) + "\n" for r in ({"a": 1, "b": "x"},)),
+        "".join(json.dumps(r) + "\n" for r in records),
         encoding="utf-8",
     )
     return path
 
 
 def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
-          keyed=False, moved=None):
+          keyed=False, moved=None, records=({"a": 1, "b": "x"},)):
     """Run _load_one_file with a recording adapter and a declared setting."""
     monkeypatch.setattr(file_loader, "_db_adapter", adapter)
     monkeypatch.setattr(
@@ -94,7 +94,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
     return file_loader._load_one_file(
         SimpleNamespace(log_depth=0), run_log,
         SimpleNamespace(commit=lambda: None, rollback=lambda: None),
-        _jsonl(tmp_path) if keyed else _csv(tmp_path),
+        _jsonl(tmp_path, records) if keyed else _csv(tmp_path),
         SimpleNamespace(file_type="JSONL" if keyed else "CSV", encoding="utf-8"),
         SimpleNamespace(name="my_load",
                         load=load_block,
@@ -274,6 +274,65 @@ class TestTheDestinationIsAbsentAndCreationIsDeclared:
         _schema, _table, defs = adapter.created[0]
         _s, _t, _rows, columns = adapter.inserted[0]
         assert [name for name, _type in defs] == columns
+
+    def test_an_INCONSISTENT_file_is_refused_BEFORE_the_table_is_created(
+        self, tmp_path: Path, monkeypatch, run_log
+    ) -> None:
+        """The gap the create path had from the day it was added.
+
+        With no destination there was nothing to validate against, so nothing
+        was validated AT ALL. An inconsistent file therefore had its table
+        created from the first record's keys and then failed inside
+        bulk_insert with a missing-column DatabaseError -- a database error
+        for what is a file defect, raised after DDL had already run.
+
+        The file is now asked whether it is coherent with ITSELF, which is a
+        question that needs no destination.
+        """
+        adapter = _Adapter(exists=False)
+
+        loaded = _load(tmp_path, monkeypatch, run_log, adapter,
+                       declared=True, keyed=True,
+                       records=({"a": 1, "b": "x"}, {"a": 2, "c": "y"}))
+
+        assert loaded == 0
+        assert adapter.created == [], "the table was created for a bad file"
+        assert adapter.inserted == []
+
+    def test_that_refusal_is_a_FILE_fault_not_a_run_fault(
+        self, tmp_path: Path, monkeypatch, run_log
+    ) -> None:
+        """So the batch continues and the file is routed.
+
+        A malformed delivery is one bad file. It must not stop a run the way
+        a missing destination does -- the next file may be perfectly good.
+        """
+        adapter = _Adapter(exists=False)
+        moved: list = []
+
+        loaded = _load(tmp_path, monkeypatch, run_log, adapter,
+                       declared=True, keyed=True, moved=moved,
+                       records=({"a": 1}, {"b": 2}))
+
+        assert loaded == 0          # returned, not raised
+        assert moved                # and routed down movements.failure
+
+    def test_a_CONSISTENT_file_still_creates_and_loads(
+        self, tmp_path: Path, monkeypatch, run_log
+    ) -> None:
+        """The capability is unchanged for files that are actually fine.
+
+        This is the regression guard: the new check must reject malformed
+        files without rejecting the ordinary ones the create path exists for.
+        """
+        adapter = _Adapter(exists=False)
+
+        loaded = _load(tmp_path, monkeypatch, run_log, adapter,
+                       declared=True, keyed=True,
+                       records=({"a": 1, "b": "x"}, {"b": "y", "a": 2}))
+
+        assert loaded == 2
+        assert len(adapter.created) == 1
 
     def test_a_keyed_source_is_not_rejected_for_a_table_that_is_not_there(
         self, tmp_path: Path, monkeypatch, run_log
