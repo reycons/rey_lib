@@ -338,6 +338,31 @@ class TestWhatTheObjectDeliberatelyDoesNotKnow:
                 f"{module.name}.py imports the database layer"
             )
 
+    def test_the_package_does_not_depend_on_the_module_it_came_from(
+        self
+    ) -> None:
+        """The migration scaffold is gone.
+
+        While the subtypes were being extracted they delegated back to
+        file_loader's validators, so the OLD checks provably ran through the
+        NEW object before anything moved. That import was temporary, and a
+        subtype still reaching back into the module it was extracted from
+        would leave the boundary unfinished -- DataTransform and DataLoader
+        are built on top of this one.
+        """
+        import pkgutil
+        from pathlib import Path as _Path
+
+        import rey_lib.files.data_file as package
+
+        for module in pkgutil.iter_modules([str(_Path(package.__file__).parent)]):
+            source = (
+                _Path(package.__file__).parent / f"{module.name}.py"
+            ).read_text(encoding="utf-8")
+            assert "file_loader" not in source, (
+                f"{module.name}.py still reaches back into file_loader"
+            )
+
     def test_no_subtype_declares_a_logical_schema(self) -> None:
         """What the produced records contain is a transform's answer.
 

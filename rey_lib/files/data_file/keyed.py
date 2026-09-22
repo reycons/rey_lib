@@ -14,11 +14,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.files import file_utils
 from rey_lib.files.data_file import data_file
 from rey_lib.files.data_file.base import DataFile, DataFileStructureError
-from rey_lib.files import file_utils
+from rey_lib.logs import get_logger
 
 __all__ = ["JsonlFile"]
+
+_logger = get_logger(__name__)
 
 
 @data_file("JSONL", "NDJSON")
@@ -98,17 +101,26 @@ class JsonlFile(DataFile):
             return
 
         if expected_columns is not None:
-            # MIGRATION STEP: delegates to the shipped validator rather than
-            # reimplementing it, so this revision provably runs the OLD check
-            # through the NEW object. The body moves in here next; doing both
-            # at once would leave no point at which "no behaviour change" is
-            # checkable rather than asserted.
-            #
-            # Imported here because file_loader imports this package; a
-            # module-level import would close the cycle.
-            from rey_lib.files.file_loader import _validate_keyed_records
+            expected = set(expected_columns)
 
-            if not _validate_keyed_records(records, expected_columns):
+            for position, row in enumerate(records, start=1):
+                actual = set(row)
+                if actual == expected:
+                    continue
+
+                # Column names, never values -- these files carry data.
+                _logger.error(
+                    "Load key validation failed at record %d of %d\n"
+                    "Missing from the record: %s\n"
+                    "Not in the destination:  %s",
+                    position,
+                    len(records),
+                    ", ".join(sorted(expected - actual)) or "(none)",
+                    ", ".join(sorted(actual - expected)) or "(none)",
+                )
+                # SHORT, because this is what the run log records. The
+                # diagnosis above goes to the logger; putting it here instead
+                # would change recorded evidence.
                 raise DataFileStructureError(
                     "Record keys do not match the destination columns",
                     validation_name="load_record_keys",
@@ -126,6 +138,16 @@ class JsonlFile(DataFile):
 
             missing = sorted(required - keys)
             extra = sorted(keys - required)
+            # Column names, never values -- these files carry data.
+            _logger.error(
+                "Record consistency failed at record %d of %d\n"
+                "Missing from the record: %s\n"
+                "Not in the first record: %s",
+                ordinal,
+                len(records),
+                ", ".join(missing) or "(none)",
+                ", ".join(extra) or "(none)",
+            )
             detail = ", ".join(
                 part for part in (
                     f"missing {missing}" if missing else "",
@@ -134,5 +156,6 @@ class JsonlFile(DataFile):
             )
             raise DataFileStructureError(
                 f"'{self.path.name}' record {ordinal} does not match the "
-                f"first record's fields: {detail}."
+                f"first record's fields: {detail}.",
+                validation_name="load_record_consistency",
             )

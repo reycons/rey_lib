@@ -16,11 +16,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.files import file_utils
 from rey_lib.files.data_file import data_file
 from rey_lib.files.data_file.base import DataFile, DataFileStructureError
-from rey_lib.files import file_utils
+from rey_lib.logs import get_logger
 
 __all__ = ["DelimitedHeaderFile"]
+
+_logger = get_logger(__name__)
 
 
 @data_file("CSV", "DELIMITED_HEADER")
@@ -87,20 +90,34 @@ class DelimitedHeaderFile(DataFile):
                 )
             return
 
-        # MIGRATION STEP: delegates to the shipped validator rather than
-        # reimplementing it, so this revision provably runs the OLD check
-        # through the NEW object. Moving the body in here is the next step;
-        # doing both at once would leave no point at which "no behaviour
-        # change" is checkable rather than asserted.
-        #
-        # Imported here because file_loader imports this package; a
-        # module-level import would close the cycle.
-        from rey_lib.files.file_loader import _validate_load_header
-
-        if not _validate_load_header(self.path, expected_columns, self.encoding):
+        try:
+            actual = self.source_structure()
+        except DataFileStructureError as exc:
+            # An unreadable file was recorded as a header failure before this
+            # moved, so it still is. The message says what actually happened;
+            # only the run log's NAME is preserved, because changing recorded
+            # evidence is not this step's business.
             raise DataFileStructureError(
-                "Header mismatch", validation_name="load_header"
-            )
+                str(exc), validation_name="load_header"
+            ) from exc
+
+        if actual == expected_columns:
+            return
+
+        _logger.error(
+            "Load header validation failed for '%s'\n"
+            "Expected table columns:\n%s\n\n"
+            "Actual file columns:\n%s",
+            self.path.name,
+            ",".join(expected_columns),
+            ",".join(actual),
+        )
+        # SHORT, because this is what the run log records. The diagnosis above
+        # goes to the logger; putting it here instead would change recorded
+        # evidence.
+        raise DataFileStructureError(
+            "Header mismatch", validation_name="load_header"
+        )
 
     def read_validated(
         self,

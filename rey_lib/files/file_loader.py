@@ -2115,6 +2115,17 @@ def _validate_load_header(
 ) -> bool:
 	"""
 	Validate converted-file header against destination table columns.
+
+	LEGACY, and its only caller is ``_read_unmigrated_source``. Every migrated
+	format asks its own DataFile subtype, which owns what its structure means;
+	this remains because XLSX and DELIMITED_NO_HEADER are still read by the
+	pre-DataFile path.
+
+	**It is also why XLSX cannot load into an existing table**: it opens the
+	file as TEXT and splits the first line on commas, which a ZIP container
+	can never satisfy. Deleted together with ``_read_unmigrated_source`` and
+	``_UNMIGRATED_FILE_TYPES`` when those formats join the hierarchy -- see
+	xlsx_load_has_no_working_structural_check.
 	"""
 	try:
 		with file_path.open(encoding=encoding, errors="replace") as fh:
@@ -2143,69 +2154,6 @@ def _validate_load_header(
 		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
 
 	return False
-
-
-def _validate_keyed_records(
-    rows: list[dict[str, Any]],
-    expected_columns: list[str],
-) -> bool:
-    """Validate that every keyed record carries exactly the destination columns.
-
-    The counterpart of ``_validate_load_header`` for a source that names its
-    columns on every record instead of once in a header -- JSONL and its
-    aliases. Separate rather than a branch inside that function, because it
-    answers the same question about different material at a different point:
-    a header is checked BEFORE the file is read, and records can only be
-    checked after.
-
-    **EQUALITY, not coverage, and this is load-bearing.** Nothing projects
-    rows onto the destination columns: ``_load_one_file`` takes
-    ``columns = list(rows[0].keys())`` and hands that to both
-    ``create_staging_table_if_not_exists`` and ``bulk_insert``. An extra key
-    on the first record would therefore BECOME a column, against a
-    destination that has no such column -- so a superset is as wrong as a
-    subset, and ``bulk_insert``'s "anything else is ignored" cannot save it.
-
-    **Every record, not the first.** ``bulk_insert`` requires every row to
-    carry every entry of ``columns``, so the first record proves nothing
-    about the second. ``read_jsonl_file`` omits an absent field rather than
-    nulling it, so disagreeing records really do arrive.
-
-    **Set, not sequence.** A CSV header is an ordered artifact and
-    ``_validate_load_header`` compares order; a JSON object's key order is
-    incidental, and rejecting a file for it would reject one that differs
-    only in how its producer serialised it.
-
-    A record short of a column is rejected rather than filled: this estate
-    does not invent a value for an absent one.
-
-    Args:
-        rows: The materialised records, already read.
-        expected_columns: Destination table columns.
-
-    Returns:
-        True when every record's key set equals the destination columns.
-    """
-    expected = set(expected_columns)
-
-    for position, row in enumerate(rows, start=1):
-        actual = set(row)
-        if actual == expected:
-            continue
-
-        # Column names, never values -- these files carry data.
-        _logger.error(
-            "Load key validation failed at record %d of %d\n"
-            "Missing from the record: %s\n"
-            "Not in the destination:  %s",
-            position,
-            len(rows),
-            ", ".join(sorted(expected - actual)) or "(none)",
-            ", ".join(sorted(actual - expected)) or "(none)",
-        )
-        return False
-
-    return True
 
 
 def _transform_map(transform_cfg: Any) -> dict[str, dict[str, Any]]:
