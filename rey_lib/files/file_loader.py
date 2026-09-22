@@ -62,6 +62,7 @@ from rey_lib.errors.error_utils import (
 )
 from rey_lib.files import file_utils
 from rey_lib.files.data_file import DataFileStructureError, data_file_for
+from rey_lib.files.data_loader import DataLoader as _DataLoader
 from rey_lib.files.data_transform import IdentityTransform
 from rey_lib.files.file_utils import (
     apply_file_movements,
@@ -1964,35 +1965,23 @@ def _load_one_file(
         column_defs = transform.logical_schema(rows)
         columns     = [name for name, _sql_type in column_defs]
 
-        # CREATE ONLY WHEN THE DESTINATION IS ABSENT, which by the refusal
-        # above means creation was declared. Calling this unconditionally
-        # would contradict the setting it is governed by: IF NOT EXISTS is no
-        # defence, because a table dropped between the check and this call
-        # would be recreated despite create_destination_table being false.
-        if not exists:
-            _db_adapter.create_staging_table_if_not_exists(
-                conn, schema, table, column_defs
-            )
-
-        try:
-            _db_adapter.bulk_insert(conn, schema, table, rows, columns)
-            conn.commit()
-        except DatabaseError as bulk_exc:
-            conn.rollback()
-            column_types = dict(column_defs)
-
-            if not _db_adapter.is_truncation_error(bulk_exc):
-                raise
-            if not _alter_oversized_columns(
-                ctx, schema, table, rows, column_defs,
-            ):
-                raise
-            _logger.info(
-                "Retrying bulk insert after column alterations: %s",
-                file_path.name,
-            )
-            _db_adapter.bulk_insert(conn, schema, table, rows, columns)
-            conn.commit()
+        # The destination half: existence, the create policy, the insert and
+        # the truncation retry. The widening is passed in because it is
+        # CONFIGURED behaviour -- it runs a declared routine and takes its
+        # parameters through ctx -- and this is the boundary that still holds
+        # ctx. DataLoader decides WHEN to retry; it never learns how widening
+        # is configured.
+        _DataLoader(
+            schema=schema,
+            table=table,
+            adapter=_db_adapter,
+            create_destination=create_declared,
+            widen_columns=(
+                lambda _conn, records, defs: _alter_oversized_columns(
+                    ctx, schema, table, records, defs,
+                )
+            ),
+        ).load(conn, rows, column_defs)
 
         _logger.info(
             "Loaded: %s → %s.%s  rows=%d",
