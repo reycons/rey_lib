@@ -62,6 +62,7 @@ from rey_lib.errors.error_utils import (
 )
 from rey_lib.files import file_utils
 from rey_lib.files.data_file import DataFileStructureError, data_file_for
+from rey_lib.files.data_transform import IdentityTransform
 from rey_lib.files.file_utils import (
     apply_file_movements,
     input_files,
@@ -72,7 +73,6 @@ from rey_lib.files.file_utils import (
     write_file,
     converted_output_path,
 )
-from rey_lib.profiling.file_profiler import infer_sql_type
 from rey_lib.files.transformer import (
     transform_row,
     match_header,
@@ -1955,8 +1955,14 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
             return 0
 
-        columns     = list(rows[0].keys())
-        column_defs = _build_column_defs(transform_cfg, columns, rows)
+        # The transform says what the produced records contain. On the load
+        # path it is IDENTITY -- the transform stage ran earlier and wrote its
+        # output to this file -- but it is explicit rather than absent, so the
+        # pipeline is one shape whether or not a transform is configured.
+        transform   = IdentityTransform(_transform_map(transform_cfg))
+        rows        = transform.transform(rows)
+        column_defs = transform.logical_schema(rows)
+        columns     = [name for name, _sql_type in column_defs]
 
         # CREATE ONLY WHEN THE DESTINATION IS ABSENT, which by the refusal
         # above means creation was declared. Calling this unconditionally
@@ -2029,85 +2035,6 @@ def _load_one_file(
 # Private — column helpers
 # ---------------------------------------------------------------------------
 
-def _build_column_defs(
-    transform_cfg: Any,
-    columns: list[str],
-    rows: list[dict[str, Any]],
-) -> list[tuple[str, str]]:
-    """
-    Build a column definition list for staging table creation.
-
-    All types use the neutral vocabulary understood by every backend via
-    db_adapter (VARCHAR(n), INTEGER, DECIMAL(p,s), DATE). Backend-specific
-    mapping happens in sqlserver_utils / duckdb_utils, not here.
-
-    Parameters
-    ----------
-    transform_cfg : Any
-        Transform Namespace providing list-based columns with inline transform
-        entries.
-    columns : list[str]
-        Ordered list of output column names.
-    rows : list[dict[str, Any]]
-        Transformed rows — used to compute max varchar lengths.
-
-    Returns
-    -------
-    list[tuple[str, str]]
-        Ordered list of (column_name, sql_type) tuples.
-    """
-    transform_map = _transform_map(transform_cfg)
-
-    # Compute max observed length per column for varchar sizing.
-    max_lengths: dict[str, int] = {}
-    for row in rows:
-        for col, val in row.items():
-            length = len(str(val)) if val is not None else 0
-            if col not in max_lengths or length > max_lengths[col]:
-                max_lengths[col] = length
-
-    _TRANSFORM_TYPE_MAP: dict[str, str] = {
-        "date":       "DATE",
-        "datetime":   "DATETIME2",
-        "time":       "TIME",
-        "regex_date": "DATE",
-        "numeric":    "DECIMAL(18, 6)",
-    }
-
-    col_defs: list[tuple[str, str]] = []
-    for col in columns:
-        transform      = transform_map.get(col, {})
-        transform_type = transform.get("type", "") if transform else ""
-        cast_to        = transform.get("cast_to", "") if transform else ""
-
-        if transform_type in _TRANSFORM_TYPE_MAP:
-            sql_type = _TRANSFORM_TYPE_MAP[transform_type]
-        elif transform_type == "regex_extract" and cast_to in ("float", "double"):
-            sql_type = "DECIMAL(18, 6)"
-        elif transform_type == "regex_extract" and cast_to in ("int", "integer"):
-            sql_type = "INTEGER"
-        else:
-            col_values = [
-                str(row.get(col, "") or "").strip()
-                for row in rows
-                if str(row.get(col, "") or "").strip()
-            ]
-            inferred = infer_sql_type(col_values) if col_values else None
-            if inferred:
-                sql_type = inferred
-            else:
-                observed = max_lengths.get(col, 0)
-                size     = max(observed + 10, 20)
-                sql_type = f"VARCHAR({size})"
-
-        col_defs.append((col, sql_type))
-
-    return col_defs
-
-
-# ---------------------------------------------------------------------------
-# Private — header validation
-# ---------------------------------------------------------------------------
 def _validate_load_header(
 	file_path: Path,
 	expected_columns: list[str],
