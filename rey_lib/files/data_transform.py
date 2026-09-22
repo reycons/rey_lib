@@ -35,6 +35,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from rey_lib.files.data_file.base import DataFileStructureError
 from rey_lib.profiling.file_profiler import infer_sql_type
 
 __all__ = ["DataTransform", "IdentityTransform"]
@@ -81,16 +82,24 @@ class IdentityTransform(DataTransform):
     def __init__(
         self,
         column_transforms: dict[str, dict[str, Any]] | None = None,
+        columns: list[str] | None = None,
     ) -> None:
-        """Hold the declared per-column transforms, where config declares any.
+        """Hold what configuration declared about the produced records.
 
         Args:
             column_transforms: Output column -> its inline transform entry,
-                already resolved to plain data. The RESOLVED map rather than a
-                config Namespace, so this object needs no knowledge of how
-                configuration is shaped or where it came from.
+                already resolved to plain data.
+            columns: The declared output columns IN ORDER, or None when
+                configuration declares none. When given they are
+                AUTHORITATIVE -- they are the schema, and records that do not
+                match them are refused.
+
+        Both are RESOLVED values rather than a config Namespace, so this
+        object needs no knowledge of how configuration is shaped, where it
+        came from, or which shapes are valid.
         """
         self.column_transforms = column_transforms or {}
+        self.columns = columns
 
     def transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return the records unchanged.
@@ -110,21 +119,29 @@ class IdentityTransform(DataTransform):
         type is inferred from the values, and failing that the column is a
         VARCHAR wide enough for what was observed.
 
-        **Columns come from the FIRST record.** That is what the loader has
-        always done, and nothing here changes it -- which schema is
-        authoritative is a separate decision, deliberately not taken while
-        this is only being moved.
+        **CONFIGURED COLUMNS ARE AUTHORITATIVE when declared.** They describe
+        the records this transform produces -- including fields with no
+        physical source at all -- so where configuration states them, they
+        are the schema and its order. The records must match; see below.
+
+        Where configuration declares none, the FIRST RECORD decides, which is
+        what the loader has always done and what the direct single-file path
+        relies on.
 
         Args:
             records: The records to be loaded.
 
         Returns:
             Ordered ``(column_name, sql_type)`` pairs, empty for no records.
+
+        Raises:
+            DataFileStructureError: When configuration declares columns and
+                these records do not carry exactly those, in that order.
         """
         if not records:
             return []
 
-        columns = list(records[0].keys())
+        columns = self._columns_for(records)
 
         # Widest observed value per column, for varchar sizing.
         max_lengths: dict[str, int] = {}
@@ -162,3 +179,49 @@ class IdentityTransform(DataTransform):
             column_defs.append((column, sql_type))
 
         return column_defs
+
+    def _columns_for(self, records: list[dict[str, Any]]) -> list[str]:
+        """Return the authoritative column list for these records.
+
+        **Ordered comparison, not a set comparison.** Order is load-bearing
+        here: a destination created in one order is later validated against a
+        file header in another, and that mismatch would surface on the NEXT
+        load rather than this one. The transform stage can produce a different
+        order from the configured one -- a hash column is computed last, so a
+        hash declared anywhere but last reorders the output -- which is
+        exactly the case this catches.
+
+        Raises:
+            DataFileStructureError: When the records do not match what
+                configuration declared. Raised BEFORE any DDL or insert. Left
+                to the insert it would arrive as a missing-column database
+                error after the table had already been created -- a database
+                error for a configuration or file-drift problem.
+        """
+        actual = list(records[0].keys())
+
+        if self.columns is None:
+            return actual
+
+        if actual == self.columns:
+            return self.columns
+
+        missing = [name for name in self.columns if name not in actual]
+        extra = [name for name in actual if name not in self.columns]
+        if missing or extra:
+            detail = ", ".join(
+                part for part in (
+                    f"missing {missing}" if missing else "",
+                    f"unexpected {extra}" if extra else "",
+                ) if part
+            )
+        else:
+            detail = (
+                f"same columns in a different order -- configured "
+                f"{self.columns}, found {actual}"
+            )
+
+        raise DataFileStructureError(
+            f"the records do not match the configured columns: {detail}.",
+            validation_name="configured_columns",
+        )

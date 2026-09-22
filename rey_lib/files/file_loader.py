@@ -474,7 +474,10 @@ def _configured_load(
         pattern=_resolve_pattern(load_cfg.pickup_pattern, load_cfg.version,
                                  ctx=ctx),
         load_one_file=_load_one,
-        transform=IdentityTransform(_transform_map(transform_cfg)),
+        transform=IdentityTransform(
+            _transform_map(transform_cfg),
+            columns=_configured_columns(transform_cfg),
+        ),
         loader=_DataLoader(
             schema=schema,
             table=table,
@@ -2011,7 +2014,10 @@ def _load_one_file(
         # path it is IDENTITY -- the transform stage ran earlier and wrote its
         # output to this file -- but it is explicit rather than absent, so the
         # pipeline is one shape whether or not a transform is configured.
-        transform   = IdentityTransform(_transform_map(transform_cfg))
+        transform   = IdentityTransform(
+            _transform_map(transform_cfg),
+            columns=_configured_columns(transform_cfg),
+        )
         rows        = transform.transform(rows)
         column_defs = transform.logical_schema(rows)
         columns     = [name for name, _sql_type in column_defs]
@@ -2109,6 +2115,55 @@ def _validate_load_header(
 		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
 
 	return False
+
+
+def _configured_columns(transform_cfg: Any) -> Optional[list[str]]:
+    """Return the declared output columns in order, or None when none are.
+
+    **Three answers, and the third is a refusal.**
+
+    ``None``
+        No ``columns:`` block. A load that declares no schema -- the direct
+        single-file path is one -- and the records decide their own shape.
+    ``[...]``
+        The current LIST shape. These are the columns, in this order.
+    *raises*
+        A ``columns:`` block in any other shape. A config that declares a
+        schema the loader cannot read is WRONG, and says so.
+
+    **Absent and unreadable are different answers and must not collapse.**
+    They did: the older mapping shape iterated to plain strings, every entry
+    was skipped as "not a dict", and a feed carrying 22 declared columns
+    behaved exactly like one declaring none. Two feeds drifted that way
+    unnoticed.
+
+    Raises:
+        ConfigError: When ``columns:`` is present in an unsupported shape.
+    """
+    declared = _namespace_to_plain(getattr(transform_cfg, "columns", None))
+
+    if declared is None:
+        return None
+
+    if not isinstance(declared, list):
+        raise ConfigError(
+            f"transform '{getattr(transform_cfg, 'name', '?')}' declares "
+            f"columns: as a {type(declared).__name__}, which is not the "
+            "supported shape. Each output column is one list entry: "
+            "- name: <column>, with an optional source: and transform:."
+        )
+
+    names: list[str] = []
+    for position, col_cfg in enumerate(declared, start=1):
+        if not isinstance(col_cfg, dict) or not col_cfg.get("name"):
+            raise ConfigError(
+                f"transform '{getattr(transform_cfg, 'name', '?')}' has a "
+                f"columns: entry at position {position} that is not a "
+                f"mapping with a name: -- found {col_cfg!r}."
+            )
+        names.append(str(col_cfg["name"]))
+
+    return names
 
 
 def _transform_map(transform_cfg: Any) -> dict[str, dict[str, Any]]:
