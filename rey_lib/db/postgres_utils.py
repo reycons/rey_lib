@@ -39,6 +39,7 @@ from typing import Any, Optional
 
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.db.routine_call import InvocationShape, RoutineCall
+from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
@@ -1527,8 +1528,6 @@ def _reference_relations(conn: Any, schema: str | None) -> list[dict[str, Any]]:
     a relation is its catalog identity, and inventing a hash would imply an
     analysis that never happened.
     """
-    import hashlib
-
     rows = _reference_rows(conn, """
         SELECT c.oid, n.nspname, c.relname, c.relkind,
                CASE WHEN c.relkind IN ('v','m')
@@ -1552,10 +1551,7 @@ def _reference_relations(conn: Any, schema: str | None) -> list[dict[str, Any]]:
         relations.append({
             "oid": oid, "schema": nsp, "name": name,
             "object_type": _RELKIND_TO_OBJECT_TYPE[relkind],
-            "definition_hash": (
-                hashlib.sha256(definition.encode("utf-8")).hexdigest()
-                if definition else ""
-            ),
+            "definition_hash": sha256_text(definition) if definition else "",
             # Kept as well as hashed. The hash answers whether this changed;
             # the text answers what it says, which is what a reader opening the
             # object needs. Blank for a table, which has no definition.
@@ -1581,8 +1577,6 @@ def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
             capability limit, and it must stop the run rather than be published
             as ``unsupported``.
     """
-    import hashlib
-
     # proallargtypes, NOT proargtypes, is the complete ordered argument list.
     # proargtypes and pg_get_function_identity_arguments carry INPUT arguments
     # only, so OUT, INOUT and TABLE arguments are invisible through them -- and
@@ -1639,8 +1633,7 @@ def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
             "object_type": _PROKIND_TO_OBJECT_TYPE.get(prokind, "function"),
             "signature": str(signature or ""),
             "language": language, "definition": definition,
-            "definition_hash": hashlib.sha256(
-                definition.encode("utf-8")).hexdigest(),
+            "definition_hash": sha256_text(definition),
             "returns_set": bool(returns_set),
             "return_type_kind": str(return_type_kind or "scalar"),
             "parameters": _routine_parameters(
@@ -1720,8 +1713,6 @@ def _reference_triggers(conn: Any, schema: str | None) -> list[dict[str, Any]]:
     ORIGINATE from it, and an observation whose source object is absent from
     the snapshot has nothing to attach to.
     """
-    import hashlib
-
     rows = _reference_rows(conn, """
         SELECT t.oid, n.nspname, t.tgname, pg_get_triggerdef(t.oid)
         FROM pg_trigger t
@@ -1735,8 +1726,7 @@ def _reference_triggers(conn: Any, schema: str | None) -> list[dict[str, Any]]:
     return [
         {
             "oid": oid, "schema": nsp, "name": name, "object_type": "trigger",
-            "definition_hash": hashlib.sha256(
-                str(definition or "").encode("utf-8")).hexdigest(),
+            "definition_hash": sha256_text(str(definition or "")),
         }
         for oid, nsp, name, definition in rows
     ]
