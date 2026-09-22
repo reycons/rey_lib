@@ -41,6 +41,7 @@ from rey_lib.files import primitive_file_io
 from rey_lib.logs import get_logger, log_run_record, record_file_operation
 
 __all__ = [
+    "KEYED_FILE_TYPES",
     "blocked_display_reason",
     "bounded_text_preview",
     "capture_path_variables",
@@ -1018,6 +1019,13 @@ def run_artifact_path(
     return collided.resolve()
 
 
+#: File types that carry their column names on EVERY record rather than once
+#: in a header. The loader needs this too -- it decides WHEN the shape can be
+#: checked, since a header is readable before the rows and record keys are
+#: not -- so one place knows the answer and the two cannot disagree.
+KEYED_FILE_TYPES: frozenset[str] = frozenset({"JSONL", "NDJSON"})
+
+
 def get_reader(
     infile: Path,
     file_type: str = "CSV",
@@ -1073,6 +1081,8 @@ def get_reader(
         )
     elif fmt == "XLSX":
         yield from _xlsx_reader(infile, row_filter=row_filter)
+    elif fmt in KEYED_FILE_TYPES:
+        yield from _jsonl_reader(infile, row_filter=row_filter)
     else:
         raise ValueError(f"Unsupported file_type '{file_type}'.")
 
@@ -1899,6 +1909,46 @@ def _display_path(path: Path, environment_root: Path | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+
+
+def _jsonl_reader(
+    infile: Path,
+    row_filter: Optional[Callable[[dict[str, str]], bool]],
+) -> Generator[dict[str, Any], None, None]:
+    """Yield one row per JSONL record, in physical file order.
+
+    DELEGATES rather than parses. ``rey_lib.files.jsonl`` owns JSONL reading
+    and already returns what this shape needs -- one mapping per line, in
+    order, refusing a line that is not exactly one JSON object. A second
+    parser here would be a second answer to one question.
+
+    Values arrive as their JSON types, not as strings. Unlike the delimited
+    and workbook readers there is nothing to coerce: the format carries them.
+    ``_build_column_defs`` and ``bulk_insert`` both take ``dict[str, Any]``,
+    so they pass through untouched.
+
+    Imported inside the function because ``rey_lib.files.jsonl`` imports from
+    this module, and a module-level import would be circular.
+
+    Args:
+        infile: Source file to read.
+        row_filter: Optional predicate. Rows for which it returns False are
+            skipped, matching every other reader here.
+
+    Yields:
+        One record per line.
+
+    Raises:
+        JsonlReadError: If the path is unreadable or any line is not exactly
+            one JSON object. Parsing stops at the first invalid line rather
+            than returning a partial file.
+    """
+    from rey_lib.files.jsonl import read_jsonl_file
+
+    for record in read_jsonl_file(infile):
+        row = dict(record.record)
+        if row_filter is None or row_filter(row):
+            yield row
 
 
 def _xlsx_reader(

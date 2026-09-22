@@ -61,6 +61,7 @@ from rey_lib.errors.error_utils import (
     build_safe_error_payload,
 )
 from rey_lib.files.file_utils import (
+    KEYED_FILE_TYPES,
     apply_file_movements,
     input_files,
     pattern_to_glob,
@@ -1863,7 +1864,21 @@ def _load_one_file(
         expected_columns = _db_adapter.get_table_columns(conn, schema, table)
         encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
 
-        if not _validate_load_header(file_path, expected_columns, encoding):
+        # The source here is a CONFIGURED path matched by a CONFIGURED pickup
+        # pattern, so its format is the transform's to declare -- the same
+        # contract the transform stage reads. Forcing "CSV" here discarded it
+        # at the reader boundary and made every reader but one unreachable.
+        # The default keeps a config that declares nothing on CSV.
+        file_type = getattr(transform_cfg, "file_type", "CSV")
+        keyed = str(file_type).upper() in KEYED_FILE_TYPES
+
+        # WHEN the shape is checked depends on where the column names live.
+        # A header is one line, so it is cheap to read before the rows and
+        # reject without parsing them. A keyed source names its columns on
+        # EVERY record, so the same question can only be answered after the
+        # records exist -- asking it earlier would parse the whole file twice.
+        if not keyed and not _validate_load_header(file_path, expected_columns,
+                                                   encoding):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
             log_validation_result(run_log,
                 validation_name="load_header",
@@ -1878,18 +1893,31 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
-        # The source here is a CONFIGURED path matched by a CONFIGURED pickup
-        # pattern, so its format is the transform's to declare -- the same
-        # contract the transform stage reads. Forcing "CSV" here discarded it
-        # at the reader boundary and made every reader but one unreachable.
-        # The default keeps a config that declares nothing on CSV.
         rows = list(
             get_reader(
                 file_path,
-                file_type=getattr(transform_cfg, "file_type", "CSV"),
-                encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
+                file_type=file_type,
+                encoding=encoding,
             )
         )
+
+        # Read ONCE: this runs over the rows above, never a second parse.
+        if keyed and rows and not _validate_keyed_records(rows, expected_columns):
+            _logger.error("Record keys do not match the destination — file "
+                          "rejected: %s", file_path.name)
+            log_validation_result(run_log,
+                validation_name="load_record_keys",
+                status="failed",
+                message="Record keys do not match the destination columns",
+                path=str(file_path),
+                schema=schema,
+                table=table,
+            )
+            _execute_movements(load_cfg.movements.failure, file_path, paths,
+                               ctx=ctx, run_log=run_log)
+            log_exit(ctx, f"_load_one_file rejected (keys): {file_path.name}",
+                     _logger)
+            return 0
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
@@ -2088,6 +2116,69 @@ def _validate_load_header(
 		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
 
 	return False
+
+
+def _validate_keyed_records(
+    rows: list[dict[str, Any]],
+    expected_columns: list[str],
+) -> bool:
+    """Validate that every keyed record carries exactly the destination columns.
+
+    The counterpart of ``_validate_load_header`` for a source that names its
+    columns on every record instead of once in a header -- JSONL and its
+    aliases. Separate rather than a branch inside that function, because it
+    answers the same question about different material at a different point:
+    a header is checked BEFORE the file is read, and records can only be
+    checked after.
+
+    **EQUALITY, not coverage, and this is load-bearing.** Nothing projects
+    rows onto the destination columns: ``_load_one_file`` takes
+    ``columns = list(rows[0].keys())`` and hands that to both
+    ``create_staging_table_if_not_exists`` and ``bulk_insert``. An extra key
+    on the first record would therefore BECOME a column, against a
+    destination that has no such column -- so a superset is as wrong as a
+    subset, and ``bulk_insert``'s "anything else is ignored" cannot save it.
+
+    **Every record, not the first.** ``bulk_insert`` requires every row to
+    carry every entry of ``columns``, so the first record proves nothing
+    about the second. ``read_jsonl_file`` omits an absent field rather than
+    nulling it, so disagreeing records really do arrive.
+
+    **Set, not sequence.** A CSV header is an ordered artifact and
+    ``_validate_load_header`` compares order; a JSON object's key order is
+    incidental, and rejecting a file for it would reject one that differs
+    only in how its producer serialised it.
+
+    A record short of a column is rejected rather than filled: this estate
+    does not invent a value for an absent one.
+
+    Args:
+        rows: The materialised records, already read.
+        expected_columns: Destination table columns.
+
+    Returns:
+        True when every record's key set equals the destination columns.
+    """
+    expected = set(expected_columns)
+
+    for position, row in enumerate(rows, start=1):
+        actual = set(row)
+        if actual == expected:
+            continue
+
+        # Column names, never values -- these files carry data.
+        _logger.error(
+            "Load key validation failed at record %d of %d\n"
+            "Missing from the record: %s\n"
+            "Not in the destination:  %s",
+            position,
+            len(rows),
+            ", ".join(sorted(expected - actual)) or "(none)",
+            ", ".join(sorted(actual - expected)) or "(none)",
+        )
+        return False
+
+    return True
 
 
 def _transform_map(transform_cfg: Any) -> dict[str, dict[str, Any]]:
