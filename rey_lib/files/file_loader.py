@@ -61,7 +61,8 @@ from rey_lib.errors.error_utils import (
     build_safe_error_payload,
 )
 from rey_lib.files import file_utils
-from rey_lib.files.data_file import DataFileStructureError, data_file_for
+from rey_lib.files.data_file import DataFileStructureError
+from rey_lib.files.data_file import data_file_for as _data_file_for
 from rey_lib.files.configured_load import ConfiguredLoad as _ConfiguredLoad
 from rey_lib.files.data_loader import DataLoader as _DataLoader
 from rey_lib.files.data_transform import IdentityTransform
@@ -427,6 +428,53 @@ def load_files(
     return total_rows
 
 
+def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:
+    """Build the transform for one load definition.
+
+    **The single place an IdentityTransform is constructed on this path.**
+    Two call sites remain -- the definition-level build and the single-file
+    entry point -- but they share this one rule, so what they produce cannot
+    drift. Step 6 removes the second by routing the single-file path through
+    a ConfiguredLoad like every other caller.
+
+    Reads the configured columns, which is where an unreadable ``columns:``
+    shape is refused rather than treated as absent.
+    """
+    return IdentityTransform(
+        _transform_map(transform_cfg),
+        columns=_configured_columns(transform_cfg),
+    )
+
+
+def _build_data_loader(
+    ctx: Any,
+    schema: str,
+    table: str,
+    create_declared: bool,
+) -> _DataLoader:
+    """Build the loader for one destination.
+
+    **The single place a DataLoader is constructed on this path**, so the
+    definition-level build and the single-file build cannot differ.
+
+    The widening callback is bound here because widening is CONFIGURED
+    behaviour -- a declared routine, never inline DDL -- and its parameters
+    travel through ``ctx``. This is the boundary that still holds ``ctx``; the
+    loader never learns how widening is configured.
+    """
+    return _DataLoader(
+        schema=schema,
+        table=table,
+        adapter=_db_adapter,
+        create_destination=create_declared,
+        widen_columns=(
+            lambda _conn, records, defs: _alter_oversized_columns(
+                ctx, schema, table, records, defs,
+            )
+        ),
+    )
+
+
 def _configured_load(
     ctx: Any,
     run_log: Any,
@@ -463,10 +511,14 @@ def _configured_load(
             size_bytes=file_path.stat().st_size if file_path.exists() else None,
         )
 
-    def _load_one(conn: Any, per_file_log: Any, file_path: Path) -> int:
+    def _load_one(conn: Any, per_file_log: Any, file_path: Path,
+                  **objects: Any) -> int:
+        # The definition's own transform, loader and DataFile rule arrive
+        # here; this step wraps them in movements and evidence and builds
+        # nothing of its own.
         return _load_one_file(
             ctx, per_file_log, conn, file_path, transform_cfg,
-            load_cfg, data_source.paths, schema, table,
+            load_cfg, data_source.paths, schema, table, **objects,
         )
 
     return _ConfiguredLoad(
@@ -474,21 +526,8 @@ def _configured_load(
         pattern=_resolve_pattern(load_cfg.pickup_pattern, load_cfg.version,
                                  ctx=ctx),
         load_one_file=_load_one,
-        transform=IdentityTransform(
-            _transform_map(transform_cfg),
-            columns=_configured_columns(transform_cfg),
-        ),
-        loader=_DataLoader(
-            schema=schema,
-            table=table,
-            adapter=_db_adapter,
-            create_destination=create_declared,
-            widen_columns=(
-                lambda _conn, records, defs: _alter_oversized_columns(
-                    ctx, schema, table, records, defs,
-                )
-            ),
-        ),
+        transform=_build_identity_transform(transform_cfg),
+        loader=_build_data_loader(ctx, schema, table, create_declared),
         file_type=getattr(transform_cfg, "file_type", "CSV"),
         encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
         max_files=getattr(data_source, "max_files_per_run", None),
@@ -1860,6 +1899,10 @@ def _load_one_file(
     paths: Any,
     schema: str,
     table: str,
+    *,
+    transform: Any = None,
+    loader: Any = None,
+    data_file_for: Any = None,
 ) -> int:
     """
     Load one file into the landing table.
@@ -1898,21 +1941,14 @@ def _load_one_file(
 
     try:
         create_declared = _create_destination_declared(load_cfg)
-        loader = _DataLoader(
-            schema=schema,
-            table=table,
-            adapter=_db_adapter,
-            create_destination=create_declared,
-            # Widening is CONFIGURED behaviour -- a declared routine, never
-            # inline DDL -- and its parameters travel through ctx. This is the
-            # boundary that still holds ctx, so it closes over it here and the
-            # loader never learns how widening is configured.
-            widen_columns=(
-                lambda _conn, records, defs: _alter_oversized_columns(
-                    ctx, schema, table, records, defs,
-                )
-            ),
-        )
+
+        # ONE CONSTRUCTION PATH. Handed the definition's own objects where a
+        # ConfiguredLoad is driving; building them only when called directly,
+        # which is the single-file entry point. Re-reading the configuration
+        # here when it has already been read would be a second graph that
+        # looks identical and can drift.
+        if loader is None:
+            loader = _build_data_loader(ctx, schema, table, create_declared)
 
         # EXISTENCE ASKED ONCE, and its answer serves both decisions: how to
         # validate the file, and whether the destination must be created.
@@ -1964,8 +2000,13 @@ def _load_one_file(
             # on where its column names live -- a header is one line and is
             # checked before the rows, record keys only after. This function
             # no longer knows which is which.
-            source = data_file_for(file_path, file_type=file_type,
-                                   encoding=encoding)
+            # The definition's rule where one is driving, so every file in a
+            # feed is built the same way; otherwise this file's own settings.
+            source = (
+                data_file_for(file_path) if data_file_for is not None
+                else _data_file_for(file_path, file_type=file_type,
+                                    encoding=encoding)
+            )
             try:
                 # ALWAYS VALIDATED, but against different things.
                 #
@@ -2014,10 +2055,8 @@ def _load_one_file(
         # path it is IDENTITY -- the transform stage ran earlier and wrote its
         # output to this file -- but it is explicit rather than absent, so the
         # pipeline is one shape whether or not a transform is configured.
-        transform   = IdentityTransform(
-            _transform_map(transform_cfg),
-            columns=_configured_columns(transform_cfg),
-        )
+        if transform is None:
+            transform = _build_identity_transform(transform_cfg)
         rows        = transform.transform(rows)
         column_defs = transform.logical_schema(rows)
         columns     = [name for name, _sql_type in column_defs]

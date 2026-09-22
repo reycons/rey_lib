@@ -50,7 +50,7 @@ class TestSelection:
         _files(tmp_path, "a.csv", "b.csv")
         (tmp_path / "c.txt").write_text("no", encoding="utf-8")
 
-        selected = _configured(tmp_path, lambda *_a: 0).select_files()
+        selected = _configured(tmp_path, lambda *_a, **_k: 0).select_files()
 
         assert [path.name for path in selected] == ["a.csv", "b.csv"]
 
@@ -58,7 +58,7 @@ class TestSelection:
         """max_files_per_run belongs to the definition, not to the caller."""
         _files(tmp_path, "a.csv", "b.csv", "c.csv")
 
-        selected = _configured(tmp_path, lambda *_a: 0,
+        selected = _configured(tmp_path, lambda *_a, **_k: 0,
                                max_files=2).select_files()
 
         assert len(selected) == 2
@@ -75,7 +75,7 @@ class TestSelection:
         _files(tmp_path, "a.csv", "b.csv", "c.csv")
         seen: list = []
 
-        taken = _configured(tmp_path, lambda *_a: 0,
+        taken = _configured(tmp_path, lambda *_a, **_k: 0,
                             max_files=1).select_files(seen.append)
 
         assert len(seen) == 3
@@ -93,7 +93,7 @@ class TestTheBatchIsAnAggregate:
 
         total = _configured(
             tmp_path,
-            lambda _conn, _log, path: (loaded.append(path.name), 10)[1],
+            lambda _conn, _log, path, **_k: (loaded.append(path.name), 10)[1],
         ).load(object(), object())
 
         assert total == 30
@@ -110,7 +110,7 @@ class TestTheBatchIsAnAggregate:
         _files(tmp_path, "a.csv", "b.csv", "c.csv")
         attempted: list = []
 
-        def _load_one(_conn, _log, path: Path) -> int:
+        def _load_one(_conn, _log, path: Path, **_kwargs) -> int:
             attempted.append(path.name)
             return 0 if path.name == "b.csv" else 5
 
@@ -129,7 +129,7 @@ class TestTheBatchIsAnAggregate:
         _files(tmp_path, "a.csv", "b.csv", "c.csv")
         attempted: list = []
 
-        def _load_one(_conn, _log, path: Path) -> int:
+        def _load_one(_conn, _log, path: Path, **_kwargs) -> int:
             attempted.append(path.name)
             raise ConfigError("destination s.t does not exist")
 
@@ -148,11 +148,61 @@ class TestTheBatchIsAnAggregate:
         """
         _files(tmp_path, "a.csv", "b.csv")
 
-        def _load_one(_conn, _log, _path) -> int:
+        def _load_one(_conn, _log, _path, **_kwargs) -> int:
             raise DatabaseError("connection lost")
 
         with pytest.raises(DatabaseError):
             _configured(tmp_path, _load_one).load(object(), object())
+
+
+class TestOneConstructionPath:
+    """One definition means one graph, and every file executes through it."""
+
+    def test_every_file_is_handed_the_SAME_transform_and_loader(
+        self, tmp_path: Path
+    ) -> None:
+        """Not rebuilt per file, and not rebuilt by the per-file step.
+
+        This object held a transform and a loader that nothing read: the
+        per-file step re-read the same configuration and built its own. Two
+        construction paths from one definition, looking identical and free to
+        drift. Identity is asserted, because equality would pass for two
+        objects built the same way and miss exactly that.
+        """
+        _files(tmp_path, "a.csv", "b.csv", "c.csv")
+        handed: list = []
+
+        def _load_one(_conn, _log, _path, **objects) -> int:
+            handed.append((objects["transform"], objects["loader"]))
+            return 0
+
+        configured = _configured(tmp_path, _load_one)
+        configured.load(object(), object())
+
+        assert len(handed) == 3
+        assert all(t is configured.transform for t, _l in handed)
+        assert all(l is configured.loader for _t, l in handed)
+
+    def test_the_data_file_RULE_is_handed_over_too(self, tmp_path: Path) -> None:
+        """So every file in a feed is built the same way.
+
+        The rule, not a built file: the file is per path, the rule is per
+        definition.
+        """
+        _files(tmp_path, "a.csv")
+        handed: list = []
+
+        configured = _configured(
+            tmp_path,
+            lambda _c, _l, _p, **objects: handed.append(objects["data_file_for"]) or 0,
+            file_type="JSONL", encoding="utf-8",
+        )
+        configured.load(object(), object())
+
+        # Bound to THIS definition -- `is` cannot be used on a bound method,
+        # since each attribute access makes a new one.
+        assert handed[0].__self__ is configured
+        assert handed[0](tmp_path / "a.csv").file_type == "JSONL"
 
 
 class TestTheBoundary:
@@ -168,7 +218,7 @@ class TestTheBoundary:
         to mean in practice.
         """
         _files(tmp_path, "a.csv")
-        configured = _configured(tmp_path, lambda *_a: 0,
+        configured = _configured(tmp_path, lambda *_a, **_k: 0,
                                  file_type="JSONL", encoding="utf-8")
 
         built = configured.data_file_for(tmp_path / "a.csv")

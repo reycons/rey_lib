@@ -46,17 +46,23 @@ _logger = get_logger(__name__)
 
 #: How one already-selected file is loaded.
 #:
-#: ``(conn, run_log, path) -> rows loaded``
+#: ``(conn, run_log, path, *, transform, loader, data_file_for) -> rows``
 #:
-#: Injected rather than imported. The per-file step still owns movements, run
+#: Injected rather than imported. The per-file step owns movements, run
 #: logging and the mapping of a database failure onto a file's routing --
 #: application concerns that live in the caller. Reaching for them from here
-#: would close an import cycle and would put this object in charge of things
-#: it does not own.
+#: would close an import cycle and put this object in charge of things it
+#: does not own.
+#:
+#: **It is HANDED the objects rather than building them.** One load
+#: definition means one ``DataTransform``, one ``DataLoader`` and one rule for
+#: building a ``DataFile``; a per-file step that re-read the same
+#: configuration would be a second construction path, and the two could
+#: disagree while looking identical.
 #:
 #: It must return 0 rather than raise for a FILE fault, so the batch
 #: continues; a RUN-level fault must raise, so the batch stops.
-LoadOneFile = Callable[[Any, Any, Path], int]
+LoadOneFile = Callable[..., int]
 
 
 class ConfiguredLoad:
@@ -169,7 +175,15 @@ class ConfiguredLoad:
             self.name or "load", len(pending), self.source_dir, self.pattern,
         )
 
+        # The objects are THIS definition's, built once and handed to every
+        # file. The per-file step wraps them in movements and evidence; it
+        # does not reinterpret the configuration they came from.
         return sum(
-            self.load_one_file(conn, run_log, file_path)
+            self.load_one_file(
+                conn, run_log, file_path,
+                transform=self.transform,
+                loader=self.loader,
+                data_file_for=self.data_file_for,
+            )
             for file_path in pending
         )
