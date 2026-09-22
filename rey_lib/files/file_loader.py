@@ -62,6 +62,7 @@ from rey_lib.errors.error_utils import (
 )
 from rey_lib.files import file_utils
 from rey_lib.files.data_file import DataFileStructureError, data_file_for
+from rey_lib.files.configured_load import ConfiguredLoad as _ConfiguredLoad
 from rey_lib.files.data_loader import DataLoader as _DataLoader
 from rey_lib.files.data_transform import IdentityTransform
 from rey_lib.files.file_utils import (
@@ -412,45 +413,9 @@ def load_files(
     total_rows = 0
 
     try:
-        source_dir    = _resolve_path(data_source.paths, load_cfg.source, ctx=ctx)
-        pattern       = _resolve_pattern(load_cfg.pickup_pattern, load_cfg.version, ctx=ctx)
-        pending       = input_files(source_dir, pattern)
-        for file_path in pending:
-            log_input_discovered(run_log,
-                input_name=file_path.name,
-                path=str(file_path),
-                pattern=pattern,
-                source_config=f"{data_source.name}.{load_cfg.name}",
-                exists=True,
-                safe_to_preview=True,
-                size_bytes=file_path.stat().st_size if file_path.exists() else None,
-            )
-        max_files     = getattr(data_source, "max_files_per_run", None)
-        if max_files is not None:
-            pending   = pending[:int(max_files)]
-            _logger.info(
-                "max_files_per_run=%d applied — %d file(s) eligible this run",
-                max_files, len(pending),
-            )
-
-        transform_cfg = _find_transform(
-            data_source.transforms,
-            load_cfg.name,
-            load_cfg.version,
+        total_rows = _configured_load(ctx, run_log, data_source, load_cfg).load(
+            conn, run_log
         )
-        schema, table = _parse_destination(load_cfg.load.destination_table)
-
-        _logger.info(
-            "load_files: %d file(s) pending in %s matching '%s'",
-            len(pending), source_dir, pattern,
-        )
-
-        for file_path in pending:
-            rows_loaded = _load_one_file(
-                ctx, run_log, conn, file_path, transform_cfg,
-                load_cfg, data_source.paths, schema, table,
-            )
-            total_rows += rows_loaded
 
     finally:
         log_exit(
@@ -460,6 +425,73 @@ def load_files(
         )
 
     return total_rows
+
+
+def _configured_load(
+    ctx: Any,
+    run_log: Any,
+    data_source: Any,
+    load_cfg: Any,
+) -> _ConfiguredLoad:
+    """Resolve one load definition into the object that runs it.
+
+    **This is the construction boundary.** Everything configuration has to say
+    is read here -- where files come from, what they are called, which
+    transform describes them, which table they go to, whether it may be
+    created -- and nothing below re-reads it.
+
+    ``ctx`` is consumed here for resolution. It still travels into the
+    per-file step, which needs it for run logging and file movements; those
+    are not configuration.
+    """
+    transform_cfg = _find_transform(
+        data_source.transforms, load_cfg.name, load_cfg.version,
+    )
+    schema, table = _parse_destination(load_cfg.load.destination_table)
+    create_declared = _create_destination_declared(load_cfg)
+    source_config = f"{data_source.name}.{load_cfg.name}"
+
+    def _record_discovered(file_path: Path) -> None:
+        log_input_discovered(run_log,
+            input_name=file_path.name,
+            path=str(file_path),
+            pattern=_resolve_pattern(load_cfg.pickup_pattern, load_cfg.version,
+                                     ctx=ctx),
+            source_config=source_config,
+            exists=True,
+            safe_to_preview=True,
+            size_bytes=file_path.stat().st_size if file_path.exists() else None,
+        )
+
+    def _load_one(conn: Any, per_file_log: Any, file_path: Path) -> int:
+        return _load_one_file(
+            ctx, per_file_log, conn, file_path, transform_cfg,
+            load_cfg, data_source.paths, schema, table,
+        )
+
+    return _ConfiguredLoad(
+        source_dir=_resolve_path(data_source.paths, load_cfg.source, ctx=ctx),
+        pattern=_resolve_pattern(load_cfg.pickup_pattern, load_cfg.version,
+                                 ctx=ctx),
+        load_one_file=_load_one,
+        transform=IdentityTransform(_transform_map(transform_cfg)),
+        loader=_DataLoader(
+            schema=schema,
+            table=table,
+            adapter=_db_adapter,
+            create_destination=create_declared,
+            widen_columns=(
+                lambda _conn, records, defs: _alter_oversized_columns(
+                    ctx, schema, table, records, defs,
+                )
+            ),
+        ),
+        file_type=getattr(transform_cfg, "file_type", "CSV"),
+        encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
+        max_files=getattr(data_source, "max_files_per_run", None),
+        name=source_config,
+        on_discovered=_record_discovered,
+    )
 
 
 def load_files_to_callback(
@@ -1862,10 +1894,28 @@ def _load_one_file(
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
     try:
-        # EXISTENCE FIRST, and asked directly. What follows branches three
-        # ways on it, and only one of those branches has a table to describe.
-        exists = _db_adapter.table_exists(conn, schema, table)
         create_declared = _create_destination_declared(load_cfg)
+        loader = _DataLoader(
+            schema=schema,
+            table=table,
+            adapter=_db_adapter,
+            create_destination=create_declared,
+            # Widening is CONFIGURED behaviour -- a declared routine, never
+            # inline DDL -- and its parameters travel through ctx. This is the
+            # boundary that still holds ctx, so it closes over it here and the
+            # loader never learns how widening is configured.
+            widen_columns=(
+                lambda _conn, records, defs: _alter_oversized_columns(
+                    ctx, schema, table, records, defs,
+                )
+            ),
+        )
+
+        # EXISTENCE ASKED ONCE, and its answer serves both decisions: how to
+        # validate the file, and whether the destination must be created.
+        # None means absent; [] would mean a table with no columns.
+        expected_columns = loader.destination_columns(conn)
+        exists = expected_columns is not None
 
         if not exists and not create_declared:
             # A misconfiguration, NOT a bad file -- so it raises rather than
@@ -1879,12 +1929,6 @@ def _load_one_file(
                 f"block to have the loader create it."
             )
 
-        # Only a table that is there can say what its columns are. Asking an
-        # absent one returned [], which every shape check then failed against
-        # -- reporting a header mismatch for a table that was never there.
-        expected_columns = (
-            _db_adapter.get_table_columns(conn, schema, table) if exists else []
-        )
         encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
 
         # The source here is a CONFIGURED path matched by a CONFIGURED pickup
@@ -1903,7 +1947,8 @@ def _load_one_file(
         # they join the hierarchy; nothing else here knows a format exists.
         if str(file_type).upper() in _UNMIGRATED_FILE_TYPES:
             rows = _read_unmigrated_source(
-                ctx, run_log, file_path, file_type, encoding, expected_columns,
+                ctx, run_log, file_path, file_type, encoding,
+                expected_columns or [],
                 exists=exists, schema=schema, table=table,
                 load_cfg=load_cfg, paths=paths,
             )
@@ -1965,23 +2010,11 @@ def _load_one_file(
         column_defs = transform.logical_schema(rows)
         columns     = [name for name, _sql_type in column_defs]
 
-        # The destination half: existence, the create policy, the insert and
-        # the truncation retry. The widening is passed in because it is
-        # CONFIGURED behaviour -- it runs a declared routine and takes its
-        # parameters through ctx -- and this is the boundary that still holds
-        # ctx. DataLoader decides WHEN to retry; it never learns how widening
-        # is configured.
-        _DataLoader(
-            schema=schema,
-            table=table,
-            adapter=_db_adapter,
-            create_destination=create_declared,
-            widen_columns=(
-                lambda _conn, records, defs: _alter_oversized_columns(
-                    ctx, schema, table, records, defs,
-                )
-            ),
-        ).load(conn, rows, column_defs)
+        # The destination half: the create policy, the insert and the
+        # truncation retry. Told what existence check already found, so the
+        # destination is inspected once per file rather than once per
+        # decision.
+        loader.load(conn, rows, column_defs, expected_columns)
 
         _logger.info(
             "Loaded: %s → %s.%s  rows=%d",

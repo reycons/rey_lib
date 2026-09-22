@@ -38,6 +38,12 @@ __all__ = ["DataLoader", "WidenColumns"]
 
 _logger = get_logger(__name__)
 
+#: "The caller did not ask" -- distinct from None, which means "the caller
+#: asked and the destination is not there". Without this sentinel the two
+#: would collapse and an absent destination would be re-checked needlessly,
+#: or a caller's answer of None would be mistaken for not having asked.
+_UNASKED: Any = object()
+
 #: How a caller widens columns that were too narrow, and reports whether it
 #: changed anything.
 #:
@@ -86,11 +92,29 @@ class DataLoader:
         self.create_destination = create_destination
         self.widen_columns = widen_columns
 
+    def destination_columns(self, conn: Any) -> list[str] | None:
+        """Return the destination's columns, or None when it does not exist.
+
+        **``None`` is not ``[]``.** An empty list would mean a table with no
+        columns, which nothing matches; ``None`` means there is no table yet.
+        The same distinction the file-structure contract uses, and for the
+        same reason -- a caller deciding whether to CREATE must not confuse
+        the two.
+
+        Asked once and answered once: the caller uses this both to decide how
+        to validate its records and to tell ``load`` what it found, so a load
+        costs one existence check rather than one per decision.
+        """
+        if not self.adapter.table_exists(conn, self.schema, self.table):
+            return None
+        return self.adapter.get_table_columns(conn, self.schema, self.table)
+
     def load(
         self,
         conn: Any,
         records: list[dict[str, Any]],
         column_defs: list[tuple[str, str]],
+        destination_columns: list[str] | None = _UNASKED,
     ) -> int:
         """Put these records in the destination, creating it if allowed.
 
@@ -115,10 +139,12 @@ class DataLoader:
         """
         columns = [name for name, _sql_type in column_defs]
 
-        # EXISTENCE FIRST, and asked directly rather than inferred from an
-        # empty column list -- "there is no such table" and "I was given no
-        # columns" are different answers, and only one of them means create.
-        exists = self.adapter.table_exists(conn, self.schema, self.table)
+        # A caller that already asked tells us what it found, so the check
+        # happens ONCE per load rather than once per decision. A caller that
+        # did not ask gets it asked here.
+        if destination_columns is _UNASKED:
+            destination_columns = self.destination_columns(conn)
+        exists = destination_columns is not None
 
         if not exists and not self.create_destination:
             raise ConfigError(

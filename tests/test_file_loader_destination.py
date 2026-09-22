@@ -40,8 +40,10 @@ class _Adapter:
         self.created: list[tuple] = []
         self.inserted: list[tuple] = []
         self.described = 0
+        self.existence_checks = 0
 
     def table_exists(self, _conn, _schema, _table) -> bool:
+        self.existence_checks += 1
         return self._exists
 
     def get_table_columns(self, _conn, _schema, _table) -> list[str]:
@@ -121,6 +123,22 @@ class TestTheDestinationIsThere:
         assert loaded == 2
         assert adapter.created == []            # no DDL at all
         assert len(adapter.inserted) == 1
+
+    def test_the_destination_is_inspected_ONCE_per_file(
+        self, tmp_path: Path, monkeypatch, run_log
+    ) -> None:
+        """Two decisions, one question.
+
+        Whether to validate the file against the destination, and whether to
+        create it, are both answered by whether it exists. Splitting the load
+        across two objects made it easy for each to ask separately, which is
+        a catalog query per file for an answer already in hand.
+        """
+        adapter = _Adapter(exists=True)
+
+        _load(tmp_path, monkeypatch, run_log, adapter)
+
+        assert adapter.existence_checks == 1
 
     def test_the_default_is_require_so_an_absent_key_changes_nothing(
         self, tmp_path: Path, monkeypatch, run_log

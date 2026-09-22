@@ -54,6 +54,10 @@ class _Adapter:
         self.calls.append("table_exists")
         return self._exists
 
+    def get_table_columns(self, _conn, _schema, _table) -> list[str]:
+        self.calls.append("get_table_columns")
+        return ["a", "b"]
+
     def create_staging_table_if_not_exists(self, _conn, schema, table, defs):
         self.calls.append("create")
         self.created.append((schema, table, defs))
@@ -153,7 +157,8 @@ class TestTheCreatePolicy:
         _loader(adapter).load(_Conn(), _RECORDS, _DEFS)
 
         assert adapter.created == []
-        assert adapter.calls == ["table_exists", "bulk_insert"]
+        assert adapter.calls == ["table_exists", "get_table_columns",
+                                 "bulk_insert"]
 
     def test_an_absent_destination_not_declared_raises(self) -> None:
         """A RUN-level fault: every file would fail identically.
