@@ -36,11 +36,17 @@ _OBJECT_COLUMNS = (
     # The text, not only its hash. A reader opening the object needs what it
     # says; the hash only says whether it changed.
     "definition",
+    # The return SHAPE of a routine. `signature` is its arguments and says
+    # nothing about what it gives back, so without these two a caller cannot
+    # tell a routine that yields rows from one that yields a value.
+    "returns_set", "return_type_kind",
 )
 _MEMBER_COLUMNS = (
     "source_key", "schema_name", "object_name", "object_type", "signature",
     "member_kind", "member_name", "ordinal", "data_type", "member_mode",
     "provider_member_id",
+    # Whether a caller may omit this argument. Always false for a column.
+    "has_default",
 )
 _OBSERVATION_COLUMNS = (
     "from_source_key", "from_schema_name", "from_object_name",

@@ -31,7 +31,12 @@ from typing import Any
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.logs.logging_setup import get_logger
 
-__all__ = ["EXTRACTOR_VERSION", "BridgeIndexWriter", "inspect_bridge"]
+__all__ = [
+    "BRIDGE_SCHEMA_VERSION",
+    "EXTRACTOR_VERSION",
+    "BridgeIndexWriter",
+    "inspect_bridge",
+]
 
 logger = get_logger(__name__)
 
@@ -39,7 +44,21 @@ SCHEMA = "code"
 
 #: What produced an extraction. Recorded on coverage, so a published bridge
 #: says which extractor's reach it reflects.
-EXTRACTOR_VERSION = "rey_repository_map/bridge 1"
+EXTRACTOR_VERSION = "rey_repository_map/bridge 3"
+
+#: WHAT THIS EXTRACTOR STATES, as a number a query can compare.
+#:
+#: Distinct from EXTRACTOR_VERSION, which is provenance for a human reading a
+#: coverage row. This is the capability level db_binding_vw tests before it
+#: asserts anything, so that an installation published by an older extractor
+#: reads as NOT CHECKED rather than as checked and clean.
+#:
+#: Ordered, not a string match, so a reader asks "at least 2" rather than
+#: knowing which literals mean what.
+#:
+#:   2  binding parameters and result_mode are published
+#:   3  the dispatch method is published
+BRIDGE_SCHEMA_VERSION = 3
 
 #: The dispatch seams read, and nothing else. Each names the repository, the
 #: module within it, the receiver and the methods whose FIRST argument is the
@@ -57,18 +76,32 @@ _SEAMS = (
 _CODE_COLUMNS = (
     "repository_key", "relative_path", "qualified_name", "source_line",
     "seam", "observed_map", "observed_binding", "resolution",
+    # The method the dispatch went through. _call_rows requires a
+    # dataset_result binding; _call forbids one, because a dataset_result
+    # binding leaves `outputs` empty and _call reads only that.
+    "dispatch_method",
 )
 _BINDING_COLUMNS = (
     "installation", "map_name", "binding_name", "target_kind",
     "schema_name", "object_name", "signature",
+    # What the binding says the routine gives back. One of the three things a
+    # binding can be wrong about, and the one that fails loudest.
+    "result_mode",
+)
+_BINDING_PARAMETER_COLUMNS = (
+    "installation", "map_name", "binding_name", "parameter_name",
 )
 _COVERAGE_COLUMNS = (
     "installation", "seam", "map_name", "extractor_version", "status",
+    # The capability level of this publication, which is what says whether the
+    # assertions in db_binding_vw may run for this installation at all.
+    "bridge_schema_version",
 )
 
 _STAGING = (
     "db_code_reference_stage",
     "db_binding_stage",
+    "db_binding_parameter_stage",
     "db_bridge_coverage_stage",
 )
 
@@ -83,7 +116,8 @@ def inspect_bridge(apps_root: Path, ctx: Any) -> dict[str, list[dict[str, Any]]]
             guesses them.
 
     Returns:
-        ``{"code": [...], "bindings": [...], "coverage": [...]}``.
+        ``{"code": [...], "bindings": [...], "binding_parameters": [...],
+        "coverage": [...]}``.
     """
     # Read from the object. The nested getattr this replaces existed only
     # because the shape was uncertain; an installation-backed context carries an
@@ -108,11 +142,14 @@ def inspect_bridge(apps_root: Path, ctx: Any) -> dict[str, list[dict[str, Any]]]
             "map_name": control_map,
             "extractor_version": EXTRACTOR_VERSION,
             "status": status,
+            "bridge_schema_version": BRIDGE_SCHEMA_VERSION,
         })
 
+    bindings, binding_parameters = _bindings(ctx, installation)
     return {
         "code": code,
-        "bindings": _bindings(ctx, installation),
+        "bindings": bindings,
+        "binding_parameters": binding_parameters,
         "coverage": coverage,
     }
 
@@ -178,6 +215,11 @@ def _seam_observations(
             "observed_map": "",
             "observed_binding": literal or _seen(first),
             "resolution": "exact" if literal else "unresolved",
+            # WHICH dispatch method reached it, which is what decides the
+            # binding's result_mode. The seam has always filtered on this and
+            # then thrown it away, so a binding could be read one way and
+            # declared the other with nothing to notice.
+            "dispatch_method": func.attr,
         })
     return found, ("complete" if complete else "partial")
 
@@ -214,22 +256,30 @@ def _seen(node: ast.expr) -> str:
         return type(node).__name__
 
 
-def _bindings(ctx: Any, installation: str) -> list[dict[str, Any]]:
-    """Every binding this installation's procedure maps declare.
+def _bindings(
+    ctx: Any, installation: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Every binding this installation's procedure maps declare, and its inputs.
 
     Derived from the authoritative YAML, which stays the source of truth. These
     rows are index state for querying and are never read back as configuration.
+
+    Returns the bindings and their mapped parameters separately, because
+    reporting WHICH parameter is wrong needs a row per parameter rather than a
+    list packed into one.
     """
     made: list[dict[str, Any]] = []
+    parameters: list[dict[str, Any]] = []
     for entry in list(getattr(ctx, "procedure_maps", None) or []):
         map_name = str(_get(entry, "name") or "")
         for binding in list(_get(entry, "routine_bindings") or []):
             routine = str(_get(binding, "routine") or "")
             schema_name, _, object_name = routine.partition(".")
+            binding_name = str(_get(binding, "name") or "")
             made.append({
                 "installation": installation,
                 "map_name": map_name,
-                "binding_name": str(_get(binding, "name") or ""),
+                "binding_name": binding_name,
                 "target_kind": "routine",
                 "schema_name": schema_name,
                 "object_name": object_name,
@@ -237,7 +287,17 @@ def _bindings(ctx: Any, installation: str) -> list[dict[str, Any]]:
                 # Resolution against the database index is by value and must
                 # cope with that; inventing one here would be worse.
                 "signature": "",
+                "result_mode": str(_get(binding, "result_mode") or ""),
             })
+            parameters.extend(
+                {
+                    "installation": installation,
+                    "map_name": map_name,
+                    "binding_name": binding_name,
+                    "parameter_name": name,
+                }
+                for name in _bound_parameters(binding)
+            )
         for binding in list(_get(entry, "sql_bindings") or []):
             made.append({
                 "installation": installation,
@@ -247,8 +307,39 @@ def _bindings(ctx: Any, installation: str) -> list[dict[str, Any]]:
                 # fabricated one.
                 "target_kind": "sql",
                 "schema_name": "", "object_name": "", "signature": "",
+                "result_mode": str(_get(binding, "result_mode") or ""),
             })
-    return made
+    return made, parameters
+
+
+def _bound_parameters(binding: Any) -> list[str]:
+    """The routine parameters one binding maps, and only those.
+
+    **``input`` only.** A binding's ``output`` block is
+    ``{variable, load_to_ctx}`` -- both name a key in the run context, not a
+    parameter of the routine. Reading them as parameters reports `variable` as
+    an unknown parameter on almost every binding in the estate, which is noise
+    that would bury the real findings.
+
+    ``inputs`` is accepted as well as ``input`` because the map loader accepts
+    both; an extractor that knew only the current spelling would silently
+    publish no parameters for a binding written the legacy way, and a binding
+    with no parameters passes every check.
+
+    READ THROUGH ``keys()``, NOT BY ITERATING. A loaded binding's ``input`` is a
+    ``config_namespace.Namespace``, not a dict: it has ``keys``, ``items`` and
+    ``get``, but no ``__iter__``, and its ``__getitem__`` is attribute access --
+    so iterating it raises on the first integer index. An ``isinstance(..., dict)``
+    test looks right, passes a test written with dict literals, and publishes
+    NOTHING against real configuration.
+    """
+    declared = _get(binding, "input")
+    if declared is None:
+        declared = _get(binding, "inputs")
+    keys = getattr(declared, "keys", None)
+    if not callable(keys):
+        return []
+    return [str(name) for name in keys()]
 
 
 def _get(obj: Any, key: str) -> Any:
@@ -279,6 +370,11 @@ class BridgeIndexWriter:
         self._clear_staging()
         self._stage("db_code_reference_stage", inspected["code"], _CODE_COLUMNS)
         self._stage("db_binding_stage", inspected["bindings"], _BINDING_COLUMNS)
+        self._stage(
+            "db_binding_parameter_stage",
+            inspected.get("binding_parameters") or [],
+            _BINDING_PARAMETER_COLUMNS,
+        )
         self._stage(
             "db_bridge_coverage_stage", inspected["coverage"], _COVERAGE_COLUMNS,
         )

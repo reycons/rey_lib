@@ -1341,6 +1341,9 @@ def inspect_database_references(
             # object because its edges originate from it -- an observation
             # whose source is not in the snapshot has nowhere to hang.
             "reference_analysis_status": "complete",
+            # A trigger is invoked by the server, never bound and never called
+            # with arguments, so it has no return shape to state.
+            "returns_set": False, "return_type_kind": "",
         })
 
     for rel in relations:
@@ -1353,6 +1356,8 @@ def inspect_database_references(
             # from the catalog, so analysis is complete by construction.
             "reference_analysis_status": "complete",
             "definition": rel.get("definition", ""),
+            # A relation does not return; the columns are stated as members.
+            "returns_set": False, "return_type_kind": "",
         })
         for column in rel["columns"]:
             members.append({
@@ -1361,6 +1366,8 @@ def inspect_database_references(
                 "member_kind": "column", "member_name": column["name"],
                 "ordinal": column["ordinal"], "data_type": column["data_type"],
                 "member_mode": "", "provider_member_id": "",
+                # A column is not an argument and is never omittable.
+                "has_default": False,
             })
 
     for routine in routines:
@@ -1377,7 +1384,29 @@ def inspect_database_references(
             "definition_hash": routine["definition_hash"],
             "reference_analysis_status": analysis.status,
             "definition": routine["definition"],
+            # The return SHAPE, which the signature cannot carry:
+            # pg_get_function_identity_arguments is arguments only. Both are
+            # needed and neither implies the other -- SETOF of a base type is
+            # row-shaped because of the set, and a plain composite return is
+            # row-shaped because of the type.
+            "returns_set": routine["returns_set"],
+            "return_type_kind": routine["return_type_kind"],
         })
+        # A routine's arguments are its members, exactly as a relation's columns
+        # are. Until now only relations emitted members, so nothing could say
+        # what a routine takes.
+        for parameter in routine["parameters"]:
+            members.append({
+                "schema_name": routine["schema"],
+                "object_name": routine["name"],
+                "object_type": routine["object_type"],
+                # Carried because members are joined to their object on
+                # (schema, name, type, signature).
+                "signature": routine["signature"],
+                "member_kind": "parameter",
+                "provider_member_id": "",
+                **parameter,
+            })
         origin = (routine["schema"], routine["name"], routine["object_type"],
                   routine["signature"])
         for kind, names in (("read", analysis.reads), ("write", analysis.writes),
@@ -1554,12 +1583,39 @@ def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
     """
     import hashlib
 
+    # proallargtypes, NOT proargtypes, is the complete ordered argument list.
+    # proargtypes and pg_get_function_identity_arguments carry INPUT arguments
+    # only, so OUT, INOUT and TABLE arguments are invisible through them -- and
+    # those are exactly what says whether a routine yields rows. Postgres leaves
+    # proallargtypes NULL when every argument is IN, hence the COALESCE.
+    #
+    # The return kind is normalized HERE, at the provider, so nothing downstream
+    # ever sees a pg_type.typtype letter. A domain is resolved to what it is a
+    # domain over.
     rows = _reference_rows(conn, """
         SELECT p.oid, n.nspname, p.proname, p.prokind, l.lanname,
-               pg_get_function_identity_arguments(p.oid)
+               pg_get_function_identity_arguments(p.oid),
+               ARRAY(SELECT format_type(a.t, NULL)
+                     FROM unnest(COALESCE(p.proallargtypes,
+                                          p.proargtypes::oid[]))
+                          WITH ORDINALITY AS a(t, ord)
+                     ORDER BY a.ord),
+               p.proargnames,
+               p.proargmodes::text[],
+               p.pronargdefaults,
+               p.proretset,
+               CASE
+                   WHEN rt.typname = 'void'   THEN 'void'
+                   WHEN rt.typname = 'record' THEN 'record'
+                   WHEN COALESCE(bt.typtype, rt.typtype) = 'c' THEN 'composite'
+                   ELSE 'scalar'
+               END
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         JOIN pg_language l ON l.oid = p.prolang
+        JOIN pg_type rt ON rt.oid = p.prorettype
+        LEFT JOIN pg_type bt
+          ON rt.typtype = 'd' AND bt.oid = rt.typbasetype
         WHERE n.nspname NOT IN ('pg_catalog','information_schema')
           AND n.nspname NOT LIKE 'pg_%%'
           AND (%s::text IS NULL OR n.nspname = %s::text)
@@ -1567,7 +1623,8 @@ def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
     """, [schema, schema])
 
     routines = []
-    for oid, nsp, name, prokind, language, signature in rows:
+    for (oid, nsp, name, prokind, language, signature, arg_types, arg_names,
+         arg_modes, n_defaults, returns_set, return_type_kind) in rows:
         try:
             definition = _reference_rows(
                 conn, "SELECT pg_get_functiondef(%s)", [oid])[0][0]
@@ -1584,8 +1641,74 @@ def _reference_routines(conn: Any, schema: str | None) -> list[dict[str, Any]]:
             "language": language, "definition": definition,
             "definition_hash": hashlib.sha256(
                 definition.encode("utf-8")).hexdigest(),
+            "returns_set": bool(returns_set),
+            "return_type_kind": str(return_type_kind or "scalar"),
+            "parameters": _routine_parameters(
+                arg_types, arg_names, arg_modes, n_defaults,
+            ),
         })
     return routines
+
+
+#: pg_proc.proargmodes letters, as the index states them. A letter never leaves
+#: this module.
+_ARG_MODES = {
+    "i": "IN", "o": "OUT", "b": "INOUT", "v": "VARIADIC", "t": "TABLE",
+}
+
+#: The modes a caller can pass a value for, and so the modes a binding is
+#: expected to map. pronargdefaults counts within THIS subsequence.
+_INPUT_CAPABLE = ("IN", "INOUT", "VARIADIC")
+
+
+def _routine_parameters(
+    arg_types: Any,
+    arg_names: Any,
+    arg_modes: Any,
+    n_defaults: Any,
+) -> list[dict[str, Any]]:
+    """One routine's arguments, in catalog order, with optionality resolved.
+
+    The three catalog arrays are parallel and are zipped by ordinal. Two things
+    about them are easy to get wrong and are handled explicitly:
+
+    ``proargmodes`` is NULL when every argument is ``IN`` -- absence is a
+    statement, not missing data. ``proargnames`` is NULL when the arguments are
+    unnamed, which no routine in this estate does today; a name is filled with
+    the empty string rather than letting the zip shorten and silently drop
+    arguments off the end.
+
+    ``pronargdefaults`` counts the trailing defaulted arguments **among the
+    input-capable ones**, not among all of them. A routine with OUT or TABLE
+    arguments mixed in has a complete list longer than its input list, so
+    applying the count to the last N of the complete list marks the wrong
+    arguments optional -- for ``f_file_profile_get`` it would mark the TABLE
+    column ``profile`` defaulted and leave a genuinely optional input looking
+    required.
+    """
+    types = list(arg_types or [])
+    names = list(arg_names or [])
+    modes = [_ARG_MODES.get(str(m), "IN") for m in list(arg_modes or [])]
+    if not modes:
+        modes = ["IN"] * len(types)
+
+    parameters: list[dict[str, Any]] = []
+    for ordinal, data_type in enumerate(types, start=1):
+        parameters.append({
+            "member_name": str(names[ordinal - 1]) if ordinal <= len(names) else "",
+            "ordinal": ordinal,
+            "data_type": str(data_type or ""),
+            "member_mode": modes[ordinal - 1] if ordinal <= len(modes) else "IN",
+            "has_default": False,
+        })
+
+    # The trailing N input-capable arguments, in their own order.
+    inputs = [p for p in parameters if p["member_mode"] in _INPUT_CAPABLE]
+    defaulted = int(n_defaults or 0)
+    if defaulted > 0:
+        for parameter in inputs[len(inputs) - defaulted:]:
+            parameter["has_default"] = True
+    return parameters
 
 
 def _reference_triggers(conn: Any, schema: str | None) -> list[dict[str, Any]]:
