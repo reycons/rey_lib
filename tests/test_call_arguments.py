@@ -157,6 +157,25 @@ class TestItNamesTheEdgeItBelongsTo:
         assert [r.edge_kind for r in rows] == [EDGE_KIND_INTERNAL_CALL]
         assert rows[0].callee == "self.run"
 
+    def test_a_call_through_a_field_is_a_dependency_not_an_internal_call(
+        self, tmp_path: Path
+    ) -> None:
+        """self._adapter.execute_sql() reaches ANOTHER object.
+
+        Backlog 21 rooted this test at self and asked nothing about depth, so
+        272 edges — including a database boundary — were recorded as internal
+        and hidden from every reader that filters on the call kind.
+        """
+        rows = _python(tmp_path, "class C:\n"
+                                 "    def m(self, q):\n"
+                                 "        self.close(q)\n"
+                                 "        self._adapter.execute_sql(q)\n")
+
+        assert [(r.callee, r.edge_kind) for r in rows] == [
+            ("self.close", EDGE_KIND_INTERNAL_CALL),
+            ("self._adapter.execute_sql", EDGE_KIND_CALL),
+        ]
+
     def test_chained_calls_are_told_apart_by_callee_not_position(
         self, tmp_path: Path
     ) -> None:
@@ -206,13 +225,27 @@ class TestTypeScript:
         assert [r.argument_form for r in rows] == [ARGUMENT_FORM_POSITIONAL]
         assert rows[0].keyword is None
 
-    def test_a_this_rooted_call_records_nothing(self, tmp_path: Path) -> None:
-        """It records no edge either, so a row here would reference nothing.
+    def test_a_this_rooted_call_carries_its_arguments(self, tmp_path: Path) -> None:
+        """Backlog 211 gave these calls an edge, so their arguments follow.
 
-        This is the case backlog 21 fixed for Python and did not fix here,
-        and it is why arguments are emitted only where the edge is.
+        Nothing here was designed for it: arguments are emitted wherever an
+        edge is, so closing the edge gap closed the argument gap with it.
         """
-        assert _typescript(tmp_path, "class C { m(a) { this.hidden(a); } }\n") == []
+        rows = _typescript(tmp_path, "class C { m(a) { this.hidden(a); } }\n")
+
+        assert [(r.callee, r.edge_kind, r.expression) for r in rows] == [
+            ("this.hidden", EDGE_KIND_INTERNAL_CALL, "a"),
+        ]
+
+    def test_a_call_with_an_unresolvable_callee_still_records_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """No edge, so a row here would reference one that does not exist.
+
+        This is the remaining JS gap (backlog 212), and it is what the
+        argument extractor must keep respecting.
+        """
+        assert _typescript(tmp_path, "function g(a, t) { t[0](a); }\n") == []
 
     def test_a_global_rooted_call_is_stamped_global_reference(
         self, tmp_path: Path

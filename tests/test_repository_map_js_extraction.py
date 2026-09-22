@@ -18,6 +18,7 @@ from rey_lib.repository_map import (
     EDGE_KIND_CALL,
     EDGE_KIND_GLOBAL_REFERENCE,
     EDGE_KIND_IMPORT,
+    EDGE_KIND_INTERNAL_CALL,
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
     SYMBOL_KIND_CLASS,
@@ -230,9 +231,61 @@ def test_member_call_is_one_call_not_also_a_property_access(tmp_path: Path) -> N
     assert [edge.edge_kind for edge in edges] == [EDGE_KIND_CALL]
 
 
-def test_this_rooted_references_are_excluded(js_path: Path) -> None:
-    """this.x and this.method() never cross a file, so neither is an edge."""
-    targets = {edge.to for edge in extract_executable_references(js_path, "JavaScript")}
+def test_a_this_rooted_call_is_an_internal_call_not_a_call(js_path: Path) -> None:
+    """Recorded, but never as a dependency.
+
+    "This method has no callers" used to be unknown rather than false for
+    every frontend class, because the call branch dropped the edge outright.
+    It is now kept under its own kind: a call on the object itself is not a
+    dependency, and counting it as one would make every class appear to
+    depend on itself.
+    """
+    edges = extract_executable_references(js_path, "JavaScript")
+    internal = [e for e in edges if e.edge_kind == EDGE_KIND_INTERNAL_CALL]
+
+    assert [e.to for e in internal] == ["this.otherMethod"]
+    assert not any(
+        e.to.startswith("this.") for e in edges if e.edge_kind == EDGE_KIND_CALL
+    )
+
+
+def test_a_call_through_a_field_reaches_another_object(tmp_path: Path) -> None:
+    """this.grid.refresh() is a DEPENDENCY, not an internal call.
+
+    The root says whose object the chain starts at; it does not say the call
+    stays there. One segment is the object's own method, two or more reaches
+    through a field to a second object -- and recording that as internal
+    hides a real edge from every reader that filters on the call kind.
+    """
+    path = tmp_path / "through.js"
+    path.write_text(
+        "class C {\n  m() {\n    this.close();\n    this.grid.refresh();\n  }\n}\n",
+        encoding="utf-8",
+    )
+
+    edges = [
+        e for e in extract_executable_references(path, "JavaScript")
+        if e.to.startswith("this.")
+    ]
+
+    assert sorted((e.to, e.edge_kind) for e in edges) == [
+        ("this.close", EDGE_KIND_INTERNAL_CALL),
+        ("this.grid.refresh", EDGE_KIND_CALL),
+    ]
+
+
+def test_a_this_rooted_property_read_is_still_excluded(js_path: Path) -> None:
+    """The row asks about calls; this.x reads are a different question.
+
+    The fixture writes this.internalState beside this.otherMethod(), so a
+    change that widened the suppression instead of redirecting it shows up
+    here rather than as a silent volume increase.
+    """
+    targets = {
+        edge.to
+        for edge in extract_executable_references(js_path, "JavaScript")
+        if edge.edge_kind == EDGE_KIND_PROPERTY_ACCESS
+    }
 
     assert not any(target.startswith("this.") for target in targets)
 

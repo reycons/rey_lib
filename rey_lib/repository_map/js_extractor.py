@@ -29,6 +29,9 @@ from rey_lib.repository_map.records import (
     EDGE_KIND_CALL,
     EDGE_KIND_GLOBAL_REFERENCE,
     EDGE_KIND_IMPORT,
+    EDGE_KIND_IMPLEMENTS,
+    EDGE_KIND_INHERITS,
+    EDGE_KIND_INTERNAL_CALL,
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
     RECORD_TYPE_FILE,
@@ -47,6 +50,7 @@ from rey_lib.repository_map.records import (
     ACCESS_KIND_SUBSCRIPT,
     ARGUMENT_FORM_POSITIONAL,
     ARGUMENT_FORM_VAR_POSITIONAL,
+    is_internal_call_target,
     rendered_expression,
     storable_literal,
     ARGUMENT_KIND_EXPRESSION,
@@ -136,6 +140,13 @@ _DECLARATION_KINDS: dict[str, str] = {
     "interface_declaration": SYMBOL_KIND_INTERFACE,
     "enum_declaration": SYMBOL_KIND_ENUM,
     "type_alias_declaration": SYMBOL_KIND_TYPE_ALIAS,
+}
+
+# Heritage clause type to the relation it declares. Data, not a branch:
+# extends and implements are different relations and carry different kinds.
+_HERITAGE_KINDS: dict[str, str] = {
+    "extends_clause": EDGE_KIND_INHERITS,
+    "implements_clause": EDGE_KIND_IMPLEMENTS,
 }
 
 # The declaration forms that own methods.
@@ -322,6 +333,8 @@ def extract_js_references(
                 continue
             target, kind = classified
             edges.append(_edge(recorded_path, node, from_id, target, kind, node.type))
+        elif node.type in _CLASS_DECLARATIONS:
+            edges.extend(_heritage_edges(recorded_path, from_id, node))
         elif node.type == "member_expression" and node.id not in callee_ids:
             if node.id in publication_ids:
                 continue
@@ -1680,6 +1693,52 @@ def _is_internal(target: str) -> bool:
     return target.split(".", 1)[0] in _SELF_ROOTS
 
 
+def _heritage_edges(
+    recorded_path: str, from_id: str, node: Node
+) -> list[ReferenceEdge]:
+    """Return the inherits and implements edges one class declares.
+
+    Two kinds, because they are two relations: extending a class brings its
+    members, implementing an interface brings none. One kind would answer
+    neither question and would not say which row was which.
+
+    Located at the named type itself, which sits on the class's own line
+    before any method, so attribution names the subclass with no rule of its
+    own.
+
+    Args:
+        recorded_path: Path to record on the edges.
+        from_id: record_id of the file making the reference.
+        node: A class_declaration or abstract_class_declaration node.
+
+    Returns:
+        One edge per named base, empty when the class declares none.
+    """
+    heritage = next(
+        (child for child in node.children if child.type == "class_heritage"), None
+    )
+    if heritage is None:
+        return []
+
+    edges: list[ReferenceEdge] = []
+    for clause in heritage.children:
+        kind = _HERITAGE_KINDS.get(clause.type)
+        if kind is None:
+            continue
+        for named in clause.named_children:
+            # Type arguments are not a base. Panel<T> derives from Panel, and
+            # recording the parameters would give a target matching no class.
+            if named.type == "type_arguments":
+                continue
+            target = _dotted_name(named) or _text(named).split("<", 1)[0].strip()
+            if not target:
+                continue
+            edges.append(
+                _edge(recorded_path, named, from_id, target, kind, clause.type)
+            )
+    return edges
+
+
 def _classify_call(node: Node) -> tuple[str, str] | None:
     """Return what a call targets and the edge kind it is recorded as.
 
@@ -1687,11 +1746,12 @@ def _classify_call(node: Node) -> tuple[str, str] | None:
     answer: the reference walk writes the edge, and the call-argument
     extractor stamps each argument with the kind of the edge it belongs to.
 
-    Unlike Python, not every call here yields an edge -- an unresolvable
-    callee or a this/super-rooted one is recorded as nothing at all, and a
-    global-rooted one is recorded under a different kind rather than skipped.
-    Returning None for the first case is what keeps the argument extractor
-    from producing a row with no edge to belong to.
+    Unlike Python, not every call here yields an edge: an unresolvable
+    callee is recorded as nothing at all, which is what keeps the argument
+    extractor from producing a row with no edge to belong to. Everything
+    else is recorded under the kind it is -- a this/super call naming one
+    segment is internal, a global-rooted one is a global reference, and a
+    call through a field reaches another object and is an ordinary call.
 
     Args:
         node: A call_expression or new_expression node.
@@ -1702,8 +1762,10 @@ def _classify_call(node: Node) -> tuple[str, str] | None:
     """
     callee = node.child_by_field_name("function")
     target = _dotted_name(callee) if callee is not None else None
-    if target is None or _is_internal(target):
+    if target is None:
         return None
+    if is_internal_call_target(target, _SELF_ROOTS):
+        return target, EDGE_KIND_INTERNAL_CALL
     kind = EDGE_KIND_GLOBAL_REFERENCE if js_is_global_rooted(target) else EDGE_KIND_CALL
     return target, kind
 

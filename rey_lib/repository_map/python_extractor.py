@@ -21,9 +21,11 @@ from rey_lib.repository_map.records import (
     ARGUMENT_FORM_POSITIONAL,
     ARGUMENT_FORM_VAR_KEYWORD,
     ARGUMENT_FORM_VAR_POSITIONAL,
+    is_internal_call_target,
     storable_literal,
     EDGE_KIND_CALL,
     EDGE_KIND_IMPORT,
+    EDGE_KIND_INHERITS,
     EDGE_KIND_INTERNAL_CALL,
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
@@ -286,6 +288,21 @@ def extract_python_references(
         if isinstance(node, ast.Call):
             target, kind = _classify_call(node)
             edges.append(_edge(recorded_path, node, from_id, target, kind, "ast.Call"))
+        elif isinstance(node, ast.ClassDef):
+            # One edge per base, located at the base itself -- which sits on
+            # the class's own line, before any method begins, so attribution
+            # names the subclass without any rule of its own.
+            for base in node.bases:
+                edges.append(
+                    _edge(
+                        recorded_path,
+                        base,
+                        from_id,
+                        _base_name(base),
+                        EDGE_KIND_INHERITS,
+                        "ast.ClassDef",
+                    )
+                )
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for record in _import_records(node):
                 edges.append(
@@ -1407,6 +1424,25 @@ def _is_internal(target: str) -> bool:
     return target.split(".", 1)[0] in _SELF_ROOTS
 
 
+def _base_name(base: ast.expr) -> str:
+    """Return the name a base-class expression declares, as written.
+
+    A subscripted base is the class it subscripts: ``Generic[T]`` derives
+    from ``Generic``, and recording the subscript would give a target that
+    matches no declared class. The TypeScript extractor strips ``<T>`` for
+    the same reason.
+
+    Args:
+        base: One entry from a ClassDef's bases.
+
+    Returns:
+        The base as written, without any type parameters.
+    """
+    if isinstance(base, ast.Subscript):
+        base = base.value
+    return _dotted_name(base) or ast.unparse(base)
+
+
 def _classify_call(node: ast.Call) -> tuple[str, str]:
     """Return what a call targets and the edge kind it is recorded as.
 
@@ -1415,9 +1451,11 @@ def _classify_call(node: ast.Call) -> tuple[str, str]:
     stamps each argument with the kind of the edge it belongs to. Deriving
     that kind twice is how the two would come to disagree.
 
-    It answers for EVERY call. A self/cls call is not dropped -- it is
+    It answers for EVERY call. A self/cls call NAMING ONE SEGMENT is
     recorded as internal_call, which keeps it out of the dependency
-    population without losing the fact that the call was written.
+    population without losing the fact that the call was written. A call
+    THROUGH a field -- self._adapter.execute_sql() -- reaches another object
+    and is an ordinary call, because it is an ordinary dependency.
 
     Args:
         node: The call node.
@@ -1426,7 +1464,11 @@ def _classify_call(node: ast.Call) -> tuple[str, str]:
         The target as written, and one of the ``EDGE_KIND_*`` constants.
     """
     target = _dotted_name(node.func) or ast.unparse(node.func)
-    kind = EDGE_KIND_INTERNAL_CALL if _is_internal(target) else EDGE_KIND_CALL
+    kind = (
+        EDGE_KIND_INTERNAL_CALL
+        if is_internal_call_target(target, _SELF_ROOTS)
+        else EDGE_KIND_CALL
+    )
     return target, kind
 
 

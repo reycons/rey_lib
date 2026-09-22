@@ -20,7 +20,9 @@ __all__ = [
     "EDGE_KIND_BACKEND_STRING_REFERENCE",
     "EDGE_KIND_CALL",
     "EDGE_KIND_GLOBAL_REFERENCE",
+    "EDGE_KIND_IMPLEMENTS",
     "EDGE_KIND_IMPORT",
+    "EDGE_KIND_INHERITS",
     "EDGE_KIND_INTERNAL_CALL",
     "EDGE_KIND_PROPERTY_ACCESS",
     "EDGE_KIND_REGISTRATION",
@@ -167,6 +169,14 @@ EDGE_KIND_CALL = "call"
 # dependency: recording these as ordinary calls would make every class appear
 # to depend on itself.
 EDGE_KIND_INTERNAL_CALL = "internal_call"
+# What a class declares it derives from. TWO KINDS, NOT ONE: a class that
+# implements an interface does not inherit from it -- no members arrive -- so
+# folding them together would make "what does this class inherit" return
+# things it does not, with nothing on the row to say which is which.
+# implements is TypeScript-only; Python expresses ABC and Protocol
+# conformance AS a base class, so those are genuinely inherits.
+EDGE_KIND_INHERITS = "inherits"
+EDGE_KIND_IMPLEMENTS = "implements"
 EDGE_KIND_IMPORT = "import"
 EDGE_KIND_RE_EXPORT = "re_export"
 EDGE_KIND_PROPERTY_ACCESS = "property_access"
@@ -237,6 +247,38 @@ def storable_literal(value: str) -> str | None:
         The value, or None when it contains a character text cannot carry.
     """
     return None if "\x00" in value else value
+
+
+def is_internal_call_target(target: str, self_roots: frozenset[str]) -> bool:
+    """Return True when a call target is the object's OWN method.
+
+    Rooted at self/cls/this/super AND naming at most one segment after the
+    root. The depth is the whole point, and leaving it out is a mistake this
+    made once already:
+
+        self.close()                 the object's own method   -> internal
+        self._adapter.execute_sql()  ANOTHER object            -> a dependency
+
+    A through-field call reaches a second object and is an ordinary
+    dependency. Recording it as internal hides a real edge -- and
+    ``self._adapter.execute_sql`` is a database boundary -- because dependency
+    readers filter on the call kind.
+
+    Bare ``cls(...)`` is internal: a classmethod constructing its own class
+    names no segment at all.
+
+    One rule for every language, holding the depth test once; the languages
+    supply only their own root names.
+
+    Args:
+        target: Dotted reference target, as written.
+        self_roots: The language's self-reference names.
+
+    Returns:
+        True when the target is the owning object's own member.
+    """
+    head, _, rest = target.partition(".")
+    return head in self_roots and "." not in rest
 
 
 def rendered_expression(text: str) -> str:
