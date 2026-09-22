@@ -1162,8 +1162,17 @@ class Control:
 
         One call, and the routine writes both the manifest row and the baseline
         mutation. A file never exists without the record of where it was found.
+
+        ``_call_rows``, because the binding is ``dataset_result`` and must stay
+        so: ``control.p_file_manifest_ins`` hands back four values, and
+        ``source_inventory`` reads ``o_manifest_created`` and
+        ``o_inventory_created`` off the row to tell a new file from a new
+        observation of one already known. A ``dataset_result`` binding leaves
+        ``outputs`` empty and fills ``rows``, so ``_call`` -- which reads only
+        ``outputs`` -- returned None here for every file, silently, against a
+        signature and a docstring that both promise the id.
         """
-        return self._call("insert_file_manifest", {
+        rows = self._call_rows("insert_file_manifest", {
             "path":            path,
             "file_name":       file_name,
             "base_name":       base_name,
@@ -1174,6 +1183,9 @@ class Control:
             "evidence":        evidence,
             "producer":        producer,
         }, required=required)
+        # No rows is the unavailable-control answer that required=False allows,
+        # and None is what this signature already promises for it.
+        return rows[0].get("o_file_manifest_id") if rows else None
 
     def update_file_manifest(self, file_manifest_id: int,
                              required: bool = True, **fields: Any) -> None:

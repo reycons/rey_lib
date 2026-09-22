@@ -546,3 +546,62 @@ class TestControlEnabledDoesNotVetoRunLogging:
                                            artifact_name="summary")
 
         assert reached == []
+
+
+class TestInventoryFileReturnsTheIdItPromises:
+    """The real object, because the doubles already return what it should.
+
+    ``ControlDouble.inventory_file`` returns ``int`` in both test doubles, and
+    the real method returned ``None`` for every file. Four test helpers called
+    it and none could see that, because none of them held a real Control. So
+    this is tested here, against the dispatch, and not through a double.
+    """
+
+    def test_the_id_comes_off_the_row_a_dataset_result_binding_returns(
+        self,
+    ) -> None:
+        """insert_file_manifest is dataset_result, so the id is in `rows`.
+
+        control.p_file_manifest_ins hands back four values and
+        source_inventory reads o_manifest_created and o_inventory_created off
+        the row, so the binding must stay dataset_result. What a dataset_result
+        binding returns is rows filled and outputs EMPTY -- which is why
+        reading `outputs` here yielded None against a signature promising an id.
+        """
+        control = _built(_ctx())
+        captured: dict[str, Any] = {}
+
+        def _execute(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"rows": [{"o_file_manifest_id": 4242,
+                              "o_manifest_created": True,
+                              "o_inventory_created": True,
+                              "o_batch_step_id": 11}],
+                    "outputs": {}}
+
+        with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
+             patch.object(Control, "_handle",
+                          return_value=SimpleNamespace(close=lambda: None)):
+            file_manifest_id = control.inventory_file(
+                path="/in/report.csv", file_name="report.csv",
+                base_name="report", file_extension="csv",
+                checksum_sha256="abc", size_bytes=1,
+            )
+
+        assert file_manifest_id == 4242
+        assert captured["routine_name"] == "insert_file_manifest"
+
+    def test_no_rows_is_still_none(self) -> None:
+        """An unavailable control is what Optional[int] is for.
+
+        _call_rows answers [] rather than raising when required is false, and
+        None is the answer this signature has always promised for that.
+        """
+        control = _built(_ctx())
+
+        with patch.object(Control, "_call_rows", return_value=[]):
+            assert control.inventory_file(
+                path="/in/report.csv", file_name="report.csv",
+                base_name="report", file_extension="csv",
+                checksum_sha256="abc", size_bytes=1, required=False,
+            ) is None
