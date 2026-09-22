@@ -523,6 +523,13 @@ def load_files_to_callback(
 
         for file_path in pending:
             try:
+                # CSV IS CORRECT HERE, and deliberately not the configured
+                # type. This reads converted_path -- the TRANSFORM'S OWN
+                # OUTPUT -- and _transform_one_file writes that as CSV
+                # unconditionally. The format is this pipeline's own choice,
+                # not the source's, so there is nothing for a config to
+                # declare. The load stage reads a configured source and does
+                # honour the configured type; this does not read one.
                 rows = list(
                     get_reader(
                         file_path,
@@ -1871,10 +1878,15 @@ def _load_one_file(
             log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
             return 0
 
+        # The source here is a CONFIGURED path matched by a CONFIGURED pickup
+        # pattern, so its format is the transform's to declare -- the same
+        # contract the transform stage reads. Forcing "CSV" here discarded it
+        # at the reader boundary and made every reader but one unreachable.
+        # The default keeps a config that declares nothing on CSV.
         rows = list(
             get_reader(
                 file_path,
-                file_type="CSV",
+                file_type=getattr(transform_cfg, "file_type", "CSV"),
                 encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
             )
         )
