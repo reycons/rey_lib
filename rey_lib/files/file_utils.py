@@ -1025,6 +1025,39 @@ def run_artifact_path(
 #: not -- so one place knows the answer and the two cannot disagree.
 KEYED_FILE_TYPES: frozenset[str] = frozenset({"JSONL", "NDJSON"})
 
+#: Filename suffix -> the file_type token ``get_reader`` dispatches on.
+#:
+#: Here, beside that dispatch, rather than in a caller: the estate already has
+#: several file-type vocabularies that disagree, and a suffix map living apart
+#: from the reader it feeds would become another. Every value below must be a
+#: token ``get_reader`` accepts, which a test asserts over the whole map.
+#:
+#: Suffixes only, and only where the suffix genuinely names the format. A
+#: caller that knows better declares a file_type and is believed.
+_SUFFIX_FILE_TYPES: dict[str, str] = {
+    ".csv":   "CSV",
+    ".jsonl": "JSONL",
+    ".ndjson": "NDJSON",
+    ".xlsx":  "XLSX",
+}
+
+
+def file_type_for_suffix(suffix: str) -> str:
+    """Return the file_type a suffix names, or "" when it names none.
+
+    Args:
+        suffix: A filename suffix, with or without its dot, any case.
+
+    Returns:
+        The token ``get_reader`` dispatches on, or an empty string. Empty is
+        an answer -- "this suffix says nothing" -- and callers refuse on it
+        rather than guessing a default.
+    """
+    key = str(suffix or "").strip().lower()
+    if key and not key.startswith("."):
+        key = f".{key}"
+    return _SUFFIX_FILE_TYPES.get(key, "")
+
 
 def get_reader(
     infile: Path,
