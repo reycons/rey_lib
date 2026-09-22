@@ -36,6 +36,7 @@ __all__ = [
     "EXTRACTOR_VERSION",
     "BridgeIndexWriter",
     "inspect_bridge",
+    "undeclared_bindings",
 ]
 
 logger = get_logger(__name__)
@@ -104,6 +105,54 @@ _STAGING = (
     "db_binding_parameter_stage",
     "db_bridge_coverage_stage",
 )
+
+
+def undeclared_bindings(
+    inspected: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Dispatches naming a binding this installation's maps do not declare.
+
+    The failure this answers happened in front of a user: a binding was added to
+    one installation's procedure map and not the others, and the first launch of
+    the installation that had been missed stopped with "binding
+    'resolve_installation' not found in routine_bindings of map 'control'" --
+    at the point the run is created, which is before the run log exists to
+    record it. Nothing noticed in between: not a test, not a lint, not a startup
+    check.
+
+    Computed, never decided. The caller reports and refuses, as it does for
+    ``check_architecture_boundaries``.
+
+    **Only ``exact`` observations.** A dispatch whose binding name is a
+    configured value rather than a literal is recorded ``unresolved``, and an
+    unresolved name is not evidence of anything: treating it as undeclared would
+    report every configuration-driven call as a fault.
+
+    **Nothing is said about the other direction.** A map may declare bindings
+    the seam never observes -- eight of local's do -- because the seam reads one
+    file and only literal arguments. Those are not faults, and reporting them
+    would bury the ones that are.
+
+    Args:
+        inspected: What :func:`inspect_bridge` returned, for ONE installation.
+            Its ``bindings`` are that installation's alone, so no installation
+            key is needed here to keep two of them apart.
+
+    Returns:
+        The offending code observations, in the order they were observed. Each
+        carries its repository, path, line and qualified name, so a caller can
+        say where the call is as well as what it names.
+    """
+    declared = {
+        str(binding.get("binding_name") or "")
+        for binding in inspected.get("bindings") or ()
+    }
+    return [
+        observation
+        for observation in inspected.get("code") or ()
+        if observation.get("resolution") == "exact"
+        and str(observation.get("observed_binding") or "") not in declared
+    ]
 
 
 def inspect_bridge(apps_root: Path, ctx: Any) -> dict[str, list[dict[str, Any]]]:
