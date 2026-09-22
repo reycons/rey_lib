@@ -57,7 +57,15 @@ def core(monkeypatch: pytest.MonkeyPatch) -> _CoreConnection:
 
 
 def _columns_are(monkeypatch: pytest.MonkeyPatch, names: list[str]) -> None:
-    """Fix what the table currently looks like, so only the decision is tested."""
+    """Fix whether the table is there, so only the decision is tested.
+
+    Creation asks ``table_exists``, not whether a column list came back empty:
+    a table with no columns is not a thing, but a failed lookup that answered
+    ``[]`` would be read as "create it" and the DDL would then collide.
+    """
+    monkeypatch.setattr(
+        postgres_utils, "table_exists", lambda *_a, **_k: bool(names)
+    )
     monkeypatch.setattr(
         postgres_utils, "get_table_columns", lambda *_a, **_k: names
     )
@@ -74,6 +82,69 @@ def _inspector_returns(monkeypatch: pytest.MonkeyPatch, answer: Any) -> None:
     monkeypatch.setattr(
         "rey_lib.db._sqlalchemy.metadata_get_columns", _metadata_get_columns
     )
+
+
+class TestTableExists:
+    """Existence asked directly, because creation policy now depends on it."""
+
+    def test_it_asks_the_inspector_rather_than_counting_columns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """has_table is the Inspector's own answer to this question.
+
+        Deriving it from a column list would conflate "there is no such
+        table" with "I was given no columns" -- here the table exists and
+        reports nothing, and existence must still be True.
+        """
+        monkeypatch.setattr(
+            "rey_lib.db._sqlalchemy.metadata_table_exists",
+            lambda _conn, _schema, _table: True,
+        )
+        _inspector_returns(monkeypatch, [])
+
+        assert postgres_utils.table_exists(None, "staging", "trade") is True
+
+    def test_an_absent_table_is_False(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The answer the loader refuses or creates on."""
+        monkeypatch.setattr(
+            "rey_lib.db._sqlalchemy.metadata_table_exists",
+            lambda _conn, _schema, _table: False,
+        )
+
+        assert postgres_utils.table_exists(None, "staging", "trade") is False
+
+    def test_a_catalog_failure_is_reported_not_answered_False(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lost connection must not read as "the table is not there".
+
+        Answering False would send the loader down the create path on a
+        connection that cannot answer -- or refuse a load whose table is
+        present.
+        """
+        def _raise(_conn, _schema, _table):
+            raise RuntimeError("connection closed")
+
+        monkeypatch.setattr(
+            "rey_lib.db._sqlalchemy.metadata_table_exists", _raise
+        )
+
+        with pytest.raises(DatabaseError) as raised:
+            postgres_utils.table_exists(None, "staging", "trade")
+
+        assert "staging.trade" in str(raised.value)
+        assert raised.value.__cause__ is not None
+
+    @pytest.mark.parametrize(
+        "schema,table",
+        [("stag ing", "trade"), ("staging", "trade; DROP TABLE x")],
+    )
+    def test_an_identifier_that_is_not_a_plain_name_is_refused(
+        self, schema: str, table: str
+    ) -> None:
+        """Refused before the catalog is touched, as the siblings refuse."""
+        with pytest.raises(DatabaseError):
+            postgres_utils.table_exists(None, schema, table)
 
 
 class TestGetTableColumns:

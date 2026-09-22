@@ -186,6 +186,18 @@ def call_proc_with_output(
 	)
 
 
+def table_exists(conn: Any, schema: str, table: str) -> bool:
+	"""Whether one table exists, asked of the shared inspector directly.
+
+	Not ``bool(get_table_columns(...))``: that inspects the whole schema and
+	answers about columns, and a caller deciding whether to CREATE needs "no
+	such table" kept apart from "no columns".
+	"""
+	from rey_lib.db._sqlalchemy import metadata_table_exists
+
+	return metadata_table_exists(conn, schema, table)
+
+
 def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
 	from rey_lib.db._sqlalchemy import inspect_schema
 

@@ -572,6 +572,58 @@ def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
 
 	return [row[0] for row in cur.fetchall()]
 
+
+def table_exists(conn: Any, schema: str, table: str) -> bool:
+	"""
+	Return whether one SQL Server table exists.
+
+	Answered from information_schema over the raw cursor, the same way this
+	module answers every other metadata question: a SQL Server connection is
+	a pyodbc connection, not a SQLAlchemy one, so the shared inspector the
+	other providers use cannot see it.
+
+	``schema`` may be either:
+	- schema
+	- database.schema
+
+	Not ``bool(get_table_columns(...))``: that answers about columns, and a
+	caller deciding whether to CREATE needs "no such table" kept apart from
+	"no columns".
+	"""
+
+	database_name = None
+	schema_name = schema
+
+	if "." in schema:
+		parts = schema.split(".", 1)
+
+		database_name = parts[0]
+		schema_name = parts[1]
+
+	if database_name:
+		sql = f"""
+			SELECT
+				1
+			FROM {database_name}.information_schema.tables
+			WHERE table_schema = ?
+				AND table_name = ?
+		"""
+	else:
+		sql = """
+			SELECT
+				1
+			FROM information_schema.tables
+			WHERE table_schema = ?
+				AND table_name = ?
+		"""
+
+	cur = conn.cursor()
+
+	cur.execute(sql, schema_name, table)
+
+	return cur.fetchone() is not None
+
+
 def quote_identifier(value: str) -> str:
 	return "[" + value.replace("]", "]]") + "]"
 

@@ -26,11 +26,24 @@ from rey_lib.errors.error_utils import (
 
 
 class _Backend:
-    """A provider module exposing only the names it is given."""
+    """A provider module exposing only the names it is given.
+
+    Records what was called: the dispatch tests are about whether the provider
+    function was REACHED, not what it returned. Some adapter methods normalise
+    their provider's answer -- ``table_exists`` coerces to bool by contract --
+    so a return value is not a reliable witness that the call happened.
+    """
 
     def __init__(self, *implemented: str) -> None:
+        self.calls: list[str] = []
         for name in implemented:
-            setattr(self, name, lambda *_a, **_k: "answered")
+            setattr(self, name, self._recorder(name))
+
+    def _recorder(self, name: str):
+        def _call(*_args, **_kwargs):
+            self.calls.append(name)
+            return "answered"
+        return _call
 
 
 @pytest.fixture
@@ -55,6 +68,7 @@ _CALLS: dict[str, tuple] = {
     "fetch_dicts": ("some_sql", None),
     "call_proc": ("some_proc", None),
     "call_proc_with_output": ("some_proc", [], []),
+    "table_exists": ("schema", "table"),
     "get_table_columns": ("schema", "table"),
     "create_staging_table_if_not_exists": ("schema", "table", [("a", "INTEGER")]),
     "bulk_insert": ("schema", "table", [], ["a"]),
@@ -107,9 +121,12 @@ class TestNoUnsupportedCombinationReachesAttributeLookup:
         self, adapter: DBAdapter, monkeypatch: pytest.MonkeyPatch, capability: str
     ) -> None:
         """The check gates the call; it does not replace it."""
-        _with_backend(monkeypatch, _Backend(capability))
+        backend = _Backend(capability)
+        _with_backend(monkeypatch, backend)
 
-        assert getattr(adapter, capability)(object(), *_CALLS[capability]) == "answered"
+        getattr(adapter, capability)(object(), *_CALLS[capability])
+
+        assert backend.calls == [capability]
 
 
 class TestSupportIsResolvedNotListed:
@@ -161,15 +178,30 @@ class TestSupportIsResolvedNotListed:
             assert not hasattr(postgres_utils, capability)
 
     def test_the_postgres_load_path_is_complete(self) -> None:
-        """The three the loader calls, in the order it calls them."""
+        """The four the loader calls, in the order it calls them."""
         from rey_lib.db import postgres_utils
 
         for capability in (
+            "table_exists",
             "get_table_columns",
             "create_staging_table_if_not_exists",
             "bulk_insert",
         ):
             assert hasattr(postgres_utils, capability)
+
+    def test_table_exists_is_answered_by_every_provider_that_can_load(self) -> None:
+        """Existence is a question the load path asks before anything else.
+
+        SQL Server answers it from its own information_schema rather than the
+        shared inspector, because its connection is raw pyodbc and the shared
+        inspector cannot see it -- and SQL Server is the provider the only
+        real loader config uses. A provider that cannot answer refuses by
+        name; it does not get a default.
+        """
+        from rey_lib.db import postgres_utils
+
+        assert hasattr(postgres_utils, "table_exists")
+        assert "table_exists" in _PROVIDER_CONTRACT_CAPABILITIES
 
 
 class TestWhatIsDeliberatelyOutsideTheRegistry:

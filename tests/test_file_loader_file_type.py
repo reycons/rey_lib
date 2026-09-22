@@ -46,7 +46,8 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     """Run _load_one_file far enough to record what the reader was given."""
     monkeypatch.setattr(
         file_loader, "_db_adapter",
-        SimpleNamespace(get_table_columns=lambda *_a, **_k: ["a", "b"]),
+        SimpleNamespace(table_exists=lambda *_a, **_k: True,
+                            get_table_columns=lambda *_a, **_k: ["a", "b"]),
     )
 
     def _reader(_path, **kwargs):
@@ -92,7 +93,8 @@ class TestTheConfiguredTypeReachesTheReader:
         """
         monkeypatch.setattr(
             file_loader, "_db_adapter",
-            SimpleNamespace(get_table_columns=lambda *_a, **_k: ["a", "b"]),
+            SimpleNamespace(table_exists=lambda *_a, **_k: True,
+                            get_table_columns=lambda *_a, **_k: ["a", "b"]),
         )
 
         with pytest.raises(ValueError) as raised:

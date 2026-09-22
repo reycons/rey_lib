@@ -1860,8 +1860,29 @@ def _load_one_file(
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
     try:
-        # Validate header before reading any rows.
-        expected_columns = _db_adapter.get_table_columns(conn, schema, table)
+        # EXISTENCE FIRST, and asked directly. What follows branches three
+        # ways on it, and only one of those branches has a table to describe.
+        exists = _db_adapter.table_exists(conn, schema, table)
+        create_declared = _create_destination_declared(load_cfg)
+
+        if not exists and not create_declared:
+            # A misconfiguration, NOT a bad file -- so it raises rather than
+            # running movements.failure. The file is fine and moving it to
+            # rejected_path would strand a good file for a fault it did not
+            # cause; every later file would fail identically anyway.
+            raise ConfigError(
+                f"load '{getattr(load_cfg, 'name', '?')}' requires destination "
+                f"{schema}.{table}, and it does not exist. Set "
+                f"create_destination_table: true under that load's 'load:' "
+                f"block to have the loader create it."
+            )
+
+        # Only a table that is there can say what its columns are. Asking an
+        # absent one returned [], which every shape check then failed against
+        # -- reporting a header mismatch for a table that was never there.
+        expected_columns = (
+            _db_adapter.get_table_columns(conn, schema, table) if exists else []
+        )
         encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
 
         # The source here is a CONFIGURED path matched by a CONFIGURED pickup
@@ -1877,8 +1898,11 @@ def _load_one_file(
         # reject without parsing them. A keyed source names its columns on
         # EVERY record, so the same question can only be answered after the
         # records exist -- asking it earlier would parse the whole file twice.
-        if not keyed and not _validate_load_header(file_path, expected_columns,
-                                                   encoding):
+        # Gated on the destination EXISTING: when it is about to be created
+        # there is nothing to validate against, because the file is what
+        # defines the shape. That is what creating from it means.
+        if exists and not keyed and not _validate_load_header(
+                file_path, expected_columns, encoding):
             _logger.error("Header mismatch — file rejected: %s", file_path.name)
             log_validation_result(run_log,
                 validation_name="load_header",
@@ -1902,7 +1926,9 @@ def _load_one_file(
         )
 
         # Read ONCE: this runs over the rows above, never a second parse.
-        if keyed and rows and not _validate_keyed_records(rows, expected_columns):
+        # Gated on the destination existing, for the same reason as the header.
+        if exists and keyed and rows and not _validate_keyed_records(
+                rows, expected_columns):
             _logger.error("Record keys do not match the destination — file "
                           "rejected: %s", file_path.name)
             log_validation_result(run_log,
@@ -1937,9 +1963,15 @@ def _load_one_file(
         columns     = list(rows[0].keys())
         column_defs = _build_column_defs(transform_cfg, columns, rows)
 
-        _db_adapter.create_staging_table_if_not_exists(
-            conn, schema, table, column_defs
-        )
+        # CREATE ONLY WHEN THE DESTINATION IS ABSENT, which by the refusal
+        # above means creation was declared. Calling this unconditionally
+        # would contradict the setting it is governed by: IF NOT EXISTS is no
+        # defence, because a table dropped between the check and this call
+        # would be recreated despite create_destination_table being false.
+        if not exists:
+            _db_adapter.create_staging_table_if_not_exists(
+                conn, schema, table, column_defs
+            )
 
         try:
             _db_adapter.bulk_insert(conn, schema, table, rows, columns)
@@ -2579,6 +2611,45 @@ def _find_transform(
     raise ValueError(
         f"No transform found with name='{name}' version='{version}'."
     )
+
+
+def _create_destination_declared(load_cfg: Any) -> bool:
+    """Whether this load declares that its destination may be created.
+
+    ``loads[].load.create_destination_table``, registered beside ``connection``
+    and ``destination_table`` in rey_loader's configuration reference.
+
+    **Absent means false**, which is what the loader already did: an absent
+    destination returned no columns, every shape check failed against them and
+    the file was rejected before creation was ever reached. So a config that
+    says nothing keeps behaving exactly as it does today, and creating a table
+    is something a data source has to ask for.
+
+    A value that is not a boolean is REFUSED rather than read for its
+    truthiness. This governs whether the loader issues DDL, and ``"false"`` as
+    a quoted string is truthy in Python -- silently creating a table for a
+    config that spelled out the opposite.
+
+    Args:
+        load_cfg: The load Namespace.
+
+    Returns:
+        Whether creation is declared.
+
+    Raises:
+        ConfigError: If the key is present and is not a boolean.
+    """
+    declared = getattr(getattr(load_cfg, "load", None),
+                       "create_destination_table", None)
+    if declared is None:
+        return False
+    if not isinstance(declared, bool):
+        raise ConfigError(
+            f"load '{getattr(load_cfg, 'name', '?')}' declares "
+            f"create_destination_table: {declared!r}, which is not true or "
+            "false."
+        )
+    return declared
 
 
 def _parse_destination(destination_table: str) -> tuple[str, str]:

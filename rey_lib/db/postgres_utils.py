@@ -621,6 +621,39 @@ def bulk_insert(
         raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
 
 
+def table_exists(conn: Any, schema: str, table: str) -> bool:
+    """Return whether one table exists.
+
+    The adapter's existence contract, answered for PostgreSQL through the same
+    inspector the rest of the estate reads metadata with. ``has_table`` is the
+    inspector's own answer to this question, so nothing here re-derives it from
+    a column list or a catalog query.
+
+    Args:
+        conn: Open connection handle.
+        schema: The table's schema.
+        table: The table.
+
+    Returns:
+        Whether it is there.
+
+    Raises:
+        DatabaseError: If an identifier is not a plain name, or the catalog
+            read fails.
+    """
+    _validate_identifier(schema, "schema")
+    _validate_identifier(table, "table")
+
+    from rey_lib.db._sqlalchemy import metadata_table_exists
+
+    try:
+        return metadata_table_exists(conn, schema, table)
+    except Exception as exc:
+        raise DatabaseError(
+            f"table_exists failed for {schema}.{table}: {exc}"
+        ) from exc
+
+
 def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
     """Return one table's column names in ordinal order.
 
@@ -722,7 +755,7 @@ def create_staging_table_if_not_exists(
         _validate_identifier(name, "column")
         _validate_column_type(sql_type)
 
-    if get_table_columns(conn, schema, table):
+    if table_exists(conn, schema, table):
         _logger.debug("Staging table already present: %s.%s", schema, table)
         return False
 

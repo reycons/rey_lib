@@ -204,6 +204,7 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         "fetch_dicts",
         "call_proc",
         "call_proc_with_output",
+        "table_exists",
         "get_table_columns",
         "create_staging_table_if_not_exists",
         "bulk_insert",
@@ -1214,6 +1215,38 @@ class DBAdapter:
     # ------------------------------------------------------------------
     # Staging / bulk insert
     # ------------------------------------------------------------------
+
+    def table_exists(self, conn: Any, schema: str, table: str) -> bool:
+        """Return whether ``schema.table`` exists on the connection's backend.
+
+        A question about EXISTENCE, asked directly. It is not
+        ``bool(get_table_columns(...))``: that answers a question about
+        columns, and an empty answer would conflate "there is no such table"
+        with "I was given no columns". A caller deciding whether to CREATE a
+        table needs the two kept apart.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        schema : str
+            Target schema — may be 'database.schema' where the backend
+            qualifies that way.
+        table : str
+            Target table name.
+
+        Returns
+        -------
+        bool
+            ``True`` if the table exists.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot answer it.
+        """
+        exists = self._require_provider_capability(conn, "table_exists")
+        return bool(exists(conn, schema, table))
 
     def get_table_columns(
         self,

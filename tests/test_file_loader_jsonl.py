@@ -58,6 +58,9 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
     monkeypatch.setattr(
         file_loader, "_db_adapter",
         SimpleNamespace(
+            # These tests are about a destination that IS there; whether an
+            # absent one is created is test_file_loader_destination.py.
+            table_exists=lambda *_a, **_k: True,
             get_table_columns=lambda *_a, **_k: list(columns),
             create_staging_table_if_not_exists=lambda *_a, **_k: True,
             bulk_insert=_bulk_insert,

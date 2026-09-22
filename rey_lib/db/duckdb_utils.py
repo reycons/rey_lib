@@ -431,7 +431,7 @@ def create_staging_table_if_not_exists(
     bool
         True if the table was created on this call; False if it already existed.
     """
-    existed = _table_exists(conn, schema, table)
+    existed = table_exists(conn, schema, table)
     if existed:
         return False
 
@@ -445,12 +445,19 @@ def create_staging_table_if_not_exists(
     return True
 
 
-def _table_exists(
+def table_exists(
     conn: duckdb.DuckDBPyConnection,
     schema: str,
     table: str,
 ) -> bool:
-    """Return True if schema.table exists in the DuckDB catalog."""
+    """Return True if schema.table exists in the DuckDB catalog.
+
+    The adapter's existence contract, answered for DuckDB. This was private
+    and used only by ``create_staging_table_if_not_exists`` below; the loader
+    now asks the same question before deciding whether it may create, and one
+    provider keeping its own answer to itself would have made DuckDB look
+    unable to answer a question it has always answered.
+    """
     rows = conn.execute(
         "SELECT 1 FROM information_schema.tables "
         "WHERE table_schema = ? AND table_name = ?",

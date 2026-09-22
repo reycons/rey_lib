@@ -290,6 +290,18 @@ def metadata_list_views(
     ]
 
 
+def metadata_table_exists(conn: Any, schema: str | None, table: str) -> bool:
+    """Whether one table exists, asked of the Inspector directly.
+
+    ``has_table`` is the Inspector's own answer to this question. Reading
+    ``get_table_names`` and searching it would list a whole schema to decide
+    one name, and deriving it from a column list would conflate "no such
+    table" with "no columns".
+    """
+    inspector, _sa_conn = _inspector(conn)
+    return bool(inspector.has_table(table, schema=schema or None))
+
+
 def metadata_get_columns(
     conn: Any,
     catalog: str,
