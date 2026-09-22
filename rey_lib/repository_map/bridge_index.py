@@ -287,7 +287,7 @@ def _bindings(
                 # Resolution against the database index is by value and must
                 # cope with that; inventing one here would be worse.
                 "signature": "",
-                "result_mode": str(_get(binding, "result_mode") or ""),
+                "result_mode": _result_mode(binding),
             })
             parameters.extend(
                 {
@@ -307,9 +307,42 @@ def _bindings(
                 # fabricated one.
                 "target_kind": "sql",
                 "schema_name": "", "object_name": "", "signature": "",
-                "result_mode": str(_get(binding, "result_mode") or ""),
+                "result_mode": _result_mode(binding),
             })
     return made, parameters
+
+
+#: The legacy call_type spellings and the result mode each one means, as
+#: rey_lib.db.procedure_map resolves them. Kept in step with
+#: _LEGACY_CALL_TYPE_TO_ROUTINE and _LEGACY_CALL_TYPE_ALIASES there.
+_LEGACY_CALL_TYPE_RESULT_MODE = {
+    "function_with_return": "scalar_result",
+    "procedure_no_return": "no_return",
+    "function": "scalar_result",
+    "procedure": "no_return",
+}
+
+
+def _result_mode(binding: Any) -> str:
+    """The result mode a binding declares, however it spells it.
+
+    ``result_mode`` when present, and the legacy ``call_type`` when not. The map
+    loader resolves one into the other at load time -- ``procedure_no_return``
+    means ``no_return``, ``function_with_return`` means ``scalar_result`` -- so
+    a binding written the legacy way HAS a mode; it simply does not carry the
+    modern key.
+
+    Reading only ``result_mode`` publishes an empty string for those, and an
+    empty mode is not checked by anything: db_binding_vw cannot compare a
+    declaration that is not there. Five of local's bindings are written this way
+    -- end_batch, end_step, end_contract_run, log_event and start_step -- so the
+    gap was a fifth of the bindings reached at the control seam.
+    """
+    declared = str(_get(binding, "result_mode") or "").strip()
+    if declared:
+        return declared
+    legacy = str(_get(binding, "call_type") or "").strip()
+    return _LEGACY_CALL_TYPE_RESULT_MODE.get(legacy, "")
 
 
 def _bound_parameters(binding: Any) -> list[str]:

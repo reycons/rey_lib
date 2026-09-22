@@ -193,6 +193,35 @@ def test_a_loaded_binding_is_a_namespace_and_is_read_the_same_way() -> None:
     assert sorted(_bound_parameters(binding)) == ["p_file_name", "p_path"]
 
 
+def test_the_legacy_call_type_spelling_yields_a_result_mode() -> None:
+    """A binding written the legacy way HAS a mode; it lacks the modern key.
+
+    procedure_map resolves ``call_type`` into a result mode at load time, so
+    reading only ``result_mode`` publishes an empty string -- and an empty mode
+    is checked by nothing, because db_binding_vw cannot compare a declaration
+    that is not there. Five of local's bindings are written this way.
+    """
+    ctx = type("Ctx", (), {"procedure_maps": [{
+        "name": "control",
+        "routine_bindings": [
+            {"name": "end_batch", "routine": "control.p_batch_end",
+             "call_type": "procedure_no_return", "input": {"p_batch_id": "batch_id"}},
+            {"name": "start_step", "routine": "control.f_batch_step_start",
+             "call_type": "function_with_return", "input": {"p_batch_id": "batch_id"}},
+            # The modern key wins where both somehow appear.
+            {"name": "modern", "routine": "control.f_x",
+             "call_type": "procedure_no_return", "result_mode": "dataset_result"},
+        ],
+    }]})()
+
+    bindings, _ = _bindings(ctx, "local")
+    modes = {b["binding_name"]: b["result_mode"] for b in bindings}
+
+    assert modes["end_batch"] == "no_return"
+    assert modes["start_step"] == "scalar_result"
+    assert modes["modern"] == "dataset_result"
+
+
 def test_the_dispatch_method_is_recorded_with_each_observation(tmp_path) -> None:
     """Which method reached a binding is what decides its result_mode.
 
