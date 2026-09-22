@@ -19,6 +19,7 @@ from rey_lib.files.file_utils import read_text_file
 from rey_lib.repository_map.records import (
     EDGE_KIND_CALL,
     EDGE_KIND_IMPORT,
+    EDGE_KIND_INTERNAL_CALL,
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
     RECORD_TYPE_FILE,
@@ -277,10 +278,11 @@ def extract_python_references(
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             target = _dotted_name(node.func) or ast.unparse(node.func)
-            if not _is_internal(target):
-                edges.append(
-                    _edge(recorded_path, node, from_id, target, EDGE_KIND_CALL, "ast.Call")
-                )
+            # A self/cls call is recorded under its own kind rather than
+            # dropped. It is still not a dependency, so it must not join the
+            # call population -- readers filter by kind.
+            kind = EDGE_KIND_INTERNAL_CALL if _is_internal(target) else EDGE_KIND_CALL
+            edges.append(_edge(recorded_path, node, from_id, target, kind, "ast.Call"))
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for record in _import_records(node):
                 edges.append(

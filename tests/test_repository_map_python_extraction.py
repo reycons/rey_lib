@@ -17,6 +17,7 @@ import pytest
 from rey_lib.repository_map import (
     EDGE_KIND_CALL,
     EDGE_KIND_IMPORT,
+    EDGE_KIND_INTERNAL_CALL,
     EDGE_KIND_PROPERTY_ACCESS,
     EDGE_KIND_RE_EXPORT,
     SYMBOL_KIND_CLASS,
@@ -252,9 +253,38 @@ def test_member_call_is_one_call_not_also_a_property_access(module_path: Path) -
     assert [edge.edge_kind for edge in join_edges] == [EDGE_KIND_CALL]
 
 
-def test_self_rooted_references_are_excluded(module_path: Path) -> None:
-    """self.attr and self.method() never cross a file, so neither is an edge."""
-    targets = {edge.to for edge in extract_executable_references(module_path, "Python")}
+def test_a_self_rooted_call_is_an_internal_call_not_a_call(module_path: Path) -> None:
+    """Recorded, but never as a dependency.
+
+    "This method has no callers" used to be unknown rather than false, because
+    the call branch dropped the edge outright. It is now kept under its own
+    kind: a self-call is still not a dependency, and counting it as one would
+    make every class appear to depend on itself.
+    """
+    edges = extract_executable_references(module_path, "Python")
+    internal = [edge for edge in edges if edge.edge_kind == EDGE_KIND_INTERNAL_CALL]
+
+    assert [edge.to for edge in internal] == ["self.other_method"]
+    # The target is kept as written, the way every other edge records its own.
+    assert not any(
+        edge.to.startswith("self.")
+        for edge in edges
+        if edge.edge_kind == EDGE_KIND_CALL
+    )
+
+
+def test_a_self_rooted_attribute_read_is_still_excluded(module_path: Path) -> None:
+    """Row 21 asks about calls; self.x reads are a different question.
+
+    The fixture writes self.attribute_access beside self.other_method(), so a
+    change that widened the suppression instead of redirecting it would show
+    up here rather than as a silent volume increase.
+    """
+    targets = {
+        edge.to
+        for edge in extract_executable_references(module_path, "Python")
+        if edge.edge_kind == EDGE_KIND_PROPERTY_ACCESS
+    }
 
     assert not any(target.startswith("self.") for target in targets)
 

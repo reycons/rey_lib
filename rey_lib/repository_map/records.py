@@ -21,6 +21,7 @@ __all__ = [
     "EDGE_KIND_CALL",
     "EDGE_KIND_GLOBAL_REFERENCE",
     "EDGE_KIND_IMPORT",
+    "EDGE_KIND_INTERNAL_CALL",
     "EDGE_KIND_PROPERTY_ACCESS",
     "EDGE_KIND_REGISTRATION",
     "EDGE_KIND_RE_EXPORT",
@@ -159,6 +160,10 @@ SYMBOL_KIND_GLOBAL_PUBLICATION = "global_publication"
 # executable syntax; registration, template_load and backend_string_reference
 # come from the INC-003 scanners, not from per-file extraction.
 EDGE_KIND_CALL = "call"
+# A call written through self/cls. Separate from call because it is not a
+# dependency: recording these as ordinary calls would make every class appear
+# to depend on itself.
+EDGE_KIND_INTERNAL_CALL = "internal_call"
 EDGE_KIND_IMPORT = "import"
 EDGE_KIND_RE_EXPORT = "re_export"
 EDGE_KIND_PROPERTY_ACCESS = "property_access"
