@@ -16,7 +16,7 @@ from typing import Any
 
 from rey_lib.files.data_file import data_file
 from rey_lib.files.data_file.base import DataFile, DataFileStructureError
-from rey_lib.files.file_utils import get_reader
+from rey_lib.files import file_utils
 
 __all__ = ["JsonlFile"]
 
@@ -38,7 +38,7 @@ class JsonlFile(DataFile):
         a loss the destination cannot undo.
         """
         return list(
-            get_reader(
+            file_utils.get_reader(
                 self.path,
                 file_type=self.file_type,
                 encoding=self.encoding,
@@ -97,8 +97,27 @@ class JsonlFile(DataFile):
         if not records:
             return
 
-        first = set(records[0])
-        required = set(expected_columns) if expected_columns is not None else first
+        if expected_columns is not None:
+            # MIGRATION STEP: delegates to the shipped validator rather than
+            # reimplementing it, so this revision provably runs the OLD check
+            # through the NEW object. The body moves in here next; doing both
+            # at once would leave no point at which "no behaviour change" is
+            # checkable rather than asserted.
+            #
+            # Imported here because file_loader imports this package; a
+            # module-level import would close the cycle.
+            from rey_lib.files.file_loader import _validate_keyed_records
+
+            if not _validate_keyed_records(records, expected_columns):
+                raise DataFileStructureError(
+                    "Record keys do not match the destination columns",
+                    validation_name="load_record_keys",
+                )
+            return
+
+        # No destination: the FIRST record is the file's claim about itself,
+        # and every later record is held to it.
+        required = set(records[0])
 
         for ordinal, record in enumerate(records, start=1):
             keys = set(record)
@@ -107,10 +126,6 @@ class JsonlFile(DataFile):
 
             missing = sorted(required - keys)
             extra = sorted(keys - required)
-            against = (
-                "the destination columns" if expected_columns is not None
-                else "the first record's fields"
-            )
             detail = ", ".join(
                 part for part in (
                     f"missing {missing}" if missing else "",
@@ -118,6 +133,6 @@ class JsonlFile(DataFile):
                 ) if part
             )
             raise DataFileStructureError(
-                f"'{self.path.name}' record {ordinal} does not match "
-                f"{against}: {detail}."
+                f"'{self.path.name}' record {ordinal} does not match the "
+                f"first record's fields: {detail}."
             )

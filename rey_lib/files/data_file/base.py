@@ -45,7 +45,21 @@ class DataFileStructureError(AppError):
     Distinct from a database error on purpose: a file that does not match its
     destination is a FILE fault, and reporting it as a failed insert -- which
     is what happens when the check is missing -- names the wrong thing.
+
+    Carries ``validation_name``, which is what the RUN LOG records. The
+    subtype supplies it because only the subtype knows which check it ran;
+    a caller deriving it would be branching on format to write a log line.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        validation_name: str = "data_file_structure",
+    ) -> None:
+        """Hold the failure and the name the run log knows it by."""
+        super().__init__(message)
+        self.validation_name = validation_name
 
 
 class DataFile(ABC):

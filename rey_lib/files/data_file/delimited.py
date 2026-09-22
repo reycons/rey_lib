@@ -18,7 +18,7 @@ from typing import Any
 
 from rey_lib.files.data_file import data_file
 from rey_lib.files.data_file.base import DataFile, DataFileStructureError
-from rey_lib.files.file_utils import get_reader
+from rey_lib.files import file_utils
 
 __all__ = ["DelimitedHeaderFile"]
 
@@ -60,7 +60,7 @@ class DelimitedHeaderFile(DataFile):
     def read(self) -> list[dict[str, Any]]:
         """Every row, keyed by the header's column names."""
         return list(
-            get_reader(
+            file_utils.get_reader(
                 self.path,
                 file_type=self.file_type,
                 encoding=self.encoding,
@@ -79,21 +79,27 @@ class DelimitedHeaderFile(DataFile):
         read against whatever the first line declared, so there is nothing a
         later row can contradict.
         """
-        actual = self.source_structure()
-
         if expected_columns is None:
-            if not actual:
+            if not self.source_structure():
                 raise DataFileStructureError(
                     f"'{self.path.name}' has no header line, so its columns "
                     "cannot be established."
                 )
             return
 
-        if actual != expected_columns:
+        # MIGRATION STEP: delegates to the shipped validator rather than
+        # reimplementing it, so this revision provably runs the OLD check
+        # through the NEW object. Moving the body in here is the next step;
+        # doing both at once would leave no point at which "no behaviour
+        # change" is checkable rather than asserted.
+        #
+        # Imported here because file_loader imports this package; a
+        # module-level import would close the cycle.
+        from rey_lib.files.file_loader import _validate_load_header
+
+        if not _validate_load_header(self.path, expected_columns, self.encoding):
             raise DataFileStructureError(
-                f"'{self.path.name}' does not match the destination.\n"
-                f"Expected: {','.join(expected_columns)}\n"
-                f"Found:    {','.join(actual)}"
+                "Header mismatch", validation_name="load_header"
             )
 
     def read_validated(

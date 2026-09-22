@@ -60,8 +60,9 @@ from rey_lib.errors.error_utils import (
     DatabaseError,
     build_safe_error_payload,
 )
+from rey_lib.files import file_utils
+from rey_lib.files.data_file import DataFileStructureError, data_file_for
 from rey_lib.files.file_utils import (
-    KEYED_FILE_TYPES,
     apply_file_movements,
     input_files,
     pattern_to_glob,
@@ -1891,59 +1892,53 @@ def _load_one_file(
         # at the reader boundary and made every reader but one unreachable.
         # The default keeps a config that declares nothing on CSV.
         file_type = getattr(transform_cfg, "file_type", "CSV")
-        keyed = str(file_type).upper() in KEYED_FILE_TYPES
 
-        # WHEN the shape is checked depends on where the column names live.
-        # A header is one line, so it is cheap to read before the rows and
-        # reject without parsing them. A keyed source names its columns on
-        # EVERY record, so the same question can only be answered after the
-        # records exist -- asking it earlier would parse the whole file twice.
-        # Gated on the destination EXISTING: when it is about to be created
-        # there is nothing to validate against, because the file is what
-        # defines the shape. That is what creating from it means.
-        if exists and not keyed and not _validate_load_header(
-                file_path, expected_columns, encoding):
-            _logger.error("Header mismatch — file rejected: %s", file_path.name)
-            log_validation_result(run_log,
-                validation_name="load_header",
-                status="failed",
-                message="Header mismatch",
-                path=str(file_path),
-                schema=schema,
-                table=table,
+        # THE ONE FORMAT BRANCH LEFT HERE, and it is a legacy exclusion rather
+        # than a distinction this function makes. XLSX and headerless
+        # delimited files have no working structural check to migrate --
+        # backlog xlsx_load_has_no_working_structural_check and
+        # delimited_no_header_silently_eats_the_first_row -- so they stay on
+        # the pre-DataFile path until those are fixed. DELETE THIS BRANCH when
+        # they join the hierarchy; nothing else here knows a format exists.
+        if str(file_type).upper() in _UNMIGRATED_FILE_TYPES:
+            rows = _read_unmigrated_source(
+                ctx, run_log, file_path, file_type, encoding, expected_columns,
+                exists=exists, schema=schema, table=table,
+                load_cfg=load_cfg, paths=paths,
             )
-            _execute_movements(load_cfg.movements.failure, file_path, paths,
-                               ctx=ctx, run_log=run_log)
-            log_exit(ctx, f"_load_one_file rejected (header): {file_path.name}", _logger)
-            return 0
-
-        rows = list(
-            get_reader(
-                file_path,
-                file_type=file_type,
-                encoding=encoding,
-            )
-        )
-
-        # Read ONCE: this runs over the rows above, never a second parse.
-        # Gated on the destination existing, for the same reason as the header.
-        if exists and keyed and rows and not _validate_keyed_records(
-                rows, expected_columns):
-            _logger.error("Record keys do not match the destination — file "
-                          "rejected: %s", file_path.name)
-            log_validation_result(run_log,
-                validation_name="load_record_keys",
-                status="failed",
-                message="Record keys do not match the destination columns",
-                path=str(file_path),
-                schema=schema,
-                table=table,
-            )
-            _execute_movements(load_cfg.movements.failure, file_path, paths,
-                               ctx=ctx, run_log=run_log)
-            log_exit(ctx, f"_load_one_file rejected (keys): {file_path.name}",
-                     _logger)
-            return 0
+            if rows is None:
+                log_exit(ctx, f"_load_one_file rejected (header): "
+                              f"{file_path.name}", _logger)
+                return 0
+        else:
+            # The file decides WHEN its shape is checked, because that depends
+            # on where its column names live -- a header is one line and is
+            # checked before the rows, record keys only after. This function
+            # no longer knows which is which.
+            source = data_file_for(file_path, file_type=file_type,
+                                   encoding=encoding)
+            try:
+                # Validated against the destination only when there IS one.
+                # An absent destination is about to be created FROM this file,
+                # so there is nothing to check it against yet.
+                rows = (source.read_validated(expected_columns) if exists
+                        else source.read())
+            except DataFileStructureError as structure_exc:
+                _logger.error("%s — file rejected: %s",
+                              structure_exc, file_path.name)
+                log_validation_result(run_log,
+                    validation_name=structure_exc.validation_name,
+                    status="failed",
+                    message=str(structure_exc),
+                    path=str(file_path),
+                    schema=schema,
+                    table=table,
+                )
+                _execute_movements(load_cfg.movements.failure, file_path, paths,
+                                   ctx=ctx, run_log=run_log)
+                log_exit(ctx, f"_load_one_file rejected (structure): "
+                              f"{file_path.name}", _logger)
+                return 0
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
@@ -2610,6 +2605,73 @@ def _find_transform(
             return t
     raise ValueError(
         f"No transform found with name='{name}' version='{version}'."
+    )
+
+
+#: Formats still read by the pre-DataFile path, and why each is still here.
+#:
+#: NOT a list of formats this module understands -- it is a list of formats
+#: that cannot be migrated yet because neither has a working structural check
+#: to preserve:
+#:
+#:   XLSX                 _validate_load_header reads a ZIP container as
+#:                        comma-delimited text, so a valid workbook never
+#:                        matches its own destination.
+#:   DELIMITED_NO_HEADER  the delimited reader always takes the first line as
+#:                        a header, so a headerless file loses its first row.
+#:
+#: Both carry defect rows. **This set goes away when they are fixed** and the
+#: subtypes join the hierarchy; it is the one format distinction left in this
+#: module and it is deliberately not a behavioural branch about how to read.
+_UNMIGRATED_FILE_TYPES: frozenset[str] = frozenset({
+    "XLSX", "DELIMITED_NO_HEADER",
+})
+
+
+def _read_unmigrated_source(
+    ctx: Any,
+    run_log: Any,
+    file_path: Path,
+    file_type: str,
+    encoding: str,
+    expected_columns: list[str],
+    *,
+    exists: bool,
+    schema: str,
+    table: str,
+    load_cfg: Any,
+    paths: Any,
+) -> Optional[list[dict[str, Any]]]:
+    """Read a format that has not moved to DataFile yet, exactly as before.
+
+    Lifted unchanged from ``_load_one_file`` so the migrated path reads
+    cleanly; the behaviour is the pre-existing one, including the header check
+    that cannot work for XLSX.
+
+    Returns:
+        The rows, or ``None`` when the file was rejected — in which case the
+        rejection has already been logged and its movements run.
+    """
+    if exists and not _validate_load_header(file_path, expected_columns,
+                                            encoding):
+        _logger.error("Header mismatch — file rejected: %s", file_path.name)
+        log_validation_result(run_log,
+            validation_name="load_header",
+            status="failed",
+            message="Header mismatch",
+            path=str(file_path),
+            schema=schema,
+            table=table,
+        )
+        _execute_movements(load_cfg.movements.failure, file_path, paths,
+                           ctx=ctx, run_log=run_log)
+        return None
+
+    # Through the module rather than this module's own binding, so the reader
+    # is reached the same way a DataFile subtype reaches it. One seam for both
+    # paths while both exist.
+    return list(
+        file_utils.get_reader(file_path, file_type=file_type, encoding=encoding)
     )
 
 
