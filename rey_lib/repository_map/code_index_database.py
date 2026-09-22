@@ -94,6 +94,11 @@ _RAISE_SITE_COLUMNS = (
     "owner_column", "source_line", "source_column", "ordinal", "is_bare",
     "value_kind", "value_chain", "callee_chain", "has_cause",
 )
+_CALL_ARGUMENT_COLUMNS = (
+    "repository_key", "relative_path", "source_line", "source_column",
+    "callee", "edge_kind", "ordinal", "argument_form", "keyword",
+    "argument_kind", "literal_argument", "expression",
+)
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
     "from_id", "from_symbol", "from_symbol_line", "from_symbol_column",
@@ -194,11 +199,17 @@ class CodeIndexDatabaseWriter:
             for entry in indexed for row in entry.raise_sites
         ]
         self._stage("raise_site_stage", raise_sites, _RAISE_SITE_COLUMNS)
+        call_arguments = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.call_arguments
+        ]
+        self._stage("call_argument_stage", call_arguments,
+                    _CALL_ARGUMENT_COLUMNS)
 
         logger.info(
             "Staged %d repositories, %d files, %d symbols, %d edges, "
             "%d parameters, %d writes, %d accesses, %d class attributes, "
-            "%d return sites, %d raise sites",
+            "%d return sites, %d raise sites, %d call arguments",
             len(repositories),
             len(files),
             len(symbols),
@@ -209,6 +220,7 @@ class CodeIndexDatabaseWriter:
             len(class_attributes),
             len(return_sites),
             len(raise_sites),
+            len(call_arguments),
         )
         # The scan side only. The authored architecture is not staged here and
         # is therefore not replaced -- but every surviving realization is
@@ -281,7 +293,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("raise_site_stage", "return_site_stage",
+        for table in ("call_argument_stage",
+                      "raise_site_stage", "return_site_stage",
                       "class_attribute_stage",
                       "access_stage",
                       "assignment_stage", "parameter_stage",

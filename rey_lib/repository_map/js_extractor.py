@@ -45,6 +45,10 @@ from rey_lib.repository_map.records import (
     PARAMETER_KIND_VAR_POSITIONAL,
     ACCESS_KIND_METHOD_CALL,
     ACCESS_KIND_SUBSCRIPT,
+    ARGUMENT_FORM_POSITIONAL,
+    ARGUMENT_FORM_VAR_POSITIONAL,
+    rendered_expression,
+    storable_literal,
     ARGUMENT_KIND_EXPRESSION,
     ARGUMENT_KIND_OTHER_LITERAL,
     ARGUMENT_KIND_STRING_LITERAL,
@@ -67,6 +71,7 @@ from rey_lib.repository_map.records import (
     VALUE_KIND_SUBSCRIPT,
     VALUE_KIND_F_STRING,
     AccessRecord,
+    CallArgumentRecord,
     AssignmentRecord,
     ClassAttributeRecord,
     ParameterRecord,
@@ -78,6 +83,7 @@ from rey_lib.repository_map.records import (
 )
 
 __all__ = [
+    "extract_js_call_arguments",
     "extract_js_class_attributes",
     "extract_js_raise_sites",
     "extract_js_return_sites",
@@ -311,11 +317,10 @@ def extract_js_references(
         if node.type in {"import_statement", "export_statement"}:
             edges.extend(_module_edges(recorded_path, from_id, node))
         elif node.type in {"call_expression", "new_expression"}:
-            callee = node.child_by_field_name("function")
-            target = _dotted_name(callee) if callee is not None else None
-            if target is None or _is_internal(target):
+            classified = _classify_call(node)
+            if classified is None:
                 continue
-            kind = EDGE_KIND_GLOBAL_REFERENCE if js_is_global_rooted(target) else EDGE_KIND_CALL
+            target, kind = classified
             edges.append(_edge(recorded_path, node, from_id, target, kind, node.type))
         elif node.type == "member_expression" and node.id not in callee_ids:
             if node.id in publication_ids:
@@ -782,6 +787,80 @@ def _own_nodes(owner: Node) -> list[Node]:
     return nodes
 
 
+def extract_js_call_arguments(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[CallArgumentRecord]:
+    """Extract every argument written at every recorded call in one file.
+
+    Emitted from the same classification that writes the call's edge, so an
+    argument's ``callee`` and ``edge_kind`` are the edge's own by
+    construction, and a call recorded as no edge produces no arguments.
+
+    JavaScript has no keyword-argument grammar -- named arguments are written
+    as an object literal, which is one positional argument and is recorded as
+    one. So only ``positional`` and ``var_positional`` occur here; their
+    absence for the other two forms is the grammar, not a gap.
+
+    Args:
+        path: Source file to read and parse.
+        language: One of the names in ``supported_js_languages()``.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The arguments, ordered within each call.
+
+    Raises:
+        ValueError: If the language has no grammar registered.
+    """
+    root = _parse(path, language)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    arguments: list[CallArgumentRecord] = []
+    for node in _walk(root):
+        if node.type not in {"call_expression", "new_expression"}:
+            continue
+        classified = _classify_call(node)
+        if classified is None:
+            continue
+        target, edge_kind = classified
+        container = node.child_by_field_name("arguments")
+        if container is None:
+            continue
+        line, column = node.start_point
+        ordinal = 0
+        for written in container.named_children:
+            if written.type == "comment":
+                continue
+            spread = written.type == "spread_element"
+            # The value beneath the spread, so the expression reads the same
+            # as it would written without one -- the form carries the dots.
+            value = written.named_children[0] if spread and written.named_children \
+                else written
+            kind, literal, expression = _js_call_argument_facts(value)
+            arguments.append(
+                CallArgumentRecord(
+                    source_path=recorded_path,
+                    source_line=line + 1,
+                    source_column=column,
+                    callee=target,
+                    edge_kind=edge_kind,
+                    ordinal=ordinal,
+                    argument_form=(
+                        ARGUMENT_FORM_VAR_POSITIONAL if spread
+                        else ARGUMENT_FORM_POSITIONAL
+                    ),
+                    keyword=None,
+                    argument_kind=kind,
+                    literal_argument=literal,
+                    expression=expression,
+                )
+            )
+            ordinal += 1
+    return arguments
+
+
 def extract_js_return_sites(
     path: Path,
     language: str,
@@ -1100,6 +1179,25 @@ def _js_access_of(
             literal_argument=literal,
         )
     return None
+
+
+def _js_call_argument_facts(value: Node) -> tuple[str, str | None, str]:
+    """Return a call argument's kind, literal value and text.
+
+    Shares the kind decision with ``_js_argument_facts`` so an argument is
+    classified one way in this file, and adds what a call argument needs that
+    a selecting argument does not: the expression as written.
+
+    Args:
+        value: The argument expression, with any spread already unwrapped.
+
+    Returns:
+        One of the ``ARGUMENT_KIND_*`` constants, the string literal's own
+        value where it is one and None otherwise, and the expression text.
+    """
+    _present, kind, literal = _js_argument_facts(value)
+    storable = storable_literal(literal) if literal is not None else None
+    return kind or ARGUMENT_KIND_EXPRESSION, storable, rendered_expression(_text(value))
 
 
 def _js_argument_facts(argument: Node | None) -> tuple[bool, str | None, str | None]:
@@ -1580,6 +1678,34 @@ def _is_internal(target: str) -> bool:
         True when the reference stays inside the owning object.
     """
     return target.split(".", 1)[0] in _SELF_ROOTS
+
+
+def _classify_call(node: Node) -> tuple[str, str] | None:
+    """Return what a call targets and the edge kind it is recorded as.
+
+    The single place that decides both, because two readers need the same
+    answer: the reference walk writes the edge, and the call-argument
+    extractor stamps each argument with the kind of the edge it belongs to.
+
+    Unlike Python, not every call here yields an edge -- an unresolvable
+    callee or a this/super-rooted one is recorded as nothing at all, and a
+    global-rooted one is recorded under a different kind rather than skipped.
+    Returning None for the first case is what keeps the argument extractor
+    from producing a row with no edge to belong to.
+
+    Args:
+        node: A call_expression or new_expression node.
+
+    Returns:
+        The target and one of the ``EDGE_KIND_*`` constants, or None when no
+        edge is recorded for this call.
+    """
+    callee = node.child_by_field_name("function")
+    target = _dotted_name(callee) if callee is not None else None
+    if target is None or _is_internal(target):
+        return None
+    kind = EDGE_KIND_GLOBAL_REFERENCE if js_is_global_rooted(target) else EDGE_KIND_CALL
+    return target, kind
 
 
 def js_is_global_rooted(name: str) -> bool:

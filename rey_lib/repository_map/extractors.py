@@ -15,6 +15,7 @@ from pathlib import Path
 
 from rey_lib.repository_map.js_extractor import (
     extract_js_class_attributes,
+    extract_js_call_arguments,
     extract_js_raise_sites,
     extract_js_return_sites,
     extract_js_parameters,
@@ -25,6 +26,7 @@ from rey_lib.repository_map.js_extractor import (
 )
 from rey_lib.repository_map.python_extractor import (
     extract_python_class_attributes,
+    extract_python_call_arguments,
     extract_python_raise_sites,
     extract_python_return_sites,
     extract_python_parameters,
@@ -38,6 +40,7 @@ __all__ = [
     "LANGUAGE_EXTRACTORS",
     "LanguageExtractor",
     "extract_class_attributes",
+    "extract_call_arguments",
     "extract_raise_sites",
     "extract_return_sites",
     "extract_declared_parameters",
@@ -64,6 +67,8 @@ class LanguageExtractor:
         raise_sites: Callable returning the raises written inside them.
         writes_and_accesses: Callable returning the writes and indexed access
             forms inside those declarations, from one walk.
+        call_arguments: Callable returning the arguments written at every call
+            the language records an edge for.
     """
 
     language: str
@@ -77,6 +82,7 @@ class LanguageExtractor:
         [Path, str, str | None],
         tuple[list[AssignmentRecord], list[AccessRecord]],
     ]
+    call_arguments: Callable[[Path, str, str | None], list[CallArgumentRecord]]
 
 
 # The registry is data: language name to the object that owns that language.
@@ -91,6 +97,7 @@ LANGUAGE_EXTRACTORS: dict[str, LanguageExtractor] = {
         return_sites=extract_python_return_sites,
         raise_sites=extract_python_raise_sites,
         writes_and_accesses=extract_python_writes_and_accesses,
+        call_arguments=extract_python_call_arguments,
     ),
 }
 
@@ -107,6 +114,7 @@ LANGUAGE_EXTRACTORS.update(
             return_sites=extract_js_return_sites,
             raise_sites=extract_js_raise_sites,
             writes_and_accesses=extract_js_writes_and_accesses,
+            call_arguments=extract_js_call_arguments,
         )
         for language in supported_js_languages()
     }
@@ -256,6 +264,31 @@ def extract_raise_sites(
     if extractor is None:
         return []
     return extractor.raise_sites(path, language, source_path)
+
+
+def extract_call_arguments(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[CallArgumentRecord]:
+    """Return the arguments written at every call one file records an edge for.
+
+    Each argument names the call it belongs to and the kind of edge that call
+    was recorded as, so it resolves to exactly one edge rather than to
+    whatever else shares its position.
+
+    Args:
+        path: Source file to read and parse.
+        language: Language name as the inventory recorded it.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The call arguments, empty for a language with no registered extractor.
+    """
+    extractor = LANGUAGE_EXTRACTORS.get(language)
+    if extractor is None:
+        return []
+    return extractor.call_arguments(path, language, source_path)
 
 
 def extract_executable_references(

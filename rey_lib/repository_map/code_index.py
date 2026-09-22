@@ -34,6 +34,7 @@ from rey_lib.repository_map.records import (
     RECORD_TYPE_ACCESS,
     RECORD_TYPE_ASSIGNMENT,
     RECORD_TYPE_CLASS_ATTRIBUTE,
+    RECORD_TYPE_CALL_ARGUMENT,
     RECORD_TYPE_RAISE_SITE,
     RECORD_TYPE_RETURN_SITE,
     RECORD_TYPE_DEPENDENCY_EDGE,
@@ -82,6 +83,9 @@ class IndexedRepository:
         files: One entry per file, each carrying its own symbol rows.
         raise_sites: One entry per raise written inside a declaration, owned
             the same way.
+        call_arguments: One entry per argument written at a call, naming the
+            call by position and callee and carrying the kind of edge that
+            call was recorded as, which is how it resolves to exactly one.
         return_sites: One entry per return written inside a declaration, named
             by the declaration that contains it -- never by one enclosing that.
         class_attributes: One entry per name bound directly in a class body,
@@ -102,7 +106,7 @@ class IndexedRepository:
 
     __slots__ = ("repository", "header", "files", "edges", "parameters",
                  "writes", "accesses", "class_attributes", "return_sites",
-                 "raise_sites")
+                 "raise_sites", "call_arguments")
 
     def __init__(
         self,
@@ -116,6 +120,7 @@ class IndexedRepository:
         class_attributes: list[dict[str, Any]] | None = None,
         return_sites: list[dict[str, Any]] | None = None,
         raise_sites: list[dict[str, Any]] | None = None,
+        call_arguments: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
@@ -129,6 +134,9 @@ class IndexedRepository:
         )
         self.return_sites = return_sites if return_sites is not None else []
         self.raise_sites = raise_sites if raise_sites is not None else []
+        self.call_arguments = (
+            call_arguments if call_arguments is not None else []
+        )
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -172,6 +180,11 @@ _RAISE_SITE_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "source_line",
     "source_column", "ordinal", "is_bare", "value_kind", "value_chain",
     "callee_chain", "has_cause",
+)
+_CALL_ARGUMENT_FIELDS = (
+    "source_line", "source_column", "callee", "edge_kind", "ordinal",
+    "argument_form", "keyword", "argument_kind", "literal_argument",
+    "expression",
 )
 _ACCESS_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "source_line",
@@ -359,5 +372,9 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
         raise_sites=_owned_rows(
             repository, repository_map, files,
             RECORD_TYPE_RAISE_SITE, _RAISE_SITE_FIELDS,
+        ),
+        call_arguments=_owned_rows(
+            repository, repository_map, files,
+            RECORD_TYPE_CALL_ARGUMENT, _CALL_ARGUMENT_FIELDS,
         ),
     )

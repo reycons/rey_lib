@@ -17,6 +17,11 @@ from pathlib import Path
 
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.repository_map.records import (
+    ARGUMENT_FORM_KEYWORD,
+    ARGUMENT_FORM_POSITIONAL,
+    ARGUMENT_FORM_VAR_KEYWORD,
+    ARGUMENT_FORM_VAR_POSITIONAL,
+    storable_literal,
     EDGE_KIND_CALL,
     EDGE_KIND_IMPORT,
     EDGE_KIND_INTERNAL_CALL,
@@ -60,6 +65,7 @@ from rey_lib.repository_map.records import (
     VALUE_KIND_SUBSCRIPT,
     AccessRecord,
     AssignmentRecord,
+    CallArgumentRecord,
     ClassAttributeRecord,
     ParameterRecord,
     RaiseSiteRecord,
@@ -70,6 +76,7 @@ from rey_lib.repository_map.records import (
 )
 
 __all__ = [
+    "extract_python_call_arguments",
     "extract_python_class_attributes",
     "extract_python_raise_sites",
     "extract_python_return_sites",
@@ -277,11 +284,7 @@ def extract_python_references(
     edges: list[ReferenceEdge] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            target = _dotted_name(node.func) or ast.unparse(node.func)
-            # A self/cls call is recorded under its own kind rather than
-            # dropped. It is still not a dependency, so it must not join the
-            # call population -- readers filter by kind.
-            kind = EDGE_KIND_INTERNAL_CALL if _is_internal(target) else EDGE_KIND_CALL
+            target, kind = _classify_call(node)
             edges.append(_edge(recorded_path, node, from_id, target, kind, "ast.Call"))
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for record in _import_records(node):
@@ -854,6 +857,100 @@ def extract_python_return_sites(
     return sites
 
 
+def _call_argument_facts(value: ast.expr) -> tuple[str, str | None, str]:
+    """Return an argument expression's kind, literal value and text.
+
+    Args:
+        value: The argument expression, with any star prefix already removed.
+
+    Returns:
+        One of the ``ARGUMENT_KIND_*`` constants, the string literal's own
+        value where it is one and None otherwise, and the expression as
+        written.
+    """
+    expression = ast.unparse(value)
+    if isinstance(value, ast.Constant):
+        if isinstance(value.value, str):
+            # The value, not the rendering. ast.unparse gives back
+            # "'start_batch'" with its quotes, which compares equal to no
+            # binding name anyone is looking for.
+            return ARGUMENT_KIND_STRING_LITERAL, storable_literal(value.value), expression
+        return ARGUMENT_KIND_OTHER_LITERAL, None, expression
+    return ARGUMENT_KIND_EXPRESSION, None, expression
+
+
+def extract_python_call_arguments(
+    path: Path,
+    language: str,
+    source_path: str | None = None,
+) -> list[CallArgumentRecord]:
+    """Extract every argument written at every call in one file.
+
+    Emitted from the same classification that writes the call's edge, so an
+    argument's ``callee`` and ``edge_kind`` are the edge's own by
+    construction. Every Python call carries an edge, so no argument here can
+    fail to find one.
+
+    Ordinal runs over positional arguments THEN keyword ones, as the AST holds
+    them -- one sequence across all four forms. Source order can differ:
+    ``f(k=1, *a)`` is legal and puts ``*a`` in ``args`` after ``k=1`` in
+    source. AST order is used because it is the order the parser proves,
+    rather than one this would have to reconstruct from positions.
+
+    Args:
+        path: Python file to read and parse.
+        language: Language name. Accepted for registry symmetry; unused.
+        source_path: Path to record. Defaults to POSIX ``path``.
+
+    Returns:
+        The arguments, ordered within each call.
+
+    Raises:
+        ValueError: If the file is not parseable Python.
+    """
+    tree = _parse(path)
+    recorded_path = source_path if source_path is not None else path.as_posix()
+
+    arguments: list[CallArgumentRecord] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target, edge_kind = _classify_call(node)
+        written: list[tuple[str, str | None, ast.expr]] = []
+        for argument in node.args:
+            if isinstance(argument, ast.Starred):
+                written.append((ARGUMENT_FORM_VAR_POSITIONAL, None, argument.value))
+            else:
+                written.append((ARGUMENT_FORM_POSITIONAL, None, argument))
+        for keyword in node.keywords:
+            # arg is None for **mapping. The name is absent rather than
+            # empty, and the form is what tells the two apart -- keyword name
+            # is deliberately not part of identity.
+            if keyword.arg is None:
+                written.append((ARGUMENT_FORM_VAR_KEYWORD, None, keyword.value))
+            else:
+                written.append((ARGUMENT_FORM_KEYWORD, keyword.arg, keyword.value))
+
+        for ordinal, (form, name, value) in enumerate(written):
+            kind, literal, expression = _call_argument_facts(value)
+            arguments.append(
+                CallArgumentRecord(
+                    source_path=recorded_path,
+                    source_line=node.lineno,
+                    source_column=node.col_offset,
+                    callee=target,
+                    edge_kind=edge_kind,
+                    ordinal=ordinal,
+                    argument_form=form,
+                    keyword=name,
+                    argument_kind=kind,
+                    literal_argument=literal,
+                    expression=expression,
+                )
+            )
+    return arguments
+
+
 def extract_python_raise_sites(
     path: Path,
     language: str,
@@ -1308,6 +1405,29 @@ def _is_internal(target: str) -> bool:
         True when the reference stays inside the owning object.
     """
     return target.split(".", 1)[0] in _SELF_ROOTS
+
+
+def _classify_call(node: ast.Call) -> tuple[str, str]:
+    """Return what a call targets and the edge kind it is recorded as.
+
+    The single place that decides both, because two readers need the same
+    answer: the edge branch writes the edge, and the call-argument extractor
+    stamps each argument with the kind of the edge it belongs to. Deriving
+    that kind twice is how the two would come to disagree.
+
+    It answers for EVERY call. A self/cls call is not dropped -- it is
+    recorded as internal_call, which keeps it out of the dependency
+    population without losing the fact that the call was written.
+
+    Args:
+        node: The call node.
+
+    Returns:
+        The target as written, and one of the ``EDGE_KIND_*`` constants.
+    """
+    target = _dotted_name(node.func) or ast.unparse(node.func)
+    kind = EDGE_KIND_INTERNAL_CALL if _is_internal(target) else EDGE_KIND_CALL
+    return target, kind
 
 
 def _dotted_name(node: ast.AST) -> str | None:

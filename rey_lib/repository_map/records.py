@@ -36,6 +36,7 @@ __all__ = [
     "RECORD_TYPE_CLASS_ATTRIBUTE",
     "RECORD_TYPE_RETURN_SITE",
     "RECORD_TYPE_RAISE_SITE",
+    "RECORD_TYPE_CALL_ARGUMENT",
     "RECORD_TYPE_ASSIGNMENT",
     "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
@@ -59,6 +60,7 @@ __all__ = [
     "ClassAttributeRecord",
     "ReturnSiteRecord",
     "RaiseSiteRecord",
+    "CallArgumentRecord",
     "AssignmentRecord",
     "ParameterRecord",
     "ReferenceEdge",
@@ -89,6 +91,7 @@ RECORD_TYPE_ACCESS = "access"
 RECORD_TYPE_CLASS_ATTRIBUTE = "class_attribute"
 RECORD_TYPE_RETURN_SITE = "return_site"
 RECORD_TYPE_RAISE_SITE = "raise_site"
+RECORD_TYPE_CALL_ARGUMENT = "call_argument"
 RECORD_TYPE_REGISTRATION = "registration"
 RECORD_TYPE_ENTRY_POINT = "entry_point"
 RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
@@ -205,6 +208,59 @@ INDEXED_ACCESS_METHODS = frozenset({"get"})
 ARGUMENT_KIND_STRING_LITERAL = "string_literal"
 ARGUMENT_KIND_OTHER_LITERAL = "other_literal"
 ARGUMENT_KIND_EXPRESSION = "expression"
+
+# How an argument is written at a call site. Three of the four are the same
+# fact as the PARAMETER_KIND_* of the same name and deliberately share its
+# spelling -- *args and **kwargs mean one thing whichever end you read them
+# from. The fourth does not: PARAMETER_KIND_KEYWORD_ONLY is a rule about how a
+# parameter MUST be passed, while a keyword argument is only how this call
+# happened to write it, so it is named for what it is and not borrowed.
+# Python writes all four; JavaScript has no keyword-argument grammar and
+# writes only the first two.
+def storable_literal(value: str) -> str | None:
+    """Return a literal's value, or None when a text column cannot hold it.
+
+    A NUL is legal in a source string and illegal in a PostgreSQL text
+    column, and the estate really writes them -- csv.py passes '\\x00' as a
+    delimiter and the sanitization tests pass strings containing one. Staging
+    such a value fails the whole insert, so the scan cannot publish at all.
+
+    Declining to store it loses nothing: ``expression`` is NOT NULL and
+    carries the same literal in escaped form, which is where a reader who
+    wants the exact text goes. Stripping the NUL instead would record a value
+    the source does not contain, which is worse than recording none.
+
+    Args:
+        value: The literal's own value.
+
+    Returns:
+        The value, or None when it contains a character text cannot carry.
+    """
+    return None if "\x00" in value else value
+
+
+def rendered_expression(text: str) -> str:
+    """Return expression text with characters a text column cannot hold escaped.
+
+    The counterpart of ``storable_literal`` for a column that cannot be NULL.
+    An expression is a RENDERING rather than a value, and a rendering escapes
+    control characters -- Python's ``ast.unparse`` already writes a NUL as
+    ``\\x00``, so this is what makes the Tree-sitter extractors, which return
+    raw source text, agree with it instead of carrying the byte itself.
+
+    Args:
+        text: The expression as written.
+
+    Returns:
+        The same text with NUL written as its escape.
+    """
+    return text.replace("\x00", "\\x00")
+
+
+ARGUMENT_FORM_POSITIONAL = PARAMETER_KIND_POSITIONAL
+ARGUMENT_FORM_VAR_POSITIONAL = PARAMETER_KIND_VAR_POSITIONAL
+ARGUMENT_FORM_KEYWORD = "keyword"
+ARGUMENT_FORM_VAR_KEYWORD = PARAMETER_KIND_VAR_KEYWORD
 
 
 # Which grammar produced a class attribute row, and nothing else. It does not
@@ -1079,6 +1135,93 @@ class RaiseSiteRecord:
             "value_chain": self.value_chain,
             "callee_chain": self.callee_chain,
             "has_cause": self.has_cause,
+        }
+
+
+@dataclass(frozen=True)
+class CallArgumentRecord:
+    """One argument written at one call site.
+
+    A call with N arguments is N facts. Packing them into a column on the edge
+    would repeat the mistake avoided when ``db_binding_parameter`` was made a
+    table rather than an array.
+
+    **Identity is the call plus the ordinal.** The call is located by path,
+    position and callee -- position alone is not enough, because a chained
+    call shares its start with the call it is chained onto:
+    ``Path(p).expanduser().resolve()`` is three calls at one line and column.
+
+    **The keyword name is not part of identity.** ``*args`` and ``**kwargs``
+    both have none, so two ``**`` arguments in one call are separable only by
+    ordinal -- and three calls in the estate write exactly that.
+
+    Attributes:
+        source_path: Path the call is written in.
+        source_line: Where the call begins, and
+        source_column: its column. The CALL's position, not the argument's, so
+            every argument of one call shares it.
+        callee: The called expression as the edge records it, so the two agree
+            by construction rather than by two spellings of one rule.
+        edge_kind: Which edge this call was recorded as. Resolution metadata:
+            it is how an argument finds its edge and is not stored beyond
+            ingest. The extractor knows it because it just emitted it, so the
+            promotion resolves on equality rather than searching a set of
+            kinds that would have to be maintained as call routing changes.
+        ordinal: Position among this call's arguments, from zero, over
+            positional arguments then keyword ones. ONE sequence spanning all
+            four forms: restarting it per form would put a positional and a
+            ``**`` at the same ordinal with the same absent keyword.
+        argument_form: One of the ``ARGUMENT_FORM_*`` constants.
+        keyword: The name, for the ``keyword`` form alone. None otherwise --
+            for ``**options`` the name is genuinely absent, not empty.
+        argument_kind: One of the ``ARGUMENT_KIND_*`` constants.
+        literal_argument: A string literal's own value, unquoted, and None
+            otherwise. Separate from ``expression`` for the reason
+            ``AccessRecord`` keeps them separate: the rendered expression of
+            ``'start_batch'`` carries its quotes and does not compare equal to
+            the name it passes.
+        expression: The argument as written, without any ``*`` or ``**``
+            prefix -- the form carries that, and repeating it here would make
+            the same fact disagree with itself.
+    """
+
+    source_path: str
+    source_line: int
+    source_column: int
+    callee: str
+    edge_kind: str
+    ordinal: int
+    argument_form: str
+    argument_kind: str
+    expression: str
+    keyword: Optional[str] = None
+    literal_argument: Optional[str] = None
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this argument."""
+        return (
+            f"{RECORD_TYPE_CALL_ARGUMENT}:{self.source_path}"
+            f":{self.source_line}:{self.source_column}:{self.callee}"
+            f":{self.ordinal}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this argument as a JSONL 'call_argument' record."""
+        return {
+            "record_type": RECORD_TYPE_CALL_ARGUMENT,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "source_column": self.source_column,
+            "callee": self.callee,
+            "edge_kind": self.edge_kind,
+            "ordinal": self.ordinal,
+            "argument_form": self.argument_form,
+            "keyword": self.keyword,
+            "argument_kind": self.argument_kind,
+            "literal_argument": self.literal_argument,
+            "expression": self.expression,
         }
 
 
