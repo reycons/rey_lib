@@ -465,11 +465,15 @@ def _route_file(
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:
     """Build the transform for one load definition.
 
-    **The single place an IdentityTransform is constructed on this path.**
-    Two call sites remain -- the definition-level build and the single-file
-    entry point -- but they share this one rule, so what they produce cannot
-    drift. Step 6 removes the second by routing the single-file path through
-    a ConfiguredLoad like every other caller.
+    **The single place an IdentityTransform is constructed.** Both callers
+    are ``ConfiguredLoad`` construction sites, so what they produce cannot
+    drift.
+
+    ``transform_cfg`` may be None -- a DIRECT load has no configuration at
+    all. Every read below is a ``getattr``, so absent configuration yields no
+    transform map and no declared columns, which is what that load means.
+    Passing a manufactured config object instead would be a stand-in for a
+    definition that does not exist.
 
     Reads the configured columns, which is where an unreadable ``columns:``
     shape is refused rather than treated as absent.
@@ -843,7 +847,12 @@ def load_file_to_table(
     return _ConfiguredLoad(
         load_one_file=_load_one,
         explicit_files=[Path(file_path)],
-        transform=IdentityTransform(),
+        # None, not a stand-in config object. The builder reads a transform
+        # config with getattr, so absent configuration produces no transform
+        # map and no declared columns -- which is exactly what a direct load
+        # means. Going through the builder rather than around it is what
+        # leaves ONE construction site for an IdentityTransform.
+        transform=_build_identity_transform(None),
         loader=_build_data_loader(ctx, schema, table, create_destination),
         file_type=file_type,
         encoding=encoding,
