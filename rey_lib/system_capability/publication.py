@@ -56,8 +56,7 @@ _EVIDENCE_TABLE = "system_capability_evidence_stage"
 
 _GENERATION_COLUMNS = (
     "publication_key", "generated_ts", "index_indexed_ts",
-    "index_repository_count", "generator", "development_recipe_id",
-    "recipe_source_hash",
+    "index_repository_count", "generator", "ai_contract_id", "ai_task_id",
 )
 _CAPABILITY_COLUMNS = (
     "publication_key", "capability_key", "label", "statement", "maturity",
@@ -101,16 +100,21 @@ class StagedGeneration:
     """One analysis pass, ready to be admitted.
 
     Carries its own provenance -- the estate it read, the model that read it,
-    and the recipe it followed -- because a later description is
+    and the CONTRACT and TASK it followed -- because a later description is
     uninterpretable unless you can tell which of those moved.
+
+    The contract pins the exact method version, which is enough on its own only
+    until a second task reuses the same contract. The task is recorded beside
+    it for that reason. The binding is not recorded: it is mutable, so its id
+    would pin a row that changes underneath the generation.
     """
 
     generated_ts: Any
     index_indexed_ts: Any
     index_repository_count: int
     generator: str
-    development_recipe_id: int
-    recipe_source_hash: str
+    ai_contract_id: int
+    ai_task_id: int
     capabilities: tuple[StagedCapability, ...] = field(default_factory=tuple)
 
 
@@ -157,8 +161,8 @@ def generation_from_payload(payload: dict[str, Any]) -> StagedGeneration:
             index_indexed_ts=payload["index_indexed_ts"],
             index_repository_count=int(payload["index_repository_count"]),
             generator=payload["generator"],
-            development_recipe_id=int(payload["development_recipe_id"]),
-            recipe_source_hash=payload["recipe_source_hash"],
+            ai_contract_id=int(payload["ai_contract_id"]),
+            ai_task_id=int(payload["ai_task_id"]),
             capabilities=capabilities,
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -266,8 +270,8 @@ class CapabilityPublisher:
             "index_indexed_ts": generation.index_indexed_ts,
             "index_repository_count": generation.index_repository_count,
             "generator": generation.generator,
-            "development_recipe_id": generation.development_recipe_id,
-            "recipe_source_hash": generation.recipe_source_hash,
+            "ai_contract_id": generation.ai_contract_id,
+            "ai_task_id": generation.ai_task_id,
         }])
 
         self._insert(_CAPABILITY_TABLE, _CAPABILITY_COLUMNS, [

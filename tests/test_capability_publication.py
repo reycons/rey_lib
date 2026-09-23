@@ -30,8 +30,8 @@ def _generation(*keys: str) -> StagedGeneration:
         index_indexed_ts="2026-09-23T07:22:12Z",
         index_repository_count=11,
         generator="test",
-        development_recipe_id=26,
-        recipe_source_hash="eed3d7f9",
+        ai_contract_id=41,
+        ai_task_id=17,
         capabilities=tuple(
             StagedCapability(
                 capability_key=key, label=key, statement="A capability.",
@@ -207,7 +207,7 @@ class TestThePayloadIsRefusedNotRepaired:
         return {
             "generated_ts": "t", "index_indexed_ts": "t",
             "index_repository_count": 11, "generator": "ai",
-            "development_recipe_id": 26, "recipe_source_hash": "h",
+            "ai_contract_id": 41, "ai_task_id": 17,
             "capabilities": [{
                 "capability_key": "a", "label": "A", "statement": "Prose.",
                 "maturity": "established",
@@ -225,12 +225,12 @@ class TestThePayloadIsRefusedNotRepaired:
 
     def test_a_missing_field_is_refused(self) -> None:
         payload = self._payload()
-        del payload["recipe_source_hash"]
+        del payload["ai_task_id"]
 
         with pytest.raises(PublicationError) as raised:
             generation_from_payload(payload)
 
-        assert "recipe_source_hash" in str(raised.value)
+        assert "ai_task_id" in str(raised.value)
 
     def test_a_payload_with_no_capabilities_is_refused_by_name(self) -> None:
         """The procedure refuses it too; saying so here names the payload."""
