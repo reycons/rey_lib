@@ -95,11 +95,22 @@ class TestPromotionIsGoverned:
 
         assert all(v["batch_step_id"] == 77 for _m, _r, v in calls)
 
-    def test_no_parent_is_allowed_and_means_a_root_step(self, calls) -> None:
-        CapabilityPublisher(_Adapter(), object()).publish(
-            object(), object(), _generation("a"))
+    def test_a_missing_parent_is_refused_HERE_not_by_the_database(self, calls) -> None:
+        """Found by running it: control.f_batch_step_begin raises "a batch or
+        a parent step is required" when given neither. An earlier draft of
+        this design claimed a NULL parent records a root step -- it does so
+        only when a batch is supplied, and with both absent it refuses.
 
-        assert all(v["batch_step_id"] is None for _m, _r, v in calls)
+        So publication outside a run is impossible, and the caller should
+        learn that from a message naming the publication rather than from a
+        control function it never invoked.
+        """
+        with pytest.raises(PublicationError) as raised:
+            CapabilityPublisher(_Adapter(), object()).publish(
+                object(), object(), _generation("a"), None)
+
+        assert "batch step" in str(raised.value)
+        assert not calls, "nothing may be attempted without a parent"
 
     def test_the_module_assembles_no_sql(self) -> None:
         """THE BOUNDARY, asserted against the source.
@@ -123,7 +134,7 @@ class TestStagingIsScopedToOnePublication:
         adapter = _Adapter()
 
         key = CapabilityPublisher(adapter, object()).publish(
-            object(), object(), _generation("a", "b"))
+            object(), object(), _generation("a", "b"), 77)
 
         assert adapter.staged, "nothing was staged"
         for table, rows in adapter.staged:
@@ -132,7 +143,7 @@ class TestStagingIsScopedToOnePublication:
 
     def test_both_operations_use_that_same_key(self, calls) -> None:
         key = CapabilityPublisher(_Adapter(), object()).publish(
-            object(), object(), _generation("a"))
+            object(), object(), _generation("a"), 77)
 
         assert {v["publication_key"] for _m, _r, v in calls} == {key}
 
@@ -140,8 +151,8 @@ class TestStagingIsScopedToOnePublication:
         """Per ATTEMPT, not per run -- two attempts in one run must differ."""
         publisher = CapabilityPublisher(_Adapter(), object())
 
-        first = publisher.publish(object(), object(), _generation("a"))
-        second = publisher.publish(object(), object(), _generation("a"))
+        first = publisher.publish(object(), object(), _generation("a"), 77)
+        second = publisher.publish(object(), object(), _generation("a"), 77)
 
         assert first != second
 
@@ -169,7 +180,7 @@ class TestTheOrderTheProcedureExpects:
         monkeypatch.setattr(module, "execute_mapped_routine", _call)
 
         CapabilityPublisher(_Recording(), object()).publish(
-            object(), object(), _generation("a"))
+            object(), object(), _generation("a"), 77)
 
         assert sequence[0] == "clear_capability_stage"
         assert sequence[-1] == "publish_system_capability"
@@ -179,7 +190,7 @@ class TestTheOrderTheProcedureExpects:
         adapter = _Adapter()
 
         CapabilityPublisher(adapter, object()).publish(
-            object(), object(), _generation("a"))
+            object(), object(), _generation("a"), 77)
 
         assert [table for table, _ in adapter.staged] == [
             "system_capability_generation_stage",

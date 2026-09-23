@@ -198,7 +198,7 @@ class CapabilityPublisher:
         ctx: Any,
         run_log: Any,
         generation: StagedGeneration,
-        parent_batch_step_id: Any = None,
+        parent_batch_step_id: Any,
     ) -> str:
         """Stage the generation and promote it, or raise.
 
@@ -207,16 +207,29 @@ class CapabilityPublisher:
             run_log: The run's evidence recorder.
             generation: What the analysis pass concluded.
             parent_batch_step_id: The step this publication hangs beneath.
-                None records a root step, which is what a call made outside a
-                run gets.
+                **Required.** Both routines register a batch step, and
+                ``control.f_batch_step_begin`` refuses when given neither a
+                batch nor a parent -- "a governed routine never creates a
+                batch". So a publication outside a run is not possible, and
+                saying so here beats a database error naming a control
+                function the caller never invoked.
 
         Returns:
             The publication key the rows were staged under.
 
         Raises:
+            PublicationError: No parent step was supplied.
             Any refusal the procedure raises. Nothing is caught here: a
             rejected generation must not look like a published one.
         """
+        if parent_batch_step_id is None:
+            raise PublicationError(
+                "publishing a capability generation needs the batch step it "
+                "hangs beneath: both routines register their own step, and a "
+                "governed routine never creates a batch. Run it as a workflow "
+                "step, or pass the step a run already opened."
+            )
+
         # Opaque, and per ATTEMPT rather than per run: two attempts within one
         # run would share a run id or a batch step, and then could not be told
         # apart in staging.
