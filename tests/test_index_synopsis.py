@@ -232,6 +232,42 @@ class TestEscapingHasOneOwner:
         assert "regexp_replace" not in source
 
 
+class TestSummaryCarriesShapeNotPayload:
+    """For a caller recording that the synopsis ran, not carrying the map."""
+
+    @staticmethod
+    def _synopsis():
+        adapter = _Adapter()
+        return synopsis(adapter, object())
+
+    def test_it_reports_every_facet(self) -> None:
+        summary = self._synopsis().summary()
+
+        assert len(summary["facets"]) == len(FACETS)
+        assert summary["facets_hash"]
+
+    def test_it_carries_no_groups(self) -> None:
+        """THE POINT OF IT.
+
+        run.metadata is in-memory only -- the engine writes status and steps
+        into it and the command reads only status and outcomes -- so putting
+        the whole map there is bytes with no reader. Scale, not payload.
+        """
+        summary = self._synopsis().summary()
+
+        for facet in summary["facets"]:
+            assert "groups" not in facet
+            assert "exemplars" not in facet
+            assert set(facet) == {"facet", "population", "total_count",
+                                  "group_count"}
+
+    def test_the_full_map_still_carries_them(self) -> None:
+        """summary() is an addition, not a replacement: the CLI prints this."""
+        rendered = self._synopsis().as_dict()
+
+        assert all("groups" in facet for facet in rendered["facets"])
+
+
 class TestTheRegistryIsProvenance:
     """What was asked shapes what is reported, so the registry is recorded."""
 

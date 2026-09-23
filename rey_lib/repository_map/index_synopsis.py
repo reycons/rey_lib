@@ -196,10 +196,33 @@ class Synopsis:
     results: tuple[FacetResult, ...]
 
     def as_dict(self) -> dict[str, Any]:
-        """Render the whole synopsis."""
+        """Render the whole synopsis, groups and exemplars included."""
         return {
             "facets_hash": self.facets_hash,
             "facets": [r.as_dict() for r in self.results],
+        }
+
+    def summary(self) -> dict[str, Any]:
+        """Render the shape and size only, without the groups.
+
+        For a caller that wants to RECORD that the synopsis ran and what it
+        found the scale of, rather than carry the map itself -- a workflow step
+        writing to run metadata, say. The whole map is around thirty-five
+        kilobytes; this is a few hundred bytes and answers "did every
+        population still resolve, and how big was each" without duplicating a
+        payload the caller is not going to read.
+        """
+        return {
+            "facets_hash": self.facets_hash,
+            "facets": [
+                {
+                    "facet": result.facet,
+                    "population": result.population,
+                    "total_count": result.total_count,
+                    "group_count": result.group_count,
+                }
+                for result in self.results
+            ],
         }
 
 
