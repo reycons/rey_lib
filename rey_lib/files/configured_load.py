@@ -71,9 +71,9 @@ class ConfiguredLoad:
     def __init__(
         self,
         *,
-        source_dir: Path,
-        pattern: str,
         load_one_file: LoadOneFile,
+        source_dir: Path | None = None,
+        pattern: str = "",
         transform: DataTransform,
         loader: DataLoader,
         file_type: str = "",
@@ -81,13 +81,16 @@ class ConfiguredLoad:
         max_files: int | None = None,
         name: str = "",
         on_discovered: Callable[[Path], None] | None = None,
+        explicit_files: list[Path] | None = None,
     ) -> None:
         """Hold what one load definition resolved to.
 
         Args:
-            source_dir: Where this load picks files up, already resolved.
-            pattern: The pickup pattern, already substituted.
             load_one_file: How one selected file is loaded.
+            source_dir: Where this load picks files up, already resolved.
+                Unused when explicit_files is given.
+            pattern: The pickup pattern, already substituted. Unused when
+                explicit_files is given.
             transform: What the produced records contain.
             loader: Where those records go.
             file_type: Declared format, or empty to infer from the suffix.
@@ -95,8 +98,11 @@ class ConfiguredLoad:
             max_files: Cap on files taken in one run, or None for all.
             name: What to call this load in logs.
             on_discovered: Recorder for every file found, before the cap.
+            explicit_files: Load exactly these instead of discovering any.
+                A caller that named its file has already answered the
+                question ``source_dir`` and ``pattern`` exist to answer.
         """
-        self.source_dir = Path(source_dir)
+        self.source_dir = Path(source_dir) if source_dir else None
         self.pattern = pattern
         self.load_one_file = load_one_file
         self.transform = transform
@@ -106,6 +112,7 @@ class ConfiguredLoad:
         self.max_files = max_files
         self.name = name
         self.on_discovered = on_discovered
+        self.explicit_files = explicit_files
 
     def select_files(
         self,
@@ -122,6 +129,16 @@ class ConfiguredLoad:
                 run log records the first -- a file left behind by
                 max_files_per_run was still there.
         """
+        # A caller that named its files has already answered this. Neither
+        # the directory nor the pattern is consulted -- and the cap is not
+        # applied either, since "how many of the files I found" means nothing
+        # when the caller found them.
+        if self.explicit_files is not None:
+            if on_discovered is not None:
+                for file_path in self.explicit_files:
+                    on_discovered(file_path)
+            return list(self.explicit_files)
+
         pending = input_files(self.source_dir, self.pattern)
 
         if on_discovered is not None:
@@ -170,10 +187,20 @@ class ConfiguredLoad:
             Rows loaded across every file taken this run.
         """
         pending = self.select_files(self.on_discovered)
-        _logger.info(
-            "%s: %d file(s) pending in %s matching '%s'",
-            self.name or "load", len(pending), self.source_dir, self.pattern,
-        )
+        if self.explicit_files is not None:
+            # Named, not discovered. Reporting a directory and a pattern the
+            # caller never gave would put a search that did not happen into
+            # the evidence -- and both would read as 'None' and ''.
+            _logger.info(
+                "%s: %d file(s) named by the caller",
+                self.name or "load", len(pending),
+            )
+        else:
+            _logger.info(
+                "%s: %d file(s) pending in %s matching '%s'",
+                self.name or "load", len(pending), self.source_dir,
+                self.pattern,
+            )
 
         # The objects are THIS definition's, built once and handed to every
         # file. The per-file step wraps them in movements and evidence; it

@@ -428,6 +428,40 @@ def load_files(
     return total_rows
 
 
+def _route_file(
+    ctx: Any,
+    run_log: Any,
+    movements: Any,
+    outcome: str,
+    file_path: Path,
+    paths: Any,
+) -> None:
+    """Move a file according to this load's policy, where it has one.
+
+    **A DIRECT load has no movement policy, and that is not the same as an
+    empty one.** Nothing was picked up from an inbox, so there is nowhere to
+    move the file to and no archive it belongs in -- the caller named a path
+    and expects it left alone.
+
+    ``movements is None`` therefore means "do not route", and is why the
+    direct path needs no manufactured ``load_cfg`` carrying empty lists.
+
+    Args:
+        outcome: ``"success"`` or ``"failure"`` -- which movement list to run.
+    """
+    if movements is None:
+        return
+
+    # An EMPTY list still goes through. A configured load declaring no moves
+    # for this outcome has a policy that moves nothing, which is not the same
+    # as having no policy -- and keeping the call means a configured load
+    # behaves exactly as it did before movements became a resolved value.
+    _execute_movements(
+        getattr(movements, outcome, []), file_path, paths,
+        ctx=ctx, run_log=run_log,
+    )
+
+
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:
     """Build the transform for one load definition.
 
@@ -480,6 +514,7 @@ def _configured_load(
     run_log: Any,
     data_source: Any,
     load_cfg: Any,
+    explicit_files: Optional[list[Path]] = None,
 ) -> _ConfiguredLoad:
     """Resolve one load definition into the object that runs it.
 
@@ -533,6 +568,7 @@ def _configured_load(
         max_files=getattr(data_source, "max_files_per_run", None),
         name=source_config,
         on_discovered=_record_discovered,
+        explicit_files=explicit_files,
     )
 
 
@@ -746,6 +782,75 @@ def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
                                header_line=header_line)
 
 
+def load_file_to_table(
+    ctx: Any,
+    run_log: Any,
+    conn: Any,
+    file_path: Path,
+    destination: str,
+    *,
+    create_destination: bool = False,
+    file_type: str = "",
+    encoding: str = "utf-8-sig",
+) -> int:
+    """Load one named file into one named table. No configuration at all.
+
+    The direct answer to "load this file into this table over this
+    connection", which for a long time could not be given without first
+    authoring a ``data_sources:`` block.
+
+    **It builds the same object graph a configured feed uses** -- a
+    ``DataFile`` for the format, an ``IdentityTransform``, a ``DataLoader``
+    for the destination -- and runs the same pipeline. It is a different way
+    of CONSTRUCTING the graph, not a second implementation of it.
+
+    What a direct load does not have, and does not pretend to:
+
+    - **no configured columns**, so the schema is inferred from the records;
+    - **no movements**, because nothing was picked up from an inbox and the
+      caller's file is left where they put it;
+    - **no transform**, because there is no conversion step ahead of it.
+
+    Args:
+        ctx: Application context, for logging and any configured widening.
+        run_log: The run's evidence recorder.
+        conn: Open connection, owned by the caller.
+        file_path: The file to load.
+        destination: ``schema.table``, or ``database.schema.table`` where the
+            backend qualifies that way.
+        create_destination: Whether an absent table may be created from the
+            file. False means it must already exist.
+        file_type: Declared format. Empty infers it from the suffix, which
+            REFUSES a suffix naming no known format -- which is why this
+            parameter exists.
+        encoding: How to decode the file. A library parameter with the
+            estate's default; no CLI exposes it.
+
+    Returns:
+        Rows loaded.
+    """
+    schema, table = _parse_destination(destination)
+
+    def _load_one(conn_: Any, per_file_log: Any, path: Path,
+                  **objects: Any) -> int:
+        # movements=None: a direct load has no movement policy, which is not
+        # the same as one that moves nothing.
+        return _load_one_file(
+            ctx, per_file_log, conn_, path, None, None, None, schema, table,
+            movements=None, load_name=f"{schema}.{table}", **objects,
+        )
+
+    return _ConfiguredLoad(
+        load_one_file=_load_one,
+        explicit_files=[Path(file_path)],
+        transform=IdentityTransform(),
+        loader=_build_data_loader(ctx, schema, table, create_destination),
+        file_type=file_type,
+        encoding=encoding,
+        name=f"direct:{schema}.{table}",
+    ).load(conn, run_log)
+
+
 def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path) -> int:
     """Load exactly one file into its destination table. No discovery, no hooks.
 
@@ -767,8 +872,14 @@ def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path
     # The shared Connection is not closed here: it outlives this load and is
     # held by every other consumer of the same name.
     conn = shared_connection(ctx, str(conn_name)).handle()
-    return _load_one_file(ctx, run_log, conn, file_path, transform_cfg, load_cfg,
-                          data_source.paths, schema, table)
+
+    # Through a ConfiguredLoad like every other caller, so this is the same
+    # object graph a discovered load runs -- one file selected explicitly
+    # rather than found by pattern. Calling the per-file step directly would
+    # be the second construction path this step exists to remove.
+    return _configured_load(
+        ctx, run_log, data_source, load_cfg, explicit_files=[file_path],
+    ).load(conn, run_log)
 
 
 def run_load(
@@ -1903,6 +2014,8 @@ def _load_one_file(
     transform: Any = None,
     loader: Any = None,
     data_file_for: Any = None,
+    movements: Any = None,
+    load_name: str = "",
 ) -> int:
     """
     Load one file into the landing table.
@@ -1940,15 +2053,29 @@ def _load_one_file(
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
     try:
-        create_declared = _create_destination_declared(load_cfg)
+        # RESOLVED, not re-read. A configured load supplies its definition's
+        # movements; a DIRECT load has none, because nothing was picked up
+        # from an inbox and there is nowhere to move it to. None means "do
+        # not route", which is different from "route nowhere".
+        if movements is None and load_cfg is not None:
+            movements = getattr(load_cfg, "movements", None)
+        if not load_name:
+            load_name = str(getattr(load_cfg, "name", "") or "load")
 
         # ONE CONSTRUCTION PATH. Handed the definition's own objects where a
-        # ConfiguredLoad is driving; building them only when called directly,
-        # which is the single-file entry point. Re-reading the configuration
-        # here when it has already been read would be a second graph that
-        # looks identical and can drift.
+        # ConfiguredLoad is driving; building them only when called directly.
+        # Re-reading the configuration here when it has already been read
+        # would be a second graph that looks identical and can drift.
         if loader is None:
-            loader = _build_data_loader(ctx, schema, table, create_declared)
+            loader = _build_data_loader(
+                ctx, schema, table, _create_destination_declared(load_cfg),
+            )
+
+        # Asked of the LOADER, which owns the policy, rather than re-read
+        # from configuration. A direct load declares it as an argument and
+        # has no config to read; reading config here would have refused its
+        # own --create.
+        create_declared = loader.create_destination
 
         # EXISTENCE ASKED ONCE, and its answer serves both decisions: how to
         # validate the file, and whether the destination must be created.
@@ -1962,7 +2089,7 @@ def _load_one_file(
             # rejected_path would strand a good file for a fault it did not
             # cause; every later file would fail identically anyway.
             raise ConfigError(
-                f"load '{getattr(load_cfg, 'name', '?')}' requires destination "
+                f"load '{load_name}' requires destination "
                 f"{schema}.{table}, and it does not exist. Set "
                 f"create_destination_table: true under that load's 'load:' "
                 f"block to have the loader create it."
@@ -2030,8 +2157,7 @@ def _load_one_file(
                     schema=schema,
                     table=table,
                 )
-                _execute_movements(load_cfg.movements.failure, file_path, paths,
-                                   ctx=ctx, run_log=run_log)
+                _route_file(ctx, run_log, movements, "failure", file_path, paths)
                 log_exit(ctx, f"_load_one_file rejected (structure): "
                               f"{file_path.name}", _logger)
                 return 0
@@ -2046,8 +2172,7 @@ def _load_one_file(
                 schema=schema,
                 table=table,
             )
-            _execute_movements(load_cfg.movements.failure, file_path, paths,
-                               ctx=ctx, run_log=run_log)
+            _route_file(ctx, run_log, movements, "failure", file_path, paths)
             log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
             return 0
 
@@ -2080,8 +2205,7 @@ def _load_one_file(
             table=table,
         )
 
-        _execute_movements(load_cfg.movements.success, file_path, paths,
-                           ctx=ctx, run_log=run_log)
+        _route_file(ctx, run_log, movements, "success", file_path, paths)
         log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
         return len(rows)
 
@@ -2094,12 +2218,11 @@ def _load_one_file(
         _log_loader_step_failure(
             ctx,
             run_log, exc,
-            failed_step_id=getattr(load_cfg, "name", "load"),
-            failed_step_name=getattr(load_cfg, "name", "load"),
+            failed_step_id=load_name,
+            failed_step_name=load_name,
             related_path=str(file_path),
         )
-        _execute_movements(load_cfg.movements.failure, file_path, paths,
-                               ctx=ctx, run_log=run_log)
+        _route_file(ctx, run_log, movements, "failure", file_path, paths)
         log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
         return 0
 
