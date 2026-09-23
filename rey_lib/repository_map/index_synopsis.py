@@ -81,8 +81,8 @@ class IndexFacet:
     population: str
     group_by: tuple[str, ...]
     parent: str | None = None
-    top: int = 20
-    exemplars: int = 3
+    top: int = 15
+    exemplars: int = 2
 
 
 #: Every facet, in the order a reader meets them. All seven populations appear,
@@ -90,21 +90,27 @@ class IndexFacet:
 #: whole index, while evidence cites only what a conclusion needed. Conflating
 #: those two is what makes "all seven populations" a coherent requirement here
 #: and an incoherent one for capability evidence.
+#: `top` is raised only where the population's groups are naturally few enough
+#: to show whole -- a repository list that omitted repositories would be a poor
+#: map. Where groups run to hundreds the default bound holds and the omission
+#: is reported, which is what `--facet ... --where` is for.
 FACETS: tuple[IndexFacet, ...] = (
-    IndexFacet("repositories", "repository", ("repository_key",), top=50),
-    IndexFacet("symbols_by_repository", "symbol", ("repository",), top=50),
+    IndexFacet("repositories", "repository", ("repository_key",), top=25),
+    IndexFacet("symbols_by_repository", "symbol", ("repository",), top=25),
     IndexFacet("symbols_by_path", "symbol", ("repository", "relative_path"),
                parent="symbols_by_repository"),
-    IndexFacet("symbol_kinds", "symbol", ("symbol_kind",), top=50),
-    IndexFacet("edge_kinds", "edge", ("edge_kind",), top=50),
+    IndexFacet("symbol_kinds", "symbol", ("symbol_kind",), top=25),
+    IndexFacet("edge_kinds", "edge", ("edge_kind",), top=25),
+    # The bulkiest by far: to_reference values are long, and 55 groups of them
+    # carried a third of the whole synopsis. Drill in rather than widen.
     IndexFacet("edges_by_repository", "edge", ("source_repository", "edge_kind"),
-               parent="edge_kinds", top=50),
+               parent="edge_kinds", top=12, exemplars=1),
     IndexFacet("database_schemas", "db_object", ("schema_name", "object_type"),
-               top=50),
+               top=25),
     IndexFacet("database_objects", "db_member", ("schema_name", "object_name"),
                parent="database_schemas"),
-    IndexFacet("concepts_by_root", "concept", ("root_concept_key",), top=50),
-    IndexFacet("code_relations", "code_relation", ("relation_kind",), top=50),
+    IndexFacet("concepts_by_root", "concept", ("root_concept_key",), top=25),
+    IndexFacet("code_relations", "code_relation", ("relation_kind",), top=25),
 )
 
 
