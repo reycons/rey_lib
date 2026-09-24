@@ -208,6 +208,11 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         "get_table_columns",
         "create_staging_table_if_not_exists",
         "bulk_insert",
+        # Optional by design, and the only one here that is. A provider
+        # without it loses nothing: the record-based path remains the
+        # guaranteed way to load anything, so support is an opportunity
+        # rather than a requirement.
+        "insert_from_path",
     }
 )
 
@@ -1344,6 +1349,55 @@ class DBAdapter:
         """
         insert_rows = self._require_provider_capability(conn, "bulk_insert")
         return insert_rows(conn, schema, table, rows, columns)
+
+    def insert_from_path(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+        source_path: Any,
+        columns: list[str],
+    ) -> int:
+        """Insert into ``schema.table`` straight from a file the provider reads.
+
+        The non-row equivalent of ``bulk_insert``: the same rows arrive, read
+        by the engine over the file rather than carried through this process.
+
+        **ASK BEFORE CALLING.** Unlike every other method here this is
+        OPTIONAL -- ``supports_provider_capability(conn, "insert_from_path")``
+        answers whether this connection's provider has it, and a caller that
+        does not ask gets the same refusal any missing capability raises. The
+        record-based path stays the guaranteed one.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        schema : str
+            Target schema (or database.schema).
+        table : str
+            Target table name.
+        source_path : Any
+            The file to read. What the provider can read is the provider's
+            answer; nothing here interprets the path.
+        columns : list[str]
+            Column names defining the insert order.
+
+        Returns
+        -------
+        int
+            Rows inserted, as the ENGINE counted them. Zero means the source
+            held no rows -- a real answer, not a failure.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot insert from a path.
+        """
+        insert_native = self._require_provider_capability(
+            conn, "insert_from_path",
+        )
+        return insert_native(conn, schema, table, source_path, columns)
 
     def is_truncation_error(self, exc: Exception) -> bool:
         """

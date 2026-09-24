@@ -466,6 +466,46 @@ def table_exists(
     return len(rows) > 0
 
 
+def get_table_columns(
+    conn: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+) -> list[str]:
+    """Return one table's column names in ordinal order.
+
+    The adapter's describe contract, answered for DuckDB. It was DECLARED and
+    not implemented, and the gap was not cosmetic: the loader asks this to
+    decide whether its destination exists and what to validate a file
+    against, so DuckDB could create a table and insert into it but could not
+    be the destination of a load at all.
+
+    Ordinal order, because that is what the contract promises and what an
+    insert column list is built from -- alphabetical would silently reorder
+    every insert built from it.
+
+    Read from ``information_schema``, as ``table_exists`` above does, so both
+    answers come from the same catalog rather than one of them from a PRAGMA
+    that could disagree.
+
+    Args:
+        conn: Open connection handle.
+        schema: The table's schema.
+        table: The table.
+
+    Returns:
+        Column names in ordinal order. An EMPTY LIST means the table does not
+        exist -- a table that does exist always has at least one column, which
+        is what lets a caller tell the two apart.
+    """
+    rows = conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = ? AND table_name = ? "
+        "ORDER BY ordinal_position",
+        [schema, table],
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # Governed SQL-file transformation
 #
@@ -585,6 +625,97 @@ def register_csv_source(
     _logger.debug(
         "Registered CSV relation '%s' from %s", relation_name, path
     )
+
+
+def insert_from_path(
+    conn: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+    source_path: Path | str,
+    columns: list[str],
+) -> int:
+    """Insert straight from a file DuckDB can read, without materializing it.
+
+    The equivalent of reading the file into records and inserting them, done
+    by the engine over the file itself. Nothing here decides WHETHER that is
+    appropriate -- a caller asks for it only when it has established that the
+    destination exists, that the source declares its structure, and that the
+    transform has an equivalent non-row form.
+
+    **RETURNS THE ENGINE'S COUNT, and the count is load-bearing.** A caller
+    reproduces the empty-source refusal from it, so a wrong answer would
+    silently accept a file with nothing in it:
+
+        > 0   that many rows were inserted
+          0   the source held no rows; nothing was added
+
+    Read from the result set, NOT from ``rowcount``. DuckDB returns the
+    inserted count as a one-row, one-column result, and reports ``rowcount``
+    as ``-1`` for the same statement -- so the obvious attribute is the wrong
+    one, and reaching for it would report "no rows" for every load.
+
+    **NO TRANSACTION IS OPENED HERE.** The statement is atomic: a failure
+    part-way through leaves the destination exactly as it was and the
+    connection usable. Wrapping it would add a boundary whose rollback could
+    reach further than this one statement, which is the opposite of what a
+    caller sharing a connection needs.
+
+    **A LOAD TAKING THIS PATH FORGOES THE WIDENING RETRY.** That repair
+    measures the widest value per column from the records, and there are no
+    records here. It costs nothing for this provider, which does not enforce
+    ``VARCHAR(n)`` and declares no truncation error at all -- but a provider
+    that truncates should weigh it before implementing this.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Open DuckDB connection. The caller owns it and its commit.
+    schema : str
+        Target schema name.
+    table : str
+        Target table name.
+    source_path : Path | str
+        The file to read. Its extension selects the reader; a format DuckDB
+        cannot read is refused rather than guessed at.
+    columns : list[str]
+        Column names, in insert order. Selected by name from the source, so
+        the source's own column order does not have to match.
+
+    Returns
+    -------
+    int
+        Rows inserted. Zero for a source holding no rows.
+
+    Raises
+    ------
+    ConfigError
+        If the path is empty or its format has no DuckDB reader.
+    DatabaseError
+        If the insert fails.
+    """
+    source = file_source_expression(source_path)
+    col_list = ", ".join(f'"{name}"' for name in columns)
+    sql = (
+        f'INSERT INTO "{schema}"."{table}" ({col_list}) '
+        f'SELECT {col_list} FROM {source}'
+    )
+    try:
+        result = conn.execute(sql).fetchall()
+    except duckdb.Error as exc:
+        raise DatabaseError(
+            f"Could not insert into {schema}.{table} from "
+            f"'{source_path}': {exc}"
+        ) from exc
+
+    # One row, one column. Defended rather than indexed blindly: this number
+    # is what the caller's empty-source refusal is built on, so an unexpected
+    # shape must not silently become zero.
+    if not result or not result[0]:
+        raise DatabaseError(
+            f"Insert into {schema}.{table} from '{source_path}' did not "
+            f"report how many rows it inserted."
+        )
+    return int(result[0][0])
 
 
 def register_text_line_source(

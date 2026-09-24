@@ -72,6 +72,10 @@ _CALLS: dict[str, tuple] = {
     "get_table_columns": ("schema", "table"),
     "create_staging_table_if_not_exists": ("schema", "table", [("a", "INTEGER")]),
     "bulk_insert": ("schema", "table", [], ["a"]),
+    # Optional for a provider, but dispatched exactly like the rest -- a
+    # caller that did not ask for support first must still get a named
+    # refusal rather than an AttributeError from inside the call.
+    "insert_from_path": ("schema", "table", "/tmp/source.csv", ["a"]),
 }
 
 

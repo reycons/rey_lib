@@ -220,6 +220,56 @@ class DataLoader:
             )
             return self._insert(conn, target, records, columns)
 
+    def load_from_path(
+        self,
+        conn: Any,
+        target: Any,
+        source_path: Any,
+        columns: list[str],
+    ) -> int:
+        """Put a file's rows in an EXISTING destination, without reading it.
+
+        The non-row sibling of ``load``. Same destination, same commit
+        discipline, same insert column list -- the rows are read by the
+        engine over the file instead of being carried through this process.
+
+        **EXISTING DESTINATIONS ONLY, and this does not check.** Deciding
+        that the destination is there, that the source declares its
+        structure, and that the transform has an equivalent non-row form is
+        the caller's; those answers are what make this callable at all. There
+        is no create policy here because creating requires a schema, and a
+        schema is derived from records this path does not have.
+
+        **NO TRANSACTION IS OPENED.** The provider's statement is atomic, so
+        a failure leaves the destination as it was. The commit below is this
+        load's, covering this file and nothing else -- the same rule
+        ``_insert`` states, which is what keeps one file's failure from
+        touching another's committed work.
+
+        No truncation retry either: widening measures the records, and there
+        are none. See ``DBAdapter.insert_from_path``.
+
+        Args:
+            conn: Open connection, owned by the caller and shared.
+            target: The database object identity being loaded into.
+            source_path: The file the provider reads.
+            columns: Insert order, established from the declared structure.
+
+        Returns:
+            Rows inserted, as the engine counted them. Zero is a real answer
+            -- the source held no rows -- and the caller refuses it the same
+            way it refuses an empty read.
+
+        Raises:
+            DatabaseError: If the insert fails.
+        """
+        schema, table = adapter_destination(target)
+        inserted = self.adapter.insert_from_path(
+            conn, schema, table, source_path, columns
+        )
+        conn.commit()
+        return inserted
+
     def _insert(
         self,
         conn: Any,

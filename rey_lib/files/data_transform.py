@@ -264,6 +264,24 @@ class IdentityTransform(DataTransform):
     def _columns_for(self, records: list[dict[str, Any]]) -> list[str]:
         """Return the authoritative column list for these records.
 
+        ONE OF TWO FEEDS into ``columns_for_names``, which is where the rule
+        lives. This one supplies the names a MATERIALISED record carries; a
+        caller that never materialises supplies the names its source
+        declares. Re-implementing the comparison on either side is how the
+        two come to disagree about the same file.
+
+        Reads ``records[0]`` and nothing else, which is what makes the other
+        feed possible at all.
+        """
+        return self.columns_for_names(list(records[0].keys()))
+
+    def columns_for_names(self, actual: list[str]) -> list[str]:
+        """Return the authoritative column list, given the names in hand.
+
+        **THE RULE, STATED ONCE**, over ordered names rather than records --
+        so a path that never materialises records performs exactly this
+        comparison rather than an approximation of it.
+
         **Ordered comparison, not a set comparison.** Order is load-bearing
         here: a destination created in one order is later validated against a
         file header in another, and that mismatch would surface on the NEXT
@@ -272,15 +290,22 @@ class IdentityTransform(DataTransform):
         hash declared anywhere but last reorders the output -- which is
         exactly the case this catches.
 
+        Args:
+            actual: The produced column names, IN ORDER. A materialised
+                caller reads them off its first record; a non-row caller
+                reads them off the structure its source declares.
+
+        Returns:
+            The authoritative columns -- the configured ones where
+            configuration declares any, otherwise the names given.
+
         Raises:
-            DataFileStructureError: When the records do not match what
+            DataFileStructureError: When the names do not match what
                 configuration declared. Raised BEFORE any DDL or insert. Left
                 to the insert it would arrive as a missing-column database
                 error after the table had already been created -- a database
                 error for a configuration or file-drift problem.
         """
-        actual = list(records[0].keys())
-
         if self.columns is None:
             return actual
 

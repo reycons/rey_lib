@@ -2087,6 +2087,122 @@ def _build_output_path(
 
 
 
+def _reject_structure(
+    ctx: Any,
+    run_log: Any,
+    structure_exc: DataFileStructureError,
+    file_path: Any,
+    schema: str,
+    table: str,
+    movements: Any,
+    paths: Any,
+) -> int:
+    """Refuse one file for a structural fault, recording why.
+
+    SHARED BY BOTH EXECUTION PATHS, so a file refused without being
+    materialized produces the same evidence as one refused after being read.
+    The validation NAME comes from the error, because only the check that ran
+    knows what it was -- ``load_header`` and ``configured_columns`` both
+    arrive here.
+
+    Returns:
+        0. A file fault is not a run fault.
+    """
+    _logger.error("%s — file rejected: %s", structure_exc, file_path.name)
+    log_validation_result(run_log,
+        validation_name=structure_exc.validation_name,
+        status="failed",
+        message=str(structure_exc),
+        path=str(file_path),
+        schema=schema,
+        table=table,
+    )
+    _route_file(ctx, run_log, movements, "failure", file_path, paths)
+    log_exit(ctx, f"_load_one_file rejected (structure): "
+                  f"{file_path.name}", _logger)
+    return 0
+
+
+def _reject_empty(
+    ctx: Any,
+    run_log: Any,
+    file_path: Any,
+    schema: str,
+    table: str,
+    movements: Any,
+    paths: Any,
+) -> int:
+    """Refuse one file that produced no rows.
+
+    SHARED BY BOTH EXECUTION PATHS. The materialised path knows the source
+    was empty because reading it produced nothing; the non-row path knows
+    because the engine reported inserting nothing. Different evidence for the
+    same fact, and the same refusal.
+
+    Returns:
+        0.
+    """
+    _logger.warning("No rows produced from file: %s", file_path.name)
+    log_validation_result(run_log,
+        validation_name="load_rows",
+        status="failed",
+        message="No rows produced",
+        path=str(file_path),
+        schema=schema,
+        table=table,
+    )
+    _route_file(ctx, run_log, movements, "failure", file_path, paths)
+    log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
+    return 0
+
+
+def _non_row_execution_possible(
+    source: Any,
+    transform: Any,
+    loader: Any,
+    conn: Any,
+    exists: bool,
+) -> bool:
+    """Whether this load can be executed without materializing its records.
+
+    **CAN THE EXECUTION ENVIRONMENT USE IT**, which is deliberately not "does
+    the target's provider read the source". The latter is true of a file and
+    false of database-to-database, where the source is already a relation and
+    nothing reads a file at all.
+
+    Four questions, and every one of them has to answer yes:
+
+    1. **The transform offers an equivalent non-row form.** ``None`` means
+       row-by-row only, which is every transform until it says otherwise.
+       Asked of the transform because equivalence is its claim to make.
+    2. **The source DECLARES its structure.** A header states every column in
+       order before a row is read, so the file can be validated and its
+       column order established without materializing it. A source that only
+       exhibits its structure -- keys on each record, positions in each line
+       -- cannot, and has nothing to offer here. This is a source primitive,
+       not a format test: no name is checked.
+    3. **The destination already exists.** Creating one needs a schema, and a
+       schema is derived from records this path will not have. An absent
+       destination is not a refusal of the load, only of this path.
+    4. **The provider implements it.** Resolved from the provider module by
+       ``supports_provider_capability``, so nothing declares support twice
+       and a provider that lacks the function simply answers no.
+
+    Returns:
+        True when all four hold. False is never a failure -- it means the
+        materialised path runs, which is the guaranteed one.
+    """
+    if transform is None or transform.execution_form() is None:
+        return False
+    if not getattr(source, "declares_structure", False):
+        return False
+    if not exists:
+        return False
+    return bool(
+        loader.adapter.supports_provider_capability(conn, "insert_from_path")
+    )
+
+
 def _load_one_file(
     source: Any,
     transform: Any,
@@ -2220,6 +2336,48 @@ def _load_one_file(
         # before the rows, record keys only after, and a headerless file
         # states its width nowhere but in its rows. This step knows none of
         # that.
+        if transform is None:
+            transform = _build_identity_transform(transform_cfg)
+
+        if _non_row_execution_possible(source, transform, loader, conn, exists):
+            # THE SAME TWO CHECKS, from the structure the file declares
+            # instead of from records. Neither is skipped and neither is
+            # reimplemented: `validate` is the half of `read_validated` that
+            # reads no rows, and the configured-columns rule is asked over
+            # ordered names by both paths.
+            try:
+                source.validate(expected_columns)
+                columns = transform.columns_for_names(source.source_structure())
+            except DataFileStructureError as structure_exc:
+                return _reject_structure(
+                    ctx, run_log, structure_exc, file_path, schema, table,
+                    movements, paths,
+                )
+
+            inserted = loader.load_from_path(conn, target, file_path, columns)
+            if not inserted:
+                # The source held no rows. Reported by the engine rather than
+                # counted here, and refused exactly as an empty read is.
+                return _reject_empty(
+                    ctx, run_log, file_path, schema, table, movements, paths,
+                )
+
+            _logger.info(
+                "Loaded: %s → %s.%s  rows=%d  (non-row execution)",
+                file_path.name, schema, table, inserted,
+            )
+            log_row_count(run_log,
+                count_name="loaded_rows",
+                count=inserted,
+                subject=file_path.name,
+                path=str(file_path),
+                schema=schema,
+                table=table,
+            )
+            _route_file(ctx, run_log, movements, "success", file_path, paths)
+            log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
+            return inserted
+
         try:
             # ALWAYS VALIDATED, but against different things.
             #
@@ -2233,41 +2391,20 @@ def _load_one_file(
             # file defect, raised after DDL.
             rows = source.read_validated(expected_columns)
         except DataFileStructureError as structure_exc:
-            _logger.error("%s — file rejected: %s",
-                          structure_exc, file_path.name)
-            log_validation_result(run_log,
-                validation_name=structure_exc.validation_name,
-                status="failed",
-                message=str(structure_exc),
-                path=str(file_path),
-                schema=schema,
-                table=table,
+            return _reject_structure(
+                ctx, run_log, structure_exc, file_path, schema, table,
+                movements, paths,
             )
-            _route_file(ctx, run_log, movements, "failure", file_path, paths)
-            log_exit(ctx, f"_load_one_file rejected (structure): "
-                          f"{file_path.name}", _logger)
-            return 0
 
         if not rows:
-            _logger.warning("No rows produced from file: %s", file_path.name)
-            log_validation_result(run_log,
-                validation_name="load_rows",
-                status="failed",
-                message="No rows produced",
-                path=str(file_path),
-                schema=schema,
-                table=table,
+            return _reject_empty(
+                ctx, run_log, file_path, schema, table, movements, paths,
             )
-            _route_file(ctx, run_log, movements, "failure", file_path, paths)
-            log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
-            return 0
 
         # The transform says what the produced records contain. On the load
         # path it is IDENTITY -- the transform stage ran earlier and wrote its
         # output to this file -- but it is explicit rather than absent, so the
         # pipeline is one shape whether or not a transform is configured.
-        if transform is None:
-            transform = _build_identity_transform(transform_cfg)
         rows        = transform.transform(rows)
         column_defs = transform.logical_schema(rows)
         columns     = [name for name, _sql_type in column_defs]
@@ -2300,8 +2437,22 @@ def _load_one_file(
         # now, so a failure before that point has nothing to undo -- and
         # calling rollback on nothing would replace a real database error
         # with an AttributeError.
+        #
+        # THE SAME HAZARD, ONE LEVEL DOWN: a provider whose statements are
+        # already atomic has no transaction open to undo, and answers the
+        # call by raising -- DuckDB says "cannot rollback - no transaction is
+        # active". Undoing nothing is exactly what was wanted there, so the
+        # refusal is not a failure and must not be allowed to replace the
+        # error being reported. The original exception is what the run log
+        # and the operator need.
         if conn is not None:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception as rollback_exc:   # noqa: BLE001 -- see above
+                _logger.debug(
+                    "Nothing to roll back for '%s': %s",
+                    file_path.name, rollback_exc,
+                )
         _logger.error(
             "Database error loading '%s' — rolled back: %s",
             file_path.name, exc,

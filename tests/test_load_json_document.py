@@ -47,6 +47,15 @@ class _Adapter:
         self.created: list[tuple] = []
         self.inserted: list[tuple] = []
 
+    def supports_provider_capability(self, _conn, _capability) -> bool:
+        """No native execution path, so the materialised one runs.
+
+        Answered rather than absent: the loader asks every adapter
+        this, and a double that omitted it would fail on the question
+        rather than on what the test is about.
+        """
+        return False
+
     def table_exists(self, _conn, _schema, _table) -> bool:
         return self._exists
 

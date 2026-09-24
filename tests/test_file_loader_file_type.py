@@ -54,7 +54,9 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     monkeypatch.setattr(
         file_loader, "_db_adapter",
         SimpleNamespace(table_exists=lambda *_a, **_k: True,
-                            get_table_columns=lambda *_a, **_k: ["a", "b"]),
+                            get_table_columns=lambda *_a, **_k: ["a", "b"],
+                            # No native path, so the reader is still reached.
+                            supports_provider_capability=lambda *_a, **_k: False),
     )
 
     def _reader(_path, **kwargs):
@@ -162,7 +164,9 @@ class TestTheConfiguredTypeReachesTheReader:
         monkeypatch.setattr(
             file_loader, "_db_adapter",
             SimpleNamespace(table_exists=lambda *_a, **_k: True,
-                            get_table_columns=lambda *_a, **_k: ["a", "b"]),
+                            get_table_columns=lambda *_a, **_k: ["a", "b"],
+                            # No native path, so the reader is still reached.
+                            supports_provider_capability=lambda *_a, **_k: False),
         )
 
         # The refusal is the REGISTRY's now: an unknown token names no
