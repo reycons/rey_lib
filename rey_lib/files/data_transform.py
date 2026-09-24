@@ -33,12 +33,18 @@ at all -- is the same three objects as a configured feed.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 from rey_lib.files.data_file.base import DataFileStructureError
 from rey_lib.profiling.file_profiler import infer_sql_type
 
-__all__ = ["DataTransform", "IdentityTransform"]
+__all__ = [
+    "IDENTITY_EXECUTION",
+    "DataTransform",
+    "ExecutionForm",
+    "IdentityTransform",
+]
 
 #: Declared transform type -> the neutral SQL type it produces.
 #:
@@ -54,12 +60,47 @@ _TRANSFORM_TYPE_MAP: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class ExecutionForm:
+    """An execution form EQUIVALENT to a transform's row behaviour.
+
+    The invariant is equivalence, not speed and not nativeness. A form that
+    some engine could execute but that does something different from
+    ``transform`` is the failure this type exists to make impossible to
+    describe by accident.
+
+    NEUTRAL BY CONSTRUCTION. It names no engine, carries no statement, and
+    holds nothing about how anything runs. What a consumer does with it is
+    the consumer's; deciding whether it is worth using at all belongs to
+    whatever is executing, not here.
+
+    **NO FIELDS YET, and that is deliberate.** A column list is earned by the
+    first transform whose ROW behaviour projects; a predicate by the first
+    that filters. Describing shapes no implementation has would be guessing
+    at semantics nothing can check -- and the guess would be consumed as
+    though it had been verified.
+    """
+
+
+#: The one form that exists today: every row, every column, unchanged.
+#:
+#: A single value rather than a per-call construction, because there is one
+#: identity semantic and two instances of it would invite a comparison that
+#: means nothing.
+IDENTITY_EXECUTION = ExecutionForm()
+
+
 class DataTransform(ABC):
     """One mapping from source records to logical records."""
 
     @abstractmethod
     def transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return the logical records these source records produce."""
+        """Return the logical records these source records produce.
+
+        THE GUARANTEED FORM. Every transform can do this; ``execution_form``
+        is the optional alternative, and this remains the fallback whenever
+        that one cannot be used.
+        """
 
     @abstractmethod
     def logical_schema(
@@ -70,6 +111,25 @@ class DataTransform(ABC):
 
         Ordered, because the order is what an insert is built from.
         """
+
+    def execution_form(self) -> ExecutionForm | None:
+        """An equivalent non-row form for this transform, if it has one.
+
+        ``None`` means row-by-row only, which is every transform until it
+        says otherwise. Whether an existing form is usable -- or preferable
+        -- is not answered here: that depends on where the records come from,
+        where they are going and how many there are, none of which a
+        transform can see.
+
+        CONCRETE, NOT ABSTRACT. An implementation that has no such form
+        should not have to say so, and every transform written before this
+        existed keeps working unchanged.
+
+        Returns:
+            The form, or None. An implementation returning one is promising
+            it is EQUIVALENT to what ``transform`` does to the same records.
+        """
+        return None
 
 
 class IdentityTransform(DataTransform):
@@ -108,6 +168,27 @@ class IdentityTransform(DataTransform):
         there is nothing left to apply.
         """
         return records
+
+    def execution_form(self) -> ExecutionForm:
+        """Identity: every row, every column, unchanged.
+
+        **``self.columns`` IS DELIBERATELY NOT CONSULTED**, and that is the
+        subtle part. Declared columns are authoritative for
+        ``logical_schema`` and for what a destination is created from -- they
+        are NOT the semantics of ``transform``, which returns records
+        untouched, including keys configuration never mentioned.
+
+        So describing this as "project these columns" would be describing a
+        different operation. A record ``{id, name, extra}`` against declared
+        ``(id, name)`` keeps ``extra`` here; a projection would drop it.
+
+        It LOOKS safe because ``logical_schema`` refuses that mismatch -- but
+        that refusal lives in another method, runs after this one, and on a
+        path that never materialises records may not run at all. Which is
+        exactly where a form gets used. So the only semantics provably equal
+        to this transform's is identity.
+        """
+        return IDENTITY_EXECUTION
 
     def logical_schema(
         self,

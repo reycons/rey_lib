@@ -15,7 +15,12 @@ from __future__ import annotations
 
 import pytest
 
-from rey_lib.files.data_transform import DataTransform, IdentityTransform
+from rey_lib.files.data_transform import (
+    IDENTITY_EXECUTION,
+    DataTransform,
+    ExecutionForm,
+    IdentityTransform,
+)
 
 
 class TestIdentityIsActuallyIdentity:
@@ -154,3 +159,106 @@ class TestTheBoundary:
         """A transform that only mapped records could not create a table."""
         assert hasattr(DataTransform, "transform")
         assert hasattr(DataTransform, "logical_schema")
+
+
+class TestTheOptionalExecutionForm:
+    """A transform may offer an equivalent non-row form. Most will not.
+
+    The contract used to be list[dict] -> list[dict] and nothing else, so an
+    implementation with an equivalent form that something could execute
+    without materialising had no way to say so. The interface forced the
+    materialisation.
+
+    What it is NOT: a claim about speed. A transform cannot see the provider,
+    the target or the data volume, so it cannot know whether its form is
+    worth using. Whatever executes decides that.
+    """
+
+    def test_a_transform_without_one_answers_none(self) -> None:
+        """And inherits the answer rather than restating it.
+
+        Concrete on the base, so every transform written before this existed
+        keeps working and a new one is not made to answer a question it has
+        no answer to.
+        """
+        class _Bare(DataTransform):
+            def transform(self, records):
+                return records
+
+            def logical_schema(self, records):
+                return []
+
+        assert _Bare().execution_form() is None
+        assert "execution_form" not in vars(_Bare)
+
+    def test_identity_answers_the_identity_form(self) -> None:
+        assert IdentityTransform().execution_form() is IDENTITY_EXECUTION
+
+    def test_the_form_is_identity_even_when_columns_are_declared(self) -> None:
+        """THE TRAP, pinned so it cannot be walked into later.
+
+        Declared columns make `ExecutionForm(columns=...)` look like the
+        natural description of this transform. It would describe a DIFFERENT
+        OPERATION -- see the next test -- so the form is identity either way.
+        """
+        declared = IdentityTransform(columns=["id", "name"])
+
+        assert declared.execution_form() is IDENTITY_EXECUTION
+        assert declared.execution_form() is IdentityTransform().execution_form()
+
+    def test_transform_keeps_a_key_configuration_never_declared(self) -> None:
+        """WHY the form is not a projection, asserted rather than asserted-in-prose.
+
+        `transform` returns records untouched. A projection over the declared
+        columns would drop `extra`; this does not. Two different operations,
+        so one cannot describe the other.
+
+        `logical_schema` does refuse this mismatch -- but in another method,
+        after this one, and on a path that never materialises records it may
+        not run at all. That is precisely where a form would be used, so the
+        refusal cannot be what makes a projection safe.
+        """
+        records = [{"id": 1, "name": "x", "extra": "y"}]
+
+        produced = IdentityTransform(columns=["id", "name"]).transform(records)
+
+        assert produced == [{"id": 1, "name": "x", "extra": "y"}]
+        assert "extra" in produced[0]
+
+    def test_the_form_describes_semantics_and_nothing_else(self) -> None:
+        """It carries no fields, and that is the design rather than a stub.
+
+        A column list is earned by the first transform whose ROW behaviour
+        projects; a predicate by the first that filters. Describing shapes no
+        implementation has would be guessing at semantics nothing can check.
+        """
+        assert not getattr(ExecutionForm, "__dataclass_fields__", {})
+        assert ExecutionForm() == ExecutionForm()
+
+    def test_the_module_depends_on_no_database_or_provider(self) -> None:
+        """NEUTRALITY, guarded over dependencies rather than over prose.
+
+        The rule: this module carries no provider-specific implementation, no
+        provider identifier, no SQL expression and no SQL execution contract.
+
+        Asserted on IMPORTS, which cannot be satisfied by accident. A guard
+        banning the word "provider" or scanning for SQL keywords would fire
+        on the docstrings that explain the rule -- which happened once
+        already today, when the transfer step's format guard tripped over its
+        own comment.
+        """
+        from pathlib import Path as _Path
+
+        import rey_lib.files.data_transform as module
+
+        source = _Path(module.__file__).read_text(encoding="utf-8")
+        imports = [
+            line.strip() for line in source.splitlines()
+            if line.strip().startswith(("import ", "from "))
+        ]
+
+        assert imports, "no imports found -- the guard read the wrong thing"
+        for line in imports:
+            assert "rey_lib.db" not in line, line
+            for engine in ("duckdb", "postgres", "mysql", "sqlserver", "sqlalchemy"):
+                assert engine not in line.lower(), line
