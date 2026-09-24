@@ -660,9 +660,25 @@ class DBAdapter:
         conn: Any,
         sql_text: str,
         *,
-        limit: int = 1_000,
+        limit: int | None = 1_000,
     ) -> tuple[list[str], list[dict[str, Any]]]:
-        """Run one read query and return its columns with at most ``limit`` rows."""
+        """Run one read query and return its columns with at most ``limit`` rows.
+
+        ``limit=None`` returns EVERY row, which is a different act from a
+        larger number: a reader previewing a result asks for a bound, and a
+        consumer that must have all of it -- a load reading its source -- has
+        no bound to name. Naming a big one instead would be a guess that
+        silently truncates when the result outgrows it.
+
+        It is this rather than a second function because "read this query" is
+        one act, and two spellings of it would be one mechanism implemented
+        twice.
+
+        NOT ``execute_page``. That is a reader's paging control and every
+        provider caps it -- 500 rows -- so reading a whole source through it
+        would be thousands of round trips against a bound designed to protect
+        a grid.
+        """
         try:
             provider = self._provider_for_conn(conn)
         except ConfigError:
@@ -681,7 +697,12 @@ class DBAdapter:
             cursor = conn.cursor()
             cursor.execute(sql_text)
             columns = [str(column[0]) for column in (cursor.description or [])]
-            values = cursor.fetchmany(max(1, int(limit))) if columns else []
+            if not columns:
+                return columns, []
+            values = (
+                cursor.fetchall() if limit is None
+                else cursor.fetchmany(max(1, int(limit)))
+            )
             return columns, [dict(zip(columns, row)) for row in values]
         except Exception as exc:
             _logger.debug(

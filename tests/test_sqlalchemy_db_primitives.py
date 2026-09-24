@@ -59,6 +59,9 @@ class _Result:
     def fetchmany(self, limit: int) -> list[tuple[Any, ...]]:
         return self._rows[:limit]
 
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
     def first(self) -> tuple[Any, ...] | None:
         return self._rows[0] if self._rows else None
 
@@ -561,3 +564,35 @@ def test_mysql_inventory_uses_inspector_and_keeps_routine_trigger_fallback(
     assert supporting["dependencies"] == [
         {"object_type": "table", "schema": "warehouse", "name": "records"}
     ]
+
+
+def test_postgres_query_rows_unbounded_returns_every_row() -> None:
+    """``limit=None`` is the load's read, and it must not be a bounded one.
+
+    The default is a reader's preview of 1,000 rows. A source read through
+    that bound loses everything past it silently, which is the defect the
+    unbounded form exists to remove -- so this asserts the rows, not the call.
+    """
+    conn, _core, _engine = _connection(
+        _Result(columns=("id",), rows=[(1,), (2,), (3,)])
+    )
+
+    columns, rows = DBAdapter().query_rows(
+        conn, "SELECT id FROM records", limit=None
+    )
+
+    assert columns == ["id"]
+    assert rows == [{"id": 1}, {"id": 2}, {"id": 3}]
+
+
+def test_mysql_query_rows_unbounded_returns_every_row() -> None:
+    conn, _core, _engine = _connection(
+        _Result(columns=("id",), rows=[(1,), (2,), (3,)]), provider="mysql"
+    )
+
+    columns, rows = DBAdapter().query_rows(
+        conn, "SELECT id FROM records", limit=None
+    )
+
+    assert columns == ["id"]
+    assert rows == [{"id": 1}, {"id": 2}, {"id": 3}]

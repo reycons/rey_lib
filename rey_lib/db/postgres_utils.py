@@ -314,9 +314,14 @@ def query_rows(
     conn: Any,
     sql_text: str,
     *,
-    limit: int = 1_000,
+    limit: int | None = 1_000,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Execute one bounded read query and normalize its result."""
+    """Execute one read query and normalize its result.
+
+    ``limit=None`` returns every row. A load reading its source has no
+    bound to name, and naming a large one instead silently truncates the
+    day the result outgrows it.
+    """
     from rey_lib.db._sqlalchemy import core_connection
 
     try:
@@ -324,7 +329,12 @@ def query_rows(
 
         result = core_connection(conn).execute(text(sql_text))
         columns = [str(column) for column in result.keys()]
-        values = result.fetchmany(max(1, int(limit))) if columns else []
+        if not columns:
+            return columns, []
+        values = (
+            result.fetchall() if limit is None
+            else result.fetchmany(max(1, int(limit)))
+        )
         return columns, [dict(zip(columns, row)) for row in values]
     except Exception as exc:
         # No rollback: the connection is in AUTOCOMMIT, so a failed read leaves
