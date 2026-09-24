@@ -231,6 +231,91 @@ class TestTheWholeProfileIsOneObject:
         assert DataProfile().clear == ()
 
 
+class TestAReadingCarriesWhatWasMeasured:
+    """The statistics the docstring promised would arrive with this work."""
+
+    #: Every fact a reading can carry beyond its identity.
+    _STATISTICS = (
+        "detected_type", "blank_count", "min_length", "max_length",
+        "min_decimal_places", "max_decimal_places", "min_numeric",
+        "max_numeric", "min_date", "max_date", "sample_values",
+        "null_like_values", "constant_value",
+    )
+
+    def test_a_reading_that_measured_nothing_is_still_a_reading(self) -> None:
+        """Identity alone remains valid -- this ADDS, it does not require."""
+        reading = FieldProfile(name="b", ordinal=2)
+
+        for name in self._STATISTICS:
+            assert getattr(reading, name) is None, name
+
+    def test_absent_is_not_zero(self) -> None:
+        """THE DISTINCTION THIS SHAPE EXISTS TO KEEP.
+
+        `blank_count=0` found no blanks. `blank_count=None` did not look.
+        A profiler that measured nothing could otherwise claim a clean
+        column, which is why the store's columns are nullable too.
+        """
+        measured = FieldProfile(name="b", ordinal=1, blank_count=0)
+        unmeasured = FieldProfile(name="b", ordinal=1)
+
+        assert measured.blank_count == 0
+        assert unmeasured.blank_count is None
+        assert measured != unmeasured
+
+    def test_a_date_reading_keeps_the_text_the_source_carried(self) -> None:
+        """Not parsed to a date: the FORMAT is itself a fact about the source."""
+        reading = FieldProfile(name="d", ordinal=1, min_date="2024-01-15")
+
+        assert reading.min_date == "2024-01-15"
+
+    def test_a_reading_is_frozen_like_the_rest(self) -> None:
+        assert FieldProfile.__dataclass_params__.frozen
+
+
+class TestTheProfileDescribesTheDelivery:
+    """Descriptive facts, and the two kinds deliberately kept out."""
+
+    def test_field_count_is_not_stored_beside_the_fields(self) -> None:
+        """One answer, not two that can disagree.
+
+        The stored one would be the one that disagreed -- which is exactly
+        the defect where a 19-field header was recorded as a field_count
+        of 2.
+        """
+        assert not hasattr(DataProfile(), "field_count")
+
+        profile = DataProfile(fields=(ProfileField(name="a", ordinal=1),))
+        assert len(profile.fields) == 1
+
+    def test_identity_is_not_part_of_what_data_is(self) -> None:
+        """Which stored profile this is belongs to the lifecycle, not here.
+
+        A description carrying its own identity could not describe a source
+        that has none.
+        """
+        profile = DataProfile()
+
+        for name in ("data_profile_key", "file_manifest_id",
+                     "installation_id", "run_id", "profile_key"):
+            assert not hasattr(profile, name), name
+
+    def test_row_count_is_the_delivery_not_the_structure(self) -> None:
+        """Two deliveries of one layout differ here and are the same shape."""
+        first = DataProfile(header_definition="a,b", row_count=5)
+        second = DataProfile(header_definition="a,b", row_count=9_000)
+
+        assert first.header_definition == second.header_definition
+        assert first.row_count != second.row_count
+
+    def test_a_profile_that_describes_nothing_still_constructs(self) -> None:
+        profile = DataProfile()
+
+        assert profile.header_definition == ""
+        assert profile.row_count is None
+        assert profile.distribution is None
+
+
 class TestComparison:
     """Described content is comparable; provenance is not part of it."""
 

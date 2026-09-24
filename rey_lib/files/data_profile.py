@@ -60,13 +60,52 @@ class FieldProfile:
     a parallel tuple -- a positional convention would break silently the
     first time a reading covered a subset of the fields.
 
-    Statistics -- detected type, lengths, decimal characteristics, counts --
-    arrive with the work that populates them from stored profiles. This
-    carries identity only, because nothing produces the rest yet.
+    **EVERY STATISTIC DEFAULTS TO ``None``, AND ``None`` IS NOT ZERO.**
+    ``blank_count=0`` is a measurement that found no blanks;
+    ``blank_count=None`` is "not measured". Conflating them would let a
+    profile that measured nothing claim a clean column, and it is why the
+    store's columns are nullable too.
+
+    A profiler fills what it measured and leaves the rest alone. A reading
+    that carries identity only -- which is all this could express before --
+    is still a legitimate reading.
+
+    Attributes:
+        name: Which field this reads.
+        ordinal: Its position, 1-based, matching its ``ProfileField``.
+        detected_type: The type the values were found to be, in the
+            profiler's vocabulary.
+        blank_count: How many values were blank.
+        min_length: The shortest non-blank value.
+        max_length: The longest non-blank value.
+        min_decimal_places: Fewest decimal places seen.
+        max_decimal_places: Most decimal places seen.
+        min_numeric: Smallest value, where the field is numeric.
+        max_numeric: Largest value, where the field is numeric.
+        min_date: Earliest value, as the text the source carried. Text
+            rather than a date, because a profile records what was THERE --
+            parsing it here would discard the format that is itself a fact.
+        max_date: Latest, on the same terms.
+        sample_values: Representative values, as the profiler ranked them.
+        null_like_values: Values found to stand in for absence.
+        constant_value: The single value, where the field never varies.
     """
 
     name: str
     ordinal: int
+    detected_type: str | None = None
+    blank_count: int | None = None
+    min_length: int | None = None
+    max_length: int | None = None
+    min_decimal_places: int | None = None
+    max_decimal_places: int | None = None
+    min_numeric: float | None = None
+    max_numeric: float | None = None
+    min_date: str | None = None
+    max_date: str | None = None
+    sample_values: Any = None
+    null_like_values: Any = None
+    constant_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +122,25 @@ class DataProfile:
             A routine that did not run is not evidence.
         clear: Readings of the values as they are.
         redacted: Readings of the values after redaction.
+        header_definition: The structure as the source STATED it -- the
+            header line the file actually carried, as text. Empty where the
+            source declares nothing.
+        row_count: How many rows this profiling event saw. An attribute of
+            the delivery, not of the structure: two deliveries of one layout
+            differ here and are still the same shape.
+        distribution: Dataset-level facts the profiler measured, carried
+            opaquely. Opaque ON PURPOSE -- what a profiler chooses to count
+            is its own, and naming each one here would make this object grow
+            a field every time a profiler learned to measure something.
+
+    **FIELD COUNT IS NOT A FIELD.** It is ``len(fields)``. Storing it beside
+    them would create two answers that can disagree, and the one that
+    disagreed would be the stored one.
+
+    **IDENTITY IS NOT HERE EITHER** -- no profile key, no file, no
+    installation, no run. This says what data IS; which stored profile it is
+    and what it was read from are the lifecycle's, and a description that
+    carried its own identity could not describe a source that has none.
 
     THE TWO FLAGS ARE DIFFERENT QUESTIONS, and conflating them is the failure
     this shape exists to prevent:
@@ -108,6 +166,9 @@ class DataProfile:
     structure_validated: bool = False
     clear: tuple[FieldProfile, ...] = ()
     redacted: tuple[FieldProfile, ...] = ()
+    header_definition: str = ""
+    row_count: int | None = None
+    distribution: Any = None
 
 
 def profile_for(source: Any) -> DataProfile:
