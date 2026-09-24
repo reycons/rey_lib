@@ -68,6 +68,17 @@ class DelimitedNoHeaderFile(DataFile):
         """The names a caller supplied, or an empty list for none."""
         return [str(name) for name in (self.settings.get("columns") or [])]
 
+    @property
+    def declares_structure(self) -> bool:
+        """Only when a caller named the columns.
+
+        Declared names ARE a structural declaration -- they say what every
+        field is called, in order, without reading anything. Positional
+        fallbacks are not: col001..colNNN are derived from the first row's
+        width, and a later row could be wider.
+        """
+        return bool(self.declared_columns)
+
     def _fields(self) -> list[list[str]]:
         """Every physical row's fields, with nothing taken as a header.
 

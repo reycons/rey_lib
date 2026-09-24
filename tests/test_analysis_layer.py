@@ -564,3 +564,34 @@ class TestAnalyzerEndToEnd:
 
         with pytest.raises(AIUnavailableError):
             analyzer.analyze(TextDataSource("text"), analysis_id="run-003")
+
+
+class TestThePreparedInputProfileIsNotTheDataSProfile:
+    """Two different concepts, and they no longer share a name.
+
+    `PreparedInputProfile` reports the sampled, redacted rows an LLM was
+    actually given. `DataProfile` in `rey_lib.files` reports what the data
+    IS. Both were called `DataProfile`, in one repository, with no boundary
+    to tell them apart.
+    """
+
+    def test_preparation_publishes_the_prepared_input_name(self) -> None:
+        from rey_lib.analysis import preparation
+
+        assert hasattr(preparation, "PreparedInputProfile")
+        assert "PreparedInputProfile" in preparation.__all__
+        assert not hasattr(preparation, "DataProfile")
+
+    def test_the_load_model_owns_the_other_one(self) -> None:
+        """Namespaced apart, so each name means one thing where it lives.
+
+        No repository-wide ban on the name: another namespaced `DataProfile`
+        elsewhere may be perfectly legitimate, and outlawing it sight unseen
+        would be a rule nobody could justify.
+        """
+        from rey_lib.files.data_profile import DataProfile
+        from rey_lib.analysis.preparation import PreparedInputProfile
+
+        assert DataProfile is not PreparedInputProfile
+        assert DataProfile.__module__ == "rey_lib.files.data_profile"
+        assert PreparedInputProfile.__module__ == "rey_lib.analysis.preparation"

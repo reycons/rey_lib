@@ -33,7 +33,7 @@ not_in     Value is not in a list.
 
 Public API
 ----------
-DataProfile
+PreparedInputProfile
     Basic statistics computed after sampling — stored in the audit record.
 PreparedInput
     Result of the full preparation pipeline.
@@ -50,7 +50,7 @@ from typing import Any, Optional
 from rey_lib.encryption import sha256_text
 from rey_lib.analysis.datasource import SourceData
 
-__all__ = ["DataProfile", "PreparedInput", "prepare"]
+__all__ = ["PreparedInputProfile", "PreparedInput", "prepare"]
 
 # Map of operator strings to comparison callables.
 _OPS: dict[str, Any] = {
@@ -72,11 +72,13 @@ _OPS: dict[str, Any] = {
 
 
 @dataclass(frozen=True)
-class DataProfile:
-    """Basic statistics about the data seen by the LLM.
+class PreparedInputProfile:
+    """Basic statistics about the PREPARED INPUT an LLM was given.
 
-    Computed from the sampled, redacted rows — reflects what was actually
-    sent to the provider, not the raw source.
+    Named for what it describes. It is NOT the profile of the data -- it
+    reports the sampled, redacted rows that were actually sent, which is a
+    different thing from what the source contains. ``DataProfile`` in
+    ``rey_lib.files`` is the data's own profile.
 
     Attributes
     ----------
@@ -118,7 +120,7 @@ class PreparedInput:
         Prompt-ready text representation of the data.
     input_hash : str
         SHA-256 of ``rendered_text`` — stored in the execution record.
-    profile : DataProfile
+    profile : PreparedInputProfile
         Statistics about what the LLM will see.
     source_ref : str
         Human-readable label from the originating DataSource.
@@ -128,7 +130,7 @@ class PreparedInput:
 
     rendered_text: str
     input_hash:    str
-    profile:       DataProfile
+    profile:       PreparedInputProfile
     source_ref:    str
     source_hash:   str
 
@@ -190,7 +192,7 @@ def prepare(
     rendered   = _render_tabular(rows, source_ref=source_data.source_ref, truncated=was_truncated)
     input_hash = _sha256(rendered)
 
-    profile = DataProfile(
+    profile = PreparedInputProfile(
         columns           = cols_used,
         rows_extracted    = rows_extracted,
         rows_after_filter = rows_after_filter,
@@ -364,7 +366,7 @@ def _prepare_text(
             text = text.replace(col, mask)
 
     input_hash = _sha256(text)
-    profile    = DataProfile(
+    profile    = PreparedInputProfile(
         columns           = [],
         rows_extracted    = 0,
         rows_after_filter = 0,

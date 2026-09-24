@@ -35,6 +35,12 @@ class DelimitedHeaderFile(DataFile):
         """Dispatched as CSV, which is what the delimited reader answers to."""
         return "CSV"
 
+    @property
+    def declares_structure(self) -> bool:
+        """The header is the declaration: every column, in order, before any
+        row is read."""
+        return True
+
     def source_structure(self) -> list[str]:
         """The header line's fields, in the order it lists them.
 

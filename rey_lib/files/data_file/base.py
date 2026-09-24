@@ -142,6 +142,26 @@ class DataFile(ABC):
         something meaningless to say so.
         """
 
+    @property
+    def declares_structure(self) -> bool:
+        """Whether this file STATES its structure, or only exhibits it.
+
+        A header names every column in order before a row is read; a declared
+        fixed-width layout does the same. Those files DECLARE. A keyed file
+        carries its names on each record and a positional file carries them
+        nowhere, so their structure is inferred from whatever was read -- and
+        the first record proves nothing about the second.
+
+        A source-specific primitive, not a profile question. What a profile
+        does with it -- whether a structural definition counts as complete --
+        is the resolver's, which is why this says only what this file knows
+        about itself.
+
+        Defaults to False: inferred is the weaker claim, and a format that
+        genuinely declares says so.
+        """
+        return False
+
     def record_shape(self) -> RecordShape:
         """Whether this file holds records, and where they are.
 
