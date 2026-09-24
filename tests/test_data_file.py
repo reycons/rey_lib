@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
+from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import (
     DataFile,
-    DataFileStructureError,
     data_file_for,
     registered_formats,
 )
@@ -223,7 +223,7 @@ class TestDelimitedHeaderFile:
         The deliberate difference from a keyed source, whose key order is
         incidental.
         """
-        with pytest.raises(DataFileStructureError):
+        with pytest.raises(DataStructureError):
             data_file_for(_csv(tmp_path, "b,a\n1,x\n")).validate(["a", "b"])
 
     def test_with_no_destination_only_the_header_must_exist(
@@ -233,7 +233,7 @@ class TestDelimitedHeaderFile:
         data_file_for(_csv(tmp_path, "a,b\n1,x\n")).validate(None)
 
     def test_a_file_with_no_header_is_refused(self, tmp_path: Path) -> None:
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             data_file_for(_csv(tmp_path, "\n\n")).validate(None)
 
         assert "no header" in str(raised.value)
@@ -247,7 +247,7 @@ class TestDelimitedHeaderFile:
         source = data_file_for(_csv(tmp_path, "a,b\n1,x\n"))
         source.read = lambda: pytest.fail("read before validation")  # type: ignore[method-assign]
 
-        with pytest.raises(DataFileStructureError):
+        with pytest.raises(DataStructureError):
             source.read_validated(["WRONG"])
 
 
@@ -291,7 +291,7 @@ class TestJsonlFile:
         from the first record, so an extra key BECOMES a column against a
         table that has none.
         """
-        with pytest.raises(DataFileStructureError):
+        with pytest.raises(DataStructureError):
             data_file_for(_jsonl(tmp_path, *records)).read_validated(["a", "b"])
 
     def test_with_no_destination_the_FIRST_record_sets_the_contract(
@@ -305,7 +305,7 @@ class TestJsonlFile:
         """
         path = _jsonl(tmp_path, {"a": 1, "b": "x"}, {"a": 2, "c": "y"})
 
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             data_file_for(path).read_validated(None)
 
         assert "record 2" in str(raised.value)
@@ -494,7 +494,7 @@ class TestDelimitedNoHeaderFile:
         """
         source = self._write(tmp_path, "1,x\n2\n")
 
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             data_file_for(source, file_type="DELIMITED_NO_HEADER").validate()
 
         assert "row 2" in str(raised.value)
@@ -504,7 +504,7 @@ class TestDelimitedNoHeaderFile:
     ) -> None:
         source = self._write(tmp_path, "1,x\n")
 
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             data_file_for(
                 source, file_type="DELIMITED_NO_HEADER"
             ).read_validated(["a", "b", "c"])

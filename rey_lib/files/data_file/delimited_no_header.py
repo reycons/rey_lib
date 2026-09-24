@@ -41,7 +41,8 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.files.data_file import data_file
-from rey_lib.files.data_file.base import DataFile, DataFileStructureError
+from rey_lib.data.errors import DataStructureError
+from rey_lib.files.data_file.base import DataFile
 from rey_lib.logs import get_logger
 
 __all__ = ["DelimitedNoHeaderFile"]
@@ -88,7 +89,7 @@ class DelimitedNoHeaderFile(DataFile):
         matching what the delimited reader has always done with them.
 
         Raises:
-            DataFileStructureError: If the file cannot be read.
+            DataStructureError: If the file cannot be read.
         """
         from rey_lib.files.csv import CsvReadError, open_csv
 
@@ -107,7 +108,7 @@ class DelimitedNoHeaderFile(DataFile):
                 if any((value or "").strip() for value in row.fields)
             ]
         except (CsvReadError, OSError) as exc:
-            raise DataFileStructureError(
+            raise DataStructureError(
                 f"Cannot read '{self.path.name}': {exc}"
             ) from exc
 
@@ -158,7 +159,7 @@ class DelimitedNoHeaderFile(DataFile):
         the only self-consistency a headerless file has.
 
         Raises:
-            DataFileStructureError: Naming the first row that disagrees.
+            DataStructureError: Naming the first row that disagrees.
         """
         rows = self._fields()
         if not rows:
@@ -174,7 +175,7 @@ class DelimitedNoHeaderFile(DataFile):
                 ",".join(expected_columns),
                 ",".join(declared),
             )
-            raise DataFileStructureError(
+            raise DataStructureError(
                 "Header mismatch", validation_name="load_header"
             )
 
@@ -184,7 +185,7 @@ class DelimitedNoHeaderFile(DataFile):
         for ordinal, fields in enumerate(rows, start=1):
             if len(fields) == width:
                 continue
-            raise DataFileStructureError(
+            raise DataStructureError(
                 f"'{self.path.name}' row {ordinal} has {len(fields)} field(s) "
                 f"where {width} were expected, so its values cannot be "
                 f"matched to columns by position.",

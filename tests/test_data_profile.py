@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 from rey_lib.files.data_file import DataFile, data_file_for
-from rey_lib.files.data_profile import (
+from rey_lib.data.data_profile import (
     DataProfile,
     FieldProfile,
     ProfileField,
@@ -408,7 +408,7 @@ class TestTheResolverIsAnAdapter:
         """
         from pathlib import Path as _Path
 
-        import rey_lib.files.data_profile as module
+        import rey_lib.data.data_profile as module
 
         source = _Path(module.__file__).read_text(encoding="utf-8")
         imports = "\n".join(

@@ -27,7 +27,7 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files import file_loader
+from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 
@@ -100,9 +100,9 @@ def _jsonl(tmp_path: Path, records=({"a": 1, "b": "x"},)) -> Path:
 def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
           keyed=False, moved=None, records=({"a": 1, "b": "x"},)):
     """Run _load_one_file with a recording adapter and a declared setting."""
-    monkeypatch.setattr(file_loader, "_db_adapter", adapter)
+    monkeypatch.setattr(load_operation, "_db_adapter", adapter)
     monkeypatch.setattr(
-        file_loader, "_execute_movements",
+        load_operation, "execute_movements",
         lambda *a, **k: moved.append(a) if moved is not None else None,
     )
 
@@ -111,7 +111,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
         load_block.create_destination_table = declared
 
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
             handle=lambda: SimpleNamespace(
                 commit=lambda: None, rollback=lambda: None,
@@ -119,7 +119,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
         ),
     )
     file_type = "JSONL" if keyed else "CSV"
-    return file_loader._load_one_file(
+    return load_operation._load_one_file(
         data_file_for(_jsonl(tmp_path, records) if keyed else _csv(tmp_path),
                       file_type=file_type, encoding="utf-8"),
         None,
@@ -195,12 +195,12 @@ class TestTheDestinationIsThere:
         moved: list = []
         path = tmp_path / "source.csv"
         path.write_text("a,WRONG\n1,x\n", encoding="utf-8")
-        monkeypatch.setattr(file_loader, "_db_adapter", adapter)
-        monkeypatch.setattr(file_loader, "_execute_movements",
+        monkeypatch.setattr(load_operation, "_db_adapter", adapter)
+        monkeypatch.setattr(load_operation, "execute_movements",
                             lambda *a, **k: moved.append(a))
 
         monkeypatch.setattr(
-            file_loader, "shared_connection",
+            load_operation, "shared_connection",
             lambda _ctx, _name: SimpleNamespace(
                 handle=lambda: SimpleNamespace(
                     commit=lambda: None, rollback=lambda: None,
@@ -208,7 +208,7 @@ class TestTheDestinationIsThere:
             ),
         )
 
-        loaded = file_loader._load_one_file(
+        loaded = load_operation._load_one_file(
             data_file_for(path, file_type="CSV", encoding="utf-8"),
             None,
             _TARGET,

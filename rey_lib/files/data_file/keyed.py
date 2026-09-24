@@ -22,11 +22,8 @@ from typing import Any
 
 from rey_lib.files import file_utils
 from rey_lib.files.data_file import data_file
-from rey_lib.files.data_file.base import (
-    DataFile,
-    DataFileStructureError,
-    RecordShape,
-)
+from rey_lib.data.errors import DataStructureError
+from rey_lib.files.data_file.base import DataFile, RecordShape
 from rey_lib.logs import get_logger
 
 __all__ = ["JsonFile", "JsonlFile", "KeyedFile"]
@@ -179,7 +176,7 @@ class KeyedFile(DataFile):
                 # SHORT, because this is what the run log records. The
                 # diagnosis above goes to the logger; putting it here instead
                 # would change recorded evidence.
-                raise DataFileStructureError(
+                raise DataStructureError(
                     "Record keys do not match the destination columns",
                     validation_name="load_record_keys",
                 )
@@ -212,7 +209,7 @@ class KeyedFile(DataFile):
                     f"unexpected {extra}" if extra else "",
                 ) if part
             )
-            raise DataFileStructureError(
+            raise DataStructureError(
                 f"'{self.path.name}' record {ordinal} does not match the "
                 f"first record's fields: {detail}.",
                 validation_name="load_record_consistency",
@@ -354,11 +351,11 @@ class JsonFile(KeyedFile):
         exactly how the document failed.
 
         Raises:
-            DataFileStructureError: When the document is not a table.
+            DataStructureError: When the document is not a table.
         """
         shape = _record_shape(*_summarise(document))
         if not shape.holds_records:
-            raise DataFileStructureError(
+            raise DataStructureError(
                 self._why_not_a_table(document),
                 validation_name="load_json_shape",
             )
@@ -406,13 +403,13 @@ class JsonFile(KeyedFile):
         position can be named, rather than at the insert.
 
         Raises:
-            DataFileStructureError: Naming the first entry that is not an
+            DataStructureError: Naming the first entry that is not an
                 object, because one is enough to stop the load.
         """
         for ordinal, row in enumerate(rows, start=1):
             if isinstance(row, dict):
                 continue
-            raise DataFileStructureError(
+            raise DataStructureError(
                 f"'{self.path.name}': entry {ordinal} of {where} is a "
                 f"{type(row).__name__}, not an object, so it names no columns.",
                 validation_name="load_json_shape",

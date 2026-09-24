@@ -66,7 +66,6 @@ from rey_lib.files.jsonl import (
     read_jsonl_file,
     search_jsonl_file,
 )
-from rey_lib.files.file_loader import load_files
 from rey_lib.files.log_run_rollback import (
     LogRunRollbackError,
     SourceFileMutationEvidenceError,
@@ -166,7 +165,6 @@ __all__ = [
     "match_header",
     "parse_date_from_filename",
     "TransformError",
-    "load_files",
     "LogRunRollbackError",
     "SourceFileMutationEvidenceError",
     "SourceFileMutationEvidenceResult",

@@ -22,8 +22,8 @@ import pytest
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
-from rey_lib.files.configured_load import ConfiguredLoad
-from rey_lib.files.data_transform import IdentityTransform
+from rey_lib.load.configured_load import ConfiguredLoad
+from rey_lib.data.data_transform import IdentityTransform
 
 
 def _files(tmp_path: Path, *names: str) -> Path:
@@ -268,7 +268,7 @@ class TestTheBoundary:
         """
         from pathlib import Path as _Path
 
-        import rey_lib.files.configured_load as module
+        import rey_lib.load.configured_load as module
 
         source = _Path(module.__file__).read_text(encoding="utf-8")
 
@@ -285,7 +285,7 @@ class TestTheBoundary:
         """
         from pathlib import Path as _Path
 
-        import rey_lib.files.configured_load as module
+        import rey_lib.load.configured_load as module
 
         assert "file_loader" not in _Path(module.__file__).read_text(
             encoding="utf-8"

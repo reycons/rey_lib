@@ -18,7 +18,8 @@ from typing import Any
 
 from rey_lib.files import file_utils
 from rey_lib.files.data_file import data_file
-from rey_lib.files.data_file.base import DataFile, DataFileStructureError
+from rey_lib.data.errors import DataStructureError
+from rey_lib.files.data_file.base import DataFile
 from rey_lib.logs import get_logger
 
 __all__ = ["DelimitedHeaderFile"]
@@ -52,7 +53,7 @@ class DelimitedHeaderFile(DataFile):
             The declared columns, or an empty list for a file with no content.
 
         Raises:
-            DataFileStructureError: If the file cannot be read.
+            DataStructureError: If the file cannot be read.
         """
         try:
             with self.path.open(encoding=self.encoding, errors="replace") as fh:
@@ -61,7 +62,7 @@ class DelimitedHeaderFile(DataFile):
                     if stripped:
                         return stripped.split(self.settings.get("delimiter", ","))
         except OSError as exc:
-            raise DataFileStructureError(
+            raise DataStructureError(
                 f"Cannot read '{self.path.name}': {exc}"
             ) from exc
         return []
@@ -90,7 +91,7 @@ class DelimitedHeaderFile(DataFile):
         """
         if expected_columns is None:
             if not self.source_structure():
-                raise DataFileStructureError(
+                raise DataStructureError(
                     f"'{self.path.name}' has no header line, so its columns "
                     "cannot be established."
                 )
@@ -98,12 +99,12 @@ class DelimitedHeaderFile(DataFile):
 
         try:
             actual = self.source_structure()
-        except DataFileStructureError as exc:
+        except DataStructureError as exc:
             # An unreadable file was recorded as a header failure before this
             # moved, so it still is. The message says what actually happened;
             # only the run log's NAME is preserved, because changing recorded
             # evidence is not this step's business.
-            raise DataFileStructureError(
+            raise DataStructureError(
                 str(exc), validation_name="load_header"
             ) from exc
 
@@ -121,7 +122,7 @@ class DelimitedHeaderFile(DataFile):
         # SHORT, because this is what the run log records. The diagnosis above
         # goes to the logger; putting it here instead would change recorded
         # evidence.
-        raise DataFileStructureError(
+        raise DataStructureError(
             "Header mismatch", validation_name="load_header"
         )
 

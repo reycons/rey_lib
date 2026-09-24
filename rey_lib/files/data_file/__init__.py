@@ -12,7 +12,11 @@ data_file           Decorator registering a subtype under one or more tokens.
 data_file_for       Build the DataFile for a path, by declared type or suffix.
 registered_formats  The tokens that resolve to a subtype.
 DataFile            The contract.
-DataFileStructureError
+
+A structural failure is NOT re-exported here. It is
+``rey_lib.data.errors.DataStructureError`` -- a data object's structure being
+wrong is not a fact about files, and a convenience alias in this package would
+put the file family back in front of it.
 """
 
 from __future__ import annotations
@@ -22,16 +26,11 @@ import pkgutil
 from pathlib import Path
 from typing import Any, Callable
 
-from rey_lib.files.data_file.base import (
-    DEFAULT_ENCODING,
-    DataFile,
-    DataFileStructureError,
-)
+from rey_lib.files.data_file.base import DEFAULT_ENCODING, DataFile
 from rey_lib.files.file_utils import file_type_for_suffix
 
 __all__ = [
     "DataFile",
-    "DataFileStructureError",
     "data_file",
     "data_file_for",
     "registered_formats",

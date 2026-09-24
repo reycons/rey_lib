@@ -32,9 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rey_lib.errors.error_utils import AppError
-
-__all__ = ["DataFile", "DataFileStructureError", "RecordShape"]
+__all__ = ["DataFile", "RecordShape"]
 
 
 @dataclass(frozen=True)
@@ -69,29 +67,6 @@ class RecordShape:
 
 #: What the loader already defaults to, kept so nothing changes by moving.
 DEFAULT_ENCODING = "utf-8-sig"
-
-
-class DataFileStructureError(AppError):
-    """A file whose structure is not what it must be.
-
-    Distinct from a database error on purpose: a file that does not match its
-    destination is a FILE fault, and reporting it as a failed insert -- which
-    is what happens when the check is missing -- names the wrong thing.
-
-    Carries ``validation_name``, which is what the RUN LOG records. The
-    subtype supplies it because only the subtype knows which check it ran;
-    a caller deriving it would be branching on format to write a log line.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        validation_name: str = "data_file_structure",
-    ) -> None:
-        """Hold the failure and the name the run log knows it by."""
-        super().__init__(message)
-        self.validation_name = validation_name
 
 
 class DataFile(ABC):
@@ -205,7 +180,7 @@ class DataFile(ABC):
         against nothing.
 
         Raises:
-            DataFileStructureError: When the file does not satisfy whichever
+            DataStructureError: When the file does not satisfy whichever
                 question was asked.
         """
 
@@ -225,7 +200,7 @@ class DataFile(ABC):
         Implementations must read the source **once**.
 
         Raises:
-            DataFileStructureError: As ``validate``.
+            DataStructureError: As ``validate``.
         """
 
     def __repr__(self) -> str:

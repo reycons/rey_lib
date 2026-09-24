@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.files import file_loader
+from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 
@@ -62,16 +62,16 @@ def _recorded(tmp_path: Path, monkeypatch, run_log, source: Path,
     """Run one load to rejection and return what was recorded about it."""
     captured: dict = {}
 
-    monkeypatch.setattr(file_loader, "_db_adapter", _Adapter())
-    monkeypatch.setattr(file_loader, "_execute_movements",
+    monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+    monkeypatch.setattr(load_operation, "execute_movements",
                         lambda *_a, **_k: None)
     monkeypatch.setattr(
-        file_loader, "log_validation_result",
+        load_operation, "log_validation_result",
         lambda _run_log, **kwargs: captured.update(kwargs),
     )
 
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
             handle=lambda: SimpleNamespace(
                 commit=lambda: None, rollback=lambda: None,
@@ -79,7 +79,7 @@ def _recorded(tmp_path: Path, monkeypatch, run_log, source: Path,
         ),
     )
 
-    loaded = file_loader._load_one_file(
+    loaded = load_operation._load_one_file(
         data_file_for(source, file_type=file_type, encoding="utf-8"),
         None,
         _TARGET,
@@ -161,12 +161,12 @@ class TestTheEvidenceSurvivedTheMove:
         source = tmp_path / "wrong.jsonl"
         source.write_text('{"a": 1, "c": 2}\n', encoding="utf-8")
 
-        monkeypatch.setattr(file_loader, "_db_adapter", _Adapter())
-        monkeypatch.setattr(file_loader, "_execute_movements",
+        monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+        monkeypatch.setattr(load_operation, "execute_movements",
                             lambda *args, **_k: moved.append(args))
 
         monkeypatch.setattr(
-            file_loader, "shared_connection",
+            load_operation, "shared_connection",
             lambda _ctx, _name: SimpleNamespace(
                 handle=lambda: SimpleNamespace(
                     commit=lambda: None, rollback=lambda: None,
@@ -174,7 +174,7 @@ class TestTheEvidenceSurvivedTheMove:
             ),
         )
 
-        loaded = file_loader._load_one_file(
+        loaded = load_operation._load_one_file(
             data_file_for(source, file_type="JSONL", encoding="utf-8"),
             None,
             _TARGET,

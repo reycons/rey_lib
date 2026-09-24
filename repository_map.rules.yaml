@@ -208,6 +208,37 @@ architecture_rules:
     edge_kinds:
       - call
 
+  # A load is one operation between two data objects, and neither endpoint
+  # family owns it. It lived under files/ for as long as the only thing ever
+  # loaded was a file, which made that family privileged: a database source
+  # could only be added by widening a package whose name already asserted the
+  # answer. The direction is one way now -- load reaches into files, db and
+  # data; none of them reaches back -- and this is what holds it that way.
+  - rule_id: the_file_family_does_not_reach_into_the_load
+    forbidden_target_globs:
+      - "rey_lib.load*"
+    scope_path_globs:
+      - "rey_lib/files/*"
+    edge_kinds:
+      - import
+      - re_export
+
+  # The shared data contracts are the bottom of that stack. A contract both
+  # families answer must not reach up into either of them -- which is not
+  # hypothetical: DataTransform raised the structural error while it was
+  # defined under files/, so the shared layer imported one implementation
+  # family to describe a failure that belongs to neither.
+  - rule_id: shared_data_contracts_name_no_implementation_family
+    forbidden_target_globs:
+      - "rey_lib.files*"
+      - "rey_lib.db*"
+      - "rey_lib.load*"
+    scope_path_globs:
+      - "rey_lib/data/*"
+    edge_kinds:
+      - import
+      - re_export
+
 # A written specifier only resolves to a file the inventory already contains.
 module_extensions:
   - ".py"

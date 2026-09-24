@@ -36,7 +36,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from rey_lib.files.data_file.base import DataFileStructureError
+from rey_lib.data.errors import DataStructureError
 from rey_lib.profiling.file_profiler import infer_sql_type
 
 __all__ = [
@@ -216,7 +216,7 @@ class IdentityTransform(DataTransform):
             Ordered ``(column_name, sql_type)`` pairs, empty for no records.
 
         Raises:
-            DataFileStructureError: When configuration declares columns and
+            DataStructureError: When configuration declares columns and
                 these records do not carry exactly those, in that order.
         """
         if not records:
@@ -300,7 +300,7 @@ class IdentityTransform(DataTransform):
             configuration declares any, otherwise the names given.
 
         Raises:
-            DataFileStructureError: When the names do not match what
+            DataStructureError: When the names do not match what
                 configuration declared. Raised BEFORE any DDL or insert. Left
                 to the insert it would arrive as a missing-column database
                 error after the table had already been created -- a database
@@ -327,7 +327,7 @@ class IdentityTransform(DataTransform):
                 f"{self.columns}, found {actual}"
             )
 
-        raise DataFileStructureError(
+        raise DataStructureError(
             f"the records do not match the configured columns: {detail}.",
             validation_name="configured_columns",
         )

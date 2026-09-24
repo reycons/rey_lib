@@ -29,14 +29,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.files import configured_load, file_loader
-from rey_lib.files.data_file import DataFileStructureError
+from rey_lib.load import load_operation
+from rey_lib.load import configured_load
+from rey_lib.data.errors import DataStructureError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.data_file.base import RecordShape
 from rey_lib.files.data_file.keyed import JsonFile, JsonlFile
-from rey_lib.files.data_loader import DataLoader
-from rey_lib.files.data_transform import DataTransform
+from rey_lib.db.data_loader import DataLoader
+from rey_lib.data.data_transform import DataTransform
 
 
 class _Adapter:
@@ -97,18 +98,18 @@ def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
     exercises the path a reader takes rather than a per-file step underneath
     it.
     """
-    monkeypatch.setattr(file_loader, "_db_adapter", adapter)
+    monkeypatch.setattr(load_operation, "_db_adapter", adapter)
     # Resolved from the target now, so it is substituted where it is resolved.
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
             handle=lambda: SimpleNamespace(
                 commit=lambda: None, rollback=lambda: None,
             )
         ),
     )
-    monkeypatch.setattr(file_loader, "_execute_movements", lambda *a, **k: None)
-    return file_loader.load_file_to_table(
+    monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
+    return load_operation.load_file_to_table(
         SimpleNamespace(log_depth=0), run_log,
         source if source is not None else _document(tmp_path, _EXPORTED),
         destination, "a_connection", **kwargs,
@@ -135,7 +136,7 @@ class TestJsonLoadsThroughTheCanonicalChain:
         three objects here at all.
         """
         used: dict = {}
-        stage = file_loader._load_one_file
+        stage = load_operation._load_one_file
 
         def _spy(source, transform, target, **context):
             used.update(
@@ -143,7 +144,7 @@ class TestJsonLoadsThroughTheCanonicalChain:
             )
             return stage(source, transform, target, **context)
 
-        monkeypatch.setattr(file_loader, "_load_one_file", _spy)
+        monkeypatch.setattr(load_operation, "_load_one_file", _spy)
 
         loaded = _load(tmp_path, monkeypatch, run_log, _Adapter())
 
@@ -163,13 +164,13 @@ class TestJsonLoadsThroughTheCanonicalChain:
         is resolved below, from the target.
         """
         seen: dict = {}
-        stage = file_loader._load_one_file
+        stage = load_operation._load_one_file
 
         def _spy(source, transform, target, **context):
             seen.update(context)
             return stage(source, transform, target, **context)
 
-        monkeypatch.setattr(file_loader, "_load_one_file", _spy)
+        monkeypatch.setattr(load_operation, "_load_one_file", _spy)
         _load(tmp_path, monkeypatch, run_log, _Adapter())
 
         assert "conn" not in seen
@@ -185,9 +186,9 @@ class TestJsonLoadsThroughTheCanonicalChain:
         be re-entered, quietly or otherwise, because only a data object
         crosses the boundary at all.
         """
-        assert not hasattr(file_loader, "_read_unmigrated_source")
-        assert not hasattr(file_loader, "_UNMIGRATED_FILE_TYPES")
-        assert not hasattr(file_loader, "_validate_load_header")
+        assert not hasattr(load_operation, "_read_unmigrated_source")
+        assert not hasattr(load_operation, "_UNMIGRATED_FILE_TYPES")
+        assert not hasattr(load_operation, "_validate_load_header")
 
         assert _load(tmp_path, monkeypatch, run_log, _Adapter()) == 2
 
@@ -253,7 +254,7 @@ class TestWhatIsRefusedRatherThanGuessedAt:
 
     def _refusal(self, tmp_path: Path, document, name="asset.json") -> str:
         source = _document(tmp_path, document, name=name)
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             JsonFile(source).read()
         return str(raised.value)
 
@@ -487,7 +488,7 @@ class TestTheRefusalsSurvivedTheExtraction:
         }
         for label, (document, expected) in cases.items():
             source = _document(tmp_path, document, name="refused.json")
-            with pytest.raises(DataFileStructureError) as raised:
+            with pytest.raises(DataStructureError) as raised:
                 JsonFile(source).read()
             assert expected in str(raised.value), label
             assert raised.value.validation_name == "load_json_shape", label

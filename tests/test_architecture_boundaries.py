@@ -289,3 +289,38 @@ def test_cli_output_in_folder_maker_is_untouched() -> None:
 
     assert source.count("print(") == 6
     assert "file=sys.stderr" in source
+
+
+def test_the_file_family_does_not_reach_into_the_load(violations) -> None:
+    """A load is not a file concern, and the direction is what says so.
+
+    ``load`` reaches into ``files``, ``db`` and ``data``; none of them reaches
+    back. Without this the extraction would decay the way it arose -- a file
+    module importing the load it used to contain, one convenience at a time,
+    until the package that owns files owns loading again.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == "the_file_family_does_not_reach_into_the_load"
+    ]
+
+    assert offenders == []
+
+
+def test_shared_data_contracts_name_no_implementation_family(violations) -> None:
+    """The contracts both endpoint families answer sit below both of them.
+
+    Not hypothetical. ``DataTransform`` raised ``DataFileStructureError``
+    while that error was defined under ``files/``, so the shared layer
+    imported one implementation family in order to describe a failure that
+    belongs to neither. Moving the error into ``data`` is what made this rule
+    true, and this is what keeps it true.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == "shared_data_contracts_name_no_implementation_family"
+    ]
+
+    assert offenders == []

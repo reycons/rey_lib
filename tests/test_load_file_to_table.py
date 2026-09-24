@@ -20,7 +20,8 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files import configured_load, file_loader
+from rey_lib.load import load_operation
+from rey_lib.load import configured_load
 
 
 class _Adapter:
@@ -68,10 +69,10 @@ def _jsonl(tmp_path: Path, *records: dict, name: str = "asset.jsonl") -> Path:
 
 def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
           destination="testing.asset", moved=None, **kwargs) -> int:
-    monkeypatch.setattr(file_loader, "_db_adapter", adapter)
+    monkeypatch.setattr(load_operation, "_db_adapter", adapter)
     # Resolved from the target now, so it is substituted where it is resolved.
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
             handle=lambda: SimpleNamespace(
                 commit=lambda: None, rollback=lambda: None,
@@ -79,10 +80,10 @@ def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
         ),
     )
     monkeypatch.setattr(
-        file_loader, "_execute_movements",
+        load_operation, "execute_movements",
         lambda *a, **k: moved.append(a) if moved is not None else None,
     )
-    return file_loader.load_file_to_table(
+    return load_operation.load_file_to_table(
         SimpleNamespace(log_depth=0), run_log,
         source if source is not None else _jsonl(tmp_path, {"a": 1, "b": "x"}),
         destination, "a_connection", **kwargs,

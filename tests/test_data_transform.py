@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from rey_lib.files.data_transform import (
+from rey_lib.data.data_transform import (
     IDENTITY_EXECUTION,
     DataTransform,
     ExecutionForm,
@@ -148,7 +148,7 @@ class TestTheBoundary:
         """
         from pathlib import Path as _Path
 
-        import rey_lib.files.data_transform as module
+        import rey_lib.data.data_transform as module
 
         source = _Path(module.__file__).read_text(encoding="utf-8")
 
@@ -249,7 +249,7 @@ class TestTheOptionalExecutionForm:
         """
         from pathlib import Path as _Path
 
-        import rey_lib.files.data_transform as module
+        import rey_lib.data.data_transform as module
 
         source = _Path(module.__file__).read_text(encoding="utf-8")
         imports = [

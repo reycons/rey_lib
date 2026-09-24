@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.files import file_loader
+from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.file_utils import KEYED_FILE_TYPES, get_reader
@@ -63,7 +63,7 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
         return len(rows)
 
     monkeypatch.setattr(
-        file_loader, "_db_adapter",
+        load_operation, "_db_adapter",
         SimpleNamespace(
             # These tests are about a destination that IS there; whether an
             # absent one is created is test_file_loader_destination.py.
@@ -74,21 +74,21 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
             is_truncation_error=lambda _exc: False,
         ),
     )
-    monkeypatch.setattr(file_loader, "_execute_movements",
+    monkeypatch.setattr(load_operation, "execute_movements",
                         lambda *_a, **_k: None)
 
     # The connection is resolved from the target now, so it is substituted
     # where it is resolved rather than injected as an argument. Same style as
     # the adapter and the movements beside it.
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
             handle=lambda: SimpleNamespace(
                 commit=lambda: None, rollback=lambda: None,
             )
         ),
     )
-    loaded = file_loader._load_one_file(
+    loaded = load_operation._load_one_file(
         data_file_for(_jsonl(tmp_path, *records),
                       file_type="JSONL", encoding="utf-8"),
         None,

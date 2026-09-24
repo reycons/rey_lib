@@ -24,9 +24,9 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files.data_file import DataFileStructureError
-from rey_lib.files.data_transform import IdentityTransform
-from rey_lib.files.file_loader import _configured_columns
+from rey_lib.data.errors import DataStructureError
+from rey_lib.data.data_transform import IdentityTransform
+from rey_lib.load.load_operation import _configured_columns
 
 _RECORDS = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
 
@@ -112,7 +112,7 @@ class TestRecordsThatDoNotMatch:
         a database error, after DDL, for a configuration or drift problem."""
         transform = IdentityTransform({}, columns=["a", "b", "c"])
 
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             transform.logical_schema(_RECORDS)
 
         assert "missing ['c']" in str(raised.value)
@@ -120,7 +120,7 @@ class TestRecordsThatDoNotMatch:
     def test_an_unexpected_column_is_refused_and_named(self) -> None:
         transform = IdentityTransform({}, columns=["a"])
 
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             transform.logical_schema(_RECORDS)
 
         assert "unexpected ['b']" in str(raised.value)
@@ -136,7 +136,7 @@ class TestRecordsThatDoNotMatch:
         """
         transform = IdentityTransform({}, columns=["b", "a"])
 
-        with pytest.raises(DataFileStructureError) as raised:
+        with pytest.raises(DataStructureError) as raised:
             transform.logical_schema(_RECORDS)
 
         assert "different order" in str(raised.value)
@@ -150,7 +150,7 @@ class TestRecordsThatDoNotMatch:
         """
         transform = IdentityTransform({}, columns=["a"])
 
-        with pytest.raises(DataFileStructureError):
+        with pytest.raises(DataStructureError):
             transform.logical_schema(_RECORDS)
 
 

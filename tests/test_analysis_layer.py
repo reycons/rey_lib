@@ -589,9 +589,9 @@ class TestThePreparedInputProfileIsNotTheDataSProfile:
         elsewhere may be perfectly legitimate, and outlawing it sight unseen
         would be a rule nobody could justify.
         """
-        from rey_lib.files.data_profile import DataProfile
+        from rey_lib.data.data_profile import DataProfile
         from rey_lib.analysis.preparation import PreparedInputProfile
 
         assert DataProfile is not PreparedInputProfile
-        assert DataProfile.__module__ == "rey_lib.files.data_profile"
+        assert DataProfile.__module__ == "rey_lib.data.data_profile"
         assert PreparedInputProfile.__module__ == "rey_lib.analysis.preparation"

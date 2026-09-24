@@ -33,9 +33,9 @@ from rey_lib.db.db_adapter import DBAdapter, _PROVIDER_CONTRACT_CAPABILITIES
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.duckdb_utils import insert_from_path
 from rey_lib.errors.error_utils import DatabaseError
-from rey_lib.files import file_loader
+from rey_lib.load import load_operation
 from rey_lib.files.data_file import data_file_for
-from rey_lib.files.data_transform import IdentityTransform
+from rey_lib.data.data_transform import IdentityTransform
 
 _TARGET = DatabaseObjectIdentity(
     connection="c", catalog="", schema="main", name="asset",
@@ -79,16 +79,16 @@ def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
     """
     if captured is not None:
         monkeypatch.setattr(
-            file_loader, "log_validation_result",
+            load_operation, "log_validation_result",
             lambda _run_log, **kwargs: captured.update(kwargs),
         )
-    monkeypatch.setattr(file_loader, "_db_adapter", adapter or _Adapter())
-    monkeypatch.setattr(file_loader, "_execute_movements", lambda *a, **k: None)
+    monkeypatch.setattr(load_operation, "_db_adapter", adapter or _Adapter())
+    monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(handle=lambda: conn),
     )
-    return file_loader._load_one_file(
+    return load_operation._load_one_file(
         data_file_for(source, file_type="CSV", encoding="utf-8"),
         IdentityTransform(columns=declared) if transform is None else transform,
         _TARGET,
@@ -321,7 +321,7 @@ class TestEveryGateRefusesOnItsOwn:
             exists=True,
         )
         defaults.update(over)
-        return file_loader._non_row_execution_possible(**defaults)
+        return load_operation._non_row_execution_possible(**defaults)
 
     def test_all_four_together_permit_it(self) -> None:
         assert self._possible() is True
@@ -359,14 +359,14 @@ class TestEveryGateRefusesOnItsOwn:
         source = tmp_path / "source.jsonl"
         source.write_text('{"asset_id": "1", "name": "Alpha"}\n', encoding="utf-8")
 
-        monkeypatch.setattr(file_loader, "_db_adapter", _Adapter())
-        monkeypatch.setattr(file_loader, "_execute_movements", lambda *a, **k: None)
+        monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+        monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
         conn = _duck(tmp_path)
         monkeypatch.setattr(
-            file_loader, "shared_connection",
+            load_operation, "shared_connection",
             lambda _ctx, _name: SimpleNamespace(handle=lambda: conn),
         )
-        loaded = file_loader._load_one_file(
+        loaded = load_operation._load_one_file(
             data_file_for(source, file_type="JSONL", encoding="utf-8"),
             IdentityTransform(), _TARGET,
             ctx=SimpleNamespace(log_depth=0), run_log=run_log,

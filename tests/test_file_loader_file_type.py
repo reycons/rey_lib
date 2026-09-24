@@ -18,7 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.files import file_loader, file_utils
+from rey_lib.files import file_utils
+from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 
@@ -52,7 +53,7 @@ def _csv(tmp_path: Path) -> Path:
 def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     """Run _load_one_file far enough to record what the reader was given."""
     monkeypatch.setattr(
-        file_loader, "_db_adapter",
+        load_operation, "_db_adapter",
         SimpleNamespace(table_exists=lambda *_a, **_k: True,
                             get_table_columns=lambda *_a, **_k: ["a", "b"],
                             # No native path, so the reader is still reached.
@@ -71,7 +72,7 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     # was handed.
     monkeypatch.setattr(file_utils, "get_reader", _reader)
     monkeypatch.setattr(
-        file_loader, "shared_connection",
+        load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
             handle=lambda: SimpleNamespace(
                 commit=lambda: None, rollback=lambda: None,
@@ -80,7 +81,7 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     )
 
     with pytest.raises(_Stop):
-        file_loader._load_one_file(
+        load_operation._load_one_file(
             data_file_for(
                 _csv(tmp_path),
                 file_type=getattr(transform_cfg, "file_type", "") or "CSV",
@@ -135,7 +136,7 @@ class TestTheConfiguredTypeReachesTheReader:
         """
         from pathlib import Path as _Path
 
-        import rey_lib.files.file_loader as loader_module
+        import rey_lib.load.load_operation as loader_module
 
         text = _Path(loader_module.__file__).read_text(encoding="utf-8")
         step = text[text.index("def _load_one_file("):]
@@ -162,7 +163,7 @@ class TestTheConfiguredTypeReachesTheReader:
         stubbed here -- that would test the test.
         """
         monkeypatch.setattr(
-            file_loader, "_db_adapter",
+            load_operation, "_db_adapter",
             SimpleNamespace(table_exists=lambda *_a, **_k: True,
                             get_table_columns=lambda *_a, **_k: ["a", "b"],
                             # No native path, so the reader is still reached.

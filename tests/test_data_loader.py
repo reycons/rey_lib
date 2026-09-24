@@ -19,7 +19,7 @@ import pytest
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
-from rey_lib.files.data_loader import DataLoader
+from rey_lib.db.data_loader import DataLoader
 
 _DEFS = [("a", "INTEGER"), ("b", "VARCHAR(20)")]
 _RECORDS = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
@@ -123,7 +123,7 @@ class TestTheDependenciesAreExplicit:
         """
         from pathlib import Path
 
-        import rey_lib.files.data_loader as module
+        import rey_lib.db.data_loader as module
 
         source = Path(module.__file__).read_text(encoding="utf-8")
 
@@ -142,7 +142,7 @@ class TestTheDependenciesAreExplicit:
         """
         from pathlib import Path
 
-        import rey_lib.files.data_loader as module
+        import rey_lib.db.data_loader as module
 
         assert "_parse_destination" not in Path(module.__file__).read_text(
             encoding="utf-8"
@@ -152,7 +152,7 @@ class TestTheDependenciesAreExplicit:
         """A destination does not care what kind of file produced the rows."""
         from pathlib import Path
 
-        import rey_lib.files.data_loader as module
+        import rey_lib.db.data_loader as module
 
         source = Path(module.__file__).read_text(encoding="utf-8")
 
