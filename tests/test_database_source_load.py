@@ -2,10 +2,11 @@
 
     QuerySource -> IdentityTransform -> DatabaseObjectIdentity
 
-THE ARCHITECTURAL PROOF, and deliberately nothing more. There is no public
-entry point for this yet, no CLI and no surface: what is asserted is that a
-source data object with NO FILE PRIMITIVE passes through the same
-``_load_one_file`` every file load uses, and its rows reach the destination.
+THE ARCHITECTURAL PROOF, and the construction site around it. No CLI and no
+surface: what is asserted is that a source data object with NO FILE PRIMITIVE
+passes through the same ``_load_one_file`` every file load uses, that its rows
+reach the destination, and that ``load_query_to_table`` is a way in for a
+caller holding two connection names and a statement.
 
 Both halves already existed and could not meet. ``QuerySource`` (824d33f) is
 the database family's read side; the boundary (757915f) stopped flattening
@@ -69,6 +70,18 @@ class _Destination:
 
     def create_staging_table_if_not_exists(self, *_args, **_kwargs) -> bool:
         raise AssertionError("the destination exists; nothing may create it")
+
+    def query_rows(self, conn, sql_text, *, limit=1_000):
+        """Reads go to the REAL adapter.
+
+        ONE ADAPTER SERVES BOTH ENDS. ``DBAdapter`` dispatches on each
+        connection's provider, so the load operation holds a single instance
+        and the source reads through the same object the destination is
+        written through. A double that answered only the destination half
+        would be asserting a split that does not exist -- which is exactly
+        what this test hit before this method was here.
+        """
+        return DBAdapter().query_rows(conn, sql_text, limit=limit)
 
 
 @pytest.fixture()
@@ -222,3 +235,96 @@ class TestWhatItRecords:
         assert records[0]["count"] == 3
         assert records[0]["schema"] == "landing"
         assert records[0]["table"] == "records"
+
+
+class TestTheConstructionSite:
+    """``load_query_to_table`` -- the public way in.
+
+    The boundary above is reached directly by the tests that prove it. This
+    is what a caller actually has: two configured connection NAMES, a
+    statement and a destination.
+    """
+
+    @staticmethod
+    def _call(monkeypatch, engine, run_log, destination: _Destination, **over):
+        """Run the entry point, recording which connections it asked for."""
+        asked: list[str] = []
+
+        def _shared(_ctx, name: str):
+            asked.append(name)
+            return SimpleNamespace(handle=lambda: engine)
+
+        monkeypatch.setattr(load_operation, "_db_adapter", destination)
+        monkeypatch.setattr(load_operation, "shared_connection", _shared)
+        monkeypatch.setattr(
+            load_operation, "execute_movements",
+            lambda *_a, **_k: pytest.fail("a query load has nothing to route"),
+        )
+
+        arguments = {
+            "statement": "SELECT a, b FROM orders ORDER BY a",
+            "source_connection": "warehouse_read",
+            "destination": "landing.records",
+            "connection": "warehouse",
+            **over,
+        }
+        loaded = load_operation.load_query_to_table(
+            SimpleNamespace(log_depth=0), run_log, **arguments
+        )
+        return loaded, asked
+
+    def test_it_loads_what_the_statement_returns(
+        self, engine, monkeypatch, run_log
+    ) -> None:
+        destination = _Destination(["a", "b"])
+
+        loaded, _asked = self._call(monkeypatch, engine, run_log, destination)
+
+        assert loaded == 3
+        assert destination.inserted == [
+            {"a": 1, "b": "x"}, {"a": 2, "b": "y"}, {"a": 3, "b": "z"},
+        ]
+
+    def test_each_end_names_its_own_connection(
+        self, engine, monkeypatch, run_log
+    ) -> None:
+        """TWO NAMES, AND THEY MAY DIFFER.
+
+        The source is opened here because a source must be readable before
+        there is anything to transfer; the target's is opened inside the
+        boundary from target.connection, where a database is first needed.
+        Both are configured NAMES resolved through the one registry.
+        """
+        _loaded, asked = self._call(
+            monkeypatch, engine, run_log, _Destination(["a", "b"]))
+
+        assert asked == ["warehouse_read", "warehouse"]
+
+    def test_it_does_not_go_through_the_file_feed(
+        self, engine, monkeypatch, run_log
+    ) -> None:
+        """ConfiguredLoad picks files up; a query has nothing to discover.
+
+        Passing a statement through it would mean calling a query a
+        one-element file list, which is the flattening the boundary stopped
+        doing.
+        """
+        monkeypatch.setattr(
+            load_operation, "_ConfiguredLoad",
+            lambda *_a, **_k: pytest.fail("a query is not a file feed"),
+        )
+
+        loaded, _asked = self._call(
+            monkeypatch, engine, run_log, _Destination(["a", "b"]))
+
+        assert loaded == 3
+
+    def test_a_destination_that_does_not_match_is_refused(
+        self, engine, monkeypatch, run_log
+    ) -> None:
+        destination = _Destination(["a", "b", "c"])
+
+        loaded, _asked = self._call(monkeypatch, engine, run_log, destination)
+
+        assert loaded == 0
+        assert destination.inserted == []

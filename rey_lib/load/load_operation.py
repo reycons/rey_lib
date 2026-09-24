@@ -40,6 +40,10 @@ load_one(ctx, run_log, data_source, load_cfg, file_path)
     Exactly one file, through its definition.
 load_file_to_table(ctx, run_log, file_path, destination, connection)
     One file into one table, with no configuration at all.
+load_query_to_table(ctx, run_log, statement, source_connection, destination,
+                    connection)
+    What one statement returns into one table. The database sibling of the
+    above -- both ends name their own configured connection.
 run_load(ctx, run_log, sql_dir)
     Every configured load, then the SQL that follows them.
 """
@@ -58,6 +62,7 @@ from rey_lib.db.data_loader import adapter_destination
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
+from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.files.file_loader import (
     execute_movements,
@@ -81,6 +86,7 @@ __all__ = [
     "load_file_to_table",
     "load_files",
     "load_one",
+    "load_query_to_table",
     "run_load",
 ]
 
@@ -460,6 +466,91 @@ def load_file_to_table(
         encoding=encoding,
         name=f"direct:{load_name}",
     ).load(run_log)
+
+
+def load_query_to_table(
+    ctx: Any,
+    run_log: Any,
+    statement: str,
+    source_connection: str,
+    destination: str,
+    connection: str,
+    *,
+    create_destination: bool = False,
+) -> int:
+    """Load what one statement returns into one named table.
+
+    The database sibling of ``load_file_to_table``, and the construction site
+    for a load that begins at a database rather than a file:
+
+        QuerySource -> IdentityTransform -> DatabaseObjectIdentity
+
+    **It does not go through ``ConfiguredLoad``.** That object is a load
+    DEFINITION built around picking files up -- ``select_files``,
+    ``data_file_for``, ``input_files`` -- and a query is one source with
+    nothing to discover. Passing a statement through it would mean calling a
+    query a one-element file list, which is the flattening the boundary just
+    stopped doing. So this reaches the transfer boundary directly, which is
+    the same boundary every file load crosses.
+
+    **BOTH ENDS NAME THEIR OWN CONNECTION, and they may differ.** The target's
+    is resolved inside the boundary from ``target.connection``, where a
+    database is first needed; the source's is resolved here, because a source
+    must be readable before there is anything to transfer. Each is a
+    CONFIGURED NAME rather than a handle, and ``shared_connection`` answers
+    both from the one registry -- so naming the same connection twice yields
+    the same object rather than a second one.
+
+    What a direct query load does not have, and does not pretend to:
+
+    - **no movements**, because nothing was picked up from anywhere and there
+      is no file to route;
+    - **no configured columns**, so the destination schema is inferred from
+      the records;
+    - **no transform**, because there is no conversion step ahead of it.
+
+    Args:
+        ctx: Application context, for logging and any configured widening.
+        run_log: The run's evidence recorder.
+        statement: The query to read. Held as written -- nothing here parses
+            it, rewrites it, or decides what it means.
+        source_connection: The CONFIGURED CONNECTION NAME the statement runs
+            on.
+        destination: ``schema.table``, or ``database.schema.table`` where the
+            backend qualifies that way.
+        connection: The CONFIGURED CONNECTION NAME the destination lives on.
+        create_destination: Whether an absent table may be created from the
+            records. False means it must already exist.
+
+    Returns:
+        Rows loaded.
+    """
+    target = _destination_identity(destination, connection)
+    load_name = ".".join(
+        part for part in (target.catalog, target.schema, target.name) if part
+    )
+    source = QuerySource(
+        shared_connection(ctx, source_connection).handle(),
+        statement,
+        adapter=_db_adapter,
+    )
+
+    return _load_one_file(
+        source,
+        # Through the builder rather than around it: ONE construction site for
+        # an IdentityTransform, and a None config is exactly what "no declared
+        # columns" means.
+        _build_identity_transform(None),
+        target,
+        ctx=ctx,
+        run_log=run_log,
+        loader=_build_data_loader(ctx, create_destination),
+        # None, not an empty policy. A load with no file has nothing to route,
+        # which is not the same as a policy that routes nothing.
+        movements=None,
+        load_name=f"query:{load_name}",
+    )
+
 
 def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path) -> int:
     """Load exactly one file into its destination table. No discovery, no hooks.
