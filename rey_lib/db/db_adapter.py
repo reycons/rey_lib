@@ -717,17 +717,37 @@ class DBAdapter:
         capability : str
             One of the declared provider-contract method names.
 
+        **A QUESTION ALWAYS ANSWERS.** A provider whose module cannot be
+        imported -- its driver is not installed in this environment -- is
+        reported as not implementing anything, rather than raising the import
+        failure out of something declared to return a bool. Otherwise the
+        answer depends on what happens to be installed: the same provider
+        would answer ``True``, ``False``, or raise.
+
+        THREE OUTCOMES, KEPT APART BY THE EXCEPTION EACH ALREADY RAISES:
+
+            unknown capability name    ConfigError   a TYPO -- see below
+            unregistered provider      ConfigError   a CONFIGURATION mistake,
+                                                     raised by ``_backend``
+                                                     before any import
+            registered, cannot import  ImportError   this installation cannot
+                                                     do it -> False
+
+        So no new error type is needed to tell a mistake from an absence.
+
         Returns
         -------
         bool
-            ``True`` if this provider implements it.
+            ``True`` if this provider implements it. ``False`` when it does
+            not, and when its module cannot be imported at all.
 
         Raises
         ------
         ConfigError
             If ``capability`` is not a declared name. An undeclared name can
             only be a typo, and answering ``False`` for it would read as
-            "unsupported" and hide the mistake.
+            "unsupported" and hide the mistake. Also if the provider itself is
+            not registered, which is the same kind of mistake one level up.
         """
         normalized = str(capability).strip().lower()
         if normalized not in _PROVIDER_CONTRACT_CAPABILITIES:
@@ -736,7 +756,28 @@ class DBAdapter:
                 f"Known capabilities: {sorted(_PROVIDER_CONTRACT_CAPABILITIES)}."
             )
         provider = self._provider_for_conn(conn)
-        return getattr(_backend(provider), normalized, None) is not None
+        try:
+            backend = _backend(provider)
+        except ImportError:
+            # ImportError, NOT Exception. ModuleNotFoundError is a subclass, so
+            # this catches an absent driver and nothing else -- a backend that
+            # raises something else while importing is a FAULT rather than an
+            # absence, and must keep propagating.
+            #
+            # Logged because the refusal built on this answer cannot say it.
+            # `_require_provider_capability` asks this first, so it reports
+            # "provider 'x' does not implement capability 'y'" -- which is not
+            # what happened. The provider does implement it; its module will
+            # not load. Without this line an operator goes looking for a
+            # function that is already there.
+            _logger.warning(
+                "DBAdapter: provider '%s' is registered but its module could "
+                "not be imported, so its capabilities are reported as "
+                "unavailable. The driver it needs is not installed here.",
+                provider, exc_info=True,
+            )
+            return False
+        return getattr(backend, normalized, None) is not None
 
     def list_catalogs(self, conn: Any) -> list[dict[str, str]]:
         """Return the catalog/database to which ``conn`` is attached."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -74,12 +75,42 @@ def pipeline_run_ctx_path(
     ) / f"{step_id}.ctx.json"
 
 
-def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
+def run_app_operation(
+    ctx: Any,
+    run_log,
+    operation: str,
+    func: Any,
+    *,
+    settings: Mapping[str, Any] | None = None,
+) -> Any:
     """Run one app command inside the shared append-only run lifecycle.
 
     Applications supply only the operation name, context, and callable. This
     helper owns the run-log lifecycle and re-raises callable exceptions so the
     caller's existing exit-code behavior remains unchanged.
+
+    Args:
+        ctx: Application context.
+        run_log: The run's evidence recorder.
+        operation: What this app was asked to do.
+        func: The command body.
+        settings: **What the run was invoked with**, recorded on RUN_START.
+
+            A run that fails before it does anything otherwise records only
+            that an operation failed and why -- and never what it was ASKED
+            to do. A refusal like "--table names a destination with no way to
+            reach it" is diagnosable from the settings and unreadable without
+            them, because the reader cannot see that --connection was empty.
+
+            The CALLER decides what to pass, because only it knows which of
+            its options are worth recording and which carry nothing. Nothing
+            here inspects them; they are recorded as given.
+
+            Absent records exactly what was recorded before, so an app that
+            passes none is unchanged.
+
+    Returns:
+        Whatever ``func`` returned.
     """
     from rey_lib.config.config_utils import record_config_file_references
     from rey_lib.errors.error_utils import build_safe_error_payload
@@ -95,7 +126,10 @@ def run_app_operation(ctx: Any, run_log, operation: str, func: Any) -> Any:
     # App semantic base (SGC_Rey_Log_Nest_Level_Phase_1). The shared app boundary,
     # so every app establishes level 3 here regardless of how it was invoked.
     run_log.set_nest_level("app")
-    log_run_start(run_log, operation=operation)
+    # Recorded BEFORE the body runs, so a command that refuses its own
+    # arguments still says what those arguments were.
+    log_run_start(run_log, operation=operation,
+                  **({"settings": dict(settings)} if settings else {}))
     bind_run(run_log)
     record_config_file_references(ctx, run_log)
     try:

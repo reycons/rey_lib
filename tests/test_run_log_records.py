@@ -170,6 +170,46 @@ def test_run_app_operation_success_records_lifecycle(tmp_path: Path) -> None:
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
+def test_run_app_operation_records_what_it_was_asked_to_do(tmp_path: Path) -> None:
+    """RUN_START carries the settings, BEFORE the body can refuse them.
+
+    A command that refuses its own arguments otherwise records only that an
+    operation failed and why -- never what it was asked to do. The refusal
+    "--table names a destination with no way to reach it" is readable only
+    beside a connection the record shows was empty.
+    """
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    start_test_run(ctx)
+    run_log = _log(ctx, tmp_path)
+
+    def _refuses() -> int:
+        raise ValueError("--table names a destination with no way to reach it.")
+
+    with pytest.raises(ValueError):
+        lifecycle_run_app_operation(
+            ctx, run_log, "load", _refuses,
+            settings={"table": "test", "connection": "", "apply": False},
+        )
+
+    start = _read(Path(run_log.path()))[0]
+    assert start["record_type"] == "RUN_START"
+    # The empty one is the point: it is what explains the refusal.
+    assert start["settings"] == {"table": "test", "connection": "", "apply": False}
+
+
+def test_run_app_operation_records_no_settings_when_given_none(
+    tmp_path: Path,
+) -> None:
+    """An app that passes none records exactly what it recorded before."""
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
+    start_test_run(ctx)
+    run_log = _log(ctx, tmp_path)
+    lifecycle_run_app_operation(ctx, run_log, "transform", lambda: 0)
+
+    start = _read(Path(run_log.path()))[0]
+    assert "settings" not in start
+
+
 def test_log_error_writes_the_canonical_object_once(tmp_path: Path) -> None:
     """The producer, proved on both sides of itself.
 
