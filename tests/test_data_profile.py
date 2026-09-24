@@ -269,3 +269,75 @@ class TestComparison:
         assert DataProfile.__dataclass_params__.frozen
         assert ProfileField.__dataclass_params__.frozen
         assert FieldProfile.__dataclass_params__.frozen
+
+
+class TestTheResolverIsAnAdapter:
+    """`profile_for` uses what a data object already exposes.
+
+    It is not a second implementation of file inspection. Every subtype
+    already answered its structural question before this existed, so the
+    resolver adapts those answers rather than reading files itself:
+
+        DelimitedHeaderFile    source_structure() -> the header line
+        JsonlFile / JsonFile   source_structure() -> first record's keys
+        DelimitedNoHeaderFile  source_structure() -> declared or positional
+
+    A subtype that lacked the right primitive would be a GAP TO RECORD, never
+    a reason to add a parser here.
+    """
+
+    def test_it_reads_only_the_primitives_the_source_publishes(
+        self, tmp_path: Path
+    ) -> None:
+        """Asserted by substitution: an object that is not a file at all,
+        exposing only the two primitives, profiles correctly.
+
+        If the resolver did any inspection of its own, this could not work --
+        there is nothing here to inspect.
+        """
+        class _NotAFile:
+            declares_structure = True
+
+            def source_structure(self) -> list[str]:
+                return ["a", "b"]
+
+        profile = profile_for(_NotAFile())
+
+        assert [f.name for f in profile.fields] == ["a", "b"]
+        assert profile.structure_complete is True
+
+    def test_it_depends_on_no_reader_parser_or_profiler(self) -> None:
+        """THE SEMANTIC BOUNDARY, guarded over dependencies.
+
+            may depend on   domain types and interfaces
+            must not on     concrete file readers or parsers
+            must not on     profiling implementation
+
+        Named modules rather than a ban on `rey_lib.files` wholesale: a
+        legitimate shared primitive could move into that package later, and a
+        package-wide ban would forbid a dependency that was never the
+        problem.
+
+        Dependency-shaped rather than a scan for words -- a guard that read
+        prose would fire on the docstrings explaining it.
+        """
+        from pathlib import Path as _Path
+
+        import rey_lib.files.data_profile as module
+
+        source = _Path(module.__file__).read_text(encoding="utf-8")
+        imports = "\n".join(
+            line for line in source.splitlines()
+            if line.strip().startswith(("import ", "from "))
+        )
+
+        forbidden = (
+            "rey_lib.profiling",        # profiling implementation
+            "rey_lib.files.csv",        # concrete delimited reader
+            "rey_lib.files.json",       # concrete document reader
+            "rey_lib.files.jsonl",
+            "rey_lib.files.file_utils", # get_reader and the suffix map
+            "rey_lib.files.primitive_file_io",
+        )
+        for name in forbidden:
+            assert name not in imports, f"{name} -- this is an adapter"
