@@ -26,10 +26,10 @@ from ``dimensions``, which the database supplies as facts.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 
+from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import AppError
 
 __all__ = [
@@ -243,7 +243,7 @@ def facets_hash() -> str:
         f"|{f.top}|{f.exemplars}"
         for f in FACETS
     )
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    return sha256_text("\n".join(parts))[:12]
 
 
 def synopsis(
