@@ -161,10 +161,15 @@ def _route_file(
     run_log: Any,
     movements: Any,
     outcome: str,
-    file_path: Path,
+    source: Any,
     paths: Any,
 ) -> None:
     """Move a file according to this load's policy, where it has one.
+
+    **THIS is a point that knows it is handling a file.** It takes the source
+    data object and reads a path from it here, rather than the boundary
+    fetching one for every load and handing it down. A source whose primitive
+    is not a file has nothing to move and nowhere to move it.
 
     **A DIRECT load has no movement policy, and that is not the same as an
     empty one.** Nothing was picked up from an inbox, so there is nowhere to
@@ -178,6 +183,14 @@ def _route_file(
         outcome: ``"success"`` or ``"failure"`` -- which movement list to run.
     """
     if movements is None:
+        return
+
+    # A source with no path is not routed. Routing moves a FILE between
+    # configured folders; there is no such act for a source whose primitive is
+    # a connection and a statement, and inventing one would be routing
+    # nowhere rather than not routing.
+    file_path = getattr(source, "path", None)
+    if file_path is None:
         return
 
     # An EMPTY list still goes through. A configured load declaring no moves
@@ -1191,11 +1204,33 @@ def _max_string_len(rows: list[dict[str, Any]], col_name: str) -> int:
         default=0,
     )
 
+def _source_path_field(source: Any) -> dict[str, str]:
+    """The ``path`` evidence field, for a source that has one.
+
+    **File-specific evidence, emitted where something knows it has a file.**
+    Every run-log row a file load has ever written carried its path and still
+    does; what changed is that the boundary no longer demands one in order to
+    write any row at all.
+
+    Absent rather than empty for a source with no path: a blank ``path`` in a
+    record reads as a delivery whose location was lost, which is a different
+    and more alarming fact than a source that never had one.
+    """
+    path = getattr(source, "path", None)
+    return {} if path is None else {"path": str(path)}
+
+
+def _related_path_field(source: Any) -> dict[str, str]:
+    """``related_path`` for a step failure, on the same terms."""
+    path = getattr(source, "path", None)
+    return {} if path is None else {"related_path": str(path)}
+
+
 def _reject_structure(
     ctx: Any,
     run_log: Any,
     structure_exc: DataStructureError,
-    file_path: Any,
+    source: Any,
     schema: str,
     table: str,
     movements: Any,
@@ -1212,24 +1247,23 @@ def _reject_structure(
     Returns:
         0. A file fault is not a run fault.
     """
-    _logger.error("%s — file rejected: %s", structure_exc, file_path.name)
+    _logger.error("%s — source rejected: %r", structure_exc, source)
     log_validation_result(run_log,
         validation_name=structure_exc.validation_name,
         status="failed",
         message=str(structure_exc),
-        path=str(file_path),
         schema=schema,
         table=table,
+        **_source_path_field(source),
     )
-    _route_file(ctx, run_log, movements, "failure", file_path, paths)
-    log_exit(ctx, f"_load_one_file rejected (structure): "
-                  f"{file_path.name}", _logger)
+    _route_file(ctx, run_log, movements, "failure", source, paths)
+    log_exit(ctx, f"_load_one_file rejected (structure): {source!r}", _logger)
     return 0
 
 def _reject_empty(
     ctx: Any,
     run_log: Any,
-    file_path: Any,
+    source: Any,
     schema: str,
     table: str,
     movements: Any,
@@ -1245,17 +1279,17 @@ def _reject_empty(
     Returns:
         0.
     """
-    _logger.warning("No rows produced from file: %s", file_path.name)
+    _logger.warning("No rows produced from source: %r", source)
     log_validation_result(run_log,
         validation_name="load_rows",
         status="failed",
         message="No rows produced",
-        path=str(file_path),
         schema=schema,
         table=table,
+        **_source_path_field(source),
     )
-    _route_file(ctx, run_log, movements, "failure", file_path, paths)
-    log_exit(ctx, f"_load_one_file rejected (empty): {file_path.name}", _logger)
+    _route_file(ctx, run_log, movements, "failure", source, paths)
+    log_exit(ctx, f"_load_one_file rejected (empty): {source!r}", _logger)
     return 0
 
 def _non_row_execution_possible(
@@ -1365,7 +1399,10 @@ def _load_one_file(
         Rows loaded, or 0 when this file was rejected. A file fault is 0; a
         run-level fault raises.
     """
-    file_path = source.path
+    # NO `source.path`. The source is a DATA OBJECT and stays one through this
+    # boundary; a path is one family's primitive, and demanding it here is what
+    # made a load impossible to begin anywhere but a file.
+    #
     # The evidence form of the destination, rendered once. Logs and run-log
     # rows have always named the object the way the adapter does; keeping that
     # means the identity gaining parts changes nothing anyone reads.
@@ -1374,7 +1411,7 @@ def _load_one_file(
     # to roll back -- the connection is resolved inside, and a failure before
     # that point has opened nothing.
     conn: Any = None
-    log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
+    log_enter(ctx, f"_load_one_file: {source!r}", _logger)
 
     try:
         # RESOLVED, not re-read. A configured load supplies its definition's
@@ -1451,32 +1488,36 @@ def _load_one_file(
                 columns = transform.columns_for_names(source.source_structure())
             except DataStructureError as structure_exc:
                 return _reject_structure(
-                    ctx, run_log, structure_exc, file_path, schema, table,
+                    ctx, run_log, structure_exc, source, schema, table,
                     movements, paths,
                 )
 
-            inserted = loader.load_from_path(conn, target, file_path, columns)
+            # THE PATH IS READ HERE and nowhere above. This branch has already
+            # established the source is eligible for the file-native path, so
+            # the path is that implementation's own primitive rather than
+            # something the shared boundary demanded of every source.
+            inserted = loader.load_from_path(conn, target, source.path, columns)
             if not inserted:
                 # The source held no rows. Reported by the engine rather than
                 # counted here, and refused exactly as an empty read is.
                 return _reject_empty(
-                    ctx, run_log, file_path, schema, table, movements, paths,
+                    ctx, run_log, source, schema, table, movements, paths,
                 )
 
             _logger.info(
-                "Loaded: %s → %s.%s  rows=%d  (non-row execution)",
-                file_path.name, schema, table, inserted,
+                "Loaded: %r → %s.%s  rows=%d  (non-row execution)",
+                source, schema, table, inserted,
             )
             log_row_count(run_log,
                 count_name="loaded_rows",
                 count=inserted,
-                subject=file_path.name,
-                path=str(file_path),
+                subject=repr(source),
                 schema=schema,
                 table=table,
+                **_source_path_field(source),
             )
-            _route_file(ctx, run_log, movements, "success", file_path, paths)
-            log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
+            _route_file(ctx, run_log, movements, "success", source, paths)
+            log_exit(ctx, f"_load_one_file done: {source!r}", _logger)
             return inserted
 
         try:
@@ -1493,13 +1534,13 @@ def _load_one_file(
             rows = source.read_validated(expected_columns)
         except DataStructureError as structure_exc:
             return _reject_structure(
-                ctx, run_log, structure_exc, file_path, schema, table,
+                ctx, run_log, structure_exc, source, schema, table,
                 movements, paths,
             )
 
         if not rows:
             return _reject_empty(
-                ctx, run_log, file_path, schema, table, movements, paths,
+                ctx, run_log, source, schema, table, movements, paths,
             )
 
         # The transform says what the produced records contain. On the load
@@ -1517,20 +1558,20 @@ def _load_one_file(
         loader.load(conn, target, rows, column_defs, expected_columns)
 
         _logger.info(
-            "Loaded: %s → %s.%s  rows=%d",
-            file_path.name, schema, table, len(rows),
+            "Loaded: %r → %s.%s  rows=%d",
+            source, schema, table, len(rows),
         )
         log_row_count(run_log,
             count_name="loaded_rows",
             count=len(rows),
-            subject=file_path.name,
-            path=str(file_path),
+            subject=repr(source),
             schema=schema,
             table=table,
+            **_source_path_field(source),
         )
 
-        _route_file(ctx, run_log, movements, "success", file_path, paths)
-        log_exit(ctx, f"_load_one_file done: {file_path.name}", _logger)
+        _route_file(ctx, run_log, movements, "success", source, paths)
+        log_exit(ctx, f"_load_one_file done: {source!r}", _logger)
         return len(rows)
 
     except DatabaseError as exc:
@@ -1551,22 +1592,22 @@ def _load_one_file(
                 conn.rollback()
             except Exception as rollback_exc:   # noqa: BLE001 -- see above
                 _logger.debug(
-                    "Nothing to roll back for '%s': %s",
-                    file_path.name, rollback_exc,
+                    "Nothing to roll back for %r: %s",
+                    source, rollback_exc,
                 )
         _logger.error(
-            "Database error loading '%s' — rolled back: %s",
-            file_path.name, exc,
+            "Database error loading %r — rolled back: %s",
+            source, exc,
         )
         log_loader_step_failure(
             ctx,
             run_log, exc,
             failed_step_id=load_name,
             failed_step_name=load_name,
-            related_path=str(file_path),
+            **_related_path_field(source),
         )
-        _route_file(ctx, run_log, movements, "failure", file_path, paths)
-        log_exit(ctx, f"_load_one_file failed: {file_path.name}", _logger)
+        _route_file(ctx, run_log, movements, "failure", source, paths)
+        log_exit(ctx, f"_load_one_file failed: {source!r}", _logger)
         return 0
 
 def _configured_columns(transform_cfg: Any) -> Optional[list[str]]:
