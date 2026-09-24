@@ -34,17 +34,11 @@ __all__ = ["JsonFile", "JsonlFile", "KeyedFile"]
 _logger = get_logger(__name__)
 
 
-def _record_shape(document: Any) -> RecordShape:
-    """Where the rows are in one already-parsed JSON document.
+def _record_shape(top_is_list: bool, keys: dict[str, bool]) -> RecordShape:
+    """Where the rows are, from a SUMMARY of one JSON document.
 
-    THE POSITIVE RULE, stated once. Private on purpose: a caller holding a
-    path asks ``JsonFile.record_shape()`` instead, so that understanding a
-    JSON file goes through the object that owns reading one. A public free
-    function here would let a caller parse a document itself and interpret it
-    beside the file abstraction, which is the duplication this exists to
-    prevent.
-
-    Two shapes are tables, and they are the two a table export produces:
+    THE POSITIVE RULE, stated once. Two shapes are tables, and they are the
+    two a table export produces:
 
         [{...}, {...}]              the rows on their own
         {"asset": [{...}, {...}]}   the rows under a key naming the table
@@ -54,22 +48,54 @@ def _record_shape(document: Any) -> RecordShape:
     on key order, and a file holding two exported tables would silently yield
     one of them.
 
+    **IT TAKES A SUMMARY, NOT A DOCUMENT**, and that is what lets one rule
+    serve two very different callers. ``_rows`` holds the decoded document and
+    summarises it; ``record_shape`` obtains the same summary while decoding,
+    without retaining the records. A cheap path that re-implemented the rule
+    could drift from the one ``read`` uses -- calling a document a table that
+    reading then refuses -- and the summary is the narrowest thing both can
+    honestly produce.
+
+    THE SUMMARY IS EVERYTHING THE RULE USES. Nothing about a top-level
+    array's CONTENTS appears here, because the rule inspects none: an array
+    is records whatever is in it. Whether each element is an object is
+    ``_records``'s question, asked only by a caller that wants the rows.
+
     Args:
-        document: A parsed JSON value. Nothing is read or parsed here.
+        top_is_list: Whether the document's top level is an array.
+        keys: For a top-level object, its keys mapped to whether each one's
+            value is an array. DUPLICATES MUST ALREADY BE COLLAPSED the way
+            ``json.loads`` collapses them -- last occurrence wins -- or
+            ``{"asset": [], "asset": []}`` reads as two keys here and as one
+            everywhere else.
 
     Returns:
         The shape. Never raises -- a document that is not a table is an
         answer, and only a caller that needed one explains why.
     """
-    if isinstance(document, list):
+    if top_is_list:
         return RecordShape(holds_records=True)
 
-    if isinstance(document, dict) and len(document) == 1:
-        name, value = next(iter(document.items()))
-        if isinstance(value, list):
+    if len(keys) == 1:
+        name, value_is_list = next(iter(keys.items()))
+        if value_is_list:
             return RecordShape(holds_records=True, record_key=str(name))
 
     return RecordShape(holds_records=False)
+
+
+def _summarise(document: Any) -> tuple[bool, dict[str, bool]]:
+    """Summarise an already-decoded document for ``_record_shape``.
+
+    The adapter for a caller that already holds the document. Mirrors what
+    the decoding path produces, so both reach the rule with the same facts.
+    """
+    if isinstance(document, dict):
+        return False, {
+            str(name): isinstance(value, list)
+            for name, value in document.items()
+        }
+    return isinstance(document, list), {}
 
 
 class KeyedFile(DataFile):
@@ -273,9 +299,47 @@ class JsonFile(KeyedFile):
                 information out of this catches it itself -- knowing it is
                 choosing to ignore an error, rather than never seeing one.
         """
-        from rey_lib.files.json import read_json_file
+        import json
 
-        return _record_shape(read_json_file(self.path, encoding=self.encoding))
+        from rey_lib.files.json import JsonReadError
+
+        keys: dict[str, bool] = {}
+
+        def _note(pairs: list[tuple[str, Any]]) -> None:
+            """Keep each object's key summary; keep none of the object.
+
+            DUPLICATES COLLAPSE AS ``json.loads`` COLLAPSES THEM -- last
+            occurrence wins. Keeping the raw pair sequence would make
+            ``{"asset": [...], "asset": [...]}`` read as TWO keys, and so not
+            a table, while ``read`` sees the decoder's one-key dict and
+            accepts it. That divergence is the one thing this must not
+            introduce.
+
+            Every object overwrites this, and the OUTERMOST completes LAST --
+            not a decoder implementation detail but the grammar: a parent
+            cannot be built before its values are. So what survives the
+            decode is the top-level object's keys.
+            """
+            nonlocal keys
+            collapsed: dict[str, bool] = {}
+            for name, value in pairs:
+                collapsed[str(name)] = isinstance(value, list)
+            keys = collapsed
+            return None                 # this object is not retained
+
+        try:
+            text = self.path.read_text(encoding=self.encoding)
+            top = json.loads(text, object_pairs_hook=_note)
+        except OSError as exc:
+            raise JsonReadError(
+                f"Cannot read '{self.path.name}': {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise JsonReadError(
+                f"Invalid JSON in '{self.path}': {exc}"
+            ) from exc
+
+        return _record_shape(isinstance(top, list), keys)
 
     def _rows(self, document: Any) -> list[dict[str, Any]]:
         """The rows inside one parsed document.
@@ -292,7 +356,7 @@ class JsonFile(KeyedFile):
         Raises:
             DataFileStructureError: When the document is not a table.
         """
-        shape = _record_shape(document)
+        shape = _record_shape(*_summarise(document))
         if not shape.holds_records:
             raise DataFileStructureError(
                 self._why_not_a_table(document),

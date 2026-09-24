@@ -490,3 +490,173 @@ class TestTheRefusalsSurvivedTheExtraction:
         source = _document(tmp_path, {"": [{"id": 1}, {"id": 2}]})
 
         assert JsonFile(source).read() == [{"id": 1}, {"id": 2}]
+
+
+#: Every shape the rule distinguishes, plus the ones that broke earlier
+#: drafts. Shared by the equivalence guard so neither list can drift.
+_SHAPE_CASES = [
+    ("bare array",          [{"a": 1}, {"b": 2}]),
+    ("keyed array",         {"asset": [{"a": 1}]}),
+    ("EMPTY-STRING key",    {"": [{"a": 1}]}),
+    ("two keys",            {"a": [], "b": []}),
+    ("one key, not array",  {"asset": {"a": 1}}),
+    ("empty object",        {}),
+    ("empty array",         []),
+    ("scalar",              "hello"),
+    ("number",              42),
+    ("array of scalars",    [1, 2]),
+    ("array of strings",    ["a", "b"]),
+    ("mixed array",         [{"a": 1}, 2]),
+    ("nested arrays",       [[1], [2]]),
+]
+
+
+class TestTheShapeIsLearnedWithoutRetainingTheRecords:
+    """`record_shape()` decodes without keeping the decoded objects.
+
+    A MEMORY fix, not a speed fix: the hook is a Python callback per object,
+    so wall time is marginally worse. What changes is that no decoded record
+    dictionary survives, which is what made a large export expensive.
+
+    NOT constant memory either. `json.loads` still needs the whole text, and
+    `object_pairs_hook` touches OBJECTS only -- the decoder still builds and
+    holds the arrays. The residual is the array of references.
+    """
+
+    def _old_rule(self, document):
+        """What the rule answered when it was handed a whole document.
+
+        Kept literally, so the equivalence guard compares against the
+        previous behaviour rather than against the new code restated.
+        """
+        if isinstance(document, list):
+            return RecordShape(holds_records=True)
+        if isinstance(document, dict) and len(document) == 1:
+            name, value = next(iter(document.items()))
+            if isinstance(value, list):
+                return RecordShape(holds_records=True, record_key=str(name))
+        return RecordShape(holds_records=False)
+
+    @pytest.mark.parametrize(
+        "label,document", _SHAPE_CASES, ids=[c[0] for c in _SHAPE_CASES],
+    )
+    def test_it_answers_what_the_full_parse_answered(
+        self, tmp_path: Path, label: str, document
+    ) -> None:
+        """THE EQUIVALENCE GUARD: before against after.
+
+        Deliberately NOT "record_shape agrees with read" -- those two
+        legitimately differ on element validity, and asserting otherwise
+        would pin a claim that was never true. `[1, 2]` is records by shape
+        and refused by `read`.
+        """
+        source = _document(tmp_path, document, name="shape.json")
+
+        assert JsonFile(source).record_shape() == self._old_rule(document)
+
+    def test_duplicate_keys_collapse_as_the_decoder_collapses_them(
+        self, tmp_path: Path
+    ) -> None:
+        """The case a naive pairs summary gets wrong.
+
+        `json.loads` collapses duplicates -- last wins -- so this document is
+        ONE key holding an array, and `read()` accepts it. A summary keeping
+        the raw pair sequence would see two keys, call it not a table, and
+        disagree with the reader about the same file.
+        """
+        source = tmp_path / "dupes.json"
+        source.write_text(
+            '{"asset": [{"id": 1}], "asset": [{"id": 2}]}', encoding="utf-8",
+        )
+
+        shape = JsonFile(source).record_shape()
+
+        assert shape == RecordShape(holds_records=True, record_key="asset")
+        # And the reader agrees, because the decoder collapsed it the same way.
+        assert JsonFile(source).read() == [{"id": 2}]
+
+    def test_no_decoded_object_survives_the_hook(self, tmp_path: Path) -> None:
+        """Technically exact: objects are replaced by the hook's return value.
+
+        NOT "no dict is ever built" -- the decoder constructs the pairs it
+        passes to the callback. NOT "nothing is retained" -- the arrays are
+        still decoder-owned. What is asserted is that no decoded object
+        accumulates in the result.
+        """
+        import json as _json
+
+        # A BARE ARRAY, so the top level survives the decode as a list. A
+        # keyed document's top level is itself an object, so the hook
+        # replaces it too and there is nothing left to inspect.
+        source = _document(tmp_path, [{"a": 1}, {"a": 2}], name="held.json")
+        seen: list = []
+        real = _json.loads
+
+        def _watch(text, **kwargs):
+            hook = kwargs.get("object_pairs_hook")
+            assert hook is not None, "record_shape decoded without a hook"
+            top = real(text, **kwargs)
+            seen.append(top)
+            return top
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_json, "loads", _watch)
+            JsonFile(source).record_shape()
+
+        # The top level survives as an array of the hook's return value.
+        assert seen and seen[0] == [None, None]
+        assert not any(isinstance(one, dict) for one in seen[0])
+
+    def test_reading_the_rows_still_materialises_them(
+        self, tmp_path: Path
+    ) -> None:
+        """`read()` is unchanged. Materialising is what it is for."""
+        source = _document(tmp_path, {"asset": [{"a": 1}, {"a": 2}]})
+
+        assert JsonFile(source).read() == [{"a": 1}, {"a": 2}]
+
+    def test_a_file_that_is_not_json_still_raises(self, tmp_path: Path) -> None:
+        """Being unparseable is not a shape, and softening it here would take
+        a real error from every direct caller."""
+        source = tmp_path / "broken.json"
+        source.write_text("{not json", encoding="utf-8")
+
+        with pytest.raises(Exception):      # noqa: B017 -- a read, not a shape
+            JsonFile(source).record_shape()
+
+    def test_the_decoded_records_are_not_held(self, tmp_path: Path) -> None:
+        """The memory claim, as a focused regression check.
+
+        SECONDARY to the semantic tests above: tracemalloc depends on the
+        environment, so the margin is deliberately loose.
+
+        AND THE MARGIN IS MODEST ON PURPOSE. Measured end to end, the shape
+        path peaks around 2.3x lower than reading -- not the ~120x the
+        decoder alone suggests -- because BOTH paths must hold the file's
+        text, and for a large document the text dominates everything else.
+        What this removes is the decoded record dictionaries, which is real
+        but is not the largest term.
+        """
+        import tracemalloc
+
+        source = _document(
+            tmp_path,
+            {"asset": [{f"f{i:02d}": "x" * 12 for i in range(15)}
+                       for _ in range(4000)]},
+            name="big.json",
+        )
+
+        tracemalloc.start()
+        JsonFile(source).record_shape()
+        _current, cheap = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        tracemalloc.start()
+        JsonFile(source).read()
+        _current, full = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        assert cheap * 3 // 2 < full, (
+            f"shape cost {cheap} bytes against {full} to read -- "
+            "the records are being retained"
+        )
