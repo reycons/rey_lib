@@ -98,7 +98,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
     exercises the path a reader takes rather than a per-file step underneath
     it.
     """
-    monkeypatch.setattr(load_operation, "_db_adapter", adapter)
+    monkeypatch.setattr(load_operation, "_write_adapter", adapter)
     # Resolved from the target now, so it is substituted where it is resolved.
     monkeypatch.setattr(
         load_operation, "shared_connection",

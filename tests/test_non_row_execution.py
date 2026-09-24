@@ -82,7 +82,7 @@ def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
             load_operation, "log_validation_result",
             lambda _run_log, **kwargs: captured.update(kwargs),
         )
-    monkeypatch.setattr(load_operation, "_db_adapter", adapter or _Adapter())
+    monkeypatch.setattr(load_operation, "_write_adapter", adapter or _Adapter())
     monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
     monkeypatch.setattr(
         load_operation, "shared_connection",
@@ -359,7 +359,7 @@ class TestEveryGateRefusesOnItsOwn:
         source = tmp_path / "source.jsonl"
         source.write_text('{"asset_id": "1", "name": "Alpha"}\n', encoding="utf-8")
 
-        monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+        monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
         monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
         conn = _duck(tmp_path)
         monkeypatch.setattr(

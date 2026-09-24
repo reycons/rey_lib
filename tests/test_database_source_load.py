@@ -39,10 +39,14 @@ _TARGET = DatabaseObjectIdentity(
 
 
 class _Destination:
-    """The destination side, recording what the load hands it.
+    """The WRITE adapter, recording what the load hands it.
 
-    Only the write half is a double. The READ half is a real DuckDB, because
-    the point is that a real result set crosses the boundary.
+    **It has no ``query_rows`` deliberately.** There are two adapter roles --
+    a read adapter the source owns, over the source connection, and a write
+    adapter the destination mechanic uses, over the target's -- and giving
+    this one a read method would assert a sharing that the contract does not
+    have. The source reads through its own, over a real DuckDB, because the
+    point is that a real result set crosses the boundary.
     """
 
     def __init__(self, columns: list[str]) -> None:
@@ -71,17 +75,6 @@ class _Destination:
     def create_staging_table_if_not_exists(self, *_args, **_kwargs) -> bool:
         raise AssertionError("the destination exists; nothing may create it")
 
-    def query_rows(self, conn, sql_text, *, limit=1_000):
-        """Reads go to the REAL adapter.
-
-        ONE ADAPTER SERVES BOTH ENDS. ``DBAdapter`` dispatches on each
-        connection's provider, so the load operation holds a single instance
-        and the source reads through the same object the destination is
-        written through. A double that answered only the destination half
-        would be asserting a split that does not exist -- which is exactly
-        what this test hit before this method was here.
-        """
-        return DBAdapter().query_rows(conn, sql_text, limit=limit)
 
 
 @pytest.fixture()
@@ -97,7 +90,7 @@ def engine():
 
 def _load(monkeypatch, run_log, source: Any, destination: _Destination) -> int:
     """Run one load through the shared boundary and return the rows loaded."""
-    monkeypatch.setattr(load_operation, "_db_adapter", destination)
+    monkeypatch.setattr(load_operation, "_write_adapter", destination)
     monkeypatch.setattr(
         load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
@@ -254,7 +247,10 @@ class TestTheConstructionSite:
             asked.append(name)
             return SimpleNamespace(handle=lambda: engine)
 
-        monkeypatch.setattr(load_operation, "_db_adapter", destination)
+        # ONLY the write adapter. The read adapter is left real, because
+        # that is the one the source is given -- substituting both would hide
+        # which role each is playing.
+        monkeypatch.setattr(load_operation, "_write_adapter", destination)
         monkeypatch.setattr(load_operation, "shared_connection", _shared)
         monkeypatch.setattr(
             load_operation, "execute_movements",

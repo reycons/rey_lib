@@ -100,7 +100,7 @@ def _jsonl(tmp_path: Path, records=({"a": 1, "b": "x"},)) -> Path:
 def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
           keyed=False, moved=None, records=({"a": 1, "b": "x"},)):
     """Run _load_one_file with a recording adapter and a declared setting."""
-    monkeypatch.setattr(load_operation, "_db_adapter", adapter)
+    monkeypatch.setattr(load_operation, "_write_adapter", adapter)
     monkeypatch.setattr(
         load_operation, "execute_movements",
         lambda *a, **k: moved.append(a) if moved is not None else None,
@@ -195,7 +195,7 @@ class TestTheDestinationIsThere:
         moved: list = []
         path = tmp_path / "source.csv"
         path.write_text("a,WRONG\n1,x\n", encoding="utf-8")
-        monkeypatch.setattr(load_operation, "_db_adapter", adapter)
+        monkeypatch.setattr(load_operation, "_write_adapter", adapter)
         monkeypatch.setattr(load_operation, "execute_movements",
                             lambda *a, **k: moved.append(a))
 

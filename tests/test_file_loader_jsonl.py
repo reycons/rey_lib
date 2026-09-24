@@ -63,7 +63,7 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
         return len(rows)
 
     monkeypatch.setattr(
-        load_operation, "_db_adapter",
+        load_operation, "_write_adapter",
         SimpleNamespace(
             # These tests are about a destination that IS there; whether an
             # absent one is created is test_file_loader_destination.py.

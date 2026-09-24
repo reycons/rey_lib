@@ -66,7 +66,7 @@ def recorded(tmp_path: Path, monkeypatch, run_log) -> dict:
     """Load one ordinary CSV through the boundary; return its ROW_COUNT row."""
     records: list[dict] = []
 
-    monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+    monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
     monkeypatch.setattr(load_operation, "execute_movements",
                         lambda *_a, **_k: None)
     monkeypatch.setattr(

@@ -69,7 +69,7 @@ def _jsonl(tmp_path: Path, *records: dict, name: str = "asset.jsonl") -> Path:
 
 def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
           destination="testing.asset", moved=None, **kwargs) -> int:
-    monkeypatch.setattr(load_operation, "_db_adapter", adapter)
+    monkeypatch.setattr(load_operation, "_write_adapter", adapter)
     # Resolved from the target now, so it is substituted where it is resolved.
     monkeypatch.setattr(
         load_operation, "shared_connection",

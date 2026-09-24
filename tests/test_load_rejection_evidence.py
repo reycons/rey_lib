@@ -62,7 +62,7 @@ def _recorded(tmp_path: Path, monkeypatch, run_log, source: Path,
     """Run one load to rejection and return what was recorded about it."""
     captured: dict = {}
 
-    monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+    monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
     monkeypatch.setattr(load_operation, "execute_movements",
                         lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -161,7 +161,7 @@ class TestTheEvidenceSurvivedTheMove:
         source = tmp_path / "wrong.jsonl"
         source.write_text('{"a": 1, "c": 2}\n', encoding="utf-8")
 
-        monkeypatch.setattr(load_operation, "_db_adapter", _Adapter())
+        monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
         monkeypatch.setattr(load_operation, "execute_movements",
                             lambda *args, **_k: moved.append(args))
 

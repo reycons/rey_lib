@@ -53,7 +53,7 @@ def _csv(tmp_path: Path) -> Path:
 def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     """Run _load_one_file far enough to record what the reader was given."""
     monkeypatch.setattr(
-        load_operation, "_db_adapter",
+        load_operation, "_write_adapter",
         SimpleNamespace(table_exists=lambda *_a, **_k: True,
                             get_table_columns=lambda *_a, **_k: ["a", "b"],
                             # No native path, so the reader is still reached.
@@ -163,7 +163,7 @@ class TestTheConfiguredTypeReachesTheReader:
         stubbed here -- that would test the test.
         """
         monkeypatch.setattr(
-            load_operation, "_db_adapter",
+            load_operation, "_write_adapter",
             SimpleNamespace(table_exists=lambda *_a, **_k: True,
                             get_table_columns=lambda *_a, **_k: ["a", "b"],
                             # No native path, so the reader is still reached.

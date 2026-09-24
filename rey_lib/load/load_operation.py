@@ -92,9 +92,20 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# The adapter every database operation here goes through. It dispatches on each
-# connection config's provider, so this module never imports a backend driver.
-_db_adapter = DBAdapter()
+# TWO ADAPTER ROLES, and they are not one shared instance.
+#
+#     QuerySource             -> a READ adapter, over the source connection
+#     DataLoader / target     -> a WRITE adapter, over the target connection
+#
+# The same concrete class serves both -- it dispatches on each connection
+# config's provider, so this module never imports a backend driver -- but the
+# roles are distinct by contract. A source reads through its own; a
+# destination is written through the loader's. Handing one object to both
+# would make a source's read depend on what the destination happens to be,
+# which is exactly backwards for endpoints that may sit on different
+# connections and different providers.
+_write_adapter = DBAdapter()
+_read_adapter = DBAdapter()
 
 # Matches {ctx.attr} and {data_source.attr} tokens in LLM prompt templates.
 _PROMPT_TOKEN_RE = re.compile(r"\{(ctx|data_source)\.([^}]+)\}")
@@ -304,7 +315,7 @@ def _build_data_loader(
     longer held.
     """
     return _DataLoader(
-        adapter=_db_adapter,
+        adapter=_write_adapter,
         create_destination=create_declared,
         widen_columns=(
             lambda _conn, target, records, defs: _alter_oversized_columns(
@@ -532,7 +543,10 @@ def load_query_to_table(
     source = QuerySource(
         shared_connection(ctx, source_connection).handle(),
         statement,
-        adapter=_db_adapter,
+        # ITS OWN READ ADAPTER. Not the loader's: a source reads on the source
+        # connection, and which provider answers there has nothing to do with
+        # where the rows are going.
+        adapter=_read_adapter,
     )
 
     return _load_one_file(
