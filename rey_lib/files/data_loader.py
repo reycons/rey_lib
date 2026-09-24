@@ -19,9 +19,14 @@ constructed and does not travel down with them. The one indirect exception is
 by every other consumer of the same name, so holding one would claim an
 ownership this object does not have. It arrives per call.
 
-**No configuration to interpret.** ``schema`` and ``table`` arrive resolved;
-parsing ``"database.schema.table"`` is configuration interpretation and
-happens at the construction boundary.
+**No destination identity.** Which object the records go to is the target
+data object's, and it arrives per call for the same reason the connection
+does. Holding a schema and a table beside a target that already names them
+would be one endpoint represented twice.
+
+**No configuration to interpret.** The target arrives resolved; parsing
+``"database.schema.table"`` is configuration interpretation and happens at the
+construction boundary.
 
 **No module globals.** The adapter is injected, so substituting one is passing
 an argument rather than patching a module attribute.
@@ -34,7 +39,7 @@ from typing import Any, Callable
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
-__all__ = ["DataLoader", "WidenColumns"]
+__all__ = ["DataLoader", "WidenColumns", "adapter_destination"]
 
 _logger = get_logger(__name__)
 
@@ -47,16 +52,40 @@ _UNASKED: Any = object()
 #: How a caller widens columns that were too narrow, and reports whether it
 #: changed anything.
 #:
-#: ``(conn, records, column_defs) -> widened?``
+#: ``(conn, target, records, column_defs) -> widened?``
 #:
 #: Injected because widening is CONFIGURED behaviour -- it must run a declared
 #: stored procedure or SQL file rather than inline DDL, and its parameters are
 #: passed through the application context. This object decides WHEN a retry is
 #: warranted; it never learns HOW widening is configured.
 #:
-#: The connection is an argument for the same reason this object does not hold
-#: one: it is externally owned and varies per call.
-WidenColumns = Callable[[Any, list[dict[str, Any]], list[tuple[str, str]]], bool]
+#: The connection and the target are arguments for the same reason this object
+#: holds neither: one is externally owned and the other is the load's, and both
+#: vary per call.
+WidenColumns = Callable[
+    [Any, Any, list[dict[str, Any]], list[tuple[str, str]]], bool
+]
+
+
+def adapter_destination(target: Any) -> tuple[str, str]:
+    """Render one database object identity as the adapter's ``(schema, table)``.
+
+    THE ONE TRANSLATION POINT, and it belongs here because this is the object
+    that talks to the adapter. The identity keeps its parts apart --
+    ``catalog`` and ``schema`` are separate fields, and it carries no rendered
+    reference -- while the adapter takes a single schema argument that is
+    ``database.schema`` where a backend qualifies that way.
+
+    Args:
+        target: A database object identity: ``catalog``, ``schema``, ``name``.
+
+    Returns:
+        ``(schema, table)`` exactly as the adapter has always received it, so
+        what reaches the database is unchanged by the identity having parts.
+    """
+    catalog = str(getattr(target, "catalog", "") or "")
+    schema = str(getattr(target, "schema", "") or "")
+    return (f"{catalog}.{schema}" if catalog else schema, str(target.name))
 
 
 class DataLoader:
@@ -65,18 +94,23 @@ class DataLoader:
     def __init__(
         self,
         *,
-        schema: str,
-        table: str,
         adapter: Any,
         create_destination: bool = False,
         widen_columns: WidenColumns | None = None,
     ) -> None:
-        """Hold the destination and the policies that govern loading into it.
+        """Hold the policies that govern loading, and nothing about where.
+
+        **NO DESTINATION IDENTITY.** Which object the records go to is the
+        target data object's, and it arrives per call -- the same reasoning
+        that has always kept the connection out of here. Holding a schema and
+        a table beside a target that already names them would be the same
+        endpoint twice, which is exactly what passing objects removes.
+
+        What remains is OPERATION POLICY: what this load may do, which is not
+        a property of the object it writes to. An endpoint carrying
+        ``create_destination`` would be meaningless when read from.
 
         Args:
-            schema: Target schema, already resolved. May be
-                ``database.schema`` where a backend qualifies that way.
-            table: Target table, already resolved.
             adapter: The ``DBAdapter`` every database operation goes through.
                 Injected rather than reached for, so this object has no
                 ambient state and a test substitutes one by passing it.
@@ -86,13 +120,11 @@ class DataLoader:
             widen_columns: How to widen columns after a truncation. Absent
                 means a truncation is simply reported.
         """
-        self.schema = schema
-        self.table = table
         self.adapter = adapter
         self.create_destination = create_destination
         self.widen_columns = widen_columns
 
-    def destination_columns(self, conn: Any) -> list[str] | None:
+    def destination_columns(self, conn: Any, target: Any) -> list[str] | None:
         """Return the destination's columns, or None when it does not exist.
 
         **``None`` is not ``[]``.** An empty list would mean a table with no
@@ -104,14 +136,20 @@ class DataLoader:
         Asked once and answered once: the caller uses this both to decide how
         to validate its records and to tell ``load`` what it found, so a load
         costs one existence check rather than one per decision.
+
+        Args:
+            conn: Open connection, owned by the caller and shared.
+            target: The database object identity being loaded into.
         """
-        if not self.adapter.table_exists(conn, self.schema, self.table):
+        schema, table = adapter_destination(target)
+        if not self.adapter.table_exists(conn, schema, table):
             return None
-        return self.adapter.get_table_columns(conn, self.schema, self.table)
+        return self.adapter.get_table_columns(conn, schema, table)
 
     def load(
         self,
         conn: Any,
+        target: Any,
         records: list[dict[str, Any]],
         column_defs: list[tuple[str, str]],
         destination_columns: list[str] | None = _UNASKED,
@@ -120,6 +158,8 @@ class DataLoader:
 
         Args:
             conn: Open connection, owned by the caller and shared.
+            target: The database object identity being loaded into. Passed,
+                not held -- see ``__init__``.
             records: The logical records to insert.
             column_defs: ``(column, sql_type)`` pairs describing them. The
                 insert column list is DERIVED from this rather than passed
@@ -138,17 +178,18 @@ class DataLoader:
                 by widening.
         """
         columns = [name for name, _sql_type in column_defs]
+        schema, table = adapter_destination(target)
 
         # A caller that already asked tells us what it found, so the check
         # happens ONCE per load rather than once per decision. A caller that
         # did not ask gets it asked here.
         if destination_columns is _UNASKED:
-            destination_columns = self.destination_columns(conn)
+            destination_columns = self.destination_columns(conn, target)
         exists = destination_columns is not None
 
         if not exists and not self.create_destination:
             raise ConfigError(
-                f"destination {self.schema}.{self.table} does not exist, and "
+                f"destination {schema}.{table} does not exist, and "
                 f"this load does not declare that it may be created."
             )
 
@@ -158,11 +199,11 @@ class DataLoader:
             # table dropped between the check and the call would be recreated
             # against a load that said not to.
             self.adapter.create_staging_table_if_not_exists(
-                conn, self.schema, self.table, column_defs
+                conn, schema, table, column_defs
             )
 
         try:
-            return self._insert(conn, records, columns)
+            return self._insert(conn, target, records, columns)
         except DatabaseError as insert_exc:
             conn.rollback()
 
@@ -170,18 +211,19 @@ class DataLoader:
                 raise
             if self.widen_columns is None:
                 raise
-            if not self.widen_columns(conn, records, column_defs):
+            if not self.widen_columns(conn, target, records, column_defs):
                 raise
 
             _logger.info(
                 "Retrying insert into %s.%s after column alterations",
-                self.schema, self.table,
+                schema, table,
             )
-            return self._insert(conn, records, columns)
+            return self._insert(conn, target, records, columns)
 
     def _insert(
         self,
         conn: Any,
+        target: Any,
         records: list[dict[str, Any]],
         columns: list[str],
     ) -> int:
@@ -191,8 +233,9 @@ class DataLoader:
         a batch of files is an aggregate of separate loads, and one failing
         must not undo another that already succeeded.
         """
+        schema, table = adapter_destination(target)
         inserted = self.adapter.bulk_insert(
-            conn, self.schema, self.table, records, columns
+            conn, schema, table, records, columns
         )
         conn.commit()
         return inserted

@@ -20,6 +20,13 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.files import file_loader
+from rey_lib.db.database_objects import DatabaseObjectIdentity
+from rey_lib.files.data_file import data_file_for
+
+#: Where these loads write. The per-file step takes a target object now.
+_TARGET = DatabaseObjectIdentity(
+    connection="c", catalog="", schema="schema", name="table",
+)
 
 
 class _Adapter:
@@ -54,15 +61,26 @@ def _recorded(tmp_path: Path, monkeypatch, run_log, source: Path,
         lambda _run_log, **kwargs: captured.update(kwargs),
     )
 
+    monkeypatch.setattr(
+        file_loader, "shared_connection",
+        lambda _ctx, _name: SimpleNamespace(
+            handle=lambda: SimpleNamespace(
+                commit=lambda: None, rollback=lambda: None,
+            )
+        ),
+    )
+
     loaded = file_loader._load_one_file(
-        SimpleNamespace(log_depth=0), run_log,
-        SimpleNamespace(commit=lambda: None, rollback=lambda: None),
-        source,
-        SimpleNamespace(file_type=file_type, encoding="utf-8"),
-        SimpleNamespace(name="a_load",
-                        load=SimpleNamespace(destination_table="s.t"),
-                        movements=SimpleNamespace(failure=[], success=[])),
-        SimpleNamespace(), "schema", "table",
+        data_file_for(source, file_type=file_type, encoding="utf-8"),
+        None,
+        _TARGET,
+        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        transform_cfg=SimpleNamespace(file_type=file_type, encoding="utf-8"),
+        load_cfg=SimpleNamespace(
+            name="a_load",
+            load=SimpleNamespace(destination_table="s.t"),
+            movements=SimpleNamespace(failure=[], success=[])),
+        paths=SimpleNamespace(),
     )
 
     assert loaded == 0
@@ -138,15 +156,26 @@ class TestTheEvidenceSurvivedTheMove:
         monkeypatch.setattr(file_loader, "_execute_movements",
                             lambda *args, **_k: moved.append(args))
 
+        monkeypatch.setattr(
+            file_loader, "shared_connection",
+            lambda _ctx, _name: SimpleNamespace(
+                handle=lambda: SimpleNamespace(
+                    commit=lambda: None, rollback=lambda: None,
+                )
+            ),
+        )
+
         loaded = file_loader._load_one_file(
-            SimpleNamespace(log_depth=0), run_log,
-            SimpleNamespace(commit=lambda: None, rollback=lambda: None),
-            source,
-            SimpleNamespace(file_type="JSONL", encoding="utf-8"),
-            SimpleNamespace(name="a_load",
-                            load=SimpleNamespace(destination_table="s.t"),
-                            movements=SimpleNamespace(failure=["f"], success=[])),
-            SimpleNamespace(), "schema", "table",
+            data_file_for(source, file_type="JSONL", encoding="utf-8"),
+            None,
+            _TARGET,
+            ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+            transform_cfg=SimpleNamespace(file_type="JSONL", encoding="utf-8"),
+            load_cfg=SimpleNamespace(
+                name="a_load",
+                load=SimpleNamespace(destination_table="s.t"),
+                movements=SimpleNamespace(failure=["f"], success=[])),
+            paths=SimpleNamespace(),
         )
 
         assert loaded == 0

@@ -56,7 +56,8 @@ class TestTheRegistry:
     def test_every_format_registers_itself(self) -> None:
         """Discovery imports the submodules; no module lists them."""
         assert set(registered_formats()) == {
-            "CSV", "DELIMITED_HEADER", "JSONL", "NDJSON",
+            "CSV", "DELIMITED_HEADER", "DELIMITED_NO_HEADER",
+            "JSON", "JSONL", "NDJSON",
         }
 
     def test_a_new_format_needs_no_change_to_any_existing_module(
@@ -150,24 +151,50 @@ class TestConstruction:
 
 
 class TestTheSuffixMapCannotDrift:
-    """It feeds get_reader, so it must speak get_reader's vocabulary."""
+    """It feeds two readers, so it must speak a vocabulary one of them has."""
 
-    def test_every_suffix_maps_to_a_token_get_reader_dispatches(
+    def test_every_suffix_maps_to_a_token_something_can_read(
         self, tmp_path: Path
     ) -> None:
         """The estate already has several file-type vocabularies that
         disagree. This asserts the suffix map is not another: every token it
-        can yield is one the reader actually accepts.
+        can yield is one SOME reader actually accepts.
+
+        Two qualify, and either is enough. ``get_reader`` dispatches on a
+        token, or the DataFile registry registers one. Requiring the first
+        alone was right while it was the only reader, and would now refuse
+        JSON -- which is read perfectly well, just not a line at a time.
+
+        Still closed: a token neither can read is still orphan vocabulary.
         """
         path = _csv(tmp_path, "a\n1\n", name="probe.csv")
+        registered = set(registered_formats())
 
         for suffix, token in _SUFFIX_FILE_TYPES.items():
+            if token in registered:
+                continue
             try:
                 list(get_reader(path, file_type=token))
             except ValueError as exc:            # the "unsupported" refusal
                 pytest.fail(f"{suffix} -> {token}: {exc}")
             except Exception:                    # noqa: BLE001
                 pass                             # wrong CONTENT is fine here
+
+    def test_json_is_carried_by_the_registry_not_by_get_reader(
+        self, tmp_path: Path
+    ) -> None:
+        """The case that moved the rule, stated so it cannot be lost.
+
+        ``.json`` resolves, and it resolves through the registry. If someone
+        later teaches ``get_reader`` to dispatch JSON, a document would be
+        read a line at a time again -- the original failure.
+        """
+        assert file_type_for_suffix(".json") == "JSON"
+        assert "JSON" in set(registered_formats())
+
+        path = _csv(tmp_path, "a\n1\n", name="probe.csv")
+        with pytest.raises(ValueError):
+            list(get_reader(path, file_type="JSON"))
 
     def test_the_suffix_is_read_forgivingly(self) -> None:
         """Case and a missing dot are not the caller's problem."""
@@ -372,3 +399,125 @@ class TestWhatTheObjectDeliberatelyDoesNotKnow:
         """
         assert not hasattr(DataFile, "logical_schema")
         assert not hasattr(DataFile, "load")
+
+
+class TestDelimitedNoHeaderFile:
+    """Every line is data, and that is the whole difference."""
+
+    def _write(self, tmp_path: Path, text: str) -> Path:
+        path = tmp_path / "positional.txt"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_the_first_row_is_data_and_is_not_eaten(
+        self, tmp_path: Path
+    ) -> None:
+        """THE DEFECT THIS FORMAT EXISTS TO FIX, pinned exactly.
+
+        The shared delimited reader takes the first line as the column names
+        whatever the declared type, so a genuinely headerless file lost its
+        first row -- silently, keyed by the values of the row that vanished:
+
+            '1,x\\n2,y\\n'  ->  [{'1': '2'}]      two rows in, ONE row out
+
+        Two rows in, two rows out, is the assertion.
+        """
+        source = self._write(tmp_path, "1,x\n2,y\n")
+
+        rows = data_file_for(source, file_type="DELIMITED_NO_HEADER").read()
+
+        assert rows == [
+            {"col001": "1", "col002": "x"},
+            {"col001": "2", "col002": "y"},
+        ]
+
+    def test_it_does_not_go_through_the_reader_that_caused_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Structural, not incidental.
+
+        ``get_reader`` still takes the first line as a header for every
+        delimited token it serves. This format is correct because it does not
+        use it -- so if someone routes it back there, the first row starts
+        disappearing again.
+        """
+        source = self._write(tmp_path, "1,x\n2,y\n")
+
+        through_the_old_reader = list(
+            get_reader(source, file_type="CSV", encoding="utf-8")
+        )
+
+        assert len(through_the_old_reader) == 1          # the defect, still there
+        assert len(data_file_for(
+            source, file_type="DELIMITED_NO_HEADER"
+        ).read()) == 2
+
+    def test_columns_are_positional_and_sort_in_order(
+        self, tmp_path: Path
+    ) -> None:
+        """col001, not column_1.
+
+        Zero-padded so a wide file sorts the way it reads: col002 before
+        col010, which column_2 and column_10 do not.
+        """
+        source = self._write(tmp_path, ",".join(str(n) for n in range(12)) + "\n")
+        names = data_file_for(source, file_type="DELIMITED_NO_HEADER").source_structure()
+
+        assert names[:3] == ["col001", "col002", "col003"]
+        assert names[-1] == "col012"
+        assert names == sorted(names)
+
+    def test_declared_names_replace_the_positional_ones(
+        self, tmp_path: Path
+    ) -> None:
+        """A caller that knows the columns says so, as a format setting.
+
+        `read` still knows nothing of any destination -- the names arrive at
+        construction, the way a delimiter does.
+        """
+        source = self._write(tmp_path, "1,x\n")
+
+        built = data_file_for(
+            source, file_type="DELIMITED_NO_HEADER", columns=["id", "name"],
+        )
+
+        assert built.source_structure() == ["id", "name"]
+        assert built.read() == [{"id": "1", "name": "x"}]
+
+    def test_a_ragged_row_is_refused_rather_than_truncated(
+        self, tmp_path: Path
+    ) -> None:
+        """Position is the only identity here, so width is the only check.
+
+        Zipping a short row to the names drops its last columns silently --
+        the same class of loss the format was migrated to stop.
+        """
+        source = self._write(tmp_path, "1,x\n2\n")
+
+        with pytest.raises(DataFileStructureError) as raised:
+            data_file_for(source, file_type="DELIMITED_NO_HEADER").validate()
+
+        assert "row 2" in str(raised.value)
+
+    def test_a_width_that_disagrees_with_the_destination_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        source = self._write(tmp_path, "1,x\n")
+
+        with pytest.raises(DataFileStructureError) as raised:
+            data_file_for(
+                source, file_type="DELIMITED_NO_HEADER"
+            ).read_validated(["a", "b", "c"])
+
+        assert raised.value.validation_name == "load_header"
+
+    def test_an_empty_file_has_no_columns_and_no_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Consistent with the header file, which answers [] the same way."""
+        source = self._write(tmp_path, "")
+        built = data_file_for(source, file_type="DELIMITED_NO_HEADER")
+
+        assert built.source_structure() == []
+        assert built.read() == []
+        built.validate()                       # nothing to disagree with

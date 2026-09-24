@@ -63,8 +63,11 @@ from rey_lib.errors.error_utils import (
 from rey_lib.files import file_utils
 from rey_lib.files.data_file import DataFileStructureError
 from rey_lib.files.data_file import data_file_for as _data_file_for
+from rey_lib.files.data_file import registered_formats
 from rey_lib.files.configured_load import ConfiguredLoad as _ConfiguredLoad
+from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_loader import DataLoader as _DataLoader
+from rey_lib.files.data_loader import adapter_destination
 from rey_lib.files.data_transform import IdentityTransform
 from rey_lib.files.file_utils import (
     apply_file_movements,
@@ -98,6 +101,7 @@ __all__ = [
     "transform_one",
     "load_one",
     "validate_one",
+    "supported_file_types",
 ]
 
 _logger = get_logger(__name__)
@@ -484,30 +488,87 @@ def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:
     )
 
 
+def _destination_identity(
+    destination_table: str,
+    connection: str,
+) -> DatabaseObjectIdentity:
+    """Resolve one configured destination into the data object it names.
+
+    **THE TARGET DATA OBJECT.** Past this point the destination is an object
+    rather than a path through strings, and nothing downstream re-parses it.
+
+    The parts are kept APART, which is the difference from
+    ``_parse_destination``: that one joins a three-part name into the single
+    schema argument the adapter takes, and it still does, for the callers that
+    hand strings straight to the adapter. An identity carries no rendered
+    reference, so the join happens where the adapter is actually called --
+    ``data_loader.adapter_destination``.
+
+        'schema.table'             -> catalog '',         schema 'schema'
+        'database.schema.table'    -> catalog 'database',  schema 'schema'
+
+    Args:
+        destination_table: ``schema.table``, or ``database.schema.table``.
+        connection: The CONFIGURED CONNECTION NAME this object lives on.
+            Required, and not defaulted: an identity without one is a partial
+            endpoint, which is what passing objects exists to stop. Every
+            construction site has it -- a direct load is given it, and a
+            configured load reads ``load.connection``.
+
+    Returns:
+        The identity. The connection is named, never resolved here: opening it
+        belongs to whoever runs the load.
+
+    Raises:
+        ValueError: When the destination names no schema, or when no
+            connection is given.
+    """
+    name = str(destination_table or "")
+    parts = name.split(".")
+    if len(parts) < 2:
+        raise ValueError(
+            f"destination_table '{name}' must be at least 'schema.table' — "
+            f"got {len(parts)} part(s)."
+        )
+    if not str(connection or "").strip():
+        raise ValueError(
+            f"destination '{name}' needs the configured connection it lives "
+            f"on; a database object identity without one is incomplete."
+        )
+    return DatabaseObjectIdentity(
+        connection=str(connection).strip(),
+        catalog=".".join(parts[:-2]),
+        schema=parts[-2],
+        name=parts[-1],
+    )
+
+
 def _build_data_loader(
     ctx: Any,
-    schema: str,
-    table: str,
     create_declared: bool,
 ) -> _DataLoader:
-    """Build the loader for one destination.
+    """Build the loader for one load's policy.
 
     **The single place a DataLoader is constructed on this path**, so the
     definition-level build and the single-file build cannot differ.
 
+    **No destination.** Which object is written to is the target data object's
+    and arrives per call, so this builds POLICY only -- what the load may do,
+    which is not a property of the object it writes to.
+
     The widening callback is bound here because widening is CONFIGURED
     behaviour -- a declared routine, never inline DDL -- and its parameters
     travel through ``ctx``. This is the boundary that still holds ``ctx``; the
-    loader never learns how widening is configured.
+    loader never learns how widening is configured. The destination reaches it
+    per call now, rather than being closed over, for the same reason it is no
+    longer held.
     """
     return _DataLoader(
-        schema=schema,
-        table=table,
         adapter=_db_adapter,
         create_destination=create_declared,
         widen_columns=(
-            lambda _conn, records, defs: _alter_oversized_columns(
-                ctx, schema, table, records, defs,
+            lambda _conn, target, records, defs: _alter_oversized_columns(
+                ctx, *adapter_destination(target), records, defs,
             )
         ),
     )
@@ -534,7 +595,13 @@ def _configured_load(
     transform_cfg = _find_transform(
         data_source.transforms, load_cfg.name, load_cfg.version,
     )
-    schema, table = _parse_destination(load_cfg.load.destination_table)
+    # THE TARGET DATA OBJECT, resolved once where configuration is read. The
+    # connection it names comes from the same load block that has always
+    # named it, so nothing downstream reads that name again.
+    target = _destination_identity(
+        load_cfg.load.destination_table,
+        getattr(getattr(load_cfg, "load", None), "connection", "") or "",
+    )
     create_declared = _create_destination_declared(load_cfg)
     source_config = f"{data_source.name}.{load_cfg.name}"
 
@@ -550,14 +617,18 @@ def _configured_load(
             size_bytes=file_path.stat().st_size if file_path.exists() else None,
         )
 
-    def _load_one(conn: Any, per_file_log: Any, file_path: Path,
-                  **objects: Any) -> int:
-        # The definition's own transform, loader and DataFile rule arrive
-        # here; this step wraps them in movements and evidence and builds
-        # nothing of its own.
+    def _load_one(source: Any, transform: Any, target: Any,
+                  **context: Any) -> int:
+        # The definition's own source, transform and target arrive here; this
+        # step wraps them in movements and evidence and builds nothing of its
+        # own.
         return _load_one_file(
-            ctx, per_file_log, conn, file_path, transform_cfg,
-            load_cfg, data_source.paths, schema, table, **objects,
+            source, transform, target,
+            ctx=ctx,
+            transform_cfg=transform_cfg,
+            load_cfg=load_cfg,
+            paths=data_source.paths,
+            **context,
         )
 
     return _ConfiguredLoad(
@@ -566,7 +637,8 @@ def _configured_load(
                                  ctx=ctx),
         load_one_file=_load_one,
         transform=_build_identity_transform(transform_cfg),
-        loader=_build_data_loader(ctx, schema, table, create_declared),
+        loader=_build_data_loader(ctx, create_declared),
+        target=target,
         file_type=getattr(transform_cfg, "file_type", "CSV"),
         encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
         max_files=getattr(data_source, "max_files_per_run", None),
@@ -789,9 +861,9 @@ def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
 def load_file_to_table(
     ctx: Any,
     run_log: Any,
-    conn: Any,
     file_path: Path,
     destination: str,
+    connection: str,
     *,
     create_destination: bool = False,
     file_type: str = "",
@@ -818,10 +890,14 @@ def load_file_to_table(
     Args:
         ctx: Application context, for logging and any configured widening.
         run_log: The run's evidence recorder.
-        conn: Open connection, owned by the caller.
         file_path: The file to load.
         destination: ``schema.table``, or ``database.schema.table`` where the
             backend qualifies that way.
+        connection: The CONFIGURED CONNECTION NAME the destination lives on.
+            A name, not a handle: the target is built from it and the handle
+            is opened from the target, so one value says where the object is
+            and nothing reads it twice. Required -- an identity without a
+            connection is a partial endpoint.
         create_destination: Whether an absent table may be created from the
             file. False means it must already exist.
         file_type: Declared format. Empty infers it from the suffix, which
@@ -833,19 +909,23 @@ def load_file_to_table(
     Returns:
         Rows loaded.
     """
-    schema, table = _parse_destination(destination)
+    target = _destination_identity(destination, connection)
+    load_name = ".".join(
+        part for part in (target.catalog, target.schema, target.name) if part
+    )
 
-    def _load_one(conn_: Any, per_file_log: Any, path: Path,
-                  **objects: Any) -> int:
+    def _load_one(source: Any, transform: Any, target_: Any,
+                  **context: Any) -> int:
         # movements=None: a direct load has no movement policy, which is not
         # the same as one that moves nothing.
         return _load_one_file(
-            ctx, per_file_log, conn_, path, None, None, None, schema, table,
-            movements=None, load_name=f"{schema}.{table}", **objects,
+            source, transform, target_,
+            ctx=ctx, movements=None, load_name=load_name, **context,
         )
 
     return _ConfiguredLoad(
         load_one_file=_load_one,
+        target=target,
         explicit_files=[Path(file_path)],
         # None, not a stand-in config object. The builder reads a transform
         # config with getattr, so absent configuration produces no transform
@@ -853,11 +933,11 @@ def load_file_to_table(
         # means. Going through the builder rather than around it is what
         # leaves ONE construction site for an IdentityTransform.
         transform=_build_identity_transform(None),
-        loader=_build_data_loader(ctx, schema, table, create_destination),
+        loader=_build_data_loader(ctx, create_destination),
         file_type=file_type,
         encoding=encoding,
-        name=f"direct:{schema}.{table}",
-    ).load(conn, run_log)
+        name=f"direct:{load_name}",
+    ).load(run_log)
 
 
 def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path) -> int:
@@ -875,20 +955,17 @@ def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path
             f"load.connection is not set for load '{getattr(load_cfg, 'name', '?')}' "
             f"in data source '{getattr(data_source, 'name', '?')}'."
         )
-    transform_cfg = _find_transform(data_source.transforms, load_cfg.name, load_cfg.version)
-    schema, table = _parse_destination(load_cfg.load.destination_table)
-
-    # The shared Connection is not closed here: it outlives this load and is
-    # held by every other consumer of the same name.
-    conn = shared_connection(ctx, str(conn_name)).handle()
-
+    # The connection name is CHECKED here and resolved nowhere here: the
+    # target carries it, and the per-file step opens one from that. Resolving
+    # a handle to pass down would be a second reading of the same name.
+    #
     # Through a ConfiguredLoad like every other caller, so this is the same
     # object graph a discovered load runs -- one file selected explicitly
     # rather than found by pattern. Calling the per-file step directly would
     # be the second construction path this step exists to remove.
     return _configured_load(
         ctx, run_log, data_source, load_cfg, explicit_files=[file_path],
-    ).load(conn, run_log)
+    ).load(run_log)
 
 
 def run_load(
@@ -2011,54 +2088,75 @@ def _build_output_path(
 
 
 def _load_one_file(
-    ctx: Any, run_log,
-    conn: Any,
-    file_path: Path,
-    transform_cfg: Any,
-    load_cfg: Any,
-    paths: Any,
-    schema: str,
-    table: str,
+    source: Any,
+    transform: Any,
+    target: Any,
     *,
-    transform: Any = None,
+    ctx: Any,
+    run_log: Any,
+    transform_cfg: Any = None,
+    load_cfg: Any = None,
+    paths: Any = None,
     loader: Any = None,
-    data_file_for: Any = None,
     movements: Any = None,
     load_name: str = "",
 ) -> int:
+    """Transfer one source into one target, through one transform.
+
+    **THE TRANSFER BOUNDARY.** Three domain inputs, and they are the whole
+    contract:
+
+        source     what is being read     a DataFile
+        transform  what the records are   a DataTransform
+        target     where they go          a DatabaseObjectIdentity
+
+    Everything else is context, evidence or policy, and is keyword-only
+    precisely so it cannot be mistaken for part of the contract.
+
+    WHAT IS NOT HERE, and must not come back
+    ----------------------------------------
+    **No connection.** An open connection is not generic execution context --
+    it is the runtime form of ONE KIND of data object. A file-to-file transfer
+    has no meaningful connection, so a boundary that demanded one would not be
+    symmetric however its parameters were spelled. It is resolved BELOW, from
+    ``target.connection``, where a database is first actually needed.
+
+    **No path, schema or table.** Those are the endpoints, and the endpoints
+    are the objects. A second representation travelling alongside would mean
+    the flattening was never removed, only joined.
+
+    **Not a batch.** One source, one target. Selecting many files is
+    ``ConfiguredLoad``'s, and a many-to-one feeder is a different abstraction
+    that would need its own object.
+
+    Args:
+        source: The data object being read. Its own type settles how.
+        transform: What the produced records contain.
+        target: The data object being written, naming its configured
+            connection rather than holding one.
+        ctx: Application context, for logging and configured widening.
+        run_log: The run's evidence recorder.
+        transform_cfg: Declared columns, where a definition declares them.
+        load_cfg: The definition, for its movements and create policy.
+        paths: Where routed files go.
+        loader: The destination mechanic.
+        movements: Resolved movement policy. None means do not route, which
+            is not the same as routing nowhere.
+        load_name: What this load is called in evidence.
+
+    Returns:
+        Rows loaded, or 0 when this file was rejected. A file fault is 0; a
+        run-level fault raises.
     """
-    Load one file into the landing table.
-
-    Validates the header, reads and transforms all rows, bulk inserts,
-    then executes the configured file movements. Full rollback on any
-    error — every row error is logged before rollback.
-
-
-    Parameters
-    ----------
-    ctx : Any
-
-    conn : Any
-        Open backend connection.
-    file_path : Path
-        Full path of the file to load.
-    transform_cfg : Any
-        Transform Namespace — provides header, list-based columns, file_type,
-        and encoding.
-    load_cfg : Any
-        Load Namespace — provides movements.
-    paths : Any
-        Paths Namespace from the data source config.
-    schema : str
-        Target schema — may be 'database.schema' for cross-db inserts.
-    table : str
-        Target table name.
-
-    Returns
-    -------
-    int
-        Number of rows loaded, or 0 on failure.
-    """
+    file_path = source.path
+    # The evidence form of the destination, rendered once. Logs and run-log
+    # rows have always named the object the way the adapter does; keeping that
+    # means the identity gaining parts changes nothing anyone reads.
+    schema, table = adapter_destination(target)
+    # Named before the try so the handlers can ask whether there is anything
+    # to roll back -- the connection is resolved inside, and a failure before
+    # that point has opened nothing.
+    conn: Any = None
     log_enter(ctx, f"_load_one_file: {file_path.name}", _logger)
 
     try:
@@ -2077,8 +2175,15 @@ def _load_one_file(
         # would be a second graph that looks identical and can drift.
         if loader is None:
             loader = _build_data_loader(
-                ctx, schema, table, _create_destination_declared(load_cfg),
+                ctx, _create_destination_declared(load_cfg),
             )
+
+        # THE CONNECTION IS DERIVED FROM THE TARGET, and this is the first
+        # point a database is actually needed. It is resolved here rather than
+        # handed in so that `target.connection` is the one source of truth --
+        # nothing reads a configured connection name once the target exists,
+        # so there is no second answer for a guard to check.
+        conn = shared_connection(ctx, target.connection).handle()
 
         # Asked of the LOADER, which owns the policy, rather than re-read
         # from configuration. A direct load declares it as an argument and
@@ -2089,7 +2194,7 @@ def _load_one_file(
         # EXISTENCE ASKED ONCE, and its answer serves both decisions: how to
         # validate the file, and whether the destination must be created.
         # None means absent; [] would mean a table with no columns.
-        expected_columns = loader.destination_columns(conn)
+        expected_columns = loader.destination_columns(conn, target)
         exists = expected_columns is not None
 
         if not exists and not create_declared:
@@ -2104,72 +2209,44 @@ def _load_one_file(
                 f"block to have the loader create it."
             )
 
-        encoding = getattr(transform_cfg, "encoding", "utf-8-sig")
-
-        # The source here is a CONFIGURED path matched by a CONFIGURED pickup
-        # pattern, so its format is the transform's to declare -- the same
-        # contract the transform stage reads. Forcing "CSV" here discarded it
-        # at the reader boundary and made every reader but one unreachable.
-        # The default keeps a config that declares nothing on CSV.
-        file_type = getattr(transform_cfg, "file_type", "CSV")
-
-        # THE ONE FORMAT BRANCH LEFT HERE, and it is a legacy exclusion rather
-        # than a distinction this function makes. XLSX and headerless
-        # delimited files have no working structural check to migrate --
-        # backlog xlsx_load_has_no_working_structural_check and
-        # delimited_no_header_silently_eats_the_first_row -- so they stay on
-        # the pre-DataFile path until those are fixed. DELETE THIS BRANCH when
-        # they join the hierarchy; nothing else here knows a format exists.
-        if str(file_type).upper() in _UNMIGRATED_FILE_TYPES:
-            rows = _read_unmigrated_source(
-                ctx, run_log, file_path, file_type, encoding,
-                expected_columns or [],
-                exists=exists, schema=schema, table=table,
-                load_cfg=load_cfg, paths=paths,
+        # NO FORMAT BRANCH, and no format name either. Every source reaching
+        # here is a data object; a format with no DataFile is refused
+        # upstream, where the object would have been built. The
+        # XLSX/DELIMITED_NO_HEADER exclusion that used to stand here is gone
+        # -- one is migrated, the other is converted to CSV upstream.
+        #
+        # The file decides WHEN its shape is checked, because that depends on
+        # where its column names live: a header is one line and is checked
+        # before the rows, record keys only after, and a headerless file
+        # states its width nowhere but in its rows. This step knows none of
+        # that.
+        try:
+            # ALWAYS VALIDATED, but against different things.
+            #
+            #   a destination  -> does this file match the table?
+            #   None (absent)  -> is this file coherent with ITSELF?
+            #
+            # The second is what the create path never had. An absent
+            # destination used to mean no check at all, so an inconsistent
+            # file had its table created from the first record and then
+            # failed inside the insert -- a database error for what is a
+            # file defect, raised after DDL.
+            rows = source.read_validated(expected_columns)
+        except DataFileStructureError as structure_exc:
+            _logger.error("%s — file rejected: %s",
+                          structure_exc, file_path.name)
+            log_validation_result(run_log,
+                validation_name=structure_exc.validation_name,
+                status="failed",
+                message=str(structure_exc),
+                path=str(file_path),
+                schema=schema,
+                table=table,
             )
-            if rows is None:
-                log_exit(ctx, f"_load_one_file rejected (header): "
-                              f"{file_path.name}", _logger)
-                return 0
-        else:
-            # The file decides WHEN its shape is checked, because that depends
-            # on where its column names live -- a header is one line and is
-            # checked before the rows, record keys only after. This function
-            # no longer knows which is which.
-            # The definition's rule where one is driving, so every file in a
-            # feed is built the same way; otherwise this file's own settings.
-            source = (
-                data_file_for(file_path) if data_file_for is not None
-                else _data_file_for(file_path, file_type=file_type,
-                                    encoding=encoding)
-            )
-            try:
-                # ALWAYS VALIDATED, but against different things.
-                #
-                #   a destination  -> does this file match the table?
-                #   None (absent)  -> is this file coherent with ITSELF?
-                #
-                # The second is what the create path never had. An absent
-                # destination used to mean no check at all, so an
-                # inconsistent file had its table created from the first
-                # record and then failed inside the insert -- a database
-                # error for what is a file defect, raised after DDL.
-                rows = source.read_validated(expected_columns)
-            except DataFileStructureError as structure_exc:
-                _logger.error("%s — file rejected: %s",
-                              structure_exc, file_path.name)
-                log_validation_result(run_log,
-                    validation_name=structure_exc.validation_name,
-                    status="failed",
-                    message=str(structure_exc),
-                    path=str(file_path),
-                    schema=schema,
-                    table=table,
-                )
-                _route_file(ctx, run_log, movements, "failure", file_path, paths)
-                log_exit(ctx, f"_load_one_file rejected (structure): "
-                              f"{file_path.name}", _logger)
-                return 0
+            _route_file(ctx, run_log, movements, "failure", file_path, paths)
+            log_exit(ctx, f"_load_one_file rejected (structure): "
+                          f"{file_path.name}", _logger)
+            return 0
 
         if not rows:
             _logger.warning("No rows produced from file: %s", file_path.name)
@@ -2199,7 +2276,7 @@ def _load_one_file(
         # truncation retry. Told what existence check already found, so the
         # destination is inspected once per file rather than once per
         # decision.
-        loader.load(conn, rows, column_defs, expected_columns)
+        loader.load(conn, target, rows, column_defs, expected_columns)
 
         _logger.info(
             "Loaded: %s → %s.%s  rows=%d",
@@ -2219,7 +2296,12 @@ def _load_one_file(
         return len(rows)
 
     except DatabaseError as exc:
-        conn.rollback()
+        # Only if one was opened. The connection is resolved inside the try
+        # now, so a failure before that point has nothing to undo -- and
+        # calling rollback on nothing would replace a real database error
+        # with an AttributeError.
+        if conn is not None:
+            conn.rollback()
         _logger.error(
             "Database error loading '%s' — rolled back: %s",
             file_path.name, exc,
@@ -2239,54 +2321,6 @@ def _load_one_file(
 # ---------------------------------------------------------------------------
 # Private — column helpers
 # ---------------------------------------------------------------------------
-
-def _validate_load_header(
-	file_path: Path,
-	expected_columns: list[str],
-	encoding: str = "utf-8-sig",
-) -> bool:
-	"""
-	Validate converted-file header against destination table columns.
-
-	LEGACY, and its only caller is ``_read_unmigrated_source``. Every migrated
-	format asks its own DataFile subtype, which owns what its structure means;
-	this remains because XLSX and DELIMITED_NO_HEADER are still read by the
-	pre-DataFile path.
-
-	**It is also why XLSX cannot load into an existing table**: it opens the
-	file as TEXT and splits the first line on commas, which a ZIP container
-	can never satisfy. Deleted together with ``_read_unmigrated_source`` and
-	``_UNMIGRATED_FILE_TYPES`` when those formats join the hierarchy -- see
-	xlsx_load_has_no_working_structural_check.
-	"""
-	try:
-		with file_path.open(encoding=encoding, errors="replace") as fh:
-			for line in fh:
-				actual_header = line.strip()
-
-				if not actual_header:
-					continue
-
-				actual_columns = actual_header.split(",")
-
-				if actual_columns == expected_columns:
-					return True
-
-				_logger.error(
-					"Load header validation failed for '%s'\n"
-					"Expected table columns:\n%s\n\n"
-					"Actual file columns:\n%s",
-					file_path.name,
-					",".join(expected_columns),
-					actual_header,
-				)
-				return False
-
-	except OSError as exc:
-		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
-
-	return False
-
 
 def _configured_columns(transform_cfg: Any) -> Optional[list[str]]:
     """Return the declared output columns in order, or None when none are.
@@ -2752,56 +2786,29 @@ def _find_transform(
 #: Both carry defect rows. **This set goes away when they are fixed** and the
 #: subtypes join the hierarchy; it is the one format distinction left in this
 #: module and it is deliberately not a behavioural branch about how to read.
-_UNMIGRATED_FILE_TYPES: frozenset[str] = frozenset({
-    "XLSX", "DELIMITED_NO_HEADER",
-})
+def supported_file_types() -> list[str]:
+    """Every format a load accepts today, sorted.
 
+    **The registry, and nothing beside it.** This used to be the registry
+    UNION a deny-list of formats the pre-DataFile path still read. That path
+    is gone: only a data object crosses the load boundary, so a format with no
+    DataFile is not loadable and must not be offered as if it were.
 
-def _read_unmigrated_source(
-    ctx: Any,
-    run_log: Any,
-    file_path: Path,
-    file_type: str,
-    encoding: str,
-    expected_columns: list[str],
-    *,
-    exists: bool,
-    schema: str,
-    table: str,
-    load_cfg: Any,
-    paths: Any,
-) -> Optional[list[dict[str, Any]]]:
-    """Read a format that has not moved to DataFile yet, exactly as before.
+    XLSX is the format that left. It is not lost -- it is CONVERTED upstream,
+    by ``convert_workbook_to_csv`` and file_operator's excel conversion, and
+    the CSV that produces loads like any other. What changed is that the
+    loader stopped pretending to read a workbook it could not structurally
+    check.
 
-    Lifted unchanged from ``_load_one_file`` so the migrated path reads
-    cleanly; the behaviour is the pre-existing one, including the header check
-    that cannot work for XLSX.
+    **Here rather than in ``data_file``, and that is a dependency fact, not a
+    preference.** ``file_loader`` reaches into ``data_file``; the reverse
+    direction is empty and was emptied deliberately. An accessor there would
+    create the first edge the wrong way.
 
     Returns:
-        The rows, or ``None`` when the file was rejected — in which case the
-        rejection has already been logged and its movements run.
+        The accepted tokens, uppercase and sorted.
     """
-    if exists and not _validate_load_header(file_path, expected_columns,
-                                            encoding):
-        _logger.error("Header mismatch — file rejected: %s", file_path.name)
-        log_validation_result(run_log,
-            validation_name="load_header",
-            status="failed",
-            message="Header mismatch",
-            path=str(file_path),
-            schema=schema,
-            table=table,
-        )
-        _execute_movements(load_cfg.movements.failure, file_path, paths,
-                           ctx=ctx, run_log=run_log)
-        return None
-
-    # Through the module rather than this module's own binding, so the reader
-    # is reached the same way a DataFile subtype reaches it. One seam for both
-    # paths while both exist.
-    return list(
-        file_utils.get_reader(file_path, file_type=file_type, encoding=encoding)
-    )
+    return sorted(registered_formats())
 
 
 def _create_destination_declared(load_cfg: Any) -> bool:

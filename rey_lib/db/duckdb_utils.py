@@ -667,6 +667,20 @@ def _sql_string_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _quoted_identifier(name: str) -> str:
+    """Quote one column name, doubling any quote it contains.
+
+    Here rather than borrowed from another provider: postgres, mysql and
+    sqlserver each keep their own, because how an identifier is written is
+    the server's rule and not a shared one.
+
+    A JSON document's key becomes a column name and is not under anyone's
+    control -- ``{"asset \"list\"": [...]}`` is legal JSON -- so the doubling
+    is load-bearing rather than defensive.
+    """
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def file_source_expression(file_path: Path | str) -> str:
     """Return the DuckDB source expression that reads ``file_path``.
 
@@ -693,29 +707,72 @@ def file_source_expression(file_path: Path | str) -> str:
     return expression.format(literal=_sql_string_literal(str(path)))
 
 
-def default_file_select_sql(file_path: Path | str) -> str:
+def default_file_select_sql(
+    file_path: Path | str,
+    *,
+    record_key: str | None = None,
+) -> str:
     """Return the default read-only query for one file.
 
     This is the statement a surface opens a file on. It is the one place that
     knows a `.parquet` needs read_parquet and a `.jsonl` needs newline-delimited
     JSON settings, so no caller builds file SQL of its own.
 
+    A JSON DOCUMENT holding its rows under a key needs unwrapping, and the
+    unwrap is a projection rather than a source -- which is why it is here and
+    not in ``file_source_expression``, which still reads no file and still
+    answers from the extension alone. Without it,
+    ``SELECT * FROM read_json_auto('asset.json')`` over
+    ``{"asset": [ ... ]}`` returns ONE row holding the whole array.
+
+    ``max_depth := 2`` is the depth, not ``recursive := true``: one level
+    turns the list into rows and each row's object into columns, and stops.
+    Recursing further dissolves a nested object into columns of its own,
+    which silently disagrees with the records ``JsonFile`` produces from the
+    same document.
+
     Parameters
     ----------
     file_path : Path | str
         The file to read. Its extension selects the reader.
+    record_key : str | None
+        For a JSON document, the key holding the rows. ``None`` means the
+        rows need no unwrapping -- every non-JSON format, and a document that
+        is itself an array. An EMPTY STRING is a real key, not a sentinel;
+        ``{"": [...]}`` is legal JSON. See
+        ``rey_lib.files.data_file.keyed.json_record_shape``, which is what
+        answers this.
 
     Returns
     -------
     str
-        ``SELECT * FROM <source expression>``.
+        ``SELECT * FROM <source>``, or the unwrapping form.
 
     Raises
     ------
     ConfigError
         If no path is given, or its format has no DuckDB reader.
     """
-    return f"SELECT * FROM {file_source_expression(file_path)}"
+    source = file_source_expression(file_path)
+    if record_key is None:
+        return f"SELECT * FROM {source}"
+
+    if record_key == "":
+        # DuckDB refuses a zero-length delimited identifier outright --
+        #   Parser Error: zero-length delimited identifier at or near """"
+        # -- so this one key cannot be named. A single-key document yields
+        # exactly one column, so COLUMNS(*) reaches it without spelling it.
+        #
+        # The exception, not the rule: COLUMNS(*) is correct only because of
+        # that one-column invariant, which is held in another module. The
+        # named form below says which key it unwraps and fails loudly if that
+        # is ever wrong, and it is what a reader sees and edits.
+        return f"SELECT unnest(COLUMNS(*), max_depth := 2) FROM {source}"
+
+    return (
+        f"SELECT unnest({_quoted_identifier(record_key)}, max_depth := 2) "
+        f"FROM {source}"
+    )
 
 
 def load_sql_file(sql_path: Path | str) -> str:

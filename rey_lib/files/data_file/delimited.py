@@ -5,11 +5,11 @@ file whose shape is wrong can be rejected without parsing a single row --
 which is why ``read_validated`` here validates FIRST and reads after, the
 opposite of a keyed source.
 
-**Headerless delimited files are deliberately absent.** ``get_reader`` accepts
-DELIMITED_NO_HEADER and dispatches it to the same reader, which always takes
-the first line as a header -- so the first DATA row is silently consumed. A
-subtype over that would be building on a defect; see
-delimited_no_header_silently_eats_the_first_row.
+**Headerless delimited files are its sibling**, in
+``delimited_no_header.py``. They were deliberately absent while the only
+reader took the first line as a header whatever the declared type -- a subtype
+over that would have been built on a defect. ``DelimitedNoHeaderFile`` does
+not use that reader, which is how it reads every line as data.
 """
 
 from __future__ import annotations

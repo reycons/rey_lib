@@ -18,13 +18,17 @@ It replaces the whole ``ctx + data_source + load_cfg`` bundle that
 
 ```
 OLD   load_files(ctx, run_log, conn, data_source, load_cfg)
-NEW   ConfiguredLoad(...).load(conn, run_log)
+NEW   ConfiguredLoad(...).load(run_log)
 ```
 
 Everything a load DEFINITION needs is resolved once, at construction. What
-varies per EXECUTION -- the connection and the run's log -- arrives at
-``load``. Neither is held: the connection is shared and outlives any one
-load, and a definition can outlive any one run.
+varies per EXECUTION -- the run's log -- arrives at ``load``. It is not held:
+a definition can outlive any one run.
+
+The connection is neither held nor passed. The definition names its target,
+the target names its configured connection, and the per-file step resolves
+one where a database is first needed -- so a definition writing somewhere
+that is not a database never sees one.
 
 Nothing below this object interprets configuration.
 """
@@ -46,7 +50,12 @@ _logger = get_logger(__name__)
 
 #: How one already-selected file is loaded.
 #:
-#: ``(conn, run_log, path, *, transform, loader, data_file_for) -> rows``
+#: ``(source, transform, target, *, run_log, loader, ...) -> rows``
+#:
+#: THE THREE DOMAIN INPUTS ARE THE CONTRACT. No connection crosses it: the
+#: per-file step resolves one from ``target.connection`` where a database is
+#: first needed, so a transfer whose target is not a database demands nothing
+#: it has no use for.
 #:
 #: Injected rather than imported. The per-file step owns movements, run
 #: logging and the mapping of a database failure onto a file's routing --
@@ -76,6 +85,7 @@ class ConfiguredLoad:
         pattern: str = "",
         transform: DataTransform,
         loader: DataLoader,
+        target: Any,
         file_type: str = "",
         encoding: str = "utf-8-sig",
         max_files: int | None = None,
@@ -92,7 +102,10 @@ class ConfiguredLoad:
             pattern: The pickup pattern, already substituted. Unused when
                 explicit_files is given.
             transform: What the produced records contain.
-            loader: Where those records go.
+            loader: The destination mechanic and this load's policy.
+            target: The data object those records go to. The definition's,
+                resolved once here -- so every file in the feed is written to
+                one object rather than each re-reading where it lives.
             file_type: Declared format, or empty to infer from the suffix.
             encoding: How to decode the files.
             max_files: Cap on files taken in one run, or None for all.
@@ -107,6 +120,7 @@ class ConfiguredLoad:
         self.load_one_file = load_one_file
         self.transform = transform
         self.loader = loader
+        self.target = target
         self.file_type = file_type
         self.encoding = encoding
         self.max_files = max_files
@@ -166,8 +180,13 @@ class ConfiguredLoad:
             path, file_type=self.file_type, encoding=self.encoding
         )
 
-    def load(self, conn: Any, run_log: Any) -> int:
+    def load(self, run_log: Any) -> int:
         """Select this load's files and load each one.
+
+        **No connection.** It only ever passed one through, and the per-file
+        step now resolves its own from the target it is given. Taking one here
+        would make a definition whose target is not a database demand a
+        database handle to run.
 
         **A batch is an AGGREGATE that may partially complete.** A file that
         fails is one failed file: the ones before it stay loaded and the ones
@@ -180,7 +199,6 @@ class ConfiguredLoad:
         reported 100 times rather than a partial success.
 
         Args:
-            conn: Open connection, owned by the caller.
             run_log: The run's evidence recorder.
 
         Returns:
@@ -205,12 +223,17 @@ class ConfiguredLoad:
         # The objects are THIS definition's, built once and handed to every
         # file. The per-file step wraps them in movements and evidence; it
         # does not reinterpret the configuration they came from.
+        # The SOURCE OBJECT is built here, not the rule for building one.
+        # This definition already owns how its files are read; handing the
+        # per-file step a builder made it construct the endpoint it was
+        # supposed to be given.
         return sum(
             self.load_one_file(
-                conn, run_log, file_path,
-                transform=self.transform,
+                self.data_file_for(file_path),
+                self.transform,
+                self.target,
+                run_log=run_log,
                 loader=self.loader,
-                data_file_for=self.data_file_for,
             )
             for file_path in pending
         )

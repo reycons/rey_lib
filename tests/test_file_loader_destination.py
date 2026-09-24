@@ -28,6 +28,16 @@ import pytest
 
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import file_loader
+from rey_lib.db.database_objects import DatabaseObjectIdentity
+from rey_lib.files.data_file import data_file_for
+
+#: Where these loads write. The per-file step takes a target object now, and
+#: resolves its own connection from it -- so tests substitute the resolution
+#: rather than injecting a handle.
+_TARGET = DatabaseObjectIdentity(
+    connection="c", catalog="", schema="schema", name="table",
+)
+
 
 _COLUMNS = ["a", "b"]
 
@@ -91,15 +101,26 @@ def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
     if declared is not None:
         load_block.create_destination_table = declared
 
+    monkeypatch.setattr(
+        file_loader, "shared_connection",
+        lambda _ctx, _name: SimpleNamespace(
+            handle=lambda: SimpleNamespace(
+                commit=lambda: None, rollback=lambda: None,
+            )
+        ),
+    )
+    file_type = "JSONL" if keyed else "CSV"
     return file_loader._load_one_file(
-        SimpleNamespace(log_depth=0), run_log,
-        SimpleNamespace(commit=lambda: None, rollback=lambda: None),
-        _jsonl(tmp_path, records) if keyed else _csv(tmp_path),
-        SimpleNamespace(file_type="JSONL" if keyed else "CSV", encoding="utf-8"),
-        SimpleNamespace(name="my_load",
-                        load=load_block,
-                        movements=SimpleNamespace(failure=[], success=[])),
-        SimpleNamespace(), "schema", "table",
+        data_file_for(_jsonl(tmp_path, records) if keyed else _csv(tmp_path),
+                      file_type=file_type, encoding="utf-8"),
+        None,
+        _TARGET,
+        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        transform_cfg=SimpleNamespace(file_type=file_type, encoding="utf-8"),
+        load_cfg=SimpleNamespace(
+            name="my_load", load=load_block,
+            movements=SimpleNamespace(failure=[], success=[])),
+        paths=SimpleNamespace(),
     )
 
 
@@ -169,15 +190,26 @@ class TestTheDestinationIsThere:
         monkeypatch.setattr(file_loader, "_execute_movements",
                             lambda *a, **k: moved.append(a))
 
+        monkeypatch.setattr(
+            file_loader, "shared_connection",
+            lambda _ctx, _name: SimpleNamespace(
+                handle=lambda: SimpleNamespace(
+                    commit=lambda: None, rollback=lambda: None,
+                )
+            ),
+        )
+
         loaded = file_loader._load_one_file(
-            SimpleNamespace(log_depth=0), run_log,
-            SimpleNamespace(commit=lambda: None, rollback=lambda: None),
-            path,
-            SimpleNamespace(file_type="CSV", encoding="utf-8"),
-            SimpleNamespace(name="my_load",
-                            load=SimpleNamespace(destination_table="s.t"),
-                            movements=SimpleNamespace(failure=[], success=[])),
-            SimpleNamespace(), "schema", "table",
+            data_file_for(path, file_type="CSV", encoding="utf-8"),
+            None,
+            _TARGET,
+            ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+            transform_cfg=SimpleNamespace(file_type="CSV", encoding="utf-8"),
+            load_cfg=SimpleNamespace(
+                name="my_load",
+                load=SimpleNamespace(destination_table="s.t"),
+                movements=SimpleNamespace(failure=[], success=[])),
+            paths=SimpleNamespace(),
         )
 
         assert loaded == 0

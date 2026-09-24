@@ -23,7 +23,14 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.files import file_loader
+from rey_lib.db.database_objects import DatabaseObjectIdentity
+from rey_lib.files.data_file import data_file_for
 from rey_lib.files.file_utils import KEYED_FILE_TYPES, get_reader
+
+#: Where these loads write. The per-file step takes a target object now.
+_TARGET = DatabaseObjectIdentity(
+    connection="c", catalog="", schema="schema", name="table",
+)
 
 
 def _ctx() -> SimpleNamespace:
@@ -70,13 +77,27 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
     monkeypatch.setattr(file_loader, "_execute_movements",
                         lambda *_a, **_k: None)
 
+    # The connection is resolved from the target now, so it is substituted
+    # where it is resolved rather than injected as an argument. Same style as
+    # the adapter and the movements beside it.
+    monkeypatch.setattr(
+        file_loader, "shared_connection",
+        lambda _ctx, _name: SimpleNamespace(
+            handle=lambda: SimpleNamespace(
+                commit=lambda: None, rollback=lambda: None,
+            )
+        ),
+    )
     loaded = file_loader._load_one_file(
-        _ctx(), run_log,
-        SimpleNamespace(commit=lambda: None, rollback=lambda: None),
-        _jsonl(tmp_path, *records),
-        SimpleNamespace(file_type="JSONL", encoding="utf-8"),
-        SimpleNamespace(movements=SimpleNamespace(failure=[], success=[])),
-        SimpleNamespace(), "schema", "table",
+        data_file_for(_jsonl(tmp_path, *records),
+                      file_type="JSONL", encoding="utf-8"),
+        None,
+        _TARGET,
+        ctx=_ctx(), run_log=run_log,
+        transform_cfg=SimpleNamespace(file_type="JSONL", encoding="utf-8"),
+        load_cfg=SimpleNamespace(
+            movements=SimpleNamespace(failure=[], success=[])),
+        paths=SimpleNamespace(),
     )
     return loaded, seen
 

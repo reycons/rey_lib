@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_loader import DataLoader
 
 _DEFS = [("a", "INTEGER"), ("b", "VARCHAR(20)")]
@@ -76,8 +77,15 @@ class _Adapter:
         return self._truncation
 
 
+#: The destination these tests load into. An identity, because that is what
+#: the loader is handed now -- it holds no schema or table of its own.
+_TARGET = DatabaseObjectIdentity(
+    connection="c", catalog="", schema="s", name="t",
+)
+
+
 def _loader(adapter, **kwargs) -> DataLoader:
-    return DataLoader(schema="s", table="t", adapter=adapter, **kwargs)
+    return DataLoader(adapter=adapter, **kwargs)
 
 
 class TestTheDependenciesAreExplicit:
@@ -93,7 +101,7 @@ class TestTheDependenciesAreExplicit:
         """
         adapter = _Adapter(exists=True)
 
-        loaded = _loader(adapter).load(_Conn(), _RECORDS, _DEFS)
+        loaded = _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert loaded == 2
 
@@ -154,7 +162,7 @@ class TestTheCreatePolicy:
         """
         adapter = _Adapter(exists=True)
 
-        _loader(adapter).load(_Conn(), _RECORDS, _DEFS)
+        _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert adapter.created == []
         assert adapter.calls == ["table_exists", "get_table_columns",
@@ -169,7 +177,7 @@ class TestTheCreatePolicy:
         adapter = _Adapter(exists=False)
 
         with pytest.raises(ConfigError) as raised:
-            _loader(adapter).load(_Conn(), _RECORDS, _DEFS)
+            _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert "s.t" in str(raised.value)
         assert adapter.created == []
@@ -180,7 +188,7 @@ class TestTheCreatePolicy:
         adapter = _Adapter(exists=False)
 
         loaded = _loader(adapter, create_destination=True).load(
-            _Conn(), _RECORDS, _DEFS
+            _Conn(), _TARGET, _RECORDS, _DEFS
         )
 
         assert loaded == 2
@@ -200,7 +208,7 @@ class TestTheInsert:
         """
         adapter = _Adapter(exists=True)
 
-        _loader(adapter).load(_Conn(), _RECORDS, _DEFS)
+        _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         _schema, _table, _records, columns = adapter.inserted[0]
         assert columns == ["a", "b"]
@@ -215,8 +223,8 @@ class TestTheInsert:
         conn = _Conn()
         loader = _loader(adapter)
 
-        loader.load(conn, _RECORDS, _DEFS)
-        loader.load(conn, _RECORDS, _DEFS)
+        loader.load(conn, _TARGET, _RECORDS, _DEFS)
+        loader.load(conn, _TARGET, _RECORDS, _DEFS)
 
         assert conn.commits == 2
         assert conn.rollbacks == 0
@@ -224,11 +232,11 @@ class TestTheInsert:
     def test_an_earlier_success_survives_a_later_failure(self) -> None:
         """The property the per-load commit exists to give."""
         conn = _Conn()
-        _loader(_Adapter(exists=True)).load(conn, _RECORDS, _DEFS)
+        _loader(_Adapter(exists=True)).load(conn, _TARGET, _RECORDS, _DEFS)
 
         failing = _Adapter(exists=True, insert_error=DatabaseError("nope"))
         with pytest.raises(DatabaseError):
-            _loader(failing).load(conn, _RECORDS, _DEFS)
+            _loader(failing).load(conn, _TARGET, _RECORDS, _DEFS)
 
         assert conn.commits == 1        # the first load stayed committed
         assert conn.rollbacks == 1
@@ -238,7 +246,7 @@ class TestTheTruncationRetry:
     """The least-covered path in the loader, and the easiest to lose."""
 
     def _widening(self, calls: list) -> Any:
-        def _widen(conn, records, column_defs) -> bool:
+        def _widen(conn, target, records, column_defs) -> bool:
             calls.append((conn, records, column_defs))
             return True
         return _widen
@@ -249,7 +257,7 @@ class TestTheTruncationRetry:
                            insert_error=DatabaseError("too long"))
 
         loaded = _loader(adapter, widen_columns=self._widening(calls)).load(
-            _Conn(), _RECORDS, _DEFS
+            _Conn(), _TARGET, _RECORDS, _DEFS
         )
 
         assert loaded == 2
@@ -269,7 +277,7 @@ class TestTheTruncationRetry:
                            insert_error=DatabaseError("too long"))
 
         _loader(adapter, widen_columns=self._widening(calls)).load(
-            conn, _RECORDS, _DEFS
+            conn, _TARGET, _RECORDS, _DEFS
         )
 
         assert calls[0][0] is conn
@@ -282,7 +290,7 @@ class TestTheTruncationRetry:
 
         with pytest.raises(DatabaseError):
             _loader(adapter, widen_columns=self._widening(calls)).load(
-                _Conn(), _RECORDS, _DEFS
+                _Conn(), _TARGET, _RECORDS, _DEFS
             )
 
         assert calls == []
@@ -293,7 +301,7 @@ class TestTheTruncationRetry:
                            insert_error=DatabaseError("too long"))
 
         with pytest.raises(DatabaseError):
-            _loader(adapter).load(_Conn(), _RECORDS, _DEFS)
+            _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert adapter.calls.count("bulk_insert") == 1
 
@@ -305,7 +313,7 @@ class TestTheTruncationRetry:
         with pytest.raises(DatabaseError):
             _loader(adapter,
                     widen_columns=lambda *_a: False).load(
-                _Conn(), _RECORDS, _DEFS
+                _Conn(), _TARGET, _RECORDS, _DEFS
             )
 
         assert adapter.calls.count("bulk_insert") == 1
@@ -322,7 +330,7 @@ class TestTheTruncationRetry:
         adapter = _Adapter(exists=False)
 
         loaded = _loader(adapter, create_destination=True).load(
-            _Conn(), _RECORDS, _DEFS
+            _Conn(), _TARGET, _RECORDS, _DEFS
         )
 
         assert loaded == 2

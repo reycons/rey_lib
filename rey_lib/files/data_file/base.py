@@ -28,12 +28,44 @@ describe them.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from rey_lib.errors.error_utils import AppError
 
-__all__ = ["DataFile", "DataFileStructureError"]
+__all__ = ["DataFile", "DataFileStructureError", "RecordShape"]
+
+
+@dataclass(frozen=True)
+class RecordShape:
+    """Whether a file holds records, and where inside it they are.
+
+    THREE STATES, and two would lose one of them:
+
+        not records   holds_records=False  record_key=None
+        records       holds_records=True   record_key=None
+        records       holds_records=True   record_key=<a key>
+
+    ``record_key=""`` CANNOT mean "no key". ``{"": [...]}`` is legal JSON -- a
+    document with one key that happens to be empty -- so a caller testing the
+    key for truthiness could not tell it from ``[...]`` and would unwrap
+    neither. The two are different documents and this says so.
+
+    **This is not "should be opened in a query surface."** It says what the
+    file object can represent, and nothing about which viewer should own it.
+    A JSONL file holds records and still belongs to its own inspector; that
+    is viewer policy, decided elsewhere and free to outrank this.
+
+    Attributes:
+        holds_records: Whether this file can present itself as rows.
+        record_key: Where they sit inside it, where that is a question the
+            format has -- None when the file simply IS its records.
+            Meaningless when ``holds_records`` is False.
+    """
+
+    holds_records: bool
+    record_key: str | None = None
 
 #: What the loader already defaults to, kept so nothing changes by moving.
 DEFAULT_ENCODING = "utf-8-sig"
@@ -109,6 +141,29 @@ class DataFile(ABC):
         caller with nothing to validate against should not have to pass
         something meaningless to say so.
         """
+
+    def record_shape(self) -> RecordShape:
+        """Whether this file holds records, and where they are.
+
+        THE SEMANTIC QUESTION, asked of the file object rather than guessed
+        from its name. A consumer deciding what a path is good for asks this;
+        a consumer that can read the file itself then reads the FILE. See
+        ``RecordShape`` -- the answer describes the file, not a surface.
+
+        Records by default, because that is already this class's contract:
+        a DataFile produces ``list[dict]``, so every format that is one holds
+        records. Formats whose record representation is CONDITIONAL override
+        this -- ``JsonFile`` is the case, since a JSON file may equally be a
+        configuration document with no rows in it.
+
+        Concrete by design, not abstract: a new format that genuinely is a
+        DataFile should not have to restate the thing that made it one.
+
+        Returns:
+            Records, with nothing to say about where. Never reads the file --
+            an override that must look may raise whatever reading raises.
+        """
+        return RecordShape(holds_records=True)
 
     @abstractmethod
     def validate(self, expected_columns: list[str] | None = None) -> None:

@@ -29,6 +29,8 @@ __all__ = [
     "Application",
     "ApplicationCommand",
     "ApplicationCommandParameter",
+    "ApplicationMode",
+    "ApplicationModeGroup",
     "build_applications",
 ]
 
@@ -45,7 +47,34 @@ _CHOICE_SOURCES: dict[str, str] = {
     "workflows": "workflows",
     "pipelines": "pipelines",
     "tools": "tools",
+    "connections": "connections",
+    "data_sources": "data_sources",
 }
+
+
+@dataclass(frozen=True)
+class ApplicationMode:
+    """One alternative within a mode group."""
+
+    name: str
+    label: str = ""
+
+
+@dataclass(frozen=True)
+class ApplicationModeGroup:
+    """One exclusive choice a command offers, and the alternatives it holds.
+
+    A command whose parameters are alternatives -- load this one file to a
+    configured destination, or to a named table, or load every configured
+    source -- can only express that as a runtime refusal today. Declaring it
+    lets a surface offer the shapes instead of offering every field at once and
+    rejecting the combination afterwards.
+    """
+
+    name: str
+    label: str = ""
+    default: str = ""
+    modes: tuple[ApplicationMode, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,6 +85,20 @@ class ApplicationCommandParameter:
     or read from the collection the declaration named, once, while this object
     was built. Which of the two it was is deliberately not recorded -- a
     consumer sees values, and has nothing to re-resolve with.
+
+    ``mode_membership`` and ``required_when`` map a **group name** to the modes
+    of that group. The group is named because ``mode_groups`` is plural and two
+    groups may each declare a mode of the same name; a bare list would say
+    nothing about which group it meant.
+
+    Empty ``mode_membership`` means the parameter is always active, which is
+    what every parameter declared before this existed carries.
+
+    ``required_when`` is separate from ``required`` rather than a conditional
+    reading of it. ``required`` keeps its global, unconditional meaning for
+    every consumer -- including ones that have never heard of modes, such as
+    the Console's application inventory -- so no reader can see ``required``
+    true without that being true in every mode.
     """
 
     name: str
@@ -64,6 +107,19 @@ class ApplicationCommandParameter:
     description: str = ""
     positional: bool = False
     possible_values: tuple[str, ...] = ()
+    #: Which modes this parameter belongs to, keyed by mode group. Membership
+    #: is a conjunction: every declared group must be on one of its named
+    #: modes for the parameter to be active.
+    mode_membership: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: The modes in which this parameter must have a value, keyed the same way.
+    required_when: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: What an empty control says it would do. For a choice, the label of the
+    #: empty option an optional parameter is given.
+    placeholder: str = ""
+    #: Where a surface draws it: with the other fields, or beside the action
+    #: that runs the command. An execution mode is not part of what is being
+    #: defined, and saying so is the declaration's business, not the reader's.
+    placement: str = "form"
 
 
 @dataclass(frozen=True)
@@ -73,6 +129,7 @@ class ApplicationCommand:
     name: str
     description: str = ""
     parameters: tuple[ApplicationCommandParameter, ...] = ()
+    mode_groups: tuple[ApplicationModeGroup, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +161,22 @@ class Application:
     #: here would silently make every application an override and leave the
     #: installation term with nothing to answer.
     log_level: str = ""
+    #: The icon this application is known by, as a name in the shared library.
+    #:
+    #: Published by the distribution, beside its CLI and its operations, because
+    #: which mark is an application's own is a fact about the application. The
+    #: surface drawing it holds the artwork and nothing else; a NAME crosses,
+    #: never markup -- an installed distribution is not a source the Console's
+    #: raw-SVG path accepts.
+    #:
+    #: OPTIONAL HERE, REQUIRED BY POLICY OF THE ESTATE'S OWN PACKAGES. The two
+    #: are different contracts on purpose: an external application has no
+    #: package to publish one and a declaration predating this field is still
+    #: valid, so both stay legal and are drawn with the generic application
+    #: mark. That the estate's own registrations must each publish one is
+    #: enforced by a test, not by this default -- reading the empty string as
+    #: laxity is the misreading this comment exists to prevent.
+    icon: str = ""
     #: The application's own parameters, declared under ``cli.parameters``.
     #:
     #: Not every application has commands. Several declare parameters at this
@@ -275,6 +348,10 @@ def _from_registration(
         app_path=app_path,
         entry_point=str(registration.get("entry_point") or "main.py"),
         shared_parameters=bool(cli.get("shared_parameters")),
+        # From the REGISTRATION: which mark is this application's own is
+        # published by the distribution, not chosen by an installation. Two
+        # installations running the same application draw the same icon.
+        icon=str(registration.get("icon") or ""),
         # From the installation entry, not the registration: how loud this
         # application runs here is this installation's decision.
         log_level=str(entry.get("log_level") or ""),
@@ -321,6 +398,10 @@ def _from_declaration(
         app_path=str(entry.get("app_path") or ""),
         entry_point=str(entry.get("entry_point") or "main.py"),
         shared_parameters=bool(cli.get("shared_parameters")),
+        # From the declaration here, because an external application has no
+        # package to publish anything. Absent is ordinary and draws the
+        # generic mark.
+        icon=str(entry.get("icon") or ""),
         log_level=str(entry.get("log_level") or ""),
         parameters=tuple(
             _parameter(one, ctx, name)
@@ -401,32 +482,160 @@ def _commands(
 
 
 def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCommand:
-    """One command declaration, as the object."""
+    """One command declaration, as the object.
+
+    The mode groups are built first, because every parameter's membership is
+    checked against them: a membership naming a group nobody declared is a typo
+    that would otherwise hide a field forever.
+    """
+    name = str(entry.get("name") or "")
+    groups = _mode_groups(entry, application, name)
     return ApplicationCommand(
-        name=str(entry.get("name") or ""),
+        name=name,
         description=str(entry.get("description") or ""),
         parameters=tuple(
-            _parameter(one, ctx, application)
+            _parameter(one, ctx, application, name, groups)
             for one in (_plain(item) for item in (entry.get("parameters") or []))
             if isinstance(one, dict)
         ),
+        mode_groups=groups,
     )
+
+
+def _mode_groups(
+    entry: dict[str, Any],
+    application: str,
+    command: str,
+) -> tuple[ApplicationModeGroup, ...]:
+    """One command's exclusive choices, refused rather than repaired.
+
+    Raises:
+        ConfigError: A group with no name or no modes, a duplicate group name,
+            a duplicate mode within one group, or a default naming a mode the
+            group does not declare. Each would present a reader with a chooser
+            that cannot work, and none is recoverable by guessing.
+    """
+    built: list[ApplicationModeGroup] = []
+    for item in (_plain(one) for one in (entry.get("mode_groups") or [])):
+        if not isinstance(item, dict):
+            continue
+        group = str(item.get("name") or "")
+        where = f"Application '{application}' command '{command}'"
+        if not group:
+            raise ConfigError(f"{where} declares a mode group with no name.")
+        if any(one.name == group for one in built):
+            raise ConfigError(
+                f"{where} declares mode group '{group}' more than once. A group "
+                "name identifies one choice, or a membership naming it cannot "
+                "say which."
+            )
+        modes = tuple(
+            ApplicationMode(
+                name=str(mode.get("name") or ""),
+                label=str(mode.get("label") or ""),
+            )
+            for mode in (_plain(one) for one in (item.get("modes") or []))
+            if isinstance(mode, dict) and mode.get("name")
+        )
+        if not modes:
+            raise ConfigError(
+                f"{where} mode group '{group}' declares no modes. A chooser "
+                "with nothing to choose is not a choice."
+            )
+        named = [one.name for one in modes]
+        if len(set(named)) != len(named):
+            raise ConfigError(
+                f"{where} mode group '{group}' declares a mode more than once: "
+                f"{', '.join(sorted(named))}."
+            )
+        default = str(item.get("default") or "")
+        if default and default not in named:
+            raise ConfigError(
+                f"{where} mode group '{group}' defaults to '{default}', which "
+                f"it does not declare. Its modes are: {', '.join(named)}."
+            )
+        built.append(ApplicationModeGroup(
+            name=group,
+            label=str(item.get("label") or ""),
+            default=default or named[0],
+            modes=modes,
+        ))
+    return tuple(built)
 
 
 def _parameter(
     entry: dict[str, Any],
     ctx: Any,
     application: str,
+    command: str = "",
+    groups: tuple[ApplicationModeGroup, ...] = (),
 ) -> ApplicationCommandParameter:
-    """One parameter declaration, with its choices resolved."""
+    """One parameter declaration, with its choices and memberships resolved."""
+    name = str(entry.get("name") or "")
     return ApplicationCommandParameter(
-        name=str(entry.get("name") or ""),
+        name=name,
         value_type=str(entry.get("value_type") or ""),
         required=bool(entry.get("required")),
         description=str(entry.get("description") or ""),
         positional=bool(entry.get("positional")),
         possible_values=_choices(entry, ctx, application),
+        mode_membership=_membership(
+            entry, "mode_membership", application, command, name, groups,
+        ),
+        required_when=_membership(
+            entry, "required_when", application, command, name, groups,
+        ),
+        placeholder=str(entry.get("placeholder") or ""),
+        placement=str(entry.get("placement") or "form"),
     )
+
+
+def _membership(
+    entry: dict[str, Any],
+    key: str,
+    application: str,
+    command: str,
+    parameter: str,
+    groups: tuple[ApplicationModeGroup, ...],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """One ``{group: [mode, ...]}`` declaration, checked against the groups.
+
+    Fails closed on a name nothing declares, because the consequence of a typo
+    is a field that is never active and never explains why.
+
+    Raises:
+        ConfigError: Naming the group or mode that does not exist, and what the
+            command actually declares.
+    """
+    declared = _plain(entry.get(key)) or {}
+    if not isinstance(declared, dict):
+        raise ConfigError(
+            f"Application '{application}' command '{command}' parameter "
+            f"'{parameter}' declares '{key}' as {type(declared).__name__}. It "
+            "maps a mode group name to the modes within it."
+        )
+    known = {one.name: {mode.name for mode in one.modes} for one in groups}
+    built: list[tuple[str, tuple[str, ...]]] = []
+    for group, modes in declared.items():
+        where = (
+            f"Application '{application}' command '{command}' parameter "
+            f"'{parameter}' {key}"
+        )
+        if str(group) not in known:
+            raise ConfigError(
+                f"{where} names mode group '{group}', which this command does "
+                f"not declare. Declared: {', '.join(sorted(known)) or 'none'}."
+            )
+        named = tuple(str(one) for one in (modes or ()))
+        unknown = [one for one in named if one not in known[str(group)]]
+        if unknown:
+            raise ConfigError(
+                f"{where} names mode(s) {', '.join(unknown)} in group "
+                f"'{group}', which declares: "
+                f"{', '.join(sorted(known[str(group)]))}."
+            )
+        built.append((str(group), named))
+    return tuple(built)
 
 
 def _choices(entry: dict[str, Any], ctx: Any, application: str) -> tuple[str, ...]:

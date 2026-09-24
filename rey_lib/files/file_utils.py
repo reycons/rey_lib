@@ -1020,22 +1020,32 @@ def run_artifact_path(
 
 
 #: File types that carry their column names on EVERY record rather than once
-#: in a header. The loader needs this too -- it decides WHEN the shape can be
-#: checked, since a header is readable before the rows and record keys are
-#: not -- so one place knows the answer and the two cannot disagree.
+#: in a header, AND that ``get_reader`` can read one line at a time.
+#:
+#: Both halves are load-bearing: this is what ``get_reader`` dispatches to its
+#: line reader on. JSON is keyed and is NOT here, because a document is one
+#: value and reading it a line at a time yields nothing -- ``JsonFile`` reads
+#: it instead. What a file_type shares with JSONL is not enough to add it.
 KEYED_FILE_TYPES: frozenset[str] = frozenset({"JSONL", "NDJSON"})
 
-#: Filename suffix -> the file_type token ``get_reader`` dispatches on.
+#: Filename suffix -> the file_type token that names the format.
 #:
-#: Here, beside that dispatch, rather than in a caller: the estate already has
+#: Here, beside ``get_reader``, rather than in a caller: the estate already has
 #: several file-type vocabularies that disagree, and a suffix map living apart
-#: from the reader it feeds would become another. Every value below must be a
-#: token ``get_reader`` accepts, which a test asserts over the whole map.
+#: from the readers it feeds would become another.
+#:
+#: TWO readers now consume it -- ``get_reader``, and the DataFile registry by
+#: way of ``data_file_for``. So the rule a test asserts over the whole map is
+#: that every token is one ``get_reader`` dispatches on OR one the registry
+#: registers. JSON is the case that made the difference visible: a document is
+#: not readable a record at a time, so ``get_reader`` has nothing to offer it,
+#: and only a DataFile can read it.
 #:
 #: Suffixes only, and only where the suffix genuinely names the format. A
 #: caller that knows better declares a file_type and is believed.
 _SUFFIX_FILE_TYPES: dict[str, str] = {
     ".csv":   "CSV",
+    ".json":  "JSON",
     ".jsonl": "JSONL",
     ".ndjson": "NDJSON",
     ".xlsx":  "XLSX",

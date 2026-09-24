@@ -270,3 +270,173 @@ class TestResolvedOnce:
         build([entry], workflows=[{"name": "alpha"}])
 
         assert "possible_values" not in entry["cli"]["parameters"][0]
+
+
+class TestModeGroups:
+    """A command's exclusive shapes, declared rather than refused at runtime.
+
+    An application whose parameters are alternatives can only express that as
+    a runtime rejection today, so every surface offers all of them at once and
+    the application says no afterwards. These prove the declaration a surface
+    can act on instead -- and that a typo in it is a load-time fault rather
+    than a field that is silently never shown.
+    """
+
+    @staticmethod
+    def _load(**over: Any) -> dict[str, Any]:
+        """One command declaring two shapes, as rey_loader's `load` does."""
+        return {
+            "name": "load",
+            "mode_groups": [{
+                "name": "load_shape",
+                "label": "Load",
+                "default": "direct",
+                "modes": [{"name": "configured"}, {"name": "direct"}],
+            }],
+            "parameters": [{
+                "name": "table",
+                "mode_membership": {"load_shape": ["direct"]},
+                "required_when": {"load_shape": ["direct"]},
+                **over,
+            }],
+        }
+
+    def _built(self, command: dict[str, Any]) -> Any:
+        return build([declaration(commands=[command])])[0].commands[0]
+
+    def test_the_group_and_its_modes_are_carried(self) -> None:
+        built = self._built(self._load())
+
+        group = built.mode_groups[0]
+        assert group.name == "load_shape"
+        assert group.default == "direct"
+        assert [one.name for one in group.modes] == ["configured", "direct"]
+
+    def test_membership_is_keyed_by_group(self) -> None:
+        # Keyed, because two groups may each declare a mode of the same name
+        # and a bare list would not say which was meant.
+        built = self._built(self._load())
+
+        assert built.parameters[0].mode_membership == (("load_shape", ("direct",)),)
+        assert built.parameters[0].required_when == (("load_shape", ("direct",)),)
+
+    def test_a_group_with_no_default_stands_on_its_first_mode(self) -> None:
+        command = self._load()
+        del command["mode_groups"][0]["default"]
+
+        assert self._built(command).mode_groups[0].default == "configured"
+
+    def test_a_parameter_declaring_nothing_is_unaffected(self) -> None:
+        # Every parameter declared before modes existed carries none, which is
+        # what keeps the rest of the estate unchanged.
+        built = self._built({"name": "x", "parameters": [{"name": "plain"}]})
+
+        assert built.parameters[0].mode_membership == ()
+        assert built.parameters[0].required_when == ()
+
+
+class TestModeDeclarationsFailClosed:
+    """A membership nothing declares would hide a field and never say why."""
+
+    def _refused(self, command: dict[str, Any]) -> str:
+        with pytest.raises(ConfigError) as raised:
+            build([declaration(commands=[command])])
+        return str(raised.value)
+
+    def test_a_membership_naming_an_undeclared_group_is_refused(self) -> None:
+        message = self._refused({
+            "name": "load",
+            "parameters": [{"name": "table", "mode_membership": {"typo": ["direct"]}}],
+        })
+
+        assert "typo" in message and "table" in message
+
+    def test_a_membership_naming_a_mode_of_another_group_is_refused(self) -> None:
+        # THE ONE A BARE LIST WOULD MISS. 'yes' is a real mode -- of the other
+        # group -- so only a group-qualified membership can catch it.
+        message = self._refused({
+            "name": "load",
+            "mode_groups": [
+                {"name": "shape", "modes": [{"name": "direct"}]},
+                {"name": "confirm", "modes": [{"name": "yes"}]},
+            ],
+            "parameters": [{"name": "table", "mode_membership": {"shape": ["yes"]}}],
+        })
+
+        assert "yes" in message and "shape" in message
+
+    def test_the_same_mode_name_in_two_groups_is_accepted(self) -> None:
+        # The ambiguity group-qualified membership exists to remove. Mode names
+        # are unique within a group, never across the command.
+        built = build([declaration(commands=[{
+            "name": "x",
+            "mode_groups": [
+                {"name": "a", "modes": [{"name": "one"}]},
+                {"name": "b", "modes": [{"name": "one"}]},
+            ],
+            "parameters": [{"name": "p", "mode_membership": {"a": ["one"], "b": ["one"]}}],
+        }])])[0].commands[0]
+
+        assert dict(built.parameters[0].mode_membership) == {
+            "a": ("one",), "b": ("one",),
+        }
+
+    def test_a_default_naming_a_mode_the_group_lacks_is_refused(self) -> None:
+        message = self._refused({
+            "name": "load",
+            "mode_groups": [{
+                "name": "shape", "default": "elsewhere",
+                "modes": [{"name": "direct"}],
+            }],
+            "parameters": [],
+        })
+
+        assert "elsewhere" in message
+
+    def test_a_duplicate_group_name_is_refused(self) -> None:
+        message = self._refused({
+            "name": "load",
+            "mode_groups": [
+                {"name": "shape", "modes": [{"name": "a"}]},
+                {"name": "shape", "modes": [{"name": "b"}]},
+            ],
+            "parameters": [],
+        })
+
+        assert "shape" in message
+
+    def test_a_group_with_no_modes_is_refused(self) -> None:
+        message = self._refused({
+            "name": "load",
+            "mode_groups": [{"name": "shape", "modes": []}],
+            "parameters": [],
+        })
+
+        assert "shape" in message
+
+    def test_required_when_is_validated_the_same_way(self) -> None:
+        message = self._refused({
+            "name": "load",
+            "mode_groups": [{"name": "shape", "modes": [{"name": "direct"}]}],
+            "parameters": [{"name": "table", "required_when": {"shape": ["nope"]}}],
+        })
+
+        assert "nope" in message
+
+
+class TestPlacementAndPlaceholder:
+    """What a surface needs that is not part of the value."""
+
+    def test_both_are_carried(self) -> None:
+        built = build([declaration(parameters=[
+            {"name": "dry-run", "value_type": "flag", "placement": "action_bar"},
+            {"name": "table", "placeholder": "schema.table"},
+        ])])[0]
+
+        assert built.parameters[0].placement == "action_bar"
+        assert built.parameters[1].placeholder == "schema.table"
+
+    def test_placement_defaults_to_the_form(self) -> None:
+        built = build([declaration(parameters=[{"name": "table"}])])[0]
+
+        assert built.parameters[0].placement == "form"

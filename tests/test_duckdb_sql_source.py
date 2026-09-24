@@ -9,6 +9,7 @@ guarantees — including the guarantees that are refusals.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import duckdb
@@ -604,3 +605,105 @@ def test_a_quoted_path_still_runs(tmp_path: Path) -> None:
     awkward = _write(tmp_path, "O'Brien holdings.csv", "Acct\nA1\n")
     with open_memory_connection() as conn:
         assert fetch_sql_rows(conn, default_file_select_sql(awkward)).rows == [("A1",)]
+
+
+# ---------------------------------------------------------------------------
+# A JSON document's rows, which may sit under a key
+# ---------------------------------------------------------------------------
+
+
+def _document(tmp_path: Path, name: str, document: object) -> Path:
+    return _write(tmp_path, name, json.dumps(document))
+
+
+def test_a_keyed_document_is_unwrapped_and_a_bare_array_is_not() -> None:
+    """The unwrap is a projection, so the reader expression is untouched."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    assert default_file_select_sql("/data/asset.json") == (
+        "SELECT * FROM read_json_auto('/data/asset.json')"
+    )
+    assert default_file_select_sql("/data/asset.json", record_key="asset") == (
+        "SELECT unnest(\"asset\", max_depth := 2) "
+        "FROM read_json_auto('/data/asset.json')"
+    )
+
+
+def test_the_depth_is_one_level_and_is_not_recursive() -> None:
+    """`recursive := true` would dissolve a nested object into columns.
+
+    That silently disagrees with the records JsonFile produces from the same
+    document, so the depth is pinned here rather than left to whoever edits
+    the statement next.
+    """
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    sql = default_file_select_sql("/data/asset.json", record_key="asset")
+    assert "max_depth := 2" in sql
+    assert "recursive" not in sql
+
+
+def test_a_key_holding_a_quote_is_escaped() -> None:
+    """A JSON key is not under anyone's control, so the doubling matters."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    sql = default_file_select_sql("/data/x.json", record_key='a "b"')
+    assert 'unnest("a ""b""", max_depth := 2)' in sql
+
+
+def test_an_empty_key_is_a_key_and_not_an_absent_one() -> None:
+    """`{"": [...]}` is legal JSON, and DuckDB cannot name that column.
+
+    A zero-length delimited identifier is a parser error, so this one key is
+    reached by position instead. What must NOT happen is the empty string
+    being read as "no key" -- that is the bare-array statement, and it would
+    return one row holding the whole array.
+    """
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    empty_key = default_file_select_sql("/data/x.json", record_key="")
+    bare = default_file_select_sql("/data/x.json", record_key=None)
+
+    assert empty_key != bare
+    assert "unnest(COLUMNS(*), max_depth := 2)" in empty_key
+    assert '""' not in empty_key
+
+
+def test_every_document_shape_actually_runs(tmp_path: Path) -> None:
+    """Proof against DuckDB, for each shape and each awkward key."""
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    rows = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+    shapes = {
+        "keyed.json":  ({"asset": rows}, "asset"),
+        "bare.json":   (rows, None),
+        "empty.json":  ({"": rows}, ""),
+        "quoted.json": ({'a "b"': rows}, 'a "b"'),
+    }
+
+    with open_memory_connection() as conn:
+        for name, (document, key) in shapes.items():
+            path = _document(tmp_path, name, document)
+            result = fetch_sql_rows(conn, default_file_select_sql(path, record_key=key))
+            assert result.rows == [(1, "a"), (2, "b")], name
+            assert [str(column) for column in result.columns] == ["id", "name"], name
+
+
+def test_a_nested_object_stays_one_column(tmp_path: Path) -> None:
+    """One level down, and no further -- what max_depth := 2 buys.
+
+    A recursive unnest would turn `meta` into columns `x` and `y`, giving a
+    different column set for the same file than the loader reads from it.
+    """
+    from rey_lib.db.duckdb_utils import default_file_select_sql
+
+    path = _document(
+        tmp_path, "nested.json",
+        {"asset": [{"id": 1, "meta": {"x": 1, "y": 2}, "tags": ["t"]}]},
+    )
+    with open_memory_connection() as conn:
+        result = fetch_sql_rows(
+            conn, default_file_select_sql(path, record_key="asset")
+        )
+
+    assert [str(column) for column in result.columns] == ["id", "meta", "tags"]
