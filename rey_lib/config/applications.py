@@ -120,6 +120,21 @@ class ApplicationCommandParameter:
     #: that runs the command. An execution mode is not part of what is being
     #: defined, and saying so is the declaration's business, not the reader's.
     placement: str = "form"
+    #: Which END of a movement this parameter belongs to: ``source``,
+    #: ``destination``, or nothing.
+    #:
+    #: THE ONE THING THE OTHER FIELDS CANNOT SAY. ``mode_membership`` says
+    #: which SHAPE a parameter belongs to and ``placement`` says WHERE it is
+    #: drawn; neither says which side of a load it describes. Once a source may
+    #: be a file or a connection-and-statement, a flat list of names cannot --
+    #: ``connection`` is ambiguous on its face.
+    #:
+    #: EMPTY IS A REAL ANSWER, not an omission to be guessed at. A parameter
+    #: that is not one end of anything says nothing, and a surface that finds
+    #: some of a command's parameters declaring an end and some not has an
+    #: incomplete declaration in front of it -- which stays visible rather than
+    #: being absorbed into a model that cannot hold it.
+    endpoint: str = ""
 
 
 @dataclass(frozen=True)
@@ -587,6 +602,10 @@ def _parameter(
         ),
         placeholder=str(entry.get("placeholder") or ""),
         placement=str(entry.get("placement") or "form"),
+        # No default of its own: absent means the declaration says nothing
+        # about ends, which is what every parameter declared before this
+        # existed says.
+        endpoint=str(entry.get("endpoint") or ""),
     )
 
 
