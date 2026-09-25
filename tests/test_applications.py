@@ -312,6 +312,29 @@ class TestModeGroups:
         assert group.default == "direct"
         assert [one.name for one in group.modes] == ["configured", "direct"]
 
+    def test_a_mode_carries_the_marks_it_declared_in_order(self) -> None:
+        # Order is the meaning: a shape is a MOVEMENT, and source-arrow-
+        # destination reversed says the opposite movement with the same marks.
+        command = self._load()
+        command["mode_groups"][0]["modes"][1]["icons"] = ["csv", "next", "table"]
+
+        modes = self._built(command).mode_groups[0].modes
+        assert modes[1].icons == ("csv", "next", "table")
+
+    def test_a_mode_declaring_no_marks_carries_none(self) -> None:
+        # Ordinary, not a fault: the label is what the alternative IS, and a
+        # surface with no glyph to draw falls back to it.
+        assert self._built(self._load()).mode_groups[0].modes[0].icons == ()
+
+    def test_a_mark_name_is_not_checked_here(self) -> None:
+        # What a mark is called is the drawing surface's vocabulary. Refusing an
+        # unknown name here would make this layer a second authority on an icon
+        # library it cannot see.
+        command = self._load()
+        command["mode_groups"][0]["modes"][0]["icons"] = ["nothing-draws-this"]
+
+        assert self._built(command).mode_groups[0].modes[0].icons == ("nothing-draws-this",)
+
     def test_membership_is_keyed_by_group(self) -> None:
         # Keyed, because two groups may each declare a mode of the same name
         # and a bare list would not say which was meant.

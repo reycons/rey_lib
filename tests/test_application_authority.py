@@ -56,6 +56,34 @@ class TestBothHalvesAreRequired:
             )
 
 
+class TestWhatItIsCalled:
+    """Three sources for the name a surface draws, and their order."""
+
+    def test_the_installation_name_wins_where_it_gave_one(self) -> None:
+        # An installation that has said what it calls an application there
+        # keeps saying it: this is what it calls its own copy.
+        built = build_applications(
+            ctx([declared(label="Feeds")]), registrations=registered(label="Loader"),
+        )
+
+        assert built[0].label == "Feeds"
+
+    def test_the_distribution_names_itself_where_the_installation_did_not(self) -> None:
+        # What an application is called is its own fact, published beside its
+        # icon and its CLI.
+        built = build_applications(
+            ctx([declared()]), registrations=registered(label="Loader"),
+        )
+
+        assert built[0].label == "Loader"
+
+    def test_the_identifier_stands_in_when_neither_said_anything(self) -> None:
+        # And then it reads like an identifier, which is what it is.
+        built = build_applications(ctx([declared()]), registrations=registered())
+
+        assert built[0].label == "loader"
+
+
 class TestIdentity:
     """A registration and a declaration cannot describe different applications."""
 

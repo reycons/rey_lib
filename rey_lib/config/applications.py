@@ -54,10 +54,24 @@ _CHOICE_SOURCES: dict[str, str] = {
 
 @dataclass(frozen=True)
 class ApplicationMode:
-    """One alternative within a mode group."""
+    """One alternative within a mode group.
+
+    ``icons`` names the marks that stand for this alternative, in the order they
+    are drawn. A TUPLE because one alternative can be a sequence: a load shape is
+    a movement, and the pair of ends with an arrow between them is what says
+    which movement it is.
+
+    Names only, and never markup. What the marks look like belongs to the surface
+    that draws them, which resolves a name through its own icon library; a
+    distribution supplying artwork is refused everywhere in this estate.
+
+    Declaring none is ordinary. The label is what the alternative IS, and a
+    surface with no glyph to draw falls back to it.
+    """
 
     name: str
     label: str = ""
+    icons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -363,7 +377,12 @@ def _from_registration(
     cli = cli if isinstance(cli, dict) else {}
     return Application(
         name=name,
-        label=str(entry.get("label") or name),
+        # THREE SOURCES, IN THAT ORDER. An installation naming an application
+        # has said what it calls it there and keeps saying it. Otherwise the
+        # distribution's own published name is used -- what an application is
+        # called is its fact, the way its icon is. The identifier stands in only
+        # when neither said anything, and then it reads like an identifier.
+        label=str(entry.get("label") or registration.get("label") or name),
         app_type="python",
         app_path=app_path,
         entry_point=str(registration.get("entry_point") or "main.py"),
@@ -553,6 +572,13 @@ def _mode_groups(
             ApplicationMode(
                 name=str(mode.get("name") or ""),
                 label=str(mode.get("label") or ""),
+                # Order is the meaning, so the sequence is carried as declared
+                # and nothing here sorts, de-duplicates or validates a name. What
+                # a mark is called is the drawing surface's vocabulary, and a
+                # name it does not carry is its own fallback to make.
+                icons=tuple(
+                    str(one) for one in (mode.get("icons") or ()) if str(one)
+                ),
             )
             for mode in (_plain(one) for one in (item.get("modes") or []))
             if isinstance(mode, dict) and mode.get("name")
