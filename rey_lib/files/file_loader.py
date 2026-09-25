@@ -1095,7 +1095,7 @@ def _read_and_transform(
 
     cfg_dict = _normalized_transform_config(transform_cfg, ctx=ctx)
     # Resolve env-var keys for any encrypt transforms — done once per file.
-    secrets = _build_secrets(cfg_dict)
+    secrets = build_secrets(cfg_dict)
 
     # ONE TRANSFORM OBJECT FOR THIS FILE, built before the rows are read. The
     # declaration, the context and the secrets are its dependencies and are
@@ -1651,9 +1651,15 @@ def _normalized_columns(columns_cfg: Any) -> list[dict[str, Any]]:
 
     raise ConfigError("Transform columns must be a list of column definitions.")
 
-def _build_secrets(cfg_dict: dict[str, Any]) -> dict[str, str]:
+def build_secrets(cfg_dict: dict[str, Any]) -> dict[str, str]:
     """
-    Resolve env-var values for all encrypt transforms in this file config.
+    Resolve env-var values for all encrypt transforms in this declaration.
+
+    **PUBLIC, because it is the trusted half of applying an `encrypt` rule.**
+    A declaration NAMES an environment variable; this reads it. Any caller
+    building a transform object has to resolve secrets the same way, or an
+    ad-hoc load would silently have none -- so there is one resolver rather
+    than one per construction site.
 
     Scans the columns list for entries with ``transform.type: encrypt`` and
     resolves their ``key_env`` names from the current environment. Each

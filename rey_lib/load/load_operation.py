@@ -55,6 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from rey_lib.data.column_transform import ColumnTransform
 from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.data.errors import DataStructureError
 from rey_lib.db.connection import shared_connection
@@ -68,6 +69,7 @@ from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_loader import (
+    build_secrets,
     execute_movements,
     log_loader_step_failure,
     namespace_to_plain,
@@ -221,6 +223,45 @@ def _route_file(
         getattr(movements, outcome, []), file_path, paths,
         ctx=ctx, run_log=run_log,
     )
+
+def _build_transform(
+    ctx: Any,
+    transform_cfg: Any = None,
+    declaration: Any = None,
+) -> Any:
+    """Build the transform object for one load.
+
+    **THE SINGLE PLACE A LOAD'S TRANSFORM IS CHOSEN**, and the choice is one
+    question: was this load TOLD what to do with its columns?
+
+        a declaration     ColumnTransform, which applies it
+        none              IdentityTransform, which passes records through
+
+    Identity is not a fallback for a missing feature. A configured file feed's
+    transform stage has already run by the time the load reads what it wrote,
+    so there really is nothing left to apply -- and an ad-hoc load that names
+    no transformation is asking for its records as they are.
+
+    Secrets are resolved HERE rather than inside the object: a declaration
+    names an environment variable and something trusted reads it, which is the
+    same `build_secrets` the transform stage uses. One resolver, so an ad-hoc
+    load cannot quietly end up with none.
+
+    Args:
+        ctx: Application context, for context values a rule may reference.
+        transform_cfg: A configured definition's transform, where there is one.
+        declaration: A transform declaration given with the invocation.
+
+    Returns:
+        The transform this load runs.
+    """
+    if declaration:
+        plain = namespace_to_plain(declaration) or {}
+        return ColumnTransform(
+            plain, context=ctx, secrets=build_secrets(plain),
+        )
+    return _build_identity_transform(transform_cfg)
+
 
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:
     """Build the transform for one load definition.
@@ -410,6 +451,7 @@ def load_file_to_table(
     create_destination: bool = False,
     file_type: str = "",
     encoding: str = "utf-8-sig",
+    transform: Any = None,
 ) -> int:
     """Load one named file into one named table. No configuration at all.
 
@@ -469,12 +511,11 @@ def load_file_to_table(
         load_one_file=_load_one,
         target=target,
         explicit_files=[Path(file_path)],
-        # None, not a stand-in config object. The builder reads a transform
-        # config with getattr, so absent configuration produces no transform
-        # map and no declared columns -- which is exactly what a direct load
-        # means. Going through the builder rather than around it is what
-        # leaves ONE construction site for an IdentityTransform.
-        transform=_build_identity_transform(None),
+        # Through the builder, which is the ONE place a load's transform is
+        # chosen. No declaration means identity: a direct load has no
+        # configuration, and absent configuration produces no transform map
+        # and no declared columns -- exactly what such a load means.
+        transform=_build_transform(ctx, None, transform),
         loader=_build_data_loader(ctx, create_destination),
         file_type=file_type,
         encoding=encoding,
@@ -491,6 +532,7 @@ def load_query_to_table(
     connection: str,
     *,
     create_destination: bool = False,
+    transform: Any = None,
 ) -> int:
     """Load what one statement returns into one named table.
 
@@ -535,6 +577,8 @@ def load_query_to_table(
         connection: The CONFIGURED CONNECTION NAME the destination lives on.
         create_destination: Whether an absent table may be created from the
             records. False means it must already exist.
+        transform: A transform declaration. Absent means identity -- the rows
+            are loaded as the query returned them.
 
     Returns:
         Rows loaded.
@@ -554,10 +598,10 @@ def load_query_to_table(
 
     return _load_one_file(
         source,
-        # Through the builder rather than around it: ONE construction site for
-        # an IdentityTransform, and a None config is exactly what "no declared
-        # columns" means.
-        _build_identity_transform(None),
+        # Through the builder rather than around it: ONE place a load's
+        # transform is chosen. No declaration means identity, which is what a
+        # load asking for its records as they are means.
+        _build_transform(ctx, None, transform),
         target,
         ctx=ctx,
         run_log=run_log,
@@ -575,6 +619,8 @@ def load_query_to_file(
     statement: str,
     source_connection: str,
     out_file: str,
+    *,
+    transform: Any = None,
 ) -> int:
     """Load what one statement returns into one file.
 
@@ -605,6 +651,8 @@ def load_query_to_file(
         statement: The query to read, held as written.
         source_connection: The CONFIGURED CONNECTION NAME it runs on.
         out_file: Where the rows go. Its suffix names the format.
+        transform: A transform declaration. Absent means identity -- the rows
+            are written as the query returned them.
 
     Returns:
         Rows written.
@@ -622,7 +670,7 @@ def load_query_to_file(
 
     return _load_one_file(
         source,
-        _build_identity_transform(None),
+        _build_transform(ctx, None, transform),
         target,
         ctx=ctx,
         run_log=run_log,
@@ -660,6 +708,7 @@ def inspect_load_endpoints(
     destination: str = "",
     connection: str = "",
     out_file: str = "",
+    transform: Any = None,
 ) -> LoadEndpoints:
     """What the two ends of this load are made of, WITHOUT running it.
 
@@ -698,6 +747,9 @@ def inspect_load_endpoints(
         destination: A table destination, as ``schema.table``.
         connection: The configured connection that table lives on.
         out_file: A file destination, by path.
+        transform: The transform declaration in force, which decides what the
+            produced columns ARE -- and therefore what a destination that does
+            not exist yet would be given.
 
     Returns:
         The two ends. An end that is not named yet is empty.
@@ -715,7 +767,7 @@ def inspect_load_endpoints(
         # directly would be right by coincidence and wrong the moment a
         # transform declares columns.
         produced = tuple(
-            _build_identity_transform(None).columns_for_names(
+            _build_transform(ctx, None, transform).columns_for_names(
                 list(source.source_structure())
             )
         )
@@ -764,6 +816,7 @@ def preview_load(
     statement: str = "",
     source_connection: str = "",
     limit: int = _PREVIEW_ROWS,
+    declaration: Any = None,
 ) -> LoadPreview:
     """The first records this load would carry, WITHOUT carrying them.
 
@@ -790,6 +843,8 @@ def preview_load(
         statement: A query source, as written.
         source_connection: The configured connection the statement runs on.
         limit: How many records at most.
+        declaration: The transform declaration in force. What is previewed is
+            what would be EXPORTED, so the records are shown through it.
 
     Returns:
         The produced columns and the records, or nothing at all where no
@@ -802,7 +857,7 @@ def preview_load(
     if source is None:
         return LoadPreview()
 
-    transform = _build_identity_transform(None)
+    transform = _build_transform(ctx, None, declaration)
     # ONE MORE THAN ASKED FOR, which is how "there is more" is established
     # without a second read. A count equal to the limit says nothing on its
     # own -- a source holding exactly that many looks identical.

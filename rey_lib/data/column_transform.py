@@ -126,6 +126,33 @@ class ColumnTransform(DeclaredTransform):
         #: made this a function taking configuration.
         self._row_num = 0
 
+    def columns_for_names(self, actual: list[str]) -> list[str]:
+        """What this transform PRODUCES from a source with these names.
+
+        **THE OVERRIDE THAT A RENAME REQUIRES.** The inherited rule compares
+        the declared columns against the names it is given and refuses a
+        mismatch -- which is exactly right for the identity transform, where
+        what is produced IS what arrived, so a declaration naming anything
+        else is a declaration that has drifted from its file.
+
+        Here they are not the same list and are not meant to be: ``actual`` is
+        the SOURCE's fields and the declared columns are the OUTPUT. A load
+        that renames ``a`` to ``identifier`` would be refused by the inherited
+        comparison for doing the one thing it was told to do.
+
+        So there is nothing to compare. The declaration says what comes out.
+
+        Args:
+            actual: The source's own field names, in order. Read only to
+                answer when a declaration names no columns at all.
+
+        Returns:
+            The declared output columns, in order.
+        """
+        if self.columns is None:
+            return actual
+        return list(self.columns)
+
     def transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Apply the declaration to these records.
 
