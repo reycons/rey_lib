@@ -203,6 +203,47 @@ class DataFile(ABC):
             DataStructureError: As ``validate``.
         """
 
+    def write(self, rows: list[dict[str, Any]]) -> int:
+        """Write these records to this file, and say how many.
+
+        **THE TARGET ROLE.** Source and target are ROLES rather than classes,
+        so the object that answers "what is this file" answers it whichever
+        end of a movement the file is on. A separate destination hierarchy
+        would be the same format knowledge written twice, disagreeing the
+        first time a format changed.
+
+        Delegation and nothing else. Every format that can be written already
+        has a writer -- ``write_delimited_rows``, ``write_json_file``,
+        ``write_jsonl_file`` -- and each takes the path and the records. The
+        column names and their order come from the records, because that is
+        what those writers already read them from; nothing here states a
+        schema, and no destination structure is asked for.
+
+        Concrete rather than abstract, and the default is a REFUSAL BY NAME.
+        Not every format can be written: a headerless delimited file states
+        its width nowhere, and the unmigrated spreadsheet path is not a
+        DataFile at all. A format that can be written says so by implementing
+        this; one that cannot refuses saying which, in the same shape
+        ``data_file_for`` refuses a format it does not know. Making it
+        abstract would instead force every reader to answer a question about
+        writing.
+
+        Args:
+            rows: The records to write. Their first record's keys fix the
+                column names and their order.
+
+        Returns:
+            Records written.
+
+        Raises:
+            ValueError: When this format has no writer.
+        """
+        raise ValueError(
+            f"{type(self).__name__} cannot be written: format "
+            f"'{self.file_type}' has no writer, so it can be a load's source "
+            f"and not its destination."
+        )
+
     def __repr__(self) -> str:
         """Name the format and the file, for a failure that has to be read."""
         return f"{type(self).__name__}({self.path.name!r})"

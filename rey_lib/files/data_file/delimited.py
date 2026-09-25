@@ -78,6 +78,21 @@ class DelimitedHeaderFile(DataFile):
             )
         )
 
+    def write(self, rows: list[dict[str, Any]]) -> int:
+        """Write the rows, header first, through this format's own writer.
+
+        ``csv.py`` is the declared sole owner of delimited format and
+        ``write_delimited_rows`` is its writer; this hands it the path and the
+        records and adds nothing. The header and its order come from the first
+        record's keys, which is what that writer already reads them from --
+        the same order ``declares_structure`` promises on the way in.
+        """
+        from rey_lib.files.csv import write_delimited_rows
+
+        write_delimited_rows(self.path, rows)
+        _logger.debug("Wrote %d row(s) to %r", len(rows), self)
+        return len(rows)
+
     def validate(self, expected_columns: list[str] | None = None) -> None:
         """Check the header, against the destination or against itself.
 

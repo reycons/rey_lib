@@ -64,6 +64,8 @@ from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
 from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.files.data_file import data_file_for
+from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_loader import (
     execute_movements,
     log_loader_step_failure,
@@ -563,6 +565,70 @@ def load_query_to_table(
         # which is not the same as a policy that routes nothing.
         movements=None,
         load_name=f"query:{load_name}",
+    )
+
+
+def load_query_to_file(
+    ctx: Any,
+    run_log: Any,
+    statement: str,
+    source_connection: str,
+    out_file: str,
+) -> int:
+    """Load what one statement returns into one file.
+
+    The same construction as ``load_query_to_table`` with the other end
+    swapped, which is the whole point of the target being a role:
+
+        QuerySource -> IdentityTransform -> DataFile
+
+    **ONE CONNECTION, and it is the SOURCE's.** A file destination has none,
+    so this takes none -- rather than accepting one and ignoring it, which
+    would leave a reader believing the file was written somewhere.
+
+    **THE FORMAT COMES FROM THE PATH, and there is no second way to say it.**
+    ``data_file_for`` reads the suffix and refuses by name when it names no
+    known format, which is the same resolver every file source goes through.
+    Nothing here lists a suffix, and no declared type is accepted: the one
+    the estate has -- ``file_type`` -- describes a data file being READ, and
+    giving a second meaning to a name that already has one is how a parameter
+    comes to mean "roughly format".
+
+    What a query-to-file load does not have, for the same reasons the
+    query-to-table one does not: no movements, no configured columns, no
+    transform.
+
+    Args:
+        ctx: Application context, for logging.
+        run_log: The run's evidence recorder.
+        statement: The query to read, held as written.
+        source_connection: The CONFIGURED CONNECTION NAME it runs on.
+        out_file: Where the rows go. Its suffix names the format.
+
+    Returns:
+        Rows written.
+    """
+    target = data_file_for(out_file)
+    source = QuerySource(
+        shared_connection(ctx, source_connection).handle(),
+        statement,
+        # ITS OWN READ ADAPTER, exactly as the table sibling's is. Which
+        # provider answers on the source connection has nothing to do with
+        # where the rows are going -- and here there is no provider at the
+        # other end at all.
+        adapter=_read_adapter,
+    )
+
+    return _load_one_file(
+        source,
+        _build_identity_transform(None),
+        target,
+        ctx=ctx,
+        run_log=run_log,
+        # NO LOADER. That is the database's destination mechanic, and this
+        # destination is its own; the boundary asks the target which it is.
+        movements=None,
+        load_name=f"query:{target.path.name}",
     )
 
 
@@ -1336,8 +1402,7 @@ def _reject_structure(
     run_log: Any,
     structure_exc: DataStructureError,
     source: Any,
-    schema: str,
-    table: str,
+    destination: dict[str, Any],
     movements: Any,
     paths: Any,
 ) -> int:
@@ -1349,6 +1414,11 @@ def _reject_structure(
     knows what it was -- ``load_header`` and ``configured_columns`` both
     arrive here.
 
+    ``destination`` is the evidence form of the target, ALREADY IN THE TARGET'S
+    OWN VOCABULARY -- a table names a schema and a table, a file names a path.
+    Carried as fields rather than two strings so a file destination is not
+    recorded under column names that mean something else.
+
     Returns:
         0. A file fault is not a run fault.
     """
@@ -1357,8 +1427,7 @@ def _reject_structure(
         validation_name=structure_exc.validation_name,
         status="failed",
         message=str(structure_exc),
-        schema=schema,
-        table=table,
+        **destination,
         **_source_path_field(source),
     )
     _route_file(ctx, run_log, movements, "failure", source, paths)
@@ -1369,8 +1438,7 @@ def _reject_empty(
     ctx: Any,
     run_log: Any,
     source: Any,
-    schema: str,
-    table: str,
+    destination: dict[str, Any],
     movements: Any,
     paths: Any,
 ) -> int:
@@ -1381,6 +1449,9 @@ def _reject_empty(
     because the engine reported inserting nothing. Different evidence for the
     same fact, and the same refusal.
 
+    ``destination`` is the target's own evidence fields, as in
+    ``_reject_structure``.
+
     Returns:
         0.
     """
@@ -1389,8 +1460,7 @@ def _reject_empty(
         validation_name="load_rows",
         status="failed",
         message="No rows produced",
-        schema=schema,
-        table=table,
+        **destination,
         **_source_path_field(source),
     )
     _route_file(ctx, run_log, movements, "failure", source, paths)
@@ -1462,9 +1532,15 @@ def _load_one_file(
     **THE TRANSFER BOUNDARY.** Three domain inputs, and they are the whole
     contract:
 
-        source     what is being read     a DataFile
+        source     what is being read     a DataFile or a QuerySource
         transform  what the records are   a DataTransform
-        target     where they go          a DatabaseObjectIdentity
+        target     where they go          a DatabaseObjectIdentity, or a
+                                          DataFile writing itself
+
+    **SOURCE AND TARGET ARE ROLES**, and the two ends are independent: a
+    DataFile answers either one, and neither end is told what the other is.
+    That is what makes file->table, query->table, query->file and file->file
+    one mechanism rather than four.
 
     Everything else is context, evidence or policy, and is keyword-only
     precisely so it cannot be mistaken for part of the contract.
@@ -1508,10 +1584,24 @@ def _load_one_file(
     # boundary; a path is one family's primitive, and demanding it here is what
     # made a load impossible to begin anywhere but a file.
     #
-    # The evidence form of the destination, rendered once. Logs and run-log
-    # rows have always named the object the way the adapter does; keeping that
-    # means the identity gaining parts changes nothing anyone reads.
-    schema, table = adapter_destination(target)
+    # WHAT THE DESTINATION IS, asked once, and the only thing this boundary
+    # branches on. A target is a ROLE: a database object is written by the
+    # loader through a connection, and a data file writes itself. Neither end
+    # is told what the other is -- which is what makes file->table,
+    # query->table, query->file and file->file one mechanism rather than four.
+    writes_a_file = isinstance(target, DataFile)
+    # The evidence form of the destination, rendered once, IN THE TARGET'S OWN
+    # VOCABULARY. Logs and run-log rows have always named a table the way the
+    # adapter does; a file names its path, because recording one under `table`
+    # would say something untrue in a column other things read.
+    schema = table = ""
+    if writes_a_file:
+        destination = {"destination_path": str(target.path)}
+        named = str(target.path)
+    else:
+        schema, table = adapter_destination(target)
+        destination = {"schema": schema, "table": table}
+        named = f"{schema}.{table}"
     # Named before the try so the handlers can ask whether there is anything
     # to roll back -- the connection is resolved inside, and a failure before
     # that point has opened nothing.
@@ -1532,41 +1622,55 @@ def _load_one_file(
         # ConfiguredLoad is driving; building them only when called directly.
         # Re-reading the configuration here when it has already been read
         # would be a second graph that looks identical and can drift.
-        if loader is None:
-            loader = _build_data_loader(
-                ctx, _create_destination_declared(load_cfg),
-            )
+        # EVERY ONE OF THESE IS A TABLE'S QUESTION, and a file target is asked
+        # none of them. Not stubbed: the dispatch is on what the target IS, so
+        # a connection, a create policy and an existing column set are simply
+        # not part of writing a file, and nothing has to answer them emptily.
+        #
+        # `expected_columns` stays None, which this boundary ALREADY means as
+        # "no destination to match, so check the source is coherent with
+        # itself" -- see `validate`'s two questions below. The file writers
+        # take no column set at all: the names and their order come from the
+        # records, which `logical_schema` fixes one step before the write.
+        expected_columns: list[str] | None = None
+        if not writes_a_file:
+            if loader is None:
+                loader = _build_data_loader(
+                    ctx, _create_destination_declared(load_cfg),
+                )
 
-        # THE CONNECTION IS DERIVED FROM THE TARGET, and this is the first
-        # point a database is actually needed. It is resolved here rather than
-        # handed in so that `target.connection` is the one source of truth --
-        # nothing reads a configured connection name once the target exists,
-        # so there is no second answer for a guard to check.
-        conn = shared_connection(ctx, target.connection).handle()
+            # THE CONNECTION IS DERIVED FROM THE TARGET, and this is the first
+            # point a database is actually needed. It is resolved here rather
+            # than handed in so that `target.connection` is the one source of
+            # truth -- nothing reads a configured connection name once the
+            # target exists, so there is no second answer for a guard to check.
+            conn = shared_connection(ctx, target.connection).handle()
 
-        # Asked of the LOADER, which owns the policy, rather than re-read
-        # from configuration. A direct load declares it as an argument and
-        # has no config to read; reading config here would have refused its
-        # own --create.
-        create_declared = loader.create_destination
+            # Asked of the LOADER, which owns the policy, rather than re-read
+            # from configuration. A direct load declares it as an argument and
+            # has no config to read; reading config here would have refused its
+            # own --create.
+            create_declared = loader.create_destination
 
-        # EXISTENCE ASKED ONCE, and its answer serves both decisions: how to
-        # validate the file, and whether the destination must be created.
-        # None means absent; [] would mean a table with no columns.
-        expected_columns = loader.destination_columns(conn, target)
-        exists = expected_columns is not None
+            # EXISTENCE ASKED ONCE, and its answer serves both decisions: how
+            # to validate the file, and whether the destination must be
+            # created. None means absent; [] would mean a table with no
+            # columns.
+            expected_columns = loader.destination_columns(conn, target)
+            exists = expected_columns is not None
 
-        if not exists and not create_declared:
-            # A misconfiguration, NOT a bad file -- so it raises rather than
-            # running movements.failure. The file is fine and moving it to
-            # rejected_path would strand a good file for a fault it did not
-            # cause; every later file would fail identically anyway.
-            raise ConfigError(
-                f"load '{load_name}' requires destination "
-                f"{schema}.{table}, and it does not exist. Set "
-                f"create_destination_table: true under that load's 'load:' "
-                f"block to have the loader create it."
-            )
+            if not exists and not create_declared:
+                # A misconfiguration, NOT a bad file -- so it raises rather
+                # than running movements.failure. The file is fine and moving
+                # it to rejected_path would strand a good file for a fault it
+                # did not cause; every later file would fail identically
+                # anyway.
+                raise ConfigError(
+                    f"load '{load_name}' requires destination "
+                    f"{schema}.{table}, and it does not exist. Set "
+                    f"create_destination_table: true under that load's 'load:' "
+                    f"block to have the loader create it."
+                )
 
         # NO FORMAT BRANCH, and no format name either. Every source reaching
         # here is a data object; a format with no DataFile is refused
@@ -1582,7 +1686,13 @@ def _load_one_file(
         if transform is None:
             transform = _build_identity_transform(transform_cfg)
 
-        if _non_row_execution_possible(source, transform, loader, conn, exists):
+        # The DB-NATIVE fast path, and it belongs to a database target: it asks
+        # the destination's provider to read the source itself. A file target
+        # has no provider to ask, so the materialised path -- the guaranteed
+        # one -- runs.
+        if not writes_a_file and _non_row_execution_possible(
+            source, transform, loader, conn, exists,
+        ):
             # THE SAME TWO CHECKS, from the structure the file declares
             # instead of from records. Neither is skipped and neither is
             # reimplemented: `validate` is the half of `read_validated` that
@@ -1593,7 +1703,7 @@ def _load_one_file(
                 columns = transform.columns_for_names(source.source_structure())
             except DataStructureError as structure_exc:
                 return _reject_structure(
-                    ctx, run_log, structure_exc, source, schema, table,
+                    ctx, run_log, structure_exc, source, destination,
                     movements, paths,
                 )
 
@@ -1606,19 +1716,18 @@ def _load_one_file(
                 # The source held no rows. Reported by the engine rather than
                 # counted here, and refused exactly as an empty read is.
                 return _reject_empty(
-                    ctx, run_log, source, schema, table, movements, paths,
+                    ctx, run_log, source, destination, movements, paths,
                 )
 
             _logger.info(
-                "Loaded: %r → %s.%s  rows=%d  (non-row execution)",
-                source, schema, table, inserted,
+                "Loaded: %r → %s  rows=%d  (non-row execution)",
+                source, named, inserted,
             )
             log_row_count(run_log,
                 count_name="loaded_rows",
                 count=inserted,
                 subject=repr(source),
-                schema=schema,
-                table=table,
+                **destination,
                 **_source_path_field(source),
             )
             _route_file(ctx, run_log, movements, "success", source, paths)
@@ -1639,13 +1748,13 @@ def _load_one_file(
             rows = source.read_validated(expected_columns)
         except DataStructureError as structure_exc:
             return _reject_structure(
-                ctx, run_log, structure_exc, source, schema, table,
+                ctx, run_log, structure_exc, source, destination,
                 movements, paths,
             )
 
         if not rows:
             return _reject_empty(
-                ctx, run_log, source, schema, table, movements, paths,
+                ctx, run_log, source, destination, movements, paths,
             )
 
         # The transform says what the produced records contain. On the load
@@ -1656,22 +1765,29 @@ def _load_one_file(
         column_defs = transform.logical_schema(rows)
         columns     = [name for name, _sql_type in column_defs]
 
-        # The destination half: the create policy, the insert and the
-        # truncation retry. Told what existence check already found, so the
-        # destination is inspected once per file rather than once per
-        # decision.
-        loader.load(conn, target, rows, column_defs, expected_columns)
+        # THE WRITE, and the only place the two target families differ.
+        #
+        # A data file writes ITSELF, through the writer its format already
+        # owns; the records carry their own column names and order, which is
+        # what `logical_schema` settled one line above and what those writers
+        # already read their header from. A database object is written by the
+        # loader: the create policy, the insert and the truncation retry, told
+        # what the existence check already found so the destination is
+        # inspected once per file rather than once per decision.
+        if writes_a_file:
+            target.write(rows)
+        else:
+            loader.load(conn, target, rows, column_defs, expected_columns)
 
         _logger.info(
-            "Loaded: %r → %s.%s  rows=%d",
-            source, schema, table, len(rows),
+            "Loaded: %r → %s  rows=%d",
+            source, named, len(rows),
         )
         log_row_count(run_log,
             count_name="loaded_rows",
             count=len(rows),
             subject=repr(source),
-            schema=schema,
-            table=table,
+            **destination,
             **_source_path_field(source),
         )
 

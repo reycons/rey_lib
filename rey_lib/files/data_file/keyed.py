@@ -240,6 +240,21 @@ class JsonlFile(KeyedFile):
             )
         )
 
+    def write(self, records: list[dict[str, Any]]) -> int:
+        """Write one record per line, through this format's own writer.
+
+        ``write_jsonl_file`` takes the path and the records and renders each
+        through the same line renderer every other JSONL writer uses, so a
+        record holding the same content is the same bytes whichever produced
+        it. Nothing here states a column set: a keyed record carries its own
+        names, which is what made this a keyed file on the way in.
+        """
+        from rey_lib.files.primitive_file_io import write_jsonl_file
+
+        write_jsonl_file(self.path, records)
+        _logger.debug("Wrote %d record(s) to %r", len(records), self)
+        return len(records)
+
 
 @data_file("JSON")
 class JsonFile(KeyedFile):
@@ -269,6 +284,21 @@ class JsonFile(KeyedFile):
         from rey_lib.files.json import read_json_file
 
         return self._rows(read_json_file(self.path, encoding=self.encoding))
+
+    def write(self, records: list[dict[str, Any]]) -> int:
+        """Write the rows as one document, through this format's own writer.
+
+        **A BARE ARRAY, which is one of the two shapes ``_rows`` reads.** The
+        other is a single key naming the table, and there is nothing here that
+        knows what to call it -- a document written under an invented key
+        would name a table that may not exist. So the shape that needs no name
+        is the one written, and what is written reads back.
+        """
+        from rey_lib.files.json import write_json_file
+
+        write_json_file(self.path, records)
+        _logger.debug("Wrote %d row(s) to %r", len(records), self)
+        return len(records)
 
     def record_shape(self) -> RecordShape:
         """Whether this file holds a table, and where its rows are.
