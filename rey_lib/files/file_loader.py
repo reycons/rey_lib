@@ -67,10 +67,11 @@ from rey_lib.files.file_utils import (
     copy_file,
     write_file,
 )
+from rey_lib.data.column_transform import ColumnTransform
+from rey_lib.data.errors import TransformError
 from rey_lib.files.transformer import (
-    transform_row,
+    keyed_record,
     match_header,
-    TransformError,
     parse_date_from_filename,
 )
 
@@ -1081,7 +1082,7 @@ def _read_and_transform(
     header_line : Optional[str]
         Exact header line to locate before reading rows.
     ctx : Any
-        Application context passed through to transform_row.
+        Application context, held by the transform object it builds.
 
     Returns
     -------
@@ -1092,9 +1093,18 @@ def _read_and_transform(
     encoding  = getattr(transform_cfg, "encoding",  "utf-8-sig")
     delimiter = getattr(transform_cfg, "delimiter", ",")
 
-    cfg_dict             = _normalized_transform_config(transform_cfg, ctx=ctx)
+    cfg_dict = _normalized_transform_config(transform_cfg, ctx=ctx)
     # Resolve env-var keys for any encrypt transforms — done once per file.
-    cfg_dict["secrets"]  = _build_secrets(cfg_dict)
+    secrets = _build_secrets(cfg_dict)
+
+    # ONE TRANSFORM OBJECT FOR THIS FILE, built before the rows are read. The
+    # declaration, the context and the secrets are its dependencies and are
+    # settled here; what it is given per row is a record and nothing else.
+    #
+    # Secrets are handed to it rather than left in `cfg_dict` for it to find:
+    # they are resolved from the environment by this function and are not part
+    # of the declaration, whoever wrote that declaration.
+    transform = ColumnTransform(cfg_dict, context=ctx, secrets=secrets)
 
     injected: dict[str, Any] = getattr(ctx, "_injected_row_columns", None) or {}
 
@@ -1114,7 +1124,11 @@ def _read_and_transform(
         if ctx is not None:
             object.__setattr__(ctx, "row_num", row_num)
         try:
-            out_row = transform_row(raw_row, cfg_dict, row_num=row_num, ctx=ctx)
+            # KEYED AT THE FILE BOUNDARY. A positional or fixed-width row is
+            # a list or a line, and the transform names its sources by key --
+            # so where a field sits in THIS format is answered here, by the
+            # module that reads files, and never inside the transform.
+            out_row = transform.transform_record(keyed_record(raw_row, cfg_dict))
             if out_row is None:
                 continue
             if injected:

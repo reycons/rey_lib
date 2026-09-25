@@ -132,11 +132,20 @@ class DataTransform(ABC):
         return None
 
 
-class IdentityTransform(DataTransform):
-    """Records pass through unchanged -- the load path's transform today.
+class DeclaredTransform(DataTransform):
+    """What a transform DECLARED BY CONFIGURATION knows about its output.
 
-    It is not a null object: it still answers ``logical_schema``, and that
-    answer is what a destination is created from.
+    **The half two transforms share, and the reason they can.** A declaration
+    says which output columns there are, in order, and what is applied to
+    each; that is the same question whether the transform then passes records
+    through or rewrites them. Only ``transform`` differs, which is why only
+    ``transform`` is left abstract here.
+
+    It was extracted from ``IdentityTransform`` unchanged when the estate's
+    column-transformation behaviour gained an owner. Nothing about the
+    identity transform's answers moved with it -- a subclass would have been
+    the other way to share this, and ``ColumnTransform`` is not an identity
+    transform, so it is not one.
     """
 
     def __init__(
@@ -160,35 +169,6 @@ class IdentityTransform(DataTransform):
         """
         self.column_transforms = column_transforms or {}
         self.columns = columns
-
-    def transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Return the records unchanged.
-
-        The load stage reads a file the transform stage already produced, so
-        there is nothing left to apply.
-        """
-        return records
-
-    def execution_form(self) -> ExecutionForm:
-        """Identity: every row, every column, unchanged.
-
-        **``self.columns`` IS DELIBERATELY NOT CONSULTED**, and that is the
-        subtle part. Declared columns are authoritative for
-        ``logical_schema`` and for what a destination is created from -- they
-        are NOT the semantics of ``transform``, which returns records
-        untouched, including keys configuration never mentioned.
-
-        So describing this as "project these columns" would be describing a
-        different operation. A record ``{id, name, extra}`` against declared
-        ``(id, name)`` keeps ``extra`` here; a projection would drop it.
-
-        It LOOKS safe because ``logical_schema`` refuses that mismatch -- but
-        that refusal lives in another method, runs after this one, and on a
-        path that never materialises records may not run at all. Which is
-        exactly where a form gets used. So the only semantics provably equal
-        to this transform's is identity.
-        """
-        return IDENTITY_EXECUTION
 
     def logical_schema(
         self,
@@ -331,3 +311,45 @@ class IdentityTransform(DataTransform):
             f"the records do not match the configured columns: {detail}.",
             validation_name="configured_columns",
         )
+
+
+class IdentityTransform(DeclaredTransform):
+    """Records pass through unchanged -- the load path's transform today.
+
+    It is not a null object: it still answers ``logical_schema``, and that
+    answer is what a destination is created from.
+
+    **Still correct, and not made obsolete by ``ColumnTransform``.** A
+    configured file feed's transform stage has already run by the time the
+    load reads what it wrote, so there really is nothing left to apply. This
+    is the transform of a load that was handed finished records.
+    """
+
+    def transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return the records unchanged.
+
+        The load stage reads a file the transform stage already produced, so
+        there is nothing left to apply.
+        """
+        return records
+
+    def execution_form(self) -> ExecutionForm:
+        """Identity: every row, every column, unchanged.
+
+        **``self.columns`` IS DELIBERATELY NOT CONSULTED**, and that is the
+        subtle part. Declared columns are authoritative for
+        ``logical_schema`` and for what a destination is created from -- they
+        are NOT the semantics of ``transform``, which returns records
+        untouched, including keys configuration never mentioned.
+
+        So describing this as "project these columns" would be describing a
+        different operation. A record ``{id, name, extra}`` against declared
+        ``(id, name)`` keeps ``extra`` here; a projection would drop it.
+
+        It LOOKS safe because ``logical_schema`` refuses that mismatch -- but
+        that refusal lives in another method, runs after this one, and on a
+        path that never materialises records may not run at all. Which is
+        exactly where a form gets used. So the only semantics provably equal
+        to this transform's is identity.
+        """
+        return IDENTITY_EXECUTION

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from rey_lib.errors.error_utils import AppError
 
-__all__ = ["DataStructureError"]
+__all__ = ["DataStructureError", "TransformError"]
 
 
 class DataStructureError(AppError):
@@ -53,3 +53,29 @@ class DataStructureError(AppError):
         """
         super().__init__(message)
         self.validation_name = validation_name
+
+
+class TransformError(AppError):
+    """One column's transformation failed and could not be recovered.
+
+    Here for the reason the error above is: the transform object raises it,
+    and the transform object lives in this layer. It was defined beside a file
+    reader while the transformation behaviour was, and a column failing to
+    transform has never been a fact about files -- the same record-level
+    failure happens to a query's rows.
+
+    ``column`` is carried because the message is read by someone looking for
+    which column to fix. It is filled in by the dispatcher where an
+    implementation raised without naming one, so no implementation has to
+    remember.
+    """
+
+    def __init__(self, message: str, column: str = "") -> None:
+        """Hold the failure and the column it happened to.
+
+        Args:
+            message: What went wrong.
+            column: The output column, where it is known.
+        """
+        super().__init__(message)
+        self.column = column

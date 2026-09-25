@@ -35,10 +35,9 @@ from rey_lib.files.file_utils import (
     visible_files,
 )
 from rey_lib.files.transformer import (
-    transform_row,
+    keyed_record,
     match_header,
     parse_date_from_filename,
-    TransformError,
 )
 from rey_lib.files.file_transaction import (
     FileSetCollisionError,
@@ -161,10 +160,9 @@ __all__ = [
     "resolve_safe_file",
     "visible_children",
     "visible_files",
-    "transform_row",
+    "keyed_record",
     "match_header",
     "parse_date_from_filename",
-    "TransformError",
     "LogRunRollbackError",
     "SourceFileMutationEvidenceError",
     "SourceFileMutationEvidenceResult",

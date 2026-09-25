@@ -13,6 +13,7 @@ What lives here is what both families and the operation between them share:
     DataTransform / IdentityTransform   what the produced records contain
     DataProfile / ProfileField          the shape and character of data
     DataStructureError                  a data object's structure being wrong
+    TransformError                      one column's rule failing to apply
 
 The families themselves live beside this, not under it:
 
@@ -34,19 +35,24 @@ from rey_lib.data.data_profile import (
     ProfileField,
     profile_for,
 )
+from rey_lib.data.column_transform import ColumnTransform
 from rey_lib.data.data_transform import (
     IDENTITY_EXECUTION,
     DataTransform,
+    DeclaredTransform,
     ExecutionForm,
     IdentityTransform,
 )
-from rey_lib.data.errors import DataStructureError
+from rey_lib.data.errors import DataStructureError, TransformError
 
 __all__ = [
     "IDENTITY_EXECUTION",
     "DataProfile",
     "DataStructureError",
+    "TransformError",
+    "ColumnTransform",
     "DataTransform",
+    "DeclaredTransform",
     "ExecutionForm",
     "FieldProfile",
     "IdentityTransform",
