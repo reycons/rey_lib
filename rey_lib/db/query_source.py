@@ -95,6 +95,33 @@ class QuerySource:
         )
         return list(rows)
 
+    def sample(self, limit: int) -> list[dict[str, Any]]:
+        """Some of the rows, for LOOKING AT rather than loading.
+
+        **DELIBERATELY NOT ``read()``**, and the two must not converge.
+        ``read()`` is unbounded because a load must have all of its source,
+        and a bound there would silently truncate the day a result outgrew it.
+        This is the opposite question -- show me what this would carry -- and
+        an answer that read the whole result to show twenty rows would make
+        looking at a load as expensive as running one.
+
+        A query is genuinely bounded here: the database is asked for that many
+        rows and stops.
+
+        Args:
+            limit: How many rows at most. A caller asking for none gets none
+                rather than everything, because that is what it asked.
+
+        Returns:
+            Up to ``limit`` rows, in the order the statement returns them.
+        """
+        if limit <= 0:
+            return []
+        _columns, rows = self.adapter.query_rows(
+            self.conn, self.statement, limit=limit,
+        )
+        return list(rows)
+
     def validate(self, expected_columns: list[str] | None = None) -> None:
         """Refuse a query whose structure is not what it must be.
 

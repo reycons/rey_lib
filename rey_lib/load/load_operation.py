@@ -51,6 +51,7 @@ run_load(ctx, run_log, sql_dir)
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -630,6 +631,251 @@ def load_query_to_file(
         movements=None,
         load_name=f"query:{target.path.name}",
     )
+
+
+@dataclass(frozen=True)
+class LoadEndpoints:
+    """What each end of a prospective load is made of.
+
+    Two ordered column lists and nothing else. Not a mapping: how they
+    correspond is the caller's to propose, and a correspondence a reader has
+    authored is a different thing again -- an object nobody has built yet.
+
+    Either may be empty, which means that end is not named yet rather than
+    that it has no columns. A load being set up is half-named most of the
+    time.
+    """
+
+    source: tuple[str, ...] = ()
+    destination: tuple[str, ...] = ()
+
+
+def inspect_load_endpoints(
+    ctx: Any,
+    *,
+    file: str = "",
+    file_type: str = "",
+    statement: str = "",
+    source_connection: str = "",
+    destination: str = "",
+    connection: str = "",
+    out_file: str = "",
+) -> LoadEndpoints:
+    """What the two ends of this load are made of, WITHOUT running it.
+
+    **THE SAME OBJECTS, ASKED INSTEAD OF USED.** This builds exactly what the
+    load entry points build from exactly the arguments they take -- the same
+    ``data_file_for``, the same ``QuerySource``, the same identity transform
+    -- and then asks each end for its structure. It inserts nothing, writes
+    nothing and creates nothing.
+
+    That is the whole of why it is here rather than in a surface. A second
+    place that worked out "what columns will this load see" would be a second
+    answer, free to disagree with the one the load acts on, and the
+    disagreement would surface as a load that did something other than what
+    the screen showed.
+
+    A DESTINATION HAS TWO ANSWERS, and which one applies is a property of the
+    destination rather than a choice:
+
+    - a table that EXISTS answers with the columns it has, because those are
+      what the insert must match;
+    - a destination that does not exist yet -- a file, or a table under
+      ``--create`` -- answers with the columns this load WOULD write. It has
+      no physical structure to read, but the load is not ignorant of where
+      the values go, and saying nothing would claim it was.
+
+    The second answer is ``transform.columns_for_names(...)`` over the
+    source's declared structure: the same call the non-row path makes, which
+    states that rule once for every caller that has no records in hand.
+
+    Args:
+        ctx: Application context, for opening a named connection.
+        file: A file source, by path.
+        file_type: Its declared format, where the suffix does not name one.
+        statement: A query source, as written.
+        source_connection: The configured connection the statement runs on.
+        destination: A table destination, as ``schema.table``.
+        connection: The configured connection that table lives on.
+        out_file: A file destination, by path.
+
+    Returns:
+        The two ends. An end that is not named yet is empty.
+
+    Raises:
+        ConfigError: As the load would, when a named end cannot be read.
+            A half-named load is not an error; an unreadable one is.
+    """
+    source = _inspection_source(ctx, file, file_type, statement, source_connection)
+    produced: tuple[str, ...] = ()
+    if source is not None:
+        # The TRANSFORM'S answer, not the source's: what a load sees is what
+        # the transform produces from what the source declares, and today's
+        # identity transform makes those the same. Reading it off the source
+        # directly would be right by coincidence and wrong the moment a
+        # transform declares columns.
+        produced = tuple(
+            _build_identity_transform(None).columns_for_names(
+                list(source.source_structure())
+            )
+        )
+
+    return LoadEndpoints(
+        source=produced,
+        destination=_inspection_destination(
+            ctx, destination, connection, out_file, produced,
+        ),
+    )
+
+
+#: How many records a preview shows unless a caller says otherwise.
+#:
+#: A number, because "what is being exported" is a question about SHAPE and
+#: content, not about volume -- and a surface that answered it with the whole
+#: source would make looking at a load as expensive as running one.
+_PREVIEW_ROWS = 50
+
+
+@dataclass(frozen=True)
+class LoadPreview:
+    """What this load would carry, as far as anyone needs to see it.
+
+    The columns are the produced ones -- what the transform makes from what
+    the source declares -- so they are the same names
+    ``inspect_load_endpoints`` reports, from the same call. The rows are what
+    would actually be written, which is why they are taken AFTER the
+    transform rather than as the source returned them.
+
+    ``truncated`` says the source held more. Stated rather than left to be
+    inferred from a row count matching the limit, which is also what a source
+    holding exactly that many looks like.
+    """
+
+    columns: tuple[str, ...] = ()
+    rows: tuple[dict[str, Any], ...] = ()
+    truncated: bool = False
+
+
+def preview_load(
+    ctx: Any,
+    *,
+    file: str = "",
+    file_type: str = "",
+    statement: str = "",
+    source_connection: str = "",
+    limit: int = _PREVIEW_ROWS,
+) -> LoadPreview:
+    """The first records this load would carry, WITHOUT carrying them.
+
+    **EXACTLY WHAT WOULD BE EXPORTED.** The rows are taken through the same
+    transform the load applies, so what a reader sees is what would be
+    written rather than what the source happens to hold -- today those are
+    the same, because the transform is identity, and the day one is not this
+    still shows the right thing.
+
+    **NO DESTINATION.** A preview is about what is leaving, not about where
+    it lands: it writes nothing, creates nothing and validates against
+    nothing. Refusing a source that does not match its destination is the
+    LOAD's job, and doing it here would mean a reader could not look at a
+    mismatch in order to fix it.
+
+    Bounded by ``sample(limit)``, which every source answers and which is
+    deliberately not ``read()`` -- see either implementation for why those
+    must not converge.
+
+    Args:
+        ctx: Application context, for opening a named connection.
+        file: A file source, by path.
+        file_type: Its declared format, where the suffix does not name one.
+        statement: A query source, as written.
+        source_connection: The configured connection the statement runs on.
+        limit: How many records at most.
+
+    Returns:
+        The produced columns and the records, or nothing at all where no
+        source is named yet.
+
+    Raises:
+        ConfigError: As the load would, when a named source cannot be read.
+    """
+    source = _inspection_source(ctx, file, file_type, statement, source_connection)
+    if source is None:
+        return LoadPreview()
+
+    transform = _build_identity_transform(None)
+    # ONE MORE THAN ASKED FOR, which is how "there is more" is established
+    # without a second read. A count equal to the limit says nothing on its
+    # own -- a source holding exactly that many looks identical.
+    sampled = source.sample(limit + 1)
+    truncated = len(sampled) > limit
+    rows = transform.transform(sampled[:limit])
+
+    return LoadPreview(
+        # From the STRUCTURE, not from the rows: an empty source still has
+        # columns, and a preview that showed none would look like a broken
+        # query rather than an empty one.
+        columns=tuple(
+            transform.columns_for_names(list(source.source_structure()))
+        ),
+        rows=tuple(rows),
+        truncated=truncated,
+    )
+
+
+def _inspection_source(
+    ctx: Any,
+    file: str,
+    file_type: str,
+    statement: str,
+    source_connection: str,
+) -> Any:
+    """The source object this load would read, or None where none is named.
+
+    The SAME two constructions the entry points make, in the same order the
+    dispatch prefers them. Nothing is manufactured to stand in for an end
+    nobody has named.
+    """
+    if statement.strip():
+        return QuerySource(
+            shared_connection(ctx, source_connection).handle(),
+            statement,
+            adapter=_read_adapter,
+        )
+    if file.strip():
+        return data_file_for(file, file_type=file_type)
+    return None
+
+
+def _inspection_destination(
+    ctx: Any,
+    destination: str,
+    connection: str,
+    out_file: str,
+    produced: tuple[str, ...],
+) -> tuple[str, ...]:
+    """The destination's columns: the ones it HAS, or the ones it WOULD get.
+
+    A file has no physical structure until it is written, and a table under
+    a create policy may not exist yet. Both are destinations the load knows
+    the shape of, so both answer with what this load would put there.
+    """
+    if out_file.strip():
+        # Resolved even though its columns come from the source: a path whose
+        # suffix names no format is refused here, exactly as the load would
+        # refuse it, rather than previewing a load that cannot run.
+        data_file_for(out_file)
+        return produced
+    if not (destination.strip() and connection.strip()):
+        return ()
+
+    target = _destination_identity(destination, connection)
+    existing = _build_data_loader(ctx, False).destination_columns(
+        shared_connection(ctx, target.connection).handle(), target,
+    )
+    # None means ABSENT, and [] would mean a table with no columns -- the same
+    # distinction the boundary draws. An absent table is one this load would
+    # create, so it answers with what would be created.
+    return tuple(existing) if existing is not None else produced
 
 
 def load_one(ctx: Any, run_log, data_source: Any, load_cfg: Any, file_path: Path) -> int:

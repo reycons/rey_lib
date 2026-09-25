@@ -203,6 +203,30 @@ class DataFile(ABC):
             DataStructureError: As ``validate``.
         """
 
+    def sample(self, limit: int) -> list[dict[str, Any]]:
+        """Some of the records, for LOOKING AT rather than loading.
+
+        The same role question a ``QuerySource`` answers, and deliberately not
+        ``read()``: that one is unbounded because a load must have all of its
+        source, and this one is "show me what this would carry".
+
+        CONCRETE AND HONEST ABOUT ITS COST. A file reader is not bounded --
+        every format here parses the whole file -- so this reads and then
+        takes what was asked for. That is correct rather than cheap, and it is
+        stated rather than hidden: a format that can stop early overrides this
+        and nothing else changes. A bounded reader invented per format would
+        be the same reading implemented twice.
+
+        Args:
+            limit: How many records at most.
+
+        Returns:
+            Up to ``limit`` records, in the order this file holds them.
+        """
+        if limit <= 0:
+            return []
+        return self.read()[:limit]
+
     def write(self, rows: list[dict[str, Any]]) -> int:
         """Write these records to this file, and say how many.
 
