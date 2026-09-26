@@ -52,6 +52,7 @@ class _Adapter:
         self.calls: list[str] = []
         self.created: list[tuple] = []
         self.emptied: list[tuple] = []
+        self.dropped: list[tuple] = []
         self.inserted: list[tuple] = []
 
     def supports_provider_capability(self, _conn, _capability) -> bool:
@@ -66,6 +67,10 @@ class _Adapter:
     def table_exists(self, _conn, _schema, _table) -> bool:
         self.calls.append("table_exists")
         return self._exists
+
+    def drop_table(self, _conn, schema, table) -> None:
+        self.calls.append("drop_table")
+        self.dropped.append((schema, table))
 
     def get_table_columns(self, _conn, _schema, _table) -> list[str]:
         self.calls.append("get_table_columns")
@@ -412,4 +417,76 @@ class TestTheReplacePolicy:
         assert "self.adapter.delete_all_rows" in source
         for named in ("postgres", "mysql", "sqlserver", "duckdb",
                       "DELETE", "TRUNCATE"):
+            assert named not in source, named
+
+
+class TestRecreateDestroysTheDestinationAndBuildsItAgain:
+    """DROP, then CREATE, then load -- and that order is what Recreate means.
+
+    The one policy here that is destructive at SCHEMA level. Replace keeps the
+    table it empties; this does not keep it at all, and nothing rebuilds what
+    the table owned.
+    """
+
+    def test_declared_it_drops_then_creates_before_writing(self) -> None:
+        adapter = _Adapter(exists=True)
+
+        loaded = _loader(adapter, recreate_destination=True).load(
+            _Conn(), _TARGET, _RECORDS, _DEFS
+        )
+
+        assert loaded == 2
+        assert adapter.dropped == [("s", "t")]
+        assert adapter.created == [("s", "t", _DEFS)]
+        assert adapter.calls == ["table_exists", "get_table_columns",
+                                 "drop_table", "create", "bulk_insert"]
+
+    def test_it_never_merely_empties(self) -> None:
+        """THE FAILURE THAT WOULD LOOK LIKE SUCCESS. Emptying instead of
+        dropping leaves standing the very schema the caller asked to rebuild,
+        and the rows would land correctly either way.
+        """
+        adapter = _Adapter(exists=True)
+
+        _loader(adapter, recreate_destination=True).load(
+            _Conn(), _TARGET, _RECORDS, _DEFS
+        )
+
+        assert adapter.emptied == []
+
+    def test_an_absent_destination_is_simply_created(self) -> None:
+        """Nothing to drop. Refusing would be a second answer to a question the
+        mode already settles: recreate asks that the table be exactly what
+        these records need, and an absent one satisfies that by being created.
+        """
+        adapter = _Adapter(exists=False)
+
+        _loader(adapter, recreate_destination=True).load(
+            _Conn(), _TARGET, _RECORDS, _DEFS
+        )
+
+        assert adapter.dropped == []
+        assert adapter.calls == ["table_exists", "create", "bulk_insert"]
+
+    def test_it_alone_authorizes_creating_what_is_absent(self) -> None:
+        """Recreate implies the table may be built, so a load declaring it and
+        not `create` is not refused for a destination that is not there.
+        """
+        adapter = _Adapter(exists=False)
+
+        _loader(adapter, recreate_destination=True).load(
+            _Conn(), _TARGET, _RECORDS, _DEFS
+        )
+
+        assert adapter.created == [("s", "t", _DEFS)]
+
+    def test_it_is_the_connector_that_is_asked(self) -> None:
+        source = inspect.getsource(DataLoader)
+
+        assert "self.adapter.drop_table" in source
+        # `DROP TABLE` is the statement; "a drop" is English, and the comments
+        # here explain the operation in words. It is SQL that must not be
+        # written, not the noun.
+        for named in ("postgres", "mysql", "sqlserver", "duckdb",
+                      "DROP TABLE", "DROP  TABLE"):
             assert named not in source, named

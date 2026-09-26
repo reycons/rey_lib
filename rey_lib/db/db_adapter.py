@@ -218,6 +218,11 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # there and is refused by name. It is not approximated with something
         # else, because every alternative means something different.
         "delete_all_rows",
+        # Optional for the same reason and at a higher cost: a load that
+        # rebuilds its destination cannot run where a provider has no drop, and
+        # is refused by name rather than degraded into emptying the table --
+        # which would keep a schema the caller asked to replace.
+        "drop_table",
     }
 )
 
@@ -1370,6 +1375,48 @@ class DBAdapter:
         # `insert_from_path` hand theirs back the same way: coercing here would
         # be this layer having an opinion about an answer it did not produce.
         return empty(conn, schema, table)
+
+    def drop_table(self, conn: Any, schema: str, table: str) -> None:
+        """Destroy ``schema.table`` itself, not merely its contents.
+
+        **THE PRIMITIVE, NAMED FOR WHAT IT DOES.** It is not called `recreate`:
+        a load mode that rebuilds a destination is built FROM this and a create,
+        and a provider should not know that such a mode exists.
+
+        **DESTRUCTIVE AT SCHEMA LEVEL, and that is the whole difference from
+        ``delete_all_rows``.** Emptying a table keeps the thing it empties; this
+        does not. WHAT THE TABLE OWNS GOES WITH IT -- its indexes, its
+        constraints, its triggers -- and nothing here rebuilds any of them.
+
+        What happens to objects that merely DEPEND on the table -- a view over
+        it, a foreign key from elsewhere -- is the provider's answer: the drop
+        may be refused, or may reach further. This layer does not decide it, and
+        a caller that needs to know must ask the database it is talking to.
+
+        **ASK BEFORE CALLING.** Optional, like ``delete_all_rows``:
+        ``supports_provider_capability(conn, "drop_table")`` answers whether
+        this connection's provider has it. A caller that does not ask gets the
+        refusal any missing capability raises, which is the intended outcome --
+        a load that cannot rebuild its destination must fail rather than fall
+        back to emptying it, which would leave a schema the caller asked to
+        replace.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        schema : str
+            Target schema (or database.schema).
+        table : str
+            Target table name.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot do it.
+        """
+        drop = self._require_provider_capability(conn, "drop_table")
+        drop(conn, schema, table)
 
     def get_table_columns(
         self,

@@ -342,6 +342,7 @@ def _build_data_loader(
     ctx: Any,
     create_declared: bool,
     replace_declared: bool = False,
+    recreate_declared: bool = False,
 ) -> _DataLoader:
     """Build the loader for one load's policy.
 
@@ -363,6 +364,7 @@ def _build_data_loader(
         adapter=_write_adapter,
         create_destination=create_declared,
         replace_destination=replace_declared,
+        recreate_destination=recreate_declared,
         widen_columns=(
             lambda _conn, target, records, defs: _alter_oversized_columns(
                 ctx, *adapter_destination(target), records, defs,
@@ -452,6 +454,7 @@ def load_file_to_table(
     *,
     create_destination: bool = False,
     replace_destination: bool = False,
+    recreate_destination: bool = False,
     file_type: str = "",
     encoding: str = "utf-8-sig",
     transform: Any = None,
@@ -485,6 +488,9 @@ def load_file_to_table(
             is opened from the target, so one value says where the object is
             and nothing reads it twice. Required -- an identity without a
             connection is a partial endpoint.
+        recreate_destination: Whether the destination is dropped and built
+            again from these records. Destructive at schema level: what the
+            table owns goes with it, and nothing rebuilds it.
         replace_destination: Whether the destination's existing contents are
             removed before these records are written. False adds to them,
             which is what a load has always done.
@@ -522,7 +528,9 @@ def load_file_to_table(
         # configuration, and absent configuration produces no transform map
         # and no declared columns -- exactly what such a load means.
         transform=_build_transform(ctx, None, transform),
-        loader=_build_data_loader(ctx, create_destination, replace_destination),
+        loader=_build_data_loader(
+            ctx, create_destination, replace_destination, recreate_destination,
+        ),
         file_type=file_type,
         encoding=encoding,
         name=f"direct:{load_name}",
@@ -539,6 +547,7 @@ def load_query_to_table(
     *,
     create_destination: bool = False,
     replace_destination: bool = False,
+    recreate_destination: bool = False,
     transform: Any = None,
 ) -> int:
     """Load what one statement returns into one named table.
@@ -582,6 +591,9 @@ def load_query_to_table(
         destination: ``schema.table``, or ``database.schema.table`` where the
             backend qualifies that way.
         connection: The CONFIGURED CONNECTION NAME the destination lives on.
+        recreate_destination: Whether the destination is dropped and built
+            again from these records. Destructive at schema level: what the
+            table owns goes with it, and nothing rebuilds it.
         replace_destination: Whether the destination's existing contents are
             removed before these records are written. False adds to them,
             which is what a load has always done.
@@ -615,7 +627,9 @@ def load_query_to_table(
         target,
         ctx=ctx,
         run_log=run_log,
-        loader=_build_data_loader(ctx, create_destination, replace_destination),
+        loader=_build_data_loader(
+            ctx, create_destination, replace_destination, recreate_destination,
+        ),
         # None, not an empty policy. A load with no file has nothing to route,
         # which is not the same as a policy that routes nothing.
         movements=None,

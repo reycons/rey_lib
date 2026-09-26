@@ -81,6 +81,11 @@ _CALLS: dict[str, tuple] = {
     # alternative means something different, so there is nothing to fall back
     # to and nothing that may be guessed at.
     "delete_all_rows": ("schema", "table"),
+    # Optional, and the refusal matters most of all here: a load that cannot
+    # DROP its destination must be told so by name rather than quietly emptying
+    # it instead, which would leave standing the very schema the caller asked
+    # to rebuild.
+    "drop_table": ("schema", "table"),
 }
 
 

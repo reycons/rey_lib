@@ -97,6 +97,7 @@ class DataLoader:
         adapter: Any,
         create_destination: bool = False,
         replace_destination: bool = False,
+        recreate_destination: bool = False,
         widen_columns: WidenColumns | None = None,
     ) -> None:
         """Hold the policies that govern loading, and nothing about where.
@@ -122,12 +123,19 @@ class DataLoader:
                 are removed before these records are written. False means they
                 are added to, which is what a load has always done and what an
                 undeclared load still means.
+            recreate_destination: Whether the destination is DESTROYED AND
+                BUILT AGAIN before these records are written -- dropped, then
+                created from them. The one policy here that is destructive at
+                schema level: what the table owns goes with it, and nothing
+                rebuilds it. Distinct from ``replace_destination``, which keeps
+                the table it empties.
             widen_columns: How to widen columns after a truncation. Absent
                 means a truncation is simply reported.
         """
         self.adapter = adapter
         self.create_destination = create_destination
         self.replace_destination = replace_destination
+        self.recreate_destination = recreate_destination
         self.widen_columns = widen_columns
 
     def destination_columns(self, conn: Any, target: Any) -> list[str] | None:
@@ -193,11 +201,23 @@ class DataLoader:
             destination_columns = self.destination_columns(conn, target)
         exists = destination_columns is not None
 
-        if not exists and not self.create_destination:
+        if not exists and not (self.create_destination or self.recreate_destination):
             raise ConfigError(
                 f"destination {schema}.{table} does not exist, and "
                 f"this load does not declare that it may be created."
             )
+
+        if exists and self.recreate_destination:
+            # THE TABLE ITSELF GOES, and is built again from these records --
+            # which is the whole difference from `replace`, where the table
+            # stays and only its rows leave. What the table owned goes with it;
+            # nothing here puts any of it back.
+            #
+            # Issued in the same transaction boundary as the insert below, as
+            # the replace removal is. WHAT A ROLLBACK THEN DOES TO A DROP is
+            # the database's own semantics and is not promised here.
+            self.adapter.drop_table(conn, schema, table)
+            exists = False
 
         if not exists:
             # Only when absent. Calling this unconditionally would contradict
