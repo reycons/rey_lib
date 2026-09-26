@@ -59,6 +59,30 @@ _TRANSFORM_TYPE_MAP: dict[str, str] = {
     "numeric":    "DECIMAL(18, 6)",
 }
 
+#: A STATED logical output type, rendered as the SQL this path already emits.
+#:
+#: **Every string here is one this module or `infer_sql_type` already produced.**
+#: Nothing new is invented: INTEGER and DATE are `infer_sql_type`'s, DECIMAL(18,
+#: 6) and DATETIME2 are `_TRANSFORM_TYPE_MAP`'s, and the VARCHAR width is the
+#: fallback's own arithmetic. So declaring a type changes WHICH of these answers
+#: a column gets, never what the answers are.
+#:
+#: Which also means `datetime` inherits DATETIME2 -- one server's spelling
+#: emitted for every provider. That is a defect this does not introduce and does
+#: not fix; correcting it needs somewhere for a provider to answer, and there is
+#: nowhere. Both are recorded on the backlog.
+#:
+#: Keyed by the logical vocabulary in `column_transform.OUTPUT_DATATYPES`, and
+#: `boolean` is absent from both for the same reason: it has no string here to
+#: render as.
+_LOGICAL_TYPE_SQL: dict[str, Any] = {
+    "text":     lambda observed: f"VARCHAR({max(observed + 10, 20)})",
+    "integer":  lambda _observed: "INTEGER",
+    "decimal":  lambda _observed: "DECIMAL(18, 6)",
+    "date":     lambda _observed: "DATE",
+    "datetime": lambda _observed: "DATETIME2",
+}
+
 
 @dataclass(frozen=True)
 class ExecutionForm:
@@ -152,6 +176,7 @@ class DeclaredTransform(DataTransform):
         self,
         column_transforms: dict[str, dict[str, Any]] | None = None,
         columns: list[str] | None = None,
+        column_datatypes: dict[str, str] | None = None,
     ) -> None:
         """Hold what configuration declared about the produced records.
 
@@ -162,13 +187,18 @@ class DeclaredTransform(DataTransform):
                 configuration declares none. When given they are
                 AUTHORITATIVE -- they are the schema, and records that do not
                 match them are refused.
+            column_datatypes: Output column -> the LOGICAL type the
+                declaration states for it, for the columns that state one. A
+                stated type is what that column IS; where none is stated the
+                type is derived as it always was.
 
-        Both are RESOLVED values rather than a config Namespace, so this
+        All three are RESOLVED values rather than a config Namespace, so this
         object needs no knowledge of how configuration is shaped, where it
         came from, or which shapes are valid.
         """
         self.column_transforms = column_transforms or {}
         self.columns = columns
+        self.column_datatypes = column_datatypes or {}
 
     def logical_schema(
         self,
@@ -217,8 +247,15 @@ class DeclaredTransform(DataTransform):
             declared = self.column_transforms.get(column, {})
             declared_type = declared.get("type", "") if declared else ""
             cast_to = declared.get("cast_to", "") if declared else ""
+            stated = self.column_datatypes.get(column, "")
 
-            if declared_type in _TRANSFORM_TYPE_MAP:
+            # A STATED OUTPUT TYPE WINS. It says what the column IS, which is a
+            # stronger claim than anything derived from how the value is made or
+            # from what this sample happened to hold. Absent, everything below
+            # is exactly what it always was.
+            if stated in _LOGICAL_TYPE_SQL:
+                sql_type = _LOGICAL_TYPE_SQL[stated](max_lengths.get(column, 0))
+            elif declared_type in _TRANSFORM_TYPE_MAP:
                 sql_type = _TRANSFORM_TYPE_MAP[declared_type]
             elif declared_type == "regex_extract" and cast_to in ("float", "double"):
                 sql_type = "DECIMAL(18, 6)"

@@ -208,11 +208,16 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         "get_table_columns",
         "create_staging_table_if_not_exists",
         "bulk_insert",
-        # Optional by design, and the only one here that is. A provider
-        # without it loses nothing: the record-based path remains the
-        # guaranteed way to load anything, so support is an opportunity
-        # rather than a requirement.
+        # Optional by design, and the only two here that are. A provider
+        # without `insert_from_path` loses nothing: the record-based path
+        # remains the guaranteed way to load anything, so support is an
+        # opportunity rather than a requirement.
         "insert_from_path",
+        # Optional, and a provider without it loses a MODE rather than a
+        # shortcut: a load that replaces a destination's contents cannot run
+        # there and is refused by name. It is not approximated with something
+        # else, because every alternative means something different.
+        "delete_all_rows",
     }
 )
 
@@ -1314,6 +1319,57 @@ class DBAdapter:
         """
         exists = self._require_provider_capability(conn, "table_exists")
         return bool(exists(conn, schema, table))
+
+    def delete_all_rows(self, conn: Any, schema: str, table: str) -> int:
+        """Remove every row from ``schema.table``, leaving the table itself.
+
+        **THE PRIMITIVE, NAMED FOR WHAT IT DOES.** It is not called `replace`:
+        a load mode that replaces a destination's contents is built FROM this,
+        and a provider should not know that such a mode exists.
+
+        What it does NOT do, each because something else does:
+
+        - it does not DROP the table. The schema, its constraints, its grants,
+          its indexes and its triggers survive, because emptying a table is not
+          the same act as destroying and rebuilding one;
+        - it does not reset identity or sequence state. A sequence continues
+          from where it was; anyone wanting it reset is asking for a different
+          operation and should ask for it by name;
+        - it does not create anything. A destination that is not there is
+          `create`'s business.
+
+        **ASK BEFORE CALLING.** Optional, like ``insert_from_path``:
+        ``supports_provider_capability(conn, "delete_all_rows")`` answers
+        whether this connection's provider has it. A caller that does not ask
+        gets the refusal any missing capability raises -- which is the intended
+        outcome. A load that cannot empty its destination must fail rather than
+        fall back to some other operation that means something else.
+
+        Parameters
+        ----------
+        conn : Any
+            Open backend connection.
+        schema : str
+            Target schema (or database.schema).
+        table : str
+            Target table name.
+
+        Returns
+        -------
+        int
+            Rows removed, as the ENGINE counted them. Zero means the table was
+            already empty -- a real answer, not a failure.
+
+        Raises
+        ------
+        UnsupportedDatabaseCapabilityError
+            If the connection's provider cannot do it.
+        """
+        empty = self._require_provider_capability(conn, "delete_all_rows")
+        # The provider's own count, carried. `bulk_insert` and
+        # `insert_from_path` hand theirs back the same way: coercing here would
+        # be this layer having an opinion about an answer it did not produce.
+        return empty(conn, schema, table)
 
     def get_table_columns(
         self,

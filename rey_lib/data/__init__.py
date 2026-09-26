@@ -35,7 +35,12 @@ from rey_lib.data.data_profile import (
     ProfileField,
     profile_for,
 )
-from rey_lib.data.column_transform import ColumnTransform
+from rey_lib.data.column_transform import (
+    OUTPUT_DATATYPES,
+    ColumnTransform,
+    authorable_starters,
+    is_exported,
+)
 from rey_lib.data.data_transform import (
     IDENTITY_EXECUTION,
     DataTransform,
@@ -47,6 +52,7 @@ from rey_lib.data.errors import DataStructureError, TransformError
 
 __all__ = [
     "IDENTITY_EXECUTION",
+    "OUTPUT_DATATYPES",
     "DataProfile",
     "DataStructureError",
     "TransformError",
@@ -57,5 +63,7 @@ __all__ = [
     "FieldProfile",
     "IdentityTransform",
     "ProfileField",
+    "authorable_starters",
+    "is_exported",
     "profile_for",
 ]

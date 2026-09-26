@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import inspect
+
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
@@ -49,6 +51,7 @@ class _Adapter:
         self._truncation = truncation
         self.calls: list[str] = []
         self.created: list[tuple] = []
+        self.emptied: list[tuple] = []
         self.inserted: list[tuple] = []
 
     def supports_provider_capability(self, _conn, _capability) -> bool:
@@ -73,6 +76,11 @@ class _Adapter:
         self.created.append((schema, table, defs))
         self._exists = True
         return True
+
+    def delete_all_rows(self, _conn, schema, table) -> int:
+        self.calls.append("delete_all_rows")
+        self.emptied.append((schema, table))
+        return 0
 
     def bulk_insert(self, _conn, schema, table, records, columns) -> int:
         self.calls.append("bulk_insert")
@@ -343,3 +351,65 @@ class TestTheTruncationRetry:
         )
 
         assert loaded == 2
+
+
+class TestTheReplacePolicy:
+    """Whether an EXISTING destination's contents are removed first.
+
+    Its sibling `create_destination` answers what happens when the table is
+    ABSENT. These two never apply to the same destination: one acts because
+    there is nothing there, the other because there is.
+    """
+
+    def test_absence_adds_to_what_is_there(self) -> None:
+        """WHAT A LOAD HAS ALWAYS DONE, and what an undeclared load means.
+
+        The case that matters most: every load in the estate declares nothing,
+        so every one of them must still take this path.
+        """
+        adapter = _Adapter(exists=True)
+
+        _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
+
+        assert adapter.emptied == []
+        assert adapter.calls == ["table_exists", "get_table_columns",
+                                 "bulk_insert"]
+
+    def test_declared_it_empties_the_destination_before_writing(self) -> None:
+        """IN THAT ORDER. Emptying after the insert would remove what was just
+        written, and the order is the whole of what Replace means.
+        """
+        adapter = _Adapter(exists=True)
+
+        loaded = _loader(adapter, replace_destination=True).load(
+            _Conn(), _TARGET, _RECORDS, _DEFS
+        )
+
+        assert loaded == 2
+        assert adapter.emptied == [("s", "t")]
+        assert adapter.calls == ["table_exists", "get_table_columns",
+                                 "delete_all_rows", "bulk_insert"]
+
+    def test_a_destination_it_just_created_is_not_emptied(self) -> None:
+        """Nothing to remove, and emptying would be a second answer to a
+        question `create` already settled.
+        """
+        adapter = _Adapter(exists=False)
+
+        _loader(
+            adapter, create_destination=True, replace_destination=True,
+        ).load(_Conn(), _TARGET, _RECORDS, _DEFS)
+
+        assert adapter.emptied == []
+        assert adapter.calls == ["table_exists", "create", "bulk_insert"]
+
+    def test_it_is_the_connector_that_is_asked(self) -> None:
+        """The loader names no provider and spells no SQL. It asks the adapter,
+        which is the one boundary a database operation crosses.
+        """
+        source = inspect.getsource(DataLoader)
+
+        assert "self.adapter.delete_all_rows" in source
+        for named in ("postgres", "mysql", "sqlserver", "duckdb",
+                      "DELETE", "TRUNCATE"):
+            assert named not in source, named

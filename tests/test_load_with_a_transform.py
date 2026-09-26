@@ -159,8 +159,11 @@ class TestTheScreenSeesWhatTheLoadWillDo:
         )
 
         assert found.columns == ("identifier", "label")
+        # As TEXT: a preview is a display, and every value is its own text. The
+        # transform's answer is unchanged -- what it renamed is still renamed,
+        # and a column it formatted keeps the formatting it gave.
         assert found.rows == (
-            {"identifier": 1, "label": "x"}, {"identifier": 2, "label": "y"},
+            {"identifier": "1", "label": "x"}, {"identifier": "2", "label": "y"},
         )
 
     def test_a_prospective_destination_gets_the_declared_columns(

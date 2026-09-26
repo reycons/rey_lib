@@ -341,6 +341,7 @@ def _destination_identity(
 def _build_data_loader(
     ctx: Any,
     create_declared: bool,
+    replace_declared: bool = False,
 ) -> _DataLoader:
     """Build the loader for one load's policy.
 
@@ -361,6 +362,7 @@ def _build_data_loader(
     return _DataLoader(
         adapter=_write_adapter,
         create_destination=create_declared,
+        replace_destination=replace_declared,
         widen_columns=(
             lambda _conn, target, records, defs: _alter_oversized_columns(
                 ctx, *adapter_destination(target), records, defs,
@@ -449,6 +451,7 @@ def load_file_to_table(
     connection: str,
     *,
     create_destination: bool = False,
+    replace_destination: bool = False,
     file_type: str = "",
     encoding: str = "utf-8-sig",
     transform: Any = None,
@@ -482,6 +485,9 @@ def load_file_to_table(
             is opened from the target, so one value says where the object is
             and nothing reads it twice. Required -- an identity without a
             connection is a partial endpoint.
+        replace_destination: Whether the destination's existing contents are
+            removed before these records are written. False adds to them,
+            which is what a load has always done.
         create_destination: Whether an absent table may be created from the
             file. False means it must already exist.
         file_type: Declared format. Empty infers it from the suffix, which
@@ -516,7 +522,7 @@ def load_file_to_table(
         # configuration, and absent configuration produces no transform map
         # and no declared columns -- exactly what such a load means.
         transform=_build_transform(ctx, None, transform),
-        loader=_build_data_loader(ctx, create_destination),
+        loader=_build_data_loader(ctx, create_destination, replace_destination),
         file_type=file_type,
         encoding=encoding,
         name=f"direct:{load_name}",
@@ -532,6 +538,7 @@ def load_query_to_table(
     connection: str,
     *,
     create_destination: bool = False,
+    replace_destination: bool = False,
     transform: Any = None,
 ) -> int:
     """Load what one statement returns into one named table.
@@ -575,6 +582,9 @@ def load_query_to_table(
         destination: ``schema.table``, or ``database.schema.table`` where the
             backend qualifies that way.
         connection: The CONFIGURED CONNECTION NAME the destination lives on.
+        replace_destination: Whether the destination's existing contents are
+            removed before these records are written. False adds to them,
+            which is what a load has always done.
         create_destination: Whether an absent table may be created from the
             records. False means it must already exist.
         transform: A transform declaration. Absent means identity -- the rows
@@ -605,7 +615,7 @@ def load_query_to_table(
         target,
         ctx=ctx,
         run_log=run_log,
-        loader=_build_data_loader(ctx, create_destination),
+        loader=_build_data_loader(ctx, create_destination, replace_destination),
         # None, not an empty policy. A load with no file has nothing to route,
         # which is not the same as a policy that routes nothing.
         movements=None,
@@ -685,17 +695,29 @@ def load_query_to_file(
 class LoadEndpoints:
     """What each end of a prospective load is made of.
 
-    Two ordered column lists and nothing else. Not a mapping: how they
-    correspond is the caller's to propose, and a correspondence a reader has
-    authored is a different thing again -- an object nobody has built yet.
+    Ordered column lists and nothing else. Not a mapping: how they correspond
+    is the caller's to propose, and a correspondence a reader has authored is a
+    different thing again -- an object nobody has built yet.
 
-    Either may be empty, which means that end is not named yet rather than
+    Any of them may be empty, which means that end is not named yet rather than
     that it has no columns. A load being set up is half-named most of the
     time.
     """
 
+    #: What the load SEES: the transform's output over the source's structure.
+    #:
+    #: Named `source` because that is what it was when the only transform was
+    #: identity and the two were the same list. They are not the same once a
+    #: declaration renames anything, which is what `source_structure` is for.
     source: tuple[str, ...] = ()
     destination: tuple[str, ...] = ()
+    #: The source's OWN field names, before the transform.
+    #:
+    #: A SECOND ANSWER, because they are two questions and only looked like one
+    #: while every transform was identity. A surface authoring a declaration
+    #: needs the names it is mapping FROM: reading `source` for them would show
+    #: the output name a reader had just typed and call it the source's own.
+    source_structure: tuple[str, ...] = ()
 
 
 def inspect_load_endpoints(
@@ -752,7 +774,8 @@ def inspect_load_endpoints(
             not exist yet would be given.
 
     Returns:
-        The two ends. An end that is not named yet is empty.
+        The two ends, and the source's own structure beside them. An end that
+        is not named yet is empty.
 
     Raises:
         ConfigError: As the load would, when a named end cannot be read.
@@ -760,7 +783,11 @@ def inspect_load_endpoints(
     """
     source = _inspection_source(ctx, file, file_type, statement, source_connection)
     produced: tuple[str, ...] = ()
+    structure: tuple[str, ...] = ()
     if source is not None:
+        # READ ONCE and answered twice. The source's own structure is what a
+        # declaration maps FROM; the produced columns are what the load sees.
+        structure = tuple(source.source_structure())
         # The TRANSFORM'S answer, not the source's: what a load sees is what
         # the transform produces from what the source declares, and today's
         # identity transform makes those the same. Reading it off the source
@@ -768,7 +795,7 @@ def inspect_load_endpoints(
         # transform declares columns.
         produced = tuple(
             _build_transform(ctx, None, transform).columns_for_names(
-                list(source.source_structure())
+                list(structure)
             )
         )
 
@@ -777,6 +804,7 @@ def inspect_load_endpoints(
         destination=_inspection_destination(
             ctx, destination, connection, out_file, produced,
         ),
+        source_structure=structure,
     )
 
 
@@ -872,9 +900,44 @@ def preview_load(
         columns=tuple(
             transform.columns_for_names(list(source.source_structure()))
         ),
-        rows=tuple(rows),
+        rows=tuple(_for_display(row) for row in rows),
         truncated=truncated,
     )
+
+
+def _for_display(row: dict[str, Any]) -> dict[str, Any]:
+    """One record as the TEXT of each value, which is what a preview shows.
+
+    **A PREVIEW IS A DISPLAY, and a load is not.** The load carries typed values
+    to a destination that has a schema for them; a preview crosses to a browser
+    over JSON and is read by a person. A database source hands back exactly what
+    its driver holds -- ``datetime``, ``date``, ``Decimal`` -- and none of those
+    survive ``json.dumps``, so a preview over a query failed outright with
+    "Object of type datetime is not JSON serializable" and showed nothing.
+
+    ONE RULE, not a table of types. Every value is its own text, and the types
+    that broke it already spell themselves correctly: a ``datetime`` is
+    ``2026-09-26 11:04:00``, a ``date`` is ``2026-09-26``, and a ``Decimal`` is
+    ``1234.50`` with the scale the database is keeping on purpose -- which
+    ``float`` would have rounded away. A branch per type would be a second
+    account of how each one reads, free to drift from how it reads everywhere
+    else.
+
+    THIS IS NOT A SECOND FORMATTER. A column the transform touched arrives as
+    text already -- ``_transform_date`` and its siblings render through
+    ``output_format`` -- so its own formatting is what passes through here.
+
+    NULL STAYS NULL, because it is absence rather than a value, and a surface
+    draws a blank for it. ``str(None)`` would put the word "None" in the cell.
+
+    The destination's declared ``datatype`` is deliberately not consulted: it
+    says what the column should BE where it lands, which is a question about the
+    load rather than about what a reader is looking at.
+    """
+    return {
+        name: None if value is None else str(value)
+        for name, value in row.items()
+    }
 
 
 def _inspection_source(

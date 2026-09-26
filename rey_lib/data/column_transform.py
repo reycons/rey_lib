@@ -38,12 +38,18 @@ constant, context, date, datetime, time, numeric, regex_extract, regex_date,
 prefix_map, strip_parens_suffix, encrypt, file_hash, not_blank, and ``hash``
 over a fixed set of output columns. Each is declared per column under
 ``transform:`` and each is implemented below.
+
+``AUTHORABLE_STARTERS`` names the subset a SURFACE may offer, with a starting
+declaration each. Every type above stays legal in a declaration however it was
+written; the subset is about what a surface hands an author, not about what
+this module executes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+from copy import deepcopy
 from datetime import date, datetime, time
 from typing import Any, Optional
 
@@ -52,9 +58,127 @@ from rey_lib.data.date_formats import to_strptime_format
 from rey_lib.data.errors import TransformError
 from rey_lib.logs import get_logger
 
-__all__ = ["ColumnTransform"]
+__all__ = [
+    "AUTHORABLE_STARTERS",
+    "OUTPUT_DATATYPES",
+    "ColumnTransform",
+    "authorable_starters",
+    "is_exported",
+]
 
 _logger = get_logger(__name__)
+
+
+#: A starting declaration per transform type a SURFACE may offer.
+#:
+#: **Authoring aids, not defaults.** Nothing below reads this: it changes no
+#: runtime behaviour and no reading of an omitted key. A declaration is only
+#: ever what its author actually wrote, and a starter is what an author is
+#: handed before they write it.
+#:
+#: It sits beside the dispatch because the dispatch owns the types. A surface
+#: holding its own list would be a second answer about what a transform is,
+#: free to drift from the one that executes.
+#:
+#: **``encrypt`` IS DELIBERATELY ABSENT, and its absence here is not a claim
+#: that it is invalid.** ``_transform_encrypt`` resolves ``key_env`` against a
+#: secrets map supplied at construction, so a declaration naming one is only
+#: as good as the store the thing that built it can reach. Existing
+#: declarations keep using it through the trusted paths that already supply
+#: that map. What is missing is the rule for a declaration arriving from a
+#: BROWSER -- which secret namespace it may name, and how those names are
+#: offered without the values -- and until that rule exists, offering the
+#: starter would advertise a capability that is not whole.
+AUTHORABLE_STARTERS: dict[str, dict[str, Any]] = {
+    "constant": {"type": "constant", "value": ""},
+    "context": {"type": "context", "value": "ctx.row_num"},
+    # TWO FORMATS, because they are two questions and only one of them was
+    # being offered. `format` READS the value; `output_format` WRITES it, and
+    # without it a rule falls back to the ANSI spelling. An author who wanted
+    # dates written as MM/dd/yyyy had to know the second key existed and type it
+    # in, because the starter mentioned only the first.
+    #
+    # Each is seeded with the ANSI default that rule already falls back to, so
+    # the key is visible and editable and changes nothing for anyone who leaves
+    # it alone.
+    "date": {
+        "type": "date", "format": "MM/dd/yyyy", "output_format": "yyyy-MM-dd",
+    },
+    "datetime": {
+        "type": "datetime", "format": "yyyy-MM-dd HH:mm:ss",
+        "output_format": "yyyy-MM-dd HH:mm:ss",
+    },
+    "time": {
+        "type": "time", "format": "HH:mm:ss", "output_format": "HH:mm:ss",
+    },
+    "numeric": {"type": "numeric", "strip_chars": ","},
+    "regex_extract": {"type": "regex_extract", "source": "", "pattern": "", "group": 1},
+    "regex_date": {
+        "type": "regex_date", "source": "", "pattern": "", "format": "yyMMdd", "group": 1,
+    },
+    "prefix_map": {"type": "prefix_map", "source": "", "prefixes": {}, "default": "Other"},
+    "strip_parens_suffix": {"type": "strip_parens_suffix"},
+    "file_hash": {"type": "file_hash"},
+    "not_blank": {"type": "not_blank"},
+    "hash": {"type": "hash", "hash_type": "sha256", "columns": []},
+}
+
+
+#: The output datatypes a declaration may state, as LOGICAL types.
+#:
+#: **What the output is intended to BE.** Its sibling questions are answered
+#: elsewhere and stay there: ``transform`` is how a value gets there, and how a
+#: logical type is spelled physically is the destination's.
+#:
+#: NEUTRAL, not a server's vocabulary. A declaration naming ``DATETIME2`` would
+#: be one engine's spelling written into a description of work, and would be
+#: wrong everywhere else it was read.
+#:
+#: NOT the profiling vocabulary either. ``detect_datatype`` answers what a value
+#: LOOKS LIKE in a source -- email, ssn, name -- which is a different question
+#: from what a destination column should be.
+#:
+#: ``boolean`` IS ABSENT, and deliberately: every member here renders as a string
+#: this estate already emits, and boolean is the one that would mean inventing a
+#: physical type in shared code. It waits for somewhere a provider can answer.
+OUTPUT_DATATYPES: tuple[str, ...] = (
+    "text", "integer", "decimal", "date", "datetime",
+)
+
+
+def is_exported(column: dict[str, Any]) -> bool:
+    """Whether this entry contributes a column to the output.
+
+    ABSENT MEANS EXPORTED. Every declaration written before the property
+    existed, and every one that simply does not care, keeps its meaning.
+
+    Args:
+        column: One entry of a declaration's ``columns``.
+
+    Returns:
+        False only where the entry states ``export: false``.
+    """
+    return column.get("export", True) is not False
+
+
+def authorable_starters() -> dict[str, dict[str, Any]]:
+    """The starting declarations a surface may offer, copied.
+
+    COPIED, because a caller that edited what it was given would edit the
+    starter every later caller is handed. A starter is a beginning, and one
+    that carried a previous author's edits would not be.
+
+    DEEPLY copied, because some of them hold a container -- ``prefixes`` and
+    ``columns`` -- and a shallow copy would share the one thing an author is
+    most likely to put something in.
+
+    Returns:
+        Each authorable type mapped to a fresh starting declaration.
+    """
+    return {
+        name: deepcopy(declaration)
+        for name, declaration in AUTHORABLE_STARTERS.items()
+    }
 
 
 class ColumnTransform(DeclaredTransform):
@@ -102,10 +226,14 @@ class ColumnTransform(DeclaredTransform):
         same declaration the application uses -- rather than from a second
         copy a caller resolved separately.
         """
+        # THE EXPORTED ONES, which is not every declared one. An entry marked
+        # `export: false` is still computed -- see `transform_record` -- and is
+        # simply not part of what comes out, so it is absent from the schema
+        # this hands upward and from every answer derived from it.
         columns = [
             str(one.get("name", ""))
             for one in declaration.get("columns") or []
-            if isinstance(one, dict) and one.get("name")
+            if isinstance(one, dict) and one.get("name") and is_exported(one)
         ]
         super().__init__(
             column_transforms={
@@ -116,7 +244,24 @@ class ColumnTransform(DeclaredTransform):
                 and isinstance(one.get("transform"), dict)
                 and one["transform"]
             },
-            columns=columns or None,
+            # NONE ONLY WHERE THE DECLARATION NAMES NO ENTRIES AT ALL, which is
+            # what None has always meant here: nothing was declared, so the
+            # records pass through. A declaration whose entries are every one of
+            # them unexported is NOT that -- it declared columns and exports
+            # none of them -- and collapsing the two would answer a mistake by
+            # silently carrying the whole source, which is the one response that
+            # looks like success.
+            columns=columns if declaration.get("columns") else None,
+            # The declared OUTPUT types, by column, for the entries that state
+            # one. Held beside the transforms because both are things the
+            # declaration says about a produced column.
+            column_datatypes={
+                str(one["name"]): str(one["datatype"])
+                for one in declaration.get("columns") or []
+                if isinstance(one, dict)
+                and one.get("name")
+                and one.get("datatype")
+            },
         )
         self.declaration = declaration
         self.context = context
@@ -239,7 +384,15 @@ class ColumnTransform(DeclaredTransform):
         for col_cfg in deferred:
             out[col_cfg["name"]] = _compute_hash(out, col_cfg["transform"])
 
-        return out
+        # PROJECTED LAST, and that ordering is the whole meaning of `export`.
+        # Every entry was computed into `out` above, so an unexported column is
+        # available to everything declared after it -- a `hash` over an
+        # intermediate value is exactly what that is for. Dropping it at the
+        # point it was computed would have made `export` an execution switch
+        # wearing an output-selection name.
+        if self.columns is None:
+            return out
+        return {name: out[name] for name in self.columns if name in out}
 
 
 def _resolve_context_value(value_str: str, ctx: Any = None, row_num: int = 0) -> Any:
@@ -285,9 +438,44 @@ def _apply_transform_v2(
 ) -> Any:
     """Transform dispatcher for the new list-based column shape."""
     if not transform_cfg:
+        # PASS-THROUGH KEEPS THE VALUE IT WAS GIVEN, typed. A column nobody
+        # declared a rule for is carried to the destination as it came, and a
+        # destination with a schema for it wants the value rather than a
+        # rendering of it.
         return value.strip() if isinstance(value, str) else value
 
     transform_type = transform_cfg.get("type", "")
+
+    # ALREADY THE THING THE RULE WAS GOING TO PARSE FOR.
+    #
+    # A driver hands back a `datetime`, and the rule's job is to produce a
+    # formatted date from one. Rendering it to text so a text parser can build
+    # the same object back is a round trip that can only lose: `str()` on a
+    # timezone-aware value with microseconds gives
+    # `2026-09-05 12:23:15.001322-04:00`, which no format in the fallback list
+    # matches -- so a value that needed no parsing at all failed to parse.
+    #
+    # Taken directly instead. Nothing is guessed, nothing is re-read, and the
+    # declared `output_format` still decides how it is written.
+    if isinstance(value, (datetime, date, time)):
+        formatted = _format_temporal(value, transform_type, transform_cfg)
+        if formatted is not _NOT_TEMPORAL:
+            return formatted
+
+    # A RULE READS TEXT, so anything else is given text.
+    #
+    # Every rule below guards its input with `isinstance(value, str) else ""`.
+    # That held while the only source was a FILE, where each field arrives as
+    # text already. A DATABASE source hands back what its driver holds, and the
+    # guard turned each of them into an empty string -- so a rule failed, or
+    # with `allow_blank: true` silently nulled the column, over a value that was
+    # perfectly good.
+    #
+    # Rendered ONCE here rather than in fourteen rules, and only for a column
+    # whose declaration asks for one -- the pass-through above is untouched, so
+    # what a load writes for an undeclared column does not change.
+    if value is not None and not isinstance(value, str):
+        value = str(value)
 
     try:
         if transform_type == "constant":
@@ -349,6 +537,80 @@ def _apply_transform_v2(
             exc.column = db_col
         raise
 
+#: Returned where the value is temporal but the RULE is not about time.
+#:
+#: A sentinel rather than None, because None is a legitimate answer from every
+#: rule here -- a blank the declaration allows -- and the two must not be read
+#: alike.
+_NOT_TEMPORAL = object()
+
+
+def _format_temporal(value: Any, transform_type: str, cfg: dict) -> Any:
+    """Write an already-temporal value the way this rule was going to write it.
+
+    The rules for ``date``, ``datetime`` and ``time`` all do the same two
+    things: read a value, then render it through ``output_format`` or the ANSI
+    default. A value that is already a ``date``, ``datetime`` or ``time`` has
+    done the first half, so only the second is left.
+
+    Narrowed where the rule asks for less than the value holds -- a ``date``
+    rule over a timestamp takes the date, a ``time`` rule takes the time -- and
+    that is the rule's own instruction rather than a loss: a column declared as
+    a date is a date.
+
+    Args:
+        value: A ``date``, ``datetime`` or ``time``.
+        transform_type: The declared rule.
+        cfg: That rule's declaration, read for ``output_format``.
+
+    Returns:
+        The formatted text, or ``_NOT_TEMPORAL`` where this rule is not one of
+        the three -- an ``encrypt`` over a timestamp still wants text.
+    """
+    if transform_type == "date":
+        taken = value.date() if isinstance(value, datetime) else value
+        if isinstance(taken, time):
+            return _NOT_TEMPORAL
+        return _apply_output_format(taken, cfg, _ANSI_DATE_FMT)
+
+    if transform_type == "datetime":
+        if isinstance(value, time):
+            return _NOT_TEMPORAL
+        taken = value if isinstance(value, datetime) else datetime(
+            value.year, value.month, value.day,
+        )
+        return _apply_output_format(taken, cfg, _ANSI_DATETIME_FMT)
+
+    if transform_type == "time":
+        taken = value.time() if isinstance(value, datetime) else value
+        if not isinstance(taken, time):
+            return _NOT_TEMPORAL
+        return _apply_output_format(taken, cfg, _ANSI_TIME_FMT)
+
+    return _NOT_TEMPORAL
+
+
+def _raw_text(raw_row: Any, source: str, default: Any = "") -> str:
+    """One named field of the raw record, as text a rule can read.
+
+    **THE SAME REASON THE DISPATCHER RENDERS ITS VALUE**, one level along. Three
+    rules -- `regex_extract`, `regex_date` and `prefix_map` -- do not use the
+    value they were handed; they go back to the raw record for a field their own
+    declaration names. So the dispatcher's rendering never reached them, and a
+    database source's `datetime` arrived here to have `.strip()` called on it:
+
+        AttributeError: 'datetime.datetime' object has no attribute 'strip'
+
+    which is a 500 with no column named rather than a fault a reader can act on.
+
+    Absent and blank both answer with the default, as they did before.
+    """
+    held = raw_row.get(source, default) if hasattr(raw_row, "get") else default
+    if held is None:
+        return ""
+    return held.strip() if isinstance(held, str) else str(held).strip()
+
+
 def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
     """
     Return True if the row passes the configured row filter.
@@ -374,7 +636,7 @@ def _passes_row_filter(raw_row: dict[str, str], file_type_cfg: dict) -> bool:
 
     column      = row_filter.get("column", "")
     filter_type = row_filter.get("type", "")
-    value       = (raw_row.get(column) or "").strip()
+    value       = _raw_text(raw_row, column)
 
     if filter_type == "date":
         fmt = to_strptime_format(row_filter.get("format", "%m/%d/%Y"))
@@ -646,7 +908,7 @@ def _transform_regex_extract(raw_row: dict[str, str], cfg: dict) -> Any:
     do_strip    = cfg.get("strip", True)
     allow_blank = cfg.get("allow_blank", False)
 
-    value = raw_row.get(source, "").strip()
+    value = _raw_text(raw_row, source)
     if not value or not pattern:
         return None if allow_blank else ""
 
@@ -719,7 +981,7 @@ def _transform_prefix_map(
     case_insensitive = cfg.get("case_insensitive", True)
     default          = cfg.get("default", "Other")
 
-    raw_value = raw_row.get(source, out.get(db_col, "")).strip()
+    raw_value = _raw_text(raw_row, source, out.get(db_col, ""))
     compare   = raw_value.upper() if case_insensitive else raw_value
 
     # Sort prefixes longest-first so more specific entries win.
@@ -779,7 +1041,7 @@ def _transform_regex_date(raw_row: dict[str, str], cfg: dict) -> Optional[str]:
     group       = cfg.get("group", 1)
     allow_blank = cfg.get("allow_blank", False)
 
-    value = raw_row.get(source, "").strip()
+    value = _raw_text(raw_row, source)
     if not value or not pattern:
         return None
 

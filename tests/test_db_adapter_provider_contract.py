@@ -76,6 +76,11 @@ _CALLS: dict[str, tuple] = {
     # caller that did not ask for support first must still get a named
     # refusal rather than an AttributeError from inside the call.
     "insert_from_path": ("schema", "table", "/tmp/source.csv", ["a"]),
+    # Optional too, and the refusal matters MORE here than anywhere else: a
+    # load that cannot empty its destination must be told so by name. Every
+    # alternative means something different, so there is nothing to fall back
+    # to and nothing that may be guessed at.
+    "delete_all_rows": ("schema", "table"),
 }
 
 

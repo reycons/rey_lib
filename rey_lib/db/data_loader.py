@@ -96,6 +96,7 @@ class DataLoader:
         *,
         adapter: Any,
         create_destination: bool = False,
+        replace_destination: bool = False,
         widen_columns: WidenColumns | None = None,
     ) -> None:
         """Hold the policies that govern loading, and nothing about where.
@@ -117,11 +118,16 @@ class DataLoader:
             create_destination: Whether an ABSENT destination may be created
                 from the records. False means the table must already exist,
                 which is what the loader did before the setting existed.
+            replace_destination: Whether the destination's EXISTING CONTENTS
+                are removed before these records are written. False means they
+                are added to, which is what a load has always done and what an
+                undeclared load still means.
             widen_columns: How to widen columns after a truncation. Absent
                 means a truncation is simply reported.
         """
         self.adapter = adapter
         self.create_destination = create_destination
+        self.replace_destination = replace_destination
         self.widen_columns = widen_columns
 
     def destination_columns(self, conn: Any, target: Any) -> list[str] | None:
@@ -201,6 +207,21 @@ class DataLoader:
             self.adapter.create_staging_table_if_not_exists(
                 conn, schema, table, column_defs
             )
+        elif self.replace_destination:
+            # THE CONTENTS ARE REPLACED, so what was there goes first.
+            #
+            # Only where the destination EXISTS: a table this load just created
+            # has nothing to remove, and emptying it would be a second answer
+            # to a question `create` already settled.
+            #
+            # BEFORE the insert and inside the same transaction as it, so a
+            # failed write leaves the destination as it was rather than empty
+            # -- the worst outcome available, because it destroys what was
+            # there and puts nothing in its place.
+            #
+            # The connector is asked; which provider is on the other end, and
+            # how it spells this, is not this object's business.
+            self.adapter.delete_all_rows(conn, schema, table)
 
         try:
             return self._insert(conn, target, records, columns)

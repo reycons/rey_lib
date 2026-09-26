@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from rey_lib.load import load_operation
+from rey_lib.data import ColumnTransform
 from rey_lib.load.load_operation import inspect_load_endpoints
 
 
@@ -101,6 +102,40 @@ class TestASourceAnswersForItself:
         """An unreadable end IS an error, unlike an unnamed one."""
         with pytest.raises(ValueError):
             inspect_load_endpoints(SimpleNamespace(), file=str(tmp_path / "in.zzz"))
+
+
+class TestTheSourceStructureIsItsOwnAnswer:
+    """The source's OWN names, beside what the load would see.
+
+    Two questions that only looked like one while every transform was identity.
+    A surface AUTHORING a declaration maps FROM the source's names, and reading
+    ``source`` for them would hand back the output name its own reader had just
+    typed and call it the source's.
+    """
+
+    def test_with_no_transform_they_are_the_same_list(self, named) -> None:
+        found = inspect_load_endpoints(
+            named, statement="SELECT a, b FROM orders", source_connection="w",
+        )
+
+        assert found.source_structure == ("a", "b")
+        assert found.source == found.source_structure
+
+    def test_a_renaming_transform_moves_one_and_not_the_other(self, named) -> None:
+        found = inspect_load_endpoints(
+            named, statement="SELECT a, b FROM orders", source_connection="w",
+            transform={"columns": [
+                {"source": "a", "name": "renamed"},
+                {"source": "b", "name": "b"},
+            ]},
+        )
+
+        # What comes OUT is the declaration's; what went IN is the query's.
+        assert found.source == ("renamed", "b")
+        assert found.source_structure == ("a", "b")
+
+    def test_an_unnamed_source_has_no_structure_either(self) -> None:
+        assert inspect_load_endpoints(SimpleNamespace()).source_structure == ()
 
 
 class TestADestinationHasTwoAnswers:
@@ -313,7 +348,11 @@ class TestThePreview:
         )
 
         assert found.columns == ("a", "b")
-        assert found.rows == ({"a": 1, "b": "x"},)
+        # TEXT, including the integer. A preview is a display and every value is
+        # its own text -- one rule rather than a list of the types that happen
+        # not to cross JSON. It reads identically on screen, and the shape is
+        # the same whatever a driver hands back.
+        assert found.rows == ({"a": "1", "b": "x"},)
         assert found.truncated is False
 
     def test_it_is_bounded(self, engine, named) -> None:
@@ -426,3 +465,80 @@ class TestThePreview:
         )
 
         assert not list(tmp_path.iterdir())
+
+
+class TestAPreviewShowsText:
+    """What a preview carries is what a reader reads, which is text.
+
+    A load carries typed values to a destination that has a schema for them. A
+    preview crosses to a browser over JSON and is read by a person, and a
+    database source hands back what its driver holds.
+    """
+
+    @pytest.fixture()
+    def typed(self, engine, monkeypatch):
+        """A relation holding the types that do not cross JSON."""
+        engine.execute(
+            "CREATE TABLE typed (n INTEGER, ts TIMESTAMP, d DATE, "
+            "amt DECIMAL(10,2), missing VARCHAR)"
+        )
+        engine.execute(
+            "INSERT INTO typed VALUES (1, TIMESTAMP '2026-09-26 11:04:00', "
+            "DATE '2026-09-26', 1234.50, NULL)"
+        )
+        return SimpleNamespace(log_depth=0)
+
+    def _previewed(self, named):
+        return load_operation.preview_load(
+            named, statement="SELECT * FROM typed", source_connection="w",
+        ).rows[0]
+
+    def test_every_value_is_its_own_text(self, named, typed) -> None:
+        """A preview over a query used to fail outright -- "Object of type
+        datetime is not JSON serializable" -- and show nothing at all.
+        """
+        assert self._previewed(named) == {
+            "n": "1",
+            "ts": "2026-09-26 11:04:00",
+            "d": "2026-09-26",
+            "amt": "1234.50",
+            "missing": None,
+        }
+
+    def test_it_survives_the_json_it_has_to_cross(self, named, typed) -> None:
+        import json
+
+        json.dumps([dict(one) for one in load_operation.preview_load(
+            named, statement="SELECT * FROM typed", source_connection="w",
+        ).rows])
+
+    def test_a_decimal_keeps_the_scale_the_source_is_holding(
+        self, named, typed
+    ) -> None:
+        """`float` would render 1234.50 as 1234.5 and lose a digit the
+        database is keeping on purpose.
+        """
+        assert self._previewed(named)["amt"] == "1234.50"
+
+    def test_null_stays_null_rather_than_becoming_the_word(
+        self, named, typed
+    ) -> None:
+        """Absence, not a value: a surface draws a blank for it, and `str`
+        would have put "None" in the cell.
+        """
+        assert self._previewed(named)["missing"] is None
+
+    def test_a_transforms_own_formatting_is_what_is_shown(self) -> None:
+        """THE WHOLE POINT, and the reason this is not a second formatter: a
+        column the transform touched arrives as text already, rendered through
+        its own `output_format`, and passes through untouched.
+        """
+        produced = ColumnTransform({"columns": [
+            {"source": "V", "name": "when", "transform": {
+                "type": "date", "format": "yyyy-MM-dd",
+                "output_format": "MM/dd/yyyy",
+            }},
+        ]}).transform([{"V": "2025-01-01"}])
+
+        assert produced == [{"when": "01/01/2025"}]
+        assert load_operation._for_display(produced[0]) == {"when": "01/01/2025"}
