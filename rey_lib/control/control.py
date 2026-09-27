@@ -1410,6 +1410,46 @@ class Control:
             return False
         return bool(dict(rows[0]).get("is_complete"))
 
+    def maintain_transform(self, file_type_id: int, mode: str = "ensure",
+                           required: bool = True) -> None:
+        """Complete one file type's transform definition, or restore it.
+
+        **The routine owns the work, and this owns none of it.** Seeding and
+        repairing a definition writes three related tables under set-based
+        rules -- one active transform, one column per profile field, one query
+        row, nothing overwritten -- and ``control.p_transform_maintain`` is
+        where those rules live. There is no SQL here, no transform row built
+        here and no loop over columns here, deliberately: a second copy of the
+        population rules in Python is where they drift from the schema that
+        enforces them.
+
+        Args:
+            file_type_id: The file type whose definition is maintained. It must
+                belong to this control object's installation; the routine
+                refuses the pair otherwise rather than matching nothing and
+                reporting success.
+            mode: ``ensure`` initialises what is absent and backfills what is
+                missing, never overwriting a customised column, an export
+                decision, an authored query or a chosen enabled state.
+                ``reset`` is DESTRUCTIVE and restores generated defaults.
+                Profiling passes neither and takes the default.
+            required: True, like the other profile writes. A profiled file type
+                always has a definition, so a call that cannot be made is a
+                fault rather than a capability to skip. ``required=False``
+                would also mark control unavailable for everything after it,
+                which is a large consequence for one absent binding.
+
+        installation_id is deliberately absent, as it is from
+        :meth:`create_run_manifest`: the binding declares
+        ``p_installation_id: installation_id`` and the map resolves it from this
+        object's property. Passing it here too would be one value supplied two
+        ways.
+        """
+        self._call("maintain_transform", {
+            "file_type_id": int(file_type_id),
+            "mode":         str(mode),
+        }, required=required)
+
     def append_file_mutation(self, file_manifest_id: int, record_type: str,
                              action: str, status: Optional[str] = None,
                              source_record_id: Optional[int] = None,
