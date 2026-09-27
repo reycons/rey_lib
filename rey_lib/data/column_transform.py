@@ -34,10 +34,16 @@ it is decrypted with would make the description a credential.
 
 Transformation types
 --------------------
-constant, context, date, datetime, time, numeric, regex_extract, regex_date,
-prefix_map, strip_parens_suffix, encrypt, file_hash, not_blank, and ``hash``
-over a fixed set of output columns. Each is declared per column under
+passthrough, constant, context, date, datetime, time, numeric, regex_extract,
+regex_date, prefix_map, strip_parens_suffix, encrypt, file_hash, not_blank, and
+``hash`` over a fixed set of output columns. Each is declared per column under
 ``transform:`` and each is implemented below.
+
+``passthrough`` returns the source value UNCHANGED -- no trim, conversion or
+coercion. It is not the same as declaring no rule at all: the absent-rule path
+strips strings, and a column that declares this operator has asked for the value
+as it came. A definition stored relationally needs it, because an operator name
+is required where absence cannot be spelled.
 
 ``AUTHORABLE_STARTERS`` names the subset a SURFACE may offer, with a starting
 declaration each. Every type above stays legal in a declaration however it was
@@ -445,6 +451,22 @@ def _apply_transform_v2(
         return value.strip() if isinstance(value, str) else value
 
     transform_type = transform_cfg.get("type", "")
+
+    # DECLARED PASS-THROUGH: THE VALUE, UNCHANGED.
+    #
+    # It returns ABOVE both steps below, and that placement is the whole rule.
+    # The temporal branch would format a `datetime` and the render below would
+    # `str()` anything that is not text -- each of them a change, and this
+    # operator's entire meaning is that nothing happens. No trim, no
+    # conversion, no coercion.
+    #
+    # NOT THE SAME AS DECLARING NO RULE, which is the branch at the top of this
+    # function and which STRIPS strings. That difference is deliberate and is
+    # recorded: a column that declares this operator has said what it wants,
+    # while the shorthand carries a trim nobody declared. Making this one strip
+    # to match would write that trim into the explicit vocabulary.
+    if transform_type == "passthrough":
+        return value
 
     # ALREADY THE THING THE RULE WAS GOING TO PARSE FOR.
     #

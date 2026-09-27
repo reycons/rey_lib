@@ -606,3 +606,105 @@ class TestATemporalValueIsNotRoundTrippedThroughText:
              "prefixes": {"2026": "this year"}, "default": "other"},
             self.AWARE,
         ) == "this year"
+
+
+class TestDeclaredPassThrough:
+    """`passthrough` returns the value unchanged, and is not the shorthand.
+
+    The operator exists because a relationally stored definition cannot spell
+    "no rule": `control.transform_column.transform_type` is NOT NULL, so a
+    seeded pass-through column needs a name to store. Naming it also made the
+    difference visible -- the absent-rule path strips, and this one must not.
+    """
+
+    def test_a_string_keeps_its_whitespace(self) -> None:
+        """The whole point. The shorthand would have trimmed this."""
+        held = ColumnTransform(_declaration(
+            {"name": "a", "source": "A", "transform": {"type": "passthrough"}},
+        ))
+
+        assert held.transform([{"A": "  spaced  "}]) == [{"a": "  spaced  "}]
+
+    def test_the_shorthand_still_strips_and_they_differ(self) -> None:
+        """Both spellings, one record, so the divergence is pinned by a test.
+
+        Recorded as an_undeclared_column_is_silently_trimmed. Retiring the
+        shorthand's strip is deferred, and until it happens THIS is the
+        behaviour -- asserted rather than assumed.
+        """
+        held = ColumnTransform(_declaration(
+            {"name": "declared", "source": "A",
+             "transform": {"type": "passthrough"}},
+            {"name": "shorthand", "source": "A"},
+        ))
+
+        assert held.transform([{"A": " x "}]) == [
+            {"declared": " x ", "shorthand": "x"},
+        ]
+
+    def test_a_non_string_is_not_rendered_to_text(self) -> None:
+        """It returns above the dispatcher's `str()` rendering.
+
+        A rule that reads text needs text; this one is not a rule that reads
+        anything, so a Decimal stays a Decimal and a destination with a numeric
+        column gets the value rather than a rendering of it.
+        """
+        held = ColumnTransform(_declaration(
+            {"name": "n", "source": "N", "transform": {"type": "passthrough"}},
+        ))
+
+        produced = held.transform([{"N": Decimal("1.50")}])[0]
+
+        assert produced["n"] == Decimal("1.50")
+        assert isinstance(produced["n"], Decimal)
+
+    def test_a_temporal_value_is_not_formatted(self) -> None:
+        """It returns above the temporal branch too.
+
+        `_format_temporal` would have rendered this to the ANSI spelling for a
+        declaration that asked for no formatting at all.
+        """
+        moment = datetime(2026, 9, 5, 12, 23, 15)
+        held = ColumnTransform(_declaration(
+            {"name": "t", "source": "T", "transform": {"type": "passthrough"}},
+        ))
+
+        assert held.transform([{"T": moment}]) == [{"t": moment}]
+
+    def test_none_stays_none(self) -> None:
+        """Absent is absent. Not "", which is what a text rule would have made."""
+        held = ColumnTransform(_declaration(
+            {"name": "a", "source": "A", "transform": {"type": "passthrough"}},
+        ))
+
+        assert held.transform([{"A": None}]) == [{"a": None}]
+
+    def test_it_is_a_declared_column_like_any_other(self) -> None:
+        """The reason the seeded model works.
+
+        A declaration naming one transformed column and ten pass-throughs
+        carries eleven columns, because a pass-through row is a declared row.
+        That is the state row 384 needs and could not reach while pass-through
+        meant "undeclared".
+        """
+        held = ColumnTransform(_declaration(
+            {"name": "kept", "source": "A", "transform": {"type": "passthrough"}},
+            {"name": "changed", "source": "B",
+             "transform": {"type": "constant", "value": "fixed"}},
+            {"name": "also_kept", "source": "C",
+             "transform": {"type": "passthrough"}},
+        ))
+
+        assert held.transform([{"A": "1", "B": "2", "C": "3"}]) == [
+            {"kept": "1", "changed": "fixed", "also_kept": "3"},
+        ]
+
+    def test_an_unexported_passthrough_leaves_the_output(self) -> None:
+        """Inclusion is decided by `export`, never by what a sibling declared."""
+        held = ColumnTransform(_declaration(
+            {"name": "kept", "source": "A", "transform": {"type": "passthrough"}},
+            {"name": "dropped", "source": "B",
+             "transform": {"type": "passthrough"}, "export": False},
+        ))
+
+        assert held.transform([{"A": "1", "B": "2"}]) == [{"kept": "1"}]
