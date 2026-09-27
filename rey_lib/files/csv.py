@@ -501,8 +501,10 @@ def _locate_header(
     Caller-required text is a locator criterion: the first line containing all
     of it is the header. Otherwise the header is the row whose width the
     following rows agree with most consistently, and which reads like column
-    names. An absent or ambiguous header returns None — the caller asked
-    whether there is one, so that is an answer rather than a failure.
+    names. Once a plausible header has been found, a later wider row does not
+    displace it merely because the rows beneath it match its width. An absent
+    or ambiguous header returns None — the caller asked whether there is one,
+    so that is an answer rather than a failure.
     """
     if required:
         for index, line in enumerate(lines):
@@ -575,8 +577,21 @@ def _locate_header(
     # the widest one on offer is not naming this table. Prose carrying two
     # commas parses as three fields and reads like column names; it loses here
     # on width rather than on any judgement about its wording.
+    #
+    # The earliest candidate is exempt: once a plausible header has been found,
+    # a later WIDER row does not displace it merely because the rows beneath it
+    # agree with its width. A single over-wide row is a ragged data row far more
+    # often than it is a header sitting below one, and eliminating the earlier
+    # candidate here decided that question before the score below -- which ranks
+    # position, and says a file's first usable row is its header until something
+    # disproves it -- ever saw the two together. The disqualifiers still outrank
+    # position, so an earliest candidate that leads a different header, or that
+    # reads like the values beneath it, still loses.
     widest = max(width for _, _, width in candidates)
-    candidates = [item for item in candidates if item[2] == widest]
+    earliest = min(index for _, index, _ in candidates)
+    candidates = [
+        item for item in candidates if item[2] == widest or item[1] == earliest
+    ]
     candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
     best_score, best_index, _ = candidates[0]
     if len(candidates) > 1 and candidates[1][0] == best_score:
