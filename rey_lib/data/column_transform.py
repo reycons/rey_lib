@@ -12,7 +12,17 @@ What the object owns, and owns together
 ---------------------------------------
 - **the declaration**: which source field each output column comes from, what
   it is called, and what is applied to it;
-- **the execution** of those rules against records.
+- **the execution** of those rules against records;
+- **which stored definition it is**, where it came from one -- see
+  ``TransformPersistence``. Held BESIDE the declaration, so an edit can be
+  written back by the ids it was hydrated with rather than re-matched by a
+  name or an ordinal an edit may have changed.
+
+**Two declaration sources, one object.** A declaration may come from YAML or
+from stored state, and this object is the execution authority for both. They
+differ in persistence CAPABILITY and not in behaviour: only the stored one
+carries identity, and ``is_persistable`` is how that is asked rather than
+inferred from a null.
 
 A class that read its declaration on every call would be a namespace with
 arguments, not an object -- so the declaration arrives once, at construction,
@@ -56,6 +66,7 @@ from __future__ import annotations
 import hashlib
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any, Optional
 
@@ -68,6 +79,7 @@ __all__ = [
     "AUTHORABLE_STARTERS",
     "OUTPUT_DATATYPES",
     "ColumnTransform",
+    "TransformPersistence",
     "authorable_starters",
     "is_exported",
 ]
@@ -152,6 +164,51 @@ OUTPUT_DATATYPES: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class TransformPersistence:
+    """Which STORED definition a transform is, so an edit can be written back.
+
+    **BESIDE the declaration, never inside it.** A declaration is a portable
+    description of work -- the same reason this module keeps secrets out of one
+    -- and database keys written into it would stop it being that. So they are
+    held here, and a declaration that travels anywhere travels clean.
+
+    **PRESENT ONLY FOR A DEFINITION THAT CAME FROM THE DATABASE.** A transform
+    declared in YAML has no stored identity and carries None, which is not a
+    degraded state: it was never a stored definition. That is the whole
+    distinction between the two declaration sources this object serves --
+    persistence CAPABILITY, not transform behaviour. Nothing about applying
+    rules reads this.
+
+    **IDs ARE THE UPDATE KEYS.** ``transform_id`` identifies the definition and
+    each ``transform_column_id`` identifies one column rule. A write must never
+    re-match a row by name, ordinal or source column: renaming a column would
+    then insert a second row and orphan the first, and reordering would write
+    to whichever column now holds that position.
+
+    Attributes:
+        transform_id: The stored definition.
+        file_type_id: The GOVERNING scope it belongs to. Held because an edit
+            persists against the type, never against the manifest or mutation
+            that happened to open it.
+        column_ids: One entry per declared column, **positionally aligned with
+            the declaration's** ``columns``. None where a column has no stored
+            row yet, which is how a newly added column is expressed -- an
+            absent id IS the insert case.
+
+            Positional rather than keyed by column name, deliberately: a name
+            is exactly what an edit may CHANGE, so an id found by name would be
+            lost by the most ordinary edit there is. Reordering or removing a
+            column must therefore move this alongside ``columns``, which is why
+            those operations belong to methods on the owning object rather than
+            to callers mutating two structures.
+    """
+
+    transform_id: int
+    file_type_id: int
+    column_ids: tuple[Optional[int], ...] = ()
+
+
 def is_exported(column: dict[str, Any]) -> bool:
     """Whether this entry contributes a column to the output.
 
@@ -210,6 +267,7 @@ class ColumnTransform(DeclaredTransform):
         *,
         context: Any = None,
         secrets: dict[str, str] | None = None,
+        persistence: Optional[TransformPersistence] = None,
     ) -> None:
         """Hold the rules, and the trusted things applying them needs.
 
@@ -226,6 +284,11 @@ class ColumnTransform(DeclaredTransform):
                 credential wearing the shape of a description, and this object
                 would have no way to tell an operator's declaration from
                 anyone else's.
+            persistence: Which stored definition this IS, where it came from
+                one. Supplied by whatever hydrated this object from stored
+                state; absent for a declaration read from YAML, which has no
+                stored identity to carry. **Nothing about applying the rules
+                reads it** -- see :class:`TransformPersistence`.
 
         The declared columns and their types are derived here, once, so the
         schema half this shares with the identity transform answers from the
@@ -272,10 +335,33 @@ class ColumnTransform(DeclaredTransform):
         self.declaration = declaration
         self.context = context
         self.secrets = secrets or {}
+        #: Which stored definition this is, or None where it is not one.
+        self.persistence = persistence
         #: Records seen, 1-based, for the ``ctx.row_num`` context value. The
         #: object's own, because a caller passing it in per record is what
         #: made this a function taking configuration.
         self._row_num = 0
+
+    @property
+    def is_persistable(self) -> bool:
+        """Whether this definition can be written back to where it is stored.
+
+        **A DECLARED CAPABILITY, so nothing infers one from a null.** Asked
+        rather than derived, for the same reason a source states
+        ``governing_scope_available`` instead of letting each surface test an
+        id for None.
+
+        False for every YAML-declared transform, which is the estate's most
+        common case and is an ANSWER rather than a failure: a declaration that
+        was never stored has nowhere to be written back to. A caller offering
+        a save control asks this first; one that assumed the capability would
+        raise on the majority of transforms in use.
+
+        Returns:
+            True only where this object was hydrated from stored state and
+            carries the identities a write keys on.
+        """
+        return self.persistence is not None
 
     def columns_for_names(self, actual: list[str]) -> list[str]:
         """What this transform PRODUCES from a source with these names.

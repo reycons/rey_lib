@@ -27,5 +27,11 @@ asks which side a data object is on in order to know what it is.
 from __future__ import annotations
 
 from rey_lib.load.configured_load import ConfiguredLoad, LoadOneFile
+from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
 
-__all__ = ["ConfiguredLoad", "LoadOneFile"]
+__all__ = [
+    "ConfiguredLoad",
+    "LoadOneFile",
+    "ManifestSource",
+    "SourceContextReader",
+]
