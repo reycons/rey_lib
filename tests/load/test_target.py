@@ -101,6 +101,31 @@ class TestTheWritePolicy:
         assert Target(_TABLE).write_policy() == "append"
 
 
+class TestSettingTheWritePolicy:
+
+    @pytest.mark.parametrize("mode", ["create", "replace", "recreate", "append"])
+    def test_it_sets_exactly_one_mode(self, mode: str) -> None:
+        target = Target({**_TABLE, "create": True, "replace": True})
+
+        target.set_write_policy(mode)
+
+        assert target.modes_given() == [mode]
+        assert target.write_policy() == mode
+        assert target.validate() == []
+
+    def test_a_name_that_is_not_a_mode_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not a write mode"):
+            Target(_TABLE).set_write_policy("truncate")
+
+    def test_it_round_trips(self) -> None:
+        target = Target(_TABLE)
+        target.set_write_policy("recreate")
+
+        again = Target.from_declaration(target.declaration())
+
+        assert again.write_policy() == "recreate"
+
+
 class TestValidation:
 
     @pytest.mark.parametrize(("values", "kind", "needs"), [

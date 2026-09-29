@@ -205,6 +205,24 @@ class Target:
             )
         self._values[name] = value
 
+    def set_write_policy(self, policy: str) -> None:
+        """Say what the load may do: one mode on, the other three off.
+
+        THE ONE-MODE RULE IS APPLIED HERE, by the Target, rather than by
+        whoever offered the choice. ``append`` is set as ``append`` -- the
+        explicit spelling of the default -- exactly as a reader choosing it
+        states it.
+
+        Raises:
+            ValueError: If ``policy`` is not one of the write modes.
+        """
+        if policy not in MODES:
+            raise ValueError(
+                f"Target: '{policy}' is not a write mode. Modes: {', '.join(MODES)}."
+            )
+        for mode in MODES:
+            self._values[mode] = mode == policy
+
     # -- execution -----------------------------------------------------------
 
     def resolve(self, ctx: Any) -> Any:
