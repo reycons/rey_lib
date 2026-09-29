@@ -30,6 +30,8 @@ from rey_lib.load.configured_load import ConfiguredLoad, LoadOneFile
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
 from rey_lib.load.source import Source
 from rey_lib.load.transform import Transform
+from rey_lib.load.target import Target
+from rey_lib.load.shape import derived_load_shape
 
 __all__ = [
     "ConfiguredLoad",
@@ -37,5 +39,7 @@ __all__ = [
     "ManifestSource",
     "Source",
     "SourceContextReader",
+    "Target",
     "Transform",
+    "derived_load_shape",
 ]
