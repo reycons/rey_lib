@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from rey_lib.data.column_transform import ColumnTransform
+from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
 from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.data.errors import DataStructureError
 from rey_lib.db.connection import shared_connection
@@ -228,6 +228,8 @@ def _build_transform(
     ctx: Any,
     transform_cfg: Any = None,
     declaration: Any = None,
+    *,
+    persistence: Optional[TransformPersistence] = None,
 ) -> Any:
     """Build the transform object for one load.
 
@@ -251,6 +253,11 @@ def _build_transform(
         ctx: Application context, for context values a rule may reference.
         transform_cfg: A configured definition's transform, where there is one.
         declaration: A transform declaration given with the invocation.
+        persistence: Which stored definition the declaration is, where it
+            came from one. Passed straight to the ``ColumnTransform`` so a
+            governed transform built here keeps the identities an edit is
+            written back by. Nothing about applying the rules reads it, and a
+            declaration without one executes the same.
 
     Returns:
         The transform this load runs.
@@ -259,6 +266,7 @@ def _build_transform(
         plain = namespace_to_plain(declaration) or {}
         return ColumnTransform(
             plain, context=ctx, secrets=build_secrets(plain),
+            persistence=persistence,
         )
     return _build_identity_transform(transform_cfg)
 

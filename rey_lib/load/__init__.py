@@ -29,6 +29,7 @@ from __future__ import annotations
 from rey_lib.load.configured_load import ConfiguredLoad, LoadOneFile
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
 from rey_lib.load.source import Source
+from rey_lib.load.transform import Transform
 
 __all__ = [
     "ConfiguredLoad",
@@ -36,4 +37,5 @@ __all__ = [
     "ManifestSource",
     "Source",
     "SourceContextReader",
+    "Transform",
 ]

@@ -1,0 +1,277 @@
+"""The Transform: one canonical object for what is done to a load's records.
+
+What is asserted is the contract every entry point relies on -- which kinds
+exist, which fields are loader parameters, what a selection keeps, what
+validation refuses, that the declarative form round-trips, and that resolution
+goes through the one existing builder, with its own call shape, and leaves
+nothing live behind.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Optional
+
+import pytest
+
+from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
+from rey_lib.data.data_transform import IdentityTransform
+from rey_lib.errors.error_utils import ConfigError
+from rey_lib.load import Transform
+from rey_lib.load import load_operation
+from rey_lib.load.transform import (
+    TRANSFORM_FIELDS,
+    TRANSFORM_KINDS,
+    TRANSFORM_PARAMETERS,
+)
+
+_DECLARED = {"columns": [{"source": "A", "name": "a"}]}
+_STORED = {"transform_id": 7, "file_type_id": 4, "column_ids": [31]}
+
+
+@pytest.fixture()
+def builds(monkeypatch: pytest.MonkeyPatch) -> list[tuple[tuple[Any, ...], dict[str, Any]]]:
+    """Wrap the real builder, recording each call exactly as it was made."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real = load_operation._build_transform
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        built = real(*args, **kwargs)
+        calls[-1] = (args, {**kwargs, "_returned": built})
+        return built
+
+    monkeypatch.setattr(load_operation, "_build_transform", spy)
+    return calls
+
+
+class TestTheVocabulary:
+
+    def test_the_kinds_are_the_four(self) -> None:
+        assert Transform.kinds() == ("identity", "declaration", "yaml", "manifest")
+
+    def test_the_fields_are_everything_the_transform_holds(self) -> None:
+        assert TRANSFORM_FIELDS == (
+            "transform", "transform-file", "declaration", "persistence",
+        )
+
+    def test_the_loader_parameters_are_the_typed_subset(self) -> None:
+        # declaration and persistence are the Transform's fields, and not
+        # parameters any loader invocation types.
+        assert TRANSFORM_PARAMETERS == ("transform", "transform-file")
+        assert set(TRANSFORM_PARAMETERS) <= set(TRANSFORM_FIELDS)
+
+    def test_persistence_is_never_required_to_execute(self) -> None:
+        manifest = next(kind for kind in TRANSFORM_KINDS if kind.id == "manifest")
+        assert manifest.required == ("declaration",)
+
+
+class TestTheSelection:
+
+    def test_nothing_said_is_identity(self) -> None:
+        assert Transform().selected_kind() == "identity"
+
+    def test_a_choice_wins(self) -> None:
+        assert Transform({"transform": "x"}, selected="yaml").selected_kind() == "yaml"
+
+    @pytest.mark.parametrize(("values", "kind"), [
+        ({"transform": "columns: []"}, "declaration"),
+        ({"transform-file": "/t.yaml"}, "yaml"),
+        ({"declaration": _DECLARED}, "manifest"),
+    ])
+    def test_unchosen_it_is_the_kind_whose_own_fields_carry_values(
+        self, values: dict[str, Any], kind: str,
+    ) -> None:
+        assert Transform(values).selected_kind() == kind
+
+    def test_switching_kinds_keeps_what_was_said_under_the_other(self) -> None:
+        transform = Transform({"transform": "inline", "transform-file": "/t.yaml"})
+
+        transform.select("yaml")
+        transform.select("declaration")
+
+        assert transform.configuration() == {"transform": "inline"}
+        assert transform.value("transform-file") == "/t.yaml"
+
+    def test_an_unknown_kind_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="no transform kind"):
+            Transform().select("sql")
+
+    def test_a_field_that_is_not_a_transform_field_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="not a transform field"):
+            Transform().update("table", "public.orders")
+
+
+class TestValidation:
+
+    @pytest.mark.parametrize(("kind", "needs"), [
+        ("identity", []),
+        ("declaration", ["transform"]),
+        ("yaml", ["transform-file"]),
+        ("manifest", ["declaration"]),
+    ])
+    def test_each_kind_names_what_it_still_needs(self, kind: str, needs: list[str]) -> None:
+        assert Transform(selected=kind).validate() == needs
+
+    def test_a_declaration_without_persistence_is_complete(self) -> None:
+        assert Transform({"declaration": _DECLARED}).validate() == []
+
+
+class TestTheDeclarativeForm:
+
+    def test_it_round_trips(self) -> None:
+        transform = Transform(
+            {"declaration": _DECLARED, "persistence": _STORED, "transform": "x"},
+            selected="manifest",
+        )
+
+        again = Transform.from_declaration(transform.declaration())
+
+        assert again.declaration() == transform.declaration()
+        assert again.selected_kind() == "manifest"
+
+    def test_it_holds_nothing_live(self) -> None:
+        declared = Transform({"declaration": _DECLARED, "persistence": _STORED}).declaration()
+
+        # Plain data all the way down: it survives JSON unchanged.
+        assert json.loads(json.dumps(declared)) == declared
+
+
+class TestResolutionThroughTheOneBuilder:
+
+    def test_identity_is_built_with_the_builders_own_call_shape(
+        self, builds: list[tuple[tuple[Any, ...], dict[str, Any]]],
+    ) -> None:
+        ctx = SimpleNamespace()
+
+        resolved = Transform().resolve(ctx)
+
+        (args, kwargs), = builds
+        assert args == (ctx, None, None)
+        assert kwargs["_returned"] is resolved
+        assert isinstance(resolved, IdentityTransform)
+
+    def test_a_manifest_with_persistence_passes_it_through(
+        self, builds: list[tuple[tuple[Any, ...], dict[str, Any]]],
+    ) -> None:
+        ctx = SimpleNamespace()
+
+        resolved = Transform(
+            {"declaration": _DECLARED, "persistence": _STORED},
+        ).resolve(ctx)
+
+        (args, kwargs), = builds
+        assert args == (ctx, None, _DECLARED)
+        assert kwargs["persistence"] == TransformPersistence(7, 4, (31,))
+        assert kwargs["_returned"] is resolved
+        assert isinstance(resolved, ColumnTransform)
+        assert resolved.is_persistable
+
+    def test_a_manifest_without_persistence_resolves_and_is_not_persistable(
+        self, builds: list[tuple[tuple[Any, ...], dict[str, Any]]],
+    ) -> None:
+        ctx = SimpleNamespace()
+
+        resolved = Transform({"declaration": _DECLARED}).resolve(ctx)
+
+        (args, kwargs), = builds
+        assert args == (ctx, None, _DECLARED)
+        assert set(kwargs) == {"_returned"}
+        assert isinstance(resolved, ColumnTransform)
+        assert not resolved.is_persistable
+
+    def test_a_manifest_set_by_hand_resolves_as_a_hydrated_one(self) -> None:
+        by_hand = Transform()
+        by_hand.update("declaration", _DECLARED)
+        by_hand.update("persistence", _STORED)
+        hydrated = Transform.from_declaration(
+            {"values": {"declaration": _DECLARED, "persistence": _STORED}},
+        )
+
+        one = by_hand.resolve(SimpleNamespace())
+        other = hydrated.resolve(SimpleNamespace())
+
+        assert (one.persistence, one.columns) == (other.persistence, other.columns)
+
+
+class TestResolution:
+
+    @pytest.mark.parametrize("given", [
+        "columns:\n  - {source: A, name: a}\n",
+        json.dumps(_DECLARED),
+        _DECLARED,
+    ])
+    def test_an_inline_declaration_resolves_to_a_column_transform(self, given: Any) -> None:
+        resolved = Transform({"transform": given}).resolve(SimpleNamespace())
+
+        assert isinstance(resolved, ColumnTransform)
+        assert resolved.columns == ["a"]
+
+    def test_a_file_is_read_into_a_column_transform(self, tmp_path: Path) -> None:
+        held = tmp_path / "t.yaml"
+        held.write_text("columns:\n  - {source: A, name: a}\n", encoding="utf-8")
+
+        resolved = Transform({"transform-file": str(held)}).resolve(SimpleNamespace())
+
+        assert isinstance(resolved, ColumnTransform)
+        assert resolved.columns == ["a"]
+
+    @pytest.mark.parametrize(("content", "refused"), [
+        (None, "no such file"),
+        ("   ", "holds no declaration"),
+        ("row_filter: x\n", "declares no columns"),
+        ("columns: [unclosed\n", "could not be read"),
+    ])
+    def test_a_file_that_is_not_a_declaration_is_refused(
+        self, tmp_path: Path, content: Optional[str], refused: str,
+    ) -> None:
+        held = tmp_path / "t.yaml"
+        if content is not None:
+            held.write_text(content, encoding="utf-8")
+
+        with pytest.raises(ConfigError, match=refused):
+            Transform({"transform-file": str(held)}).resolve(SimpleNamespace())
+
+    def test_an_incomplete_selection_is_refused_before_anything_is_built(
+        self, builds: list[tuple[tuple[Any, ...], dict[str, Any]]],
+    ) -> None:
+        with pytest.raises(ConfigError, match="transform-file"):
+            Transform(selected="yaml").resolve(SimpleNamespace())
+        assert builds == []
+
+    def test_secrets_are_resolved_at_resolution_and_never_held(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("REY_TEST_TRANSFORM_KEY", "k" * 32)
+        declared = {"columns": [{
+            "source": "A", "name": "a",
+            "transform": {"type": "encrypt", "key_env": "REY_TEST_TRANSFORM_KEY"},
+        }]}
+        transform = Transform({"transform": declared})
+        before = transform.declaration()
+
+        resolved = transform.resolve(SimpleNamespace())
+
+        assert resolved.secrets == {"REY_TEST_TRANSFORM_KEY": "k" * 32}
+        assert transform.declaration() == before
+        assert "k" * 32 not in json.dumps(transform.declaration())
+
+
+class TestTheBuilderCarriesPersistence:
+
+    def test_a_call_with_persistence_passes_it_on(self) -> None:
+        stored = TransformPersistence(7, 4, (31,))
+
+        built = load_operation._build_transform(
+            SimpleNamespace(), None, _DECLARED, persistence=stored,
+        )
+
+        assert built.persistence == stored
+
+    def test_a_call_without_it_is_unchanged(self) -> None:
+        built = load_operation._build_transform(SimpleNamespace(), None, _DECLARED)
+
+        assert isinstance(built, ColumnTransform)
+        assert built.persistence is None
