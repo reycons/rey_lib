@@ -78,10 +78,18 @@ SOURCE_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in SOURCE_KINDS}
 
+#: The kind that reads a governed file, and whose identity its context is about.
+_MANIFEST = "manifest"
+
 
 def _held(value: Any) -> bool:
     """Whether a value says anything. Empty text and None say nothing."""
     return value is not None and str(value).strip() != ""
+
+
+def _said(value: Any) -> str:
+    """What a value says, as text: 10 and "10" say the same, None and "" nothing."""
+    return str(value).strip() if _held(value) else ""
 
 
 class Source:
@@ -110,6 +118,9 @@ class Source:
         """
         self._values: dict[str, Any] = {}
         self._selected: Optional[str] = None
+        # CONTEXT, NOT CONFIGURATION: the governed file this source was last
+        # hydrated for. Never in `declaration()`, never validated, never persisted.
+        self._governed: Optional[dict[str, Any]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -193,6 +204,9 @@ class Source:
                 f"Kinds: {', '.join(self.kinds())}."
             )
         self._selected = kind
+        # A source that no longer reads the governed file no longer has its facts.
+        if kind != _MANIFEST:
+            self._governed = None
 
     def update(self, name: str, value: Any) -> None:
         """Say something about one field.
@@ -207,7 +221,27 @@ class Source:
                 f"Source: '{name}' is not a source field. "
                 f"Fields: {', '.join(SOURCE_FIELDS)}."
             )
+        # A DIFFERENT GOVERNED IDENTITY is a different file: the facts held were
+        # about the one before, so they go. Saying the same identity again does
+        # not, whatever its spelling.
+        if name in _BY_ID[_MANIFEST].fields and _said(value) != _said(self._values.get(name)):
+            self._governed = None
         self._values[name] = value
+
+    # -- governed context ----------------------------------------------------
+
+    def observe_governed_context(self, context: Optional[Mapping[str, Any]]) -> None:
+        """Be told the governed facts of the file this source reads, or None.
+
+        A fact of this instance's context -- whoever read the governed file
+        says so -- and not configuration: nothing about what is declared,
+        selected or valid changes.
+        """
+        self._governed = dict(context) if context else None
+
+    def governed_context(self) -> Optional[dict[str, Any]]:
+        """The governed facts last observed for this source, or None."""
+        return None if self._governed is None else dict(self._governed)
 
     # -- execution -----------------------------------------------------------
 

@@ -91,6 +91,9 @@ COLUMN_FIELDS: tuple[str, ...] = ("source", "name", "datatype", "export", "type"
 #: Where each authorable kind keeps its declaration.
 _AUTHORED_IN: dict[str, str] = {"declaration": "transform", "manifest": "declaration"}
 
+#: The persisted facts held per entry, beside the declaration and never in it.
+_ALIGNED: tuple[str, ...] = ("column_ids", "column_ordinals")
+
 
 def _held(value: Any) -> bool:
     """Whether a value says anything. None, empty text and an empty mapping do not."""
@@ -252,6 +255,50 @@ class Transform:
         completed, _ = _completed(_entries(declared), None, self._source_columns)
         return completed
 
+    def column_ids(self) -> list[Optional[int]]:
+        """The stored ``transform_column_id`` of each entry of :meth:`columns`.
+
+        None for an entry no stored row stands behind -- one spliced in or
+        added -- and empty where no stored identities are held at all.
+        """
+        return self._stored("column_ids")
+
+    def column_ordinals(self) -> list[Optional[int]]:
+        """The stored ``column_ordinal`` of each entry of :meth:`columns`.
+
+        The PERSISTED ordinal, not the entry's position: the two agree only
+        until an entry is moved or added, and what is shown as stored must be
+        what is stored. Aligned as :meth:`column_ids` is.
+        """
+        return self._stored("column_ordinals")
+
+    def _stored(self, key: str) -> list[Any]:
+        """One persisted per-entry fact, aligned to :meth:`columns`."""
+        aligned = self._held_alignment()
+        if aligned is None or key not in aligned:
+            return []
+        declared = self.in_force_declaration() or {}
+        _, completed = _completed(_entries(declared), aligned, self._source_columns)
+        return list(completed[key])
+
+    def _held_alignment(self) -> Optional[dict[str, list[Any]]]:
+        """The per-entry persisted facts the Manifest kind holds, or None.
+
+        ``column_ids`` wherever a persistence is held, as it always has been;
+        ``column_ordinals`` only where the persistence stored them -- none are
+        manufactured for one that never had them.
+        """
+        if self.selected_kind() != "manifest":
+            return None
+        persistence = self._values.get("persistence")
+        if not _held(persistence):
+            return None
+        held = dict(persistence)
+        return {
+            key: list(held.get(key) or ())
+            for key in _ALIGNED if key == "column_ids" or key in held
+        }
+
     def edit_column(self, at: int, field: str, value: Any) -> None:
         """Change one field of one entry, and nothing else about it.
 
@@ -271,7 +318,7 @@ class Transform:
                 f"Transform: '{field}' is not a column field. "
                 f"Fields: {', '.join(COLUMN_FIELDS)}."
             )
-        declared, columns, ids = self._authoring()
+        declared, columns, aligned = self._authoring()
         entry = columns[_position(at, columns)]
 
         if field == "source":
@@ -300,7 +347,7 @@ class Transform:
             else:
                 raise ValueError("Transform: a column's transform is a mapping, or None.")
 
-        self._write(declared, columns, ids)
+        self._write(declared, columns, aligned)
 
     def add_column(self, after: Optional[int] = None) -> None:
         """Add an entry after one, from the same source, or at the end.
@@ -313,7 +360,7 @@ class Transform:
             ValueError: If the selected kind is not authored here, or ``after``
                 names no entry.
         """
-        declared, columns, ids = self._authoring()
+        declared, columns, aligned = self._authoring()
         if after is None:
             landed, made = len(columns), {"name": ""}
         else:
@@ -322,9 +369,9 @@ class Transform:
             made = {"source": source, "name": source} if source else {"name": ""}
             landed = int(after) + 1
         columns.insert(landed, made)
-        if ids is not None:
-            ids.insert(landed, None)
-        self._write(declared, columns, ids)
+        for stored in (aligned or {}).values():
+            stored.insert(landed, None)
+        self._write(declared, columns, aligned)
 
     def move_column(self, at: int, to: int) -> None:
         """Move one entry to another position. Moving it nowhere authors nothing.
@@ -333,17 +380,19 @@ class Transform:
             ValueError: If the selected kind is not authored here, or either
                 position names no entry.
         """
-        declared, columns, ids = self._authoring()
+        declared, columns, aligned = self._authoring()
         start, end = _position(at, columns), _position(to, columns)
         if start == end:
             return
         columns.insert(end, columns.pop(start))
-        if ids is not None:
-            ids.insert(end, ids.pop(start))
-        self._write(declared, columns, ids)
+        for stored in (aligned or {}).values():
+            stored.insert(end, stored.pop(start))
+        self._write(declared, columns, aligned)
 
-    def _authoring(self) -> tuple[dict[str, Any], list[dict[str, Any]], Optional[list[Any]]]:
-        """The declaration an edit lands in, completed, with its stored ids where held.
+    def _authoring(
+        self,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], Optional[dict[str, list[Any]]]]:
+        """The declaration an edit lands in, completed, with its stored facts where held.
 
         Raises:
             ValueError: For a kind that is not authored here, or declaration
@@ -365,18 +414,16 @@ class Transform:
                 f"Transform ({kind}): the declaration is not JSON, and is left as "
                 "it was written rather than reformatted."
             )
-        persistence = self._values.get("persistence") if kind == "manifest" else None
-        ids: Optional[list[Any]] = None
-        if _held(persistence):
-            ids = list(dict(persistence).get("column_ids") or ())
-        columns, ids = _completed(_entries(declared), ids, self._source_columns)
-        return declared, columns, ids
+        columns, aligned = _completed(
+            _entries(declared), self._held_alignment(), self._source_columns,
+        )
+        return declared, columns, aligned
 
     def _write(
         self,
         declared: dict[str, Any],
         columns: list[dict[str, Any]],
-        ids: Optional[list[Any]],
+        aligned: Optional[dict[str, list[Any]]],
     ) -> None:
         """Put the whole authored declaration back where its kind keeps it."""
         kind = self.selected_kind()
@@ -386,11 +433,12 @@ class Transform:
             self._values["transform"] = json.dumps(written, indent=2)
             return
         self._values["declaration"] = written
-        # ONLY WHERE STORED IDENTITIES ARE HELD. None are manufactured for a
-        # declaration that was never stored.
-        if ids is not None:
+        # ONLY WHAT IS HELD. No stored fact is manufactured for a declaration
+        # that was never stored, nor a key a persistence never had.
+        if aligned:
             self._values["persistence"] = {
-                **dict(self._values["persistence"]), "column_ids": list(ids),
+                **dict(self._values["persistence"]),
+                **{key: list(stored) for key, stored in aligned.items()},
             }
 
     # -- execution -----------------------------------------------------------
@@ -480,9 +528,9 @@ def _entries(declared: Mapping[str, Any]) -> list[tuple[int, dict[str, Any]]]:
 
 def _completed(
     entries: list[tuple[int, dict[str, Any]]],
-    ids: Optional[list[Any]],
+    stored: Optional[Mapping[str, list[Any]]],
     structure: tuple[str, ...],
-) -> tuple[list[dict[str, Any]], Optional[list[Any]]]:
+) -> tuple[list[dict[str, Any]], Optional[dict[str, list[Any]]]]:
     """Every source column represented, with no existing entry reordered.
 
     **A DECLARATION IS AUTHORITATIVE ONCE IT NAMES ONE COLUMN** -- every source
@@ -496,12 +544,15 @@ def _completed(
       2. failing that, before the FIRST entry of the nearest one after it;
       3. failing both, at the end.
 
-    Stored ids stay aligned: a spliced entry has none.
+    Every stored per-entry fact stays aligned: a spliced entry has none.
     """
     columns = [entry for _, entry in entries]
-    aligned: Optional[list[Any]] = None
-    if ids is not None:
-        aligned = [ids[at] if at < len(ids) else None for at, _ in entries]
+    aligned: Optional[dict[str, list[Any]]] = None
+    if stored is not None:
+        aligned = {
+            key: [facts[at] if at < len(facts) else None for at, _ in entries]
+            for key, facts in stored.items()
+        }
 
     def held(source: str) -> list[int]:
         return [at for at, one in enumerate(columns) if str(one.get("source") or "") == source]
@@ -523,8 +574,8 @@ def _completed(
                     break
         landed = len(columns) if at is None else at
         columns.insert(landed, {"source": source, "name": source})
-        if aligned is not None:
-            aligned.insert(landed, None)
+        for facts in (aligned or {}).values():
+            facts.insert(landed, None)
     return columns, aligned
 
 

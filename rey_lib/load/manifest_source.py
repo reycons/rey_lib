@@ -51,6 +51,7 @@ is the entire point of there being one.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
@@ -143,7 +144,9 @@ class ManifestSource:
         }
 
         self._profile_fields = _dedupe(rows, "data_profile_field_id")
-        self._transform_columns = _dedupe(rows, "transform_column_id")
+        # IN column_ordinal ORDER, STATED HERE rather than inherited from how the
+        # contract happens to join: the stored ordinal is the columns' order.
+        self._transform_columns = _in_column_order(_dedupe(rows, "transform_column_id"))
         self.data_profile_id: Optional[int] = _as_int(first["data_profile_id"])
         self.transform_id: Optional[int] = _as_int(first["transform_id"])
         self._profile_header: str = first["profile_header_definition"] or ""
@@ -445,6 +448,56 @@ class ManifestSource:
             ),
         )
 
+    # -- the canonical objects, populated ------------------------------------
+
+    def governed_context(self) -> dict[str, Any]:
+        """The governed facts a canonical Source holds as read-only context.
+
+        The file's identities and its name: what it IS in the estate, never
+        what a load is configured to do with it.
+        """
+        return {
+            "file_manifest_id": self.file_manifest_id,
+            "file_mutation_id": self.file_mutation_id,
+            "installation_id": self.installation_id,
+            "data_profile_id": self.data_profile_id,
+            "file_name": self.file_facts.get("file_name"),
+        }
+
+    def populate(self, source: Any, transform: Any) -> None:
+        """Hydrate one canonical Source and Transform from this governed file.
+
+        **THE ONE POPULATOR, for every entry point.** The Console, a workflow
+        step and the CLI hand their own instances here rather than each reading
+        the context its own way.
+
+        The Source is told its governed context -- a fact about the file, never
+        configuration. The Transform is given the stored definition as its
+        Manifest configuration ONLY where the definition is switched on and a
+        governing scope is active; otherwise it is left exactly as it was.
+        Nothing is created and the Target is not touched.
+
+        Args:
+            source: The canonical Source to tell its governed context.
+            transform: The canonical Transform to configure.
+        """
+        source.observe_governed_context(self.governed_context())
+        built = self.column_transform() if self.transform_is_enabled else None
+        if built is None:
+            return
+        transform.select("manifest")
+        transform.update("declaration", deepcopy(dict(built.declaration)))
+        # THE PERSISTED FACTS, held beside the declaration and never inside it:
+        # each column's row id and its stored ordinal, aligned to the entries.
+        transform.update("persistence", {
+            "transform_id": built.persistence.transform_id,
+            "file_type_id": built.persistence.file_type_id,
+            "column_ids": list(built.persistence.column_ids),
+            "column_ordinals": [
+                _as_int(row["column_ordinal"]) for row in self._transform_columns
+            ],
+        })
+
 
 #: File facts the contract returns, carried as read-only context.
 #:
@@ -522,6 +575,18 @@ def _dedupe(
         seen.add(identity)
         kept.append(row)
     return kept
+
+
+def _in_column_order(rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Transform column rows by their stored ``column_ordinal``, absent ones last.
+
+    STABLE, and on that key alone: rows with an equal or no ordinal keep the
+    order the reader returned them in. A second sort key would be a second
+    answer to what the order is.
+    """
+    return sorted(rows, key=lambda row: (
+        row["column_ordinal"] is None, _as_int(row["column_ordinal"]) or 0,
+    ))
 
 
 def _as_int(value: Any) -> Optional[int]:
