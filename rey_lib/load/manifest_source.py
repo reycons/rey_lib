@@ -471,8 +471,11 @@ class ManifestSource:
         step and the CLI hand their own instances here rather than each reading
         the context its own way.
 
-        The Source is told its governed context -- a fact about the file, never
-        configuration. The Transform is given the stored definition as its
+        The Source is POPULATED: it selects manifest and holds the identities the
+        contract resolved -- manifest, working mutation, and the governing type
+        where one is active -- as its own configuration. It is then told its
+        governed context, a fact about the file and never configuration. The
+        Transform is given the stored definition as its
         Manifest configuration ONLY where the definition is switched on and a
         governing scope is active; otherwise it is left exactly as it was.
         Nothing is created and the Target is not touched.
@@ -481,6 +484,16 @@ class ManifestSource:
             source: The canonical Source to tell its governed context.
             transform: The canonical Transform to configure.
         """
+        # THE SOURCE IS POPULATED FROM THE RESOLVED CONTEXT: the kind, and the
+        # identities the contract resolved -- the working mutation, and the
+        # governing type where one is active. Its own configuration, not context.
+        source.select("manifest")
+        source.update("file-manifest-id", str(self.file_manifest_id))
+        source.update("file-mutation-id", str(self.file_mutation_id))
+        if self.requested_file_type_id is not None:
+            source.update("file-type-id", str(self.requested_file_type_id))
+        # LAST: filling the identities clears context about any earlier file, so
+        # this file's facts are told once its identities are in place.
         source.observe_governed_context(self.governed_context())
         built = self.column_transform() if self.transform_is_enabled else None
         if built is None:

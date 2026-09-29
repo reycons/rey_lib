@@ -129,12 +129,50 @@ class TestTheSourceIsToldTheGovernedFacts:
     def test_the_context_is_not_configuration(self) -> None:
         source, _ = _populated(_joined([_column(301, "a", 1)]))
 
+        # The resolved IDENTITIES are configuration (row 435: the source object
+        # is populated from the resolved values); the file's facts are not.
         assert source.declaration() == {
-            "selected": "manifest", "values": {"file-manifest-id": "10"},
+            "selected": "manifest",
+            "values": {"file-manifest-id": "10", "file-mutation-id": "25",
+                       "file-type-id": "4"},
         }
         assert "file_name" not in source.configuration()
         assert source.validate() == []
         assert Source.from_declaration(source.declaration()).governed_context() is None
+
+
+class TestTheSourceIsPopulatedFromTheResolvedContext:
+    """Row 435: ManifestSource resolves; the source object is populated from it."""
+
+    def test_the_resolved_identities_fill_its_manifest_fields(self) -> None:
+        source = Source({"file-manifest-id": "10"}, selected="manifest")
+        _manifest(_joined([_column(301, "a", 1)])).populate(source, Transform())
+
+        assert source.selected_kind() == "manifest"
+        assert source.configuration() == {
+            "file-manifest-id": "10", "file-mutation-id": "25", "file-type-id": "4",
+        }
+
+    def test_opened_by_its_mutation_it_gains_its_manifest(self) -> None:
+        source = Source({"file-mutation-id": "25"})
+        ManifestSource.create(
+            _Reader(_joined([_column(301, "a", 1)])), file_mutation_id=25,
+            adopt_persisted_type=True,
+        ).populate(source, Transform())
+
+        assert source.configuration()["file-manifest-id"] == "10"
+        assert source.selected_kind() == "manifest"
+
+    def test_its_context_survives_its_own_population(self) -> None:
+        source, _ = _populated(_joined([_column(301, "a", 1)]))
+
+        assert source.governed_context() is not None
+
+    def test_no_governing_type_leaves_the_type_field_as_it_was(self) -> None:
+        source, _ = _populated([_row(file_type_id=None)])
+
+        assert source.value("file-type-id") is None
+        assert source.value("file-mutation-id") == "25"
 
 
 class TestTheContextBelongsToOneIdentity:
