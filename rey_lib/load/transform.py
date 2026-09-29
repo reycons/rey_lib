@@ -395,20 +395,18 @@ class Transform:
 
     # -- execution -----------------------------------------------------------
 
-    def resolve(self, ctx: Any) -> Any:
-        """The transform the selected configuration applies, as the load builds it.
+    def executed_declaration(self) -> Optional[dict[str, Any]]:
+        """The declaration execution sees, as data -- or None for identity.
 
-        Every kind goes through ``_build_transform`` -- the one place a load's
-        transform is built, and where secrets are resolved -- and what it
-        builds is handed back, never kept.
-
-        Args:
-            ctx: The runtime context, for context values a rule may reference.
+        THE ONE STATEMENT OF WHAT RUNS. ``resolve`` builds from this, and
+        anything that must show what a load would do -- a preview, an
+        inspection -- reads it rather than working it out again. Data, never a
+        built transform: building is ``_build_transform``'s.
 
         Returns:
-            An ``IdentityTransform`` for ``identity``; a ``ColumnTransform`` for
-            every other kind, carrying its ``TransformPersistence`` where the
-            configuration holds one.
+            None for ``identity``; the parsed declaration for ``declaration``
+            (inline YAML or JSON text, or a mapping) and ``yaml`` (the file,
+            read here); the stored declaration for ``manifest``.
 
         Raises:
             ConfigError: If the selected kind is incomplete, or a declaration is
@@ -421,27 +419,41 @@ class Transform:
             )
         held = self.configuration()
         kind = self.selected_kind()
-
         if kind == "identity":
-            return load_operation._build_transform(ctx, None, None)
+            return None
         if kind == "declaration":
-            return load_operation._build_transform(
-                ctx, None, _declared(held["transform"], "transform"),
-            )
+            return _declared(held["transform"], "transform")
         if kind == "yaml":
+            return _declared_in(held["transform-file"])
+        return _plain(held["declaration"], "declaration")
+
+    def resolve(self, ctx: Any) -> Any:
+        """The transform the selected configuration applies, as the load builds it.
+
+        Every kind goes through ``_build_transform`` -- the one place a load's
+        transform is built, and where secrets are resolved -- from
+        :meth:`executed_declaration`, and what it builds is handed back, never
+        kept.
+
+        Args:
+            ctx: The runtime context, for context values a rule may reference.
+
+        Returns:
+            An ``IdentityTransform`` for ``identity``; a ``ColumnTransform`` for
+            every other kind, carrying its ``TransformPersistence`` where the
+            configuration holds one.
+
+        Raises:
+            ConfigError: As :meth:`executed_declaration` refuses.
+        """
+        declared = self.executed_declaration()
+        # MANIFEST PERSISTENCE travels only where it is held, exactly as before.
+        persistence = self.configuration().get("persistence")
+        if self.selected_kind() == "manifest" and _held(persistence):
             return load_operation._build_transform(
-                ctx, None, _declared_in(held["transform-file"]),
+                ctx, None, declared, persistence=_persistence(persistence),
             )
-        # manifest -- persistence travels only where it is held.
-        persistence = held.get("persistence")
-        if _held(persistence):
-            return load_operation._build_transform(
-                ctx, None, _plain(held["declaration"], "declaration"),
-                persistence=_persistence(persistence),
-            )
-        return load_operation._build_transform(
-            ctx, None, _plain(held["declaration"], "declaration"),
-        )
+        return load_operation._build_transform(ctx, None, declared)
 
 
 def _json_mapping(value: Any) -> Optional[dict[str, Any]]:
