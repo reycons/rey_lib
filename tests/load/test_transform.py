@@ -16,7 +16,11 @@ from typing import Any, Optional
 
 import pytest
 
-from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
+from rey_lib.data.column_transform import (
+    ColumnTransform,
+    TransformPersistence,
+    authorable_starters,
+)
 from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import Transform
@@ -275,3 +279,295 @@ class TestTheBuilderCarriesPersistence:
 
         assert isinstance(built, ColumnTransform)
         assert built.persistence is None
+
+
+def _declared(transform: Transform) -> dict[str, Any]:
+    """The authored declaration, as the selected kind holds it."""
+    held = transform.in_force_declaration()
+    assert held is not None
+    return held
+
+
+def _authoring(*source: str, declared: Optional[dict[str, Any]] = None) -> Transform:
+    """A Declaration transform that has been told what the source carries."""
+    transform = Transform(
+        {"transform": json.dumps(declared) if declared else ""}, selected="declaration",
+    )
+    transform.observe_source_columns(list(source))
+    return transform
+
+
+class TestTheCompletedView:
+
+    def test_it_lists_the_source_columns_before_anything_is_declared(self) -> None:
+        transform = _authoring("feature_id", "feature_name")
+
+        assert transform.columns() == [
+            {"source": "feature_id", "name": "feature_id"},
+            {"source": "feature_name", "name": "feature_name"},
+        ]
+
+    def test_looking_is_not_authoring(self) -> None:
+        transform = _authoring("a", "b")
+
+        transform.columns()
+
+        assert transform.value("transform") == ""
+
+    def test_the_source_columns_are_context_never_configuration(self) -> None:
+        transform = _authoring("observed_col_one", "observed_col_two")
+
+        assert "observed_col" not in json.dumps(transform.declaration())
+
+
+class TestEditingOneField:
+
+    def test_the_first_edit_names_every_source_column(self) -> None:
+        transform = _authoring("a", "b", "c")
+
+        transform.edit_column(1, "name", "b_out")
+
+        assert _declared(transform)["columns"] == [
+            {"source": "a", "name": "a"},
+            {"source": "b", "name": "b_out"},
+            {"source": "c", "name": "c"},
+        ]
+
+    def test_completing_a_partial_declaration_reorders_no_existing_entry(self) -> None:
+        transform = _authoring("A", "B", "C", declared={"columns": [
+            {"source": "A", "name": "a"},
+            {"name": "x", "transform": {"type": "constant", "value": "1"}},
+            {"source": "B", "name": "b"},
+            {"name": "digest", "transform": {"type": "hash", "columns": ["a", "b"]}},
+        ]})
+
+        transform.edit_column(0, "name", "a_out")
+
+        assert _declared(transform)["columns"] == [
+            {"source": "A", "name": "a_out"},
+            {"name": "x", "transform": {"type": "constant", "value": "1"}},
+            {"source": "B", "name": "b"},
+            {"source": "C", "name": "C"},
+            {"name": "digest", "transform": {"type": "hash", "columns": ["a", "b"]}},
+        ]
+
+    def test_a_missing_column_before_every_named_one_goes_before_the_first(self) -> None:
+        transform = _authoring("A", "B", declared={"columns": [{"source": "B", "name": "b"}]})
+
+        transform.edit_column(1, "name", "b2")
+
+        assert [one["source"] for one in _declared(transform)["columns"]] == ["A", "B"]
+
+    def test_with_nothing_source_backed_it_goes_at_the_end(self) -> None:
+        transform = _authoring("A", declared={"columns": [{"name": "k"}]})
+
+        transform.edit_column(0, "name", "k2")
+
+        assert _declared(transform)["columns"] == [
+            {"name": "k2"}, {"source": "A", "name": "A"},
+        ]
+
+    def test_repointing_the_input_changes_source_and_nothing_else(self) -> None:
+        transform = _authoring("a", "b")
+        transform.edit_column(0, "name", "keep_me")
+        transform.edit_column(0, "type", "numeric")
+        starter = _declared(transform)["columns"][0]["transform"]
+
+        transform.edit_column(0, "source", "b")
+
+        assert _declared(transform)["columns"][0] == {
+            "source": "b", "name": "keep_me", "transform": starter,
+        }
+
+    def test_clearing_the_input_removes_the_source(self) -> None:
+        transform = _authoring("a")
+
+        transform.edit_column(0, "source", "")
+
+        assert _declared(transform)["columns"][0] == {"name": "a"}
+
+    def test_export_is_written_only_to_say_false(self) -> None:
+        transform = _authoring("a")
+
+        transform.edit_column(0, "export", "false")
+        assert _declared(transform)["columns"][0] == {"source": "a", "name": "a", "export": False}
+
+        transform.edit_column(0, "export", "true")
+        assert _declared(transform)["columns"][0] == {"source": "a", "name": "a"}
+
+    def test_a_datatype_is_written_when_stated_and_removed_when_cleared(self) -> None:
+        transform = _authoring("a")
+
+        transform.edit_column(0, "datatype", "decimal")
+        assert _declared(transform)["columns"][0]["datatype"] == "decimal"
+
+        transform.edit_column(0, "datatype", "")
+        assert _declared(transform)["columns"][0] == {"source": "a", "name": "a"}
+
+    def test_choosing_a_type_copies_the_starter(self) -> None:
+        transform = _authoring("a", "b")
+
+        transform.edit_column(0, "type", "date")
+        transform.edit_column(1, "type", "date")
+        first, second = _declared(transform)["columns"]
+        first["transform"]["format"] = "changed"
+
+        assert second["transform"]["type"] == "date"
+        assert second["transform"].get("format") != "changed"
+        # ...and the library's own starter is untouched too.
+        assert authorable_starters()["date"].get("format") != "changed"
+
+    def test_a_type_with_no_starter_leaves_the_entry_alone(self) -> None:
+        transform = _authoring("a", "b", declared={"columns": [
+            {"source": "a", "name": "a", "transform": {"type": "encrypt", "key_env": "K"}},
+            {"source": "b", "name": "b"},
+        ]})
+
+        transform.edit_column(1, "type", "encrypt")
+
+        assert _declared(transform)["columns"] == [
+            {"source": "a", "name": "a", "transform": {"type": "encrypt", "key_env": "K"}},
+            {"source": "b", "name": "b"},
+        ]
+
+    def test_the_transform_field_sets_the_rule_or_removes_it(self) -> None:
+        transform = _authoring("a")
+
+        transform.edit_column(0, "transform", {"type": "date", "format": "yyyy-MM-dd"})
+        assert _declared(transform)["columns"][0]["transform"] == {
+            "type": "date", "format": "yyyy-MM-dd",
+        }
+
+        transform.edit_column(0, "transform", None)
+        assert _declared(transform)["columns"][0] == {"source": "a", "name": "a"}
+
+    def test_the_declaration_is_written_back_as_the_parameters_json_text(self) -> None:
+        transform = _authoring("a")
+
+        transform.edit_column(0, "name", "a_out")
+
+        assert json.loads(transform.value("transform")) == {
+            "columns": [{"source": "a", "name": "a_out"}],
+        }
+
+    def test_the_rest_of_the_declaration_is_kept(self) -> None:
+        transform = _authoring("a", declared={
+            "columns": [{"source": "a", "name": "a"}], "row_filter": "a is not null",
+        })
+
+        transform.edit_column(0, "name", "b")
+
+        assert _declared(transform)["row_filter"] == "a is not null"
+
+    @pytest.mark.parametrize(("at", "field"), [(5, "name"), (0, "colour")])
+    def test_a_missing_position_or_an_unknown_field_is_refused(
+        self, at: int, field: str,
+    ) -> None:
+        with pytest.raises(ValueError):
+            _authoring("a").edit_column(at, field, "x")
+
+
+class TestAddingAndMoving:
+
+    def test_add_inserts_after_a_column_from_the_same_source(self) -> None:
+        transform = _authoring("amount", "other")
+
+        transform.add_column(0)
+
+        assert _declared(transform)["columns"] == [
+            {"source": "amount", "name": "amount"},
+            {"source": "amount", "name": "amount"},
+            {"source": "other", "name": "other"},
+        ]
+
+    def test_add_appends_when_no_column_is_given(self) -> None:
+        transform = _authoring("a")
+
+        transform.add_column()
+
+        assert _declared(transform)["columns"] == [{"source": "a", "name": "a"}, {"name": ""}]
+
+    def test_move_puts_one_column_at_another_position(self) -> None:
+        transform = _authoring("a", "b", "c")
+
+        transform.move_column(2, 0)
+
+        assert [one["source"] for one in _declared(transform)["columns"]] == ["c", "a", "b"]
+
+    def test_a_move_to_where_it_is_authors_nothing(self) -> None:
+        transform = _authoring("a", "b")
+
+        transform.move_column(0, 0)
+
+        assert transform.value("transform") == ""
+
+
+class TestWhereAuthoringLands:
+
+    def test_identity_authors_nothing_and_says_to_choose_declaration(self) -> None:
+        transform = Transform(selected="identity")
+        transform.observe_source_columns(["a"])
+
+        with pytest.raises(ValueError, match="Declaration"):
+            transform.edit_column(0, "name", "b")
+
+    def test_a_declaration_file_is_not_edited_here(self) -> None:
+        transform = Transform({"transform-file": "/t.yaml"}, selected="yaml")
+        transform.observe_source_columns(["a"])
+
+        with pytest.raises(ValueError, match="where it lives"):
+            transform.add_column()
+
+    def test_hand_written_yaml_is_left_as_it_was_written(self) -> None:
+        text = "columns:\n  - {source: a, name: a}\n"
+        transform = Transform({"transform": text}, selected="declaration")
+
+        with pytest.raises(ValueError, match="not JSON"):
+            transform.add_column()
+        assert transform.value("transform") == text
+        assert transform.in_force_declaration() is None
+
+    def test_a_manifest_keeps_its_stored_ids_aligned(self) -> None:
+        transform = Transform({
+            "declaration": {"columns": [{"source": "b", "name": "b"}]},
+            "persistence": {"transform_id": 7, "file_type_id": 4, "column_ids": [31]},
+        }, selected="manifest")
+        transform.observe_source_columns(["a", "b"])
+
+        # Completion puts `a` before `b`, with no stored id of its own.
+        transform.add_column(1)
+        assert transform.value("persistence")["column_ids"] == [None, 31, None]
+
+        transform.move_column(1, 0)
+        assert transform.value("persistence")["column_ids"] == [31, None, None]
+        assert [one.get("source") for one in _declared(transform)["columns"]] == ["b", "a", "b"]
+        assert transform.value("persistence")["transform_id"] == 7
+
+    def test_a_manifest_without_persistence_authors_and_manufactures_none(self) -> None:
+        transform = Transform(
+            {"declaration": {"columns": [{"source": "a", "name": "a"}]}}, selected="manifest",
+        )
+        transform.observe_source_columns(["a", "b"])
+
+        transform.edit_column(0, "name", "a_out")
+        transform.add_column(0)
+        transform.move_column(2, 0)
+
+        assert [one["name"] for one in _declared(transform)["columns"]] == ["b", "a_out", "a"]
+        assert transform.value("persistence") is None
+        assert "persistence" not in transform.declaration()["values"]
+
+
+class TestTheInForceDeclaration:
+
+    @pytest.mark.parametrize(("values", "kind", "expected"), [
+        ({}, "identity", None),
+        ({"transform": json.dumps(_DECLARED)}, "declaration", _DECLARED),
+        ({"transform": "columns: []"}, "declaration", None),
+        ({"transform-file": "/t.yaml"}, "yaml", None),
+        ({"declaration": _DECLARED}, "manifest", _DECLARED),
+    ])
+    def test_for_each_kind(
+        self, values: dict[str, Any], kind: str, expected: Optional[dict[str, Any]],
+    ) -> None:
+        assert Transform(values, selected=kind).in_force_declaration() == expected
