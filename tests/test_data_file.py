@@ -175,8 +175,13 @@ class TestTheSuffixMapCannotDrift:
                 continue
             try:
                 list(get_reader(path, file_type=token))
-            except ValueError as exc:            # the "unsupported" refusal
-                pytest.fail(f"{suffix} -> {token}: {exc}")
+            except ValueError as exc:
+                # ONLY get_reader's own refusal says a token is unsupported. A
+                # reader refusing this CSV's content -- pandas' "Excel file
+                # format cannot be determined" for XLSX -- also raises
+                # ValueError, and is wrong content, which is fine here.
+                if str(exc).startswith("Unsupported file_type"):
+                    pytest.fail(f"{suffix} -> {token}: {exc}")
             except Exception:                    # noqa: BLE001
                 pass                             # wrong CONTENT is fine here
 

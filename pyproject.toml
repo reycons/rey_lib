@@ -27,7 +27,10 @@ files = [
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
     "polars>=1.43.0",
-    "fastexcel>=0.20.2",
+    # <0.21: 0.21.0 reports a header of control characters only ("\t\n") as
+    # "", and workbook conversion keeps such a header for the separate
+    # sanitization boundary (test_control_only_header_is_not_sanitized_by_conversion).
+    "fastexcel>=0.20.2,<0.21",
 ]
 encrypt = [
     "cryptography>=41.0.0",
