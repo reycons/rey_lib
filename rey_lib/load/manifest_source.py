@@ -151,6 +151,11 @@ class ManifestSource:
         # column row: a transform may have a row filter and no columns yet, and
         # reading it off the children would lose it in exactly that case.
         self._row_filter: Any = first["transform_row_filter"]
+        #: Whether the stored transformation is switched on. A FACT, read from the
+        #: parent row for the same reason the row filter is, and applied by no
+        #: one here: ``column_transform`` returns the stored definition either
+        #: way, and what "off" means is for whoever runs it to decide.
+        self.transform_is_enabled: bool = bool(first.get("transform_is_enabled"))
 
     # -- construction -------------------------------------------------------
 
@@ -162,6 +167,7 @@ class ManifestSource:
         file_manifest_id: Optional[int] = None,
         file_mutation_id: Optional[int] = None,
         file_type_id: Optional[int] = None,
+        adopt_persisted_type: bool = False,
     ) -> "ManifestSource":
         """Read one governed file's context and return the source for it.
 
@@ -187,7 +193,16 @@ class ManifestSource:
                 over the top of a caller's explicit choice.
             file_type_id: The INTENDED governing scope, or None to open the
                 file with none. **None is never replaced by the manifest's
-                persisted type** -- see :meth:`governing_scope_available`.
+                persisted type** unless the caller asks for exactly that with
+                ``adopt_persisted_type`` -- see :meth:`governing_scope_available`.
+            adopt_persisted_type: Where no ``file_type_id`` was supplied, govern
+                by the type the file already has. OPT-IN, and for a caller whose
+                missing type is a fact it could not carry rather than a choice:
+                a reader opening the loader on a governed file from a tree node
+                did not ask for no governing scope, the node simply holds none.
+                Taken from the rows this call already read, so it costs no
+                second read. A supplied ``file_type_id`` still wins and is still
+                validated.
 
         Returns:
             The source, with its context resolved.
@@ -215,6 +230,10 @@ class ManifestSource:
             requested_file_type_id=file_type_id,
         )
         source._validate_against(file_manifest_id, file_mutation_id, file_type_id)
+        if file_type_id is None and adopt_persisted_type:
+            # The persisted type, now asked for. Validated by construction: it
+            # is the value _validate_against would have compared against.
+            source.requested_file_type_id = source.persisted_file_type_id
         return source
 
     def _validate_against(

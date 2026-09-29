@@ -642,3 +642,68 @@ class TestAnEmptyReadIsNotAnEmptyConfiguration:
         transformation configuration" are different answers."""
         with pytest.raises(DataStructureError, match="no rows"):
             ManifestSource.create(CountingReader([]), file_manifest_id=10)
+
+
+class TestAdoptingThePersistedType:
+    """A caller that could not carry a type may govern by the one the file has.
+
+    Opt-in, and from the rows already read -- so it costs no second read, and a
+    caller that did not ask for it keeps today's supplied-only rule.
+    """
+
+    def test_by_default_no_supplied_type_means_no_transform(self) -> None:
+        source = ManifestSource.create(CountingReader([_row()]), file_manifest_id=10)
+
+        assert source.governing_scope_available is False
+        assert source.column_transform() is None
+
+    def test_adopting_it_governs_by_the_persisted_type_in_one_read(self) -> None:
+        reader = CountingReader([_row()])
+
+        source = ManifestSource.create(
+            reader, file_manifest_id=10, adopt_persisted_type=True,
+        )
+
+        assert len(reader.calls) == 1
+        assert source.requested_file_type_id == 4
+        transform = source.column_transform()
+        assert transform is not None
+        assert transform.persistence.file_type_id == 4
+
+    def test_a_supplied_type_still_wins_and_is_still_validated(self) -> None:
+        with pytest.raises(DataStructureError, match="governed by 4"):
+            ManifestSource.create(
+                CountingReader([_row()]), file_manifest_id=10, file_type_id=9,
+                adopt_persisted_type=True,
+            )
+
+    def test_a_file_with_no_persisted_type_stays_ungoverned(self) -> None:
+        source = ManifestSource.create(
+            CountingReader([_row(file_type_id=None)]), file_manifest_id=10,
+            adopt_persisted_type=True,
+        )
+
+        assert source.governing_scope_available is False
+        assert source.column_transform() is None
+
+
+class TestWhetherTheTransformIsOn:
+    """A fact the contract returns and the source reports, applying it nowhere."""
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_it_is_read_from_the_row(self, enabled: bool) -> None:
+        source = ManifestSource.create(
+            CountingReader([_row(transform_is_enabled=enabled)]),
+            file_manifest_id=10, file_type_id=4,
+        )
+
+        assert source.transform_is_enabled is enabled
+
+    def test_a_disabled_transform_is_still_returned_as_stored(self) -> None:
+        """What "off" means is for whoever runs it, not for the source."""
+        source = ManifestSource.create(
+            CountingReader([_row(transform_is_enabled=False)]),
+            file_manifest_id=10, file_type_id=4,
+        )
+
+        assert source.column_transform() is not None
