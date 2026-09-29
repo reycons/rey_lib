@@ -28,10 +28,12 @@ from __future__ import annotations
 
 from rey_lib.load.configured_load import ConfiguredLoad, LoadOneFile
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
+from rey_lib.load.source import Source
 
 __all__ = [
     "ConfiguredLoad",
     "LoadOneFile",
     "ManifestSource",
+    "Source",
     "SourceContextReader",
 ]
