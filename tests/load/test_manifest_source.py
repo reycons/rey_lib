@@ -171,6 +171,27 @@ class TestOneCallAndNoSecondLookup:
         assert reader.calls == []
 
 
+class TestTheResolvedQueryIsKeptAsReturned:
+    """The governed read's resolved SQL is held unchanged, from the one call."""
+
+    def test_the_returned_value_is_exposed_unchanged(self) -> None:
+        resolved = (
+            "SELECT * FROM read_csv('/data/incoming/asset.txt', header = true)\n"
+            "  WHERE  amount > 0 "
+        )
+        reader = CountingReader([
+            {**row, "resolved_query_sql": resolved} for row in _joined_rows()
+        ])
+
+        source = ManifestSource.create(reader, file_manifest_id=10, file_type_id=4)
+
+        assert source.resolved_query_sql is resolved
+        assert len(reader.calls) == 1
+
+    def test_a_read_without_it_holds_none(self, source) -> None:
+        assert source.resolved_query_sql is None
+
+
 class TestTheRepeatedRowsMaterialise:
     """Invariant 2: parents repeat by design; children are distinct by ID."""
 

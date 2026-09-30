@@ -137,6 +137,8 @@ class ManifestSource:
         self.path: Optional[str] = first["path"]
         #: The DECLARED format token, which beats the path's suffix.
         self.layout: Optional[str] = first["layout"]
+        #: The SQL the database resolved for this file's path, as returned.
+        self.resolved_query_sql: Optional[str] = first.get("resolved_query_sql")
 
         #: The file facts, as the contract returned them. Read-only.
         self.file_facts: dict[str, Any] = {
