@@ -199,11 +199,16 @@ class TestTheContextBelongsToOneIdentity:
 
         assert source.governed_context() is not None
 
-    def test_leaving_the_manifest_kind_clears_it(self, source: Source) -> None:
+    def test_selecting_another_kind_and_back_keeps_it(self, source: Source) -> None:
+        # The selected kind is the configuration in force; it destroys nothing.
+        before = source.governed_context()
+
         source.select("file")
+        assert source.governed_context() == before
         source.select("manifest")
 
-        assert source.governed_context() is None
+        assert source.governed_context() == before
+        assert source.value("file-mutation-id") == "25"
 
 
 class TestTheTransformIsConfiguredFromTheStoredDefinition:

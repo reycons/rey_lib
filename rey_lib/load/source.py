@@ -203,10 +203,11 @@ class Source:
                 f"Source: no source kind is called '{kind}'. "
                 f"Kinds: {', '.join(self.kinds())}."
             )
+        # SELECTING IS NOT DESTROYING. Which kind is in force is chosen here; the
+        # governed context -- like every kind's values -- stays with the object,
+        # and is there again when manifest is chosen again. Only a different
+        # governed identity ends it (see `update`).
         self._selected = kind
-        # A source that no longer reads the governed file no longer has its facts.
-        if kind != _MANIFEST:
-            self._governed = None
 
     def update(self, name: str, value: Any) -> None:
         """Say something about one field.
