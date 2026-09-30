@@ -78,18 +78,9 @@ SOURCE_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in SOURCE_KINDS}
 
-#: The kind that reads a governed file, and whose identity its context is about.
-_MANIFEST = "manifest"
-
-
 def _held(value: Any) -> bool:
     """Whether a value says anything. Empty text and None say nothing."""
     return value is not None and str(value).strip() != ""
-
-
-def _said(value: Any) -> str:
-    """What a value says, as text: 10 and "10" say the same, None and "" nothing."""
-    return str(value).strip() if _held(value) else ""
 
 
 class Source:
@@ -118,8 +109,9 @@ class Source:
         """
         self._values: dict[str, Any] = {}
         self._selected: Optional[str] = None
-        # CONTEXT, NOT CONFIGURATION: the governed file this source was last
-        # hydrated for. Never in `declaration()`, never validated, never persisted.
+        # CONTEXT, NOT CONFIGURATION: the governed file this source was hydrated
+        # with, once, and keeps for its lifetime. Never in `declaration()`, never
+        # validated, never persisted.
         self._governed: Optional[dict[str, Any]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
@@ -204,9 +196,8 @@ class Source:
                 f"Kinds: {', '.join(self.kinds())}."
             )
         # SELECTING IS NOT DESTROYING. Which kind is in force is chosen here; the
-        # governed context -- like every kind's values -- stays with the object,
-        # and is there again when manifest is chosen again. Only a different
-        # governed identity ends it (see `update`).
+        # governed context -- like every kind's values -- stays with the object
+        # for its lifetime.
         self._selected = kind
 
     def update(self, name: str, value: Any) -> None:
@@ -222,11 +213,8 @@ class Source:
                 f"Source: '{name}' is not a source field. "
                 f"Fields: {', '.join(SOURCE_FIELDS)}."
             )
-        # A DIFFERENT GOVERNED IDENTITY is a different file: the facts held were
-        # about the one before, so they go. Saying the same identity again does
-        # not, whatever its spelling.
-        if name in _BY_ID[_MANIFEST].fields and _said(value) != _said(self._values.get(name)):
-            self._governed = None
+        # AN EDIT CHANGES THIS VALUE AND NOTHING ELSE. The governed context was
+        # the hydrated starting state and stays for the object's lifetime.
         self._values[name] = value
 
     # -- governed context ----------------------------------------------------

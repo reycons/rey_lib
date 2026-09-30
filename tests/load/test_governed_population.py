@@ -175,7 +175,8 @@ class TestTheSourceIsPopulatedFromTheResolvedContext:
         assert source.value("file-mutation-id") == "25"
 
 
-class TestTheContextBelongsToOneIdentity:
+class TestTheObjectKeepsItsStateForItsLifetime:
+    """Hydrated once; after that no edit and no selection clears any of it."""
 
     @pytest.fixture()
     def source(self) -> Source:
@@ -183,16 +184,13 @@ class TestTheContextBelongsToOneIdentity:
         return held
 
     @pytest.mark.parametrize("field", ["file-manifest-id", "file-mutation-id", "file-type-id"])
-    def test_a_different_identity_clears_it(self, source: Source, field: str) -> None:
+    def test_editing_an_identity_changes_that_value_only(self, source: Source, field: str) -> None:
+        before = source.governed_context()
+
         source.update(field, "99")
 
-        assert source.governed_context() is None
-
-    def test_the_same_identity_said_again_keeps_it(self, source: Source) -> None:
-        source.update("file-manifest-id", 10)
-        source.update("file-manifest-id", " 10 ")
-
-        assert source.governed_context() is not None
+        assert source.value(field) == "99"
+        assert source.governed_context() == before
 
     def test_another_kinds_field_keeps_it(self, source: Source) -> None:
         source.update("file", "/elsewhere.csv")
