@@ -211,6 +211,9 @@ class Application:
     #: enforced by a test, not by this default -- reading the empty string as
     #: laxity is the misreading this comment exists to prevent.
     icon: str = ""
+    #: The panel kind this application is drawn by, published by the
+    #: distribution beside its icon. Empty means the general application panel.
+    panel: str = ""
     #: The application's own parameters, declared under ``cli.parameters``.
     #:
     #: Not every application has commands. Several declare parameters at this
@@ -391,6 +394,9 @@ def _from_registration(
         # published by the distribution, not chosen by an installation. Two
         # installations running the same application draw the same icon.
         icon=str(registration.get("icon") or ""),
+        # From the REGISTRATION, as the icon is: which panel draws it is the
+        # distribution's fact about itself.
+        panel=str(registration.get("panel") or ""),
         # From the installation entry, not the registration: how loud this
         # application runs here is this installation's decision.
         log_level=str(entry.get("log_level") or ""),
