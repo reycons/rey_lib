@@ -15,6 +15,7 @@ column, parent values repeating.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence
 
 import pytest
@@ -114,7 +115,8 @@ class TestTheSourceIsToldTheGovernedFacts:
 
         assert source.governed_context() == {
             "file_manifest_id": 10, "file_mutation_id": 25, "installation_id": 1,
-            "data_profile_id": 7, "file_name": "asset.txt",
+            "data_profile_id": 7, "file_name": "asset.txt", "mutation_choices": [],
+            "transform_query_id": None,
         }
 
     def test_a_file_with_no_profile_still_has_its_context(self) -> None:
@@ -132,12 +134,14 @@ class TestTheSourceIsToldTheGovernedFacts:
         # The resolved IDENTITIES are configuration (row 435: the source object
         # is populated from the resolved values); the file's facts are not.
         assert source.declaration() == {
-            "selected": "manifest",
-            "values": {"file-manifest-id": "10", "file-mutation-id": "25",
+            "selected": "database",
+            "values": {"statement": "", "file": "/data/incoming/asset.txt",
+                       "file-manifest-id": "10", "file-mutation-id": "25",
                        "file-type-id": "4"},
         }
         assert "file_name" not in source.configuration()
-        assert source.validate() == []
+        # No connection is invented, and this read resolved no SQL.
+        assert source.validate() == ["source-connection", "statement"]
         assert Source.from_declaration(source.declaration()).governed_context() is None
 
 
@@ -148,10 +152,10 @@ class TestTheSourceIsPopulatedFromTheResolvedContext:
         source = Source({"file-manifest-id": "10"}, selected="manifest")
         _manifest(_joined([_column(301, "a", 1)])).populate(source, Transform())
 
-        assert source.selected_kind() == "manifest"
-        assert source.configuration() == {
-            "file-manifest-id": "10", "file-mutation-id": "25", "file-type-id": "4",
-        }
+        assert source.selected_kind() == "database"
+        assert {name: source.value(name) for name in (
+            "file-manifest-id", "file-mutation-id", "file-type-id",
+        )} == {"file-manifest-id": "10", "file-mutation-id": "25", "file-type-id": "4"}
 
     def test_opened_by_its_mutation_it_gains_its_manifest(self) -> None:
         source = Source({"file-mutation-id": "25"})
@@ -160,8 +164,8 @@ class TestTheSourceIsPopulatedFromTheResolvedContext:
             adopt_persisted_type=True,
         ).populate(source, Transform())
 
-        assert source.configuration()["file-manifest-id"] == "10"
-        assert source.selected_kind() == "manifest"
+        assert source.value("file-manifest-id") == "10"
+        assert source.selected_kind() == "database"
 
     def test_its_context_survives_its_own_population(self) -> None:
         source, _ = _populated(_joined([_column(301, "a", 1)]))
@@ -211,14 +215,14 @@ class TestTheObjectKeepsItsStateForItsLifetime:
 
 class TestTheTransformIsConfiguredFromTheStoredDefinition:
 
-    def test_it_becomes_the_manifest_kind_with_the_stored_mapping(self) -> None:
+    def test_it_becomes_the_declaration_kind_with_the_stored_mapping(self) -> None:
         _, transform = _populated(_joined([
             _column(301, "a", 1, column_datatype="integer",
                     transform_type="upper", transform_config={"type": "ignored", "x": 1}),
             _column(302, "b", 2, column_datatype=None, column_is_exported=False),
         ]))
 
-        assert transform.selected_kind() == "manifest"
+        assert transform.selected_kind() == "declaration"
         assert transform.validate() == []
         assert transform.columns() == [
             {"name": "a", "source": "a", "datatype": "integer",
@@ -234,7 +238,7 @@ class TestTheTransformIsConfiguredFromTheStoredDefinition:
     def test_the_stored_facts_never_enter_the_declaration(self) -> None:
         _, transform = _populated(_joined([_column(301, "a", 1), _column(302, "b", 2)]))
 
-        for entry in transform.value("declaration")["columns"]:
+        for entry in transform.in_force_declaration()["columns"]:
             assert not {"transform_column_id", "column_ordinal", "id", "ordinal"} & set(entry)
 
     def test_repeated_parent_rows_are_one_definition(self) -> None:
@@ -310,3 +314,163 @@ class TestTheStoredFactsStayAligned:
         transform = Transform({"transform": '{"columns": [{"source": "a", "name": "a"}]}'})
 
         assert transform.column_ids() == [] and transform.column_ordinals() == []
+
+
+_CHOICES = [
+    {"file_mutation_id": 25, "result": "inventoried", "path": "/data/a/asset.txt",
+     "resolved_query_sql": "SELECT * FROM read_csv('/data/a/asset.txt')"},
+    {"file_mutation_id": 31, "result": "sanitized_file", "path": "/data/b/asset.txt",
+     "resolved_query_sql": "SELECT * FROM read_csv('/data/b/asset.txt')"},
+]
+
+
+def _chosen_from(**overrides: Any) -> Source:
+    """A Source populated from a read carrying the manifest's live mutations."""
+    source, _ = _populated([_row(
+        mutation_choices=_CHOICES,
+        resolved_query_sql=_CHOICES[0]["resolved_query_sql"], **overrides,
+    )])
+    return source
+
+
+class TestTheSourceIsAnOrdinaryDatabaseSource:
+
+    def test_it_holds_the_resolved_sql_and_the_mutation_path(self) -> None:
+        source = _chosen_from()
+
+        assert source.selected_kind() == "database"
+        assert source.value("statement") == _CHOICES[0]["resolved_query_sql"]
+        assert source.value("file") == "/data/incoming/asset.txt"
+        assert source.value("file-mutation-id") == "25"
+
+    def test_the_mutation_choices_are_context_as_returned(self) -> None:
+        assert _chosen_from().governed_context()["mutation_choices"] == _CHOICES
+
+
+class TestChoosingAMutation:
+
+    def test_it_brings_that_mutations_path_and_sql(self) -> None:
+        source = _chosen_from()
+
+        source.update("file-mutation-id", "31")
+
+        assert source.value("file-mutation-id") == "31"
+        assert source.value("file") == "/data/b/asset.txt"
+        assert source.value("statement") == _CHOICES[1]["resolved_query_sql"]
+
+    def test_an_id_that_is_no_choice_changes_only_the_id(self) -> None:
+        source = _chosen_from()
+
+        source.update("file-mutation-id", "99")
+
+        assert source.value("file-mutation-id") == "99"
+        assert source.value("file") == "/data/incoming/asset.txt"
+        assert source.value("statement") == _CHOICES[0]["resolved_query_sql"]
+
+
+class _Writer:
+    """Records what a save hands the database, and does nothing else."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, Any]] = []
+
+    def update_transform_query_sql(self, transform_query_id: Any, query_sql: Any) -> None:
+        self.calls.append((transform_query_id, query_sql))
+
+
+class TestSavingTheWorkingQuery:
+
+    def test_the_transform_query_id_is_kept(self) -> None:
+        source = _chosen_from(transform_query_id=42)
+
+        assert source.governed_context()["transform_query_id"] == 42
+        assert source.saves_query() is True
+
+    def test_both_values_are_handed_over_unchanged(self) -> None:
+        source = _chosen_from(transform_query_id=42)
+        working = "SELECT *\\n  FROM read_json('/my/renamed.json')  -- mine"
+        source.update("statement", working)
+        writer = _Writer()
+
+        source.save_query(SimpleNamespace(shared_control=writer))
+
+        assert writer.calls == [(42, working)]
+
+    def test_a_source_with_no_transform_query_cannot_save(self) -> None:
+        source = _chosen_from()
+        writer = _Writer()
+
+        assert source.saves_query() is False
+        with pytest.raises(ValueError, match="governed transform query"):
+            source.save_query(SimpleNamespace(shared_control=writer))
+        assert writer.calls == []
+
+
+class _ColumnWriter:
+    """Stands in for Control: records a mapping save and answers ids."""
+
+    def __init__(self, answer: list[int]) -> None:
+        self.answer = answer
+        self.calls: list[tuple[Any, Any]] = []
+
+    def update_transform_columns(self, transform_id: Any, columns: Any) -> list[int]:
+        self.calls.append((transform_id, columns))
+        return list(self.answer)
+
+
+class TestSavingTheWorkingMapping:
+
+    def _populated_transform(self) -> Transform:
+        _, transform = _populated(_joined([_column(301, "a", 1), _column(302, "b", 2)]))
+        return transform
+
+    def test_a_governed_transform_saves(self) -> None:
+        assert self._populated_transform().saves() is True
+        assert Transform().saves() is False
+
+    def test_the_working_set_is_sent_unchanged_with_its_ids(self) -> None:
+        transform = self._populated_transform()
+        transform.add_column(None)
+        working = transform.columns()
+        writer = _ColumnWriter([301, 302, 999])
+
+        transform.save(SimpleNamespace(shared_control=writer))
+
+        (transform_id, sent), = writer.calls
+        assert transform_id == 20
+        assert [{k: v for k, v in one.items() if k != "transform_column_id"}
+                for one in sent] == working
+        assert [one["transform_column_id"] for one in sent] == [301, 302, None]
+
+    def test_the_saved_ids_become_its_stored_identities(self) -> None:
+        transform = self._populated_transform()
+        transform.add_column(None)
+
+        transform.save(SimpleNamespace(shared_control=_ColumnWriter([301, 302, 999])))
+
+        assert transform.column_ids() == [301, 302, 999]
+        assert transform.column_ordinals() == [1, 2, 3]
+
+    def test_a_transform_with_nothing_governed_cannot_save(self) -> None:
+        with pytest.raises(ValueError, match="governed file"):
+            Transform().save(SimpleNamespace(shared_control=_ColumnWriter([])))
+
+
+class TestAGovernedDeclarationResolvesWithItsPersistence:
+
+    def test_the_persistence_travels_to_the_built_transform(self, monkeypatch) -> None:
+        from rey_lib.load import load_operation
+
+        seen: dict[str, Any] = {}
+
+        def build(_ctx: Any, _cfg: Any, declared: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return declared
+
+        monkeypatch.setattr(load_operation, "_build_transform", build)
+        _, transform = _populated(_joined([_column(301, "a", 1)]))
+
+        transform.resolve(SimpleNamespace())
+
+        assert transform.selected_kind() == "declaration"
+        assert seen["persistence"].transform_id == 20

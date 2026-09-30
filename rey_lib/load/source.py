@@ -60,7 +60,9 @@ class _Kind:
 
 #: The kinds a Source can be, in the order a reader is offered them.
 SOURCE_KINDS: tuple[_Kind, ...] = (
-    _Kind("file", ("file", "file-type"), ("file",)),
+    # `file-mutation-id` names WHICH governed mutation `file` is the path of,
+    # where the source was populated from a governed file. Never required.
+    _Kind("file", ("file", "file-type", "file-mutation-id"), ("file",)),
     _Kind("database", ("source-connection", "statement"),
           ("source-connection", "statement")),
     _Kind("sql_file", ("source-connection", "sql-file"),
@@ -213,9 +215,22 @@ class Source:
                 f"Source: '{name}' is not a source field. "
                 f"Fields: {', '.join(SOURCE_FIELDS)}."
             )
-        # AN EDIT CHANGES THIS VALUE AND NOTHING ELSE. The governed context was
-        # the hydrated starting state and stays for the object's lifetime.
+        # AN EDIT CHANGES THIS VALUE AND NOTHING ELSE -- with one exception: a
+        # governed mutation chosen by id brings its own path and resolved SQL.
+        # The governed context stays for the object's lifetime.
         self._values[name] = value
+        if name == "file-mutation-id":
+            chosen = self._mutation_choice(value)
+            if chosen is not None:
+                self._values["file"] = chosen.get("path") or ""
+                self._values["statement"] = chosen.get("resolved_query_sql") or ""
+
+    def _mutation_choice(self, file_mutation_id: Any) -> Optional[dict[str, Any]]:
+        """The governed mutation choice with this id, or None."""
+        for choice in (self._governed or {}).get("mutation_choices") or []:
+            if str(choice.get("file_mutation_id")) == str(file_mutation_id):
+                return dict(choice)
+        return None
 
     # -- governed context ----------------------------------------------------
 
@@ -231,6 +246,40 @@ class Source:
     def governed_context(self) -> Optional[dict[str, Any]]:
         """The governed facts last observed for this source, or None."""
         return None if self._governed is None else dict(self._governed)
+
+    def saves_query(self) -> bool:
+        """Whether this source's statement can be saved as a governed template."""
+        return (self._governed or {}).get("transform_query_id") is not None
+
+    def save_query(self, ctx: Any) -> None:
+        """Save the working statement as the governed transform's template.
+
+        THE SOURCE SAVES ITSELF: it holds the transform_query_id and the
+        statement, and persists them through the runtime's own database access.
+        Both are handed over exactly as held; the database owns turning the
+        reader's file argument into the template token.
+
+        Args:
+            ctx: The runtime context, whose control database this is saved to.
+
+        Raises:
+            ValueError: If this source was not populated from a governed file
+                that holds a transform query.
+            ConfigError: If the runtime has no control database.
+        """
+        if not self.saves_query():
+            raise ValueError(
+                "Source: only a source populated from a governed transform query can save it."
+            )
+        # Imported here: the bootstrap reaches the load package, not the other way.
+        from rey_lib.config.bootstrap import open_shared_control
+
+        control = open_shared_control(ctx).shared_control
+        if control is None:
+            raise ConfigError("Source: this runtime has no control database to save to.")
+        control.update_transform_query_sql(
+            self._governed["transform_query_id"], self._values.get("statement"),
+        )
 
     # -- execution -----------------------------------------------------------
 

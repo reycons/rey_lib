@@ -32,7 +32,7 @@ from rey_lib.load.source import Source
 from rey_lib.load.target import Target
 from rey_lib.load.transform import Transform
 
-__all__ = ["run_selected_load"]
+__all__ = ["load_arguments", "preview_selected", "run_selected_load", "source_columns"]
 
 
 def run_selected_load(
@@ -108,3 +108,100 @@ def run_selected_load(
         ctx=ctx, run_log=run_log, loader=loader, movements=None,
         load_name=name if shape in ("direct", "manifest") else f"query:{name}",
     )
+
+
+def source_columns(
+    ctx: Any,
+    source: Source,
+    *,
+    reader: Optional[SourceContextReader] = None,
+) -> list[str]:
+    """The columns the Source's selected configuration carries, read through it.
+
+    Args:
+        ctx: The runtime context, for configured connections.
+        source: The canonical Source.
+        reader: Whatever answers the source-context contract. Needed only for
+            a manifest source.
+
+    Returns:
+        The source's own column names, or none where it is not complete.
+
+    Raises:
+        ConfigError: If a named source cannot be resolved.
+    """
+    if source.validate():
+        return []
+    resolved = source.resolve(ctx, reader=reader, adapter=load_operation._read_adapter)
+    return list(resolved.source_structure())
+
+
+def preview_selected(
+    ctx: Any,
+    source: Source,
+    transform: Transform,
+    *,
+    limit: int,
+    reader: Optional[SourceContextReader] = None,
+) -> load_operation.LoadPreview:
+    """The first records the objects would carry, through the objects themselves.
+
+    The Source and Transform each resolve through their own contract, as
+    :func:`run_selected_load` resolves them, and the resolved source is SAMPLED
+    rather than read. A Source that is not complete is answered empty; a
+    Transform that is not complete shows the rows as they came.
+
+    Args:
+        ctx: The runtime context, for configured connections.
+        source: The canonical Source.
+        transform: The canonical Transform.
+        limit: How many records at most.
+        reader: Whatever answers the source-context contract. Needed only for
+            a manifest source.
+
+    Returns:
+        The produced columns, the records, and whether the source held more.
+
+    Raises:
+        ConfigError: If a named source or transform cannot be resolved.
+    """
+    if source.validate():
+        return load_operation.LoadPreview()
+    resolved = source.resolve(ctx, reader=reader, adapter=load_operation._read_adapter)
+    built = (
+        load_operation._build_transform(ctx, None, None)
+        if transform.validate() else transform.resolve(ctx)
+    )
+    # ONE MORE THAN ASKED FOR, which is how "there is more" is established.
+    sampled = resolved.sample(limit + 1)
+    return load_operation.LoadPreview(
+        columns=tuple(built.columns_for_names(list(resolved.source_structure()))),
+        rows=tuple(
+            load_operation._for_display(row) for row in built.transform(sampled[:limit])
+        ),
+        truncated=len(sampled) > limit,
+    )
+
+
+def load_arguments(source: Source, transform: Transform, target: Target) -> dict[str, Any]:
+    """The objects' execution arguments: each selected configuration, as held.
+
+    The inverse of rey_loader's parsing of its arguments into these objects: an
+    object's field names ARE the loader's option names, so its selected
+    configuration is its part of the invocation. Unset values are dropped;
+    nothing is resolved or validated here -- the objects the invocation builds
+    do that.
+
+    Args:
+        source, transform, target: The load's three canonical objects.
+
+    Returns:
+        Option name to value, for the three selected configurations.
+    """
+    arguments: dict[str, Any] = {}
+    for one in (source, transform, target):
+        for name, value in one.configuration().items():
+            if value in (None, "", False):
+                continue
+            arguments[name] = value
+    return arguments

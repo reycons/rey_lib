@@ -32,7 +32,6 @@ from rey_lib.load.source import Source
 from rey_lib.load.transform import Transform
 from rey_lib.load.target import Target
 from rey_lib.load.shape import derived_load_shape
-from rey_lib.load.inspection import inspection_arguments
 from rey_lib.load.execution import run_selected_load
 
 __all__ = [
@@ -44,6 +43,5 @@ __all__ = [
     "Target",
     "Transform",
     "derived_load_shape",
-    "inspection_arguments",
     "run_selected_load",
 ]

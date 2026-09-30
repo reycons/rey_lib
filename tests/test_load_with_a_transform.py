@@ -149,46 +149,6 @@ class TestAQueryLoadRunsIt:
         ]
 
 
-class TestTheScreenSeesWhatTheLoadWillDo:
-    """Preview and the endpoint inspection run the SAME transform."""
-
-    def test_the_preview_shows_the_transformed_records(self, named) -> None:
-        found = load_operation.preview_load(
-            named, statement="SELECT a, b FROM orders ORDER BY a",
-            source_connection="w", declaration=DECLARATION,
-        )
-
-        assert found.columns == ("identifier", "label")
-        # As TEXT: a preview is a display, and every value is its own text. The
-        # transform's answer is unchanged -- what it renamed is still renamed,
-        # and a column it formatted keeps the formatting it gave.
-        assert found.rows == (
-            {"identifier": "1", "label": "x"}, {"identifier": "2", "label": "y"},
-        )
-
-    def test_a_prospective_destination_gets_the_declared_columns(
-        self, named, tmp_path
-    ) -> None:
-        """A file has no columns until it is written, and what WOULD be
-        written is now the transform's output rather than the query's.
-        """
-        found = load_operation.inspect_load_endpoints(
-            named, statement="SELECT a, b FROM orders", source_connection="w",
-            out_file=str(tmp_path / "rows.csv"), transform=DECLARATION,
-        )
-
-        assert found.source == ("identifier", "label")
-        assert found.destination == ("identifier", "label")
-
-    def test_without_one_they_are_the_source_s_own_names(self, named, tmp_path) -> None:
-        found = load_operation.inspect_load_endpoints(
-            named, statement="SELECT a, b FROM orders", source_connection="w",
-            out_file=str(tmp_path / "rows.csv"),
-        )
-
-        assert found.source == ("a", "b")
-
-
 class _Log:
     def append(self, *_a, **_k) -> None:
         pass

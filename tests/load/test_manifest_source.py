@@ -728,3 +728,21 @@ class TestWhetherTheTransformIsOn:
         )
 
         assert source.column_transform() is not None
+
+
+class TestTheMutationChoicesAreKeptAsReturned:
+
+    def test_they_are_exposed_as_returned(self) -> None:
+        choices = [{"file_mutation_id": 25, "result": "inventoried",
+                    "path": "/a", "resolved_query_sql": "SELECT 1"}]
+        reader = CountingReader([
+            {**row, "mutation_choices": choices} for row in _joined_rows()
+        ])
+
+        source = ManifestSource.create(reader, file_manifest_id=10, file_type_id=4)
+
+        assert source.mutation_choices == choices
+        assert len(reader.calls) == 1
+
+    def test_a_read_without_them_holds_none(self, source) -> None:
+        assert source.mutation_choices == []

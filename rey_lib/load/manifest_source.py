@@ -51,6 +51,7 @@ is the entire point of there being one.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
@@ -139,6 +140,12 @@ class ManifestSource:
         self.layout: Optional[str] = first["layout"]
         #: The SQL the database resolved for this file's path, as returned.
         self.resolved_query_sql: Optional[str] = first.get("resolved_query_sql")
+        #: The governed query row this file's SQL template is stored in.
+        self.transform_query_id: Optional[int] = _as_int(first.get("transform_query_id"))
+        #: The manifest's live mutations, each with its path and resolved SQL.
+        self.mutation_choices: list[dict[str, Any]] = [
+            dict(one) for one in (first.get("mutation_choices") or [])
+        ]
 
         #: The file facts, as the contract returned them. Read-only.
         self.file_facts: dict[str, Any] = {
@@ -464,6 +471,8 @@ class ManifestSource:
             "installation_id": self.installation_id,
             "data_profile_id": self.data_profile_id,
             "file_name": self.file_facts.get("file_name"),
+            "mutation_choices": [dict(one) for one in self.mutation_choices],
+            "transform_query_id": self.transform_query_id,
         }
 
     def populate(self, source: Any, transform: Any) -> None:
@@ -473,9 +482,11 @@ class ManifestSource:
         step and the CLI hand their own instances here rather than each reading
         the context its own way.
 
-        The Source is POPULATED: it selects manifest and holds the identities the
-        contract resolved -- manifest, working mutation, and the governing type
-        where one is active -- as its own configuration. It is then told its
+        The Source is POPULATED AS AN ORDINARY SOURCE: it selects database, with
+        the SQL the database resolved as its statement and the working
+        mutation's path as its file, and holds the identities the contract
+        resolved -- manifest, working mutation, and the governing type where one
+        is active -- as its own configuration. It is then told its
         governed context, a fact about the file and never configuration. The
         Transform is given the stored definition as its
         Manifest configuration ONLY where the definition is switched on and a
@@ -489,7 +500,9 @@ class ManifestSource:
         # THE SOURCE IS POPULATED FROM THE RESOLVED CONTEXT: the kind, and the
         # identities the contract resolved -- the working mutation, and the
         # governing type where one is active. Its own configuration, not context.
-        source.select("manifest")
+        source.select("database")
+        source.update("statement", self.resolved_query_sql or "")
+        source.update("file", self.path or "")
         source.update("file-manifest-id", str(self.file_manifest_id))
         source.update("file-mutation-id", str(self.file_mutation_id))
         if self.requested_file_type_id is not None:
@@ -500,8 +513,10 @@ class ManifestSource:
         built = self.column_transform() if self.transform_is_enabled else None
         if built is None:
             return
-        transform.select("manifest")
-        transform.update("declaration", deepcopy(dict(built.declaration)))
+        # THE DECLARATION KIND, in its own JSON form: the governed mapping is an
+        # ordinary declaration, with its stored facts beside it.
+        transform.select("declaration")
+        transform.update("transform", json.dumps(deepcopy(dict(built.declaration)), indent=2))
         # THE PERSISTED FACTS, held beside the declaration and never inside it:
         # each column's row id and its stored ordinal, aligned to the entries.
         transform.update("persistence", {

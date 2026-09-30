@@ -79,7 +79,9 @@ class TestTheKindsAndTheSelection:
         source.update("statement", "select 1")
         source.select("file")
 
-        assert source.configuration() == {"file": "/data/a.csv", "file-type": None}
+        assert source.configuration() == {
+            "file": "/data/a.csv", "file-type": None, "file-mutation-id": None,
+        }
         assert source.value("statement") == "select 1"
 
     def test_an_unknown_kind_is_refused(self) -> None:

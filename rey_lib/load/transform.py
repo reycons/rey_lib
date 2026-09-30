@@ -133,6 +133,9 @@ class Transform:
         # CONTEXT, NOT CONFIGURATION: the columns the source was last observed
         # to carry. Never in `declaration()`, never persisted.
         self._source_columns: tuple[str, ...] = ()
+        # EPHEMERAL OUTPUT, not configuration: the last preview produced through
+        # this transform. Never in `declaration()`, never persisted or run.
+        self._preview: Optional[dict[str, Any]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -232,6 +235,71 @@ class Transform:
         """
         self._source_columns = tuple(str(one) for one in (columns or ()))
 
+    def source_columns(self) -> list[str]:
+        """The columns the source was last observed to carry."""
+        return list(self._source_columns)
+
+    def observe_preview(self, preview: Optional[Mapping[str, Any]]) -> None:
+        """Hold the last preview produced through this transform, or None.
+
+        Ephemeral output: nothing about what is declared, selected or valid
+        changes, and it is never part of the declarative form.
+        """
+        self._preview = deepcopy(dict(preview)) if preview is not None else None
+
+    def current_preview(self) -> Optional[dict[str, Any]]:
+        """The last preview produced through this transform, or None."""
+        return deepcopy(self._preview) if self._preview is not None else None
+
+    # -- persistence ---------------------------------------------------------
+
+    def saves(self) -> bool:
+        """Whether this transform can save its mapping to a governed transform."""
+        if self.selected_kind() not in _AUTHORED_IN:
+            return False
+        persistence = self._values.get("persistence")
+        return _held(persistence) and dict(persistence).get("transform_id") is not None
+
+    def save(self, ctx: Any) -> None:
+        """Save the working column mapping to the governed transform it came from.
+
+        THE TRANSFORM SAVES ITSELF: every entry of :meth:`columns` is sent as it
+        stands, with the stored ``transform_column_id`` it is aligned to (None
+        for one no stored row stands behind), through the runtime's own database
+        access. The database owns how they become rows; the ids it answers with,
+        in working order, become this transform's stored identities.
+
+        Args:
+            ctx: The runtime context, whose control database this is saved to.
+
+        Raises:
+            ValueError: If this transform holds no governed transform to save to.
+            ConfigError: If the runtime has no control database.
+        """
+        if not self.saves():
+            raise ValueError(
+                "Transform: only a transform populated from a governed file can save it."
+            )
+        declared, columns, aligned = self._authoring()
+        ids = list((aligned or {}).get("column_ids") or [None] * len(columns))
+        entries = [
+            {**deepcopy(entry), "transform_column_id": ids[at] if at < len(ids) else None}
+            for at, entry in enumerate(columns)
+        ]
+        # Imported here: the bootstrap reaches the load package, not the other way.
+        from rey_lib.config.bootstrap import open_shared_control
+
+        control = open_shared_control(ctx).shared_control
+        if control is None:
+            raise ConfigError("Transform: this runtime has no control database to save to.")
+        saved = control.update_transform_columns(
+            dict(self._values["persistence"])["transform_id"], entries,
+        )
+        self._write(declared, columns, {
+            "column_ids": list(saved),
+            "column_ordinals": list(range(1, len(saved) + 1)),
+        })
+
     def in_force_declaration(self) -> Optional[dict[str, Any]]:
         """The selected kind's declaration as data, or None where there is none to read.
 
@@ -288,7 +356,7 @@ class Transform:
         ``column_ordinals`` only where the persistence stored them -- none are
         manufactured for one that never had them.
         """
-        if self.selected_kind() != "manifest":
+        if self.selected_kind() not in _AUTHORED_IN:
             return None
         persistence = self._values.get("persistence")
         if not _held(persistence):
@@ -431,8 +499,8 @@ class Transform:
         if kind == "declaration":
             # JSON text: the loader parameter's own form, read by `parse_yaml`.
             self._values["transform"] = json.dumps(written, indent=2)
-            return
-        self._values["declaration"] = written
+        else:
+            self._values["declaration"] = written
         # ONLY WHAT IS HELD. No stored fact is manufactured for a declaration
         # that was never stored, nor a key a persistence never had.
         if aligned:
@@ -495,9 +563,10 @@ class Transform:
             ConfigError: As :meth:`executed_declaration` refuses.
         """
         declared = self.executed_declaration()
-        # MANIFEST PERSISTENCE travels only where it is held, exactly as before.
-        persistence = self.configuration().get("persistence")
-        if self.selected_kind() == "manifest" and _held(persistence):
+        # GOVERNED PERSISTENCE travels only where it is held, for the kinds
+        # authored here.
+        persistence = self._values.get("persistence")
+        if self.selected_kind() in _AUTHORED_IN and _held(persistence):
             return load_operation._build_transform(
                 ctx, None, declared, persistence=_persistence(persistence),
             )

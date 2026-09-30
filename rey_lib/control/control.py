@@ -32,6 +32,7 @@ exactly as it did before.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional, Sequence
 
 from rey_lib.db.connection import shared_connection
@@ -1196,6 +1197,33 @@ class Control:
                      "evidence", "producer", "data_profile_key"):
             values[name] = fields.get(name)
         self._call("update_file_manifest", values, required=required)
+
+    def update_transform_query_sql(self, transform_query_id: int, query_sql: str,
+                                   required: bool = True) -> None:
+        """Save a working query as its transform's template.
+
+        The SQL is handed over exactly as given; the routine owns turning its
+        reader's file argument into the template token.
+        """
+        self._call("update_transform_query_sql", {
+            "transform_query_id": transform_query_id,
+            "query_sql": query_sql,
+        }, required=required)
+
+    def update_transform_columns(self, transform_id: int, columns: list[dict[str, Any]],
+                                 required: bool = True) -> list[int]:
+        """Save a transform's working column mapping; answer the saved ids in order.
+
+        The entries are handed over exactly as given; the routine owns how they
+        become rows -- updated, inserted, or kept as not exported.
+        """
+        saved = self._call("update_transform_columns", {
+            "transform_id": transform_id,
+            "columns": columns,
+        }, required=required)
+        if isinstance(saved, str):
+            saved = json.loads(saved)
+        return [int(one) for one in (saved or [])]
 
     def ai_configuration(self, installation: str,
                          required: bool = True) -> list[dict[str, Any]]:
