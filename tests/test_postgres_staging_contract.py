@@ -368,3 +368,58 @@ class TestWhatIsRefusedBeforeAnyDDLIsComposed:
             )
 
         assert "no columns" in str(raised.value)
+
+
+class TestColumnNamesAreQuotedNotRefused:
+    """The transform's projected names reach the DDL quoted, whatever they are.
+
+    Schema and table still take the plain-name boundary; a column is always
+    written through ``_quoted_identifier``, so only what PostgreSQL cannot
+    represent as a quoted identifier is refused.
+    """
+
+    def test_a_name_with_a_space_is_created_quoted(
+        self, core: _CoreConnection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _columns_are(monkeypatch, [])
+
+        postgres_utils.create_staging_table_if_not_exists(
+            _Connection(), "testing", "test3",
+            [("Security Description", "VARCHAR(40)"), ("d", "DATE")],
+        )
+
+        assert '"Security Description" VARCHAR(40) NULL' in core.statements[0]
+
+    def test_an_embedded_quote_is_doubled(
+        self, core: _CoreConnection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _columns_are(monkeypatch, [])
+
+        postgres_utils.create_staging_table_if_not_exists(
+            _Connection(), "testing", "test3", [('say "hi"', "TEXT")],
+        )
+
+        assert '"say ""hi""" TEXT NULL' in core.statements[0]
+
+    @pytest.mark.parametrize("name", ["", "nul\x00here"])
+    def test_an_empty_name_or_a_nul_byte_is_refused(
+        self, core: _CoreConnection, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        _columns_are(monkeypatch, [])
+
+        with pytest.raises(DatabaseError, match="Invalid PostgreSQL column name"):
+            postgres_utils.create_staging_table_if_not_exists(
+                _Connection(), "testing", "test3", [(name, "TEXT")],
+            )
+        assert core.statements == []
+
+    @pytest.mark.parametrize(
+        "schema,table", [("test ing", "test3"), ("testing", "test 3")],
+    )
+    def test_schema_and_table_keep_the_plain_name_boundary(
+        self, core: _CoreConnection, schema: str, table: str
+    ) -> None:
+        with pytest.raises(DatabaseError, match="Invalid PostgreSQL identifier"):
+            postgres_utils.create_staging_table_if_not_exists(
+                _Connection(), schema, table, [("Security Description", "TEXT")],
+            )

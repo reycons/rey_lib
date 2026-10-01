@@ -618,8 +618,9 @@ def bulk_insert(
         How many rows were inserted.
 
     Raises:
-        DatabaseError: If an identifier is not a plain name, or the insert
-            fails.
+        DatabaseError: If the schema or table is not a plain name, a column
+            name cannot be a quoted identifier (see ``_validate_column_name``),
+            or the insert fails.
     """
     if batch_size < 1:
         raise DatabaseError(
@@ -632,7 +633,7 @@ def bulk_insert(
     _validate_identifier(schema, "schema")
     _validate_identifier(table, "table")
     for name in columns:
-        _validate_identifier(name, "column")
+        _validate_column_name(name)
 
     from rey_lib.db._sqlalchemy import core_connection
 
@@ -788,7 +789,7 @@ def create_staging_table_if_not_exists(
     _validate_identifier(schema, "schema")
     _validate_identifier(table, "table")
     for name, sql_type in column_defs:
-        _validate_identifier(name, "column")
+        _validate_column_name(name)
         _validate_column_type(sql_type)
 
     if table_exists(conn, schema, table):
@@ -855,6 +856,35 @@ def _validate_identifier(name: str, label: str) -> None:
         raise DatabaseError(
             f"Invalid PostgreSQL identifier for {label}: '{name}'. "
             "Only alphanumeric characters and underscores are permitted."
+        )
+
+
+def _validate_column_name(name: str) -> None:
+    """Refuse a column name PostgreSQL cannot represent as a quoted identifier.
+
+    A column is named by the transform's projection -- ``Security Description``
+    as readily as ``account`` -- and is ALWAYS written quoted, through
+    ``_quoted_identifier`` in DDL and SQLAlchemy's quoting in an insert. So the
+    plain-name pattern schema and table still take does not apply: any
+    non-empty column name PostgreSQL can represent as a quoted identifier is
+    accepted. What it cannot represent is an empty name (``""`` is a
+    zero-length delimited identifier, which PostgreSQL refuses) and a NUL byte
+    (which no PostgreSQL text can hold).
+
+    Args:
+        name: The candidate column name.
+
+    Raises:
+        DatabaseError: If it is empty or contains a NUL byte.
+    """
+    if not isinstance(name, str) or name == "":
+        raise DatabaseError(
+            f"Invalid PostgreSQL column name: {name!r}. A column needs a name."
+        )
+    if "\x00" in name:
+        raise DatabaseError(
+            f"Invalid PostgreSQL column name: {name!r}. "
+            "A NUL byte cannot appear in a PostgreSQL identifier."
         )
 
 

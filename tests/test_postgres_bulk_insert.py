@@ -109,11 +109,48 @@ class TestIdentifiersAreNotValues:
                 None, identifier, "file_stage", [{"a": 1}], ["a"]
             )
 
-    def test_a_column_is_checked_too(self, core: _CoreConnection) -> None:
-        with pytest.raises(DatabaseError, match="Invalid PostgreSQL identifier"):
-            postgres_utils.bulk_insert(
-                None, "code", "file_stage", [{"a": 1}], ["a); DROP TABLE x --"]
-            )
+
+
+class TestColumnNamesAreQuotedNotRefused:
+    """A column is named by the transform's projection and always quoted.
+
+    So any name PostgreSQL can represent as a quoted identifier is accepted;
+    only an empty name and a NUL byte are refused.
+    """
+
+    @staticmethod
+    def _rendered(core: _CoreConnection) -> str:
+        from sqlalchemy.dialects import postgresql
+
+        statement, _parameters = core.executions[0]
+        return str(statement.compile(dialect=postgresql.dialect()))
+
+    def test_a_name_with_a_space_is_inserted_quoted(self, core: _CoreConnection) -> None:
+        postgres_utils.bulk_insert(
+            None, "testing", "test3", [{"Security Description": "x"}],
+            ["Security Description"],
+        )
+
+        assert '"Security Description"' in self._rendered(core)
+        assert core.executions[0][1] == [{"Security Description": "x"}]
+
+    def test_a_hostile_name_is_quoted_whole_rather_than_obeyed(
+        self, core: _CoreConnection,
+    ) -> None:
+        postgres_utils.bulk_insert(
+            None, "code", "file_stage", [{"a); DROP TABLE x --": 1}],
+            ["a); DROP TABLE x --"],
+        )
+
+        assert '"a); DROP TABLE x --"' in self._rendered(core)
+
+    @pytest.mark.parametrize("name", ["", "nul\x00here"])
+    def test_an_empty_name_or_a_nul_byte_is_refused(
+        self, core: _CoreConnection, name: str,
+    ) -> None:
+        with pytest.raises(DatabaseError, match="Invalid PostgreSQL column name"):
+            postgres_utils.bulk_insert(None, "code", "file_stage", [{name: 1}], [name])
+        assert core.executions == []
 
 
 class TestBatching:
