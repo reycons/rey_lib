@@ -122,6 +122,7 @@ class TestTheSourceIsToldTheGovernedFacts:
                 {"transform_id": 20, "transform_name": None, "is_default": True},
             ],
             "selected_transform_id": 20,
+            "unsaved": False,
         }
 
     def test_a_file_with_no_profile_still_has_its_context(self) -> None:
@@ -560,3 +561,115 @@ class TestSavedSettingsSelectTheTransform:
 
     def test_profile_fields_are_not_doubled_by_a_second_transform(self) -> None:
         assert len(_manifest(self._two()).data_profile().fields) == 2
+
+
+class _Maintaining:
+    """What answers maintain_transform, recording each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def maintain_transform(self, file_type_id: Any = None, **values: Any) -> None:
+        self.calls.append({"file_type_id": file_type_id, **values})
+
+
+class TestSavedSettingsAreEditedThenSaved:
+    """Edits change the working choices; Save persists only what changed."""
+
+    _two = staticmethod(TestSavedSettingsSelectTheTransform._two)
+
+    def test_a_rename_is_working_until_saved(self) -> None:
+        governed = _manifest(self._two())
+
+        governed.edit_transform(21, "transform_name", "wide")
+
+        assert governed.unsaved() is True
+        assert governed.governed_context()["unsaved"] is True
+        assert [one["transform_name"] for one in governed.transform_choices] == ["t20", "wide"]
+
+    def test_making_one_the_default_clears_the_other(self) -> None:
+        governed = _manifest(self._two())
+
+        governed.edit_transform(21, "is_default", True)
+
+        assert [one["is_default"] for one in governed.transform_choices] == [False, True]
+
+    def test_a_foreign_transform_and_another_field_are_refused(self) -> None:
+        governed = _manifest(self._two())
+
+        with pytest.raises(DataStructureError, match="transform 99"):
+            governed.edit_transform(99, "transform_name", "x")
+        with pytest.raises(ValueError, match="cannot be edited"):
+            governed.edit_transform(20, "row_filter", None)
+
+    def test_save_renames_then_moves_the_default_with_make_default_alone(self) -> None:
+        governed = _manifest(self._two())
+        control = _Maintaining()
+        governed.edit_transform(21, "transform_name", "wide")
+        governed.edit_transform(21, "is_default", True)
+
+        governed.save_transforms(control)
+
+        assert control.calls == [
+            {"file_type_id": 4, "action": "name_change", "transform_id": 21,
+             "transform_name": "wide"},
+            {"file_type_id": 4, "action": "make_default", "transform_id": 21},
+        ]
+
+    def test_removing_the_default_sends_clear_default_alone(self) -> None:
+        governed = _manifest(self._two())
+        control = _Maintaining()
+        governed.edit_transform(20, "is_default", False)
+
+        governed.save_transforms(control)
+
+        assert control.calls == [
+            {"file_type_id": 4, "action": "clear_default", "transform_id": 20},
+        ]
+
+    def test_nothing_changed_sends_nothing(self) -> None:
+        governed = _manifest(self._two())
+        control = _Maintaining()
+
+        governed.save_transforms(control)
+
+        assert control.calls == []
+
+    def test_after_save_the_retained_rows_carry_it_and_nothing_is_unsaved(self) -> None:
+        governed = _manifest(self._two())
+        governed.edit_transform(21, "transform_name", "wide")
+        governed.edit_transform(21, "is_default", True)
+
+        governed.save_transforms(_Maintaining())
+
+        assert governed.unsaved() is False
+        rows_21 = [row for row in governed._rows if row["transform_id"] == 21]
+        assert {row["transform_name"] for row in rows_21} == {"wide"}
+        assert {row["transform_is_default"] for row in rows_21} == {True}
+        assert _transform_choices_after_reread(governed) == governed.transform_choices
+
+    def test_saving_reads_nothing_and_leaves_the_selection(self) -> None:
+        reads: list[int] = []
+
+        class _Counting(_Reader):
+            def file_source_context(self, *args: Any, **kwargs: Any):
+                reads.append(1)
+                return super().file_source_context(*args, **kwargs)
+
+        governed = ManifestSource.create(
+            _Counting(self._two()), file_manifest_id=10, adopt_persisted_type=True,
+        )
+        governed.select_transform(21)
+        governed.edit_transform(20, "transform_name", "standard")
+
+        governed.save_transforms(_Maintaining())
+
+        assert len(reads) == 1
+        assert governed.selected_transform_id == 21
+
+
+def _transform_choices_after_reread(governed: ManifestSource) -> list[dict[str, Any]]:
+    """The choices the retained rows now give, as a fresh read would."""
+    from rey_lib.load.manifest_source import _transform_choices
+
+    return _transform_choices(governed._rows)

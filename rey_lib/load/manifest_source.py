@@ -130,6 +130,9 @@ class ManifestSource:
         self._rows: list[dict[str, Any]] = [dict(row) for row in rows]
         #: The saved settings -- every transform of the file's type.
         self.transform_choices: list[dict[str, Any]] = _transform_choices(self._rows)
+        #: The choices as last read or saved -- what ``unsaved`` compares the
+        #: working ``transform_choices`` against.
+        self._saved_choices: list[dict[str, Any]] = deepcopy(self.transform_choices)
 
         first = self._rows[0]
         self.file_manifest_id: int = int(first["file_manifest_id"])
@@ -157,6 +160,81 @@ class ManifestSource:
         self.select_transform(None)
 
     # -- the saved settings -------------------------------------------------
+
+    def edit_transform(self, transform_id: int, field: str, value: Any) -> None:
+        """Edit one saved setting's name or default, in the WORKING choices only.
+
+        Nothing is persisted until ``save_transforms``. Making one transform
+        the default clears the others, as the one-default rule will on save.
+
+        Args:
+            transform_id: One of the file type's transforms.
+            field: ``transform_name`` or ``is_default``.
+            value: The new name, or whether it is the default.
+
+        Raises:
+            DataStructureError: If the transform is not one of the file type's.
+            ValueError: If ``field`` is neither of the two.
+        """
+        if field not in ("transform_name", "is_default"):
+            raise ValueError(
+                f"ManifestSource: a saved setting's {field!r} cannot be edited; "
+                "only transform_name and is_default."
+            )
+        chosen = int(transform_id)
+        _selected(self.transform_choices, chosen)  # refuses a foreign transform
+        for one in self.transform_choices:
+            if field == "transform_name" and one["transform_id"] == chosen:
+                one["transform_name"] = value
+            elif field == "is_default":
+                if one["transform_id"] == chosen:
+                    one["is_default"] = bool(value)
+                elif bool(value):
+                    one["is_default"] = False
+
+    def unsaved(self) -> bool:
+        """Whether a name or default edit differs from what was last saved."""
+        return self.transform_choices != self._saved_choices
+
+    def save_transforms(self, control: Any) -> None:
+        """Persist the working names and default through the maintenance routine.
+
+        A renamed transform -> ``name_change``. The default by its change only:
+        moved to another transform -> ``make_default`` for it ALONE (the
+        routine clears the other atomically); removed -> ``clear_default`` for
+        the one that had it; unchanged -> nothing. Afterwards the retained rows
+        and saved choices reflect what was saved -- no re-read. The selection is
+        untouched.
+
+        Args:
+            control: What answers ``maintain_transform``.
+        """
+        saved = {one["transform_id"]: one for one in self._saved_choices}
+        for one in self.transform_choices:
+            before = saved.get(one["transform_id"])
+            if before is not None and one["transform_name"] != before["transform_name"]:
+                control.maintain_transform(
+                    self.persisted_file_type_id, action="name_change",
+                    transform_id=one["transform_id"],
+                    transform_name=one["transform_name"],
+                )
+        was = next((one["transform_id"] for one in self._saved_choices if one["is_default"]), None)
+        now = next((one["transform_id"] for one in self.transform_choices if one["is_default"]), None)
+        if now is not None and now != was:
+            control.maintain_transform(
+                self.persisted_file_type_id, action="make_default", transform_id=now,
+            )
+        elif now is None and was is not None:
+            control.maintain_transform(
+                self.persisted_file_type_id, action="clear_default", transform_id=was,
+            )
+        working = {one["transform_id"]: one for one in self.transform_choices}
+        for row in self._rows:
+            one = working.get(_as_int(row.get("transform_id")))
+            if one is not None:
+                row["transform_name"] = one["transform_name"]
+                row["transform_is_default"] = one["is_default"]
+        self._saved_choices = deepcopy(self.transform_choices)
 
     def select_transform(self, transform_id: Optional[int]) -> None:
         """Make one transform of the file's type the selected one, in memory.
@@ -515,6 +593,8 @@ class ManifestSource:
             # THE SAVED SETTINGS, and the one selected -- None while unresolved.
             "transform_choices": [dict(one) for one in self.transform_choices],
             "selected_transform_id": self.selected_transform_id,
+            # Whether a name or default edit is waiting to be saved.
+            "unsaved": self.unsaved(),
         }
 
     def populate(self, source: Any, transform: Any) -> None:
