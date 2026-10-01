@@ -1487,44 +1487,48 @@ class Control:
             "file_mutation_id": file_mutation_id,
         }, required=required)
 
-    def maintain_transform(self, file_type_id: int, mode: str = "ensure",
+    def maintain_transform(self, file_type_id: Optional[int] = None,
+                           action: str = "ensure",
+                           transform_id: Optional[int] = None,
+                           transform_name: Optional[str] = None,
+                           column_source: Optional[str] = None,
                            required: bool = True) -> None:
-        """Complete one file type's transform definition, or restore it.
+        """Maintain a file type's transforms through the one routine that does.
 
-        **The routine owns the work, and this owns none of it.** Seeding and
-        repairing a definition writes three related tables under set-based
-        rules -- one active transform, one column per profile field, one query
-        row, nothing overwritten -- and ``control.p_transform_maintain`` is
-        where those rules live. There is no SQL here, no transform row built
-        here and no loop over columns here, deliberately: a second copy of the
-        population rules in Python is where they drift from the schema that
-        enforces them.
+        **The routine owns the work, and this owns none of it.**
+        ``control.p_transform_maintain`` creates, regenerates, renames and sets
+        the default of transforms under set-based rules; there is no SQL here
+        and no second copy of those rules in Python.
 
         Args:
-            file_type_id: The file type whose definition is maintained. It must
-                belong to this control object's installation; the routine
-                refuses the pair otherwise rather than matching nothing and
-                reporting success.
-            mode: ``ensure`` initialises what is absent and backfills what is
-                missing, never overwriting a customised column, an export
-                decision, an authored query or a chosen enabled state.
-                ``reset`` is DESTRUCTIVE and restores generated defaults.
-                Profiling passes neither and takes the default.
-            required: True, like the other profile writes. A profiled file type
-                always has a definition, so a call that cannot be made is a
-                fault rather than a capability to skip. ``required=False``
-                would also mark control unavailable for everything after it,
-                which is a large consequence for one absent binding.
+            file_type_id: The file type acted on. It must belong to this
+                control object's installation; the routine refuses the pair
+                otherwise.
+            action: ``ensure`` (profiling's: for a type with no transform,
+                create the prepared/sanitized pair; existing transforms are
+                left as they are), ``reset`` (re-create, in place, the type's
+                transform generated from ``column_source``), ``name_change``,
+                ``make_default``, ``clear_default`` or ``new``.
+            transform_id: The transform ``name_change`` / ``make_default`` /
+                ``clear_default`` act on.
+            transform_name: The name ``name_change`` sets, or ``new`` gives.
+            column_source: The generated SQL form -- ``field_name`` or
+                ``prepared_name`` -- that ``reset`` and ``new`` require.
+            required: True, like the other profile writes: a call that cannot
+                be made is a fault rather than a capability to skip.
 
-        installation_id is deliberately absent, as it is from
-        :meth:`create_run_manifest`: the binding declares
-        ``p_installation_id: installation_id`` and the map resolves it from this
-        object's property. Passing it here too would be one value supplied two
-        ways.
+        EVERY VALUE IS SENT, None where not given. The binding declares an
+        input for each, and the procedure map refuses an input that is
+        missing from the call (``_resolve_value``) -- so a value left out is a
+        failed call, not a NULL. installation_id is deliberately absent: the
+        binding resolves it from this object's property.
         """
         self._call("maintain_transform", {
-            "file_type_id": int(file_type_id),
-            "mode":         str(mode),
+            "file_type_id":   None if file_type_id is None else int(file_type_id),
+            "action":         str(action),
+            "transform_id":   None if transform_id is None else int(transform_id),
+            "transform_name": transform_name,
+            "column_source":  column_source,
         }, required=required)
 
     def append_file_mutation(self, file_manifest_id: int, record_type: str,

@@ -42,3 +42,25 @@ def test_an_absent_prepared_name_is_sent_as_none() -> None:
     control.insert_data_profile_field(7, "Run Date", "clear", ordinal=1)
 
     assert calls[0][1]["prepared_name"] is None
+
+
+def test_ensure_sends_every_maintain_transform_value() -> None:
+    """Profiling's call: the binding declares five inputs, and a missing one is
+    refused by the map rather than passed as NULL -- so all five are sent."""
+    control, calls = _recording()
+
+    control.maintain_transform(42)
+
+    assert calls == [("maintain_transform", {
+        "file_type_id": 42, "action": "ensure", "transform_id": None,
+        "transform_name": None, "column_source": None,
+    })]
+
+
+def test_a_re_create_names_its_source() -> None:
+    control, calls = _recording()
+
+    control.maintain_transform(42, action="reset", column_source="prepared_name")
+
+    assert calls[0][1]["action"] == "reset"
+    assert calls[0][1]["column_source"] == "prepared_name"
