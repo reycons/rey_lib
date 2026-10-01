@@ -227,13 +227,14 @@ class ManifestSource:
         self.transform_choices = working
 
     def new_transform(self, control: Any, source: Any, transform: Any) -> None:
-        """Create a transform for the file's type, select it, and hydrate both objects.
+        """Create a transform based on the selected one, select it, and hydrate both objects.
 
-        ``new`` creates it in the ``prepared_name`` form, unnamed, and makes it
-        the type's DEFAULT. The routine returns no id, so this object reads its
-        own context once more -- the one contract ``create`` uses -- and its
-        default selection is then the new transform. ``populate`` hydrates the
-        Source and Transform from it.
+        ``new`` is given the SELECTED transform as its basis; the database
+        decides the rest -- its file type, its form, its name with " 2", and
+        that it is the type's DEFAULT. The routine returns no id, so this object
+        reads its own context once more -- the one contract ``create`` uses --
+        and its default selection is then the new transform. ``populate``
+        hydrates the Source and Transform from it.
 
         Args:
             control: What answers ``maintain_transform`` and the source-context
@@ -242,7 +243,7 @@ class ManifestSource:
             transform: The canonical Transform to hydrate.
         """
         control.maintain_transform(
-            self.persisted_file_type_id, action="new", column_source="prepared_name",
+            self.persisted_file_type_id, action="new", transform_id=self.selected_transform_id,
         )
         rows = list(control.file_source_context(
             file_manifest_id=self.file_manifest_id,

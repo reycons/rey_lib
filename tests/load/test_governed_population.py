@@ -736,14 +736,13 @@ class TestANewSavedSetting:
         source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
         return governed, control, source, transform
 
-    def test_new_sends_the_type_and_the_prepared_name_form_unnamed(self) -> None:
+    def test_new_sends_the_selected_transform_as_its_basis(self) -> None:
         governed, control, source, transform = self._opened()
+        governed.select_transform(21)
 
         governed.new_transform(control, source, transform)
 
-        assert control.calls == [
-            {"file_type_id": 4, "action": "new", "column_source": "prepared_name"},
-        ]
+        assert control.calls == [{"file_type_id": 4, "action": "new", "transform_id": 21}]
 
     def test_the_new_transform_is_a_choice_and_selected(self) -> None:
         governed, control, source, transform = self._opened()
