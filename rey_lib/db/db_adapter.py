@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import importlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from rey_lib.db.routine_call import RoutineCall
@@ -92,6 +92,14 @@ class PageResult:
     offset: int
     limit: int
     next_offset: int | None = None
+    #: A neutral kind per column, where the provider stated one -- e.g.
+    #: ``"document"`` for a structured value. Absent means not stated. The
+    #: vocabulary is the providers'; this type assigns no meaning to any kind.
+    column_kinds: dict[str, str] = field(default_factory=dict)
+    #: The most rows the provider will return per page FOR THIS RESULT, or None
+    #: where it sets no ceiling. Why it set one is the provider's; ``limit``
+    #: already reports the limit actually applied.
+    max_page_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,9 @@ class StatementResult:
     columns: list[str]
     rows: list[dict[str, Any]]
     row_count: int | None = None
+    #: A neutral kind per column, where the provider stated one. See
+    #: ``PageResult.column_kinds``.
+    column_kinds: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

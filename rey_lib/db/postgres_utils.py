@@ -344,6 +344,31 @@ def query_rows(
         raise DatabaseError(f"DBAdapter: query failed: {exc}") from exc
 
 
+#: The PostgreSQL types whose values are structured documents: json, jsonb.
+_DOCUMENT_TYPE_OIDS = frozenset({114, 3802})
+
+#: The most rows one page may hold where a column is a document. A document is
+#: a whole structure per value, so the page is bounded before it is fetched.
+_DOCUMENT_PAGE_SIZE = 50
+
+
+def _column_kinds(description: Any) -> dict[str, str]:
+    """The neutral kind of each column this driver's types can state.
+
+    Read from ``cursor.description``, where ``type_code`` is the column's
+    PostgreSQL type OID. Only ``"document"`` is stated; every other column is
+    left unstated rather than given a kind this module would be guessing.
+    """
+    kinds: dict[str, str] = {}
+    for column in description or []:
+        code = getattr(column, "type_code", None)
+        if code is None and len(column) > 1:
+            code = column[1]
+        if code in _DOCUMENT_TYPE_OIDS:
+            kinds[str(column[0])] = "document"
+    return kinds
+
+
 def execute_statements(
     conn: Any,
     sql_text: str,
@@ -383,6 +408,7 @@ def execute_statements(
                 columns=columns,
                 rows=[dict(zip(columns, row)) for row in values],
                 row_count=_affected(cursor),
+                column_kinds=_column_kinds(description),
             ))
             if len(collected) >= _MAX_RESULT_SETS:
                 raise DatabaseError(
@@ -2584,6 +2610,15 @@ def execute_page(
             # UnsupportedDatabaseCapabilityError.
             _refuse_if_not_pageable(core, wrapped)
             try:
+                # DESCRIBED BEFORE IT IS PAGED. A zero-row read gives the column
+                # types, so a page holding a document is bounded before any of
+                # its rows are fetched rather than trimmed after.
+                described = core.exec_driver_sql(f"SELECT * FROM {wrapped} LIMIT 0")
+                kinds = _column_kinds(described.cursor.description)
+                described.close()
+                if kinds:
+                    limit = min(limit, _DOCUMENT_PAGE_SIZE)
+
                 # Counted with parameters only when a filter supplied one.
                 # Which form of the subquery is used follows from that, and
                 # from nothing else.
@@ -2628,4 +2663,6 @@ def execute_page(
         offset=offset,
         limit=limit,
         next_offset=consumed if consumed < total else None,
+        column_kinds=kinds,
+        max_page_size=_DOCUMENT_PAGE_SIZE if kinds else None,
     )

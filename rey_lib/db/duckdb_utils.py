@@ -1270,6 +1270,27 @@ def _refuse_unpageable(handle: duckdb.DuckDBPyConnection, wrapped: str) -> None:
         ) from exc
 
 
+#: The DuckDB type whose values are structured documents, as its cursor
+#: description names it. A nested STRUCT or LIST -- which ``read_json_auto``
+#: infers for objects in a file -- is not stated: only the JSON type is.
+_DOCUMENT_TYPE_NAMES = frozenset({"JSON"})
+
+#: The most rows one page may hold where a column is a document.
+_DOCUMENT_PAGE_SIZE = 50
+
+
+def _column_kinds(description: Any) -> dict[str, str]:
+    """The neutral kind of each column this driver's types can state.
+
+    Only ``"document"`` is stated; every other column is left unstated.
+    """
+    return {
+        str(column[0]): "document"
+        for column in description or []
+        if len(column) > 1 and str(column[1]) in _DOCUMENT_TYPE_NAMES
+    }
+
+
 def execute_page(
     conn: duckdb.DuckDBPyConnection,
     sql_text: str,
@@ -1333,6 +1354,12 @@ def execute_page(
         # UnsupportedDatabaseCapabilityError.
         _refuse_unpageable(handle, wrapped)
         try:
+            # DESCRIBED BEFORE IT IS PAGED, so a page holding a document is
+            # bounded before any of its rows are fetched.
+            described = handle.execute(f"SELECT * FROM {wrapped}{where} LIMIT 0", bound or None)
+            kinds = _column_kinds(described.description)
+            if kinds:
+                limit = min(limit, _DOCUMENT_PAGE_SIZE)
             # One row beyond the page. Its existence is the whole continuation
             # signal: it says another page follows without anyone counting the
             # rows that make it up.
@@ -1365,4 +1392,6 @@ def execute_page(
         offset=offset,
         limit=limit,
         next_offset=offset + limit if has_more else None,
+        column_kinds=kinds,
+        max_page_size=_DOCUMENT_PAGE_SIZE if kinds else None,
     )
