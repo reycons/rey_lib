@@ -797,12 +797,12 @@ def create_staging_table_if_not_exists(
         return False
 
     columns_sql = ",\n\t".join(
-        f"{_quoted_identifier(name)} {sql_type.strip()} NULL"
+        f"{quote_identifier(name)} {sql_type.strip()} NULL"
         for name, sql_type in column_defs
     )
     ddl = (
         f"CREATE TABLE IF NOT EXISTS "
-        f"{_quoted_identifier(schema)}.{_quoted_identifier(table)} (\n"
+        f"{quote_identifier(schema)}.{quote_identifier(table)} (\n"
         f"\t{columns_sql}\n"
         f")"
     )
@@ -864,7 +864,7 @@ def _validate_column_name(name: str) -> None:
 
     A column is named by the transform's projection -- ``Security Description``
     as readily as ``account`` -- and is ALWAYS written quoted, through
-    ``_quoted_identifier`` in DDL and SQLAlchemy's quoting in an insert. So the
+    ``quote_identifier`` in DDL and SQLAlchemy's quoting in an insert. So the
     plain-name pattern schema and table still take does not apply: any
     non-empty column name PostgreSQL can represent as a quoted identifier is
     accepted. What it cannot represent is an empty name (``""`` is a
@@ -2459,7 +2459,7 @@ _FILTER_OPERATORS: dict[str, str] = {
 }
 
 
-def _quoted_identifier(name: str) -> str:
+def quote_identifier(name: str) -> str:
     """Return one identifier, quoted so any column name is safe to write.
 
     A result column may be called anything a query chose to call it, including
@@ -2467,6 +2467,33 @@ def _quoted_identifier(name: str) -> str:
     this total rather than a pattern that rejects legitimate names.
     """
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def execute_statement(conn: Any, sql_text: str) -> int:
+    """Run one statement on this connection and return what it touched.
+
+    The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
+    adapter writes the statement, this runs it the way this driver runs one.
+    It does NOT commit -- whether the statement sits in a transaction is the
+    connection's, and is the caller's to manage.
+
+    Args:
+        conn: Open connection handle.
+        sql_text: One complete statement, already composed by the adapter.
+
+    Returns:
+        The driver's affected-row count, as it reported it (a statement with
+        no row count, such as DDL, reports what the driver reports for it).
+
+    Raises:
+        DatabaseError: If the statement fails.
+    """
+    from rey_lib.db._sqlalchemy import core_connection
+
+    try:
+        return int(core_connection(conn).exec_driver_sql(sql_text).rowcount)
+    except Exception as exc:
+        raise DatabaseError(f"execute_statement failed: {exc}") from exc
 
 
 def _validated_page(offset: int, limit: int) -> tuple[int, int]:
@@ -2534,7 +2561,7 @@ def _rendered_filters(
                 f"Unknown filter operator '{operator}'. "
                 f"Known operators: {sorted(_FILTER_OPERATORS)}."
             )
-        clauses.append(template.format(column=_quoted_identifier(column)))
+        clauses.append(template.format(column=quote_identifier(column)))
         values.append(one.get("value"))
     return "\nWHERE  " + "\n   AND ".join(clauses), values
 
@@ -2554,7 +2581,7 @@ def _rendered_order(order_by: Optional[list[dict[str, Any]]]) -> str:
             raise DatabaseError("An ordering must name a column.")
         descending = str(one.get("direction") or "asc").lower() == "desc"
         direction = "DESC" if descending else "ASC"
-        terms.append(f"{_quoted_identifier(column)} {direction}")
+        terms.append(f"{quote_identifier(column)} {direction}")
     return "\nORDER BY " + ", ".join(terms)
 
 

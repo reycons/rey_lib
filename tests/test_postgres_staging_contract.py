@@ -374,7 +374,7 @@ class TestColumnNamesAreQuotedNotRefused:
     """The transform's projected names reach the DDL quoted, whatever they are.
 
     Schema and table still take the plain-name boundary; a column is always
-    written through ``_quoted_identifier``, so only what PostgreSQL cannot
+    written through ``quote_identifier``, so only what PostgreSQL cannot
     represent as a quoted identifier is refused.
     """
 

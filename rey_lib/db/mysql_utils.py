@@ -224,6 +224,33 @@ def quote_identifier(value: str) -> str:
 	return "`" + value.replace("`", "``") + "`"
 
 
+def execute_statement(conn: Any, sql_text: str) -> int:
+	"""Run one statement on this connection and return what it touched.
+
+	The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
+	adapter writes the statement, this runs it the way this driver runs one.
+	It does NOT commit -- whether the statement sits in a transaction is the
+	connection's, and is the caller's to manage.
+
+	Args:
+		conn: Open connection handle.
+		sql_text: One complete statement, already composed by the adapter.
+
+	Returns:
+		The driver's affected-row count, as it reported it (a statement with
+		no row count, such as DDL, reports what the driver reports for it).
+
+	Raises:
+		DatabaseError: If the statement fails.
+	"""
+	from rey_lib.db._sqlalchemy import core_connection
+
+	try:
+		return int(core_connection(conn).exec_driver_sql(sql_text).rowcount)
+	except Exception as exc:
+		raise DatabaseError(f"execute_statement failed: {exc}") from exc
+
+
 def load_sql(name: str) -> str:
 	_require_init()
 

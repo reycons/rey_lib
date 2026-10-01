@@ -224,16 +224,14 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # remains the guaranteed way to load anything, so support is an
         # opportunity rather than a requirement.
         "insert_from_path",
-        # Optional, and a provider without it loses a MODE rather than a
-        # shortcut: a load that replaces a destination's contents cannot run
-        # there and is refused by name. It is not approximated with something
-        # else, because every alternative means something different.
-        "delete_all_rows",
-        # Optional for the same reason and at a higher cost: a load that
-        # rebuilds its destination cannot run where a provider has no drop, and
-        # is refused by name rather than degraded into emptying the table --
-        # which would keep a schema the caller asked to replace.
-        "drop_table",
+        # THE TWO PRIMITIVES the adapter's own table operations are built from
+        # -- `delete_all_rows` and `drop_table` are written ONCE, in DBAdapter,
+        # and need from a provider only what genuinely differs: how it spells
+        # an identifier, and how its driver runs one statement on a connection
+        # and counts what it touched. Required, not optional: a provider
+        # without them fails the contract test rather than a load.
+        "quote_identifier",
+        "execute_statement",
     }
 )
 
@@ -1354,12 +1352,11 @@ class DBAdapter:
         - it does not create anything. A destination that is not there is
           `create`'s business.
 
-        **ASK BEFORE CALLING.** Optional, like ``insert_from_path``:
-        ``supports_provider_capability(conn, "delete_all_rows")`` answers
-        whether this connection's provider has it. A caller that does not ask
-        gets the refusal any missing capability raises -- which is the intended
-        outcome. A load that cannot empty its destination must fail rather than
-        fall back to some other operation that means something else.
+        **WRITTEN ONCE, HERE.** ``DELETE FROM`` is the same statement on every
+        provider; only the spelling of the name and the running of the
+        statement differ, and those are the provider's ``quote_identifier`` and
+        ``execute_statement``. It does not commit: whether the statement sits
+        in a transaction is the connection's, and is the caller's to manage.
 
         Parameters
         ----------
@@ -1381,11 +1378,10 @@ class DBAdapter:
         UnsupportedDatabaseCapabilityError
             If the connection's provider cannot do it.
         """
-        empty = self._require_provider_capability(conn, "delete_all_rows")
         # The provider's own count, carried. `bulk_insert` and
         # `insert_from_path` hand theirs back the same way: coercing here would
         # be this layer having an opinion about an answer it did not produce.
-        return empty(conn, schema, table)
+        return self._run_table_statement(conn, "DELETE FROM", schema, table)
 
     def drop_table(self, conn: Any, schema: str, table: str) -> None:
         """Destroy ``schema.table`` itself, not merely its contents.
@@ -1404,13 +1400,9 @@ class DBAdapter:
         may be refused, or may reach further. This layer does not decide it, and
         a caller that needs to know must ask the database it is talking to.
 
-        **ASK BEFORE CALLING.** Optional, like ``delete_all_rows``:
-        ``supports_provider_capability(conn, "drop_table")`` answers whether
-        this connection's provider has it. A caller that does not ask gets the
-        refusal any missing capability raises, which is the intended outcome --
-        a load that cannot rebuild its destination must fail rather than fall
-        back to emptying it, which would leave a schema the caller asked to
-        replace.
+        **WRITTEN ONCE, HERE**, as ``delete_all_rows`` is: ``DROP TABLE``,
+        with no ``CASCADE``, through the provider's ``quote_identifier`` and
+        ``execute_statement``. It does not commit.
 
         Parameters
         ----------
@@ -1426,8 +1418,23 @@ class DBAdapter:
         UnsupportedDatabaseCapabilityError
             If the connection's provider cannot do it.
         """
-        drop = self._require_provider_capability(conn, "drop_table")
-        drop(conn, schema, table)
+        self._run_table_statement(conn, "DROP TABLE", schema, table)
+
+    def _run_table_statement(
+        self, conn: Any, verb: str, schema: str, table: str,
+    ) -> int:
+        """Run ``<verb> <schema>.<table>`` through this provider's two primitives.
+
+        The statement is the adapter's; the provider spells the names and runs
+        it. A schema of ``database.schema`` -- the qualification some backends
+        use -- is quoted part by part, so each part is one identifier.
+        """
+        quote = self._require_provider_capability(conn, "quote_identifier")
+        execute = self._require_provider_capability(conn, "execute_statement")
+        qualified = ".".join(
+            quote(part) for part in (*str(schema).split("."), str(table))
+        )
+        return execute(conn, f"{verb} {qualified}")
 
     def get_table_columns(
         self,

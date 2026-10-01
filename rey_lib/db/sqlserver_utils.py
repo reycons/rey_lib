@@ -627,6 +627,36 @@ def table_exists(conn: Any, schema: str, table: str) -> bool:
 def quote_identifier(value: str) -> str:
 	return "[" + value.replace("]", "]]") + "]"
 
+
+def execute_statement(conn: pyodbc.Connection, sql_text: str) -> int:
+	"""Run one statement on this connection and return what it touched.
+
+	The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
+	adapter writes the statement, this runs it the way pyodbc runs one. It does
+	NOT commit -- the transaction is the caller's to manage.
+
+	Args:
+		conn: Open pyodbc connection.
+		sql_text: One complete statement, already composed by the adapter.
+
+	Returns:
+		The cursor's affected-row count, as pyodbc reported it (-1 where the
+		statement has none, such as DDL).
+
+	Raises:
+		DatabaseError: If the statement fails.
+	"""
+	try:
+		cursor = conn.cursor()
+		try:
+			cursor.execute(sql_text)
+			return int(cursor.rowcount)
+		finally:
+			cursor.close()
+	except pyodbc.Error as exc:
+		raise DatabaseError(f"execute_statement failed: {exc}") from exc
+
+
 def load_sql(name: str) -> str:
     """
     Return the preloaded SQL string for a named query.

@@ -61,32 +61,37 @@ def _with_backend(monkeypatch: pytest.MonkeyPatch, backend: Any) -> None:
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
 
 
-# Every declared capability, with arguments that satisfy its signature. Kept as
-# data so a capability added to the contract without a dispatch to match shows
-# up here rather than going unexercised.
-_CALLS: dict[str, tuple] = {
-    "fetch_dicts": ("some_sql", None),
-    "call_proc": ("some_proc", None),
-    "call_proc_with_output": ("some_proc", [], []),
-    "table_exists": ("schema", "table"),
-    "get_table_columns": ("schema", "table"),
-    "create_staging_table_if_not_exists": ("schema", "table", [("a", "INTEGER")]),
-    "bulk_insert": ("schema", "table", [], ["a"]),
+# Every declared capability, with the ADAPTER CALL that reaches it and
+# arguments that satisfy its signature. Kept as data so a capability added to
+# the contract without a dispatch to match shows up here rather than going
+# unexercised. Most are reached by the adapter method of the same name; the two
+# primitives are reached through the adapter operations built from them.
+_CALLS: dict[str, tuple[str, tuple]] = {
+    "fetch_dicts": ("fetch_dicts", ("some_sql", None)),
+    "call_proc": ("call_proc", ("some_proc", None)),
+    "call_proc_with_output": ("call_proc_with_output", ("some_proc", [], [])),
+    "table_exists": ("table_exists", ("schema", "table")),
+    "get_table_columns": ("get_table_columns", ("schema", "table")),
+    "create_staging_table_if_not_exists": (
+        "create_staging_table_if_not_exists", ("schema", "table", [("a", "INTEGER")]),
+    ),
+    "bulk_insert": ("bulk_insert", ("schema", "table", [], ["a"])),
     # Optional for a provider, but dispatched exactly like the rest -- a
     # caller that did not ask for support first must still get a named
     # refusal rather than an AttributeError from inside the call.
-    "insert_from_path": ("schema", "table", "/tmp/source.csv", ["a"]),
-    # Optional too, and the refusal matters MORE here than anywhere else: a
-    # load that cannot empty its destination must be told so by name. Every
-    # alternative means something different, so there is nothing to fall back
-    # to and nothing that may be guessed at.
-    "delete_all_rows": ("schema", "table"),
-    # Optional, and the refusal matters most of all here: a load that cannot
-    # DROP its destination must be told so by name rather than quietly emptying
-    # it instead, which would leave standing the very schema the caller asked
-    # to rebuild.
-    "drop_table": ("schema", "table"),
+    "insert_from_path": ("insert_from_path", ("schema", "table", "/tmp/source.csv", ["a"])),
+    # THE PRIMITIVES `delete_all_rows` and `drop_table` are written from. A
+    # provider missing either cannot empty or drop a destination, and the load
+    # must be told which primitive is missing, by name.
+    "quote_identifier": ("delete_all_rows", ("schema", "table")),
+    "execute_statement": ("delete_all_rows", ("schema", "table")),
 }
+
+
+def _reach(adapter: DBAdapter, capability: str) -> Any:
+    """Make the adapter call that reaches one capability."""
+    method, arguments = _CALLS[capability]
+    return getattr(adapter, method)(object(), *arguments)
 
 
 class TestNoUnsupportedCombinationReachesAttributeLookup:
@@ -105,10 +110,11 @@ class TestNoUnsupportedCombinationReachesAttributeLookup:
         An AttributeError names the attribute and leaves the reader to work out
         which provider was in play and whether the name was a typo or a gap.
         """
-        _with_backend(monkeypatch, _Backend())          # implements nothing
+        # Everything BUT this one, so the refusal can only be about it.
+        _with_backend(monkeypatch, _Backend(*(set(_CALLS) - {capability})))
 
         with pytest.raises(UnsupportedDatabaseCapabilityError) as raised:
-            getattr(adapter, capability)(object(), *_CALLS[capability])
+            _reach(adapter, capability)
 
         assert "postgres" in str(raised.value)
         assert capability in str(raised.value)
@@ -123,10 +129,10 @@ class TestNoUnsupportedCombinationReachesAttributeLookup:
         so this fails if any dispatch is ever returned to bare attribute
         access -- which is exactly the change that would look harmless.
         """
-        _with_backend(monkeypatch, _Backend())
+        _with_backend(monkeypatch, _Backend(*(set(_CALLS) - {capability})))
 
         with pytest.raises(Exception) as raised:
-            getattr(adapter, capability)(object(), *_CALLS[capability])
+            _reach(adapter, capability)
 
         assert not isinstance(raised.value, AttributeError)
 
@@ -135,12 +141,12 @@ class TestNoUnsupportedCombinationReachesAttributeLookup:
         self, adapter: DBAdapter, monkeypatch: pytest.MonkeyPatch, capability: str
     ) -> None:
         """The check gates the call; it does not replace it."""
-        backend = _Backend(capability)
+        backend = _Backend(*_CALLS)
         _with_backend(monkeypatch, backend)
 
-        getattr(adapter, capability)(object(), *_CALLS[capability])
+        _reach(adapter, capability)
 
-        assert backend.calls == [capability]
+        assert capability in backend.calls
 
 
 class TestSupportIsResolvedNotListed:
@@ -216,6 +222,37 @@ class TestSupportIsResolvedNotListed:
 
         assert hasattr(postgres_utils, "table_exists")
         assert "table_exists" in _PROVIDER_CONTRACT_CAPABILITIES
+
+
+class TestEveryProviderHasThePrimitives:
+    """Required, not optional: a gap fails here rather than in a load."""
+
+    @pytest.mark.parametrize("provider", ["postgres", "mysql", "duckdb", "sqlserver"])
+    @pytest.mark.parametrize("primitive", ["quote_identifier", "execute_statement"])
+    def test_the_provider_module_defines_it(self, provider: str, primitive: str) -> None:
+        """Read from the module source, so an absent driver cannot hide a gap."""
+        import ast
+        from pathlib import Path
+
+        import rey_lib.db as db_package
+
+        source = Path(db_package.__file__).parent / f"{provider}_utils.py"
+        defined = {
+            node.name for node in ast.parse(source.read_text()).body
+            if isinstance(node, ast.FunctionDef)
+        }
+        assert primitive in defined
+
+    def test_no_provider_writes_the_table_statements_itself(self) -> None:
+        """DELETE FROM and DROP TABLE are the adapter's, written once."""
+        from pathlib import Path
+
+        import rey_lib.db as db_package
+
+        for provider in ("postgres", "mysql", "duckdb", "sqlserver"):
+            text = (Path(db_package.__file__).parent / f"{provider}_utils.py").read_text()
+            assert "def delete_all_rows" not in text, provider
+            assert "def drop_table" not in text, provider
 
 
 class TestWhatIsDeliberatelyOutsideTheRegistry:

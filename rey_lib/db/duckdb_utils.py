@@ -798,7 +798,7 @@ def _sql_string_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _quoted_identifier(name: str) -> str:
+def quote_identifier(name: str) -> str:
     """Quote one column name, doubling any quote it contains.
 
     Here rather than borrowed from another provider: postgres, mysql and
@@ -810,6 +810,35 @@ def _quoted_identifier(name: str) -> str:
     is load-bearing rather than defensive.
     """
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def execute_statement(conn: duckdb.DuckDBPyConnection, sql_text: str) -> int:
+    """Run one statement on this connection and return what it touched.
+
+    The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
+    adapter writes the statement, this runs it the way DuckDB runs one. It
+    does NOT commit -- DuckDB's statements are atomic on their own unless the
+    caller opened a transaction, which stays the caller's.
+
+    DuckDB answers a DML statement with a one-row result holding its count; a
+    statement with no such result, such as DDL, touched no rows and is 0.
+
+    Args:
+        conn: Open DuckDB connection.
+        sql_text: One complete statement, already composed by the adapter.
+
+    Returns:
+        The rows the statement affected.
+
+    Raises:
+        DatabaseError: If the statement fails.
+    """
+    try:
+        result = conn.execute(sql_text)
+        row = result.fetchone() if result.description else None
+    except duckdb.Error as exc:
+        raise DatabaseError(f"execute_statement failed: {exc}") from exc
+    return int(row[0]) if row else 0
 
 
 def file_source_expression(file_path: Path | str) -> str:
@@ -901,7 +930,7 @@ def default_file_select_sql(
         return f"SELECT unnest(COLUMNS(*), max_depth := 2) FROM {source}"
 
     return (
-        f"SELECT unnest({_quoted_identifier(record_key)}, max_depth := 2) "
+        f"SELECT unnest({quote_identifier(record_key)}, max_depth := 2) "
         f"FROM {source}"
     )
 
