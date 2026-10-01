@@ -45,6 +45,42 @@ def test_header_is_located_past_a_junk_preamble(tmp_path: Path) -> None:
     assert read.data_line_numbers == (4, 5)
 
 
+def test_a_sanitized_preamble_does_not_become_the_header(tmp_path: Path) -> None:
+    """The real sanitized shape: the source_line_number name lands on a
+    preamble line, and the real header carries its line number instead."""
+    source = _write(
+        tmp_path,
+        "sanitized.csv",
+        "source_line_number,\n"
+        "2,\n"
+        "3,Run Date,Account,Action,Amount\n"
+        "4,01/02/2024,Brokerage,BUY,100\n"
+        "5,01/03/2024,Brokerage,SELL,-50\n",
+    )
+
+    read = read_csv(source)
+
+    assert read.has_header is True
+    assert read.header_line_number == 3
+    assert read.header_fields == ("3", "Run Date", "Account", "Action", "Amount")
+
+
+def test_a_later_over_wide_data_row_does_not_displace_the_header(
+    tmp_path: Path,
+) -> None:
+    """What ba63612 protects: the earliest plausible header keeps its place."""
+    source = _write(
+        tmp_path,
+        "overwide.csv",
+        "Account,Symbol,Qty\nA1,IBM,10\nA2,X,30,EXTRA\nA3,Y,1\n",
+    )
+
+    read = read_csv(source)
+
+    assert read.header_line_number == 1
+    assert read.header_fields == ("Account", "Symbol", "Qty")
+
+
 def test_a_headerless_file_reports_no_header_rather_than_failing(
     tmp_path: Path,
 ) -> None:

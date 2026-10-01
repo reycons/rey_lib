@@ -886,7 +886,20 @@ def _case_style(value: str) -> str:
 
 def _is_header_candidate(fields: list[str]) -> bool:
     """Return whether ``fields`` are structurally plausible column names."""
-    stripped = [field.strip() for field in fields]
+    # Imported here because rey_lib.profiling imports this module; a
+    # module-level import would close the cycle.
+    from rey_lib.profiling.file_profiler import is_profile_excluded_column
+
+    # SANITIZATION'S OWN CELL IS NOT A COLUMN NAME. It prepends
+    # ``source_line_number`` to every record and names it on physical line 1,
+    # which for a file whose header sits below a preamble is a preamble line:
+    # ``source_line_number,`` -- one name-like cell over an empty one. Counted,
+    # it qualifies that line as a header, and as the earliest plausible header
+    # it then wins. Dropped by the same rule profiling uses, it cannot qualify.
+    stripped = [
+        field.strip() for field in fields
+        if not is_profile_excluded_column(field)
+    ]
     if len(stripped) < 2:
         return False
     # One unusable name does not make a row stop being the header. A column
