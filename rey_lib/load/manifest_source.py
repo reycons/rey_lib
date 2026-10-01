@@ -226,6 +226,63 @@ class ManifestSource:
                 row["transform_is_default"] = one["is_default"]
         self.transform_choices = working
 
+    def new_transform(self, control: Any, source: Any, transform: Any) -> None:
+        """Create a transform for the file's type, select it, and hydrate both objects.
+
+        ``new`` creates it in the ``prepared_name`` form, unnamed, and makes it
+        the type's DEFAULT. The routine returns no id, so this object reads its
+        own context once more -- the one contract ``create`` uses -- and its
+        default selection is then the new transform. ``populate`` hydrates the
+        Source and Transform from it.
+
+        Args:
+            control: What answers ``maintain_transform`` and the source-context
+                contract.
+            source: The canonical Source to hydrate.
+            transform: The canonical Transform to hydrate.
+        """
+        control.maintain_transform(
+            self.persisted_file_type_id, action="new", column_source="prepared_name",
+        )
+        rows = list(control.file_source_context(
+            file_manifest_id=self.file_manifest_id,
+            file_mutation_id=self.file_mutation_id if self.opened_by == "mutation" else None,
+        ))
+        # THE ONE MATERIALISATION, re-run in place over the persisted state: the
+        # same object, so whatever holds it keeps holding the current one.
+        self.__init__(
+            rows, opened_by=self.opened_by, requested_file_type_id=self.requested_file_type_id,
+        )
+        self.populate(source, transform)
+
+    def delete_transform(self, control: Any, source: Any, transform: Any) -> None:
+        """Delete the selected transform, resolve the selection, and hydrate both objects.
+
+        ``delete`` removes it with its query and columns (the database's FK
+        cascade) and chooses no other default. No read: the retained rows hold
+        every transform of the type, so dropping the deleted one's rows is the
+        persisted state. The selection then resolves as it always does -- the
+        default, else unresolved -- and ``populate`` hydrates from it.
+
+        Args:
+            control: What answers ``maintain_transform``.
+            source: The canonical Source to hydrate.
+            transform: The canonical Transform to hydrate.
+
+        Raises:
+            ValueError: If no transform is selected.
+        """
+        deleted = self.selected_transform_id
+        if deleted is None:
+            raise ValueError("ManifestSource: no saved setting is selected to delete.")
+        control.maintain_transform(
+            self.persisted_file_type_id, action="delete", transform_id=deleted,
+        )
+        self._rows = [row for row in self._rows if _as_int(row.get("transform_id")) != deleted]
+        self.transform_choices = _transform_choices(self._rows)
+        self.select_transform(None)
+        self.populate(source, transform)
+
     def select_transform(self, transform_id: Optional[int]) -> None:
         """Make one transform of the file's type the selected one, in memory.
 

@@ -705,6 +705,126 @@ class TestRereadingAfterASave:
         assert fresh.requested_file_type_id == governed.requested_file_type_id
 
 
+class _Creating(_Reader):
+    """The control database: ``new`` adds a default transform the next read returns."""
+
+    def __init__(self, rows: list[dict[str, Any]], created: list[dict[str, Any]]) -> None:
+        super().__init__(rows)
+        self.created = created
+        self.calls: list[dict[str, Any]] = []
+
+    def maintain_transform(self, file_type_id: Any = None, **values: Any) -> None:
+        self.calls.append({"file_type_id": file_type_id, **values})
+        self.rows = [{**row, "transform_is_default": False} for row in self.rows] + self.created
+
+
+class TestANewSavedSetting:
+    """New: the routine creates it, ManifestSource selects it and hydrates both objects."""
+
+    _two = staticmethod(TestSavedSettingsSelectTheTransform._two)
+
+    def _opened(self) -> tuple[ManifestSource, _Creating, Source, Transform]:
+        rows = self._two()
+        created = [
+            {**row, "transform_id": 22, "transform_name": None, "transform_is_default": True,
+             "transform_query_id": 220, "resolved_query_sql": "select 'new'",
+             "transform_column_id": 501}
+            for row in rows if row["transform_id"] == 21
+        ]
+        control = _Creating(rows, created)
+        governed = ManifestSource.create(control, file_manifest_id=10, adopt_persisted_type=True)
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+        return governed, control, source, transform
+
+    def test_new_sends_the_type_and_the_prepared_name_form_unnamed(self) -> None:
+        governed, control, source, transform = self._opened()
+
+        governed.new_transform(control, source, transform)
+
+        assert control.calls == [
+            {"file_type_id": 4, "action": "new", "column_source": "prepared_name"},
+        ]
+
+    def test_the_new_transform_is_a_choice_and_selected(self) -> None:
+        governed, control, source, transform = self._opened()
+
+        governed.new_transform(control, source, transform)
+
+        assert [one["transform_id"] for one in governed.transform_choices] == [20, 21, 22]
+        assert governed.selected_transform_id == 22
+
+    def test_both_objects_are_hydrated_from_it(self) -> None:
+        governed, control, source, transform = self._opened()
+
+        governed.new_transform(control, source, transform)
+
+        assert source.value("statement") == "select 'new'"
+        assert transform.value("persistence")["transform_id"] == 22
+
+
+class TestDeletingTheSelectedSavedSetting:
+    """Delete: the routine removes it; ManifestSource resolves the selection and hydrates."""
+
+    _two = staticmethod(TestSavedSettingsSelectTheTransform._two)
+
+    def test_delete_sends_the_selected_transform(self) -> None:
+        governed = _manifest(self._two())
+        governed.select_transform(21)
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+        control = _Maintaining()
+
+        governed.delete_transform(control, source, transform)
+
+        assert control.calls == [{"file_type_id": 4, "action": "delete", "transform_id": 21}]
+
+    def test_the_deleted_transform_is_gone_and_the_default_is_selected(self) -> None:
+        governed = _manifest(self._two())
+        governed.select_transform(21)
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+
+        governed.delete_transform(_Maintaining(), source, transform)
+
+        assert [one["transform_id"] for one in governed.transform_choices] == [20]
+        assert governed.selected_transform_id == 20
+        assert source.value("statement") == "select 'default'"
+        assert transform.value("persistence")["transform_id"] == 20
+
+    def test_deleting_the_default_leaves_no_default_and_nothing_selected(self) -> None:
+        governed = _manifest(self._two())
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+
+        governed.delete_transform(_Maintaining(), source, transform)
+
+        assert [one["is_default"] for one in governed.transform_choices] == [False]
+        assert governed.selected_transform_id is None
+
+    def test_nothing_selected_is_refused_and_nothing_is_sent(self) -> None:
+        governed = _manifest(self._two(default=None))
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+        control = _Maintaining()
+
+        with pytest.raises(ValueError, match="no saved setting is selected"):
+            governed.delete_transform(control, source, transform)
+        assert control.calls == []
+
+    def test_nothing_is_read(self) -> None:
+        reads: list[int] = []
+
+        class _Counting(_Reader):
+            def file_source_context(self, *args: Any, **kwargs: Any):
+                reads.append(1)
+                return super().file_source_context(*args, **kwargs)
+
+        governed = ManifestSource.create(
+            _Counting(self._two()), file_manifest_id=10, adopt_persisted_type=True,
+        )
+        source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
+
+        governed.delete_transform(_Maintaining(), source, transform)
+
+        assert len(reads) == 1
+
+
 def _transform_choices_after_reread(governed: ManifestSource) -> list[dict[str, Any]]:
     """The choices the retained rows now give, as a fresh read would."""
     from rey_lib.load.manifest_source import _transform_choices
