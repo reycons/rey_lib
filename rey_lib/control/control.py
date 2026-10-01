@@ -1396,7 +1396,7 @@ class Control:
         "ordinal", "detected_type", "blank_count", "min_length", "max_length",
         "min_decimal_places", "max_decimal_places", "min_numeric", "max_numeric",
         "min_date", "max_date", "sample_values", "null_like_values",
-        "constant_value",
+        "constant_value", "prepared_name",
     )
 
     def insert_data_profile_field(self, data_profile_id: int, field_name: str,

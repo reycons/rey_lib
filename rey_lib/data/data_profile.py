@@ -89,6 +89,9 @@ class FieldProfile:
         sample_values: Representative values, as the profiler ranked them.
         null_like_values: Values found to stand in for absence.
         constant_value: The single value, where the field never varies.
+        prepared_name: The header ``create_prepared_files`` writes for this
+            field -- the observed name through the same normalization prepare
+            applies. ``name`` stays the header as observed.
     """
 
     name: str
@@ -106,6 +109,7 @@ class FieldProfile:
     sample_values: Any = None
     null_like_values: Any = None
     constant_value: str | None = None
+    prepared_name: str | None = None
 
 
 @dataclass(frozen=True)
