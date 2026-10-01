@@ -48,7 +48,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "path": "/data/incoming/asset.txt", "file_name": "asset.txt",
         "layout": "DELIMITED_HEADER", "profile_header_definition": "asset_id",
         "field_name": "asset_id", "field_ordinal": 1, "field_detected_type": "integer",
-        "transform_is_enabled": True, "transform_row_filter": None,
+        "transform_is_default": True, "transform_row_filter": None,
         "column_name": "asset_id", "source_column": "asset_id", "column_ordinal": 1,
         "column_datatype": "integer", "transform_type": "passthrough",
         "transform_config": None, "column_is_exported": True,
@@ -249,8 +249,8 @@ class TestTheTransformIsConfiguredFromTheStoredDefinition:
         assert len(transform.columns()) == 4
         assert transform.column_ids() == [301, 302, 303, 304]
 
-    def test_a_switched_off_definition_leaves_the_transform_alone(self) -> None:
-        source, transform = _populated([_row(transform_is_enabled=False)])
+    def test_a_definition_that_is_not_the_default_leaves_the_transform_alone(self) -> None:
+        source, transform = _populated([_row(transform_is_default=False)])
 
         assert transform.declaration() == Transform().declaration()
         assert source.governed_context() is not None

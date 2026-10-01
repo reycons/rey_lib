@@ -99,7 +99,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "field_detected_type": "integer",
         "field_is_nullable": False,
         "field_type": "redacted",
-        "transform_is_enabled": True,
+        "transform_is_default": True,
         "transform_row_filter": None,
         "column_name": "asset_id",
         "source_column": "asset_id",
@@ -708,22 +708,22 @@ class TestAdoptingThePersistedType:
         assert source.column_transform() is None
 
 
-class TestWhetherTheTransformIsOn:
+class TestWhetherTheTransformIsTheDefault:
     """A fact the contract returns and the source reports, applying it nowhere."""
 
-    @pytest.mark.parametrize("enabled", [True, False])
-    def test_it_is_read_from_the_row(self, enabled: bool) -> None:
+    @pytest.mark.parametrize("default", [True, False])
+    def test_it_is_read_from_the_row(self, default: bool) -> None:
         source = ManifestSource.create(
-            CountingReader([_row(transform_is_enabled=enabled)]),
+            CountingReader([_row(transform_is_default=default)]),
             file_manifest_id=10, file_type_id=4,
         )
 
-        assert source.transform_is_enabled is enabled
+        assert source.transform_is_default is default
 
-    def test_a_disabled_transform_is_still_returned_as_stored(self) -> None:
-        """What "off" means is for whoever runs it, not for the source."""
+    def test_a_transform_that_is_not_the_default_is_still_returned_as_stored(self) -> None:
+        """Whether it is used is for whoever selects it, not for the source."""
         source = ManifestSource.create(
-            CountingReader([_row(transform_is_enabled=False)]),
+            CountingReader([_row(transform_is_default=False)]),
             file_manifest_id=10, file_type_id=4,
         )
 

@@ -44,7 +44,7 @@ class CountingReader:
             "data_profile_id": None, "data_profile_field_id": None,
             "transform_id": None, "transform_column_id": None,
             "profile_header_definition": None, "transform_row_filter": None,
-            "transform_is_enabled": True,
+            "transform_is_default": True,
         }]
 
 

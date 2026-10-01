@@ -163,11 +163,11 @@ class ManifestSource:
         # column row: a transform may have a row filter and no columns yet, and
         # reading it off the children would lose it in exactly that case.
         self._row_filter: Any = first["transform_row_filter"]
-        #: Whether the stored transformation is switched on. A FACT, read from the
-        #: parent row for the same reason the row filter is, and applied by no
-        #: one here: ``column_transform`` returns the stored definition either
-        #: way, and what "off" means is for whoever runs it to decide.
-        self.transform_is_enabled: bool = bool(first.get("transform_is_enabled"))
+        #: Whether the stored transformation is its file type's DEFAULT -- at most
+        #: one per installation and file type, and possibly none. A FACT, read
+        #: from the parent row for the same reason the row filter is:
+        #: ``column_transform`` returns the stored definition either way.
+        self.transform_is_default: bool = bool(first.get("transform_is_default"))
 
     # -- construction -------------------------------------------------------
 
@@ -489,8 +489,11 @@ class ManifestSource:
         is active -- as its own configuration. It is then told its
         governed context, a fact about the file and never configuration. The
         Transform is given the stored definition as its
-        Manifest configuration ONLY where the definition is switched on and a
-        governing scope is active; otherwise it is left exactly as it was.
+        Manifest configuration ONLY where the definition is its type's default
+        and a governing scope is active; otherwise it is left exactly as it was.
+        (TEMPORARY: the default stands in for the selection until Saved Settings
+        -- loader_saved_settings_selects_transform_configuration -- replaces
+        this gate with the transform actually selected.)
         Nothing is created and the Target is not touched.
 
         Args:
@@ -510,7 +513,7 @@ class ManifestSource:
         # LAST: filling the identities clears context about any earlier file, so
         # this file's facts are told once its identities are in place.
         source.observe_governed_context(self.governed_context())
-        built = self.column_transform() if self.transform_is_enabled else None
+        built = self.column_transform() if self.transform_is_default else None
         if built is None:
             return
         # THE DECLARATION KIND, in its own JSON form: the governed mapping is an
