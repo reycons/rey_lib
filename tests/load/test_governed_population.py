@@ -672,6 +672,39 @@ class TestSavedSettingsAreEditedThenSaved:
         assert governed.selected_transform_id == 21
 
 
+class TestRereadingAfterASave:
+    """A save makes the retained rows stale; one re-read replaces them."""
+
+    _two = staticmethod(TestSavedSettingsSelectTheTransform._two)
+
+    def test_one_read_returns_the_persisted_state_and_keeps_the_selection(self) -> None:
+        reads: list[dict[str, Any]] = []
+        rows = self._two()
+
+        class _Counting(_Reader):
+            def file_source_context(self, *args: Any, **kwargs: Any):
+                reads.append(kwargs)
+                return super().file_source_context(*args, **kwargs)
+
+        reader = _Counting(rows)
+        governed = ManifestSource.create(reader, file_manifest_id=10, adopt_persisted_type=True)
+        governed.select_transform(21)
+        reader.rows = [
+            {**row, "resolved_query_sql": "select 'saved'"}
+            if row["transform_id"] == 21 else row
+            for row in rows
+        ]
+
+        fresh = governed.reread(reader)
+
+        assert len(reads) == 2
+        assert reads[1] == {"file_manifest_id": 10, "file_mutation_id": None}
+        assert fresh is not governed
+        assert fresh.selected_transform_id == 21
+        assert fresh.resolved_query_sql == "select 'saved'"
+        assert fresh.requested_file_type_id == governed.requested_file_type_id
+
+
 def _transform_choices_after_reread(governed: ManifestSource) -> list[dict[str, Any]]:
     """The choices the retained rows now give, as a fresh read would."""
     from rey_lib.load.manifest_source import _transform_choices

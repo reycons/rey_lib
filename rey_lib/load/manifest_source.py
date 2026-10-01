@@ -355,6 +355,28 @@ class ManifestSource:
             source.requested_file_type_id = source.persisted_file_type_id
         return source
 
+    def reread(self, reader: SourceContextReader) -> "ManifestSource":
+        """Read this governed file's context again, keeping the selected transform.
+
+        For after a save: the persisted query or columns have changed, so the
+        retained rows are stale. ONE ``create`` with the identities and the
+        governing type this one was opened with; the selection is carried over.
+
+        Args:
+            reader: Whatever answers the source-context contract.
+
+        Returns:
+            A new ManifestSource over the persisted state.
+        """
+        fresh = type(self).create(
+            reader,
+            file_manifest_id=self.file_manifest_id,
+            file_mutation_id=self.file_mutation_id if self.opened_by == "mutation" else None,
+            file_type_id=self.requested_file_type_id,
+        )
+        fresh.select_transform(self.selected_transform_id)
+        return fresh
+
     def _validate_against(
         self,
         file_manifest_id: Optional[int],
