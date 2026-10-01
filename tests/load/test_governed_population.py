@@ -122,7 +122,6 @@ class TestTheSourceIsToldTheGovernedFacts:
                 {"transform_id": 20, "transform_name": None, "is_default": True},
             ],
             "selected_transform_id": 20,
-            "unsaved": False,
         }
 
     def test_a_file_with_no_profile_still_has_its_context(self) -> None:
@@ -574,41 +573,26 @@ class _Maintaining:
 
 
 class TestSavedSettingsAreEditedThenSaved:
-    """Edits change the working choices; Save persists only what changed."""
+    """The grid's edited rows are saved once; only what changed is sent."""
 
     _two = staticmethod(TestSavedSettingsSelectTheTransform._two)
 
-    def test_a_rename_is_working_until_saved(self) -> None:
-        governed = _manifest(self._two())
-
-        governed.edit_transform(21, "transform_name", "wide")
-
-        assert governed.unsaved() is True
-        assert governed.governed_context()["unsaved"] is True
-        assert [one["transform_name"] for one in governed.transform_choices] == ["t20", "wide"]
-
-    def test_making_one_the_default_clears_the_other(self) -> None:
-        governed = _manifest(self._two())
-
-        governed.edit_transform(21, "is_default", True)
-
-        assert [one["is_default"] for one in governed.transform_choices] == [False, True]
-
-    def test_a_foreign_transform_and_another_field_are_refused(self) -> None:
-        governed = _manifest(self._two())
-
-        with pytest.raises(DataStructureError, match="transform 99"):
-            governed.edit_transform(99, "transform_name", "x")
-        with pytest.raises(ValueError, match="cannot be edited"):
-            governed.edit_transform(20, "row_filter", None)
+    @staticmethod
+    def _settings(**changed: tuple[str, bool]) -> list[dict[str, Any]]:
+        """The two rows as the grid sends them, ``t<id>=(name, is_default)``."""
+        rows = {"t20": ("t20", True), "t21": ("t21", False), **changed}
+        return [
+            {"transform_id": int(key[1:]), "transform_name": name, "is_default": default}
+            for key, (name, default) in rows.items()
+        ]
 
     def test_save_renames_then_moves_the_default_with_make_default_alone(self) -> None:
         governed = _manifest(self._two())
         control = _Maintaining()
-        governed.edit_transform(21, "transform_name", "wide")
-        governed.edit_transform(21, "is_default", True)
 
-        governed.save_transforms(control)
+        governed.save_transforms(
+            control, self._settings(t20=("t20", False), t21=("wide", True)),
+        )
 
         assert control.calls == [
             {"file_type_id": 4, "action": "name_change", "transform_id": 21,
@@ -619,9 +603,8 @@ class TestSavedSettingsAreEditedThenSaved:
     def test_removing_the_default_sends_clear_default_alone(self) -> None:
         governed = _manifest(self._two())
         control = _Maintaining()
-        governed.edit_transform(20, "is_default", False)
 
-        governed.save_transforms(control)
+        governed.save_transforms(control, self._settings(t20=("t20", False)))
 
         assert control.calls == [
             {"file_type_id": 4, "action": "clear_default", "transform_id": 20},
@@ -631,18 +614,40 @@ class TestSavedSettingsAreEditedThenSaved:
         governed = _manifest(self._two())
         control = _Maintaining()
 
-        governed.save_transforms(control)
+        governed.save_transforms(control, self._settings())
 
         assert control.calls == []
 
-    def test_after_save_the_retained_rows_carry_it_and_nothing_is_unsaved(self) -> None:
+    def test_a_foreign_transform_is_refused_and_nothing_is_sent(self) -> None:
         governed = _manifest(self._two())
-        governed.edit_transform(21, "transform_name", "wide")
-        governed.edit_transform(21, "is_default", True)
+        control = _Maintaining()
 
-        governed.save_transforms(_Maintaining())
+        with pytest.raises(DataStructureError, match="transform 99"):
+            governed.save_transforms(control, [
+                {"transform_id": 99, "transform_name": "x", "is_default": False},
+            ])
+        assert control.calls == []
 
-        assert governed.unsaved() is False
+    def test_two_defaults_are_refused_and_nothing_is_sent(self) -> None:
+        governed = _manifest(self._two())
+        control = _Maintaining()
+
+        with pytest.raises(ValueError, match="at most one"):
+            governed.save_transforms(control, self._settings(t21=("t21", True)))
+        assert control.calls == []
+
+    def test_after_save_the_choices_and_retained_rows_carry_it(self) -> None:
+        governed = _manifest(self._two())
+
+        governed.save_transforms(
+            _Maintaining(), self._settings(t20=("t20", False), t21=("wide", True)),
+        )
+
+        assert governed.transform_choices == [
+            {"transform_id": 20, "transform_name": "t20", "is_default": False},
+            {"transform_id": 21, "transform_name": "wide", "is_default": True},
+        ]
+        assert governed.governed_context()["transform_choices"] == governed.transform_choices
         rows_21 = [row for row in governed._rows if row["transform_id"] == 21]
         assert {row["transform_name"] for row in rows_21} == {"wide"}
         assert {row["transform_is_default"] for row in rows_21} == {True}
@@ -660,9 +665,8 @@ class TestSavedSettingsAreEditedThenSaved:
             _Counting(self._two()), file_manifest_id=10, adopt_persisted_type=True,
         )
         governed.select_transform(21)
-        governed.edit_transform(20, "transform_name", "standard")
 
-        governed.save_transforms(_Maintaining())
+        governed.save_transforms(_Maintaining(), self._settings(t20=("standard", True)))
 
         assert len(reads) == 1
         assert governed.selected_transform_id == 21
