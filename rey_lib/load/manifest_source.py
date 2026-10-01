@@ -125,7 +125,13 @@ class ManifestSource:
                 "means the context could not be read at all."
             )
 
-        first = dict(rows[0])
+        #: The rows the ONE read returned, kept: every transform of the file's
+        #: type is in them, and choosing between those transforms reads nothing.
+        self._rows: list[dict[str, Any]] = [dict(row) for row in rows]
+        #: The saved settings -- every transform of the file's type.
+        self.transform_choices: list[dict[str, Any]] = _transform_choices(self._rows)
+
+        first = self._rows[0]
         self.file_manifest_id: int = int(first["file_manifest_id"])
         self.file_mutation_id: int = int(first["file_mutation_id"])
         #: The manifest's PERSISTED governing scope, which is a fact and is not
@@ -138,36 +144,69 @@ class ManifestSource:
         self.path: Optional[str] = first["path"]
         #: The DECLARED format token, which beats the path's suffix.
         self.layout: Optional[str] = first["layout"]
-        #: The SQL the database resolved for this file's path, as returned.
-        self.resolved_query_sql: Optional[str] = first.get("resolved_query_sql")
-        #: The governed query row this file's SQL template is stored in.
-        self.transform_query_id: Optional[int] = _as_int(first.get("transform_query_id"))
-        #: The manifest's live mutations, each with its path and resolved SQL.
-        self.mutation_choices: list[dict[str, Any]] = [
-            dict(one) for one in (first.get("mutation_choices") or [])
-        ]
 
         #: The file facts, as the contract returned them. Read-only.
         self.file_facts: dict[str, Any] = {
             name: first[name] for name in _FILE_FACTS if name in first
         }
 
-        self._profile_fields = _dedupe(rows, "data_profile_field_id")
+        self._profile_fields = _dedupe(self._rows, "data_profile_field_id")
+        self.data_profile_id: Optional[int] = _as_int(first["data_profile_id"])
+        self._profile_header: str = first["profile_header_definition"] or ""
+        # THE DEFAULT, else unresolved -- the selection a Loader opens with.
+        self.select_transform(None)
+
+    # -- the saved settings -------------------------------------------------
+
+    def select_transform(self, transform_id: Optional[int]) -> None:
+        """Make one transform of the file's type the selected one, in memory.
+
+        The given transform, else the type's default, else none -- UNRESOLVED,
+        a legitimate state (at most one default, zero allowed), and never the
+        lowest id. Every per-transform fact is re-derived from the rows the one
+        read returned; nothing is read. ``populate`` then rehydrates from it.
+
+        Args:
+            transform_id: The saved setting chosen, or None for the default.
+
+        Raises:
+            DataStructureError: If ``transform_id`` is not one of the file
+                type's transforms.
+        """
+        self.selected_transform_id: Optional[int] = _selected(
+            self.transform_choices, transform_id,
+        )
+        selected = [
+            row for row in self._rows
+            if self.selected_transform_id is not None
+            and _as_int(row.get("transform_id")) == self.selected_transform_id
+        ]
+        chosen = selected[0] if selected else {}
+        #: The SQL the database resolved for this file's path, from the selected
+        #: transform's query -- None while the selection is unresolved.
+        self.resolved_query_sql: Optional[str] = chosen.get("resolved_query_sql")
+        #: The governed query row the selected transform's SQL template is in.
+        self.transform_query_id: Optional[int] = _as_int(chosen.get("transform_query_id"))
+        #: The manifest's live mutations, each with its path and the selected
+        #: transform's resolved SQL. Unresolved: the mutations, with no SQL.
+        self.mutation_choices: list[dict[str, Any]] = [
+            dict(one) for one in (chosen.get("mutation_choices") or [])
+        ] if selected else [
+            {**dict(one), "resolved_query_sql": None}
+            for one in (self._rows[0].get("mutation_choices") or [])
+        ]
         # IN column_ordinal ORDER, STATED HERE rather than inherited from how the
         # contract happens to join: the stored ordinal is the columns' order.
-        self._transform_columns = _in_column_order(_dedupe(rows, "transform_column_id"))
-        self.data_profile_id: Optional[int] = _as_int(first["data_profile_id"])
-        self.transform_id: Optional[int] = _as_int(first["transform_id"])
-        self._profile_header: str = first["profile_header_definition"] or ""
+        self._transform_columns = _in_column_order(_dedupe(selected, "transform_column_id"))
+        self.transform_id: Optional[int] = self.selected_transform_id
         # THE DEFINITION'S OWN, taken from the parent row rather than from a
         # column row: a transform may have a row filter and no columns yet, and
         # reading it off the children would lose it in exactly that case.
-        self._row_filter: Any = first["transform_row_filter"]
-        #: Whether the stored transformation is its file type's DEFAULT -- at most
-        #: one per installation and file type, and possibly none. A FACT, read
-        #: from the parent row for the same reason the row filter is:
+        self._row_filter: Any = chosen.get("transform_row_filter")
+        #: Whether the selected transformation is its file type's DEFAULT -- at
+        #: most one per installation and file type, and possibly none. A FACT:
         #: ``column_transform`` returns the stored definition either way.
-        self.transform_is_default: bool = bool(first.get("transform_is_default"))
+        self.transform_is_default: bool = bool(chosen.get("transform_is_default"))
 
     # -- construction -------------------------------------------------------
 
@@ -473,6 +512,9 @@ class ManifestSource:
             "file_name": self.file_facts.get("file_name"),
             "mutation_choices": [dict(one) for one in self.mutation_choices],
             "transform_query_id": self.transform_query_id,
+            # THE SAVED SETTINGS, and the one selected -- None while unresolved.
+            "transform_choices": [dict(one) for one in self.transform_choices],
+            "selected_transform_id": self.selected_transform_id,
         }
 
     def populate(self, source: Any, transform: Any) -> None:
@@ -488,18 +530,20 @@ class ManifestSource:
         resolved -- manifest, working mutation, and the governing type where one
         is active -- as its own configuration. It is then told its
         governed context, a fact about the file and never configuration. The
-        Transform is given the stored definition as its
-        Manifest configuration ONLY where the definition is its type's default
-        and a governing scope is active; otherwise it is left exactly as it was.
-        (TEMPORARY: the default stands in for the selection until Saved Settings
-        -- loader_saved_settings_selects_transform_configuration -- replaces
-        this gate with the transform actually selected.)
+        Transform is given the SELECTED transform's stored definition -- the one
+        chosen through ``select_transform``, default or not, else the type's
+        default -- where a governing scope is active. Where the selection is
+        unresolved it is left exactly as it was.
         Nothing is created and the Target is not touched.
 
         Args:
             source: The canonical Source to tell its governed context.
             transform: The canonical Transform to configure.
         """
+        # A REHYDRATION STARTS CLEAN: context told for an earlier selection must
+        # not answer while this one's identities are written -- filling
+        # file-mutation-id would otherwise restore the earlier transform's SQL.
+        source.observe_governed_context(None)
         # THE SOURCE IS POPULATED FROM THE RESOLVED CONTEXT: the kind, and the
         # identities the contract resolved -- the working mutation, and the
         # governing type where one is active. Its own configuration, not context.
@@ -513,7 +557,7 @@ class ManifestSource:
         # LAST: filling the identities clears context about any earlier file, so
         # this file's facts are told once its identities are in place.
         source.observe_governed_context(self.governed_context())
-        built = self.column_transform() if self.transform_is_default else None
+        built = self.column_transform() if self.selected_transform_id is not None else None
         if built is None:
             return
         # THE DECLARATION KIND, in its own JSON form: the governed mapping is an
@@ -620,6 +664,54 @@ def _in_column_order(rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return sorted(rows, key=lambda row: (
         row["column_ordinal"] is None, _as_int(row["column_ordinal"]) or 0,
     ))
+
+
+def _transform_choices(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Every transform of the file's type the rows carry, in transform_id order.
+
+    Args:
+        rows: The contract's result -- every transform's rows, repeating.
+
+    Returns:
+        One entry per distinct transform: its id, name and whether it is the
+        type's default. Empty for a type with no transform.
+    """
+    found: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        identity = _as_int(row.get("transform_id"))
+        if identity is None or identity in found:
+            continue
+        found[identity] = {
+            "transform_id": identity,
+            "transform_name": row.get("transform_name"),
+            "is_default": bool(row.get("transform_is_default")),
+        }
+    return [found[key] for key in sorted(found)]
+
+
+def _selected(choices: list[dict[str, Any]], chosen: Optional[int]) -> Optional[int]:
+    """The transform to hydrate: the chosen one, else the default, else None.
+
+    Args:
+        choices: The file type's transforms.
+        chosen: The transform chosen, or None.
+
+    Returns:
+        A transform_id, or None where the selection is unresolved.
+
+    Raises:
+        DataStructureError: If ``chosen`` is not one of the choices.
+    """
+    if chosen is not None:
+        if any(one["transform_id"] == int(chosen) for one in choices):
+            return int(chosen)
+        raise DataStructureError(
+            f"ManifestSource: transform {chosen} is not a transform of this "
+            f"file's type. Its transforms: "
+            f"{[one['transform_id'] for one in choices] or 'none'}."
+        )
+    defaults = [one["transform_id"] for one in choices if one["is_default"]]
+    return defaults[0] if defaults else None
 
 
 def _as_int(value: Any) -> Optional[int]:

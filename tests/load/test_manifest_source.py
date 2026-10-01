@@ -720,14 +720,37 @@ class TestWhetherTheTransformIsTheDefault:
 
         assert source.transform_is_default is default
 
-    def test_a_transform_that_is_not_the_default_is_still_returned_as_stored(self) -> None:
-        """Whether it is used is for whoever selects it, not for the source."""
+    def test_a_transform_nobody_selected_and_that_is_not_the_default_is_unresolved(
+        self,
+    ) -> None:
+        """No default: nothing is selected, and no lowest id is taken."""
         source = ManifestSource.create(
             CountingReader([_row(transform_is_default=False)]),
             file_manifest_id=10, file_type_id=4,
         )
 
+        assert source.selected_transform_id is None
+        assert source.column_transform() is None
+
+    def test_a_selected_transform_is_returned_as_stored_default_or_not(self) -> None:
+        source = ManifestSource.create(
+            CountingReader([_row(transform_is_default=False)]),
+            file_manifest_id=10, file_type_id=4,
+        )
+
+        source.select_transform(20)
+
+        assert source.selected_transform_id == 20
         assert source.column_transform() is not None
+
+    def test_selecting_reads_nothing(self) -> None:
+        reader = CountingReader([_row(transform_is_default=False)])
+        source = ManifestSource.create(reader, file_manifest_id=10, file_type_id=4)
+
+        source.select_transform(20)
+        source.select_transform(None)
+
+        assert len(reader.calls) == 1
 
 
 class TestTheMutationChoicesAreKeptAsReturned:

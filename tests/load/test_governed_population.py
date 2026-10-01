@@ -21,6 +21,7 @@ from typing import Any, Mapping, Optional, Sequence
 import pytest
 
 from rey_lib.load import Source, Transform
+from rey_lib.data.errors import DataStructureError
 from rey_lib.load.manifest_source import ManifestSource
 
 
@@ -117,6 +118,10 @@ class TestTheSourceIsToldTheGovernedFacts:
             "file_manifest_id": 10, "file_mutation_id": 25, "installation_id": 1,
             "data_profile_id": 7, "file_name": "asset.txt", "mutation_choices": [],
             "transform_query_id": None,
+            "transform_choices": [
+                {"transform_id": 20, "transform_name": None, "is_default": True},
+            ],
+            "selected_transform_id": 20,
         }
 
     def test_a_file_with_no_profile_still_has_its_context(self) -> None:
@@ -474,3 +479,84 @@ class TestAGovernedDeclarationResolvesWithItsPersistence:
 
         assert transform.selected_kind() == "declaration"
         assert seen["persistence"].transform_id == 20
+
+
+class TestSavedSettingsSelectTheTransform:
+    """One read carries every transform; the source selects among them in memory."""
+
+    @staticmethod
+    def _two(default: Optional[int] = 20) -> list[dict[str, Any]]:
+        """Two transforms of one type, each with its own query and column."""
+        def of(transform_id: int, column_id: int, name: str, sql: str) -> list[dict[str, Any]]:
+            return [
+                {**row, "transform_id": transform_id, "transform_name": f"t{transform_id}",
+                 "transform_is_default": transform_id == default,
+                 "transform_query_id": transform_id * 10, "resolved_query_sql": sql,
+                 "mutation_choices": [{"file_mutation_id": 25, "result": "ok",
+                                       "path": "/p", "resolved_query_sql": sql}]}
+                for row in _joined([_column(column_id, name, 1)], fields=2)
+            ]
+        return of(20, 301, "a", "select 'default'") + of(21, 401, "b", "select 'other'")
+
+    @staticmethod
+    def _hydrated(governed: ManifestSource) -> tuple[Source, Transform]:
+        source = Source({"file-manifest-id": "10"}, selected="manifest")
+        transform = Transform()
+        governed.populate(source, transform)
+        return source, transform
+
+    def test_every_transform_is_a_choice(self) -> None:
+        assert _manifest(self._two()).transform_choices == [
+            {"transform_id": 20, "transform_name": "t20", "is_default": True},
+            {"transform_id": 21, "transform_name": "t21", "is_default": False},
+        ]
+
+    def test_created_it_hydrates_the_default(self) -> None:
+        governed = _manifest(self._two())
+        source, transform = self._hydrated(governed)
+
+        assert governed.selected_transform_id == 20
+        assert source.value("statement") == "select 'default'"
+        assert [one["name"] for one in transform.columns()] == ["a"]
+
+    def test_a_selected_transform_rehydrates_the_same_objects(self) -> None:
+        governed = _manifest(self._two())
+        source, transform = self._hydrated(governed)
+
+        governed.select_transform(21)
+        governed.populate(source, transform)
+
+        assert source.value("statement") == "select 'other'"
+        assert [one["name"] for one in transform.columns()] == ["b"]
+        assert transform.value("persistence")["transform_id"] == 21
+        assert governed.mutation_choices[0]["resolved_query_sql"] == "select 'other'"
+
+    def test_a_then_b_then_a_restores_each_statement_on_the_same_objects(self) -> None:
+        """The regression: a stale context must not restore the earlier SQL."""
+        governed = _manifest(self._two())
+        source, transform = self._hydrated(governed)
+        assert source.value("statement") == "select 'default'"
+
+        for chosen, sql, column in ((21, "select 'other'", "b"), (20, "select 'default'", "a")):
+            governed.select_transform(chosen)
+            governed.populate(source, transform)
+
+            assert source.value("statement") == sql
+            assert [one["name"] for one in transform.columns()] == [column]
+            assert transform.value("persistence")["transform_id"] == chosen
+
+    def test_with_no_default_the_selection_is_unresolved(self) -> None:
+        governed = _manifest(self._two(default=None))
+        source, transform = self._hydrated(governed)
+
+        assert governed.selected_transform_id is None
+        assert transform.declaration() == Transform().declaration()
+        assert source.value("statement") == ""
+        assert governed.mutation_choices[0]["resolved_query_sql"] is None
+
+    def test_an_unknown_transform_is_refused_by_name(self) -> None:
+        with pytest.raises(DataStructureError, match="transform 99"):
+            _manifest(self._two()).select_transform(99)
+
+    def test_profile_fields_are_not_doubled_by_a_second_transform(self) -> None:
+        assert len(_manifest(self._two()).data_profile().fields) == 2
