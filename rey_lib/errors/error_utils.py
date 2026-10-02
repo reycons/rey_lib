@@ -16,14 +16,12 @@ DatabaseError         Raised when a database operation fails — connection, DDL
 StateError            Raised when a JSON state file cannot be read or written.
 FtpConnectionError    Raised when an FTP connection cannot be established.
 FtpDownloadError      Raised when a file download fails or is incomplete.
-handle_exception      Log and re-raise with chained traceback context.
 validate_path         Validate that a required path exists on disk.
 validate_required     Validate that a required string value is non-empty.
 """
 
 from __future__ import annotations
 
-import logging
 import re
 import traceback
 import uuid
@@ -36,7 +34,6 @@ __all__ = [
     "StateError",
     "FtpConnectionError",
     "FtpDownloadError",
-    "handle_exception",
     "build_error_record_payload",
     "build_process_failure_payload",
     "build_safe_error_payload",
@@ -306,45 +303,6 @@ class FtpConnectionError(AppError):
 
 class FtpDownloadError(AppError):
     """Raised when a file download fails or is incomplete."""
-
-
-# ---------------------------------------------------------------------------
-# Exception handler
-# ---------------------------------------------------------------------------
-
-def handle_exception(
-    logger: logging.Logger,
-    exc: Exception,
-    msg: str,
-    new_exc_type: type[AppError] = AppError,
-    ctx: Any | None = None,
-) -> None:
-    """
-    Log an exception and re-raise it as an AppError subclass.
-
-    Always uses exception chaining to preserve the original traceback.
-    Never silently swallows exceptions.
-
-    Parameters
-    ----------
-    logger : logging.Logger
-        The logger to write the error message to.
-    exc : Exception
-        The original exception that was caught.
-    msg : str
-        Human-readable context message describing where the error occurred.
-    new_exc_type : type[AppError]
-        The exception type to raise. Defaults to AppError.
-    ctx : Any | None
-        Optional context object. Reserved for future use.
-
-    Raises
-    ------
-    AppError
-        Always raises — this function never returns normally.
-    """
-    logger.error("%s: %s", msg, exc, exc_info=True)
-    raise new_exc_type(f"{msg}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
