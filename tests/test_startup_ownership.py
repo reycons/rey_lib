@@ -81,4 +81,5 @@ def test_the_bootstrap_is_the_only_place_logging_starts() -> None:
     """One initializer, in the module that owns startup."""
     bootstrap = (APPS_ROOT / "rey_lib/rey_lib/config/bootstrap.py").read_text(encoding="utf-8")
     assert bootstrap.count("setup_logging(") == 1
-    assert bootstrap.count("install_process_error_boundary(") == 1
+    # No parallel error boundary: an uncaught failure is the interpreter's.
+    assert "install_process_error_boundary" not in bootstrap
