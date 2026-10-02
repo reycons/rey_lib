@@ -330,12 +330,12 @@ def _destination_identity(
     name = str(destination_table or "")
     parts = name.split(".")
     if len(parts) < 2:
-        raise ValueError(
+        raise ConfigError(
             f"destination_table '{name}' must be at least 'schema.table' — "
             f"got {len(parts)} part(s)."
         )
     if not str(connection or "").strip():
-        raise ValueError(
+        raise ConfigError(
             f"destination '{name}' needs the configured connection it lives "
             f"on; a database object identity without one is incomplete."
         )
@@ -2061,7 +2061,7 @@ def _find_transform(
             and getattr(t, "version", None) == version
         ):
             return t
-    raise ValueError(
+    raise ConfigError(
         f"No transform found with name='{name}' version='{version}'."
     )
 

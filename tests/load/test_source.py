@@ -85,11 +85,11 @@ class TestTheKindsAndTheSelection:
         assert source.value("statement") == "select 1"
 
     def test_an_unknown_kind_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="no source kind"):
+        with pytest.raises(ConfigError, match="no source kind"):
             Source().select("table")
 
     def test_a_field_that_is_not_a_source_field_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="not a source field"):
+        with pytest.raises(ConfigError, match="not a source field"):
             Source().update("table", "public.t")
 
 

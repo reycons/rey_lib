@@ -26,6 +26,7 @@ from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile
 
 from rey_lib.load.manifest_source import ManifestSource
+from rey_lib.errors.error_utils import ConfigError
 
 
 class CountingReader:
@@ -165,7 +166,7 @@ class TestOneCallAndNoSecondLookup:
     def test_neither_identity_is_refused_before_any_call(self, reader) -> None:
         """Refused here as well as by the routine, so no call is made that
         cannot succeed."""
-        with pytest.raises(ValueError, match="file_manifest_id"):
+        with pytest.raises(ConfigError, match="file_manifest_id"):
             ManifestSource.create(reader)
 
         assert reader.calls == []

@@ -186,7 +186,7 @@ class Target:
             ValueError: If no kind is called that.
         """
         if kind not in _BY_ID:
-            raise ValueError(
+            raise ConfigError(
                 f"Target: no target kind is called '{kind}'. "
                 f"Kinds: {', '.join(self.kinds())}."
             )
@@ -199,7 +199,7 @@ class Target:
             ValueError: If the field is not a Target field.
         """
         if name not in TARGET_FIELDS:
-            raise ValueError(
+            raise ConfigError(
                 f"Target: '{name}' is not a target field. "
                 f"Fields: {', '.join(TARGET_FIELDS)}."
             )
@@ -217,7 +217,7 @@ class Target:
             ValueError: If ``policy`` is not one of the write modes.
         """
         if policy not in MODES:
-            raise ValueError(
+            raise ConfigError(
                 f"Target: '{policy}' is not a write mode. Modes: {', '.join(MODES)}."
             )
         for mode in MODES:

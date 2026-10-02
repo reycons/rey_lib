@@ -23,6 +23,8 @@ import pytest
 from rey_lib.load import Source, Transform
 from rey_lib.data.errors import DataStructureError
 from rey_lib.load.manifest_source import ManifestSource
+from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import StateError
 
 
 class _Reader:
@@ -406,7 +408,7 @@ class TestSavingTheWorkingQuery:
         writer = _Writer()
 
         assert source.saves_query() is False
-        with pytest.raises(ValueError, match="governed transform query"):
+        with pytest.raises(StateError, match="governed transform query"):
             source.save_query(SimpleNamespace(shared_control=writer))
         assert writer.calls == []
 
@@ -457,7 +459,7 @@ class TestSavingTheWorkingMapping:
         assert transform.column_ordinals() == [1, 2, 3]
 
     def test_a_transform_with_nothing_governed_cannot_save(self) -> None:
-        with pytest.raises(ValueError, match="governed file"):
+        with pytest.raises(StateError, match="governed file"):
             Transform().save(SimpleNamespace(shared_control=_ColumnWriter([])))
 
 
@@ -632,7 +634,7 @@ class TestSavedSettingsAreEditedThenSaved:
         governed = _manifest(self._two())
         control = _Maintaining()
 
-        with pytest.raises(ValueError, match="at most one"):
+        with pytest.raises(ConfigError, match="at most one"):
             governed.save_transforms(control, self._settings(t21=("t21", True)))
         assert control.calls == []
 
@@ -802,7 +804,7 @@ class TestDeletingTheSelectedSavedSetting:
         source, transform = TestSavedSettingsSelectTheTransform._hydrated(governed)
         control = _Maintaining()
 
-        with pytest.raises(ValueError, match="no saved setting is selected"):
+        with pytest.raises(StateError, match="no saved setting is selected"):
             governed.delete_transform(control, source, transform)
         assert control.calls == []
 

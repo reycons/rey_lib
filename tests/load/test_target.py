@@ -83,11 +83,11 @@ class TestTheSelection:
         assert target.value("out-file") == "/o.csv"
 
     def test_an_unknown_kind_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="no target kind"):
+        with pytest.raises(ConfigError, match="no target kind"):
             Target().select("queue")
 
     def test_a_field_that_is_not_a_target_field_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="not a target field"):
+        with pytest.raises(ConfigError, match="not a target field"):
             Target().update("statement", "select 1")
 
 
@@ -114,7 +114,7 @@ class TestSettingTheWritePolicy:
         assert target.validate() == []
 
     def test_a_name_that_is_not_a_mode_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="not a write mode"):
+        with pytest.raises(ConfigError, match="not a write mode"):
             Target(_TABLE).set_write_policy("truncate")
 
     def test_it_round_trips(self) -> None:

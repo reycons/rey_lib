@@ -45,6 +45,7 @@ from rey_lib.files.data_file import data_file_for
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
+from rey_lib.errors.error_utils import StateError
 
 __all__ = ["Source", "SOURCE_FIELDS", "SOURCE_KINDS"]
 
@@ -193,7 +194,7 @@ class Source:
             ValueError: If no kind is called that.
         """
         if kind not in _BY_ID:
-            raise ValueError(
+            raise ConfigError(
                 f"Source: no source kind is called '{kind}'. "
                 f"Kinds: {', '.join(self.kinds())}."
             )
@@ -211,7 +212,7 @@ class Source:
                 keeping it would carry it somewhere it means nothing.
         """
         if name not in SOURCE_FIELDS:
-            raise ValueError(
+            raise ConfigError(
                 f"Source: '{name}' is not a source field. "
                 f"Fields: {', '.join(SOURCE_FIELDS)}."
             )
@@ -268,7 +269,7 @@ class Source:
             ConfigError: If the runtime has no control database.
         """
         if not self.saves_query():
-            raise ValueError(
+            raise StateError(
                 "Source: only a source populated from a governed transform query can save it."
             )
         # Imported here: the bootstrap reaches the load package, not the other way.

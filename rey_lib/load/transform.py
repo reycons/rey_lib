@@ -50,6 +50,7 @@ from rey_lib.data.column_transform import TransformPersistence, authorable_start
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
+from rey_lib.errors.error_utils import StateError
 
 __all__ = [
     "COLUMN_FIELDS", "Transform", "TRANSFORM_FIELDS", "TRANSFORM_KINDS", "TRANSFORM_PARAMETERS",
@@ -204,7 +205,7 @@ class Transform:
             ValueError: If no kind is called that.
         """
         if kind not in _BY_ID:
-            raise ValueError(
+            raise ConfigError(
                 f"Transform: no transform kind is called '{kind}'. "
                 f"Kinds: {', '.join(self.kinds())}."
             )
@@ -218,7 +219,7 @@ class Transform:
                 destination setting handed to a transform is a wiring fault.
         """
         if name not in TRANSFORM_FIELDS:
-            raise ValueError(
+            raise ConfigError(
                 f"Transform: '{name}' is not a transform field. "
                 f"Fields: {', '.join(TRANSFORM_FIELDS)}."
             )
@@ -277,7 +278,7 @@ class Transform:
             ConfigError: If the runtime has no control database.
         """
         if not self.saves():
-            raise ValueError(
+            raise StateError(
                 "Transform: only a transform populated from a governed file can save it."
             )
         declared, columns, aligned = self._authoring()
@@ -382,7 +383,7 @@ class Transform:
                 not one an entry has, or no entry is at that position.
         """
         if field not in COLUMN_FIELDS:
-            raise ValueError(
+            raise ConfigError(
                 f"Transform: '{field}' is not a column field. "
                 f"Fields: {', '.join(COLUMN_FIELDS)}."
             )
@@ -413,7 +414,7 @@ class Transform:
             elif isinstance(value, Mapping):
                 entry["transform"] = deepcopy(dict(value))
             else:
-                raise ValueError("Transform: a column's transform is a mapping, or None.")
+                raise ConfigError("Transform: a column's transform is a mapping, or None.")
 
         self._write(declared, columns, aligned)
 
@@ -469,7 +470,7 @@ class Transform:
         kind = self.selected_kind()
         field = _AUTHORED_IN.get(kind)
         if field is None:
-            raise ValueError(
+            raise StateError(
                 f"Transform ({kind}): nothing is authored here. "
                 + ("Choose Declaration to author a mapping."
                    if kind == "identity" else
@@ -478,7 +479,7 @@ class Transform:
         held = self._values.get(field)
         declared = _json_mapping(held) if _held(held) else {}
         if declared is None:
-            raise ValueError(
+            raise ConfigError(
                 f"Transform ({kind}): the declaration is not JSON, and is left as "
                 "it was written rather than reformatted."
             )
@@ -653,9 +654,9 @@ def _position(at: Any, columns: list[Any]) -> int:
     try:
         position = int(at)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"Transform: '{at}' is not a column position.") from exc
+        raise ConfigError(f"Transform: '{at}' is not a column position.") from exc
     if position < 0 or position >= len(columns):
-        raise ValueError(f"Transform: there is no column at position {position}.")
+        raise ConfigError(f"Transform: there is no column at position {position}.")
     return position
 
 

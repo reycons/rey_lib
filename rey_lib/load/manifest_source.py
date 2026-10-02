@@ -61,6 +61,8 @@ from rey_lib.data.data_profile import DataProfile, FieldProfile, ProfileField
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.logs import get_logger
+from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import StateError
 
 __all__ = ["ManifestSource", "SourceContextReader"]
 
@@ -195,7 +197,7 @@ class ManifestSource:
         ]
         defaults = [one["transform_id"] for one in working if one["is_default"]]
         if len(defaults) > 1:
-            raise ValueError(
+            raise ConfigError(
                 f"ManifestSource: at most one saved setting is the default; "
                 f"{defaults} were given."
             )
@@ -275,7 +277,7 @@ class ManifestSource:
         """
         deleted = self.selected_transform_id
         if deleted is None:
-            raise ValueError("ManifestSource: no saved setting is selected to delete.")
+            raise StateError("ManifestSource: no saved setting is selected to delete.")
         control.maintain_transform(
             self.persisted_file_type_id, action="delete", transform_id=deleted,
         )
@@ -391,7 +393,7 @@ class ManifestSource:
                 asked for.
         """
         if file_manifest_id is None and file_mutation_id is None:
-            raise ValueError(
+            raise ConfigError(
                 "ManifestSource: a file_manifest_id or a file_mutation_id is "
                 "required. There is no default file."
             )

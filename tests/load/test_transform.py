@@ -30,6 +30,7 @@ from rey_lib.load.transform import (
     TRANSFORM_KINDS,
     TRANSFORM_PARAMETERS,
 )
+from rey_lib.errors.error_utils import StateError
 
 _DECLARED = {"columns": [{"source": "A", "name": "a"}]}
 _STORED = {"transform_id": 7, "file_type_id": 4, "column_ids": [31]}
@@ -100,11 +101,11 @@ class TestTheSelection:
         assert transform.value("transform-file") == "/t.yaml"
 
     def test_an_unknown_kind_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="no transform kind"):
+        with pytest.raises(ConfigError, match="no transform kind"):
             Transform().select("sql")
 
     def test_a_field_that_is_not_a_transform_field_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="not a transform field"):
+        with pytest.raises(ConfigError, match="not a transform field"):
             Transform().update("table", "public.orders")
 
 
@@ -463,7 +464,7 @@ class TestEditingOneField:
     def test_a_missing_position_or_an_unknown_field_is_refused(
         self, at: int, field: str,
     ) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigError):
             _authoring("a").edit_column(at, field, "x")
 
 
@@ -508,21 +509,21 @@ class TestWhereAuthoringLands:
         transform = Transform(selected="identity")
         transform.observe_source_columns(["a"])
 
-        with pytest.raises(ValueError, match="Declaration"):
+        with pytest.raises(StateError, match="Declaration"):
             transform.edit_column(0, "name", "b")
 
     def test_a_declaration_file_is_not_edited_here(self) -> None:
         transform = Transform({"transform-file": "/t.yaml"}, selected="yaml")
         transform.observe_source_columns(["a"])
 
-        with pytest.raises(ValueError, match="where it lives"):
+        with pytest.raises(StateError, match="where it lives"):
             transform.add_column()
 
     def test_hand_written_yaml_is_left_as_it_was_written(self) -> None:
         text = "columns:\n  - {source: a, name: a}\n"
         transform = Transform({"transform": text}, selected="declaration")
 
-        with pytest.raises(ValueError, match="not JSON"):
+        with pytest.raises(ConfigError, match="not JSON"):
             transform.add_column()
         assert transform.value("transform") == text
         assert transform.in_force_declaration() is None
