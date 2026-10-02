@@ -462,7 +462,10 @@ def test_shared_inspector_normalizes_schema_metadata() -> None:
 
     engine = create_engine("sqlite://")
     core = engine.connect()
-    core.exec_driver_sql("CREATE TABLE parent (id INTEGER PRIMARY KEY, code TEXT UNIQUE)")
+    core.exec_driver_sql(
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY, code TEXT UNIQUE, "
+        "CONSTRAINT ck_parent_id_positive CHECK (id > 0))"
+    )
     core.exec_driver_sql(
         "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL, "
         "FOREIGN KEY(parent_id) REFERENCES parent(id))"
@@ -484,6 +487,11 @@ def test_shared_inspector_normalizes_schema_metadata() -> None:
     assert child["indexes"][0]["name"] == "ix_child_parent"
     parent = next(table for table in metadata["tables"] if table["name"] == "parent")
     assert parent["unique_constraints"][0]["column_names"] == ["code"]
+    # Backlog 571: the bulk read carries each table's check constraints.
+    assert [check["name"] for check in parent["check_constraints"]] == [
+        "ck_parent_id_positive"
+    ]
+    assert child["check_constraints"] == []
     assert metadata["views"] == [
         {"name": "child_ids", "definition": "CREATE VIEW child_ids AS SELECT id FROM child"}
     ]

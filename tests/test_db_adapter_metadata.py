@@ -29,6 +29,7 @@ _ALL_CAPABILITIES = {
     "foreign_keys",
     "indexes",
     "unique_constraints",
+    "check_constraints",
 }
 
 
@@ -39,7 +40,8 @@ def _sqlalchemy_connection(provider: str) -> ReyConnection:
         "CREATE TABLE parent ("
         "id INTEGER, code TEXT, "
         "CONSTRAINT pk_parent PRIMARY KEY(id), "
-        "CONSTRAINT uq_parent_code UNIQUE(code))"
+        "CONSTRAINT uq_parent_code UNIQUE(code), "
+        "CONSTRAINT ck_parent_id_positive CHECK (id > 0))"
     )
     core.exec_driver_sql(
         "CREATE TABLE child ("
@@ -151,6 +153,17 @@ def test_sqlalchemy_providers_return_the_same_normalized_contract(
                 "columns": ["code"],
             }
         ]
+        # Backlog 571: a check constraint, by name, with the expression it checks.
+        assert adapter.get_check_constraints(conn, "main", "parent") == [
+            {
+                "catalog": "subject",
+                "schema": "main",
+                "table": "parent",
+                "name": "ck_parent_id_positive",
+                "expression": "id > 0",
+            }
+        ]
+        assert adapter.get_check_constraints(conn, "main", "child") == []
 
         for value in (
             columns,
@@ -158,6 +171,7 @@ def test_sqlalchemy_providers_return_the_same_normalized_contract(
             foreign_keys,
             adapter.get_indexes(conn, "main", "child"),
             adapter.get_unique_constraints(conn, "main", "parent"),
+            adapter.get_check_constraints(conn, "main", "parent"),
         ):
             _assert_rey_primitives(value)
     finally:

@@ -212,6 +212,10 @@ def inspect_schema(conn: Any, schema: str) -> dict[str, Any]:
                     dict(value)
                     for value in inspector.get_unique_constraints(table_name, schema=schema)
                 ],
+                "check_constraints": [
+                    dict(value)
+                    for value in inspector.get_check_constraints(table_name, schema=schema)
+                ],
             }
         )
 
@@ -411,4 +415,23 @@ def metadata_get_unique_constraints(
             "columns": _name_list(value.get("column_names")),
         }
         for value in inspector.get_unique_constraints(table, schema=schema)
+    ]
+
+
+def metadata_get_check_constraints(
+    conn: Any,
+    catalog: str,
+    schema: str,
+    table: str,
+) -> list[dict[str, Any]]:
+    inspector, _sa_conn = _inspector(conn)
+    return [
+        {
+            "catalog": str(catalog),
+            "schema": str(schema),
+            "table": str(table),
+            "name": _optional_name(value.get("name")),
+            "expression": str(value.get("sqltext") or ""),
+        }
+        for value in inspector.get_check_constraints(table, schema=schema)
     ]

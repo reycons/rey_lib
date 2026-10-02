@@ -174,6 +174,7 @@ _METADATA_CAPABILITIES = frozenset(
         "foreign_keys",
         "indexes",
         "unique_constraints",
+        "check_constraints",
         "procedures",
         "functions",
     }
@@ -961,6 +962,19 @@ class DBAdapter:
 
         return metadata_get_unique_constraints(conn, catalog, schema, table)
 
+    def get_check_constraints(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+    ) -> list[dict[str, Any]]:
+        """Return normalized check constraints for a table, each with its expression."""
+        provider = self._require_metadata_capability(conn, "check_constraints")
+        catalog = self._metadata_catalog(conn, provider)
+        from rey_lib.db._sqlalchemy import metadata_get_check_constraints
+
+        return metadata_get_check_constraints(conn, catalog, schema, table)
+
     def list_procedures(
         self,
         conn: Any,
@@ -1005,7 +1019,7 @@ class DBAdapter:
         """Return one schema's relations, each with what it is made of.
 
         The provider's own bulk schema read: every table with its columns,
-        primary key, foreign keys, indexes and unique constraints, and every
+        primary key, foreign keys, indexes, unique and check constraints, and every
         view with its definition, in one pass rather than a read per relation.
 
         Args:
