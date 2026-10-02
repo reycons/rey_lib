@@ -32,6 +32,8 @@ from rey_lib.files.file_utils import (
     visible_children,
     visible_files,
 )
+from rey_lib.errors.error_utils import ConfigError
+from rey_lib.files.file_routing import FileRoutingError
 
 
 def _source_cfg(tmp_path: Path, pattern: str | list[str] = "*.jsonl") -> SimpleNamespace:
@@ -184,7 +186,7 @@ def test_resolve_safe_file_rejects_outside_root(tmp_path: Path) -> None:
 
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("x", encoding="utf-8")
-    with pytest.raises(ValueError):
+    with pytest.raises(FileRoutingError):
         resolve_safe_file(outside, tmp_path)
     outside.unlink(missing_ok=True)
 
@@ -314,7 +316,7 @@ def test_list_relevant_files_rejects_unsafe_sources(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside_relevant"
     outside.mkdir(exist_ok=True)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(FileRoutingError):
         list_relevant_files(
             ctx=ctx,
             metadata={"sources": [str(outside)], "include": ["*.yaml"]},
@@ -365,7 +367,7 @@ def test_preview_file_for_display_rejects_unsafe_and_secret_files(tmp_path: Path
 
     assert secret_result["supported"] is False
     assert "Sensitive" in secret_result["reason"]
-    with pytest.raises(ValueError):
+    with pytest.raises(FileRoutingError):
         preview_file_for_display(outside, approved_roots=[allowed])
 
 
@@ -579,25 +581,25 @@ def test_capture_path_variables_accepts_a_path_object() -> None:
 )
 def test_capture_path_variables_rejects_partial_segment_patterns(pattern: str) -> None:
     """A braced name must occupy a whole segment."""
-    with pytest.raises(ValueError, match="whole"):
+    with pytest.raises(ConfigError, match="whole"):
         capture_path_variables("/work/bmo/in", pattern)
 
 
 def test_capture_path_variables_rejects_an_empty_name() -> None:
     """An empty brace declares nothing and is malformed."""
-    with pytest.raises(ValueError, match="empty name"):
+    with pytest.raises(ConfigError, match="empty name"):
         capture_path_variables("/work/bmo/in", "/work/{}/in")
 
 
 def test_capture_path_variables_rejects_duplicate_names() -> None:
     """A repeated variable name is a malformed pattern."""
-    with pytest.raises(ValueError, match="more than once"):
+    with pytest.raises(ConfigError, match="more than once"):
         capture_path_variables("/work/a/b", "/work/{name}/{name}")
 
 
 def test_capture_path_variables_validates_the_pattern_before_matching() -> None:
     """A malformed pattern raises even when the path could never match."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ConfigError):
         capture_path_variables("/completely/different", "/work/{a}{b}/in")
 
 

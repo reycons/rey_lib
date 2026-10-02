@@ -196,7 +196,7 @@ def convert_workbook_to_csv(
     source = Path(source_path).expanduser().resolve()
     destination = Path(output_dir).expanduser().resolve()
     if not isinstance(overwrite, bool):
-        raise TypeError("overwrite must be a boolean.")
+        raise WorkbookConversionError("overwrite must be a boolean.", source)
     extension = source.suffix.lower()
 
     if extension not in SUPPORTED_WORKBOOK_EXTENSIONS:
@@ -404,8 +404,9 @@ def _load_table(reader: Any, source: Path, sheet_name: str, table_name: str) -> 
     try:
         table = reader.load_table(table_name)
         if str(table.sheet_name) != sheet_name:
-            raise ValueError(
-                f"table belongs to worksheet '{table.sheet_name}', expected '{sheet_name}'"
+            raise WorkbookConversionError(
+                f"table belongs to worksheet '{table.sheet_name}', expected '{sheet_name}'",
+                source, sheet_name=sheet_name, table_name=table_name,
             )
         return table.to_polars()
     except Exception as exc:  # noqa: BLE001 - third-party exception boundary

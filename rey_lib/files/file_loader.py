@@ -50,6 +50,7 @@ from rey_lib.logs.log_utils import (
     log_step_failure,
     log_validation_result,
 )
+from rey_lib.data.errors import DataStructureError
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import (
     ConfigError,
@@ -261,7 +262,7 @@ def _run_file_movements_pipeline(data_source: Any) -> int:
 
     try:
         return apply_file_movements(data_source.paths, file_movements)
-    except ValueError as exc:
+    except (ConfigError, DataStructureError) as exc:
         _logger.error(
             "Invalid file_movements config for %s: %s",
             getattr(data_source, "name", "<unknown>"),
@@ -1339,7 +1340,7 @@ def resolve_path(paths: Any, key: str, ctx: Any = None) -> Path:
     """
     value = getattr(paths, key, None)
     if value is None:
-        raise ValueError(
+        raise ConfigError(
             f"Path key '{key}' not found in data source paths config."
         )
     return Path(resolve_ctx_tokens(str(value), ctx))
@@ -1441,7 +1442,7 @@ def _parse_destination(destination_table: str) -> tuple[str, str]:
     """
     parts = destination_table.split(".")
     if len(parts) < 2:
-        raise ValueError(
+        raise ConfigError(
             f"destination_table '{destination_table}' must be at least "
             f"'schema.table' — got {len(parts)} part(s)."
         )

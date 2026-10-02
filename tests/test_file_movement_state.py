@@ -20,6 +20,7 @@ from rey_lib.files.file_utils import (
 from tests.conftest import make_run_log, start_test_run
 
 from rey_lib.logs import read_run_log_sections
+from rey_lib.errors.error_utils import ConfigError
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -55,7 +56,7 @@ def test_file_movement_log_path_is_alias(tmp_path: Path) -> None:
 
 def test_missing_paths_raises(tmp_path: Path) -> None:
     ctx = SimpleNamespace()
-    with pytest.raises(ValueError, match="ctx.paths is required"):
+    with pytest.raises(ConfigError, match="ctx.paths is required"):
         file_operation_log_path(ctx)
 
 

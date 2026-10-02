@@ -205,7 +205,7 @@ class TestTheFormatIsDecidedTheSameWay:
         """Refused by name rather than guessed at."""
         mystery = _jsonl(tmp_path, {"a": 1}, name="delivery.dat")
 
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             _load(tmp_path, monkeypatch, run_log, _Adapter(exists=True),
                   source=mystery)
 

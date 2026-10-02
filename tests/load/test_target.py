@@ -215,7 +215,7 @@ class TestResolution:
         assert isinstance(resolved, DataFile)
 
     def test_a_suffix_that_names_no_format_is_refused(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigError):
             Target({"out-file": "/out/rows.nothing"}).resolve(SimpleNamespace())
 
     @pytest.mark.parametrize("values", [

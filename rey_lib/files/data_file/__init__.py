@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from rey_lib.files.data_file.base import DEFAULT_ENCODING, DataFile
 from rey_lib.files.file_utils import file_type_for_suffix
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "DataFile",
@@ -97,13 +98,13 @@ def data_file_for(
     token = (file_type or file_type_for_suffix(source.suffix)).strip().upper()
 
     if not token:
-        raise ValueError(
+        raise ConfigError(
             f"Cannot tell what kind of file '{source.name}' is: no file_type "
             f"was declared and '{source.suffix}' names no known format. "
             f"Known formats: {sorted(_REGISTRY)}."
         )
     if token not in _REGISTRY:
-        raise ValueError(
+        raise ConfigError(
             f"Unsupported file_type '{token}'. "
             f"Known formats: {sorted(_REGISTRY)}."
         )

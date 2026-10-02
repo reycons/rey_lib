@@ -67,12 +67,14 @@ def governed_file_id(value: Any, *, subject: str = "") -> FileId:
 
     about = f"{subject} " if subject else ""
     if isinstance(value, str):
-        raise ValueError(
+        from rey_lib.logs.file_manifest import FileManifestError  # noqa: PLC0415 -- import cycle
+        raise FileManifestError(
             f"{about}was given the file id {value!r} as a string. A governed "
             "file is identified by control.file_manifest.file_manifest_id, "
             "which the database mints; the string identity was retired."
         )
-    raise ValueError(
+    from rey_lib.logs.file_manifest import FileManifestError  # noqa: PLC0415 -- import cycle
+    raise FileManifestError(
         f"{about}requires a governed file id -- a positive "
         f"file_manifest_id -- and was given {value!r}."
     )

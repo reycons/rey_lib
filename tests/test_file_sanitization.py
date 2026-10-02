@@ -477,7 +477,7 @@ def test_policy_conflicts_and_malformed_entries_fail_closed(
     policy: dict,
     message: str,
 ) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(FileSanitizationError, match=message):
         compose_sanitization_policy(policy, {
             "policy_name": "feed", "policy_version": "1", "remove": {},
             "preserve": {}, "preserve_if_quoted": {}, "replace": {},
@@ -670,7 +670,7 @@ def test_quote_state_is_maintained_while_quote_rules_are_applied(
 
 
 def test_non_string_replacement_is_rejected_without_coercion() -> None:
-    with pytest.raises(ValueError, match="requires 'with' to be a string"):
+    with pytest.raises(FileSanitizationError, match="requires 'with' to be a string"):
         compose_sanitization_policy(
             {
                 "policy_name": "platform", "policy_version": "1", "remove": {},
@@ -709,7 +709,7 @@ def test_success_result_carries_both_acknowledged_evidence_references(
 
 
 def test_zero_width_line_repair_is_rejected_before_processing() -> None:
-    with pytest.raises(ValueError, match="may match an empty string"):
+    with pytest.raises(FileSanitizationError, match="may match an empty string"):
         compose_sanitization_policy(
             {
                 "policy_name": "platform", "policy_version": "1", "remove": {},

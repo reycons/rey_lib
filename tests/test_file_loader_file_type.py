@@ -22,6 +22,7 @@ from rey_lib.files import file_utils
 from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
+from rey_lib.errors.error_utils import ConfigError
 
 #: Where these loads write. The per-file step takes a target object now.
 _TARGET = DatabaseObjectIdentity(
@@ -173,7 +174,7 @@ class TestTheConfiguredTypeReachesTheReader:
         # The refusal is the REGISTRY's now: an unknown token names no
         # DataFile, so building the source is where it is caught. That is the
         # same boundary moving with the object, not a weaker check.
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             data_file_for(_csv(tmp_path), file_type="NO_SUCH_FORMAT")
 
         assert "NO_SUCH_FORMAT" in str(raised.value)

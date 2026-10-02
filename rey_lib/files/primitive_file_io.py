@@ -53,6 +53,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from rey_lib.errors.error_utils import StateError
 
 try:  # POSIX only; absent on Windows
     import fcntl
@@ -395,7 +396,7 @@ class StagedStreamWrite:
     def write(self, data: bytes) -> int:
         """Write one encoded chunk without materializing the complete file."""
         if self.closed:
-            raise ValueError("Cannot write to a closed staged stream.")
+            raise StateError("Cannot write to a closed staged stream.")
         return int(self.handle.write(data))
 
     def install(self, *, overwrite: bool = False) -> Path:
@@ -403,7 +404,7 @@ class StagedStreamWrite:
         if self.installed:
             return self.destination
         if self.closed:
-            raise ValueError("Cannot install a closed staged stream.")
+            raise StateError("Cannot install a closed staged stream.")
         self.handle.flush()
         if self.tier in (_TIER_FLUSHED, _TIER_MAXIMUM):
             _flush_file(self.handle.fileno(), self.tier)
@@ -562,7 +563,7 @@ _TIERS = (_TIER_VISIBILITY, _TIER_FLUSHED, _TIER_MAXIMUM)
 def _checked_tier(tier: str) -> str:
     """Return ``tier`` if it names a real guarantee, else raise."""
     if tier not in _TIERS:
-        raise ValueError(
+        raise StateError(
             f"Unknown write tier {tier!r}; expected one of {', '.join(_TIERS)}."
         )
     return tier

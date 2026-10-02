@@ -27,6 +27,7 @@ from rey_lib.files.primitive_file_io import (
     stage_write_bytes,
     stage_stream_write,
 )
+from rey_lib.errors.error_utils import StateError
 
 
 @pytest.fixture
@@ -190,7 +191,7 @@ def test_maximum_durability_fails_when_the_directory_cannot_be_synced(
 
 
 def test_an_unknown_tier_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="Unknown write tier"):
+    with pytest.raises(StateError, match="Unknown write tier"):
         stage_write_bytes(tmp_path / "x", b"", tier="durable")
 
 

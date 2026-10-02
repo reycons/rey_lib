@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from rey_lib.files.file_utils import file_reference_metadata
+from rey_lib.files.file_routing import FileRoutingError
 
 
 def test_metadata_for_existing_file_under_approved_root(tmp_path: Path) -> None:
@@ -46,5 +47,5 @@ def test_metadata_rejects_path_outside_approved_roots(tmp_path: Path) -> None:
     approved = tmp_path / "approved"
     approved.mkdir()
 
-    with pytest.raises(ValueError):
+    with pytest.raises(FileRoutingError):
         file_reference_metadata(outside / "secret.txt", approved_roots=[approved])

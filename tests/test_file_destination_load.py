@@ -35,6 +35,7 @@ from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.query_source import QuerySource
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
+from rey_lib.errors.error_utils import ConfigError
 
 
 class _Table:
@@ -254,7 +255,7 @@ class TestEachFormatReachesItsOwnWriter:
         that does not say what it is is refused before a load starts, rather
         than guessed at and written wrongly.
         """
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             data_file_for(tmp_path / "rows.unknown")
 
         assert "rows.unknown" in str(raised.value)
@@ -268,7 +269,7 @@ class TestEachFormatReachesItsOwnWriter:
         """
         source = data_file_for(tmp_path / "rows.txt", file_type="DELIMITED_NO_HEADER")
 
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             source.write([{"a": 1}])
 
         assert "DELIMITED_NO_HEADER" in str(raised.value)
@@ -366,7 +367,7 @@ class TestTheWayIn:
             lambda _ctx, _name: SimpleNamespace(handle=lambda: engine),
         )
 
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             load_operation.load_query_to_file(
                 SimpleNamespace(log_depth=0), run_log,
                 "SELECT a FROM orders", "warehouse",

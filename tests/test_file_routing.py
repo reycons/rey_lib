@@ -22,6 +22,7 @@ from rey_lib.files import (
     SourceFileMutationEvidenceFailurePhase,
 )
 from rey_lib.files import file_routing
+from rey_lib.logs.file_manifest import FileManifestError
 
 
 def _context(
@@ -233,7 +234,7 @@ def test_missing_route_fails_before_filesystem_access(
 def test_missing_file_id_fails_before_path_normalization() -> None:
     # The identity is a database-minted integer, so the empty string is not a
     # missing id in the old sense -- it is the retired string model.
-    with pytest.raises(ValueError, match="file id"):
+    with pytest.raises(FileManifestError, match="file id"):
         GovernedFileReference("", object())  # type: ignore[arg-type]
 
 

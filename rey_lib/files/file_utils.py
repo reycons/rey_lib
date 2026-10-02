@@ -39,6 +39,7 @@ from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextI
 from rey_lib.encryption import sha256_file, sha256_text
 from rey_lib.files import primitive_file_io
 from rey_lib.logs import get_logger, log_run_record, record_file_operation
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "KEYED_FILE_TYPES",
@@ -289,14 +290,14 @@ def capture_path_variables(
             or not segment.startswith("{")
             or not segment.endswith("}")
         ):
-            raise ValueError(
+            raise ConfigError(
                 f"Path pattern segment must be a whole '{{name}}' or a literal: {segment}"
             )
         name = segment[1:-1]
         if not name:
-            raise ValueError(f"Path pattern segment has an empty name: {segment}")
+            raise ConfigError(f"Path pattern segment has an empty name: {segment}")
         if name in names:
-            raise ValueError(f"Path pattern declares '{name}' more than once.")
+            raise ConfigError(f"Path pattern declares '{name}' more than once.")
         names.append(name)
 
     path_parts = PurePosixPath(str(path)).parts
@@ -396,12 +397,14 @@ def resolve_safe_file(raw_path: Path | str, root_path: Path | str) -> Path:
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"Path is outside root: {path}") from exc
+        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+        raise FileRoutingError(f"Path is outside root: {path}") from exc
 
     if not path.exists():
         raise FileNotFoundError(f"Path does not exist: {path}")
     if not path.is_file():
-        raise ValueError(f"Path is not a file: {path}")
+        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+        raise FileRoutingError(f"Path is not a file: {path}")
     return path
 
 
@@ -704,7 +707,7 @@ def _resolve_under_approved_roots(
     path = Path(raw_path).expanduser().resolve()
     roots = [Path(root).expanduser().resolve() for root in approved_roots if root]
     if not roots:
-        raise ValueError("No approved roots configured for file preview.")
+        raise ConfigError("No approved roots configured for file preview.")
     for root in roots:
         try:
             path.relative_to(root)
@@ -712,12 +715,14 @@ def _resolve_under_approved_roots(
         except ValueError:
             continue
     else:
-        raise ValueError(f"Path is outside approved roots: {path}")
+        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+        raise FileRoutingError(f"Path is outside approved roots: {path}")
 
     if not path.exists():
         raise FileNotFoundError(f"Path does not exist: {path}")
     if not path.is_file():
-        raise ValueError(f"Path is not a file: {path}")
+        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+        raise FileRoutingError(f"Path is not a file: {path}")
     return path
 
 
@@ -890,7 +895,7 @@ def _append_unique_root(roots: list[Path], path: Path) -> None:
 def _require_under_relevant_root(path: Path, allowed_roots: list[Path]) -> None:
     """Fail closed when a relevant-file path is outside approved roots."""
     if not allowed_roots:
-        raise ValueError("No approved roots configured for relevant-file discovery.")
+        raise ConfigError("No approved roots configured for relevant-file discovery.")
     resolved = path.expanduser().resolve()
     for root in allowed_roots:
         try:
@@ -898,7 +903,8 @@ def _require_under_relevant_root(path: Path, allowed_roots: list[Path]) -> None:
             return
         except ValueError:
             continue
-    raise ValueError(f"Relevant file source is outside approved roots: {resolved}")
+    from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+    raise FileRoutingError(f"Relevant file source is outside approved roots: {resolved}")
 
 
 def _safe_relative_path(path: Path, source: Path) -> str:
@@ -1127,7 +1133,7 @@ def get_reader(
     elif fmt in KEYED_FILE_TYPES:
         yield from _jsonl_reader(infile, row_filter=row_filter)
     else:
-        raise ValueError(f"Unsupported file_type '{file_type}'.")
+        raise ConfigError(f"Unsupported file_type '{file_type}'.")
 
 
 def write_file(
@@ -1190,7 +1196,8 @@ def write_file(
 
     if fmt in ("CSV", "XLSX"):
         if not content:
-            raise ValueError("write_file called with empty rows list.")
+            from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+            raise DataStructureError("write_file called with empty rows list.")
         if fmt == "CSV":
             # Imported here, not at module scope: rey_lib.files.csv imports
             # read_text_file from this module, so a top-level import closes a cycle.
@@ -1207,7 +1214,7 @@ def write_file(
             json.dumps(content, default=str, indent=2, sort_keys=sort_keys),
         )
     else:
-        raise ValueError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
+        raise ConfigError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
 
     if run_log is not None:
         try:
@@ -1282,9 +1289,10 @@ def file_reference_metadata(
     path = Path(raw_path).expanduser().resolve()
     roots = [Path(root).expanduser().resolve() for root in approved_roots if root]
     if not roots:
-        raise ValueError("No approved roots configured for file metadata.")
+        raise ConfigError("No approved roots configured for file metadata.")
     if not any(_path_within(path, root) for root in roots):
-        raise ValueError(f"Path is outside approved roots: {path}")
+        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+        raise FileRoutingError(f"Path is outside approved roots: {path}")
     if not path.exists():
         return {
             "name": path.name,
@@ -1311,7 +1319,8 @@ def delete_file(path: Path | str) -> bool:
     if not file_path.exists():
         return False
     if not file_path.is_file():
-        raise ValueError(f"Path is not a file: {file_path}")
+        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
+        raise FileRoutingError(f"Path is not a file: {file_path}")
     file_path.unlink()
     record_file_operation("delete", source_path=str(file_path))
     return True
@@ -1527,7 +1536,7 @@ def file_operation_log_path(ctx: Any) -> Path:
     paths = getattr(ctx, "paths", None)
     if hasattr(paths, "resolve"):
         return paths.resolve("file_operations_state")
-    raise ValueError(
+    raise ConfigError(
         "ctx.paths is required — build ctx with build_ctx_from_path."
     )
 
@@ -1716,12 +1725,12 @@ def apply_file_movements(paths: Any, file_movements: Any) -> int:
 
     first_move = getattr(success[0], "move", None)
     if first_move is None:
-        raise ValueError("file_movements.success[0].move is required.")
+        raise ConfigError("file_movements.success[0].move is required.")
 
     source_key = getattr(first_move, "from", None)
     dest_key = getattr(first_move, "to", None)
     if source_key is None or dest_key is None:
-        raise ValueError("file_movements.success[0].move requires 'from' and 'to'.")
+        raise ConfigError("file_movements.success[0].move requires 'from' and 'to'.")
 
     source_dir = _resolve_path_key(paths, source_key)
     dest_dir = _resolve_path_key(paths, dest_key)
@@ -1844,7 +1853,7 @@ def _resolve_path_key(paths: Any, key: str) -> Path:
     """Resolve a named path key from a data-source paths namespace."""
     value = getattr(paths, key, None)
     if value is None:
-        raise ValueError(f"Path key '{key}' not found in data source paths.")
+        raise ConfigError(f"Path key '{key}' not found in data source paths.")
     return Path(value)
 
 
@@ -1859,7 +1868,7 @@ def _resolve_dest_name(file_path: Path, name_transforms: list[Any]) -> str:
     if transform_type == "date_range_from_column":
         return _apply_date_range_from_column(file_path, transform)
 
-    raise ValueError(f"Unsupported name_transform type: '{transform_type}'.")
+    raise ConfigError(f"Unsupported name_transform type: '{transform_type}'.")
 
 
 def _apply_date_range_from_column(file_path: Path, transform: Any) -> str:
@@ -1903,7 +1912,8 @@ def _read_date_range_from_column(
     )
     columns = list(read.header_fields)
     if source_column not in columns:
-        raise ValueError(f"Column '{source_column}' not found in file.")
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError(f"Column '{source_column}' not found in file.")
     for row in read.rows:
         raw = (dict(zip(columns, row.fields)).get(source_column, "") or "").strip()
         if not raw:
@@ -1919,7 +1929,8 @@ def _read_date_range_from_column(
             )
 
     if not dates:
-        raise ValueError(
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError(
             f"No parseable values found for column '{source_column}' in '{file_path.name}'."
         )
 

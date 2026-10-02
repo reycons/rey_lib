@@ -72,11 +72,11 @@ class GovernedFileReference:
     def __post_init__(self) -> None:
         file_id = governed_file_id(self.file_id, subject="a governed file reference")
         if not isinstance(self.current_path, (str, Path)):
-            raise ValueError("current_path must be a path.")
+            raise FileRoutingError("current_path must be a path.")
         if self.classification is not None and not isinstance(
             self.classification, Mapping
         ):
-            raise ValueError("classification must be a mapping or None.")
+            raise FileRoutingError("classification must be a mapping or None.")
         object.__setattr__(self, "file_id", file_id)
         object.__setattr__(
             self,
@@ -118,15 +118,15 @@ class FileRoutingContext:
             else ""
         )
         if not application_name:
-            raise ValueError("application_name must be a non-empty string.")
+            raise FileRoutingError("application_name must be a non-empty string.")
         if not isinstance(self.routes, Mapping):
-            raise ValueError("routes must be a mapping.")
+            raise FileRoutingError("routes must be a mapping.")
         if not self.governed_roots:
-            raise ValueError("governed_roots must contain at least one path.")
+            raise FileRoutingError("governed_roots must contain at least one path.")
         try:
             collision_policy = CollisionPolicy(self.collision_policy)
         except ValueError as exc:
-            raise ValueError("collision_policy must be 'overwrite'.") from exc
+            raise FileRoutingError("collision_policy must be 'overwrite'.") from exc
 
         object.__setattr__(self, "application_name", application_name)
         object.__setattr__(self, "routes", dict(self.routes))
@@ -188,9 +188,14 @@ class FileRoutingResult:
 
 
 class FileRoutingError(AppError):
-    """Raised when routing validation or physical mutation fails."""
+    """Raised when routing validation or physical mutation fails.
 
-    def __init__(self, message: str, result: FileRoutingResult) -> None:
+    ``result`` is the attempted route's outcome. It is None for a refusal made
+    before any route is attempted -- an out-of-governance path, a path that is
+    not a file, or an invalid routing context.
+    """
+
+    def __init__(self, message: str, result: FileRoutingResult | None = None) -> None:
         super().__init__(message)
         self.result = result
 

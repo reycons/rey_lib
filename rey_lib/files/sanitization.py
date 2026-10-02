@@ -127,7 +127,7 @@ def compose_sanitization_policy(
         else global_layer.max_line
     )
     if lines and max_line is None:
-        raise ValueError(
+        raise FileSanitizationError(
             "An effective policy with line_repair requires "
             "max_logical_line_characters."
         )
@@ -200,17 +200,17 @@ class FileSanitizationContext:
     def __post_init__(self) -> None:
         application = self.application_name.strip() if isinstance(self.application_name, str) else ""
         if not application:
-            raise ValueError("application_name must be non-empty.")
+            raise FileSanitizationError("application_name must be non-empty.")
         if not self.governed_roots:
-            raise ValueError("governed_roots must contain at least one path.")
+            raise FileSanitizationError("governed_roots must contain at least one path.")
         if not isinstance(self.policy, EffectiveSanitizationPolicy):
-            raise ValueError("policy must be an EffectiveSanitizationPolicy.")
+            raise FileSanitizationError("policy must be an EffectiveSanitizationPolicy.")
         object.__setattr__(self, "application_name", application)
         object.__setattr__(self, "destination_path", Path(self.destination_path).expanduser().resolve())
         object.__setattr__(self, "governed_roots", tuple(Path(root).expanduser().resolve() for root in self.governed_roots))
         object.__setattr__(self, "collision_policy", FileSanitizationCollisionPolicy(self.collision_policy))
         if not isinstance(self.add_source_line_number, bool):
-            raise ValueError("add_source_line_number must be true or false.")
+            raise FileSanitizationError("add_source_line_number must be true or false.")
         for field in ("file_operation_metadata", "mutation_run_log_fields"):
             value = getattr(self, field)
             object.__setattr__(self, field, MappingProxyType(deepcopy(dict(value))) if value is not None else None)
@@ -337,9 +337,9 @@ def _record_failed_mutation(
 
 def sanitize_file(ctx: FileSanitizationContext, file_reference: GovernedFileReference) -> FileSanitizationResult:
     if not isinstance(ctx, FileSanitizationContext):
-        raise TypeError("sanitize_file requires FileSanitizationContext.")
+        raise FileSanitizationError("sanitize_file requires FileSanitizationContext.")
     if not isinstance(file_reference, GovernedFileReference):
-        raise TypeError("sanitize_file requires GovernedFileReference.")
+        raise FileSanitizationError("sanitize_file requires GovernedFileReference.")
     source = file_reference.current_path
     destination = ctx.destination_path
     _validate_paths(ctx, source, destination)
@@ -649,10 +649,10 @@ def _frozen_counts(counts: Mapping[str, int] | None) -> Mapping[str, int]:
 
 def _parse_policy_layer(raw: Mapping[str, Any], label: str) -> _PolicyLayer:
     if not isinstance(raw, Mapping):
-        raise ValueError(f"The {label} sanitization policy must be a mapping.")
+        raise FileSanitizationError(f"The {label} sanitization policy must be a mapping.")
     unknown = set(raw) - _POLICY_FIELDS
     if unknown:
-        raise ValueError(f"The {label} sanitization policy has unknown fields: {sorted(unknown)}")
+        raise FileSanitizationError(f"The {label} sanitization policy has unknown fields: {sorted(unknown)}")
     name = _required_text(raw, "policy_name", label)
     version = _required_text(raw, "policy_version", label)
     seen: set[str] = set()
@@ -660,53 +660,53 @@ def _parse_policy_layer(raw: Mapping[str, Any], label: str) -> _PolicyLayer:
     for action in _TABLES:
         table = raw.get(action)
         if not isinstance(table, Mapping):
-            raise ValueError(f"The {label} policy {action!r} table must be a mapping.")
+            raise FileSanitizationError(f"The {label} policy {action!r} table must be a mapping.")
         for codepoint, entry in table.items():
             key = _validated_codepoint(codepoint)
             if key in seen:
-                raise ValueError(f"Code point {key} appears in multiple {label} policy tables.")
+                raise FileSanitizationError(f"Code point {key} appears in multiple {label} policy tables.")
             seen.add(key)
             if not isinstance(entry, Mapping):
-                raise ValueError(f"Policy rule {key} must be a mapping.")
+                raise FileSanitizationError(f"Policy rule {key} must be a mapping.")
             expected = {"name", "reason", *( ["with"] if action == "replace" else [])}
             if set(entry) != expected:
-                raise ValueError(f"Policy rule {key} requires exactly {sorted(expected)}.")
+                raise FileSanitizationError(f"Policy rule {key} requires exactly {sorted(expected)}.")
             replacement = entry.get("with") if action == "replace" else None
             if action == "replace" and not isinstance(replacement, str):
-                raise ValueError(
+                raise FileSanitizationError(
                     f"Policy replacement rule {key} requires 'with' to be a string."
                 )
             characters.append((key, action, _CharacterRule(key, _required_text(entry, "name", key), _required_text(entry, "reason", key), replacement)))
     line_table = raw.get("line_repair")
     if not isinstance(line_table, Mapping):
-        raise ValueError(f"The {label} policy 'line_repair' table must be a mapping.")
+        raise FileSanitizationError(f"The {label} policy 'line_repair' table must be a mapping.")
     line_rules = tuple(_parse_line_rule(str(rule_name), entry) for rule_name, entry in line_table.items())
     maximum = raw.get("max_logical_line_characters")
     if maximum is not None and (not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0):
-        raise ValueError("max_logical_line_characters must be a positive integer.")
+        raise FileSanitizationError("max_logical_line_characters must be a positive integer.")
     return _PolicyLayer(name, version, tuple(characters), line_rules, maximum)
 
 
 def _parse_line_rule(name: str, entry: Any) -> _LineRepairRule:
     if not name.strip() or not isinstance(entry, Mapping):
-        raise ValueError("Every line_repair rule requires a nonblank name and mapping.")
+        raise FileSanitizationError("Every line_repair rule requires a nonblank name and mapping.")
     if set(entry) - {"pattern", "replacement", "reason", "flags"} or not {"pattern", "replacement", "reason"} <= set(entry):
-        raise ValueError(f"Line-repair rule {name!r} is malformed.")
+        raise FileSanitizationError(f"Line-repair rule {name!r} is malformed.")
     flags_raw = entry.get("flags", [])
     if not isinstance(flags_raw, (list, tuple)) or any(flag not in _REGEX_FLAGS for flag in flags_raw):
-        raise ValueError(f"Line-repair rule {name!r} has unsupported flags.")
+        raise FileSanitizationError(f"Line-repair rule {name!r} has unsupported flags.")
     pattern_value = entry.get("pattern")
     if not isinstance(pattern_value, str) or not pattern_value.strip():
-        raise ValueError(f"Line-repair rule {name!r} requires a nonblank pattern.")
+        raise FileSanitizationError(f"Line-repair rule {name!r} requires a nonblank pattern.")
     pattern = pattern_value
     replacement = entry["replacement"]
     if not isinstance(replacement, str):
-        raise ValueError(f"Line-repair rule {name!r} replacement must be a string.")
+        raise FileSanitizationError(f"Line-repair rule {name!r} replacement must be a string.")
     flags_value = sum((_REGEX_FLAGS[flag] for flag in flags_raw), re.NOFLAG)
     compiled = re.compile(pattern, flags_value)
     parsed = re._parser.parse(pattern, flags_value)  # type: ignore[attr-defined]
     if parsed.getwidth()[0] == 0:
-        raise ValueError(f"Line-repair rule {name!r} may match an empty string.")
+        raise FileSanitizationError(f"Line-repair rule {name!r} may match an empty string.")
     compiled.sub(replacement, "")
     return _LineRepairRule(name, pattern, replacement, _required_text(entry, "reason", name), tuple(flags_raw), compiled)
 
@@ -714,17 +714,17 @@ def _parse_line_rule(name: str, entry: Any) -> _LineRepairRule:
 def _required_text(mapping: Mapping[str, Any], field: str, label: str) -> str:
     value = mapping.get(field)
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{label} requires non-empty {field!r}.")
+        raise FileSanitizationError(f"{label} requires non-empty {field!r}.")
     return value.strip()
 
 
 def _validated_codepoint(value: Any) -> str:
     if not isinstance(value, str) or _CODEPOINT.fullmatch(value) is None:
-        raise ValueError(f"Invalid Unicode code-point key: {value!r}.")
+        raise FileSanitizationError(f"Invalid Unicode code-point key: {value!r}.")
     number = int(value[2:], 16)
     canonical = f"U+{number:04X}"
     if value != canonical or number > 0x10FFFF or 0xD800 <= number <= 0xDFFF:
-        raise ValueError(f"Invalid Unicode scalar key: {value!r}.")
+        raise FileSanitizationError(f"Invalid Unicode scalar key: {value!r}.")
     return value
 
 

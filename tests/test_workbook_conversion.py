@@ -23,6 +23,7 @@ from rey_lib.files import (
     is_supported_workbook,
 )
 from tests.fixtures.workbooks import mixed_workbook, sheet_only_workbook
+from rey_lib.files.workbook_conversion import WorkbookConversionError
 
 
 def _create_test_workbook(tmp_path: Path, content_cells: list[list[Any]], sheet_name: str = "Sheet1") -> Path:
@@ -320,7 +321,7 @@ def test_existing_destination_is_replaced_only_when_folder_authorizes_overwrite(
 def test_overwrite_authority_must_be_boolean(tmp_path: Path) -> None:
     source = sheet_only_workbook(tmp_path / "book.xlsx", ("Sheet",))
 
-    with pytest.raises(TypeError, match="overwrite must be a boolean"):
+    with pytest.raises(WorkbookConversionError, match="overwrite must be a boolean"):
         convert_workbook_to_csv(
             source,
             tmp_path / "out",

@@ -227,13 +227,13 @@ def test_manifest_append_failure_reports_post_run_log_phase_without_a_row(
 
 
 def test_mutation_evidence_phase_owns_commit_state() -> None:
-    with pytest.raises(ValueError, match="cannot carry"):
+    with pytest.raises(LogRunRollbackError, match="cannot carry"):
         SourceFileMutationEvidenceError(
             "failed",
             phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
             run_log_id=1,
         )
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(LogRunRollbackError, match="positive"):
         SourceFileMutationEvidenceError(
             "failed",
             phase=(

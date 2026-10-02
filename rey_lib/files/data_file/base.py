@@ -31,6 +31,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["DataFile", "RecordShape"]
 
@@ -262,7 +263,7 @@ class DataFile(ABC):
         Raises:
             ValueError: When this format has no writer.
         """
-        raise ValueError(
+        raise ConfigError(
             f"{type(self).__name__} cannot be written: format "
             f"'{self.file_type}' has no writer, so it can be a load's source "
             f"and not its destination."

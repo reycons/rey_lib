@@ -82,12 +82,12 @@ class SourceFileMutationEvidenceError(LogRunRollbackError):
         )
         if committed:
             if _optional_positive_int(run_log_id) is None:
-                raise ValueError(
+                raise LogRunRollbackError(
                     "The post-run-log mutation-evidence phase requires a positive "
                     "run_log_id."
                 )
         elif run_log_id is not None:
-            raise ValueError(
+            raise LogRunRollbackError(
                 "The pre-run-log mutation-evidence phase cannot carry a committed "
                 "run-log reference."
             )

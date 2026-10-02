@@ -26,6 +26,7 @@ from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.file_utils import KEYED_FILE_TYPES, get_reader
+from rey_lib.errors.error_utils import ConfigError
 
 #: Where these loads write. The per-file step takes a target object now.
 _TARGET = DatabaseObjectIdentity(
@@ -249,7 +250,7 @@ class TestTheReaderDelegates:
         path = tmp_path / "x.jsonl"
         path.write_text('{"a": 1}\n', encoding="utf-8")
 
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             list(get_reader(path, file_type="NOT_A_FORMAT"))
 
         assert "NOT_A_FORMAT" in str(raised.value)

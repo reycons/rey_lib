@@ -33,6 +33,7 @@ from rey_lib.files.file_utils import (
     file_type_for_suffix,
     get_reader,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 
 def _jsonl(tmp_path: Path, *records: dict, name: str = "source.jsonl") -> Path:
@@ -135,7 +136,7 @@ class TestConstruction:
         path = tmp_path / "mystery.dat"
         path.write_text("a,b\n", encoding="utf-8")
 
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             data_file_for(path)
 
         assert ".dat" in str(raised.value)
@@ -144,7 +145,7 @@ class TestConstruction:
         self, tmp_path: Path
     ) -> None:
         """Including XLSX, which is deliberately not in this hierarchy yet."""
-        with pytest.raises(ValueError) as raised:
+        with pytest.raises(ConfigError) as raised:
             data_file_for(tmp_path / "book.xlsx")
 
         assert "XLSX" in str(raised.value)
@@ -198,7 +199,7 @@ class TestTheSuffixMapCannotDrift:
         assert "JSON" in set(registered_formats())
 
         path = _csv(tmp_path, "a\n1\n", name="probe.csv")
-        with pytest.raises(ValueError):
+        with pytest.raises(ConfigError):
             list(get_reader(path, file_type="JSON"))
 
     def test_the_suffix_is_read_forgivingly(self) -> None:
