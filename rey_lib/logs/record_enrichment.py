@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from rey_lib.logs.record_validation import _validate_run_record, _validate_run_record_fields
+from rey_lib.errors.error_utils import StateError
 
 
 _RUN_RECORD_SCHEMA_VERSION = 1
@@ -81,7 +82,7 @@ def require_run_id(ctx: Any) -> Any:
     """
     run_id = getattr(ctx, "run_id", None)
     if not run_id:
-        raise ValueError(
+        raise StateError(
             "No run identity has been established. A run is identified by "
             "recording it at its launch boundary, before anything is logged; "
             "logging reads that identity and never makes one."

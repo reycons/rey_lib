@@ -15,6 +15,7 @@ from rey_lib.logs.record_enrichment import (
     FILES_RECORD_SUBGROUP,
     RUN_RESULT_RECORD_TYPES,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 
 def log_file_metadata(path: Path, jsonl_stems: set[str] | None = None) -> dict[str, Any]:
@@ -126,12 +127,12 @@ def read_jsonl_file_record_page(
             **log_file_metadata(log_path),
         }
     if max_records <= 0:
-        raise ValueError("max_records must be a positive integer.")
+        raise ConfigError("max_records must be a positive integer.")
     if offset < 0:
-        raise ValueError("offset must be a non-negative integer.")
+        raise ConfigError("offset must be a non-negative integer.")
     direction = str(sort_direction or "asc").lower()
     if direction not in {"asc", "desc"}:
-        raise ValueError("sort_direction must be 'asc' or 'desc'.")
+        raise ConfigError("sort_direction must be 'asc' or 'desc'.")
 
     selected_filters = filters or {}
     selected_sort = str(sort_field or "")
@@ -1109,7 +1110,7 @@ def get_run_section(path: Path | str, section: str) -> dict[str, Any]:
     """
     key = str(section or "").strip().lower()
     if key not in _RUN_SECTION_NAMES:
-        raise ValueError(f"Unknown run section: {section!r}")
+        raise ConfigError(f"Unknown run section: {section!r}")
     sections = read_run_log_sections(path)["sections"]
     payload = sections["files"][key] if key in _RUN_FILE_SUBGROUPS else sections[key]
     return {"section": key, **payload}

@@ -47,6 +47,8 @@ from rey_lib.logs import (
 )
 from rey_lib.errors.error_utils import build_process_failure_payload
 from rey_lib.run_lifecycle import run_app_operation as lifecycle_run_app_operation
+from rey_lib.data.errors import DataStructureError
+from rey_lib.errors.error_utils import ConfigError
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -305,7 +307,7 @@ def test_open_run_log_fails_closed_without_log_path() -> None:
     """Without a durable log path, resolving the run log raises (fail closed)."""
     from rey_lib.logs.run_log import RunLog
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ConfigError):
         RunLog(app="rey_loader", run_id="r1", run_timestamp="ts").path()
 
 
@@ -382,7 +384,7 @@ def test_failed_run_complete_requires_failure_evidence(tmp_path: Path) -> None:
     """A failed RUN_COMPLETE without evidence is a programming error."""
     ctx = _ctx(tmp_path)
     run_log = _log(ctx, tmp_path)
-    with pytest.raises(ValueError, match="requires structured failure evidence"):
+    with pytest.raises(DataStructureError, match="requires structured failure evidence"):
         log_run_complete(run_log, "failed")
 
 
@@ -824,7 +826,7 @@ def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
     assert ref["file_role"] == "report"
     assert get_run_file_reference(path, str(tmp_path / "nope.txt")) is None
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ConfigError):
         get_run_section(path, "bogus")
 
 

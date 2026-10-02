@@ -27,6 +27,8 @@ from rey_lib.logs import (
     run_workbench_input_stream,
 )
 from rey_lib.logs.record_enrichment import log_run_record
+from rey_lib.ai.errors import AIRequestError
+from rey_lib.data.errors import DataStructureError
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -416,7 +418,7 @@ def test_missing_source_record_fails_with_requested_type(tmp_path: Path) -> None
     log_path = tmp_path / "demo.20260714_120000.jsonl"
     _write_jsonl(log_path, _completed_records(config_path))
 
-    with pytest.raises(ValueError, match="source record: RESULTS_SUMMARY"):
+    with pytest.raises(DataStructureError, match="source record: RESULTS_SUMMARY"):
         _pkg(log_path)
 
     assert not any(record["record_type"] == "LLM_PACKAGE" for record in _records(log_path))
@@ -594,7 +596,7 @@ def test_stdout_result_uses_configured_record_type_and_group(tmp_path, monkeypat
 def test_missing_package_record_fails_explicitly(tmp_path, monkeypatch) -> None:
     log_path = _package_log(tmp_path, _analysis_config(tmp_path), with_package=False)
     _patch_direct_ask(monkeypatch, response=_envelope({"ok": True}))
-    with pytest.raises(ValueError, match="package record: LLM_PACKAGE"):
+    with pytest.raises(DataStructureError, match="package record: LLM_PACKAGE"):
         _run(log_path)
 
 
@@ -740,14 +742,14 @@ def test_record_analysis_requires_a_json_object_record(tmp_path: Path, monkeypat
     _patch_direct_ask(monkeypatch, raises=AssertionError("provider must not be called"))
     ctx = _record_ctx(tmp_path)
     for value in ("a string", [1, 2], 42, None):
-        with pytest.raises(ValueError, match="requires a JSON object record"):
+        with pytest.raises(DataStructureError, match="requires a JSON object record"):
             run_configured_record_analysis(ctx, value, "email_results")
 
 
 def test_record_analysis_enforces_the_input_size_limit(tmp_path: Path, monkeypatch) -> None:
     """An oversized package is rejected before any provider contact."""
     _patch_direct_ask(monkeypatch, raises=AssertionError("provider must not be called"))
-    with pytest.raises(ValueError, match="over the configured limit"):
+    with pytest.raises(AIRequestError, match="over the configured limit"):
         run_configured_record_analysis(
             _record_ctx(tmp_path), {"big": "x" * 500}, "email_results",
             max_input_characters=50,

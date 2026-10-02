@@ -42,6 +42,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["RunLog"]
 
@@ -391,7 +392,7 @@ class RunLog:
             self._current_nest_level = level
             return level
         if semantic not in SEMANTIC_BASES:
-            raise ValueError(
+            raise ConfigError(
                 f"Unknown semantic nest level: {semantic!r}. "
                 f"Known bases: {sorted(SEMANTIC_BASES)}; relative operations: "
                 "'next', 'sibling'."
@@ -503,7 +504,7 @@ class RunLog:
         if self._path:
             return Path(self._path)
         if not self._log_dir:
-            raise ValueError(
+            raise ConfigError(
                 "Cannot open run log: no durable log path. A RunLog is built "
                 "with either a resolved path or the directory to write into."
             )
@@ -773,7 +774,7 @@ class RunLog:
         value a governed record stores.
         """
         if self.control is None:
-            raise ValueError(
+            raise ConfigError(
                 "run_store selects the control database but no Control was "
                 "supplied to this run log."
             )
@@ -781,7 +782,8 @@ class RunLog:
                    if key not in _ENVELOPE_FIELDS and key not in _SHARED_FIELDS}
         payload_column = TYPE_PAYLOAD_COLUMNS.get(str(record_type).upper())
         if payload and payload_column is None:
-            raise ValueError(
+            from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+            raise DataStructureError(
                 f"{record_type} records have no typed payload column, but "
                 f"{sorted(payload)} was supplied. Either the value is a shared "
                 "fact with a column of its own, or this record type needs a "

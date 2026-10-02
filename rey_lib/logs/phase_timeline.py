@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from rey_lib.errors.error_utils import ConfigError, StateError
 
 __all__ = ["PhaseTimeline"]
 
@@ -85,7 +86,7 @@ class PhaseTimeline:
                 already been reported as complete.
         """
         if self._ended is not None:
-            raise ValueError("Cannot enter a phase after the timeline has finished.")
+            raise StateError("Cannot enter a phase after the timeline has finished.")
         self._boundaries.append((_named(phase), time.monotonic()))
 
     def finish(self) -> bool:
@@ -176,5 +177,5 @@ def _named(phase: str) -> str:
     """
     name = str(phase or "").strip()
     if not name:
-        raise ValueError("A phase must be named; an unnamed interval hides work.")
+        raise ConfigError("A phase must be named; an unnamed interval hides work.")
     return name

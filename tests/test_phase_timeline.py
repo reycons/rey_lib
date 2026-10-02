@@ -10,6 +10,8 @@ from __future__ import annotations
 import pytest
 
 from rey_lib.logs.phase_timeline import PhaseTimeline
+from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import StateError
 
 
 class _Clock:
@@ -150,7 +152,7 @@ class TestTerminationIsNotATransition:
         timeline = _timeline(clock)
         timeline.finish()
 
-        with pytest.raises(ValueError, match="after the timeline has finished"):
+        with pytest.raises(StateError, match="after the timeline has finished"):
             timeline.enter("late")
 
 
@@ -186,13 +188,13 @@ class TestItCannotBeBuiltWithoutABoundary:
     """The two failures the constructor exists to prevent."""
 
     def test_an_unnamed_opening_phase_is_refused(self, clock: _Clock) -> None:
-        with pytest.raises(ValueError, match="must be named"):
+        with pytest.raises(ConfigError, match="must be named"):
             PhaseTimeline(started=clock.now, phase="   ")
 
     def test_an_unnamed_transition_is_refused(self, clock: _Clock) -> None:
         timeline = _timeline(clock)
 
-        with pytest.raises(ValueError, match="must be named"):
+        with pytest.raises(ConfigError, match="must be named"):
             timeline.enter("")
 
     def test_the_start_is_the_supplied_mark(self, clock: _Clock) -> None:

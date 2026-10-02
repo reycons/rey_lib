@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from rey_lib.logs.evidence_projection import read_run_log_sections
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "create_llm_package",
@@ -61,7 +62,8 @@ def create_llm_package(
         if str(record.get("record_type") or "").upper() == source_record_type.upper()
     ), None)
     if source_record is None:
-        raise ValueError(
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError(
             f"Execution log does not contain source record: {source_record_type}"
         )
 
@@ -149,7 +151,7 @@ def load_contract_references(ctx: Any, declared: Any) -> list[dict[str, Any]] | 
             content = read_text_file(_resolve_reference_path(ctx, raw_path))
         except Exception as exc:
             if required:
-                raise ValueError(
+                raise ConfigError(
                     f"Required contract reference '{name}' could not be loaded "
                     f"from '{raw_path}': {exc}"
                 ) from exc
@@ -267,7 +269,8 @@ def _execute_analysis_package(
 
     prompt = json.dumps(package) + build_envelope_instruction(artifact_type)
     if max_input_characters and len(prompt) > max_input_characters:
-        raise ValueError(
+        from rey_lib.ai.errors import AIRequestError  # noqa: PLC0415 -- import cycle
+        raise AIRequestError(
             f"Analysis input is {len(prompt)} characters, "
             f"over the configured limit of {max_input_characters}"
         )
@@ -351,7 +354,8 @@ def run_configured_record_analysis(
     result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
 
     if not isinstance(record, dict):
-        raise ValueError("Record analysis requires a JSON object record")
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError("Record analysis requires a JSON object record")
 
     analyses = getattr(ctx, "log_analysis", None)
     analysis = analyses.get(analysis_name) if analyses is not None else None
@@ -426,7 +430,8 @@ def run_uncontracted_record_analysis(
     result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
 
     if not isinstance(record, dict):
-        raise ValueError("Record analysis requires a JSON object record")
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError("Record analysis requires a JSON object record")
     # A caller naming a profile is asserting it exists. A caller naming a task
     # names none: its settings answer, and the AI refuses a selection it does
     # not offer, so checking here would be a second authority on one question.
@@ -442,7 +447,8 @@ def run_uncontracted_record_analysis(
     # (direct_ask with no output_format sends the prompt exactly as supplied).
     prompt = json.dumps(record)
     if max_input_characters and len(prompt) > max_input_characters:
-        raise ValueError(
+        from rey_lib.ai.errors import AIRequestError  # noqa: PLC0415 -- import cycle
+        raise AIRequestError(
             f"Analysis input is {len(prompt)} characters, "
             f"over the configured limit of {max_input_characters}"
         )
@@ -641,7 +647,8 @@ def run_configured_log_analysis(
         if str(record.get("record_type") or "").upper() == package_record_type.upper()
     ), None)
     if package is None:
-        raise ValueError(
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError(
             f"Execution log does not contain package record: {package_record_type}"
         )
 

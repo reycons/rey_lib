@@ -20,7 +20,8 @@ def _validate_run_record(record: dict[str, Any]) -> None:
                 if not record.get(key)
             ]
             if missing:
-                raise ValueError(
+                from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+                raise DataStructureError(
                     "RUN_COMPLETE status='failed' requires structured failure "
                     f"evidence fields: {', '.join(missing)}."
                 )
@@ -43,7 +44,8 @@ def _validate_run_record_fields(record_type: str, fields: dict[str, Any]) -> Non
         if not fields.get(key)
     ]
     if missing:
-        raise ValueError(
+        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
+        raise DataStructureError(
             "RUN_COMPLETE status='failed' requires structured failure "
             f"evidence fields: {', '.join(missing)}."
         )

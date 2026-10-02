@@ -12,6 +12,7 @@ import pytest
 from tests.conftest import make_run_log
 
 from rey_lib.config.config_utils import Namespace
+from rey_lib.errors.error_utils import ConfigError
 
 
 def _ctx():
@@ -74,7 +75,7 @@ def test_previous_never_goes_negative(run_log) -> None:
 
 
 def test_unknown_semantic_base_is_rejected(run_log) -> None:
-    with pytest.raises(ValueError, match="Unknown semantic nest level"):
+    with pytest.raises(ConfigError, match="Unknown semantic nest level"):
         run_log.set_nest_level("step")
 
 
