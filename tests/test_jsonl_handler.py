@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from rey_lib.errors.error_utils import AppError
 from rey_lib.logs.jsonl_handler import JsonlHandler
 
 
@@ -346,14 +347,6 @@ class TestTheBoundRunLogIsThePersistencePath:
         ]
         assert path.read_text(encoding="utf-8") == ""
 
-    def test_an_error_stays_on_the_file(self, tmp_path: Path, bound: _BoundRunLog) -> None:
-        handler, path = _make_handler(tmp_path, _make_ctx())
-        _logger_for(handler).error("failed")
-        handler.close()
-
-        assert bound.appended == []
-        assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "failed"
-
     def test_with_no_run_bound_the_file_is_written(self, tmp_path: Path) -> None:
         handler, path = _make_handler(tmp_path, _make_ctx())
         _logger_for(handler).warning("unbound")
@@ -377,3 +370,50 @@ class TestTheBoundRunLogIsThePersistencePath:
 
         assert [one[1]["message"] for one in run_log.appended] == ["outer"]
         assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "from inside"
+
+
+# ---------------------------------------------------------------------------
+# An AppError logged through the logger is persisted by the logger.
+# ---------------------------------------------------------------------------
+
+class _Refused(AppError):
+    """An application's own error, rooted in the canonical error object."""
+
+
+def _log_app_error(logger: logging.Logger, level: int) -> None:
+    """What an application does: raise an AppError and log it. Nothing else."""
+    try:
+        raise _Refused("the transform could not be created")
+    except _Refused as exc:
+        logger.log(level, "refused: %s", exc, exc_info=exc)
+
+
+class TestAnAppErrorIsPersistedByTheLogger:
+
+    @pytest.mark.parametrize("level", [logging.ERROR, logging.CRITICAL])
+    def test_with_run_persistence_active_it_is_an_error_record_there(
+        self, tmp_path: Path, level: int,
+    ) -> None:
+        from rey_lib.logs.record_enrichment import bind_run, reset_run_binding
+        from tests.conftest import make_db_run_log
+
+        run_log = make_db_run_log(tmp_path / "run", path=str(tmp_path / "run.jsonl"))
+        handler, fallback = _make_handler(tmp_path, _make_ctx())
+        bind_run(run_log)
+        try:
+            _log_app_error(_logger_for(handler), level)
+        finally:
+            reset_run_binding()
+        handler.close()
+
+        [row] = [one for one in run_log.control.rows if one["record_type"] == "ERROR"]
+        assert "the transform could not be created" in row["message"]
+        assert fallback.read_text(encoding="utf-8") == ""
+
+    def test_with_no_run_persistence_the_logger_writes_its_file(self, tmp_path: Path) -> None:
+        handler, fallback = _make_handler(tmp_path, _make_ctx())
+        _log_app_error(_logger_for(handler), logging.ERROR)
+        handler.close()
+
+        written = json.loads(fallback.read_text(encoding="utf-8").strip())
+        assert "the transform could not be created" in written["message"]

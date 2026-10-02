@@ -175,17 +175,18 @@ class JsonlHandler(logging.Handler):
             rec = self._build_record(record, seq, parent_seq, depth)
 
             # The run's persistence path when the run has one; this file is
-            # the fallback. ERROR records are not routed here: they belong to
-            # the ERROR-record increment.
+            # the fallback.
             from rey_lib.logs.record_enrichment import bound_run_log
 
             run_log = bound_run_log()
-            if (run_log is not None and record.levelno < logging.ERROR
-                    and not getattr(_DELIVERING, "active", False)):
+            if run_log is not None and not getattr(_DELIVERING, "active", False):
                 _DELIVERING.active = True
                 try:
-                    record_type = "WARNING" if record.levelno >= logging.WARNING else "INFO"
-                    run_log.append(record_type, message=rec["message"], logger=record.name)
+                    if record.levelno >= logging.ERROR:
+                        self._persist_error(run_log, record, rec)
+                    else:
+                        record_type = "WARNING" if record.levelno >= logging.WARNING else "INFO"
+                        run_log.append(record_type, message=rec["message"], logger=record.name)
                 finally:
                     _DELIVERING.active = False
                 return
@@ -193,6 +194,24 @@ class JsonlHandler(logging.Handler):
             self._write(rec)
         except Exception:  # noqa: BLE001 — handler must never raise
             self.handleError(record)
+
+    @staticmethod
+    def _persist_error(run_log: Any, record: logging.LogRecord, rec: dict[str, Any]) -> None:
+        """Write one error event through the run's persistence as its ERROR record.
+
+        The error object the record carries names the error's type; the
+        exception text is the one this handler already derived. Shaping and
+        redaction are rey_lib.errors' payload builder's.
+        """
+        from rey_lib.errors.error_utils import build_error_record_payload
+
+        fields: dict[str, Any] = {"logger": record.name}
+        if record.exc_info and record.exc_info[0] is not None:
+            fields["error_type"] = record.exc_info[0].__name__
+        if "exception" in rec:
+            fields["sanitized_exception"] = rec["exception"]
+        built = build_error_record_payload(message=rec["message"], **fields)
+        run_log.append("ERROR", message=built["message"], error_message=built["error_message"])
 
     def close(self) -> None:
         """Flush and close the JSONL file."""
