@@ -44,7 +44,6 @@ from rey_lib.logs.log_utils import (
     get_logger,
     log_artifact_reference,
     log_enter,
-    log_error,
     log_exit,
     log_input_discovered,
     log_row_count,
@@ -288,26 +287,14 @@ def log_loader_step_failure(
     failed_step_name: str,
     related_path: str = "",
 ) -> str:
-    """Log canonical ERROR evidence and STEP_FAILURE reference for loader work."""
-    error_payload = build_safe_error_payload(
+    """Record STEP_FAILURE evidence for loader work; the caller logs the error."""
+    return log_step_failure(run_log, **build_safe_error_payload(
         exc,
         message=str(exc),
         failed_step_id=failed_step_id,
         failed_step_name=failed_step_name,
         related_path=related_path,
-    )
-    error_record = log_error(run_log, **error_payload)
-    error_id = str(error_record.get("error_id") or "")
-    # The text, not the payload -- see build_error_record_payload.
-    error_message = str(error_record.get("message") or str(exc))
-    return log_step_failure(run_log,
-        failed_step_id=failed_step_id,
-        failed_step_name=failed_step_name,
-        message=error_message,
-        failure_record_id=error_id,
-        error_id=error_id,
-        related_path=related_path,
-    )
+    ))
 
 
 def _match_transform(

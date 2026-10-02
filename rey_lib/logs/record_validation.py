@@ -81,14 +81,10 @@ def validate_run_log_completeness(records: list[dict[str, Any]]) -> dict[str, An
             "message": "Run log has no RUN_COMPLETE record.",
         })
 
-    # A failure record carries its whole payload in error_message, so its
-    # identity is read from there. RUN_COMPLETE is not a failure record and
-    # keeps its linkage flat.
-    error_ids = {
-        str(_failure_payload(record).get("error_id") or "")
-        for record in records
-        if str(record.get("record_type") or "").upper() == "ERROR"
-    }
+    # A failed run's RUN_COMPLETE references its STEP_FAILURE. A failure
+    # record carries its whole payload in error_message, so its identity is
+    # read from there. RUN_COMPLETE is not a failure record and keeps its
+    # linkage flat.
     failure_ids = {
         str(_failure_payload(record).get("failure_record_id") or "")
         for record in records
@@ -107,7 +103,7 @@ def validate_run_log_completeness(records: list[dict[str, Any]]) -> dict[str, An
                 for key in ("failed_step_id", "failed_step_name", "failure_message")
             )
             has_referenced_evidence = bool(
-                evidence_id and (evidence_id in error_ids or evidence_id in failure_ids)
+                evidence_id and evidence_id in failure_ids
             )
             if not has_failure_fields or not has_referenced_evidence:
                 issues.append({

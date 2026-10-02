@@ -42,7 +42,6 @@ from rey_lib.logs.llm_package import (
 )
 from rey_lib.logs.execution_records import (
     log_app_execution,
-    log_error,
     log_execution_plan,
     log_run_complete,
     log_run_start,
@@ -136,7 +135,6 @@ __all__ = [
     "log_step_end",
     "monotonic_ms",
     "log_step_failure",
-    "log_error",
     "log_run_complete",
     "log_run_summary",
     "log_app_execution",

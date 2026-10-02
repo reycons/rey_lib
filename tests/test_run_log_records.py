@@ -10,7 +10,6 @@ open without a durable log path, and fail-safe appends.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,7 +27,6 @@ from rey_lib.logs import (
     log_app_execution,
     log_artifact_reference,
     log_config_file_reference,
-    log_error,
     log_execution_plan,
     log_file_operation,
     log_input_discovered,
@@ -210,38 +208,6 @@ def test_run_app_operation_records_no_settings_when_given_none(
     assert "settings" not in start
 
 
-def test_log_error_writes_the_canonical_object_once(tmp_path: Path) -> None:
-    """The producer, proved on both sides of itself.
-
-    One change repairs two contracts -- what is stored and what is returned --
-    and the failed-run tests only prove the consequence downstream. The record's
-    error_message column *is* the canonical object, and the object log_error
-    hands back is that same object, so a completion can reference its error_id.
-
-    The third assertion is the one that failed: the payload used to be wrapped
-    in its own field set before being written, which buried the object a level
-    down and left error_id where nothing looked for it.
-    """
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
-    start_test_run(ctx)
-    run_log = _log(ctx, tmp_path)
-
-    returned = log_error(run_log, message="it failed", error_type="ProofError",
-                         failed_step_id="load")
-
-    stored = next(record for record in _read(Path(run_log.path()))
-                  if record["record_type"] == "ERROR")
-    payload = stored["error_message"]
-
-    assert payload["error_id"] == returned["error_id"]
-    assert returned["error_id"]
-    # Not wrapped: the object is the payload, not a field set holding one.
-    assert not isinstance(payload.get("error_message"), Mapping)
-    # And the fields the caller gave are in it, rather than a level deeper.
-    assert payload["error_type"] == "ProofError"
-    assert payload["failed_step_id"] == "load"
-
-
 def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
     """Process failure evidence includes bounded sanitized stderr details."""
     payload = build_process_failure_payload(
@@ -252,55 +218,13 @@ def test_process_failure_payload_sanitizes_and_summarizes_stderr() -> None:
     )
 
     # The canonical fields, and nothing wrapping them: this builds what a
-    # record is made from, and log_error makes the record.
+    # record is made from, and the record writer makes the record.
     assert "error_message" not in payload
     assert payload["exit_code"] == 1
     assert payload["failed_step_id"] == "load"
     assert payload["stderr_summary"] == "database failed password=[REDACTED]"
     assert "hunter2" not in json.dumps(payload)
     assert payload["message"].startswith("Application exited with code 1: database failed")
-
-
-def test_a_process_failure_payload_is_built_into_one_record(tmp_path: Path) -> None:
-    """The two builders answer with the same shape, and log_error builds once.
-
-    build_process_failure_payload used to return a finished record, so
-    log_error(**payload) ran the builder again over its own output: the
-    canonical object became a field of a second canonical object, and every
-    reader of a summary had to know to unwrap it first. Two of them did not,
-    and a failing pipeline step forwarded no diagnostic at all.
-
-    This asserts both ends of the repair -- nothing wrapping the fields on the
-    way in, exactly one canonical object on the way out.
-    """
-    ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
-    start_test_run(ctx)
-    run_log = _log(ctx, tmp_path)
-
-    payload = build_process_failure_payload(
-        message="Application exited with code 2",
-        error_type="AppExecutionError",
-        exit_code=2,
-        stderr="failed password=hunter2",
-    )
-
-    # Fields, not a record.
-    assert "error_message" not in payload
-    assert payload["error_type"] == "AppExecutionError"
-    assert payload["stderr_summary"] == "failed password=[REDACTED]"
-
-    returned = log_error(run_log, **payload)
-    stored = next(record for record in _read(Path(run_log.path()))
-                  if record["record_type"] == "ERROR")
-    canonical = stored["error_message"]
-
-    # One canonical object, holding the identity and the evidence, with no
-    # second copy of itself inside.
-    assert not isinstance(canonical.get("error_message"), Mapping)
-    assert canonical["error_id"] == returned["error_id"]
-    assert canonical["error_type"] == "AppExecutionError"
-    assert canonical["stderr_summary"] == "failed password=[REDACTED]"
-    assert canonical["exit_code"] == 2
 
 
 def test_process_failure_payload_reports_missing_diagnostics() -> None:
@@ -315,8 +239,10 @@ def test_process_failure_payload_reports_missing_diagnostics() -> None:
     assert "stderr_summary" not in payload
 
 
-def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) -> None:
-    """Failures produce canonical ERROR evidence and preserve exception behavior."""
+def test_run_app_operation_failure_records_error_and_reraises(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failure is logged with its error, and the run completes against its STEP_FAILURE."""
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
@@ -324,45 +250,54 @@ def test_run_app_operation_failure_records_error_and_reraises(tmp_path: Path) ->
     def fail() -> None:
         raise ValueError("password=hunter2 failed")
 
-    with pytest.raises(ValueError):
+    with caplog.at_level("ERROR"), pytest.raises(ValueError) as raised:
         lifecycle_run_app_operation(ctx, run_log, "load", fail)
 
+    logged = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert [r.exc_info[1] for r in logged] == [raised.value]
     records = _read(Path(run_log.path()))
     by_type = {record["record_type"]: record for record in records}
     assert [record["record_type"] for record in records] == [
         "RUN_START",
-        "ERROR",
+        "STEP_FAILURE",
         "RUN_COMPLETE",
     ]
-    assert by_type["ERROR"]["error_message"]["error_id"]
-    assert by_type["ERROR"]["error_message"]["failed_step_id"] == "load"
-    assert "hunter2" not in by_type["ERROR"]["error_message"]
+    failure = by_type["STEP_FAILURE"]["error_message"]
+    assert failure["failed_step_id"] == "load"
+    assert failure["error_type"] == "ValueError"
+    assert "hunter2" not in json.dumps(by_type["STEP_FAILURE"])
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
-    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_message"]["error_id"]
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == failure["failure_record_id"]
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
-def test_run_app_operation_nonzero_result_records_failed_lifecycle(tmp_path: Path) -> None:
+def test_run_app_operation_nonzero_result_records_failed_lifecycle(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
     """A nonzero integer return is failed evidence but still returned unchanged."""
+    from rey_lib.errors.error_utils import AppError
+
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="file_operator")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
 
-    result = lifecycle_run_app_operation(ctx, run_log, "redact", lambda: 1)
+    with caplog.at_level("ERROR"):
+        result = lifecycle_run_app_operation(ctx, run_log, "redact", lambda: 1)
 
     assert result == 1
+    logged = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(logged) == 1 and isinstance(logged[0].exc_info[1], AppError)
     records = _read(Path(run_log.path()))
     by_type = {record["record_type"]: record for record in records}
     assert [record["record_type"] for record in records] == [
         "RUN_START",
-        "ERROR",
         "STEP_FAILURE",
         "RUN_COMPLETE",
     ]
-    assert by_type["ERROR"]["error_message"]["error_type"] == "AppOperationFailed"
-    assert by_type["STEP_FAILURE"]["error_message"]["failure_record_id"] == by_type["ERROR"]["error_message"]["error_id"]
+    failure = by_type["STEP_FAILURE"]["error_message"]
+    assert failure["error_type"] == "AppOperationFailed"
     assert by_type["RUN_COMPLETE"]["status"] == "failed"
-    assert by_type["RUN_COMPLETE"]["failure_record_id"] == by_type["ERROR"]["error_message"]["error_id"]
+    assert by_type["RUN_COMPLETE"]["failure_record_id"] == failure["failure_record_id"]
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
@@ -482,7 +417,6 @@ def test_new_event_helpers_emit_approved_record_types(tmp_path: Path) -> None:
     """Phase 2 helpers emit narrow event semantics through log_run_record."""
     ctx = _ctx(tmp_path)
     run_log = _log(ctx, tmp_path)
-    log_error(run_log, message="bad", error_type="RuntimeError")
     log_sql_execution(run_log, connection_name="local", database="db",
                       sql_path=str(tmp_path / "apply.sql"), operation="apply",
                       status="success", duration_ms=12)
@@ -490,7 +424,7 @@ def test_new_event_helpers_emit_approved_record_types(tmp_path: Path) -> None:
     log_validation_result(run_log, validation_name="headers", status="success")
 
     types = [record["record_type"] for record in _read(Path(run_log.path()))]
-    assert types == ["ERROR", "SQL_EXECUTION", "ROW_COUNT", "VALIDATION_RESULT"]
+    assert types == ["SQL_EXECUTION", "ROW_COUNT", "VALIDATION_RESULT"]
 
 
 def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
@@ -634,9 +568,9 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
 
 
 def test_workflow_failure_emits_canonical_error_and_referenced_completion(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Exception failures produce canonical ERROR evidence referenced by lifecycle records."""
+    """An exception is logged with its error; STEP_FAILURE is what completion references."""
     from rey_lib.logs import current_step
     from rey_lib.workflow import RunContext, run_workflow
 
@@ -653,33 +587,26 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
         raise RuntimeError("load failed password=hunter2 token=abc123")
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
+    with caplog.at_level("ERROR"):
+        result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "failed"
+    logged = [r for r in caplog.records if r.levelname == "ERROR" and r.exc_info]
+    assert [type(r.exc_info[1]) for r in logged] == [RuntimeError]
     records = _read(Path(run_log.path()))
-    error = next(r for r in records if r["record_type"] == "ERROR")
     failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
     complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
-    assert error["error_message"]["error_id"]
-    assert error["error_message"]["error_type"] == "RuntimeError"
-    assert error["error_message"]
-    assert error["error_message"]["sanitized_exception"]
-    assert error["error_message"]["sanitized_traceback"]
-    assert error["error_message"]["traceback_summary"]
-    assert error["error_message"]["failed_step_id"] == "s1"
-    assert error["error_message"]["failed_step_name"] == "One"
-    assert error["error_message"]["failed_step_sequence"] == 1
-    assert "hunter2" not in json.dumps(error)
-    assert "abc123" not in json.dumps(error)
+    assert failure["error_message"]["error_type"] == "RuntimeError"
+    assert failure["error_message"]["sanitized_exception"]
+    assert failure["error_message"]["sanitized_traceback"]
+    assert failure["error_message"]["traceback_summary"]
     assert failure["error_message"]["failed_step_id"] == "s1"
     assert failure["error_message"]["failed_step_name"] == "One"
     assert failure["error_message"]["failed_step_sequence"] == 1
-    assert failure["error_message"]["error_id"] == error["error_message"]["error_id"]
-    assert failure["error_message"]["failure_record_id"] == error["error_message"]["error_id"]
     assert "hunter2" not in json.dumps(failure)
     assert "abc123" not in json.dumps(failure)
     assert complete["status"] == "failed"
-    assert complete["failure_record_id"] == error["error_message"]["error_id"]
+    assert complete["failure_record_id"] == failure["error_message"]["failure_record_id"]
     assert complete["failed_step_id"] == "s1"
     assert complete["failed_step_name"] == "One"
     assert "hunter2" not in json.dumps(complete)

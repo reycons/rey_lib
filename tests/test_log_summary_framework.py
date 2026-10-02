@@ -13,7 +13,6 @@ from tests.conftest import make_db_run_log
 
 from rey_lib.logs import (
     create_results_summary,
-    log_error,
     log_file_operation,
     log_run_complete,
     log_run_start,
@@ -46,8 +45,6 @@ def _completed_run(
     log_run_start(run_log, run_started_at="2026-07-11T12:00:00+00:00")
     log_step_start(run_log, "one", 1, step_id="one")
     if status == "failed":
-        log_error(run_log, message="boom", error_type="RuntimeError", error_id="error-1",
-        )
         log_step_failure(run_log, failed_step_id="one", failed_step_name="one", message="boom",
             error_type="RuntimeError", error_message="boom",
             failure_record_id="error-1",

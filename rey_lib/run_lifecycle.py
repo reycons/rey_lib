@@ -113,15 +113,17 @@ def run_app_operation(
         Whatever ``func`` returned.
     """
     from rey_lib.config.config_utils import record_config_file_references
-    from rey_lib.errors.error_utils import build_safe_error_payload
+    from rey_lib.errors.error_utils import AppError, build_safe_error_payload
     from rey_lib.logs.log_utils import (
         bind_run,
         clear_run,
-        log_error,
+        get_logger,
         log_run_complete,
         log_run_start,
         log_step_failure,
     )
+
+    logger = get_logger(__name__)
 
     # App semantic base (SGC_Rey_Log_Nest_Level_Phase_1). The shared app boundary,
     # so every app establishes level 3 here regardless of how it was invoked.
@@ -141,11 +143,9 @@ def run_app_operation(
             failed_step_id=operation,
             failed_step_name=operation,
         )
-        error_record = log_error(run_log, **error_payload)
-        failure_id = str(error_record.get("error_id") or "")
-        # The text, not the payload: error_message carries the whole
-        # canonical object for the jsonb column.
-        failure_message = str(error_record.get("message") or str(exc))
+        failure_message = str(error_payload.get("message") or str(exc))
+        logger.error("%s", failure_message, exc_info=exc)
+        failure_id = log_step_failure(run_log, **error_payload)
         # Ownership-return (SGC_Rey_Log_Hierarchy_Shared_Run_State_Correction): the app
         # may have descended into workflow/analysis/other deeper scopes that left the
         # shared hierarchy deeper than the app base. Reassert app ownership before
@@ -169,30 +169,20 @@ def run_app_operation(
             failure_message = (
                 f"app operation '{operation}' returned nonzero result {result}."
             )
-            # The fields, not a finished record: log_error builds it, and
-            # building one here as well nested the canonical object inside a
-            # second copy of itself.
-            error_record = log_error(run_log,
-                message=failure_message,
-                error_type="AppOperationFailed",
-                failed_step_id=operation,
-                failed_step_name=operation,
-                result=result,
-            )
-            failure_record_id = str(error_record.get("error_id") or "")
+            logger.error("%s", failure_message, exc_info=AppError(failure_message))
             failure_id = log_step_failure(run_log,
                 failed_step_id=operation,
                 failed_step_name=operation,
                 message=failure_message,
-                failure_record_id=failure_record_id,
-                error_id=failure_record_id,
+                error_type="AppOperationFailed",
+                result=result,
             )
             # Ownership-return: reassert app ownership before RUN_COMPLETE.
             run_log.set_nest_level("app")
             log_run_complete(run_log,
                 "failed",
                 message=failure_message,
-                failure_record_id=failure_record_id or failure_id,
+                failure_record_id=failure_id,
                 failed_step_id=operation,
                 failed_step_name=operation,
                 failure_message=failure_message,

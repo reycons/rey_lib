@@ -403,14 +403,12 @@ _STREAM_SECTIONS: tuple[tuple[str, str], ...] = (
 _STREAM_RANK = {stream: index for index, (stream, _label) in enumerate(_STREAM_SECTIONS)}
 
 
-def _logical_failure_id(record: dict[str, Any], rtype: str,
-                        known_error_ids: frozenset[str]) -> str:
+def _logical_failure_id(record: dict[str, Any], rtype: str) -> str:
     """Return the logical failure identity for an error-bearing record.
 
-    Correlation is evidence-only: a STEP_FAILURE joins an ERROR when its
-    ``failure_record_id`` matches that ERROR's ``error_id``; otherwise it falls back
-    to a shared ``failed_step_id`` group. No fuzzy correlation (timestamps, message or
-    traceback similarity) is ever attempted
+    Correlation is evidence-only: an ERROR is its own failure, and a
+    STEP_FAILURE groups by its ``failed_step_id``. No fuzzy correlation
+    (timestamps, message or traceback similarity) is ever attempted
     (SGC_Rey_Lib_Results_Summary_Diagnostic_Package_Correction).
     """
     evidence = _error_evidence(record, rtype)
@@ -418,8 +416,6 @@ def _logical_failure_id(record: dict[str, Any], rtype: str,
         return str(evidence.get("error_id") or record.get("run_log_id") or "")
     if rtype == _STEP_FAILURE:
         failure_id = str(evidence.get("failure_record_id") or "")
-        if failure_id and failure_id in known_error_ids:
-            return failure_id
         step_id = str(evidence.get("failed_step_id") or "")
         if step_id:
             return f"step:{step_id}"
@@ -442,8 +438,7 @@ def _error_evidence(record: dict[str, Any], rtype: str) -> dict[str, Any]:
     return record
 
 
-def _collect_error_blocks(records: list[dict[str, Any]],
-                          known_error_ids: frozenset[str]) -> list[dict[str, Any]]:
+def _collect_error_blocks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Extract labelled error-evidence blocks from records in original log order.
 
     Each block records its stream, logical failure, and whether its own upstream
@@ -459,7 +454,7 @@ def _collect_error_blocks(records: list[dict[str, Any]],
         evidence = _error_evidence(record, rtype)
         record_id = str(record.get("run_log_id") or evidence.get("error_id")
                         or evidence.get("failure_record_id") or "")
-        logical_id = _logical_failure_id(record, rtype, known_error_ids)
+        logical_id = _logical_failure_id(record, rtype)
         flag_truncated = bool(evidence.get("output_truncated")
                               or evidence.get("truncated"))
         has_full_traceback = bool(evidence.get("sanitized_traceback"))
@@ -551,10 +546,6 @@ def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
     complete = next((r for r in reversed(records) if _rtype(r) == _RUN_COMPLETE), {})
     # A failure record carries its identity inside its payload, so these read
     # through the same resolver the blocks do rather than off the record root.
-    known_error_ids = frozenset(
-        str(_error_evidence(r, _ERROR).get("error_id") or r.get("run_log_id") or "")
-        for r in records if _rtype(r) == _ERROR
-    ) - {""}
     failure_ids = [
         str(_error_evidence(r, _STEP_FAILURE).get("failure_record_id")
             or r.get("run_log_id") or "")
@@ -565,11 +556,11 @@ def _diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
         for r in records if _rtype(r) == _ERROR
     ]
 
-    raw_blocks = _collect_error_blocks(records, known_error_ids)
+    raw_blocks = _collect_error_blocks(records)
     kept, removed = _dedupe_error_blocks(raw_blocks)
 
     logical_ids = {
-        _logical_failure_id(r, _rtype(r), known_error_ids)
+        _logical_failure_id(r, _rtype(r))
         for r in records if _rtype(r) in (_ERROR, _STEP_FAILURE)
     } - {""}
     truncated_source_ids: list[str] = []

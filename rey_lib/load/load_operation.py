@@ -1953,7 +1953,7 @@ def _load_one_file(
                 )
         _logger.error(
             "Database error loading %r — rolled back: %s",
-            source, exc,
+            source, exc, exc_info=exc,
         )
         log_loader_step_failure(
             ctx,

@@ -420,26 +420,28 @@ class TestEveryRecordHonoursTheDestination:
     because that is exactly what the earlier coverage missed.
     """
 
-    def test_an_error_record_reaches_the_database(self, tmp_path, control_calls) -> None:
-        from rey_lib.logs import log_error
+    def test_a_failure_record_reaches_the_database(self, tmp_path, control_calls) -> None:
+        from rey_lib.logs import log_step_failure
 
         run_log = _ctx(tmp_path, "db")
         log_run_start(run_log, operation="scan")
         control_calls.clear()
 
-        log_error(run_log, message="something failed", error_type="AppError")
+        log_step_failure(run_log, failed_step_id="scan", failed_step_name="scan",
+                         message="something failed", error_type="AppError")
 
         events = [v for name, v, _ in control_calls if name == "write_run_log_record"]
-        assert [e["record_type"] for e in events] == ["ERROR"]
+        assert [e["record_type"] for e in events] == ["STEP_FAILURE"]
 
-    def test_an_error_record_writes_no_jsonl_under_db(self, tmp_path,
-                                                      control_calls) -> None:
-        from rey_lib.logs import log_error
+    def test_a_failure_record_writes_no_jsonl_under_db(self, tmp_path,
+                                                       control_calls) -> None:
+        from rey_lib.logs import log_step_failure
 
         run_log = _ctx(tmp_path, "db")
         log_run_start(run_log, operation="scan")
 
-        log_error(run_log, message="something failed", error_type="AppError")
+        log_step_failure(run_log, failed_step_id="scan", failed_step_name="scan",
+                         message="something failed", error_type="AppError")
 
         assert _records(run_log) == []
 

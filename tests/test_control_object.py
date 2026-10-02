@@ -215,24 +215,31 @@ class TestDestructionClosesTheBatchItOwns:
 
         assert control.calls == []
 
-    def test_a_close_failure_is_recorded_and_teardown_continues(self) -> None:
-        """Recorded through the run log, not raised out of destruction."""
+    def test_a_close_failure_is_recorded_and_teardown_continues(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Logged with its error through the logger, not raised out of destruction."""
         recorded: list[dict] = []
 
         control = self._owning(run_outcome="success")
         control.run_log = SimpleNamespace(
             append=lambda record_type, **fields: recorded.append(
                 {"record_type": record_type, **fields}))
+        failure = RuntimeError("control unreachable")
 
         def _boom(*args: Any, **kwargs: Any) -> None:
-            raise RuntimeError("control unreachable")
+            raise failure
 
         control._call = _boom
 
-        control.close()          # must not raise
+        with caplog.at_level("ERROR"):
+            control.close()          # must not raise
 
-        assert [r["record_type"] for r in recorded] == ["ERROR"]
-        assert "could not be closed" in recorded[0]["message"]
+        logged = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert [r.exc_info[1] for r in logged] == [failure]
+        assert "could not be closed" in logged[0].getMessage()
+        # Nothing but the logger writes an ERROR record.
+        assert recorded == []
         # Teardown still released everything.
         assert control.batch_id is None
         assert control.run_log is None

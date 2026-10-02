@@ -241,28 +241,15 @@ class Control:
             pass
 
     def _record_close_failure(self, exc: BaseException) -> None:
-        """Record a batch that would not close, then let teardown continue.
+        """Log a batch that would not close, then let teardown continue.
 
-        Through the run log, because that is where this estate's failures are
-        recorded and a batch left open is a fact about the run. Not re-raised:
-        destruction raising would fail a collection that is releasing
-        everything else correctly, and would replace whatever error ended the
-        run with one about bookkeeping.
-
-        The module logger is the fallback. A run log that cannot take the
-        record is exactly the case where the message must still reach
-        somewhere.
+        Through the logger, which persists it to the bound run when there is
+        one. Not re-raised: destruction raising would fail a collection that
+        is releasing everything else correctly, and would replace whatever
+        error ended the run with one about bookkeeping.
         """
-        message = f"Batch {self.batch_id} could not be closed at teardown: {exc}"
-        run_log = self.run_log
-        if run_log is not None:
-            try:
-                run_log.append("ERROR", message=message,
-                               error_message={"failure_reason": str(exc)})
-                return
-            except Exception:  # noqa: BLE001
-                pass
-        _logger.error("%s", message)
+        _logger.error("Batch %s could not be closed at teardown: %s",
+                      self.batch_id, exc, exc_info=exc)
 
     def __getattr__(self, name: str) -> Any:
         """Fall through to the context for anything Control does not hold.

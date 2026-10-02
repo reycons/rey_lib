@@ -38,7 +38,6 @@ from rey_lib.logs import (
     finalize_run_log,
     log_run_complete,
     log_run_start,
-    log_error,
     log_step_failure,
     log_step_end,
     log_step_start,
@@ -496,25 +495,16 @@ def run_workflow(
                     failed_step_name=step_name,
                     failed_step_sequence=sequence,
                 )
-                error_record = log_error(run_log, **error_payload)
-                # The text, not the payload -- see build_error_record_payload.
-                failure_message = str(error_record.get("message") or "")
-                failure_id = str(error_record.get("error_id") or "")
-                failure_id = log_step_failure(run_log,
-                    failed_step_id=step_id,
-                    failed_step_name=step_name,
-                    message=failure_message,
-                    failure_record_id=failure_id,
-                    error_id=failure_id,
-                    failed_step_sequence=sequence,
-                )
+                failure_message = str(error_payload["message"])
+                _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc,
+                              exc_info=exc)
+                failure_id = log_step_failure(run_log, **error_payload)
                 log_step_end(run_log, step_name, "failed", message=failure_message,
                              duration_ms=monotonic_ms(step_started))
                 run.outcomes.append(
                     StepOutcome(step_id, label, process, "failed", error=failure_message)
                 )
                 run.status = "failed"
-                _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc)
                 # Recorded once. A later always_run step that also fails writes
                 # its own ERROR, STEP_FAILURE and STEP_END at its own step; what
                 # it must not do is replace the reason normal execution stopped.
