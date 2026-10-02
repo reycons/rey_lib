@@ -477,9 +477,9 @@ def _print_result(result: FolderMakerResult) -> None:
         for p in result.existed:
             print(f"  = {p}")
     if result.errors:
-        print(f"\nErrors ({len(result.errors)}):", file=sys.stderr)
+        _logger.error("Errors (%d):", len(result.errors))
         for e in result.errors:
-            print(f"  ! {e}", file=sys.stderr)
+            _logger.error("  ! %s", e)
 
 
 def main() -> None:

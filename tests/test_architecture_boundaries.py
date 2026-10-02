@@ -275,11 +275,11 @@ def test_the_logging_rule_forbids_the_logging_api_not_program_output() -> None:
     assert logging_rule.forbidden_target_globs == ("logging.getLogger",)
 
 
-def test_cli_output_in_folder_maker_is_untouched() -> None:
-    """_print_result still writes to stdout and stderr.
+def test_cli_output_in_folder_maker_reports_and_logs_errors() -> None:
+    """_print_result prints its report; its errors go through the logger.
 
-    Behavioural guard: the correction narrowed a rule rather than rewriting a
-    CLI tool to satisfy it.
+    The created/existed lines are the tool's product and stay on stdout. An
+    error is an error, so it is logged rather than written to stderr.
     """
     import inspect
 
@@ -287,8 +287,9 @@ def test_cli_output_in_folder_maker_is_untouched() -> None:
 
     source = inspect.getsource(folder_maker._print_result)
 
-    assert source.count("print(") == 6
-    assert "file=sys.stderr" in source
+    assert source.count("print(") == 4
+    assert "file=sys.stderr" not in source
+    assert source.count("_logger.error(") == 2
 
 
 def test_the_file_family_does_not_reach_into_the_load(violations) -> None:
