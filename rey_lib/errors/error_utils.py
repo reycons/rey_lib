@@ -33,8 +33,6 @@ import traceback
 import uuid
 from typing import Any
 
-from rey_lib.logs import get_logger
-
 __all__ = [
     "AppError",
     "ConfigError",
@@ -51,8 +49,6 @@ __all__ = [
     "validate_path",
     "validate_required",
 ]
-
-_logger = get_logger(__name__)
 
 _SECRET_ERROR_RE = re.compile(
     r"(?i)"
@@ -454,6 +450,8 @@ def install_process_error_boundary(ctx: Any | None = None) -> None:
         The resolved context, accepted so the boundary can be scoped to the run
         it belongs to. Reserved; the logger already carries run identity.
     """
+    from rey_lib.logs import get_logger
+
     global _boundary_installed
     if _boundary_installed:
         return

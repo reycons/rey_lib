@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from rey_lib.files.governed_file import FileId, is_governed_file_id
+from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import delete_file, run_artifact_path
 from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_file
 from rey_lib.run import establish_run_identity
@@ -51,7 +52,7 @@ _SELECTABLE_RECORD_TYPES = (
     MUTATION_RECORD_TYPE,
 )
 
-class LogRunRollbackError(Exception):
+class LogRunRollbackError(AppError):
     """Raised when a rollback request cannot be planned or governed safely."""
 
 

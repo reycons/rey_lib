@@ -19,6 +19,7 @@ from rey_lib.files.log_run_rollback import (
     SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
 )
+from rey_lib.errors.error_utils import AppError
 from rey_lib.files.governed_file import FileId
 from rey_lib.files.primitive_file_io import stage_stream_write
 from rey_lib.logs import get_logger
@@ -252,7 +253,7 @@ class FileSanitizationResult:
     failure_reason: str | None
 
 
-class FileSanitizationError(Exception):
+class FileSanitizationError(AppError):
     def __init__(self, message: str, result: FileSanitizationResult | None = None) -> None:
         super().__init__(message)
         self.result = result

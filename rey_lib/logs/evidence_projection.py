@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
+from rey_lib.errors.error_utils import AppError
 from rey_lib.logs.record_enrichment import (
     EXECUTION_RECORD_TYPES,
     FILES_RECORD_SUBGROUP,
@@ -873,7 +874,7 @@ _RUN_SECTION_NAMES = (
 _RUN_FILE_SUBGROUPS = ("input_files", "config_files", "file_operations", "artifacts")
 
 
-class RunLogIdentityError(Exception):
+class RunLogIdentityError(AppError):
     """A run log cannot be identified because a record carries no run identity.
 
     Every durable run record carries a ``run_id``. One that does not is

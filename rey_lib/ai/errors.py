@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.errors.error_utils import AppError
+
 __all__ = [
     "AICancelled",
     "AICapabilityError",
@@ -29,7 +31,7 @@ __all__ = [
 ]
 
 
-class AIError(Exception):
+class AIError(AppError):
     """Anything the AI subsystem refuses or cannot complete.
 
     Carries the provider's own message as ``cause`` where one exists, so an

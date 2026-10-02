@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rey_lib.logs.logging_setup import get_logger
+from rey_lib.errors.error_utils import AppError
 __all__ = [
     "FileManifestError",
     "FileManifestSession",
@@ -84,7 +85,7 @@ _CANONICAL_ROOT_FIELDS: tuple[str, ...] = (
 _logger = get_logger(__name__)
 
 
-class FileManifestError(Exception):
+class FileManifestError(AppError):
     """Raised when a governed manifest record cannot be sequenced or appended.
 
     Deliberately not derived from ``rey_lib.errors.AppError``: the logging layer

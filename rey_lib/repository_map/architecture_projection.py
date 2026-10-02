@@ -48,6 +48,7 @@ from typing import Any
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.encryption import sha256_text
 from rey_lib.files.file_utils import read_text_file
+from rey_lib.errors.error_utils import AppError
 from rey_lib.files.jsonl import render_jsonl_line
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.records import (
@@ -117,7 +118,7 @@ SOURCE_CAPABILITY_ARCHITECTURE = "SOURCE_CAPABILITY_ARCHITECTURE"
 CONSUMED_OWNERSHIP_SECTIONS = ("canonical_modules", "canonical_symbols")
 
 
-class ArchitectureProjectionError(Exception):
+class ArchitectureProjectionError(AppError):
     """Raised when authored architecture cannot be joined to current evidence.
 
     Every case is a contradiction between the two authorities, and none has a

@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from rey_lib.errors.error_utils import AppError
+
 from rey_lib.logs import get_logger
 
 __all__ = [
@@ -39,7 +41,7 @@ __all__ = [
 _logger = get_logger(__name__)
 
 
-class WorkflowError(Exception):
+class WorkflowError(AppError):
     """Raised for engine-level problems (e.g. an unknown step name)."""
 
 

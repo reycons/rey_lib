@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from rey_lib.errors.error_utils import AppError
+
 __all__ = [
     "PROFILE_ACCESS_REDACTED",
     "PROFILE_ACCESS_UNREDACTED",
@@ -51,7 +53,7 @@ _ACCESS_PROFILE_COLUMNS = {
 }
 
 
-class ProfileLibraryError(Exception):
+class ProfileLibraryError(AppError):
     """Raised when a governed profile cannot be resolved."""
 
 

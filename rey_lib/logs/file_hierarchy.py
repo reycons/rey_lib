@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from rey_lib.errors.error_utils import AppError
+
 from rey_lib.logs.file_manifest import FileManifestError
 
 __all__ = [
@@ -40,7 +42,7 @@ _MAX_LIMIT = 250
 _MAX_STAGE_LIMIT = 500
 
 
-class FileHierarchyError(Exception):
+class FileHierarchyError(AppError):
     """Raised when a canonical manifest cannot produce a valid hierarchy."""
 
 

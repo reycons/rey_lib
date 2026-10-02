@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from rey_lib.errors.error_utils import AppError
+
 __all__ = [
     "FileSetCollisionError",
     "FileSetCommitError",
@@ -48,7 +50,7 @@ __all__ = [
 _COLLISION_POLICIES = ("fail", "replace")
 
 
-class FileSetTransactionError(Exception):
+class FileSetTransactionError(AppError):
     """Base error for transactional file-set publication."""
 
 

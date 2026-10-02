@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
+from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import move_file
 from rey_lib.files.governed_file import FileId, governed_file_id
 from rey_lib.logs import get_logger
@@ -186,7 +187,7 @@ class FileRoutingResult:
     failure_reason: str | None
 
 
-class FileRoutingError(Exception):
+class FileRoutingError(AppError):
     """Raised when routing validation or physical mutation fails."""
 
     def __init__(self, message: str, result: FileRoutingResult) -> None:
