@@ -1501,9 +1501,9 @@ class Control:
         and no second copy of those rules in Python.
 
         Args:
-            file_type_id: The file type acted on. It must belong to this
-                control object's installation; the routine refuses the pair
-                otherwise.
+            file_type_id: The file type acted on -- required for every action.
+                It is the identity: the routine derives the installation from
+                it, and refuses a transform_id that does not belong to it.
             action: ``ensure`` (profiling's: for a type with no transform,
                 create the prepared/sanitized pair; existing transforms are
                 left as they are), ``reset`` (re-create, in place, the type's
@@ -1520,8 +1520,8 @@ class Control:
         EVERY VALUE IS SENT, None where not given. The binding declares an
         input for each, and the procedure map refuses an input that is
         missing from the call (``_resolve_value``) -- so a value left out is a
-        failed call, not a NULL. installation_id is deliberately absent: the
-        binding resolves it from this object's property.
+        failed call, not a NULL. No installation is sent or bound: the routine
+        derives it from file_type_id.
         """
         self._call("maintain_transform", {
             "file_type_id":   None if file_type_id is None else int(file_type_id),
