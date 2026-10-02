@@ -155,3 +155,66 @@ class TestRealizationsAreStagedAsAuthored:
         rows = architecture_rows(_written(tmp_path, NESTED))
 
         assert not [r for r in rows.realizations if r["concept_key"] == "apps"]
+
+
+CANONICAL = """
+architecture_concepts:
+  concepts:
+    - key: console
+      label: Console
+      statement: The reader's surface.
+      concepts:
+        - key: explorer
+          label: Explorer
+          statement: How a reader navigates.
+          canonical:
+            - key: console.explorer.tabs
+              responsibility: which tabs an installation has
+              object: rey_console.tree_definitions.TreeTabs
+              authority: the one authority for tab existence
+              public_seam: TreeTabs
+              must_not_bypass: a panel building its own tab list
+              evidence: concept console.explorer.tabs realizes it
+              status: active
+"""
+
+
+class TestCanonicalOwnersAreStagedAsAuthored:
+    """A canonical entry is serialized verbatim on its concept; the schema judges it."""
+
+    def test_an_entry_becomes_one_row_on_its_concept(self, tmp_path: Path) -> None:
+        rows = architecture_rows(_written(tmp_path, CANONICAL))
+
+        assert rows.canonical_objects == [{
+            "concept_key": "console.explorer",
+            "object_key": "console.explorer.tabs",
+            "responsibility": "which tabs an installation has",
+            "implementation_reference": "rey_console.tree_definitions.TreeTabs",
+            "authority": "the one authority for tab existence",
+            "public_seam": "TreeTabs",
+            "must_not_bypass": "a panel building its own tab list",
+            "evidence": "concept console.explorer.tabs realizes it",
+            "status": "active",
+            "superseded_by_key": "",
+            "notes": "",
+        }]
+
+    def test_a_concept_with_no_canonical_entry_contributes_none(self, tmp_path: Path) -> None:
+        assert architecture_rows(_written(tmp_path, NESTED)).canonical_objects == []
+
+    def test_a_missing_field_is_refused_by_name(self, tmp_path: Path) -> None:
+        body = CANONICAL.replace("              public_seam: TreeTabs\n", "")
+
+        with pytest.raises(ArchitectureProjectionError, match="states no public_seam"):
+            architecture_rows(_written(tmp_path, body))
+
+    def test_nothing_is_resolved_or_judged(self, tmp_path: Path) -> None:
+        """An unknown object and an odd status are staged as written; p_publish refuses them."""
+        body = CANONICAL.replace(
+            "rey_console.tree_definitions.TreeTabs", "no.such.Object",
+        ).replace("status: active", "status: someday")
+
+        [row] = architecture_rows(_written(tmp_path, body)).canonical_objects
+
+        assert row["implementation_reference"] == "no.such.Object"
+        assert row["status"] == "someday"

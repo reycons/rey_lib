@@ -40,24 +40,29 @@ logger = get_logger(__name__)
 
 
 class ArchitectureRows:
-    """The authored architecture as two sets of staged rows.
+    """The authored architecture as three sets of staged rows.
 
     Attributes:
         concepts: One row per concept, in declared order, each naming its
             parent by ``concept_key`` rather than by a surrogate id.
         realizations: One row per ``realized_by`` reference, naming its concept
             the same way. The reference is the authored string, unresolved.
+        canonical_objects: One row per ``canonical`` entry: the object that is
+            the authority for one responsibility within its concept, its public
+            seam and what must not be bypassed. Authored strings, unresolved.
     """
 
-    __slots__ = ("concepts", "realizations")
+    __slots__ = ("concepts", "realizations", "canonical_objects")
 
     def __init__(
         self,
         concepts: list[dict[str, Any]],
         realizations: list[dict[str, Any]],
+        canonical_objects: list[dict[str, Any]],
     ) -> None:
         self.concepts = concepts
         self.realizations = realizations
+        self.canonical_objects = canonical_objects
 
 
 def architecture_rows(architecture_path: Path) -> ArchitectureRows:
@@ -82,11 +87,12 @@ def architecture_rows(architecture_path: Path) -> ArchitectureRows:
             f"{CONCEPTS_SECTION}.{CONCEPTS_KEY}."
         )
 
-    rows = ArchitectureRows([], [])
+    rows = ArchitectureRows([], [], [])
     _walk(concepts, parent_key="", path=(), rows=rows)
     logger.info(
-        "Read %d concepts and %d realizations from %s",
-        len(rows.concepts), len(rows.realizations), architecture_path.name,
+        "Read %d concepts, %d realizations and %d canonical objects from %s",
+        len(rows.concepts), len(rows.realizations), len(rows.canonical_objects),
+        architecture_path.name,
     )
     return rows
 
@@ -147,3 +153,60 @@ def _walk(
                     "sort_order": position,
                 }
             )
+        for entry in declared.get("canonical") or []:
+            rows.canonical_objects.append(_canonical_row(entry, concept_key))
+
+
+#: What a ``canonical`` entry must state, and the staged column each becomes.
+_CANONICAL_REQUIRED: tuple[tuple[str, str], ...] = (
+    ("key", "object_key"),
+    ("responsibility", "responsibility"),
+    ("object", "implementation_reference"),
+    ("authority", "authority"),
+    ("public_seam", "public_seam"),
+    ("must_not_bypass", "must_not_bypass"),
+    ("evidence", "evidence"),
+    ("status", "status"),
+)
+
+
+def _canonical_row(entry: Any, concept_key: str) -> dict[str, Any]:
+    """One authored ``canonical`` entry as a staged row, verbatim.
+
+    Nothing is resolved or judged here: which symbol ``object`` names, whether a
+    status is valid and whether a responsibility already has an active owner are
+    the schema's (``code.p_publish``). This only refuses an entry that is not
+    there to stage -- a missing or non-text field.
+
+    Args:
+        entry: One item of a concept's ``canonical`` list.
+        concept_key: The dotted key of the concept it is authored on.
+
+    Returns:
+        The row for ``code.canonical_object_stage``.
+
+    Raises:
+        ArchitectureProjectionError: If a required field is missing or is not text.
+    """
+    if not isinstance(entry, dict):
+        raise ArchitectureProjectionError(
+            f"A canonical entry under {concept_key} is not a mapping."
+        )
+    row: dict[str, Any] = {"concept_key": concept_key}
+    for field, column in _CANONICAL_REQUIRED:
+        value = entry.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ArchitectureProjectionError(
+                f"Canonical entry {entry.get('key') or '?'} under {concept_key} "
+                f"states no {field} as text."
+            )
+        row[column] = value
+    for field, column in (("superseded_by", "superseded_by_key"), ("notes", "notes")):
+        value = entry.get(field) or ""
+        if not isinstance(value, str):
+            raise ArchitectureProjectionError(
+                f"Canonical entry {row['object_key']} under {concept_key} "
+                f"states {field} as something other than text."
+            )
+        row[column] = value
+    return row

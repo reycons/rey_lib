@@ -253,7 +253,7 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
     """
 
     @staticmethod
-    def _rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         concepts = [
             {"concept_key": "console", "parent_concept_key": "", "label": "Console",
              "statement": "", "sort_order": 0},
@@ -265,28 +265,35 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
             {"concept_key": "console", "reference": "rey_console/routes.py",
              "sort_order": 0},
         ]
-        return concepts, realizations
+        canonical_objects = [
+            {"object_key": "console.explorer.tabs", "concept_key": "console.explorer",
+             "responsibility": "which tabs exist",
+             "implementation_reference": "rey_console.tree_definitions.TreeTabs",
+             "authority": "a", "public_seam": "s", "must_not_bypass": "b",
+             "evidence": "e", "status": "active", "superseded_by_key": "", "notes": ""},
+        ]
+        return concepts, realizations, canonical_objects
 
     def test_it_promotes_the_architecture_and_never_the_scan(self) -> None:
         """Declared explicitly, so the schema validates against the live scan
         rather than guessing from whether staging happens to be empty."""
         adapter = _Adapter()
-        concepts, realizations = self._rows()
+        concepts, realizations, canonical_objects = self._rows()
 
         CodeIndexDatabaseWriter(adapter, None).replace_architecture(
-            concepts, realizations
+            concepts, realizations, canonical_objects
         )
 
         assert "CALL code.p_publish(false, true)" in adapter.statements
         staged = {table for _s, table, _c, _cols in adapter.inserts}
-        assert staged == {"concept_stage", "realization_stage"}
+        assert staged == {"concept_stage", "realization_stage", "canonical_object_stage"}
 
     def test_no_scan_staging_is_touched(self) -> None:
         adapter = _Adapter()
-        concepts, realizations = self._rows()
+        concepts, realizations, canonical_objects = self._rows()
 
         CodeIndexDatabaseWriter(adapter, None).replace_architecture(
-            concepts, realizations
+            concepts, realizations, canonical_objects
         )
 
         staged = {table for _s, table, _c, _cols in adapter.inserts}
@@ -297,20 +304,21 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
         }
 
     def test_staging_is_emptied_before_it_is_filled(self) -> None:
-        """Realizations first: they name the concepts.
+        """Realizations and canonical objects first: they name the concepts.
 
         A previous run that staged and failed to promote must not survive into
         the next promotion.
         """
         adapter = _Adapter()
-        concepts, realizations = self._rows()
+        concepts, realizations, canonical_objects = self._rows()
 
         CodeIndexDatabaseWriter(adapter, None).replace_architecture(
-            concepts, realizations
+            concepts, realizations, canonical_objects
         )
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
+            "DELETE FROM code.canonical_object_stage",
             "DELETE FROM code.realization_stage",
             "DELETE FROM code.concept_stage",
         ]
@@ -322,10 +330,10 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
         itself, which is exactly what the natural-key carriage exists to avoid.
         """
         adapter = _Adapter()
-        concepts, realizations = self._rows()
+        concepts, realizations, canonical_objects = self._rows()
 
         CodeIndexDatabaseWriter(adapter, None).replace_architecture(
-            concepts, realizations
+            concepts, realizations, canonical_objects
         )
 
         columns = {table: cols for _s, table, _c, cols in adapter.inserts}
@@ -342,13 +350,33 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
         A match kind computed here would be that rule stated twice.
         """
         adapter = _Adapter()
-        concepts, realizations = self._rows()
+        concepts, realizations, canonical_objects = self._rows()
 
         CodeIndexDatabaseWriter(adapter, None).replace_architecture(
-            concepts, realizations
+            concepts, realizations, canonical_objects
         )
 
         columns = {table: cols for _s, table, _c, cols in adapter.inserts}
         assert columns["realization_stage"] == [
             "concept_key", "reference", "sort_order",
+        ]
+
+    def test_a_canonical_object_is_staged_by_concept_key_as_authored(self) -> None:
+        """The registry is replaced with the architecture: same run, linked by key.
+
+        ``code.f_canonical_object_resolution`` decides what the object names and
+        ``code.p_publish`` refuses two active owners; neither is anticipated here.
+        """
+        adapter = _Adapter()
+        concepts, realizations, canonical_objects = self._rows()
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture(
+            concepts, realizations, canonical_objects
+        )
+
+        columns = {table: cols for _s, table, _c, cols in adapter.inserts}
+        assert columns["canonical_object_stage"] == [
+            "object_key", "concept_key", "responsibility", "implementation_reference",
+            "authority", "public_seam", "must_not_bypass", "evidence", "status",
+            "superseded_by_key", "notes",
         ]

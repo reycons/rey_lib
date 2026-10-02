@@ -79,6 +79,11 @@ _CONCEPT_COLUMNS = (
     "concept_key", "parent_concept_key", "label", "statement", "sort_order",
 )
 _REALIZATION_COLUMNS = ("concept_key", "reference", "sort_order")
+_CANONICAL_OBJECT_COLUMNS = (
+    "object_key", "concept_key", "responsibility", "implementation_reference",
+    "authority", "public_seam", "must_not_bypass", "evidence", "status",
+    "superseded_by_key", "notes",
+)
 _CLASS_ATTRIBUTE_COLUMNS = (
     "repository_key", "relative_path", "owner_qualified_name", "owner_line",
     "owner_column", "name", "ordinal", "declaration_form", "is_annotated",
@@ -233,6 +238,7 @@ class CodeIndexDatabaseWriter:
         self,
         concepts: list[dict[str, Any]],
         realizations: list[dict[str, Any]],
+        canonical_objects: list[dict[str, Any]],
     ) -> None:
         """Replace the authored architecture, all or nothing.
 
@@ -252,13 +258,17 @@ class CodeIndexDatabaseWriter:
             concepts: One row per concept, naming its parent by
                 ``concept_key``. A domain names the empty string.
             realizations: One row per authored reference.
+            canonical_objects: One row per authored canonical owner. REQUIRED:
+                the promotion replaces the registry with what is staged, so an
+                omitted list would publish an empty registry.
         """
         self._clear_architecture_staging()
         self._stage("concept_stage", concepts, _CONCEPT_COLUMNS)
         self._stage("realization_stage", realizations, _REALIZATION_COLUMNS)
+        self._stage("canonical_object_stage", canonical_objects, _CANONICAL_OBJECT_COLUMNS)
         logger.info(
-            "Staged %d concepts and %d realizations",
-            len(concepts), len(realizations),
+            "Staged %d concepts, %d realizations and %d canonical objects",
+            len(concepts), len(realizations), len(canonical_objects),
         )
         self._call("p_publish", "false, true")
         logger.info("Promoted the staged architecture to the live index")
@@ -268,9 +278,9 @@ class CodeIndexDatabaseWriter:
 
         A promotion empties it itself, so this only matters after a run that
         staged and then failed to promote -- exactly as the scan side does it.
-        Realizations first: they name the concepts.
+        Realizations and canonical objects first: they name the concepts.
         """
-        for table in ("realization_stage", "concept_stage"):
+        for table in ("canonical_object_stage", "realization_stage", "concept_stage"):
             self._adapter.execute_sql(
                 self._connection,
                 f"DELETE FROM {SCHEMA}.{table}",
