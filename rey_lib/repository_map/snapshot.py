@@ -49,6 +49,7 @@ from rey_lib.repository_map.writer import (
 )
 from rey_lib.repository_map.inventory import load_scan_rules
 from rey_lib.repository_map.records import ScanRules
+from rey_lib.repository_map.architecture_projection import ArchitectureProjectionError
 
 __all__ = ["CodeIndexSnapshot", "scan"]
 
@@ -138,7 +139,7 @@ def _refuse(artifact: str, reasons: list[str]) -> None:
             be none, so one means an input moved during the scan.
     """
     if reasons:
-        raise ValueError(
+        raise ArchitectureProjectionError(
             f"The {artifact} does not describe the inputs it was just built from: "
             + "; ".join(reasons)
         )

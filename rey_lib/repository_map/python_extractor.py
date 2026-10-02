@@ -76,6 +76,7 @@ from rey_lib.repository_map.records import (
     SymbolInventory,
     SymbolRecord,
 )
+from rey_lib.data.errors import DataStructureError
 
 __all__ = [
     "extract_python_call_arguments",
@@ -1299,7 +1300,7 @@ def _parse(path: Path) -> ast.Module:
     try:
         return ast.parse(text, filename=str(path))
     except SyntaxError as exc:
-        raise ValueError(f"Could not parse Python file {path}: {exc}") from exc
+        raise DataStructureError(f"Could not parse Python file {path}: {exc}") from exc
 
 
 def _dunder_all_node(tree: ast.Module) -> ast.Assign | None:

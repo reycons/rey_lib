@@ -35,6 +35,7 @@ from rey_lib.repository_map.python_extractor import (
     extract_python_symbols,
 )
 from rey_lib.repository_map.records import ReferenceEdge, SymbolInventory
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "LANGUAGE_EXTRACTORS",
@@ -329,7 +330,7 @@ def _extractor_for(language: str) -> LanguageExtractor:
     """
     extractor = LANGUAGE_EXTRACTORS.get(language)
     if extractor is None:
-        raise ValueError(
+        raise ConfigError(
             f"No repository-map extractor registered for language '{language}'. "
             f"Registered languages: {', '.join(supported_languages()) or 'none'}."
         )

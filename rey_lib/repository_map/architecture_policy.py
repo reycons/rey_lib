@@ -32,6 +32,7 @@ from rey_lib.config.config_utils import parse_yaml
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.repository_map.records import ScanRules
 from rey_lib.repository_map.rule_families import RULE_FAMILIES
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "ArchitectureRuleSource",
@@ -165,7 +166,7 @@ def compile_architecture_policy(
     try:
         parsed = parse_yaml(read_text_file(architecture_path))
     except Exception as exc:  # Surface the offending file, not a bare parse error.
-        raise ValueError(f"Architecture context is not valid YAML: {architecture_path}") from exc
+        raise ConfigError(f"Architecture context is not valid YAML: {architecture_path}") from exc
 
     repositories = (parsed or {}).get(_OWNERSHIP_SECTION, {}).get("repositories", {})
     block = repositories.get(repository)
@@ -178,7 +179,7 @@ def compile_architecture_policy(
 
     for section, statement_key, annotation in _annotated_statements(block):
         if not isinstance(annotation, dict):
-            raise ValueError(
+            raise ConfigError(
                 f"Architecture annotation on {repository}.{section}[{statement_key}] "
                 f"must be a mapping, got {type(annotation).__name__}."
             )
@@ -186,7 +187,7 @@ def compile_architecture_policy(
         if config_key not in families:
             # Loud, not skipped: a mistyped family would otherwise read as a
             # statement nobody chose to enforce.
-            raise ValueError(
+            raise ConfigError(
                 f"Architecture annotation on {repository}.{section}[{statement_key}] names "
                 f"unknown rule family {config_key!r}. Known families: {sorted(families)}."
             )
@@ -276,7 +277,7 @@ def build_effective_policy(
         for rule in compiled_rules:
             rule_id = getattr(rule, "rule_id", None)
             if rule_id and rule_id in provenance:
-                raise ValueError(
+                raise ConfigError(
                     f"Rule id {rule_id!r} is declared both in the repository's rules file and "
                     f"in the architecture context. One rule id must identify one rule."
                 )

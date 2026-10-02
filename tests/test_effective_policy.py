@@ -26,6 +26,7 @@ from rey_lib.repository_map.writer import (
     _policy_status,
     effective_policy_for,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 ARCHITECTURE = """
 canonical_ownership:
@@ -111,7 +112,7 @@ def test_a_duplicate_rule_id_across_sources_is_refused(architecture: Path) -> No
         RULE_FAMILIES,
     )
 
-    with pytest.raises(ValueError, match="declared both in"):
+    with pytest.raises(ConfigError, match="declared both in"):
         build_effective_policy(
             colliding, compile_architecture_policy(architecture, "shared_lib")
         )

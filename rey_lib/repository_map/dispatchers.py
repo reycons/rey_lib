@@ -33,6 +33,7 @@ from rey_lib.repository_map.records import (
     ReferenceEdge,
     ScanRules,
 )
+from rey_lib.data.errors import DataStructureError
 
 __all__ = ["inventory_dispatchers_and_switches"]
 
@@ -139,7 +140,7 @@ def _python_dispatchers(path: Path, source_path: str) -> list[DispatcherRecord]:
     try:
         tree = ast.parse(read_text_file(path), filename=str(path))
     except SyntaxError as exc:
-        raise ValueError(f"Could not parse Python file {path}: {exc}") from exc
+        raise DataStructureError(f"Could not parse Python file {path}: {exc}") from exc
 
     enclosing = _python_enclosing_symbols(tree)
     records: list[DispatcherRecord] = []

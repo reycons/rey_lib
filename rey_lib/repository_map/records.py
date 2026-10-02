@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 from typing import Any, Optional
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "EDGE_KIND_BACKEND_STRING_REFERENCE",
@@ -1970,7 +1971,7 @@ class ScanRules:
                 shape. Missing sections are permitted and yield empty rules.
         """
         if not isinstance(data, dict):
-            raise ValueError(f"Scan rules must be a mapping, got {type(data).__name__}.")
+            raise ConfigError(f"Scan rules must be a mapping, got {type(data).__name__}.")
 
         extensions = _require_str_mapping(data, "language_by_extension")
         extraction = _require_bool_mapping(data, "fact_extraction")
@@ -2020,7 +2021,7 @@ def _require_str_list(data: dict[str, Any], key: str) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"Scan rules section '{key}' must be a list of strings.")
+        raise ConfigError(f"Scan rules section '{key}' must be a list of strings.")
     return value
 
 
@@ -2041,7 +2042,7 @@ def _rule_entries(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise ValueError(f"Scan rules section '{key}' must be a list of mappings.")
+        raise ConfigError(f"Scan rules section '{key}' must be a list of mappings.")
     return value
 
 
@@ -2060,7 +2061,7 @@ def _required(entry: dict[str, Any], key: str, section: str) -> Any:
         ValueError: If the field is missing.
     """
     if key not in entry:
-        raise ValueError(f"Scan rules section '{section}' entry is missing '{key}'.")
+        raise ConfigError(f"Scan rules section '{section}' entry is missing '{key}'.")
     return entry[key]
 
 
@@ -2169,7 +2170,7 @@ def _require_bool_mapping(data: dict[str, Any], key: str) -> dict[str, bool]:
     if not isinstance(value, dict) or not all(
         isinstance(name, str) and isinstance(flag, bool) for name, flag in value.items()
     ):
-        raise ValueError(f"Scan rules section '{key}' must map strings to booleans.")
+        raise ConfigError(f"Scan rules section '{key}' must map strings to booleans.")
     return value
 
 
@@ -2192,5 +2193,5 @@ def _require_str_mapping(data: dict[str, Any], key: str) -> dict[str, str]:
     if not isinstance(value, dict) or not all(
         isinstance(item, str) for pair in value.items() for item in pair
     ):
-        raise ValueError(f"Scan rules section '{key}' must map strings to strings.")
+        raise ConfigError(f"Scan rules section '{key}' must map strings to strings.")
     return value

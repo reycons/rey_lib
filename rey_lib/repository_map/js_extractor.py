@@ -85,6 +85,7 @@ from rey_lib.repository_map.records import (
     SymbolInventory,
     SymbolRecord,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "extract_js_call_arguments",
@@ -430,7 +431,7 @@ def _parse(path: Path, language: str) -> Node:
     if parser is None:
         grammar = _GRAMMARS.get(language)
         if grammar is None:
-            raise ValueError(
+            raise ConfigError(
                 f"No Tree-sitter grammar registered for language '{language}'. "
                 f"Registered languages: {', '.join(supported_js_languages())}."
             )

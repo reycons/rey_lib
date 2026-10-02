@@ -40,6 +40,7 @@ from rey_lib.repository_map.records import (
     ScanRules,
     matches_any_glob,
 )
+from rey_lib.data.errors import DataStructureError
 
 __all__ = ["extract_registrations"]
 
@@ -287,7 +288,7 @@ def _python_registrations(
     try:
         tree = ast.parse(read_text_file(path), filename=str(path))
     except SyntaxError as exc:
-        raise ValueError(f"Could not parse Python file {path}: {exc}") from exc
+        raise DataStructureError(f"Could not parse Python file {path}: {exc}") from exc
 
     records = []
     for rule in applicable:

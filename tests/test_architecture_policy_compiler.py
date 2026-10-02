@@ -18,6 +18,7 @@ from rey_lib.repository_map.architecture_policy import (
     compile_architecture_policy,
 )
 from rey_lib.repository_map.rule_families import RULE_FAMILIES
+from rey_lib.errors.error_utils import ConfigError
 
 DOC = """
 canonical_ownership:
@@ -113,7 +114,7 @@ def test_an_unknown_family_fails_loudly(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="unknown rule family"):
+    with pytest.raises(ConfigError, match="unknown rule family"):
         compile_architecture_policy(path, "shared_lib")
 
 
@@ -134,7 +135,7 @@ def test_malformed_fields_fail_through_the_owning_family(tmp_path: Path) -> None
     )
 
     # architecture_rules requires forbidden_target_globs and scope_path_globs.
-    with pytest.raises(ValueError, match="missing"):
+    with pytest.raises(ConfigError, match="missing"):
         compile_architecture_policy(path, "shared_lib")
 
 
@@ -167,7 +168,7 @@ def test_the_compiler_resolves_families_only_through_the_registry(doc: Path) -> 
     """
     empty_registry: tuple = ()
 
-    with pytest.raises(ValueError, match="unknown rule family"):
+    with pytest.raises(ConfigError, match="unknown rule family"):
         compile_architecture_policy(doc, "shared_lib", rule_families=empty_registry)
 
 

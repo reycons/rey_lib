@@ -32,6 +32,7 @@ from rey_lib.repository_map.migration import (
     validate_migration_manifest,
     verify_retirement_ready,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 MANIFEST = MigrationManifest(
     migration_id="retire_legacy_panel",
@@ -402,7 +403,7 @@ def test_a_manifest_missing_a_required_field_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "m.yaml"
     path.write_text("migration:\n  migration_id: x\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="missing 'capability'"):
+    with pytest.raises(ConfigError, match="missing 'capability'"):
         load_migration_manifest(path)
 
 
@@ -534,7 +535,7 @@ def test_a_manifest_retiring_nothing_is_refused(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="nothing it retires"):
+    with pytest.raises(ConfigError, match="nothing it retires"):
         load_migration_manifest(path)
 
 

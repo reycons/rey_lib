@@ -29,6 +29,8 @@ from rey_lib.repository_map import (
     extract_symbols,
     supported_languages,
 )
+from rey_lib.data.errors import DataStructureError
+from rey_lib.errors.error_utils import ConfigError
 
 SOURCE = '''"""Module docstring mentioning ghost_call() which is not a call."""
 
@@ -420,7 +422,7 @@ def test_unsupported_language_is_refused_not_emptied() -> None:
     HTML is in the contract's scope but has no extractor yet, so it stands in
     for any language whose facts are not available.
     """
-    with pytest.raises(ValueError, match="No repository-map extractor"):
+    with pytest.raises(ConfigError, match="No repository-map extractor"):
         extract_executable_references(Path("template.html"), "HTML")
 
 
@@ -429,7 +431,7 @@ def test_unparseable_python_names_the_file(tmp_path: Path) -> None:
     path = tmp_path / "broken.py"
     path.write_text("def broken(:\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="broken.py"):
+    with pytest.raises(DataStructureError, match="broken.py"):
         extract_symbols(path, "Python")
 
 

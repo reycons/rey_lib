@@ -24,6 +24,7 @@ from rey_lib.repository_map.records import (
     ScanRules,
     matches_any_glob,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["inventory_files", "load_scan_rules"]
 
@@ -42,7 +43,7 @@ def load_scan_rules(rules_path: Path) -> ScanRules:
     Raises:
         FileNotFoundError: If the rules file does not exist. The path is
             configuration and is never guessed or substituted.
-        ValueError: If the rules file is not valid rules content.
+        ConfigError: If the rules file is not valid rules content.
     """
     if not rules_path.is_file():
         raise FileNotFoundError(f"Scan rules file not found: {rules_path}")
@@ -51,12 +52,12 @@ def load_scan_rules(rules_path: Path) -> ScanRules:
     try:
         parsed = parse_yaml(text)
     except Exception as exc:  # Surface the offending file, not a bare parse error.
-        raise ValueError(f"Scan rules file is not valid YAML: {rules_path}") from exc
+        raise ConfigError(f"Scan rules file is not valid YAML: {rules_path}") from exc
 
     try:
         return ScanRules.from_mapping(parsed, RULE_FAMILIES)
-    except ValueError as exc:
-        raise ValueError(f"Invalid scan rules in {rules_path}: {exc}") from exc
+    except ConfigError as exc:
+        raise ConfigError(f"Invalid scan rules in {rules_path}: {exc}") from exc
 
 
 def inventory_files(repo_root: Path, rules: ScanRules) -> list[FileRecord]:

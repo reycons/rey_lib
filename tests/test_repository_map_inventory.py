@@ -18,6 +18,7 @@ from rey_lib.repository_map import (
     load_scan_rules,
 )
 from rey_lib.repository_map.records import matches_any_glob
+from rey_lib.errors.error_utils import ConfigError
 
 RULES_TEXT = """
 ignored_directory_names:
@@ -260,7 +261,7 @@ def test_fact_extraction_section_must_be_booleans(tmp_path: Path) -> None:
     rules_path = tmp_path / "repository_map.rules.yaml"
     rules_path.write_text('fact_extraction:\n  vendor: "false"\n', encoding="utf-8")
 
-    with pytest.raises(ValueError, match="fact_extraction"):
+    with pytest.raises(ConfigError, match="fact_extraction"):
         load_scan_rules(rules_path)
 
 
@@ -281,7 +282,7 @@ def test_malformed_rules_section_is_rejected(tmp_path: Path) -> None:
     rules_path = tmp_path / "repository_map.rules.yaml"
     rules_path.write_text("ignored_directory_names: node_modules\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="ignored_directory_names"):
+    with pytest.raises(ConfigError, match="ignored_directory_names"):
         load_scan_rules(rules_path)
 
 

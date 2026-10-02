@@ -38,6 +38,7 @@ from rey_lib.repository_map.records import (
     ViolationRecord,
     matches_any_glob,
 )
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["RULE_FAMILIES", "Evidence", "RuleFamily"]
 
@@ -93,7 +94,7 @@ def _required(entry: dict[str, Any], key: str, section: str) -> Any:
         ValueError: If the field is missing.
     """
     if key not in entry:
-        raise ValueError(f"Scan rules section '{section}' entry is missing '{key}'.")
+        raise ConfigError(f"Scan rules section '{section}' entry is missing '{key}'.")
     return entry[key]
 
 

@@ -35,6 +35,7 @@ from typing import Any
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.repository_map.records import matches_any_glob
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "BLOCKER_PROBES",
@@ -215,14 +216,14 @@ def load_migration_manifest(path: Path) -> MigrationManifest:
     try:
         parsed = parse_yaml(read_text_file(path))
     except Exception as exc:  # Surface the offending file, not a bare parse error.
-        raise ValueError(f"Migration manifest is not valid YAML: {path}") from exc
+        raise ConfigError(f"Migration manifest is not valid YAML: {path}") from exc
 
     data = (parsed or {}).get("migration", parsed) or {}
     for required in ("migration_id", "capability", "new_owner_path_globs"):
         if not data.get(required):
-            raise ValueError(f"Migration manifest {path} is missing '{required}'.")
+            raise ConfigError(f"Migration manifest {path} is missing '{required}'.")
     if not data.get("old_owner_path_globs") and not data.get("old_symbol_globs"):
-        raise ValueError(
+        raise ConfigError(
             f"Migration manifest {path} names neither old_owner_path_globs nor "
             "old_symbol_globs, so there is nothing it retires."
         )
