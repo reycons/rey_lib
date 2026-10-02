@@ -167,6 +167,11 @@ def build_ctx_for_app(
         # step hit the NOT NULL on control.batch_step.
         ctx.shared_control = _open_control(ctx)
         _settle_installation_id(ctx)
+        # The installation this process runs under, recorded with the run. The
+        # bootstrap is its authority: a caller's own "installation" is replaced.
+        installation = getattr(ctx, "installation", None)
+        if installation is not None and installation.name:
+            settings = {**(settings or {}), "installation": installation.name}
         ctx.run = Run.start(
             ctx.shared_control,
             subject_type=subject_type or "app",

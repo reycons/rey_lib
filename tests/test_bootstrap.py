@@ -76,6 +76,56 @@ def test_build_ctx_for_app_loads_shared_installation_configs(
     assert ctx.apps[0].name == "sample_app"
 
 
+@pytest.mark.parametrize("given, recorded", [
+    (None, {"installation": "ccc"}),
+    ({"command": "x"}, {"command": "x", "installation": "ccc"}),
+    ({"installation": "wrong", "command": "x"}, {"installation": "ccc", "command": "x"}),
+])
+def test_the_run_records_the_installation_it_runs_under(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    given: dict | None,
+    recorded: dict,
+) -> None:
+    """The bootstrap stamps the installation; a caller cannot override it."""
+    project_root = tmp_path / "apps" / "sample_app"
+    config_root = tmp_path / "development" / "installations" / "ccc"
+    (config_root / "apps").mkdir(parents=True)
+    (config_root / "shared").mkdir(parents=True)
+    (config_root / "config.yaml").write_text(
+        "installation:\n"
+        "  name: ccc\n"
+        "paths:\n"
+        "  - name: root\n"
+        f"    path: {tmp_path}\n"
+        "  - name: configs\n"
+        "    path: '{root}/development/installations/ccc'\n"
+        f"log_path: '{tmp_path}/logs/sample_app.{{operation}}.{{timestamp}}.log'\n"
+        "config_loading:\n"
+        "  apps:\n"
+        "    sample_app:\n"
+        "      include:\n"
+        "        - '{configs}/apps/sample_app.yaml'\n"
+        "        - '{configs}/shared'\n",
+        encoding="utf-8",
+    )
+    (config_root / "apps" / "sample_app.yaml").write_text("name: sample_app\n", encoding="utf-8")
+    (config_root / "shared" / "app_registry.yaml").write_text(
+        "apps:\n"
+        "  - name: sample_app\n"
+        "    enabled: true\n"
+        f"    app_path: {project_root}\n",
+        encoding="utf-8",
+    )
+
+    installed(monkeypatch, "sample_app")
+    ctx = build_ctx_for_app(
+        config_root / "config.yaml", "sample_app", project_root, settings=given,
+    )
+
+    assert ctx.run.settings == recorded
+
+
 def _jsonl_handlers() -> list[logging.Handler]:
     """Every JSONL run-log handler currently attached to the root logger."""
     return [
