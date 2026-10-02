@@ -409,29 +409,6 @@ def _stderr_is_watched() -> bool:
     return not stat.S_ISREG(mode)
 
 
-def add_jsonl_handler(
-    logger_name: str,
-    jsonl_path: Path,
-    *,
-    context: dict[str, Any],
-    ctx: Any = None,
-    ctx_fields: tuple[str, ...] = (),
-    level: int | None = None,
-) -> JsonlHandler:
-    """Attach a JSONL handler through the shared logging utility boundary."""
-    handler = JsonlHandler(
-        jsonl_path=jsonl_path,
-        context=context,
-        ctx=ctx,
-        ctx_fields=ctx_fields,
-    )
-    if level is not None:
-        handler.setLevel(level)
-    handler.addFilter(_ProviderWarningFilter())
-    get_logger(logger_name).addHandler(handler)
-    return handler
-
-
 def log_enter(ctx: Any, msg: str, logger: logging.Logger) -> None:
     """
     Log function entry and increment ctx.log_depth.

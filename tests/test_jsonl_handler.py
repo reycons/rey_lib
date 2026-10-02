@@ -284,3 +284,96 @@ class TestDumpCtxFalse:
         assert record["operation"] == "LOAD"
         assert record["rows"] == 500
         assert "ctx_dump" not in record
+
+
+# ---------------------------------------------------------------------------
+# The run's persistence path when the run has one; the file is the fallback.
+# ---------------------------------------------------------------------------
+
+class _BoundRunLog:
+    """Stands in for a bound RunLog: a durable path, and the records appended."""
+
+    def __init__(self, path: Path, on_append: Any = None) -> None:
+        self._path = path
+        self._on_append = on_append
+        self.appended: list[tuple[str, dict[str, Any]]] = []
+
+    def path(self) -> Path:
+        return self._path
+
+    def append(self, record_type: str, *, message: str = "", **fields: Any) -> int:
+        self.appended.append((record_type, {"message": message, **fields}))
+        if self._on_append is not None:
+            self._on_append()
+        return 1
+
+
+@pytest.fixture()
+def bound(tmp_path: Path):
+    """A stand-in RunLog bound as the run's, released after the test."""
+    from rey_lib.logs.record_enrichment import bind_run, reset_run_binding
+
+    run_log = _BoundRunLog(tmp_path / "run.jsonl")
+    bind_run(run_log)
+    yield run_log
+    reset_run_binding()
+
+
+def _logger_for(handler: JsonlHandler) -> logging.Logger:
+    logger = logging.getLogger(f"test.bound.{id(handler)}")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+class TestTheBoundRunLogIsThePersistencePath:
+
+    @pytest.mark.parametrize("level, record_type", [
+        (logging.WARNING, "WARNING"),
+        (logging.INFO, "INFO"),
+        (logging.DEBUG, "INFO"),
+    ])
+    def test_a_record_goes_to_the_run_log_and_not_the_file(
+        self, tmp_path: Path, bound: _BoundRunLog, level: int, record_type: str,
+    ) -> None:
+        handler, path = _make_handler(tmp_path, _make_ctx())
+        _logger_for(handler).log(level, "said %s", "this")
+        handler.close()
+
+        assert bound.appended == [
+            (record_type, {"message": "said this", "logger": f"test.bound.{id(handler)}"}),
+        ]
+        assert path.read_text(encoding="utf-8") == ""
+
+    def test_an_error_stays_on_the_file(self, tmp_path: Path, bound: _BoundRunLog) -> None:
+        handler, path = _make_handler(tmp_path, _make_ctx())
+        _logger_for(handler).error("failed")
+        handler.close()
+
+        assert bound.appended == []
+        assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "failed"
+
+    def test_with_no_run_bound_the_file_is_written(self, tmp_path: Path) -> None:
+        handler, path = _make_handler(tmp_path, _make_ctx())
+        _logger_for(handler).warning("unbound")
+        handler.close()
+
+        assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "unbound"
+
+    def test_a_record_logged_during_the_hand_off_goes_to_the_file(self, tmp_path: Path) -> None:
+        from rey_lib.logs.record_enrichment import bind_run, reset_run_binding
+
+        handler, path = _make_handler(tmp_path, _make_ctx())
+        logger = _logger_for(handler)
+        run_log = _BoundRunLog(tmp_path / "run.jsonl",
+                               on_append=lambda: logger.warning("from inside"))
+        bind_run(run_log)
+        try:
+            logger.warning("outer")
+        finally:
+            reset_run_binding()
+        handler.close()
+
+        assert [one[1]["message"] for one in run_log.appended] == ["outer"]
+        assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "from inside"

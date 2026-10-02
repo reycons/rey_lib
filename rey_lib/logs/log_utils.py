@@ -64,7 +64,6 @@ from rey_lib.logs.file_records import (
     record_file_operation,
 )
 from rey_lib.logs.logging_setup import (
-    add_jsonl_handler,
     get_logger,
     log_enter,
     log_exit,
@@ -96,7 +95,6 @@ from rey_lib.logs.sql_records import log_sql_execution
 
 __all__ = [
     "setup_logging",
-    "add_jsonl_handler",
     "get_logger",
     "log_file_metadata",
     "log_enter",

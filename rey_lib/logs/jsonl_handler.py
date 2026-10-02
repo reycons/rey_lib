@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -81,6 +82,11 @@ _STANDARD_ATTRS: frozenset[str] = frozenset({
 _SQL_EXTRA_KEYS: frozenset[str] = frozenset({
     "sql", "proc", "query", "params", "inputs", "sql_type",
 })
+
+# True while this thread is handing a record to the bound run log. A record
+# logged during that hand-off -- the run log's own failure warning -- goes to
+# the fallback file instead of back into the run log.
+_DELIVERING = threading.local()
 
 
 class JsonlHandler(logging.Handler):
@@ -167,6 +173,23 @@ class JsonlHandler(logging.Handler):
             self._prune_depth_stack(depth)
 
             rec = self._build_record(record, seq, parent_seq, depth)
+
+            # The run's persistence path when the run has one; this file is
+            # the fallback. ERROR records are not routed here: they belong to
+            # the ERROR-record increment.
+            from rey_lib.logs.record_enrichment import bound_run_log
+
+            run_log = bound_run_log()
+            if (run_log is not None and record.levelno < logging.ERROR
+                    and not getattr(_DELIVERING, "active", False)):
+                _DELIVERING.active = True
+                try:
+                    record_type = "WARNING" if record.levelno >= logging.WARNING else "INFO"
+                    run_log.append(record_type, message=rec["message"], logger=record.name)
+                finally:
+                    _DELIVERING.active = False
+                return
+
             self._write(rec)
         except Exception:  # noqa: BLE001 — handler must never raise
             self.handleError(record)

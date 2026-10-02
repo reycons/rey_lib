@@ -34,7 +34,6 @@ from rey_lib.logs.file_hierarchy import (
     build_file_hierarchy_stages,
 )
 from rey_lib.logs.log_utils import (
-    add_jsonl_handler,
     build_artifact_manifest_entries,
     build_jsonl_event_table,
     format_jsonl_records,
@@ -139,7 +138,6 @@ __all__ = [
     "build_file_hierarchy_feeds",
     "build_file_hierarchy_feed",
     "build_file_hierarchy_stages",
-    "add_jsonl_handler",
     "build_jsonl_event_table",
     "build_artifact_manifest_entries",
     "format_jsonl_records",
