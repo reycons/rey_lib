@@ -33,6 +33,7 @@ from typing import Any
 
 from rey_lib.ai.content import AIInput, text
 from rey_lib.ai.requests import AIOutputSpec, AIRequest, AIRequestOptions
+from rey_lib.ai.errors import AISelectionError
 
 __all__ = ["AIObject", "AIObjectStatus"]
 
@@ -110,7 +111,7 @@ class AIObject:
         }
         unknown = set(changes) - allowed
         if unknown:
-            raise ValueError(
+            raise AISelectionError(
                 f"An AI object has no composable setting named: {', '.join(sorted(unknown))}"
             )
         return replace(self, **changes)

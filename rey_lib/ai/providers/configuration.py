@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rey_lib.ai.capabilities import AICapabilitySet
+from rey_lib.ai.errors import AIConfigurationError
 
 __all__ = ["ConfiguredProvider", "ProviderCapabilities"]
 
@@ -77,7 +78,7 @@ class ConfiguredProvider:
 
     def __post_init__(self) -> None:
         if not self.id:
-            raise ValueError("A ConfiguredProvider must have an id.")
+            raise AIConfigurationError("A ConfiguredProvider must have an id.")
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,6 @@ class ProviderCapabilities:
 
     def __post_init__(self) -> None:
         if not self.configured_provider_id:
-            raise ValueError(
+            raise AIConfigurationError(
                 "ProviderCapabilities must name the configured provider it describes."
             )

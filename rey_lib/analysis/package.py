@@ -33,6 +33,7 @@ from typing import Any
 
 from rey_lib.encryption import sha256_file
 from rey_lib.files import read_text_file
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "LlmPackageContract",
@@ -139,7 +140,7 @@ def _analysis_section(analysis: Mapping[str, Any] | str) -> dict[str, Any]:
         return {"name": analysis}
     section = {str(key): value for key, value in dict(analysis).items()}
     if not str(section.get("name") or ""):
-        raise ValueError("Canonical package analysis requires a name.")
+        raise ConfigError("Canonical package analysis requires a name.")
     return section
 
 

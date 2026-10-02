@@ -23,6 +23,7 @@ import pytest
 from rey_lib.redaction.char_utils import analyze_pattern, generate_replacement
 from rey_lib.redaction.masks import KNOWN_MASKS, apply_mask
 from rey_lib.redaction.registry import RedactionExhausted, RedactionRegistry
+from rey_lib.errors.error_utils import ConfigError
 
 #: Profiling datatypes that reach the masking side but name no mask. These four
 #: are the defect: each one used to leave its column entirely in the clear.
@@ -51,7 +52,7 @@ class TestAnUnresolvableProposalStillRedacts:
 
     def test_apply_mask_refuses_rather_than_returning_its_input(self) -> None:
         """The primitive fails closed, so the leak cannot return via a new caller."""
-        with pytest.raises(ValueError, match="Unknown mask type"):
+        with pytest.raises(ConfigError, match="Unknown mask type"):
             apply_mask("alpha", "SMITH", 1)
 
         assert "alpha" not in KNOWN_MASKS

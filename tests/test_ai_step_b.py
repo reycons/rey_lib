@@ -103,19 +103,19 @@ def test_output_error_may_not_be_made_transport_retryable() -> None:
     """The guard that predates this work, kept."""
     from rey_lib.ai.errors import AIOutputError
 
-    with pytest.raises(ValueError, match="must not be transport-retryable"):
+    with pytest.raises(AIConfigurationError, match="must not be transport-retryable"):
         TransportRetryPolicy(retry_on=(AIOutputError,))
 
 
 def test_each_domain_refuses_a_nonsense_budget() -> None:
     """A budget that cannot be satisfied is refused at construction."""
-    with pytest.raises(ValueError):
+    with pytest.raises(AIConfigurationError):
         ExecutionBudget(max_turns=0)
-    with pytest.raises(ValueError):
+    with pytest.raises(AIConfigurationError):
         TransportRetryPolicy(attempts=0)
-    with pytest.raises(ValueError):
+    with pytest.raises(AIConfigurationError):
         ToolCorrectionPolicy(max_corrections=-1)
-    with pytest.raises(ValueError):
+    with pytest.raises(AIConfigurationError):
         ValidationCorrectionPolicy(max_corrections=-1)
 
 

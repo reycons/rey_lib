@@ -25,6 +25,7 @@ a second runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from rey_lib.ai.errors import AIConfigurationError
 
 __all__ = ["AISettings", "AISettingsTask"]
 
@@ -67,7 +68,7 @@ class AISettingsTask:
 
     def __post_init__(self) -> None:
         if not str(self.name or "").strip():
-            raise ValueError("An AI settings task must be named.")
+            raise AIConfigurationError("An AI settings task must be named.")
 
 
 @dataclass(frozen=True)

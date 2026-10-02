@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from rey_lib.messaging.errors import MessageValidationError
 
 __all__ = ["build_body", "SUPPORTED_BUILDER_TYPES"]
 
@@ -41,7 +42,7 @@ def build_body(
     """
     builder_type = str(getattr(body_builder_config, "type", "") or "template").lower()
     if builder_type not in SUPPORTED_BUILDER_TYPES:
-        raise ValueError(
+        raise MessageValidationError(
             f"Unsupported body_builder type '{builder_type}'. "
             f"Supported: {sorted(SUPPORTED_BUILDER_TYPES)}"
         )

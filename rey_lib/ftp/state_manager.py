@@ -28,6 +28,7 @@ from rey_lib.errors.error_utils import StateError
 from rey_lib.files.json import JsonReadError, read_json_file
 from rey_lib.files.file_utils import write_file
 from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
+from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "get_failed_file_path",
@@ -71,7 +72,7 @@ def get_state_file_path(ctx: Any, conn: Any) -> Path:
         return p if p.is_absolute() else _installation_root_path(ctx) / p
     ftp_dir = getattr(getattr(ctx, "state", None), "ftp_dir", None)
     if not ftp_dir:
-        raise ValueError(
+        raise ConfigError(
             "ctx.state.ftp_dir is not configured. "
             "Add 'state: ftp_dir:' to the installation config."
         )
@@ -100,7 +101,7 @@ def get_failed_file_path(ctx: Any, conn: Any) -> Path:
         return p if p.is_absolute() else _installation_root_path(ctx) / p
     ftp_dir = getattr(getattr(ctx, "state", None), "ftp_dir", None)
     if not ftp_dir:
-        raise ValueError(
+        raise ConfigError(
             "ctx.state.ftp_dir is not configured. "
             "Add 'state: ftp_dir:' to the installation config."
         )
@@ -518,5 +519,5 @@ def _installation_root_path(ctx: Any) -> Path:
     """Return the installation root path from ctx."""
     configured = getattr(ctx, "installation_root", None)
     if not configured:
-        raise ValueError("ctx.installation_root is required to resolve FTP state paths.")
+        raise ConfigError("ctx.installation_root is required to resolve FTP state paths.")
     return Path(str(configured)).expanduser().resolve()

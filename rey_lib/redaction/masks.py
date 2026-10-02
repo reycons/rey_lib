@@ -15,6 +15,7 @@ apply_mask      Dispatch to the appropriate mask function by type name.
 from __future__ import annotations
 
 import random
+from rey_lib.errors.error_utils import ConfigError
 
 __all__: list[str] = ["KNOWN_MASKS", "apply_mask"]
 
@@ -61,7 +62,7 @@ def apply_mask(mask_type: str, value: str, counter: int) -> str:
     """
     handler = _HANDLERS.get(mask_type)
     if handler is None:
-        raise ValueError(
+        raise ConfigError(
             f"Unknown mask type {mask_type!r}; expected one of "
             f"{sorted(KNOWN_MASKS)}. Refusing to return the value unmasked."
         )

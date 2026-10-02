@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from rey_lib.ai.objects import AIObject, AIObjectStatus
+from rey_lib.ai.errors import AISelectionError
 
 
 class TestItHoldsOneAsk:
@@ -50,7 +51,7 @@ class TestItComposesOnlyWhatAReaderComposes:
     @pytest.mark.parametrize("setting", ["status", "id", "answer", "error", "subject"])
     def test_everything_else_is_refused(self, setting: str) -> None:
         """Including the subject: it is seeded once and is not composable."""
-        with pytest.raises(ValueError, match="no composable setting"):
+        with pytest.raises(AISelectionError, match="no composable setting"):
             AIObject().with_settings(**{setting: "x"})
 
 

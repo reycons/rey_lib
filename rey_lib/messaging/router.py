@@ -18,6 +18,7 @@ from rey_lib.messaging.models import DeliveryResult, Message, MessageContent, Me
 from rey_lib.messaging.policy import approval_required as policy_approval_required
 from rey_lib.messaging.rendering import render_message as render_generated_message
 from rey_lib.messaging.repository import FileMessageRepository
+from rey_lib.messaging.errors import MessageValidationError
 
 __all__ = [
     "approve_message",
@@ -149,7 +150,7 @@ def _send_by_channel(ctx: Any, message: Message) -> DeliveryResult:
         return send_text(ctx, message)
     if message.request.channel == "webhook":
         return send_webhook(ctx, message)
-    raise ValueError(f"Unsupported message channel: {message.request.channel}")
+    raise MessageValidationError(f"Unsupported message channel: {message.request.channel}")
 
 
 def _persist(ctx: Any, message: Message, event_type: str, error: str = "") -> None:

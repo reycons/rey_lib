@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from rey_lib.ai.errors import AIError, AIOutputError, AIProviderError
+from rey_lib.ai.errors import AIConfigurationError
 
 __all__ = [
     "AIExecutionPolicy",
@@ -65,7 +66,7 @@ class ExecutionBudget:
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:
-            raise ValueError(
+            raise AIConfigurationError(
                 f"ExecutionBudget.max_turns must be >= 1, got {self.max_turns}."
             )
 
@@ -151,13 +152,13 @@ class TransportRetryPolicy:
 
     def __post_init__(self) -> None:
         if self.attempts < 1:
-            raise ValueError(
+            raise AIConfigurationError(
                 f"TransportRetryPolicy.attempts must be >= 1, got {self.attempts}."
             )
         if self.backoff_seconds < 0:
-            raise ValueError("TransportRetryPolicy.backoff_seconds must not be negative.")
+            raise AIConfigurationError("TransportRetryPolicy.backoff_seconds must not be negative.")
         if AIOutputError in self.retry_on:
-            raise ValueError(
+            raise AIConfigurationError(
                 "AIOutputError must not be transport-retryable. Output that does "
                 "not satisfy its shape is a failed execution, not a transient "
                 "one; feeding it back to the model is a validation correction."
@@ -218,7 +219,7 @@ class ToolCorrectionPolicy:
 
     def __post_init__(self) -> None:
         if self.max_corrections < 0:
-            raise ValueError(
+            raise AIConfigurationError(
                 "ToolCorrectionPolicy.max_corrections must be >= 0, got "
                 f"{self.max_corrections}."
             )
@@ -246,7 +247,7 @@ class ValidationCorrectionPolicy:
 
     def __post_init__(self) -> None:
         if self.max_corrections < 0:
-            raise ValueError(
+            raise AIConfigurationError(
                 "ValidationCorrectionPolicy.max_corrections must be >= 0, got "
                 f"{self.max_corrections}."
             )
