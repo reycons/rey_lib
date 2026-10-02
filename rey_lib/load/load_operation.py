@@ -1712,8 +1712,9 @@ def _load_one_file(
         load_name: What this load is called in evidence.
 
     Returns:
-        Rows loaded, or 0 when this file was rejected. A file fault is 0; a
-        run-level fault raises.
+        Rows loaded, or 0 when this file was rejected within a batch. A file
+        fault in a batch (a movement policy is set) is 0; a run-level fault,
+        or any fault in a single load (movements is None), raises.
     """
     # NO `source.path`. The source is a DATA OBJECT and stays one through this
     # boundary; a path is one family's primitive, and demanding it here is what
@@ -1964,6 +1965,12 @@ def _load_one_file(
         )
         _route_file(ctx, run_log, movements, "failure", source, paths)
         log_exit(ctx, f"_load_one_file failed: {source!r}", _logger)
+        if movements is None:
+            # A single load has no routing policy and no batch to carry on
+            # with: its one transfer failing IS the load failing, so the error
+            # propagates and the run ends failed. Returning 0 here reported a
+            # failed load as a successful one of zero rows.
+            raise
         return 0
 
 def _configured_columns(transform_cfg: Any) -> Optional[list[str]]:
