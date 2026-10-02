@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from rey_lib.errors.error_utils import ConfigError, StateError
 
 __all__ = ["InvocationShape", "RoutineCall"]
 
@@ -67,15 +68,15 @@ class RoutineCall:
 
     def __post_init__(self) -> None:
         if not str(self.routine or "").strip():
-            raise ValueError("routine_call: a call must name a routine.")
+            raise ConfigError("routine_call: a call must name a routine.")
         if not isinstance(self.shape, InvocationShape):
-            raise ValueError(
+            raise StateError(
                 "routine_call: shape must be decided before rendering; "
                 f"got {self.shape!r}."
             )
         for name in self.arguments:
             if not str(name or "").strip():
-                raise ValueError(
+                raise ConfigError(
                     f"routine_call: {self.routine} was given an unnamed "
                     "argument. Arguments are matched by name, so an unnamed "
                     "one has nowhere to go."

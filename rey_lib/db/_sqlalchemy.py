@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import UnsupportedDatabaseCapabilityError
 
 
 def _sqlalchemy() -> tuple[Any, Any]:
@@ -111,7 +112,7 @@ def open_connection(
 def core_connection(conn: Any) -> Any:
     """Return the private SQLAlchemy Connection for a Rey handle."""
     if not isinstance(conn, ReyConnection):
-        raise TypeError("connection is not SQLAlchemy-backed")
+        raise UnsupportedDatabaseCapabilityError("connection is not SQLAlchemy-backed")
     return conn._connection
 
 
@@ -141,7 +142,7 @@ def own_connection(conn: Any, *, isolation_level: str = "") -> Iterator[Any]:
         TypeError: If the handle is not SQLAlchemy-backed.
     """
     if not isinstance(conn, ReyConnection):
-        raise TypeError("connection is not SQLAlchemy-backed")
+        raise UnsupportedDatabaseCapabilityError("connection is not SQLAlchemy-backed")
     borrowed = conn._engine.connect()
     try:
         if isolation_level:

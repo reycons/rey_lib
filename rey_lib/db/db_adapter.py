@@ -527,7 +527,7 @@ class DBAdapter:
         """
         backend = _backend(self._provider_for_conn(conn))
         if not hasattr(backend, "run_sql"):
-            raise NotImplementedError(
+            raise UnsupportedDatabaseCapabilityError(
                 f"DBAdapter: provider '{self._provider_for_conn(conn)}' "
                 "does not support run_sql."
             )
@@ -554,7 +554,7 @@ class DBAdapter:
         """
         backend = _backend(self._provider_for_conn(conn))
         if not hasattr(backend, "execute_named_sql"):
-            raise NotImplementedError(
+            raise UnsupportedDatabaseCapabilityError(
                 f"DBAdapter: provider '{self._provider_for_conn(conn)}' "
                 "does not support execute_named_sql."
             )
@@ -1293,7 +1293,7 @@ class DBAdapter:
         backend = _backend(provider)
         render = getattr(backend, "render_and_execute", None)
         if render is None:
-            raise NotImplementedError(
+            raise UnsupportedDatabaseCapabilityError(
                 f"DBAdapter: provider '{provider}' renders no routine calls."
             )
         return render(conn, call)

@@ -256,11 +256,11 @@ def load_ctx_snapshot(ctx_file: str) -> "Namespace":
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"Cannot load ctx snapshot {ctx_file!r}: {exc}") from exc
+        raise ConfigError(f"Cannot load ctx snapshot {ctx_file!r}: {exc}") from exc
 
     version = data.get("ctx_schema_version")
     if version != "1.0":
-        raise RuntimeError(f"Unsupported ctx snapshot version: {version!r}")
+        raise ConfigError(f"Unsupported ctx snapshot version: {version!r}")
 
     ctx_data: dict = data["ctx"]
 
@@ -269,7 +269,7 @@ def load_ctx_snapshot(ctx_file: str) -> "Namespace":
     # parent's, which is the divergence this whole seam exists to remove.
     config_path_raw = ctx_data.get("config_path")
     if not config_path_raw:
-        raise RuntimeError(
+        raise ConfigError(
             f"Ctx snapshot {ctx_file!r} names no config_path, so the installation it "
             "came from cannot be established. The coordinator writes this; a snapshot "
             "without it was not written by a complete context."
@@ -319,12 +319,12 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
     config_path = getattr(args, "config_path", None)
 
     if ctx_file and config_path:
-        raise RuntimeError("--ctx-file and --config-path are mutually exclusive")
+        raise ConfigError("--ctx-file and --config-path are mutually exclusive")
 
     if ctx_file:
         try:
             ctx = load_ctx_snapshot(ctx_file)
-        except (RuntimeError, OSError) as exc:
+        except (ConfigError, OSError) as exc:
             raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
         object.__setattr__(ctx, "app_name", app_name)
         log_file = getattr(args, "log_file", None)

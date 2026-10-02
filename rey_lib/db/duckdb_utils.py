@@ -39,6 +39,7 @@ import duckdb
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.logs import get_logger
+from rey_lib.errors.error_utils import StateError
 
 __all__ = [
     "DB_PATH",
@@ -325,7 +326,7 @@ def load_sql(name: str) -> str:
     """
     _require_init()
     if name not in _SQL:
-        raise KeyError(
+        raise ConfigError(
             f"SQL query '{name}' not found. "
             f"Available: {sorted(_SQL.keys())}"
         )
@@ -1018,7 +1019,7 @@ def fetch_sql_rows(
 def _require_init() -> None:
     """Raise RuntimeError if init_db() has not been called."""
     if _db_path is None:
-        raise RuntimeError(
+        raise StateError(
             "duckdb_utils.init_db() must be called before using the database."
         )
 
@@ -1109,7 +1110,7 @@ def get_object_ddl(conn: duckdb.DuckDBPyConnection, obj: dict[str, Any]) -> str:
             [schema, name],
         ).fetchone()
         if not row:
-            raise ValueError(f"duckdb_utils: sequence not found: {schema}.{name}")
+            raise DatabaseError(f"duckdb_utils: sequence not found: {schema}.{name}")
         cycle_sql = "CYCLE" if bool(row[4]) else "NO CYCLE"
         return (
             f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."{name}" '

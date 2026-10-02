@@ -19,6 +19,7 @@ from mysql.connector import Error as MySQLError
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.logs import get_logger
+from rey_lib.errors.error_utils import ConfigError, StateError, UnsupportedDatabaseCapabilityError
 
 __all__ = [
 	"init_db",
@@ -190,7 +191,7 @@ def call_proc_with_output(
 	named_input_params: list[tuple[str, Any]],
 	output_param_specs: list[tuple[str, str]],
 ) -> dict[str, Any]:
-	raise NotImplementedError(
+	raise UnsupportedDatabaseCapabilityError(
 		"MySQL call_proc_with_output is not implemented yet. "
 		"Use call_proc() or add a MySQL OUT-param implementation when needed."
 	)
@@ -255,7 +256,7 @@ def load_sql(name: str) -> str:
 	_require_init()
 
 	if name not in _SQL:
-		raise KeyError(
+		raise ConfigError(
 			f"SQL query '{name}' not found. "
 			f"Available: {sorted(_SQL.keys())}"
 		)
@@ -306,7 +307,7 @@ def is_truncation_error(exc: Exception) -> bool:
 
 def _require_init() -> None:
 	if _sql_dir is None:
-		raise RuntimeError("mysql_utils.init_db() must be called before using the database.")
+		raise StateError("mysql_utils.init_db() must be called before using the database.")
 
 
 def _connect_with_retry(db_cfg: Any, timeout: int, *, ctx: Any = None) -> Any:

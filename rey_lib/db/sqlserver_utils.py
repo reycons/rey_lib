@@ -60,6 +60,7 @@ import pyodbc
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
 from rey_lib.logs import get_logger
+from rey_lib.errors.error_utils import StateError
 
 __all__ = [
     "init_db",
@@ -680,7 +681,7 @@ def load_sql(name: str) -> str:
     """
     _require_init()
     if name not in _SQL:
-        raise KeyError(
+        raise ConfigError(
             f"SQL query '{name}' not found. "
             f"Available: {sorted(_SQL.keys())}"
         )
@@ -793,7 +794,7 @@ def is_truncation_error(exc: Exception) -> bool:
 def _require_init() -> None:
     """Raise RuntimeError if init_db() has not been called."""
     if _sql_dir is None:
-        raise RuntimeError(
+        raise StateError(
             "sqlserver_utils.init_db() must be called before using the database."
         )
 
