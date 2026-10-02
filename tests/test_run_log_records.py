@@ -1270,3 +1270,18 @@ def test_row_value_records_route_to_the_shared_column(tmp_path: Path) -> None:
     assert SENSITIVE_FIELD not in TYPE_PAYLOAD_COLUMNS.values()
     # And the column exists to route to, named exactly as the field is.
     assert SENSITIVE_FIELD == "contains_sensitive_data"
+
+
+@pytest.mark.parametrize("record_type", ["ERROR", "STEP_FAILURE", "error"])
+def test_a_failure_record_payload_is_its_error_message(record_type: str) -> None:
+    """The reader's answer for the two types the map leaves out on purpose."""
+    from rey_lib.logs import payload_column
+
+    assert payload_column(record_type) == "error_message"
+
+
+def test_every_other_type_answers_the_maps_column() -> None:
+    from rey_lib.logs import TYPE_PAYLOAD_COLUMNS, payload_column
+
+    assert {kind: payload_column(kind) for kind in TYPE_PAYLOAD_COLUMNS} == TYPE_PAYLOAD_COLUMNS
+    assert payload_column("MYSTERY") is None

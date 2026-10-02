@@ -141,6 +141,29 @@ TYPE_PAYLOAD_COLUMNS: dict[str, str] = {
     "WARNING": "warning",
 }
 
+#: The record types whose whole payload is the shared ``error_message`` object,
+#: and which therefore have no entry in TYPE_PAYLOAD_COLUMNS.
+FAILURE_RECORD_TYPES: frozenset[str] = frozenset({"ERROR", "STEP_FAILURE"})
+
+
+def payload_column(record_type: str) -> str | None:
+    """Return the column that holds one record type's payload, for a reader.
+
+    The writer's answer, stated once: a failure record's payload is its
+    ``error_message`` object; every other type's is the column
+    TYPE_PAYLOAD_COLUMNS names. None for a type that carries no payload.
+
+    Args:
+        record_type: The record's type, in any case.
+
+    Returns:
+        The column name, or None.
+    """
+    kind = str(record_type or "").upper()
+    if kind in FAILURE_RECORD_TYPES:
+        return "error_message"
+    return TYPE_PAYLOAD_COLUMNS.get(kind)
+
 #: The canonical run lineage every durable record carries.
 LINEAGE_FIELDS: tuple[str, ...] = (
     "parent_run_id", "subject_type", "subject_id", "subject_name",
