@@ -200,6 +200,25 @@ def test_the_record_is_written_before_the_file_moves(run_log, tmp_path: Path) ->
     assert moved.classification["values"] == {"feed": "alpha"}
 
 
+def test_the_move_evidence_names_the_selected_mutation(run_log, tmp_path: Path) -> None:
+    """Legacy parity (backlog row 610): the M3 move's run-log evidence carries
+    source_record_id = the SELECTED row's mutation, not the classification
+    record written just before it; the moved file still takes routing's id."""
+    source = tmp_path / "alpha" / "inbox" / "Example7.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("a,b\n1,2\n", encoding="utf-8")
+    selected = data_file_for(source, file_manifest_id=7, file_mutation_id=31)
+    ctx, control = _ctx(tmp_path)
+
+    with patch.object(source_classification, "log_run_record", return_value=123), \
+         patch.object(file_routing, "log_source_file_mutation", return_value=456) as mutation:
+        (moved,) = _classify(ctx, _routed_entry(tmp_path), selected)
+
+    assert control.mutations[0]["record_type"] == "source_file_classification"
+    assert mutation.call_args.kwargs["run_log_fields"] == {"source_record_id": 31}
+    assert moved.file_mutation_id == 456
+
+
 def test_no_processing_route_classifies_without_moving(run_log, tmp_path: Path) -> None:
     ctx, _ = _ctx(tmp_path)
     data_file = _file(Path("/data/alpha/inbox/Example7.csv"))

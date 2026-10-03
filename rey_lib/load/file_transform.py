@@ -261,6 +261,9 @@ class MoveTransform(FileTransform):
                 "pipeline_step_name": getattr(self._ctx, "pipeline_step_name", ""),
                 "pipeline_step_id": getattr(self._ctx, "pipeline_step_id", ""),
             },
+            # The move's lineage: the governed state it moved from, written into
+            # the move's run-log evidence by routing.
+            mutation_run_log_fields={"source_record_id": data_file.file_mutation_id},
             pipeline_name=getattr(self._ctx, "pipeline_name", None),
             workflow_name=getattr(self._ctx, "workflow_name", None),
         )

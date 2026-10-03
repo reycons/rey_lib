@@ -607,12 +607,17 @@ class ClassifyTransform(FileTransform):
             ) from exc
         if not classified:
             return ()
-        governed = _restated(governed, file_mutation_id=manifest_record_id)
+        recorded = _restated(governed, file_mutation_id=manifest_record_id)
 
         # Recorded; now move. A failure here leaves the file where it has been
         # all along -- in the inbox -- and two records standing together say so:
         # this classification mutation, naming the destination, and the
         # failed-move evidence routing writes itself.
+        #
+        # The move is handed the SELECTED state, not the one just recorded: the
+        # move evidence's source_record_id is the mutation it moved from, and
+        # legacy classification names the selected row there. The moved file
+        # takes its own new identity from routing either way.
         if move is not None:
             try:
                 (moved,) = move.apply(governed)
@@ -630,10 +635,10 @@ class ClassifyTransform(FileTransform):
                     f"recording it against '{planned}'. The manifest and the "
                     "filesystem no longer agree."
                 )
-            governed = moved
+            recorded = moved
 
         _store_data_profile_key(self._ctx, outcome)
-        return (governed,)
+        return (recorded,)
 
 
 def _selected_record(data_file: DataFile, source_record_type: Any) -> dict[str, Any]:
