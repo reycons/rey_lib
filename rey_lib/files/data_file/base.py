@@ -30,7 +30,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["DataFile", "RecordShape"]
@@ -74,6 +74,12 @@ class DataFile(ABC):
     """One source file, and what its format means.
 
     Construction is a subtype's own; nothing is discovered afterwards.
+
+    **A GOVERNED FILE CARRIES ITS IDENTITY** -- ``file_manifest_id``, the
+    ``file_mutation_id`` of the state it was built from, ``classification`` and
+    ``base_path`` -- as ``ManifestSource.data_file()`` supplies them. All four
+    are None for a file nothing governs. They are facts handed in, never
+    looked up: which state a file is opened at is the caller's selection.
     """
 
     def __init__(
@@ -81,18 +87,36 @@ class DataFile(ABC):
         path: Path,
         *,
         encoding: str = DEFAULT_ENCODING,
+        file_manifest_id: int | None = None,
+        file_mutation_id: int | None = None,
+        classification: Mapping[str, Any] | None = None,
+        base_path: str | None = None,
         **settings: Any,
     ) -> None:
-        """Hold the file and its format settings.
+        """Hold the file, its format settings and, when governed, its identity.
 
         Args:
             path: The file.
             encoding: How to decode it. The loader's existing default.
+            file_manifest_id: The governed file this is, or None for a file
+                nothing governs.
+            file_mutation_id: The governed state this object was built from --
+                the mutation the caller selected, never one worked out here.
+            classification: What the governed file was classified as, at that
+                state.
+            base_path: Where the governed file's lifecycle is rooted, at that
+                state.
             settings: Format-specific settings a subtype declares -- delimiter,
                 sheet, field widths. Held rather than interpreted here.
         """
         self.path = Path(path)
         self.encoding = encoding
+        self.file_manifest_id = file_manifest_id
+        self.file_mutation_id = file_mutation_id
+        self.classification = (
+            dict(classification) if classification is not None else None
+        )
+        self.base_path = base_path
         self.settings = settings
 
     @property

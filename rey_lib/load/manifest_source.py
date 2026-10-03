@@ -535,8 +535,17 @@ class ManifestSource:
             )
         # NO READ HAPPENS HERE. A DataFile is built over a path; opening it is
         # the caller's, which is what keeps this object out of the filesystem.
+        #
+        # THE GOVERNED IDENTITY OF EXACTLY THIS STATE: the mutation this source
+        # was opened at, and the classification and base_path its rows carry.
+        # Which state that is was the caller's selection, made before create().
         return data_file_for(
-            Path(self.path), file_type=self.layout or "", **settings
+            Path(self.path), file_type=self.layout or "",
+            file_manifest_id=self.file_manifest_id,
+            file_mutation_id=self.file_mutation_id,
+            classification=self.file_facts.get("classification"),
+            base_path=self.file_facts.get("base_path"),
+            **settings,
         )
 
     def data_profile(self) -> DataProfile:

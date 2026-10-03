@@ -1054,7 +1054,10 @@ _SUFFIX_FILE_TYPES: dict[str, str] = {
     ".json":  "JSON",
     ".jsonl": "JSONL",
     ".ndjson": "NDJSON",
+    ".xls":   "XLS",
     ".xlsx":  "XLSX",
+    ".xlsb":  "XLSB",
+    ".xlsm":  "XLSM",
 }
 
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from rey_lib.files.data_file.base import DEFAULT_ENCODING, DataFile
 from rey_lib.files.file_utils import file_type_for_suffix
@@ -71,6 +71,10 @@ def data_file_for(
     *,
     file_type: str = "",
     encoding: str = DEFAULT_ENCODING,
+    file_manifest_id: int | None = None,
+    file_mutation_id: int | None = None,
+    classification: Mapping[str, Any] | None = None,
+    base_path: str | None = None,
     **settings: Any,
 ) -> DataFile:
     """Return the DataFile for this path.
@@ -82,6 +86,10 @@ def data_file_for(
         path: The file.
         file_type: The declared format token, where configuration declares one.
         encoding: How to decode it.
+        file_manifest_id: The governed identity, where the file is governed.
+        file_mutation_id: The governed state the caller selected.
+        classification: The governed classification at that state.
+        base_path: The governed lifecycle root at that state.
         settings: Format-specific settings passed to the subtype.
 
     Returns:
@@ -109,7 +117,12 @@ def data_file_for(
             f"Known formats: {sorted(_REGISTRY)}."
         )
 
-    return _REGISTRY[token](source, encoding=encoding, **settings)
+    return _REGISTRY[token](
+        source, encoding=encoding,
+        file_manifest_id=file_manifest_id, file_mutation_id=file_mutation_id,
+        classification=classification, base_path=base_path,
+        **settings,
+    )
 
 
 def _discover() -> None:

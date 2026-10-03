@@ -1393,11 +1393,10 @@ def supported_file_types() -> list[str]:
     is gone: only a data object crosses the load boundary, so a format with no
     DataFile is not loadable and must not be offered as if it were.
 
-    XLSX is the format that left. It is not lost -- it is CONVERTED upstream,
-    by ``convert_workbook_to_csv`` and file_operator's excel conversion, and
-    the CSV that produces loads like any other. What changed is that the
-    loader stopped pretending to read a workbook it could not structurally
-    check.
+    XLSX once left, because the loader could not structurally check a
+    workbook. The Excel family (XLS, XLSX, XLSB, XLSM) is a DataFile now, read
+    through FastExcel with its header row as the declaration, so it is offered
+    by the same rule as every other format.
 
     **Here rather than in ``data_file``, and that is a dependency fact, not a
     preference.** ``file_loader`` reaches into ``data_file``; the reverse

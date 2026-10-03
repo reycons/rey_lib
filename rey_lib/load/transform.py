@@ -50,6 +50,7 @@ from rey_lib.data.column_transform import TransformPersistence, authorable_start
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
+from rey_lib.load.file_transform import build_file_transform, file_kind, file_kinds
 from rey_lib.errors.error_utils import StateError
 
 __all__ = [
@@ -85,6 +86,35 @@ TRANSFORM_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 TRANSFORM_PARAMETERS: tuple[str, ...] = ("transform", "transform-file")
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TRANSFORM_KINDS}
+
+# THE FILE-LEVEL KINDS -- what is done to a governed file rather than to its
+# records -- are a REGISTRY OF THEIR OWN (``rey_lib.load.file_transform``),
+# deliberately kept out of TRANSFORM_KINDS and :meth:`Transform.kinds`, which
+# are the record-transform choices a load is offered. One resolver still serves
+# both: :meth:`Transform.resolve` builds a ``FileTransform`` for a registered
+# file-level kind.
+
+
+def _kind_of(kind_id: str) -> Optional[_Kind]:
+    """The record kind, or the registered file-level kind, called ``kind_id``."""
+    if kind_id in _BY_ID:
+        return _BY_ID[kind_id]
+    registered = file_kind(kind_id)
+    if registered is None:
+        return None
+    return _Kind(registered.id, registered.fields, registered.required)
+
+
+def _is_file_kind(kind_id: str) -> bool:
+    """Whether ``kind_id`` is a registered file-level kind."""
+    return kind_id not in _BY_ID and file_kind(kind_id) is not None
+
+
+def _file_fields() -> tuple[str, ...]:
+    """Every field the registered file-level kinds hold."""
+    return tuple(dict.fromkeys(
+        name for kind in file_kinds() for name in kind.fields
+    ))
 
 #: The one field of one entry an edit may change, as ``edit_column`` names it.
 COLUMN_FIELDS: tuple[str, ...] = ("source", "name", "datatype", "export", "type", "transform")
@@ -187,12 +217,12 @@ class Transform:
 
     def configuration(self) -> dict[str, Any]:
         """The selected kind's fields and their values -- what is in force."""
-        kind = _BY_ID[self.selected_kind()]
+        kind = _kind_of(self.selected_kind())
         return {name: self._values.get(name) for name in kind.fields}
 
     def validate(self) -> list[str]:
         """What the selected kind still needs, or nothing where it is complete."""
-        kind = _BY_ID[self.selected_kind()]
+        kind = _kind_of(self.selected_kind())
         held = self.configuration()
         return [name for name in kind.required if not _held(held.get(name))]
 
@@ -204,10 +234,10 @@ class Transform:
         Raises:
             ValueError: If no kind is called that.
         """
-        if kind not in _BY_ID:
+        if _kind_of(kind) is None:
             raise ConfigError(
-                f"Transform: no transform kind is called '{kind}'. "
-                f"Kinds: {', '.join(self.kinds())}."
+                f"Transform: no transform kind is called '{kind}'. Kinds: "
+                f"{', '.join((*self.kinds(), *(one.id for one in file_kinds())))}."
             )
         self._selected = kind
 
@@ -218,10 +248,10 @@ class Transform:
             ValueError: If the field is not a Transform field. A source or a
                 destination setting handed to a transform is a wiring fault.
         """
-        if name not in TRANSFORM_FIELDS:
+        if name not in TRANSFORM_FIELDS and name not in _file_fields():
             raise ConfigError(
                 f"Transform: '{name}' is not a transform field. "
-                f"Fields: {', '.join(TRANSFORM_FIELDS)}."
+                f"Fields: {', '.join((*TRANSFORM_FIELDS, *_file_fields()))}."
             )
         self._values[name] = value
 
@@ -536,6 +566,11 @@ class Transform:
             )
         held = self.configuration()
         kind = self.selected_kind()
+        if _is_file_kind(kind):
+            raise ConfigError(
+                f"Transform ({kind}) is a file-level kind: it operates on a governed "
+                "file and has no record declaration."
+            )
         if kind == "identity":
             return None
         if kind == "declaration":
@@ -557,12 +592,22 @@ class Transform:
 
         Returns:
             An ``IdentityTransform`` for ``identity``; a ``ColumnTransform`` for
-            every other kind, carrying its ``TransformPersistence`` where the
-            configuration holds one.
+            every other record kind, carrying its ``TransformPersistence`` where
+            the configuration holds one; a ``FileTransform`` for a registered
+            file-level kind (``rey_lib.load.file_transform``).
 
         Raises:
-            ConfigError: As :meth:`executed_declaration` refuses.
+            ConfigError: As :meth:`executed_declaration` refuses, or where a
+                file-level kind is incomplete.
         """
+        kind = self.selected_kind()
+        if _is_file_kind(kind):
+            missing = self.validate()
+            if missing:
+                raise ConfigError(
+                    f"Transform ({kind}) is missing: {', '.join(missing)}."
+                )
+            return build_file_transform(ctx, kind, self.configuration())
         declared = self.executed_declaration()
         # GOVERNED PERSISTENCE travels only where it is held, for the kinds
         # authored here.

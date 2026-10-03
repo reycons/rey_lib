@@ -59,6 +59,7 @@ class TestTheRegistry:
         assert set(registered_formats()) == {
             "CSV", "DELIMITED_HEADER", "DELIMITED_NO_HEADER",
             "JSON", "JSONL", "NDJSON",
+            "XLS", "XLSB", "XLSM", "XLSX",
         }
 
     def test_a_new_format_needs_no_change_to_any_existing_module(
@@ -144,11 +145,15 @@ class TestConstruction:
     def test_an_unknown_declared_type_is_refused_by_name(
         self, tmp_path: Path
     ) -> None:
-        """Including XLSX, which is deliberately not in this hierarchy yet."""
-        with pytest.raises(ConfigError) as raised:
-            data_file_for(tmp_path / "book.xlsx")
+        """A declared token no subtype registers is named in the refusal.
 
-        assert "XLSX" in str(raised.value)
+        XLSX used to be the case here; it is a DataFile now (row 602), so the
+        refusal is shown with a format the hierarchy still does not have.
+        """
+        with pytest.raises(ConfigError) as raised:
+            data_file_for(tmp_path / "book.parquet", file_type="PARQUET")
+
+        assert "PARQUET" in str(raised.value)
 
 
 class TestTheSuffixMapCannotDrift:

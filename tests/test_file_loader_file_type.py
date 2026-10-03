@@ -249,12 +249,10 @@ class TestSupportedFileTypes:
         assert {
             "CSV", "DELIMITED_HEADER", "DELIMITED_NO_HEADER",
             "JSON", "JSONL", "NDJSON",
+            # The Excel family is a DataFile (row 602), so it is offered: a
+            # format with a DataFile is a format a load can read and check.
+            "XLS", "XLSB", "XLSM", "XLSX",
         } <= set(supported_file_types())
-        # XLSX IS NOT OFFERED, and that is the point rather than an omission.
-        # It has no DataFile, so it cannot be loaded directly; it is converted
-        # to CSV upstream and the CSV loads like any other. Offering it here
-        # would advertise a format that fails when chosen.
-        assert "XLSX" not in set(supported_file_types())
 
     def test_data_file_still_reaches_nothing_in_the_loader(self) -> None:
         """THE REASON THE ACCESSOR IS ON THIS SIDE.
