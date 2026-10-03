@@ -80,6 +80,7 @@ from rey_lib.load.redacted_artifacts import redacted_csv_text
 from rey_lib.load.transform import Transform
 from rey_lib.logs import bound_run_log
 from rey_lib.profiling.file_profiler import is_profile_excluded_column
+from rey_lib.redaction.registry import RedactionExhausted
 
 __all__ = [
     "CreatePreparedFilesBatchResult",
@@ -229,9 +230,11 @@ def run_create_prepared_files(
                 results.append(preparer.result)
             else:
                 results.append(preparer.plan(data_file))
-        except PreparationError as error:
+        except (PreparationError, RedactionExhausted) as error:
             # RULE 75: KICK THE FILE OUT, THEN RECORD THE FAILURE. A dry run
-            # writes nothing, so it moves nothing either.
+            # writes nothing, so it moves nothing either. A redacted companion
+            # that cannot be built (RedactionExhausted, row 613) is this file's
+            # failure too: nothing was published, and the batch goes on.
             if apply:
                 kick_out_original(
                     ctx,
@@ -392,7 +395,7 @@ def _prepare_one_file(
 def _failed_result(
     ctx: Any,
     record: Mapping[str, Any],
-    error: PreparationError,
+    error: PreparationError | RedactionExhausted,
     *,
     source_field: str,
     apply: bool,

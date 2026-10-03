@@ -1300,3 +1300,47 @@ def test_a_state_that_cannot_be_opened_is_a_file_failure(run_log, tmp_path: Path
         result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
 
     _only_failure(result, "cannot be opened for preparation")
+
+
+def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
+    run_log, tmp_path: Path,
+) -> None:
+    """Row 606 live finding: RedactionExhausted is this file's failure (rule 75).
+
+    The file is kicked out and recorded, nothing is published for it, and the
+    batch goes on to prepare the next file.
+    """
+    from rey_lib.redaction.registry import RedactionExhausted
+
+    first = _source(tmp_path, [
+        "Account Number,Trade Amount,Settle Date", "A-1,100,2026-05-01"],
+        name="CWATranMay26.csv")
+    _profile(tmp_path, first)
+    second = _source(tmp_path, [
+        "Account Number,Trade Amount,Settle Date", "A-2,200,2026-05-02"],
+        name="CWAHoldMay26.csv")
+    _profile(tmp_path, second, source_record_id=11)
+    config = {**_config(tmp_path), "file_kickouts": _FILE_KICKOUTS}
+    config["outbox"] = {**config["outbox"], "redacted_copy": True}
+    real = loader_prepare.redacted_csv_text
+    calls = {"n": 0}
+
+    def exhausted_first(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RedactionExhausted("Column 'asset_code': no replacement left")
+        return real(*args, **kwargs)
+
+    with patch.object(loader_prepare, "redacted_csv_text", side_effect=exhausted_first), \
+         patch.object(loader_prepare, "kick_out_original") as kickout:
+        result = _run(_ctx(tmp_path), run_log, config,
+                      [_record(first), _record(second, record_id=11)])
+
+    assert (result.selected, result.prepared, result.failed) == (2, 1, 1)
+    failed = next(item for item in result.results if item.status == "failed")
+    assert "no replacement left" in failed.reason
+    assert not (tmp_path / "prepared" / first.name).exists()
+    assert (tmp_path / "prepared" / second.name).exists()
+    kickout.assert_called_once()
+    assert kickout.call_args.kwargs["operation"] == "create_prepared_files"
+    assert kickout.call_args.kwargs["destination"] == _FILE_KICKOUTS["path"]
