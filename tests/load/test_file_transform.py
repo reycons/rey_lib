@@ -91,7 +91,9 @@ class TestTheKindRegistry:
         move = file_kind("move")
 
         assert move is not None
-        assert move.fields == ("role", "route", "operation")
+        assert move.fields == ("role", "route", "operation", "name")
+        # The destination name is optional: unset keeps the file's own name.
+        assert move.required == ("role", "route", "operation")
         assert move.builder is MoveTransform
 
     def test_a_move_resolves_to_a_file_transform(self, tmp_path: Path) -> None:

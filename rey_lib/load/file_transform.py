@@ -123,7 +123,8 @@ def file_kinds() -> tuple[FileKind, ...]:
     return tuple(_REGISTRY.values())
 
 
-@file_transform("move", fields=("role", "route", "operation"))
+@file_transform("move", fields=("role", "route", "operation", "name"),
+                required=("role", "route", "operation"))
 class MoveTransform(FileTransform):
     """Move one governed file to a role's route.
 
@@ -139,6 +140,7 @@ class MoveTransform(FileTransform):
         role: str,
         route: str,
         operation: str,
+        name: str | None = None,
     ) -> None:
         """Hold the move's configuration and the runtime it runs in.
 
@@ -149,6 +151,9 @@ class MoveTransform(FileTransform):
                 file; ``<classification.*>`` resolves in routing.
             operation: The operation this move serves -- the caller's, which
                 the move's evidence states.
+            name: The destination file name, where the caller resolved one (a
+                declared destination such as ``{kickouts}/<file_name>``).
+                Unset keeps the file's own name, as every move did before.
 
         Raises:
             ConfigError: If the role names no routing role.
@@ -163,6 +168,7 @@ class MoveTransform(FileTransform):
         self._ctx = ctx
         self._route = str(route)
         self._operation = str(operation)
+        self._name = str(name).strip() if name else None
 
     def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Move the file, and return it at its new path.
@@ -255,7 +261,7 @@ class MoveTransform(FileTransform):
             routes={self._role: _route_for(self._route, data_file)},
             governed_roots=(governed_root,),
             dry_run=False,
-            destination_name=None,
+            destination_name=self._name,
             collision_policy=CollisionPolicy.OVERWRITE,
             file_operation_metadata={
                 "pipeline_step_name": getattr(self._ctx, "pipeline_step_name", ""),
