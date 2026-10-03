@@ -1175,6 +1175,34 @@ class Control:
         # and None is what this signature already promises for it.
         return rows[0].get("o_file_manifest_id") if rows else None
 
+    def inventory_file_result(self, path: str, file_name: str, base_name: str,
+                              file_extension: str, checksum_sha256: str,
+                              size_bytes: int, source_name: Optional[str] = None,
+                              evidence: Optional[dict[str, Any]] = None,
+                              producer: Optional[dict[str, Any]] = None,
+                              required: bool = True) -> Optional[dict[str, Any]]:
+        """Record a file and the start of its history, returning the whole row.
+
+        The same binding and the same single call as :meth:`inventory_file`,
+        answering with everything ``control.p_file_manifest_ins`` returns --
+        ``o_file_manifest_id``, ``o_manifest_created``, ``o_inventory_created``,
+        ``o_batch_step_id`` -- because the inventory outcome is read off the two
+        flags. ``inventory_file`` keeps answering with the id alone.
+        """
+        rows = self._call_rows("insert_file_manifest", {
+            "path":            path,
+            "file_name":       file_name,
+            "base_name":       base_name,
+            "file_extension":  file_extension,
+            "checksum_sha256": checksum_sha256,
+            "size_bytes":      size_bytes,
+            "source_name":     source_name,
+            "evidence":        evidence,
+            "producer":        producer,
+        }, required=required)
+        # No rows is the unavailable-control answer that required=False allows.
+        return dict(rows[0]) if rows else None
+
     def update_file_manifest(self, file_manifest_id: int,
                              required: bool = True, **fields: Any) -> None:
         """Change a file's current state. Absent fields are left alone."""

@@ -235,17 +235,19 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
     file_object = dict(record.get("file") or {})
 
     if record_type == "source_file_inventory":
-        return manifest.inventory(
-            path=str(file_object.get("path") or ""),
-            file_name=str(file_object.get("file_name") or ""),
-            base_name=str(file_object.get("base_name") or ""),
-            file_extension=str(file_object.get("file_extension") or ""),
-            checksum_sha256=str(file_object.get("checksum_sha256") or ""),
-            size_bytes=int(file_object.get("size_bytes") or 0),
+        # FileManifest.inventory reads the candidate's facts itself, from the
+        # file at the recorded path, so only the path travels.
+        outcome = manifest.inventory(
+            str(file_object.get("path") or ""),
             source_name=str(record.get("source_name") or ""),
             evidence=record.get("evidence"),
             producer=record.get("producer"),
         )
+        if outcome.status == "failed":
+            raise FileManifestError(
+                f"The inventory record could not be written: {outcome.reason}"
+            )
+        return int(outcome.file_manifest_id)
 
     if record_type in (
         "source_file_mutation", "source_file_rollback", "source_file_profile",

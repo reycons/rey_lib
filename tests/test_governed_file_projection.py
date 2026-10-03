@@ -21,7 +21,9 @@ def seeded():
     """One governed file, classified, with one mutation beneath it."""
     ctx = control_backed_ctx()
     manifest = FileManifest(ctx.shared_control)
-    file_id = manifest.inventory(
+    # Seeded from given facts through the Control's record call: this tests the
+    # projection, and FileManifest.inventory reads a real file's facts.
+    file_id = ctx.shared_control.inventory_file(
         path="/in/a.csv", file_name="a.csv", base_name="a",
         file_extension="csv", checksum_sha256="sha-a", size_bytes=1,
         source_name="feed",
@@ -70,7 +72,7 @@ def test_a_file_and_a_mutation_may_share_a_number(seeded) -> None:
     ctx, manifest, first_file, move_id = seeded
     # A second file whose identity is the number an existing mutation already
     # holds -- the collision the two sequences make inevitable.
-    second_file = manifest.inventory(
+    second_file = ctx.shared_control.inventory_file(
         path="/in/b.csv", file_name="b.csv", base_name="b",
         file_extension="csv", checksum_sha256="sha-b", size_bytes=1,
         source_name="feed",

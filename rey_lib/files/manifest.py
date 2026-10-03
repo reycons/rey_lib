@@ -39,9 +39,36 @@ either is written down.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
-__all__ = ["FileManifest"]
+from rey_lib.encryption import sha256_file
+from rey_lib.errors.error_utils import ConfigError, DatabaseError
+
+__all__ = ["FileManifest", "InventoryOutcome"]
+
+
+@dataclass(frozen=True)
+class InventoryOutcome:
+    """What inventorying one candidate did.
+
+    ``status`` is ``inventoried``, ``inventory_recorded``,
+    ``already_inventoried`` or ``failed``. A failure carries its ``reason``
+    and nothing else; the created flags are the routine's answer, read off the
+    row it returned.
+    """
+
+    status: str
+    reason: Optional[str] = None
+    file_manifest_id: Optional[int] = None
+    manifest_created: bool = False
+    inventory_created: bool = False
+
+    @classmethod
+    def failed(cls, reason: str) -> "InventoryOutcome":
+        """A candidate that could not be inventoried, and why."""
+        return cls(status="failed", reason=reason)
 
 
 class FileManifest:
@@ -64,37 +91,91 @@ class FileManifest:
 
     def inventory(
         self,
+        path: Path | str,
         *,
-        path: str,
-        file_name: str,
-        base_name: str,
-        file_extension: str,
-        checksum_sha256: str,
-        size_bytes: int,
         source_name: str = "",
         evidence: Optional[dict[str, Any]] = None,
         producer: Optional[dict[str, Any]] = None,
-    ) -> int:
-        """Record a governed file for the first time, and return its id.
+    ) -> InventoryOutcome:
+        """Inventory one candidate file, and say what happened.
 
-        The manifest row and the first mutation are written together: a file
-        never exists without the record of where it was discovered, so a later
-        move is always understood as a change from somewhere.
+        Reads the candidate's facts, then records it: the manifest row and the
+        baseline mutation are written together by one routine call, so a file
+        never exists without the record of where it was discovered.
 
-        The id is the database's. Nothing mints one here, the same way nothing
-        mints a run id -- recording the file is what gives it identity.
+        Nothing is looked up first. The routine decides: a file whose (path,
+        checksum) is already governed is written nowhere and comes back as the
+        id it already had. The id is the database's; nothing mints one here.
 
-        Returns
-        -------
-        int
-            ``file_manifest_id``.
+        A manifest record must describe ONE STABLE FILE STATE. The size is read
+        either side of the checksum, and a file whose size moved was being
+        written while it was read -- its checksum and size would describe
+        different states -- so it is failed rather than recorded.
+
+        Two facts come back, because they are two different kinds of thing: the
+        manifest row is the file's identity, minted once; the baseline is a
+        mutation saying it was observed. A file can already exist and still need
+        a new observation -- rollback deletes mutations and leaves the manifest
+        standing.
+
+        Args:
+            path: The candidate file.
+            source_name: The configured inventory source it was found under.
+            evidence: Evidence handed to the routine, where a caller has some.
+            producer: Who is recording it.
+
+        Returns:
+            ``inventoried`` (a new governed file), ``inventory_recorded`` (a new
+            observation of a known one), ``already_inventoried``, or ``failed``
+            with its reason.
         """
-        return int(self._control.inventory_file(
-            path=path, file_name=file_name, base_name=base_name,
-            file_extension=file_extension, checksum_sha256=checksum_sha256,
-            size_bytes=size_bytes, source_name=source_name or None,
-            evidence=evidence, producer=producer,
-        ))
+        source_file = Path(path)
+        try:
+            size_before = source_file.stat().st_size
+            checksum = sha256_file(source_file)
+            size_after = source_file.stat().st_size
+        except OSError as exc:
+            return InventoryOutcome.failed(str(exc))
+
+        if size_before != size_after:
+            return InventoryOutcome.failed(
+                f"the file changed during inventory (size {size_before} -> {size_after})"
+            )
+
+        try:
+            row = self._control.inventory_file_result(
+                path=str(source_file),
+                file_name=source_file.name,
+                base_name=source_file.stem,
+                file_extension=source_file.suffix.removeprefix(".").lower(),
+                checksum_sha256=checksum,
+                size_bytes=size_after,
+                source_name=source_name or None,
+                evidence=evidence,
+                producer=producer,
+            )
+        except (ConfigError, DatabaseError) as exc:
+            return InventoryOutcome.failed(str(exc))
+
+        if not row:
+            return InventoryOutcome.failed(
+                "the file manifest returned no result for the inventoried file"
+            )
+
+        manifest_created = bool(row.get("o_manifest_created"))
+        inventory_created = bool(row.get("o_inventory_created"))
+        if manifest_created:
+            status = "inventoried"
+        elif inventory_created:
+            status = "inventory_recorded"
+        else:
+            status = "already_inventoried"
+        return InventoryOutcome(
+            status=status,
+            file_manifest_id=row.get("o_file_manifest_id"),
+            manifest_created=manifest_created,
+            inventory_created=inventory_created,
+        )
 
     def update(self, file_manifest_id: int, **fields: Any) -> None:
         """Change a file's current state.

@@ -40,8 +40,12 @@ class _Store:
 
     def inventory(self, name: str, feed: str, file_name: str,
                   path: str) -> int:
-        """Record a governed file. Order of calls is order of identity."""
-        self.ids[name] = self.manifest.inventory(
+        """Record a governed file. Order of calls is order of identity.
+
+        Seeded from given facts through the Control's record call: this tests
+        the hierarchy, and FileManifest.inventory reads a real file's facts.
+        """
+        self.ids[name] = self.ctx.shared_control.inventory_file(
             path=path, file_name=file_name, base_name=file_name.split(".")[0],
             file_extension=file_name.rsplit(".", 1)[-1],
             checksum_sha256=f"sha-{name}", size_bytes=1, source_name=feed,
