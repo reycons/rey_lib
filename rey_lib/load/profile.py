@@ -39,9 +39,7 @@ from rey_lib.data.data_profile import DataProfile, FieldProfile, ProfileField
 from rey_lib.data.errors import DataStructureError
 from rey_lib.encryption import sha256_file
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
-from rey_lib.files import FileRoutingError
 from rey_lib.files.csv import normalized_header
-from rey_lib.files.manifest import FileManifest
 from rey_lib.load.layouts.common import effective_max_sample_rows
 from rey_lib.load.layouts.delimited import (
     build_clean_single_file_profile,
@@ -49,8 +47,8 @@ from rey_lib.load.layouts.delimited import (
 )
 from rey_lib.load.manifest_source import ManifestSource
 from rey_lib.load.profile_errors import ProfilingError
-from rey_lib.load.record_templates import record_field, resolve_record_template
-from rey_lib.load.transform import Transform
+from rey_lib.load.kickout import kick_out_original
+from rey_lib.load.record_templates import record_field
 from rey_lib.logs import (
     PROFILE_RECORD_TYPE,
     FileManifestError,
@@ -71,8 +69,6 @@ _log = get_logger(__name__)
 
 #: The operation every profiling record and kickout move states.
 _OPERATION = "record_type_profiling"
-#: The result a move into processing records; the original is where it says.
-_IN_PROCESSING = "moved_to_processing"
 
 # The run-log record a governed profile points back at, named for what it
 # records as SOURCE_FILE_INVENTORY and SOURCE_FILE_MUTATION are.
@@ -819,75 +815,14 @@ def _kickout_original(
 ) -> None:
     """Move the ORIGINAL of a file that could not be profiled to its kickouts.
 
-    Never raises. The profiling failure is the error this file already has;
-    failing to file it away must not replace that with a routing one, and the
-    file counts as failed either way. Routing records its own failed-move
-    mutation, so a move that does not take effect is still evidence.
-
-    The file moved is the governed original where classification put it -- its
-    latest live, successful move, when that move's result is
-    ``moved_to_processing`` -- never the sanitized copy that was profiled. An
-    original that has already left processing is not moved, and says so.
-
-    The destination is declared per step, as a full path such as
-    ``{kickouts}/<file_name>``, and resolves against the original's own
-    governed record (its ``file_name`` and ``base_path``). A step with no
-    ``kickouts`` declared leaves the file where it is.
+    The shared rule-75 mechanism (``rey_lib.load.kickout``), with this step's
+    declared ``kickouts`` destination and its operation. Never raises.
     """
     declared = config.get("kickouts")
-    destination = _value(declared, "path") if declared else None
-    if not isinstance(destination, str) or not destination.strip():
-        _log.warning(
-            "'%s' could not be profiled and no kickouts destination is declared "
-            "for this step, so it stays where it is and will be selected again.",
-            source.name,
-        )
-        return
-
-    control = getattr(ctx, "shared_control", None)
-    try:
-        history = FileManifest(control).history(int(file_manifest_id))
-        moves = [
-            mutation for mutation in history
-            if mutation.get("deleted_in") is None
-            and mutation.get("status") == "success"
-            and mutation.get("action") == "move"
-        ]
-        if not moves or moves[-1].get("result") != _IN_PROCESSING:
-            _log.warning(
-                "'%s' could not be profiled, and its original (governed file %s) "
-                "is not in processing, so there is nothing to kick out.",
-                source.name, file_manifest_id,
-            )
-            return
-        original = ManifestSource.create(
-            control, file_mutation_id=int(moves[-1]["file_mutation_id"]))
-        data_file = original.data_file()
-        resolution = resolve_record_template(destination.strip(), {
-            "file_name": original.governed_context().get("file_name"),
-            "base_path": data_file.base_path,
-            "classification": data_file.classification,
-        })
-        if not resolution.resolved:
-            _log.warning(
-                "'%s' could not be profiled, and its kickouts destination cannot "
-                "be resolved: field %r is missing or empty.",
-                source.name, resolution.missing_field,
-            )
-            return
-        target = Path(resolution.path)
-        Transform(
-            values={
-                "role": "kickouts",
-                "route": str(target.parent),
-                "name": target.name,
-                # Profiling is the operation; the move is what it does with a
-                # file it cannot profile. One operation, two mutation records.
-                "operation": _OPERATION,
-            },
-            selected="move",
-        ).resolve(ctx).apply(data_file)
-    except (FileRoutingError, FileManifestError, ConfigError, DatabaseError, OSError,
-            ValueError, KeyError, DataStructureError) as exc:
-        _log.warning("'%s' could not be profiled and its original could not be "
-                     "moved to kickouts: %s", source.name, exc)
+    kick_out_original(
+        ctx,
+        destination=_value(declared, "path") if declared else None,
+        file_manifest_id=file_manifest_id,
+        source=source,
+        operation=_OPERATION,
+    )

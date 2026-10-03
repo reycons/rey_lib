@@ -20,6 +20,7 @@ import pytest
 
 from rey_lib.files import file_routing
 from rey_lib.files.data_file import data_file_for
+from rey_lib.files.manifest import FileManifest
 from rey_lib.load import profile as workflow
 from tests.support.selecting_control import SelectingControl
 
@@ -247,7 +248,7 @@ def test_a_failed_profile_kicks_out_the_original_then_records_the_failure(
         order.append(record_type)
         return 44
 
-    with patch.object(workflow.FileManifest, "history", return_value=_history((3, "moved_to_processing"))), \
+    with patch.object(FileManifest, "history", return_value=_history((3, "moved_to_processing"))), \
          patch.object(workflow.ManifestSource, "create", side_effect=_original_at(original, tmp_path)), \
          patch.object(file_routing, "move_file", side_effect=moved) as move, \
          patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation, \
@@ -269,7 +270,7 @@ def test_a_failed_profile_kicks_out_the_original_then_records_the_failure(
 def test_an_original_no_longer_in_processing_is_not_moved(tmp_path: Path) -> None:
     original, _sanitized, ctx = _failing_sanitized_copy(tmp_path)
 
-    with patch.object(workflow.FileManifest, "history",
+    with patch.object(FileManifest, "history",
                       return_value=_history((3, "moved_to_processing"), (4, "moved_to_archive"))), \
          patch.object(workflow.ManifestSource, "create", side_effect=_original_at(original, tmp_path)), \
          patch.object(file_routing, "move_file") as move, \
@@ -284,7 +285,7 @@ def test_an_original_no_longer_in_processing_is_not_moved(tmp_path: Path) -> Non
 def test_a_step_with_no_kickouts_declared_moves_nothing(tmp_path: Path) -> None:
     original, _sanitized, ctx = _failing_sanitized_copy(tmp_path)
 
-    with patch.object(workflow.FileManifest, "history") as history, \
+    with patch.object(FileManifest, "history") as history, \
          patch.object(file_routing, "move_file") as move, \
          patch.object(workflow, "log_run_record", return_value=44):
         result = _run(ctx, _run_log(tmp_path, ctx))
