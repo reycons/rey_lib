@@ -39,19 +39,14 @@ _MAX_ATTEMPTS: int = 32
 
 
 class RedactionExhausted(AppError):
-    """Raised when no replacement can satisfy the redaction contract.
+    """Raised when no replacement can differ from the value at all.
 
-    The search is an online allocator: it assigns as each value arrives and
-    cannot revise a replacement it has already handed out. It therefore does
-    **not** guarantee full use of the finite replacement space -- it can strand,
-    where candidates remain in principle but the only unused one is equal to the
-    value now being redacted. Exhaustion means *no currently available non-self
-    unique encoding remains*, which is not the same as the namespace having
-    filled the space.
-
-    Aliasing two different sources onto one replacement, or handing back the
-    source itself, would both be silent information leaks. Failing is the only
-    other option, so this is raised rather than either.
+    Since row 613 (user, 2026-10-03) an exhausted replacement space no longer
+    raises: an already-assigned replacement is reused, because uniqueness
+    within a column is not a requirement. What is never done is handing back
+    the source itself. So this is raised only when no candidate of the value's
+    width and character type differs from it -- which no pattern with a
+    variable slot can produce. It stays defined for callers that catch it.
     """
 
 
@@ -148,8 +143,8 @@ class _Namespace:
         self.count:     int            = 0
         self.mask_type: str | None     = _resolve_mask(name, mask_type)
         self._map:      dict[str, str] = {}
-        # Every replacement handed out for this column, so a second source can
-        # never be given one that is already spoken for.
+        # Every replacement handed out for this column, so a fresh one is
+        # always preferred; one is reused only once none is left (row 613).
         self._assigned: set[str]       = set()
 
     def get_or_create(self, value: str) -> str:
@@ -175,24 +170,39 @@ class _Namespace:
         return replacement
 
     def _generic(self, value: str) -> str:
-        """Return a replacement that is neither the value nor already taken.
+        """Return a replacement of the value's width and type, never the value.
 
-        Successive counters are consumed rather than reused, so every distinct
-        source keeps its own counter and two sources cannot land on one
-        replacement. A candidate is rejected when it equals the source -- the
-        encoding is right-aligned and pad-filled, so a value that happens to be
-        the encoding of its own counter would otherwise survive verbatim
-        (``1``, ``B`` and ``AB`` all do this at counter 1) -- or when it has
-        already been handed out.
+        A FRESH replacement first: successive counters are consumed, and a
+        candidate is taken when it is neither the source -- the encoding is
+        right-aligned and pad-filled, so a value that happens to be the
+        encoding of its own counter would otherwise survive verbatim (``1``,
+        ``B`` and ``AB`` all do this at counter 1) -- nor already handed out.
+
+        WHEN THE SPACE IS EXHAUSTED, AN ASSIGNED REPLACEMENT IS REUSED (row 613,
+        user 2026-10-03). A short value's space is small -- a one-letter slot has
+        ten outputs -- and a column of codes or tickers can hold far more
+        distinct values than that. Uniqueness is not a requirement, so two
+        sources may then share a replacement; what is never given up is that
+        the replacement differs from its source and keeps its width and
+        character type.
 
         Raises:
-            RedactionExhausted: When no candidate in range satisfies both.
+            RedactionExhausted: Only when no candidate differs from the value at
+                all, which no pattern with a variable slot can produce.
         """
         pattern = analyze_pattern(value)
         for _ in range(_MAX_ATTEMPTS):
             self.count += 1
             candidate = _generate(pattern, self.count)
             if candidate != value and candidate not in self._assigned:
+                return candidate
+
+        # Exhausted: every output this pattern can take within the period is
+        # either assigned or the value itself. Reuse an assigned one -- the
+        # first, in counter order, that is not the value.
+        for offset in range(1, _MAX_ATTEMPTS + 1):
+            candidate = _generate(pattern, self.count + offset)
+            if candidate != value:
                 return candidate
 
         raise RedactionExhausted(

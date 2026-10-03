@@ -22,7 +22,7 @@ import pytest
 
 from rey_lib.redaction.char_utils import analyze_pattern, generate_replacement
 from rey_lib.redaction.masks import KNOWN_MASKS, apply_mask
-from rey_lib.redaction.registry import RedactionExhausted, RedactionRegistry
+from rey_lib.redaction.registry import RedactionRegistry
 from rey_lib.errors.error_utils import ConfigError
 
 #: Profiling datatypes that reach the masking side but name no mask. These four
@@ -142,51 +142,63 @@ class TestTheBoundRestsOnTheGenerator:
         assert len(set(produced)) == 10
 
 
-class TestExhaustionFailsClosed:
-    """When the contract cannot be met, nothing is emitted.
+class TestExhaustionReusesAnAssignedReplacement:
+    """When the space is exhausted, an assigned replacement is reused (row 613).
 
-    The allocator is online: it assigns as each value arrives and cannot revise
-    a replacement already handed out. So it does not promise full use of the
-    finite space -- it can strand, with candidates left in principle but the
-    only free one equal to the incoming source. These assert that it raises when
-    both invariants cannot hold, never that some particular ordinal value fails.
+    Uniqueness within a column is not a requirement (user, 2026-10-03). What
+    never changes: the replacement keeps the value's width and character type
+    and is never the value itself, and the same source keeps its replacement.
+    Fresh outputs are used up before any is reused.
     """
 
-    def test_a_stranded_namespace_raises_rather_than_aliasing(self) -> None:
-        """Candidates may remain and the allocator still legitimately fail.
+    def test_a_stranded_value_reuses_an_assigned_replacement_not_itself(self) -> None:
+        """B-J are taken and the only fresh output left, A, is the source itself.
 
-        An uppercase slot produces B-J then A, over counters 1-10. Nine sources
-        drawn from outside that set take B-J, so the only output left is A --
-        and A is the value now arriving. Handing it back, or reusing one of the
-        nine, are both leaks, so neither is done.
-
-        A different global assignment could have placed all ten. The allocator
-        cannot reach it, having already emitted the nine, and that is the limit
-        this test pins rather than papers over.
+        It is neither handed back nor refused: an assigned replacement is reused.
         """
         registry = RedactionRegistry(["c"])
-        for value in "ZYXWVUTSR":
-            registry.redact("c", value)
+        assigned = {registry.redact("c", value) for value in "ZYXWVUTSR"}
 
-        with pytest.raises(RedactionExhausted, match="already assigned"):
-            registry.redact("c", "A")
+        replacement = registry.redact("c", "A")
 
-    def test_an_exhausted_namespace_raises(self) -> None:
-        """A width-1 column cannot hold more distinct values than it has outputs."""
+        assert replacement != "A"
+        assert replacement in assigned
+        assert len(replacement) == 1 and replacement.isupper()
+
+    def test_a_width_1_column_with_more_values_than_outputs_redacts_every_value(
+        self,
+    ) -> None:
+        """Sixteen one-letter sources, ten one-letter outputs: none is refused."""
         registry = RedactionRegistry(["c"])
 
-        with pytest.raises(RedactionExhausted):
-            for value in "abcdefghijklmnop":
-                registry.redact("c", value)
-
-    def test_nothing_is_aliased_before_it_gives_up(self) -> None:
-        """Every value emitted up to the failure still satisfies the contract."""
-        registry = RedactionRegistry(["c"])
-        emitted: dict[str, str] = {}
-
-        with pytest.raises(RedactionExhausted):
-            for value in "abcdefghijklmnop":
-                emitted[value] = registry.redact("c", value)
+        emitted = {value: registry.redact("c", value) for value in "abcdefghijklmnop"}
 
         assert all(source != replacement for source, replacement in emitted.items())
-        assert len(set(emitted.values())) == len(emitted)
+        assert all(len(r) == 1 and r.islower() for r in emitted.values())
+        # Reuse happened, which is now allowed.
+        assert len(set(emitted.values())) < len(emitted)
+
+    def test_fresh_outputs_are_used_up_before_any_is_reused(self) -> None:
+        registry = RedactionRegistry(["c"])
+
+        first_ten = [registry.redact("c", value) for value in "abcdefghij"]
+
+        assert len(set(first_ten)) == len(first_ten)
+
+    def test_the_same_source_keeps_its_replacement_after_reuse_begins(self) -> None:
+        registry = RedactionRegistry(["c"])
+        first = {value: registry.redact("c", value) for value in "abcdefghijklmnop"}
+
+        again = {value: registry.redact("c", value) for value in "abcdefghijklmnop"}
+
+        assert again == first
+
+    def test_a_two_character_code_column_beyond_its_space_still_redacts(self) -> None:
+        """The live case: more distinct 2-letter codes than the encoder has."""
+        registry = RedactionRegistry(["asset_code"])
+        codes = [a + b for a in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" for b in "ABCDEF"]
+
+        emitted = {code: registry.redact("asset_code", code) for code in codes}
+
+        assert all(source != replacement for source, replacement in emitted.items())
+        assert all(len(r) == 2 and r.isupper() for r in emitted.values())
