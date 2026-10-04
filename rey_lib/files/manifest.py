@@ -327,26 +327,26 @@ class FileManifest:
         scope: str = "file",
         file_manifest_id: Optional[int] = None,
         file_mutation_id: Optional[int] = None,
-        boundary_record_type: Optional[str] = None,
         dry_run: bool = True,
     ) -> dict[str, Any]:
         """Take governed files back to a point in their history (backlog 612).
 
-            criteria -> the rollback request returns the mutations to reverse
-            -> newest first, reverse each: undo its change, delete its record
+            selected mutation + scope -> the DB returns the scope's records
+            -> per manifest, cut at the selected mutation's record type
+            -> newest first, reverse each after the cut: undo its change,
+               delete its record
             -> a file with no mutation left: delete its manifest
 
-        The request function decides the set -- the scope, resolved from the
-        selected node, and the boundary. Nothing here selects or filters it.
+        The selected mutation is the anchor and its record type the lifecycle
+        boundary. Its own manifest is cut at the selected mutation exactly;
+        every other manifest at its latest mutation of that record type, which
+        stays. A manifest with no mutation of that type has nothing reversed.
+        A selected file, with no mutation, is reversed whole.
 
         Args:
             scope: file, run, file_type, batch_step, batch or installation.
             file_manifest_id: The selected file, when no mutation was selected.
-            file_mutation_id: The selected mutation. For scope ``file`` it is
-                the exact boundary; it and everything earlier stay.
-            boundary_record_type: For a multi-file scope, each file's boundary
-                is its latest mutation of this record type (by default the
-                selected mutation's).
+            file_mutation_id: The selected mutation.
             dry_run: Return the mutations that would be reversed, changing nothing.
 
         Returns:
@@ -356,10 +356,10 @@ class FileManifest:
             ``manifests_deleted``.
 
         Raises:
-            ValueError: Unless exactly one of the file or the mutation is given.
+            ValueError: Unless exactly one of the file or the mutation is given,
+                or when the selected mutation is not among the scope's records.
         """
-        # Deferred: the reverse behaviour lives beside the mutation evidence it
-        # reverses, and that module imports from this package.
+        # The reverse behaviour per action already exists; it is used, not copied.
         from rey_lib.files.log_run_rollback import (
             _reversal_candidate,
             _resolved_compensation,
@@ -370,29 +370,38 @@ class FileManifest:
                 "FileManifest.rollback needs the selected file or the selected "
                 "mutation, exactly one."
             )
-        mutations = self._control.request_file_rollback(
-            dry_run=True,
-            scope=scope,
-            anchor_file_manifest_id=(
-                int(file_manifest_id) if file_mutation_id is None else None),
-            rollback_to_mutation_id=(
-                int(file_mutation_id) if file_mutation_id is not None else None),
-            boundary_record_type=boundary_record_type,
+        records = sorted(
+            self._control.request_file_rollback(
+                dry_run=True,
+                scope=scope,
+                anchor_file_manifest_id=(
+                    int(file_manifest_id) if file_mutation_id is None else None),
+                rollback_to_mutation_id=(
+                    int(file_mutation_id) if file_mutation_id is not None else None),
+            ),
+            key=lambda row: int(row["file_mutation_id"]),
+            reverse=True,
         )
-        # What the selected boundary is, for the reader: descriptive only.
         boundary = None
+        mutations = records
         if file_mutation_id is not None:
-            rows = self._control.list_file_mutations(file_mutation_id=int(file_mutation_id))
+            anchor = next((row for row in records
+                           if int(row["file_mutation_id"]) == int(file_mutation_id)), None)
+            if anchor is None:
+                raise ValueError(
+                    f"mutation {file_mutation_id} is not among the scope's records; "
+                    "only a successful mutation can be a rollback boundary."
+                )
             boundary = {"file_mutation_id": int(file_mutation_id),
-                        "record_type": rows[0].get("record_type") if rows else None}
+                        "record_type": anchor.get("record_type")}
+            mutations = self._after_boundary(records, anchor)
         result: dict[str, Any] = {
             "scope": scope,
             "file_manifest_id": file_manifest_id,
             "file_mutation_id": file_mutation_id,
             "boundary": boundary,
-            "boundary_record_type": boundary_record_type,
             "dry_run": bool(dry_run),
-            "mutations": list(mutations),
+            "mutations": mutations,
             "reversed": [],
             "failed": None,
             "manifests_deleted": [],
@@ -420,6 +429,26 @@ class FileManifest:
                 self._control.delete_file_manifest(manifest)
                 result["manifests_deleted"].append(manifest)
         return result
+
+    @staticmethod
+    def _after_boundary(
+        records: list[Mapping[str, Any]], anchor: Mapping[str, Any],
+    ) -> list[Mapping[str, Any]]:
+        """The records after each manifest's boundary, newest first.
+
+        The anchor's manifest is cut at the anchor; every other manifest at its
+        latest record of the anchor's record type. A manifest without one is
+        not cut, so nothing of it is returned.
+        """
+        record_type = anchor.get("record_type")
+        cut = {int(anchor["file_manifest_id"]): int(anchor["file_mutation_id"])}
+        for row in records:
+            manifest = int(row["file_manifest_id"])
+            if manifest not in cut and row.get("record_type") == record_type:
+                cut[manifest] = int(row["file_mutation_id"])
+        return [row for row in records
+                if int(row["file_manifest_id"]) in cut
+                and int(row["file_mutation_id"]) > cut[int(row["file_manifest_id"])]]
 
     @staticmethod
     def _reverse(row: Mapping[str, Any], candidate_of: Any, reverse_of: Any) -> Optional[str]:
