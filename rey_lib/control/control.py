@@ -1859,7 +1859,7 @@ class Control:
     # reversals all succeeded. The mutation rows themselves carry no rollback
     # state, so there is no queue here to read.
 
-    def request_file_rollback(self, *, dry_run: bool = True,
+    def request_file_rollback(self, *,
                               file_mutation_id: Optional[int] = None,
                               file_manifest_id: Optional[int] = None,
                               batch_step_id: Optional[int] = None,
@@ -1869,7 +1869,7 @@ class Control:
                               anchor_file_manifest_id: Optional[int] = None,
                               rollback_to_mutation_id: Optional[int] = None,
                               required: bool = True) -> list[dict[str, Any]]:
-        """Return the rollback set for one scope, marking it unless previewing.
+        """Return the rollback set for one scope. A read; nothing is marked.
 
         A named ``scope`` (file, run, file_type, batch_step, batch,
         installation) is resolved by the routine from its anchor -- the
@@ -1878,21 +1878,18 @@ class Control:
         scope's manifests is returned (backlog 612). Where each manifest is cut
         is ``FileManifest.rollback``'s, not the routine's.
 
-        Exactly one scope is supplied. Under ``dry_run`` nothing is written and
-        the rows come back with no rollback identity; otherwise each row is a
-        requested rollback record. Either way the shape is the same, so a
-        preview and its execution cannot describe different reversals.
+        Exactly one scope is supplied. The routine writes nothing (backlog 640
+        retired the request/complete marking): a preview and an execution read
+        the same rows, so they cannot describe different reversals.
 
         A row that can be reversed carries the command that reverses it. One
         that cannot is still returned -- it is a fact about the rollback -- and
         carries no command.
         """
-        # Scoped names, not the ambient ones. A supplied value outranks the run
-        # context, so passing `batch_step_id` here would blank the governing
-        # step the map reads under that name -- which is what the rollback's own
-        # batch steps hang under.
+        # Scoped names, not the ambient ones: a supplied value outranks the run
+        # context, so a plain `batch_step_id` here would be read as the ambient
+        # step rather than the scope.
         return self._call_rows("request_file_rollback", {
-            "rollback_dry_run":         bool(dry_run),
             "file_mutation_id":         file_mutation_id,
             "rollback_file_manifest_id": file_manifest_id,
             "rollback_batch_step_id":   batch_step_id,
@@ -1901,7 +1898,6 @@ class Control:
             "rollback_scope":           scope,
             "rollback_anchor_file_manifest_id": anchor_file_manifest_id,
             "rollback_to_mutation_id":  rollback_to_mutation_id,
-            "rollback_execution_run_id": self._execution_run_id(),
         }, required=required)
 
     def delete_file_mutation(self, file_mutation_id: int, required: bool = True) -> None:

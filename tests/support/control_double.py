@@ -153,19 +153,14 @@ class ControlDouble:
 
     # -- rollback ------------------------------------------------------------
 
-    def request_file_rollback(self, *, dry_run: bool = True,
+    def request_file_rollback(self, *,
                               file_mutation_id: Optional[int] = None,
                               file_manifest_id: Optional[int] = None,
                               batch_step_id: Optional[int] = None,
                               batch_id: Optional[int] = None,
                               run_id: Optional[int] = None,
                               required: bool = True) -> list[dict[str, Any]]:
-        """Return the rollback set for one scope, marking it unless previewing.
-
-        One predicate and one shape either way, as the routine has: a preview
-        and its execution cannot describe different reversals. Under
-        ``dry_run`` nothing is written.
-        """
+        """Return the rollback set for one scope. A read, as the routine is."""
         scopes = [file_mutation_id, file_manifest_id, batch_step_id, batch_id, run_id]
         if sum(scope is not None for scope in scopes) != 1:
             raise ValueError("exactly one rollback scope is required")
@@ -179,9 +174,6 @@ class ControlDouble:
                 continue
             if row["rollback_request_in"] or row["rollback_complete_in"]:
                 continue
-            if not dry_run:
-                row["rollback_request_in"] = 1
-                row["rollback_request_batch_step_id"] = self.batch_step_id
             selected.append({
                 "file_mutation_id": row["file_mutation_id"],
                 "file_manifest_id": row["file_manifest_id"],
@@ -191,20 +183,6 @@ class ControlDouble:
                 "restore_to_path": self._restore_target(row),
             })
         return selected
-
-    def pending_file_rollbacks(self,
-                               required: bool = True) -> list[dict[str, Any]]:
-        """Pending rows newest first, each with where it reverses to."""
-        pending = [row for row in self.mutations
-                   if row["rollback_request_in"] == 1
-                   and row["rollback_complete_in"] == 0]
-        rows = []
-        for row in sorted(pending, key=lambda r: r["file_mutation_id"],
-                          reverse=True):
-            out = dict(row)
-            out["restore_to_path"] = self._restore_target(row)
-            rows.append(out)
-        return rows
 
     def _file(self, file_manifest_id: int) -> Optional[dict[str, Any]]:
         return next((row for row in self.files

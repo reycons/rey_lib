@@ -366,11 +366,9 @@ class FileManifest:
                     f"A run is rolled back with scope run, not {scope!r}."
                 )
             # The mutations the run wrote, as the request has always answered.
-            requested = self._control.request_file_rollback(
-                dry_run=True, run_id=int(run_id))
+            requested = self._control.request_file_rollback(run_id=int(run_id))
         else:
             requested = self._control.request_file_rollback(
-                dry_run=True,
                 scope=scope,
                 anchor_file_manifest_id=(
                     int(file_manifest_id) if file_mutation_id is None else None),

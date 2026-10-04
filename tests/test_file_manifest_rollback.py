@@ -90,7 +90,7 @@ def test_the_mutation_and_scope_go_to_the_request_function(tmp_path: Path) -> No
     FileManifest(control).rollback(scope="run", file_mutation_id=2)
 
     (sent,) = control.requests
-    assert sent == {"dry_run": True, "scope": "run", "anchor_file_manifest_id": None,
+    assert sent == {"scope": "run", "anchor_file_manifest_id": None,
                     "rollback_to_mutation_id": 2}
 
 
@@ -162,7 +162,7 @@ def test_a_run_reads_its_mutations_and_reverses_them_all(tmp_path: Path) -> None
     preview = FileManifest(control).rollback(run_id=330)
 
     (sent,) = control.requests
-    assert sent == {"dry_run": True, "run_id": 330}
+    assert sent == {"run_id": 330}
     assert preview["scope"] == "run" and preview["boundary"] is None
     assert [row["file_mutation_id"] for row in preview["mutations"]] == [4, 3]
 
