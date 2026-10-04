@@ -111,10 +111,23 @@ def test_no_rows_is_none() -> None:
     assert control.get_file_manifest(11) is None
 
 
-def test_only_the_manifest_id_is_sent() -> None:
-    """The installation is read off Control.installation_id by the binding."""
+def test_the_manifest_alone_is_asked_for_its_history() -> None:
+    """Every declared input is sent; the installation is not -- the binding
+    reads it off Control.installation_id."""
     control, calls = _answering([_flat_row(1)])
 
     control.get_file_manifest(11)
 
-    assert calls == [("get_file_manifest", {"file_manifest_id": 11})]
+    assert calls == [("get_file_manifest", {
+        "file_manifest_id": 11, "file_mutation_id": None, "operation": None,
+        "source_name": None, "effective_mutation": False,
+    })]
+
+
+def test_an_explicit_installation_is_sent() -> None:
+    control, calls = _answering([])
+
+    control.get_file_manifests(installation_id=3, operation="data_profile")
+
+    assert calls[0][1]["installation_id"] == 3
+    assert calls[0][1]["operation"] == "data_profile"

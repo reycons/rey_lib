@@ -52,6 +52,7 @@ is the entire point of there being one.
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
@@ -77,14 +78,61 @@ class SourceContextReader(Protocol):
     directly.
     """
 
-    def file_source_context(
+    def get_file_manifests(
         self,
+        *,
+        installation_id: Optional[int] = None,
         file_manifest_id: Optional[int] = None,
         file_mutation_id: Optional[int] = None,
+        operation: Optional[str] = None,
+        source_name: Optional[str] = None,
+        effective_mutation: bool = False,
         required: bool = True,
     ) -> Sequence[Mapping[str, Any]]:
-        """Return the joined context rows for one governed file."""
+        """Return the flat manifest rows f_file_manifest_get selects (backlog 618).
+
+        One row per selected mutation x profile field x transform column,
+        ordered by manifest, then mutation, so each file's rows are contiguous.
+        Which mutation is selected -- current, explicit, or eligible for an
+        operation -- is the routine's decision, never the caller's.
+        """
         ...
+
+
+def _require_manifest_reader(reader: Any) -> None:
+    """Refuse a reader that does not offer the manifest retrieval contract.
+
+    By name, here, rather than as an AttributeError at the call: a reader
+    written against the retired single-file contract (file_source_context)
+    would otherwise fail somewhere less informative.
+    """
+    if not callable(getattr(reader, "get_file_manifests", None)):
+        raise ConfigError(
+            f"ManifestSource: the reader {type(reader).__name__} does not offer "
+            "get_file_manifests, the governed manifest retrieval contract "
+            "(control.f_file_manifest_get)."
+        )
+
+
+def _read_governed_file(
+    reader: Any,
+    *,
+    file_manifest_id: Optional[int],
+    file_mutation_id: Optional[int],
+) -> list[dict[str, Any]]:
+    """Read ONE governed file at one mutation: the single-file entry of the getter.
+
+    A named mutation IS the working mutation, preserved exactly, deleted or not;
+    with a manifest as well, the routine refuses a pair that disagrees. A
+    manifest alone asks for its EFFECTIVE mutation, which the routine decides
+    (the highest live file_mutation_id) -- this never decides what is current.
+    """
+    _require_manifest_reader(reader)
+    return [dict(row) for row in reader.get_file_manifests(
+        file_manifest_id=file_manifest_id,
+        file_mutation_id=file_mutation_id,
+        effective_mutation=file_mutation_id is None,
+    )]
 
 
 class ManifestSource:
@@ -247,10 +295,11 @@ class ManifestSource:
         control.maintain_transform(
             self.persisted_file_type_id, action="new", transform_id=self.selected_transform_id,
         )
-        rows = list(control.file_source_context(
+        rows = _read_governed_file(
+            control,
             file_manifest_id=self.file_manifest_id,
             file_mutation_id=self.file_mutation_id if self.opened_by == "mutation" else None,
-        ))
+        )
         # THE ONE MATERIALISATION, re-run in place over the persisted state: the
         # same object, so whatever holds it keeps holding the current one.
         self.__init__(
@@ -398,10 +447,9 @@ class ManifestSource:
                 "required. There is no default file."
             )
 
-        rows = list(reader.file_source_context(
-            file_manifest_id=file_manifest_id,
-            file_mutation_id=file_mutation_id,
-        ))
+        rows = _read_governed_file(
+            reader, file_manifest_id=file_manifest_id, file_mutation_id=file_mutation_id,
+        )
 
         source = cls(
             rows,
@@ -414,6 +462,47 @@ class ManifestSource:
             # is the value _validate_against would have compared against.
             source.requested_file_type_id = source.persisted_file_type_id
         return source
+
+    @classmethod
+    def get_for_operation(
+        cls,
+        reader: SourceContextReader,
+        installation_id: int,
+        operation: str,
+        source_name: Optional[str] = None,
+    ) -> list["ManifestSource"]:
+        """Every governed file remaining for one operation, one object per file.
+
+        **ONE control call for the whole set** (backlog 619). The database
+        decides which files remain for the operation, at which mutation, in
+        which installation and source, and excludes kicked-out files; nothing
+        here filters, re-selects or orders what came back.
+
+        Each object is exactly what :meth:`create` builds from one file's rows,
+        opened by its mutation: one governed file at one working mutation. The
+        rows arrive ordered by manifest then mutation, so a file's rows are
+        contiguous; they are grouped by ``file_mutation_id`` in arrival order.
+
+        Args:
+            reader: Whatever answers the manifest retrieval contract.
+            installation_id: The installation whose files these are.
+            operation: The operation the files are wanted for, e.g.
+                ``file_sanitization``. The routine refuses one it does not know.
+            source_name: Narrows the set to one declared source, or None.
+
+        Returns:
+            One ManifestSource per selected file, in the routine's order; an
+            empty list when nothing remains.
+        """
+        _require_manifest_reader(reader)
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in reader.get_file_manifests(
+            installation_id=installation_id,
+            operation=operation,
+            source_name=source_name,
+        ):
+            grouped.setdefault(int(row["file_mutation_id"]), []).append(dict(row))
+        return [cls(rows, opened_by="mutation") for rows in grouped.values()]
 
     def reread(self, reader: SourceContextReader) -> "ManifestSource":
         """Read this governed file's context again, keeping the selected transform.
@@ -657,6 +746,52 @@ class ManifestSource:
 
     # -- the canonical objects, populated ------------------------------------
 
+    @property
+    def working_file_name(self) -> Optional[str]:
+        """The working mutation's file name: the last segment of its path.
+
+        NOT the manifest's ``file_name``, which is fixed when the file is
+        inventoried. A conversion or a move gives the working mutation a path of
+        its own -- an Excel sheet's CSV, a sanitized copy -- and this is that
+        path's name, by the rule the file selectors applied
+        (regexp_replace(path, '^.*/', '')).
+        """
+        if not self.path:
+            return None
+        return re.sub(r"^.*/", "", self.path)
+
+    @property
+    def working_base_name(self) -> Optional[str]:
+        """The working file name without its last extension.
+
+        The selectors' rule exactly -- regexp_replace(name, '\\.[^.]*$', '') --
+        not ``Path.stem``, which keeps a leading-dot name whole.
+        """
+        name = self.working_file_name
+        if name is None:
+            return None
+        return re.sub(r"\.[^.]*$", "", name)
+
+    def template_context(self) -> dict[str, Any]:
+        """The fields a configured destination template may name.
+
+        ``<file_name>`` and ``<base_name>`` are the WORKING names, as they were
+        on the selector row a step used to resolve its templates against;
+        ``<base_path>`` and ``<classification.*>`` are the file's current
+        classification. Facts of what the file IS, read once with the context.
+        """
+        return {
+            "file_manifest_id": self.file_manifest_id,
+            "file_mutation_id": self.file_mutation_id,
+            "path": self.path,
+            "file_name": self.working_file_name,
+            "base_name": self.working_base_name,
+            "base_path": self.file_facts.get("base_path"),
+            "classification": self.file_facts.get("classification"),
+            "record_type": self.file_facts.get("record_type"),
+            "conversion": self.file_facts.get("conversion"),
+        }
+
     def governed_context(self) -> dict[str, Any]:
         """The governed facts a canonical Source holds as read-only context.
 
@@ -746,6 +881,12 @@ _FILE_FACTS: tuple[str, ...] = (
     "result", "mutated_ts", "classification", "is_classified",
     "file_type_key", "file_type_name", "signature", "type_header_definition",
     "key_fields", "filename_match", "data_profile_key", "profile_row_count",
+    # The working mutation's conversion provenance -- sanitize reads its
+    # operator to tell an Excel-generated CSV from a delivered one -- and the
+    # MANIFEST's data profile key, which profiling builds on. Not the
+    # same-named data_profile_key above: that is the file type's profile and
+    # is empty until a profile exists (backlog 619).
+    "conversion", "manifest_data_profile_key",
 )
 
 

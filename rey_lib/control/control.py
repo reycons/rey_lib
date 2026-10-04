@@ -1642,13 +1642,49 @@ class Control:
         (see _FILE_MANIFEST_COLUMNS), never by the plain names the projection
         gives the working mutation.
         """
-        rows = self._call_rows("get_file_manifest",
-                               {"file_manifest_id": file_manifest_id},
-                               required=required)
+        rows = self.get_file_manifests(file_manifest_id=file_manifest_id, required=required)
         if not rows:
             return None
         first = rows[0]
         return {column: first[source] for column, source in _FILE_MANIFEST_COLUMNS}
+
+    def get_file_manifests(
+        self,
+        *,
+        installation_id: Optional[int] = None,
+        file_manifest_id: Optional[int] = None,
+        file_mutation_id: Optional[int] = None,
+        operation: Optional[str] = None,
+        source_name: Optional[str] = None,
+        effective_mutation: bool = False,
+        required: bool = True,
+    ) -> list[dict[str, Any]]:
+        """The governed manifest retrieval contract: f_file_manifest_get's rows.
+
+        The one route to control.f_file_manifest_get (backlog 618), through the
+        one ``get_file_manifest`` binding. Every filter the binding declares is
+        sent, absent ones as None, because the map refuses a declared input that
+        was not supplied. Which files and which mutation the filters select is
+        the routine's decision; see its header.
+
+        ``installation_id`` is sent only when given. Otherwise the binding reads
+        it off :attr:`installation_id` -- this object's context -- exactly as it
+        does for every installation-scoped selector.
+
+        Returns:
+            The flat rows, one per selected mutation x profile field x
+            transform column, each file's rows contiguous.
+        """
+        values: dict[str, Any] = {
+            "file_manifest_id": file_manifest_id,
+            "file_mutation_id": file_mutation_id,
+            "operation": operation,
+            "source_name": source_name,
+            "effective_mutation": effective_mutation,
+        }
+        if installation_id is not None:
+            values["installation_id"] = installation_id
+        return self._call_rows("get_file_manifest", values, required=required)
 
     def find_file_manifest(self, path: Optional[str] = None,
                            checksum_sha256: Optional[str] = None,

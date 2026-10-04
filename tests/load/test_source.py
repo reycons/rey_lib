@@ -29,11 +29,12 @@ class CountingReader:
         self.path = path
         self.calls: list[tuple[Optional[int], Optional[int]]] = []
 
-    def file_source_context(
+    def get_file_manifests(
         self,
+        *,
         file_manifest_id: Optional[int] = None,
         file_mutation_id: Optional[int] = None,
-        required: bool = True,
+        **_filters: Any,
     ) -> Sequence[Mapping[str, Any]]:
         self.calls.append((file_manifest_id, file_mutation_id))
         return [{

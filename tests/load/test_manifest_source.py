@@ -26,6 +26,7 @@ from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile
 
 from rey_lib.load.manifest_source import ManifestSource
+from rey_lib.load.record_templates import resolve_record_template
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -41,15 +42,18 @@ class CountingReader:
         self.rows = list(rows)
         self.calls: list[dict[str, Any]] = []
 
-    def file_source_context(
+    def get_file_manifests(
         self,
+        *,
         file_manifest_id: Optional[int] = None,
         file_mutation_id: Optional[int] = None,
-        required: bool = True,
+        effective_mutation: bool = False,
+        **_filters: Any,
     ) -> Sequence[Mapping[str, Any]]:
         self.calls.append({
             "file_manifest_id": file_manifest_id,
             "file_mutation_id": file_mutation_id,
+            "effective_mutation": effective_mutation,
         })
         return self.rows
 
@@ -170,6 +174,165 @@ class TestOneCallAndNoSecondLookup:
             ManifestSource.create(reader)
 
         assert reader.calls == []
+
+
+class TestTheIdentityIsTheGettersSingleFileEntry:
+    """create reads one file through f_file_manifest_get (backlog 619).
+
+    Which mutation is current is the ROUTINE's decision: a manifest alone asks
+    for the effective mutation, a named mutation is sent as itself.
+    """
+
+    def test_a_manifest_alone_asks_for_its_effective_mutation(self, reader) -> None:
+        ManifestSource.create(reader, file_manifest_id=10, file_type_id=4)
+
+        assert reader.calls == [{
+            "file_manifest_id": 10, "file_mutation_id": None, "effective_mutation": True,
+        }]
+
+    def test_a_named_mutation_is_sent_as_itself(self) -> None:
+        reader = CountingReader([_row(file_mutation_id=25)])
+
+        ManifestSource.create(reader, file_mutation_id=25)
+
+        assert reader.calls == [{
+            "file_manifest_id": None, "file_mutation_id": 25, "effective_mutation": False,
+        }]
+
+    def test_both_are_sent_and_the_routine_checks_they_agree(self) -> None:
+        reader = CountingReader([_row(file_mutation_id=25)])
+
+        ManifestSource.create(reader, file_manifest_id=10, file_mutation_id=25)
+
+        assert reader.calls == [{
+            "file_manifest_id": 10, "file_mutation_id": 25, "effective_mutation": False,
+        }]
+
+    def test_a_reader_of_the_retired_contract_is_refused_by_name(self) -> None:
+        class _Retired:
+            def file_source_context(self, **_identities: Any) -> list[dict[str, Any]]:
+                raise AssertionError("the retired contract was called")
+
+        with pytest.raises(ConfigError, match="get_file_manifests"):
+            ManifestSource.create(_Retired(), file_manifest_id=10)
+
+
+class _SetReader:
+    """The manifest retrieval contract answered with a set, recording each call."""
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self.rows = list(rows)
+        self.calls: list[dict[str, Any]] = []
+
+    def get_file_manifests(self, **filters: Any) -> Sequence[Mapping[str, Any]]:
+        self.calls.append(filters)
+        return self.rows
+
+
+class TestOneReadForTheOperationsWholeSet:
+    """get_for_operation: one call, one object per file, in the routine's order."""
+
+    @staticmethod
+    def _three_files() -> list[dict[str, Any]]:
+        return [
+            _row(file_manifest_id=10, file_mutation_id=25, data_profile_field_id=1),
+            _row(file_manifest_id=10, file_mutation_id=25, data_profile_field_id=2),
+            _row(file_manifest_id=11, file_mutation_id=31),
+            _row(file_manifest_id=12, file_mutation_id=40),
+        ]
+
+    def test_the_whole_set_is_one_call(self) -> None:
+        reader = _SetReader(self._three_files())
+
+        ManifestSource.get_for_operation(reader, 3, "file_sanitization")
+
+        assert reader.calls == [{
+            "installation_id": 3, "operation": "file_sanitization", "source_name": None,
+        }]
+
+    def test_one_object_per_file_in_the_routines_order(self) -> None:
+        sources = ManifestSource.get_for_operation(
+            _SetReader(self._three_files()), 3, "file_sanitization",
+        )
+
+        assert [(s.file_manifest_id, s.file_mutation_id) for s in sources] == [
+            (10, 25), (11, 31), (12, 40),
+        ]
+
+    def test_each_object_is_what_create_builds_from_its_rows(self) -> None:
+        rows = self._three_files()
+        sources = ManifestSource.get_for_operation(_SetReader(rows), 3, "file_sanitization")
+
+        one = ManifestSource.create(CountingReader(rows[:2]), file_mutation_id=25)
+
+        assert sources[0]._rows == one._rows
+        assert sources[0].opened_by == one.opened_by == "mutation"
+        assert sources[0].file_facts == one.file_facts
+
+    def test_the_source_is_passed_through(self) -> None:
+        reader = _SetReader([])
+
+        ManifestSource.get_for_operation(reader, 3, "file_classification", source_name="fidelity")
+
+        assert reader.calls[0]["source_name"] == "fidelity"
+
+    def test_nothing_remaining_is_no_objects(self) -> None:
+        assert ManifestSource.get_for_operation(_SetReader([]), 3, "data_profile") == []
+
+    def test_a_reader_of_the_retired_contract_is_refused_by_name(self) -> None:
+        with pytest.raises(ConfigError, match="get_file_manifests"):
+            ManifestSource.get_for_operation(object(), 3, "data_profile")
+
+
+class TestTheFactsAStepNeedsAreTheObjects:
+    """What a Loader step read off the selector row, it reads off the object."""
+
+    def test_conversion_provenance_is_a_fact(self) -> None:
+        source = ManifestSource.create(
+            CountingReader([_row(conversion={"operator": "excel"})]), file_mutation_id=25,
+        )
+
+        assert source.file_facts["conversion"] == {"operator": "excel"}
+
+    def test_the_manifests_profile_key_is_not_the_types(self) -> None:
+        source = ManifestSource.create(CountingReader([_row(
+            data_profile_key=None, manifest_data_profile_key="feed|transactions",
+        )]), file_mutation_id=25)
+
+        assert source.file_facts["manifest_data_profile_key"] == "feed|transactions"
+        assert source.file_facts["data_profile_key"] is None
+
+    @pytest.mark.parametrize(("path", "name", "base"), [
+        ("/d/feed/work/sanitized_csv/Book_Sheet1.csv", "Book_Sheet1.csv", "Book_Sheet1"),
+        ("/d/feed/a.tar.gz", "a.tar.gz", "a.tar"),
+        ("/d/feed/.hidden", ".hidden", ""),
+        ("/d/feed/noext", "noext", "noext"),
+    ])
+    def test_the_working_names_follow_the_selectors_rule(self, path, name, base) -> None:
+        source = ManifestSource.create(CountingReader([_row(path=path)]), file_mutation_id=25)
+
+        assert source.working_file_name == name
+        assert source.working_base_name == base
+
+    def test_no_path_has_no_working_name(self) -> None:
+        source = ManifestSource.create(CountingReader([_row(path=None)]), file_mutation_id=25)
+
+        assert source.working_file_name is None
+        assert source.working_base_name is None
+
+    def test_templates_resolve_to_the_working_names(self) -> None:
+        source = ManifestSource.create(CountingReader([_row(
+            path="/d/feed/work/converted/Book_Sheet1.csv",
+            file_name="Book.xlsx", base_path="/d/feed",
+        )]), file_mutation_id=25)
+
+        context = source.template_context()
+        resolved = resolve_record_template("<base_path>/work/prepared/<file_name>", context)
+        kickouts = resolve_record_template("/k/<base_name>.kickouts.jsonl", context)
+
+        assert str(resolved.path) == "/d/feed/work/prepared/Book_Sheet1.csv"
+        assert str(kickouts.path) == "/k/Book_Sheet1.kickouts.jsonl"
+        assert source.governed_context()["file_name"] == "Book.xlsx"
 
 
 class TestTheResolvedQueryIsKeptAsReturned:

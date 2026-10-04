@@ -33,12 +33,7 @@ class _Reader:
     def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
         self.rows = list(rows)
 
-    def file_source_context(
-        self,
-        file_manifest_id: Optional[int] = None,
-        file_mutation_id: Optional[int] = None,
-        required: bool = True,
-    ) -> Sequence[Mapping[str, Any]]:
+    def get_file_manifests(self, **_filters: Any) -> Sequence[Mapping[str, Any]]:
         return self.rows
 
 
@@ -659,9 +654,9 @@ class TestSavedSettingsAreEditedThenSaved:
         reads: list[int] = []
 
         class _Counting(_Reader):
-            def file_source_context(self, *args: Any, **kwargs: Any):
+            def get_file_manifests(self, *args: Any, **kwargs: Any):
                 reads.append(1)
-                return super().file_source_context(*args, **kwargs)
+                return super().get_file_manifests(*args, **kwargs)
 
         governed = ManifestSource.create(
             _Counting(self._two()), file_manifest_id=10, adopt_persisted_type=True,
@@ -684,9 +679,9 @@ class TestRereadingAfterASave:
         rows = self._two()
 
         class _Counting(_Reader):
-            def file_source_context(self, *args: Any, **kwargs: Any):
+            def get_file_manifests(self, *args: Any, **kwargs: Any):
                 reads.append(kwargs)
-                return super().file_source_context(*args, **kwargs)
+                return super().get_file_manifests(*args, **kwargs)
 
         reader = _Counting(rows)
         governed = ManifestSource.create(reader, file_manifest_id=10, adopt_persisted_type=True)
@@ -700,7 +695,9 @@ class TestRereadingAfterASave:
         fresh = governed.reread(reader)
 
         assert len(reads) == 2
-        assert reads[1] == {"file_manifest_id": 10, "file_mutation_id": None}
+        assert reads[1] == {
+            "file_manifest_id": 10, "file_mutation_id": None, "effective_mutation": True,
+        }
         assert fresh is not governed
         assert fresh.selected_transform_id == 21
         assert fresh.resolved_query_sql == "select 'saved'"
@@ -812,9 +809,9 @@ class TestDeletingTheSelectedSavedSetting:
         reads: list[int] = []
 
         class _Counting(_Reader):
-            def file_source_context(self, *args: Any, **kwargs: Any):
+            def get_file_manifests(self, *args: Any, **kwargs: Any):
                 reads.append(1)
-                return super().file_source_context(*args, **kwargs)
+                return super().get_file_manifests(*args, **kwargs)
 
         governed = ManifestSource.create(
             _Counting(self._two()), file_manifest_id=10, adopt_persisted_type=True,
