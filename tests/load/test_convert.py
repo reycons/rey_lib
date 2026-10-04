@@ -38,7 +38,7 @@ from rey_lib.load.convert import (
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.files import WorkbookOpenError, serialize_source_file_mutation
 from rey_lib.files.data_file import data_file_for
-from rey_lib.logs import bind_run, clear_run
+from rey_lib.logs import bind_run, bind_step, clear_run, clear_step
 
 #: A sentinel, so a test can say "this row carries no classification".
 _UNSET = object()
@@ -70,6 +70,22 @@ class _Lifecycle:
         self.mutations.append(record)
         return 100 + len(self.mutations)
 
+    def log_source_file_mutation(self, _ctx: object, **kwargs: object) -> int:
+        # The moves are routing's (the move kind), recorded through the same
+        # canonical serializer as the conversion's own mutations.
+        kwargs.pop("message", None)
+        kwargs.pop("run_log_fields", None)
+        for name in ("source_path", "destination_path", "recovery_path",
+                     "previous_version_path"):
+            if name in kwargs:
+                kwargs[name] = str(kwargs[name])
+        record = serialize_source_file_mutation(
+            run_log_id=len(self.mutations) + 1,
+            **kwargs,
+        )
+        self.mutations.append(record)
+        return 100 + len(self.mutations)
+
     def of_action(self, action: str) -> list[dict[str, object]]:
         return [item for item in self.mutations if item.get("action") == action]
 
@@ -81,21 +97,27 @@ def lifecycle() -> _Lifecycle:
     with patch(
         "rey_lib.load.convert.log_governed_source_file_mutation",
         side_effect=captured.log_governed_source_file_mutation,
+    ), patch(
+        "rey_lib.files.file_routing.log_source_file_mutation",
+        side_effect=captured.log_source_file_mutation,
     ):
         yield captured
 
 
 @pytest.fixture(autouse=True)
 def _the_step_run_log_is_bound(run_log):
-    """Bind the step's run log, as app_runtime does before any step runs.
+    """Bind the step's run log and step, as the workflow does before any step runs.
 
     The transform writes through the bound run log; in production that is the
-    very run log the step is handed.
+    very run log the step is handed. A kickout states the bound step as the
+    operation it served.
     """
     bind_run(run_log)
+    bind_step(step_id="convert_alpha_workbooks")
     try:
         yield
     finally:
+        clear_step()
         clear_run()
 
 
@@ -139,10 +161,14 @@ def _selector_row(
             "source_field": "file.path",
             "values": dict(values) if values is not None else {"group": "alpha"},
         }
-    # The mutation the routine selected; the workbook opens at exactly it.
+    # The mutation the routine selected; the workbook opens at exactly it. It
+    # was inventoried where it is and has not moved, so it is its own original.
+    mutation = 7000 + int(file_manifest_id)
+    located = None if path is None else str(path)
     return manifest_row(
-        file_manifest_id, 7000 + int(file_manifest_id), path,
+        file_manifest_id, mutation, path,
         classification=classification, base_path="/data/alpha",
+        manifest_path=located, original_path=located, original_mutation_id=mutation,
     )
 
 
@@ -173,7 +199,6 @@ def _entry(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         },
         "processing": str(tmp_path / "processing"),
         "outbox": str(tmp_path / "outbox"),
-        "kickouts": str(tmp_path / "kickouts"),
         "archive": str(tmp_path / "archive"),
         "include_hidden_sheets": False,
         "include_empty_sheets": False,
@@ -185,6 +210,8 @@ def _entry(tmp_path: Path, **overrides: object) -> SimpleNamespace:
 def _ctx(tmp_path: Path, *entries: object) -> SimpleNamespace:
     return SimpleNamespace(
         app_name="rey_loader",
+        # The move kind routes within the governed root.
+        paths=SimpleNamespace(resolve=lambda name: str(tmp_path)),
         excel_conversions=list(entries or [_entry(tmp_path)]),
         pipeline_name="alpha_pipeline",
         pipeline_run_id="run-1",
@@ -253,12 +280,10 @@ def test_resolve_excel_conversion_config_returns_concrete_paths(
     assert resolved.source_field == "path"
     assert resolved.processing == str(tmp_path / "processing")
     assert resolved.outbox == str(tmp_path / "outbox")
-    assert resolved.kickouts == str(tmp_path / "kickouts")
     assert resolved.archive == str(tmp_path / "archive")
     assert resolved.folder_overwrite == {
         "processing": False,
         "outbox": False,
-        "kickouts": False,
         "archive": False,
     }
 
@@ -268,7 +293,6 @@ def test_folder_declarations_own_their_overwrite_authority(tmp_path: Path) -> No
         tmp_path,
         processing={"path": str(tmp_path / "processing"), "overwrite": True},
         outbox={"path": str(tmp_path / "outbox"), "overwrite": True},
-        kickouts={"path": str(tmp_path / "kickouts"), "overwrite": True},
         archive={"path": str(tmp_path / "archive"), "overwrite": True},
     )
 
@@ -276,12 +300,10 @@ def test_folder_declarations_own_their_overwrite_authority(tmp_path: Path) -> No
 
     assert resolved.processing == str(tmp_path / "processing")
     assert resolved.outbox == str(tmp_path / "outbox")
-    assert resolved.kickouts == str(tmp_path / "kickouts")
     assert resolved.archive == str(tmp_path / "archive")
     assert resolved.folder_overwrite == {
         "processing": True,
         "outbox": True,
-        "kickouts": True,
         "archive": True,
     }
 
@@ -293,15 +315,15 @@ def test_folder_declarations_are_read_when_config_loading_yields_namespaces(
     entry = _entry(
         tmp_path,
         outbox=Namespace({"path": str(tmp_path / "outbox"), "overwrite": True}),
-        kickouts=Namespace({"path": str(tmp_path / "kickouts"), "overwrite": True}),
+        archive=Namespace({"path": str(tmp_path / "archive"), "overwrite": True}),
     )
 
     resolved = _config(_ctx(tmp_path, entry))
 
     assert resolved.outbox == str(tmp_path / "outbox")
-    assert resolved.kickouts == str(tmp_path / "kickouts")
+    assert resolved.archive == str(tmp_path / "archive")
     assert resolved.folder_overwrite["outbox"] is True
-    assert resolved.folder_overwrite["kickouts"] is True
+    assert resolved.folder_overwrite["archive"] is True
 
 
 def test_folder_overwrite_must_be_boolean(tmp_path: Path) -> None:
@@ -767,23 +789,42 @@ def test_success_without_archive_leaves_source_in_processing(run_log,
     assert not source.exists()
 
 
-def test_conversion_failure_moves_source_to_kickouts_and_reraises_same_error(run_log, 
+def test_conversion_failure_kicks_the_original_out_to_its_inbox_and_fails_the_step(
+    run_log,
     tmp_path: Path,
 ) -> None:
+    """A failing workbook goes to <inbox>/kickouts by the common execution path."""
     source = _one_workbook(tmp_path, "broken.xls")
     ctx = _ctx(tmp_path)
-    conversion_error = WorkbookOpenError("cannot open", source)
 
     with patch(
         "rey_lib.load.convert.convert_workbook_to_csv",
-        side_effect=conversion_error,
+        side_effect=WorkbookOpenError("cannot open", source),
     ):
-        with pytest.raises(WorkbookOpenError) as raised:
-            run_excel_conversion(ctx, run_log, _inline(ctx))
+        assert run_excel_conversion(ctx, run_log, _inline(ctx)) == 1
 
-    assert raised.value is conversion_error
-    assert (tmp_path / "kickouts" / source.name).exists()
+    assert (source.parent / "kickouts" / source.name).exists()
     assert not (tmp_path / "processing" / source.name).exists()
+
+
+def test_one_failing_workbook_does_not_stop_the_batch(run_log, tmp_path: Path) -> None:
+    good = _source_file(tmp_path, "good.xls")
+    bad = _source_file(tmp_path, "bad.xls")
+    _selector_rows(tmp_path, _selector_row(1001, good), _selector_row(1011, bad))
+    ctx = _ctx(tmp_path)
+
+    def convert(source: Path, outbox: Path, **kwargs: object) -> SimpleNamespace:
+        if source.name == "bad.xls":
+            raise WorkbookOpenError("cannot open", source)
+        return _converter(source, outbox, **kwargs)
+
+    with patch(
+        "rey_lib.load.convert.convert_workbook_to_csv", side_effect=convert,
+    ), patch("rey_lib.load.convert.log_artifact_reference"):
+        assert run_excel_conversion(ctx, run_log, _inline(ctx)) == 1
+
+    assert (bad.parent / "kickouts" / bad.name).exists()
+    assert (tmp_path / "archive" / good.name).exists()
 
 
 def test_conversion_evidence_links_both_lifecycle_records(run_log, tmp_path: Path) -> None:
@@ -850,7 +891,6 @@ def _templated_entry(tmp_path: Path) -> SimpleNamespace:
         tmp_path,
         processing=str(tmp_path) + "/<classification.values.group>/processing",
         outbox=str(tmp_path) + "/<classification.values.group>/converted_csv",
-        kickouts=str(tmp_path) + "/<classification.values.group>/kickouts",
         archive=None,
     )
 
@@ -932,7 +972,7 @@ def test_source_file_move_mutations_are_appended_to_the_file_manifest(run_log,
     ]
     first = moves[0]
     assert first["file_id"] == 1001
-    assert first["conversion"] == {"operator": "excel_conversion", "name": "alpha"}
+    assert first["producer"]["operation"] == "excel_conversion"
     assert first["file"]["original_path"] == str(source.resolve())
     assert first["file"]["path"] == str(tmp_path / "processing" / source.name)
     assert "rollback" not in first
@@ -1016,7 +1056,11 @@ def test_move_mutations_declare_no_conversion_kind(run_log,
     tmp_path: Path,
     lifecycle: _Lifecycle,
 ) -> None:
-    """Only the created file is a conversion; claiming and archiving are not."""
+    """Only the created file is a conversion; claiming and archiving are moves.
+
+    The moves are the move kind's, through routing, which states the operation
+    they served and no conversion section (backlog 624).
+    """
     _one_workbook(tmp_path)
     ctx = _ctx(tmp_path)
 
@@ -1029,11 +1073,8 @@ def test_move_mutations_declare_no_conversion_kind(run_log,
     moves = lifecycle.of_action("move")
     assert moves
     for record in moves:
-        assert "source" not in record["conversion"]
-        assert record["conversion"] == {
-            "operator": "excel_conversion",
-            "name": "alpha",
-        }
+        assert "conversion" not in record
+        assert record["producer"]["operation"] == "excel_conversion"
 
 
 def test_created_extension_is_declared_not_derived_from_the_output_path(run_log, 
@@ -1073,8 +1114,7 @@ def test_kickout_move_is_recorded_when_conversion_fails(run_log,
         "rey_lib.load.convert.convert_workbook_to_csv",
         side_effect=WorkbookOpenError("cannot open", source),
     ):
-        with pytest.raises(WorkbookOpenError):
-            run_excel_conversion(ctx, run_log, _inline(ctx))
+        assert run_excel_conversion(ctx, run_log, _inline(ctx)) == 1
 
     assert [
         record["result"] for record in lifecycle.of_action("move")
@@ -1095,17 +1135,27 @@ def test_uncommitted_move_evidence_prevents_the_manifest_append(run_log,
     _one_workbook(tmp_path)
     ctx = _ctx(tmp_path)
 
-    from rey_lib.files import LogRunRollbackError
+    from rey_lib.files.file_routing import FileRoutingEvidenceError
+    from rey_lib.files.log_run_rollback import (
+        SourceFileMutationEvidenceError,
+        SourceFileMutationEvidenceFailurePhase,
+    )
 
     with patch(
-        "rey_lib.load.convert.log_governed_source_file_mutation",
-        side_effect=LogRunRollbackError("evidence did not commit"),
+        "rey_lib.files.file_routing.log_source_file_mutation",
+        side_effect=SourceFileMutationEvidenceError(
+            "evidence did not commit",
+            phase=SourceFileMutationEvidenceFailurePhase.RUN_LOG_NOT_COMMITTED,
+            run_log_id=None,
+        ),
     ), patch(
         "rey_lib.load.convert.convert_workbook_to_csv",
         side_effect=_converter,
-    ):
-        with pytest.raises(ConversionError, match="could not be committed"):
+    ) as convert:
+        with pytest.raises(FileRoutingEvidenceError, match="evidence did not commit"):
             run_excel_conversion(ctx, run_log, _inline(ctx))
+
+    convert.assert_not_called()
 
 
 def test_dry_run_appends_no_lifecycle_record(run_log, 

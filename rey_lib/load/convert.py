@@ -25,7 +25,8 @@ This module owns the application-specific boundary around the neutral
 * consume each classification record's governed physical path;
 * retain the legacy conversion-owned processing claim when configured;
 * emit converted CSV artifacts with source lineage; and
-* dispose source workbooks to archive or kickouts.
+* leave the workbook's moves (processing, archive) to ``Transform(kind="move")``
+  and a failed workbook's kickout to the common execution path (backlog 624).
 
 Candidate selection is manifest-driven. This module never enumerates an inbox,
 never infers eligibility from a filename, and never reconstructs a source path
@@ -49,7 +50,6 @@ from rey_lib.files import (
     convert_workbook_to_csv,
     is_supported_workbook,
     LogRunRollbackError,
-    move_file,
 )
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.logs import (
@@ -165,7 +165,6 @@ class ExcelConversionConfig:
     source_field: str
     processing: str | None
     outbox: str
-    kickouts: str
     archive: str | None
     folder_overwrite: Mapping[str, bool]
     include_hidden_sheets: bool
@@ -213,7 +212,6 @@ class ConversionDestinations:
 
     processing: Path | None
     outbox: Path
-    kickouts: Path
     archive: Path | None
     folder_overwrite: Mapping[str, bool]
 
@@ -407,21 +405,50 @@ def run_excel_conversion(
         )
         return 0
 
-    # Each candidate is already resolved; it crosses into the transform whole,
+    # Each candidate is already resolved; it crosses into the transforms whole,
     # and its workbook is opened at exactly the mutation the selector named.
+    # The step only SEQUENCES Transform kinds (backlog 624):
+    #   workbook -> move(processing, when declared) -> convert -> CSVs
+    #            -> move(archive, when declared)
+    # A workbook that cannot be converted is kicked out by the common
+    # execution path; it is recorded here and the batch goes on.
+    failed = 0
     for candidate in selection.candidates:
         workbook = _candidate_data_file(ctx, candidate)
-        Transform(
-            values={"config": config, "candidate": candidate},
-            selected="convert",
-        ).resolve(ctx).apply(workbook)
+        if candidate.destinations.processing is not None:
+            (workbook,) = Transform(
+                values={"role": "processing", "operation": _OPERATOR_NAME,
+                        "route": str(candidate.destinations.processing)},
+                selected="move",
+            ).resolve(ctx).apply(workbook)
+        try:
+            Transform(
+                values={"config": config, "candidate": candidate},
+                selected="convert",
+            ).resolve(ctx).apply(workbook)
+        except ConversionError as error:
+            failed += 1
+            log_validation_result(run_log,
+                validation_name="excel_conversion_workbook",
+                status="failed",
+                message=str(error),
+                conversion_name=config.name,
+            )
+            continue
+        if candidate.destinations.archive is not None:
+            Transform(
+                values={"role": "archive", "operation": _OPERATOR_NAME,
+                        "route": str(candidate.destinations.archive)},
+                selected="move",
+            ).resolve(ctx).apply(workbook)
 
     log_row_count(run_log,
         count_name="workbooks_converted",
-        count=len(selection.candidates),
+        count=len(selection.candidates) - failed,
         subject=config.name,
     )
-    return 0
+    # Any failed workbook fails the step; the rest of the batch still ran.
+    return 1 if failed else 0
 
 
 def _candidate_data_file(ctx: Any, candidate: ConversionCandidate) -> DataFile:
@@ -489,19 +516,23 @@ class ConvertTransform(FileTransform):
         self._config = config
         self._candidate = candidate
 
+    #: A workbook that cannot be converted is a failure of that file: the
+    #: common execution path kicks its original out (backlog 624).
+    file_failures = (ConversionError,)
+
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Convert the workbook and return each CSV at its M10 mutation.
 
-        The conversion reads the workbook where it is when conversion runs --
-        after the processing move, when one is declared -- exactly as legacy
-        does; ``data_file`` identifies the governed file, not where it now is.
+        Converts the workbook WHERE THIS DATAFILE IS -- the step has already
+        moved it to processing through ``Transform(kind="move")`` when one is
+        declared. Convert moves nothing itself (backlog 624).
 
         Returns:
             One DataFile per converted CSV, or nothing when the workbook
             produced no output.
         """
         produced = _convert_claimed_workbook(
-            self._ctx, bound_run_log(), self._config, self._candidate)
+            self._ctx, bound_run_log(), self._config, self._candidate, Path(data_file.path))
         # The conversion produces CSV by definition, so the type is declared,
         # never derived from the output's name.
         return tuple(
@@ -545,9 +576,12 @@ def _resolve_inline_excel_conversion_config(
         entry, "processing", name
     )
     outbox, outbox_overwrite = _required_folder_template(entry, "outbox", name)
-    kickouts, kickouts_overwrite = _required_folder_template(
-        entry, "kickouts", name
-    )
+    if _has(entry, "kickouts"):
+        raise ConversionError(
+            f"Excel conversion '{name}' kickouts is retired (backlog 624): a "
+            "workbook that cannot be converted has its original moved to "
+            "<inbox>/kickouts by the common execution path. Remove 'kickouts'."
+        )
     archive, archive_overwrite = _optional_folder_template(entry, "archive", name)
     return ExcelConversionConfig(
         name=name,
@@ -556,12 +590,10 @@ def _resolve_inline_excel_conversion_config(
         source_field=_source_field(entry, name),
         processing=processing,
         outbox=outbox,
-        kickouts=kickouts,
         archive=archive,
         folder_overwrite={
             "processing": processing_overwrite,
             "outbox": outbox_overwrite,
-            "kickouts": kickouts_overwrite,
             "archive": archive_overwrite,
         },
         include_hidden_sheets=_optional_bool(
@@ -622,11 +654,21 @@ def _convert_claimed_workbook(
     ctx: Any, run_log,
     config: ExcelConversionConfig,
     candidate: ConversionCandidate,
+    workbook: Path,
 ) -> tuple[tuple[Path, int], ...]:
-    """Convert, record, and dispose one selected governed workbook.
+    """Convert and record one selected governed workbook, where it now is.
+
+    No move happens here: processing and archive are ``Transform(kind="move")``
+    steps the workflow sequences around this, and a workbook that cannot be
+    converted is kicked out by the common execution path (backlog 624).
 
     Returns:
         Each converted CSV's path and the M10 mutation that recorded it.
+
+    Raises:
+        ConversionError: When the workbook cannot be converted -- after the
+            failed conversion is recorded, so the evidence exists whatever
+            happens to the file next.
     """
 
     original_source = candidate.source_path
@@ -638,60 +680,23 @@ def _convert_claimed_workbook(
         source=_application(ctx),
         **_lifecycle_evidence(config, candidate),
     )
-    processing_file = original_source
-    if candidate.destinations.processing is not None:
-        processing_file = _move_source(
-            ctx,
-            original_source,
-            candidate.destinations.processing,
-            reason="processing",
-            candidate=candidate,
-            config=config,
-            original_source=original_source,
-        )
 
     try:
         result = convert_workbook_to_csv(
-            processing_file,
+            workbook,
             candidate.destinations.outbox,
             include_hidden_sheets=config.include_hidden_sheets,
             include_empty_sheets=config.include_empty_sheets,
             overwrite=candidate.destinations.folder_overwrite["outbox"],
         )
-    except Exception as conversion_error:
+    except Exception as conversion_error:  # noqa: BLE001 -- recorded, then this file's failure
         # The conversion ran against a governed workbook and produced nothing.
-        # Recorded before the source is moved to kickouts, so the evidence
-        # exists whether or not that move succeeds.
         _record_failed_conversion(ctx, candidate, original_source, conversion_error)
-        try:
-            _move_source(
-                ctx,
-                processing_file,
-                candidate.destinations.kickouts,
-                reason="kickouts",
-                candidate=candidate,
-                config=config,
-                original_source=original_source,
-            )
-        except Exception as kickout_error:
-            raise ConversionError(
-                f"Workbook conversion failed for '{original_source.name}', and "
-                f"the claimed source could not be moved to kickouts: {kickout_error}"
-            ) from conversion_error
-        raise
+        raise ConversionError(
+            f"Workbook conversion failed for '{original_source.name}': {conversion_error}"
+        ) from conversion_error
 
-    produced = _record_conversion_result(ctx, run_log, config, candidate, result)
-    if candidate.destinations.archive is not None:
-        _move_source(
-            ctx,
-            processing_file,
-            candidate.destinations.archive,
-            reason="archive",
-            candidate=candidate,
-            config=config,
-            original_source=original_source,
-        )
-    return produced
+    return _record_conversion_result(ctx, run_log, config, candidate, result)
 
 
 def _record_conversion_result(
@@ -773,58 +778,6 @@ def _record_conversion_result(
             **lifecycle,
         )
     return tuple(produced)
-
-
-def _move_source(
-    ctx: Any,
-    source_path: Path,
-    destination: Path,
-    *,
-    reason: str,
-    original_source: Path,
-    candidate: ConversionCandidate,
-    config: ExcelConversionConfig,
-) -> Path:
-    """Move one source workbook through the standard File Operator evidence path."""
-
-    destination_file = destination / source_path.name
-    if destination_file.exists() and not config.folder_overwrite[reason]:
-        raise ConversionError(
-            f"Excel conversion folder '{reason}' does not authorize replacing "
-            f"existing file '{destination_file}'."
-        )
-
-    moved = move_file(
-        source_path,
-        destination,
-        state_ctx=ctx,
-        app=_application(ctx),
-        pipeline=getattr(ctx, "pipeline_name", None),
-        reason=reason,
-        original_source=original_source,
-        metadata={
-            "pipeline_step_name": getattr(ctx, "pipeline_step_name", ""),
-            "pipeline_step_id": getattr(ctx, "pipeline_step_id", ""),
-        },
-    )
-    _log.info("moved to %s: %s", reason, moved)
-    _append_mutation_record(
-        ctx,
-        config,
-        candidate,
-        action="move",
-        source_path=source_path,
-        destination_path=moved,
-        message=(
-            f"Source file moved to {reason} for inventory record "
-            f"{candidate.inventory_record_id}."
-        ),
-        conversion=ExcelConversionValues(name=config.name),
-        # Excel is the operation; the destination is the outcome.
-        operation=_OPERATOR_NAME,
-        reason="moved_to_" + reason,
-    )
-    return moved
 
 
 def _record_failed_conversion(
@@ -1219,7 +1172,7 @@ def _resolve_destinations(
     """
 
     resolved: dict[str, Path | None] = {}
-    for key in ("processing", "outbox", "kickouts", "archive"):
+    for key in ("processing", "outbox", "archive"):
         template = getattr(config, key)
         if template is None:
             resolved[key] = None
@@ -1233,7 +1186,6 @@ def _resolve_destinations(
         ConversionDestinations(
             processing=resolved["processing"],
             outbox=resolved["outbox"],
-            kickouts=resolved["kickouts"],
             archive=resolved["archive"],
             folder_overwrite=dict(config.folder_overwrite),
         ),
