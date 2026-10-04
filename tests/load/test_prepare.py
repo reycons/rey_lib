@@ -224,27 +224,26 @@ def _config(
     tmp_path: Path,
     *,
     outbox_overwrite: bool = False,
-    kickouts_overwrite: bool = False,
-    redacted_copy: bool = True,
+    output: str | None = None,
+    outbox_path: str | None = None,
 ) -> dict:
-    return {
+    config = {
         "file_selection": {
-            "operation": "create_prepared_files",
+            "operation": (
+                "create_prepared_redacted_files" if output == "redacted"
+                else "create_prepared_files"
+            ),
             "source_field": "path",
         },
         "preparation": {"headers": {"convert_to": "snake_case"}},
         "outbox": {
-            "path": str(tmp_path / "prepared" / "<file_name>"),
+            "path": outbox_path or str(tmp_path / "prepared" / "<file_name>"),
             "overwrite": outbox_overwrite,
         },
-        "kickouts": {
-            "path": str(
-                tmp_path / "kickouts" / "<base_name>.kickouts.jsonl"
-            ),
-            "overwrite": kickouts_overwrite,
-            "redacted_copy": redacted_copy,
-        },
     }
+    if output is not None:
+        config["output"] = output
+    return config
 
 
 @pytest.fixture(autouse=True)
@@ -314,9 +313,6 @@ def test_selected_header_is_the_canonical_header_and_never_a_kickout(run_log, tm
         "A-1,100,2026-05-01",
         "A-2,200,2026-05-02",
     ]
-    assert not (tmp_path / "kickouts").exists()
-    assert result.results[0].kickout_path is None
-    assert result.results[0].excluded_rows == 0
 
 
 def test_legacy_exclude_metadata_is_ignored(run_log, tmp_path: Path) -> None:
@@ -354,8 +350,7 @@ def test_legacy_excludes_never_filter_prepared_rows(run_log, tmp_path: Path) -> 
         encoding="utf-8").splitlines() == [
             "col_one,col_two", "1,2", "junk row", "3,4", "another junk",
         ]
-    assert not (tmp_path / "kickouts").exists()
-    assert (result.results[0].included_rows, result.results[0].excluded_rows) == (4, 0)
+    assert result.results[0].included_rows == 4
 
 
 def test_source_column_order_and_values_are_preserved(run_log, tmp_path: Path) -> None:
@@ -404,7 +399,6 @@ def test_output_filenames_come_from_manifest_fields(run_log, tmp_path: Path) -> 
     )
 
     assert Path(result.results[0].prepared_path).name == "BmoHoldMay26.csv"
-    assert result.results[0].kickout_path is None
 
 
 def test_headers_are_converted_to_snake_case(run_log, tmp_path: Path) -> None:
@@ -540,7 +534,7 @@ def test_outbox_overwrite_authority_is_honored(run_log, tmp_path: Path) -> None:
 
     _run(
         _ctx(tmp_path), run_log,
-        _config(tmp_path, outbox_overwrite=True, kickouts_overwrite=True),
+        _config(tmp_path, outbox_overwrite=True),
         [_record(source)],
     )
     assert existing.read_text(encoding="utf-8") != "keep me"
@@ -576,7 +570,6 @@ def test_folder_declarations_are_read_from_loaded_config_namespaces(run_log, tmp
     source, _ = _tabular(tmp_path)
     config = _config(tmp_path)
     config["outbox"] = Namespace(dict(config["outbox"]))
-    config["kickouts"] = Namespace(dict(config["kickouts"]))
 
     result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
 
@@ -619,7 +612,6 @@ def test_evidence_records_prepared_artifact_with_counts_and_header_mapping(run_l
     ]
     assert artifact.call_args_list[0].kwargs["header_mapping"] == {"Col One": "col_one"}
     assert artifact.call_args_list[0].kwargs["included_row_count"] == 2
-    assert artifact.call_args_list[0].kwargs["excluded_row_count"] == 0
     assert artifact.call_args_list[0].kwargs["file_id"] == _FILE_ID
     assert mutation.call_count == 1
     assert {call.kwargs["action"] for call in mutation.call_args_list} == {"create"}
@@ -806,17 +798,6 @@ def _with_kickouts(tmp_path: Path):
     return source
 
 
-def test_legacy_excludes_create_no_kickout_artifacts(run_log, 
-    tmp_path: Path,
-) -> None:
-    source = _with_kickouts(tmp_path)
-
-    result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
-    assert result.results[0].kickout_path is None
-    assert result.results[0].kickout_redacted_path is None
-    assert not (tmp_path / "kickouts").exists()
-
-
 def test_legacy_excluded_values_remain_prepared_data(run_log, tmp_path: Path) -> None:
     source = _with_kickouts(tmp_path)
 
@@ -840,36 +821,6 @@ def test_no_llm_is_reachable_from_the_orchestrator(tmp_path: Path) -> None:
 
     for forbidden in ("llm", "anthropic", "openai", "analyzer", "prompt"):
         assert forbidden not in text.lower()
-
-
-def test_no_kickouts_are_created_without_non_header_exclusions(run_log, tmp_path: Path) -> None:
-    source, _ = _tabular(tmp_path)
-
-    result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
-
-    assert result.results[0].kickout_path is None
-    assert result.results[0].kickout_redacted_path is None
-    assert not (tmp_path / "kickouts").exists()
-
-
-def test_existing_legacy_redacted_kickout_is_untouched(run_log, tmp_path: Path) -> None:
-    source = _with_kickouts(tmp_path)
-    existing = tmp_path / "kickouts" / f"{source.stem}.kickouts.redacted.jsonl"
-    existing.parent.mkdir(parents=True)
-    existing.write_text("keep me", encoding="utf-8")
-
-    result = _run(
-        _ctx(tmp_path), run_log, _config(tmp_path, outbox_overwrite=True), [_record(source)]
-    )
-    assert result.failed == 0
-    assert existing.read_text(encoding="utf-8") == "keep me"
-
-    _run(
-        _ctx(tmp_path), run_log,
-        _config(tmp_path, outbox_overwrite=True, kickouts_overwrite=True),
-        [_record(source)],
-    )
-    assert existing.read_text(encoding="utf-8") == "keep me"
 
 
 def test_existing_legacy_kickout_does_not_block_prepared_publication(run_log, 
@@ -897,92 +848,11 @@ def test_existing_legacy_kickout_does_not_block_prepared_publication(run_log,
 # ---------------------------------------------------------------------------
 
 
-def test_redacted_copy_defaults_to_false_and_publishes_no_sister(run_log, 
-    tmp_path: Path,
-) -> None:
-    """Existing outputs without the flag keep their current behaviour."""
-    source = _with_kickouts(tmp_path)
-    config = _config(tmp_path)
-    del config["kickouts"]["redacted_copy"]
-
-    result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
-
-    assert result.results[0].kickout_redacted_path is None
-    assert not (tmp_path / "kickouts" / f"{source.stem}.kickouts.jsonl").exists()
-    assert not (
-        tmp_path / "kickouts" / f"{source.stem}.kickouts.redacted.jsonl"
-    ).exists()
-    assert Path(result.results[0].prepared_path).exists()
-    assert not (tmp_path / "prepared" / f"{source.stem}.redacted.csv").exists()
-
-
-def test_legacy_kickout_sister_is_never_replaced(run_log, tmp_path: Path) -> None:
-    source = _with_kickouts(tmp_path)
-    sister = tmp_path / "kickouts" / f"{source.stem}.kickouts.redacted.jsonl"
-    sister.parent.mkdir(parents=True)
-    sister.write_text("keep me", encoding="utf-8")
-
-    result = _run(
-        _ctx(tmp_path), run_log, _config(tmp_path, outbox_overwrite=True), [_record(source)]
-    )
-    assert result.failed == 0
-    assert sister.read_text(encoding="utf-8") == "keep me"
-
-    _run(
-        _ctx(tmp_path), run_log,
-        _config(tmp_path, outbox_overwrite=True, kickouts_overwrite=True),
-        [_record(source)],
-    )
-    assert sister.read_text(encoding="utf-8") == "keep me"
-
-
 def test_an_unknown_folder_key_is_rejected(run_log, tmp_path: Path) -> None:
     config = _config(tmp_path)
-    config["kickouts"]["redacted_path"] = "/nope"
+    config["outbox"]["redacted_path"] = "/nope"
     with pytest.raises(PreparationError, match="unknown fields: redacted_path"):
         _run(_ctx(tmp_path), run_log, config, [])
-
-
-def test_redacted_copy_must_be_boolean(run_log, tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    config["kickouts"]["redacted_copy"] = "yes"
-    with pytest.raises(PreparationError, match="'redacted_copy' must be true or false"):
-        _run(_ctx(tmp_path), run_log, config, [])
-
-
-def test_namespace_backed_folders_support_redacted_copy(run_log, tmp_path: Path) -> None:
-    """Loaded YAML supplies Namespace sections, not dicts."""
-    source = _with_kickouts(tmp_path)
-    config = _config(tmp_path)
-    config["kickouts"] = Namespace(dict(config["kickouts"]))
-    config["outbox"] = Namespace(dict(config["outbox"]))
-
-    result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
-
-    assert result.results[0].kickout_redacted_path is None
-    assert Path(result.results[0].prepared_path).exists()
-
-
-def test_the_prepared_outbox_may_opt_in_and_its_sister_is_redacted(run_log, 
-    tmp_path: Path,
-) -> None:
-    """Any folder may opt in; the sister is a redaction, not a copy."""
-    source = _with_kickouts(tmp_path)
-    config = _config(tmp_path)
-    config["outbox"]["redacted_copy"] = True
-
-    _run(_ctx(tmp_path), run_log, config, [_record(source)])
-
-    original = (tmp_path / "prepared" / source.name).read_text(
-        encoding="utf-8").splitlines()
-    sister = (tmp_path / "prepared" / f"{source.stem}.redacted.csv").read_text(
-        encoding="utf-8").splitlines()
-
-    assert sister[0] == original[0]                 # header preserved
-    assert len(sister) == len(original)             # row count preserved
-    for source_line, sister_line in zip(original[1:], sister[1:]):
-        assert len(source_line.split(",")) == len(sister_line.split(","))
-    assert sister[1:] != original[1:]               # values did differ
 
 
 def test_blank_rows_are_not_filtered_by_legacy_profile_metadata(run_log, 
@@ -1011,8 +881,7 @@ def test_blank_rows_are_not_filtered_by_legacy_profile_metadata(run_log,
     assert ",," in prepared
     assert "A-1,100,2026-05-01" in prepared
     assert "A-3,300,2026-05-03" in prepared
-    assert (result.results[0].included_rows, result.results[0].excluded_rows) == (6, 0)
-    assert not (tmp_path / "kickouts").exists()
+    assert result.results[0].included_rows == 6
 
 
 def test_repeated_header_is_removed_and_never_reaches_kickouts(run_log, 
@@ -1048,65 +917,7 @@ def test_repeated_header_is_removed_and_never_reaches_kickouts(run_log,
         "A-3,300,2026-05-03",
         "A-4,400,2026-05-04",
     ]
-    assert not (tmp_path / "kickouts").exists()
-    assert result.results[0].kickout_path is None
-    assert (result.results[0].included_rows, result.results[0].excluded_rows) == (4, 0)
-
-
-def test_the_prepared_file_gets_a_redacted_companion(run_log, tmp_path: Path) -> None:
-    """A prepared file can be reviewed without its contents.
-
-    The companion carries the same header, the same rows and the same columns;
-    only the values are replaced. It is recorded as its own governed artifact,
-    or it exists on disk and in no lifecycle.
-    """
-    source = _source(tmp_path, [
-        "Account Number,Trade Amount,Settle Date",
-        "A-1,100,2026-05-01",
-        "A-2,200,2026-05-02",
-    ])
-    _profile(tmp_path, source)
-    config = _config(tmp_path)
-    config["outbox"]["redacted_copy"] = True
-
-    with patch(
-        "rey_lib.load.prepare.log_governed_source_file_mutation",
-        return_value=1,
-    ) as logged:
-        result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
-
-    prepared = tmp_path / "prepared" / source.name
-    companion = prepared.with_name(f"{prepared.stem}.redacted{prepared.suffix}")
-    assert companion.is_file()
-    assert result.results[0].prepared_redacted_path == str(companion)
-
-    original = prepared.read_text(encoding="utf-8").splitlines()
-    redacted = companion.read_text(encoding="utf-8").splitlines()
-    # Same shape, same header, different values.
-    assert len(redacted) == len(original)
-    assert redacted[0] == original[0]
-    assert [len(line.split(",")) for line in redacted] == [
-        len(line.split(",")) for line in original
-    ]
-    assert redacted[1] != original[1]
-    assert "A-1" not in companion.read_text(encoding="utf-8")
-
-    reasons = [call.kwargs["reason"] for call in logged.call_args_list]
-    assert "redacted_prepared_file" in reasons
-
-
-def test_no_redacted_companion_when_the_folder_does_not_ask_for_one(run_log, 
-    tmp_path: Path,
-) -> None:
-    """Redaction of the prepared file is the folder's decision, as elsewhere."""
-    source, _ = _tabular(tmp_path)
-
-    result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
-
-    prepared = tmp_path / "prepared" / source.name
-    companion = prepared.with_name(f"{prepared.stem}.redacted{prepared.suffix}")
-    assert not companion.exists()
-    assert result.results[0].prepared_redacted_path is None
+    assert result.results[0].included_rows == 4
 
 
 # ---------------------------------------------------------------------------
@@ -1261,7 +1072,7 @@ def test_a_retired_file_kickouts_key_is_refused_by_name(run_log, tmp_path: Path)
     config = {**_config(tmp_path),
               "file_kickouts": {"path": "<base_path>/work/kickouts/<file_name>"}}
 
-    with pytest.raises(PreparationError, match="file_kickouts is retired"):
+    with pytest.raises(PreparationError, match="'file_kickouts' is retired"):
         _run(_ctx(tmp_path), run_log, config, [])
 
 
@@ -1288,10 +1099,10 @@ def test_a_state_that_cannot_be_read_is_a_file_failure(run_log, tmp_path: Path) 
     _only_failure(result, "could not be read")
 
 
-def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
+def test_a_redacted_file_that_cannot_be_built_is_a_file_failure(
     run_log, tmp_path: Path,
 ) -> None:
-    """Row 606 live finding: RedactionExhausted is this file's failure (rule 75).
+    """RedactionExhausted fails the redacted output for this file (rule 75).
 
     The file's original is kicked out by the common path and the failure
     recorded, nothing is published for it, and the batch goes on to prepare
@@ -1308,8 +1119,7 @@ def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
         name="CWAHoldMay26.csv")
     _profile(tmp_path, second, source_record_id=11)
     original = _original(tmp_path)
-    config = _config(tmp_path)
-    config["outbox"] = {**config["outbox"], "redacted_copy": True}
+    config = _config(tmp_path, output="redacted")
     real = loader_prepare.redacted_csv_text
     calls = {"n": 0}
 
@@ -1355,3 +1165,63 @@ def test_a_retired_procedure_key_is_refused_by_name(run_log, tmp_path: Path) -> 
 
     with pytest.raises(PreparationError, match="procedure is retired"):
         _run(_ctx(tmp_path), run_log, config, [])
+
+
+# -- Transform(prepare, output="clear" | "redacted") (backlog 614) -----------
+
+def test_clear_output_writes_only_the_clear_prepared_file(run_log, tmp_path: Path) -> None:
+    source, _ = _tabular(tmp_path)
+
+    with patch("rey_lib.load.prepare.log_governed_source_file_mutation",
+               return_value=91) as mutation:
+        result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
+
+    assert result.prepared == 1
+    assert [p.name for p in (tmp_path / "prepared").iterdir()] == [source.name]
+    assert (tmp_path / "prepared" / source.name).read_text(encoding="utf-8").splitlines()[1] \
+        == "A-1,100,2026-05-01"
+    (call,) = mutation.call_args_list
+    assert (call.kwargs["action"], call.kwargs["reason"], call.kwargs["operation"]) == (
+        "create", "prepared_file", "create_prepared_files")
+
+
+def test_redacted_output_writes_only_the_redacted_prepared_file(run_log, tmp_path: Path) -> None:
+    source, _ = _tabular(tmp_path)
+    config = _config(tmp_path, output="redacted",
+                     outbox_path=str(tmp_path / "prepared" / "<base_name>.redacted.csv"))
+
+    with patch("rey_lib.load.prepare.log_governed_source_file_mutation",
+               return_value=92) as mutation:
+        result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
+
+    assert result.prepared == 1
+    written = tmp_path / "prepared" / f"{source.stem}.redacted.csv"
+    assert [p.name for p in (tmp_path / "prepared").iterdir()] == [written.name]
+    lines = written.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "account_number,trade_amount,settle_date"
+    assert "A-1,100,2026-05-01" not in lines
+    assert len(lines) == 3
+    (call,) = mutation.call_args_list
+    assert (call.kwargs["action"], call.kwargs["reason"], call.kwargs["operation"]) == (
+        "create", "redacted_prepared_file", "create_prepared_redacted_files")
+
+
+@pytest.mark.parametrize("retired", ["kickouts", "file_kickouts"])
+def test_a_kickout_setting_is_refused_by_name(run_log, tmp_path: Path, retired: str) -> None:
+    config = {**_config(tmp_path), retired: {"path": "/x"}}
+
+    with pytest.raises(PreparationError, match=f"'{retired}' is retired"):
+        _run(_ctx(tmp_path), run_log, config, [])
+
+
+def test_redacted_copy_is_refused_by_name(run_log, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config["outbox"]["redacted_copy"] = True
+
+    with pytest.raises(PreparationError, match="'redacted_copy' is retired"):
+        _run(_ctx(tmp_path), run_log, config, [])
+
+
+def test_an_unknown_output_is_refused(run_log, tmp_path: Path) -> None:
+    with pytest.raises(PreparationError, match="output 'both'"):
+        _run(_ctx(tmp_path), run_log, _config(tmp_path, output="both"), [])

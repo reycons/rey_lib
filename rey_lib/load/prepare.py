@@ -6,17 +6,16 @@ calls (``normalize_row``, ``normalized_header_fields``). What changed, and only
 because the boundary required it:
 
 * each kept record opens its selected (sanitized) state through
-  ``ManifestSource`` and is prepared through ``Transform(prepare)``:
-  ``PrepareTransform.apply`` returns the prepared file (and its redacted
-  companion, and the row-kickout files when there are any) as DataFiles at
-  their own M17 mutations; ``plan`` is the dry run -- legacy's result with
-  ``applied=False``, nothing published, no identity invented;
+  ``ManifestSource`` and is prepared through ``Transform(prepare,
+  output=...)`` -- ``clear`` writes the prepared file, ``redacted`` its
+  redacted equivalent (backlog 614); one file, at the outbox path, as a
+  DataFile at its own M17 mutation; ``plan`` is the dry run -- nothing
+  published, no identity invented;
 * a file that cannot be prepared is KICKED OUT first (rule 75,
   ``a_failed_file_is_kicked_out``) by the common execution path every
   Transform kind runs through (backlog 624): its ORIGINAL, wherever it is,
   moves to <inbox>/kickouts -- which is also what stops the manifest retrieval
-  offering it again -- and then the step records its failure (M18) as legacy
-  did. The step's own ``kickouts`` stays what it was: the ROW-kickout JSONL;
+  offering it again -- and then the kind records its failure (M18);
 * the error is ``PreparationError``, and the producer is the runtime context's
   application.
 
@@ -24,19 +23,15 @@ The process selects already-governed sanitized CSV mutation records, resolves
 the current profile-library record for each file object, and uses its canonical
 header to materialize the prepared CSV. No structure is rediscovered here.
 
-The process selects already-governed sanitized CSV mutation records, resolves
-the current profile-library record for each file object, and uses its canonical
-header to materialize the prepared CSV. No structure is rediscovered here.
-
 The profile's selected header row is the canonical header. It is consumed once,
 normalized to snake_case, and written as the prepared file's header; it is never
-kickout content and never a data row.
+a data row.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +39,6 @@ from rey_lib.files import (
     FileSetCollisionError,
     FileSetMember,
     publish_file_set,
-    redacted_companion_path,
 )
 from rey_lib.files.csv import (
     CsvReadError,
@@ -60,8 +54,6 @@ from rey_lib.logs import (
     log_artifact_reference,
     log_input_file_reference,
 )
-from rey_lib.redaction.redactors import redact_delimited
-from rey_lib.redaction.registry import RedactionRegistry
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.data_file import DataFile, data_file_for
@@ -87,8 +79,12 @@ __all__ = [
     "run_create_prepared_files",
 ]
 
-#: The operation every prepared-file record and kickout move states.
-_OPERATION = "create_prepared_files"
+#: What a prepared file is written as: the clear text, or its redacted
+#: equivalent. Each is its own operation's result (backlog 614).
+_OUTPUTS: dict[str, str] = {
+    "clear": "prepared_file",
+    "redacted": "redacted_prepared_file",
+}
 
 
 class PreparationError(AppError):
@@ -101,11 +97,9 @@ def _application(ctx: Any) -> str:
 
 _log = get_logger(__name__)
 
-# Evidence columns lead every kickout row so a reviewer can trace it back to
-# the exact source line and the reason it was excluded. Redaction never sees
-# them, so they read identically in the original and redacted files.
+# The source-line column sanitization prepends. It is part of the canonical
+# header when the source carries it.
 _SOURCE_LINE_COLUMN = "source_line_number"
-_REASON_COLUMN = "kickout_reason"
 
 
 @dataclass(frozen=True)
@@ -115,11 +109,7 @@ class PreparedFileResult:
     file_id: FileId
     source_path: str
     prepared_path: str
-    kickout_path: str | None
-    prepared_redacted_path: str | None
-    kickout_redacted_path: str | None
     included_rows: int
-    excluded_rows: int
     header_mapping: tuple[tuple[str, str], ...]
     applied: bool
     status: str = "success"
@@ -157,7 +147,6 @@ class _DeclaredFolder:
 
     path: str
     overwrite: bool
-    redacted_copy: bool = False
 
 
 @dataclass(frozen=True)
@@ -165,8 +154,9 @@ class _PreparedConfig:
     operation: str
     source_field: str
     outbox: _DeclaredFolder
-    kickouts: _DeclaredFolder
     convert_headers_to: str
+    #: clear | redacted -- which prepared file this process writes.
+    output: str = "clear"
 
 
 def run_create_prepared_files(
@@ -205,7 +195,7 @@ def run_create_prepared_files(
         # has already kicked out its original when the error arrives here, and
         # the batch goes on. A dry run plans and never applies.
         preparer = Transform(
-            values={"config": config, "apply": apply},
+            values={"config": config, "apply": apply, "output": config.output},
             selected="prepare",
         ).resolve(ctx)
         try:
@@ -232,11 +222,11 @@ def _prepare_one_file(
     *,
     apply: bool,
 ) -> tuple[PreparedFileResult, tuple[tuple[str, int], ...]]:
-    """Materialize one governed file's prepared and kickout artifacts.
+    """Materialize one governed file's prepared file, clear or redacted.
 
     Returns:
-        The result, and each published artifact's path with its M17 mutation
-        (none on a dry run, which publishes nothing).
+        The result, and the published file's path with its M17 mutation (none
+        on a dry run, which publishes nothing).
     """
     mutation_context = _mutation_context(record)
     source = _source_path(record, config.source_field)
@@ -250,78 +240,36 @@ def _prepare_one_file(
     canonical_header = _profile_header(profile, consumed_record_id, delimiter)
 
     # Header phase: the first match is the canonical header and every match is
-    # removed. A repeated header is neither data nor a kickout.
-    header_fields, remaining = _partition_headers(
+    # removed. A repeated header is not a data row.
+    header_fields, data_rows = _partition_headers(
         rows, canonical_header, source
     )
     normalized = normalized_header(header_fields)
     _require_unique_headers(header_fields, normalized, source)
     header_mapping = tuple(zip(header_fields, normalized))
 
-    data_rows = remaining
-    kickout_rows: list[tuple[int, str, list[str]]] = []
-    included_lines = [
-        render_delimited_line(fields, delimiter) for _, _, fields in data_rows
-    ]
-
     prepared_path = _resolved_template(config.outbox.path, record, source, "outbox")
-    kickout_path = (
-        _resolved_template(config.kickouts.path, record, source, "kickouts")
-        if kickout_rows
-        else None
-    )
-    # The prepared file's redacted companion carries the same rows and columns
-    # with only its values replaced, so a prepared file can be reviewed without
-    # its contents.
-    prepared_redacted_path = (
-        str(redacted_companion_path(prepared_path))
-        if config.outbox.redacted_copy
-        else None
-    )
-    kickout_redacted_path = (
-        str(redacted_companion_path(kickout_path))
-        if kickout_rows and config.kickouts.redacted_copy
-        else None
-    )
-
-    prepared_text = "".join(
-        line + "\n"
-        for line in [render_delimited_line(normalized, delimiter), *included_lines]
-    )
-    # The publication primitive owns companion naming and atomicity; each
-    # producer supplies only what a companion contains.
-    members = [FileSetMember(
-        destination=Path(prepared_path),
-        text=prepared_text,
-        redacted_text=(
-            redacted_csv_text(
-                normalized, [fields for _, _, fields in data_rows], delimiter
-            )
-            if config.outbox.redacted_copy
-            else None
-        ),
-    )]
-    if kickout_rows:
-        columns = _kickout_columns(kickout_rows, normalized)
-        members.append(FileSetMember(
-            destination=Path(kickout_path),
-            text=_kickout_text(kickout_rows),
-            redacted_text=(
-                _kickout_text(_redacted_kickout_rows(kickout_rows, columns))
-                if config.kickouts.redacted_copy
-                else None
-            ),
-        ))
+    # ONE FILE: the clear prepared text, or the same rows and columns with only
+    # their values replaced (backlog 614).
+    if config.output == "redacted":
+        text = redacted_csv_text(
+            normalized, [fields for _, _, fields in data_rows], delimiter
+        )
+    else:
+        text = "".join(
+            line + "\n"
+            for line in [
+                render_delimited_line(normalized, delimiter),
+                *(render_delimited_line(fields, delimiter) for _, _, fields in data_rows),
+            ]
+        )
+    members = [FileSetMember(destination=Path(prepared_path), text=text)]
 
     result = PreparedFileResult(
         file_id=mutation_context.file_id,
         source_path=source,
         prepared_path=prepared_path,
-        kickout_path=kickout_path,
-        prepared_redacted_path=prepared_redacted_path,
-        kickout_redacted_path=kickout_redacted_path,
-        included_rows=len(included_lines),
-        excluded_rows=len(kickout_rows),
+        included_rows=len(data_rows),
         header_mapping=header_mapping,
         applied=False,
     )
@@ -335,14 +283,9 @@ def _prepare_one_file(
         file_id=mutation_context.file_id,
     )
 
-    # Collision policy is set-scoped, so publication may only replace when
-    # every folder contributing a member authorizes it.
-    overwrite = config.outbox.overwrite and (
-        not kickout_rows or config.kickouts.overwrite
-    )
     try:
         publish_file_set(
-            members, on_collision="replace" if overwrite else "fail"
+            members, on_collision="replace" if config.outbox.overwrite else "fail"
         )
     except FileSetCollisionError as exc:
         raise PreparationError(
@@ -354,17 +297,17 @@ def _prepare_one_file(
             f"Prepared output for '{source}' could not be published: {exc}"
         ) from exc
 
-    produced = _record_evidence(ctx, run_log, mutation_context, result, producing_step,
-                                record, header_mapping)
+    produced = _record_evidence(ctx, run_log, config, mutation_context, result,
+                                producing_step, record, header_mapping)
     return PreparedFileResult(**{**vars(result), "applied": True}), produced
 
 
 def _failed_result(
     ctx: Any,
+    config: _PreparedConfig,
     record: Mapping[str, Any],
-    error: PreparationError | RedactionExhausted,
+    error: BaseException,
     *,
-    source_field: str,
     apply: bool,
 ) -> PreparedFileResult:
     """Record one file's failure as governed evidence and as an item result.
@@ -372,7 +315,7 @@ def _failed_result(
     The paths are reported best effort: a record can fail before either is
     resolvable, and an unreportable path must not replace the real error.
     """
-    source = _optional_text(record_field(record, source_field))
+    source = _optional_text(record_field(record, config.source_field))
     file_id = _optional_text(record.get("file_manifest_id"))
     # The failure itself goes through the logger with its error, which is what
     # writes the run's ERROR record.
@@ -387,11 +330,11 @@ def _failed_result(
                 status="failed",
                 source_path=source,
                 application_name=_application(ctx),
-                operation=_OPERATION,
+                operation=config.operation,
                 # The outcome of a failed preparation is that nothing was
                 # produced; why is the error, and it belongs in the message.
                 # Same result as a success; status distinguishes them.
-                reason="prepared_file",
+                reason=_OUTPUTS[config.output],
                 message=str(error),
                 run_log_fields={
                     "source_record_id": record.get("file_mutation_id"),
@@ -405,11 +348,7 @@ def _failed_result(
         file_id=file_id,
         source_path=source,
         prepared_path="",
-        kickout_path=None,
-        prepared_redacted_path=None,
-        kickout_redacted_path=None,
         included_rows=0,
-        excluded_rows=0,
         header_mapping=(),
         applied=False,
         status="failed",
@@ -424,27 +363,21 @@ def _optional_text(value: Any) -> str:
 
 def _record_evidence(
     ctx: Any, run_log,
+    config: _PreparedConfig,
     mutation_context: Any,
     result: PreparedFileResult,
     producing_step: str,
     record: Mapping[str, Any],
     header_mapping: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, int], ...]:
-    """Record the created artifacts through the existing governed boundary.
+    """Record the prepared file through the existing governed boundary.
 
     Returns:
-        Each artifact's path and the M17 mutation that recorded it.
+        The file's path and the M17 mutation that recorded it.
     """
     mapping_payload = {original: new for original, new in header_mapping}
     produced: list[tuple[str, int]] = []
-    for path, role in (
-        (result.prepared_path, "prepared_file"),
-        (result.prepared_redacted_path, "redacted_prepared_file"),
-        (result.kickout_path, "kickout_file"),
-        (result.kickout_redacted_path, "redacted_kickout_file"),
-    ):
-        if path is None:
-            continue
+    for path, role in ((result.prepared_path, _OUTPUTS[config.output]),):
         mutation = log_governed_source_file_mutation(
             ctx,
             mutation_context,
@@ -452,12 +385,11 @@ def _record_evidence(
             status="success",
             destination_path=path,
             application_name=_application(ctx),
-            operation=_OPERATION,
+            operation=config.operation,
             reason=role,
             run_log_fields={
                 "source_record_id": record.get("file_mutation_id"),
                 "included_row_count": result.included_rows,
-                "excluded_row_count": result.excluded_rows,
             },
         )
         log_artifact_reference(run_log, str(path), role=role, event="created",
@@ -467,7 +399,6 @@ def _record_evidence(
             producing_step=producing_step, viewer_type="file",
             safe_to_preview=True, file_id=result.file_id,
             included_row_count=result.included_rows,
-            excluded_row_count=result.excluded_rows,
             header_mapping=mapping_payload,
         )
         produced.append((str(path), mutation))
@@ -695,75 +626,6 @@ def _partition_headers(
     return canonical, remaining
 
 
-def _kickout_columns(
-    kickout_rows: Sequence[tuple[int, str, list[str]]],
-    normalized: Sequence[str],
-) -> list[str]:
-    """Return the source column names a kicked-out row's fields map onto.
-
-    A kicked-out row may carry more fields than the canonical header has
-    columns — that width is often why it was excluded. Overflow positions are
-    named the way the profiler already names unnamed columns, so every value
-    has a name to be redacted under and none is dropped.
-    """
-    widest = max((len(fields) for _, _, fields in kickout_rows), default=0)
-    columns = list(normalized)
-    for index in range(len(normalized), widest):
-        columns.append(f"column_{index + 1}")
-    return columns
-
-
-def _kickout_text(kickout_rows: Sequence[tuple[int, str, list[str]]]) -> str:
-    """Render one kickout file as JSONL, one excluded row per line.
-
-    Evidence is kept out of the record itself: the line number and reason are
-    their own fields, and ``fields`` holds the source row exactly as it was
-    read. A CSV would have had to interleave the two, which both widens the
-    original record and misaligns any row whose width is why it was excluded.
-    """
-    return "".join(
-        render_jsonl_line({
-            _SOURCE_LINE_COLUMN: line_number,
-            _REASON_COLUMN: reason,
-            "fields": list(fields),
-        }) + "\n"
-        for line_number, reason, fields in kickout_rows
-    )
-
-
-def _redacted_kickout_rows(
-    kickout_rows: Sequence[tuple[int, str, list[str]]],
-    columns: Sequence[str],
-) -> list[tuple[int, str, list[str]]]:
-    """Return the same rows with only their source values redacted.
-
-    Redaction runs through the shared governed boundary with the source
-    columns registered and nothing else, so the evidence columns are never
-    reachable by it and no redaction rule is decided here.
-    """
-    source_columns = [
-        column for column in columns
-        if column not in {_SOURCE_LINE_COLUMN, _REASON_COLUMN}
-    ]
-    registry = RedactionRegistry(source_columns)
-    rows = [
-        {
-            column: fields[index] if index < len(fields) else ""
-            for index, column in enumerate(source_columns)
-        }
-        for _, _, fields in kickout_rows
-    ]
-    redacted = redact_delimited(rows, source_columns, registry)
-    return [
-        (
-            line_number,
-            reason,
-            [redacted[position][column] for column in source_columns[:len(fields)]],
-        )
-        for position, (line_number, reason, fields) in enumerate(kickout_rows)
-    ]
-
-
 def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
     """Resolve one inline process mapping into its governed configuration."""
     if not _is_mapping_like(inline_config):
@@ -788,11 +650,18 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
             "preparing for file_selection.operation. Remove 'selections'."
         )
     file_selection = config.get("file_selection")
-    if "file_kickouts" in config:
+    for retired in ("file_kickouts", "kickouts"):
+        if retired in config:
+            raise PreparationError(
+                f"create_prepared_files' {retired!r} is retired (backlogs 614, "
+                "624): a file that cannot be prepared has its original moved to "
+                f"<inbox>/kickouts by the common execution path. Remove {retired!r}."
+            )
+    output = config.get("output", "clear")
+    if output not in _OUTPUTS:
         raise PreparationError(
-            "create_prepared_files' file_kickouts is retired (backlog 624): a file "
-            "that cannot be prepared has its original moved to <inbox>/kickouts by "
-            "the common execution path. Remove 'file_kickouts'."
+            f"create_prepared_files output {output!r} is not one of "
+            f"{', '.join(_OUTPUTS)}."
         )
     if isinstance(file_selection, Mapping) and "procedure" in file_selection:
         raise PreparationError(
@@ -834,8 +703,8 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
         operation=operation.strip(),
         source_field=source_field.strip(),
         outbox=_required_folder(config, "outbox"),
-        kickouts=_required_folder(config, "kickouts"),
         convert_headers_to=convert_to,
+        output=output,
     )
 
 
@@ -846,7 +715,13 @@ def _required_folder(mapping: Mapping[str, Any], field: str) -> _DeclaredFolder:
         raise PreparationError(
             f"create_prepared_files requires inline {field!r} as a folder mapping."
         )
-    unknown = sorted(set(declared) - {"path", "overwrite", "redacted_copy"})
+    if "redacted_copy" in declared:
+        raise PreparationError(
+            f"create_prepared_files folder {field!r} 'redacted_copy' is retired "
+            "(backlog 614): the redacted prepared file is its own process, with "
+            "output: redacted. Remove 'redacted_copy'."
+        )
+    unknown = sorted(set(declared) - {"path", "overwrite"})
     if unknown:
         raise PreparationError(
             f"create_prepared_files folder {field!r} contains unknown fields: "
@@ -857,16 +732,9 @@ def _required_folder(mapping: Mapping[str, Any], field: str) -> _DeclaredFolder:
         raise PreparationError(
             f"create_prepared_files folder {field!r} 'overwrite' must be true or false."
         )
-    redacted_copy = declared.get("redacted_copy", False)
-    if not isinstance(redacted_copy, bool):
-        raise PreparationError(
-            f"create_prepared_files folder {field!r} 'redacted_copy' must be "
-            "true or false."
-        )
     return _DeclaredFolder(
         path=_required_text(declared, "path", f"folder {field!r}"),
         overwrite=overwrite,
-        redacted_copy=redacted_copy,
     )
 
 
@@ -973,15 +841,15 @@ def _plain_config_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@file_transform("prepare", fields=("config", "apply"), required=("config",))
+@file_transform("prepare", fields=("config", "apply", "output"), required=("config",))
 class PrepareTransform(FileTransform):
-    """Prepare one governed sanitized file.
+    """Prepare one governed sanitized file, clear or redacted (backlog 614).
 
-        DataFile (sanitized) -> prepare -> prepared DataFile
-                                           [+ redacted companion]
-                                           [+ row kickouts (+ redacted)]
+        DataFile (sanitized) -> Transform(prepare, output="clear")    -> DataFile
+        DataFile (sanitized) -> Transform(prepare, output="redacted") -> DataFile
 
-    ``config`` is the step's validated preparation. Everything about the file --
+    ``config`` is the step's validated preparation; ``output`` is which
+    prepared file this writes. Everything about the file --
     the templates' fields, the source field, the governed identity -- is read
     off the DataFile (``DataFile.template_context()``, backlog 630). ``apply``
     says whether this is an applied run, so a failure is recorded as governed
@@ -993,18 +861,26 @@ class PrepareTransform(FileTransform):
     The step records nothing.
     """
 
-    def __init__(self, ctx: Any, *, config: _PreparedConfig, apply: Any = True) -> None:
-        """Keep the validated preparation and the row it prepares.
+    def __init__(
+        self, ctx: Any, *, config: _PreparedConfig, apply: Any = True, output: Any = None,
+    ) -> None:
+        """Keep the validated preparation, and which prepared file to write.
 
         Raises:
-            PreparationError: If the preparation is not what the step produces.
+            PreparationError: If the preparation is not what the step produces,
+                or ``output`` is neither clear nor redacted.
         """
         if not isinstance(config, _PreparedConfig):
             raise PreparationError(
                 "Transform (prepare) requires the step's validated preparation."
             )
+        chosen = config.output if output is None else str(output)
+        if chosen not in _OUTPUTS:
+            raise PreparationError(
+                f"Transform (prepare) output {chosen!r} is not one of {', '.join(_OUTPUTS)}."
+            )
         self._ctx = ctx
-        self._config = config
+        self._config = replace(config, output=chosen)
         self._record: dict[str, Any] = {}
         self._apply_run = apply is not False
         self._result: PreparedFileResult | None = None
@@ -1017,10 +893,10 @@ class PrepareTransform(FileTransform):
     file_failures = (PreparationError, RedactionExhausted)
 
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
-        """Prepare and publish the file, recording each artifact.
+        """Prepare and publish the file, and record it.
 
         Returns:
-            Each published artifact as a DataFile at its own M17 mutation.
+            The published prepared file as a DataFile at its M17 mutation.
         """
         self._record = data_file.template_context()
         result, produced = _prepare_one_file(
@@ -1029,8 +905,6 @@ class PrepareTransform(FileTransform):
         return tuple(
             data_file_for(
                 Path(path),
-                # The prepared files are CSV; the row kickouts are JSONL. Each
-                # path's own suffix says which, as the producer named it.
                 **{**data_file.governed_facts(), "file_mutation_id": mutation},
             )
             for path, mutation in produced
@@ -1060,8 +934,7 @@ class PrepareTransform(FileTransform):
     def _fail(self, error: BaseException) -> None:
         """Record this file's failure, and hold it as the item result."""
         self._result = _failed_result(
-            self._ctx, self._record, error,
-            source_field=self._config.source_field, apply=self._apply_run,
+            self._ctx, self._config, self._record, error, apply=self._apply_run,
         )
 
 
