@@ -24,7 +24,7 @@ A dry run classifies the selected rows in memory and persists nothing.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -76,7 +76,7 @@ class FileClassificationSourceConfig:
     name: str
     enabled: bool
     classification_type: str
-    procedure: str
+    operation: str
     source_field: str
     variables: tuple[DiscoveryVariable, ...]
     path_regex: re.Pattern[str]
@@ -105,6 +105,10 @@ class SourceClassificationCandidate:
     status: str
     reason_code: str | None = None
     reason: str | None = None
+    #: The governed file this candidate was prepared from, opened once by
+    #: ManifestSource.get_for_operation (backlog 619). Its DataFile is opened
+    #: from it; no second read of the file's context is made.
+    governed: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -188,14 +192,15 @@ def load_source_classification_candidates(
     ctx: Any, run_log,
     process_config: Any,
 ) -> tuple[SourceClassificationCandidate, ...]:
-    """Select candidate rows and prepare them without classifying.
+    """Select each source's governed files and prepare them without classifying.
 
-    Each source names the binding that answers which of its files still need
-    classifying, and this calls it. No filter is declared here and none is
-    applied afterwards: the routine returns the work, including excluding what
-    is already classified, and this module interprets nothing about how it
-    decided. Candidate-level field problems produce a rejected candidate and
-    never stop later records from being prepared.
+    One read per source, through the manifest retrieval routine for the
+    source's declared operation and its name (backlog 619). No filter is
+    declared here and none is applied afterwards: the routine returns the work,
+    including excluding what is already classified, and this module interprets
+    nothing about how it decided. Each candidate is prepared from the governed
+    object's own facts. Candidate-level field problems produce a rejected
+    candidate and never stop later records from being prepared.
     """
     control = getattr(ctx, "shared_control", None)
     if control is None:
@@ -208,24 +213,26 @@ def load_source_classification_candidates(
     candidates: list[SourceClassificationCandidate] = []
 
     for config in configs:
-        # The source's name is its identity, and the routine's argument. What
-        # that binding is, what it maps to and which parameter carries the name
-        # are the procedure map's; this knows only what configuration named.
+        # The source's name is its identity, and the routine's scope: the
+        # database narrows to this source, never this module.
         #
         # Nothing filters the result afterwards. A file the routine did not
         # return is not this run's work -- including one already classified,
         # which the routine excludes itself.
         try:
-            rows = control.call_rows(config.procedure,
-                                     {"source_name": config.name})
+            governed = ManifestSource.get_for_operation(
+                control, control.installation_id, config.operation,
+                source_name=config.name,
+            )
         except (ConfigError, DatabaseError) as exc:
             raise ClassificationError(
                 f"Source classification '{config.name}' cannot select files "
-                f"through '{config.procedure}': {exc}"
+                f"for operation '{config.operation}': {exc}"
             ) from exc
 
-        for row in rows:
-            candidates.append(_candidate(config, row))
+        for selected in governed:
+            candidate = _candidate(config, selected.template_context())
+            candidates.append(replace(candidate, governed=selected))
 
     return tuple(candidates)
 
@@ -391,19 +398,11 @@ def _classify_selected(
     lifecycle append -- and the step continues. The criterion is the DataFile
     registry, never a list of suffixes.
     """
-    mutation = candidate.manifest_record.get("file_mutation_id")
-    if candidate.status == "rejected" or mutation is None:
+    selected = candidate.governed
+    if candidate.status == "rejected" or selected is None:
         _record_rejection(ctx, run_log, _classify_candidate(candidate))
         return False
 
-    control = getattr(ctx, "shared_control", None)
-    if control is None:
-        raise ClassificationError(
-            "The governed file manifest is held in the control database, and "
-            "this context exposes no shared Control to open the selected file "
-            "through."
-        )
-    selected = ManifestSource.create(control, file_mutation_id=int(mutation))
     try:
         data_file = selected.data_file()
     except ConfigError as exc:
@@ -1002,10 +1001,17 @@ def _classification_source_config(
         raise ClassificationError(
             f"Source classification '{name}' retry_rejects must be a boolean."
         )
-    # Both live in the selection block: which routine names this source's work,
-    # and which field of the row it returns holds the file.
+    # Both live in the selection block: which operation this source's work is
+    # retrieved for, and which field of the governed file holds its path.
     file_selection = _required_mapping(entry, "file_selection", name)
-    procedure = _required_string(file_selection, "procedure", name)
+    if _get(file_selection, "procedure", MISSING) is not MISSING:
+        raise ClassificationError(
+            f"Source classification '{name}' file_selection.procedure is retired "
+            "(backlog 619): files are retrieved by file_selection.operation "
+            "through the manifest retrieval routine. Replace 'procedure' with "
+            "'operation'."
+        )
+    operation = _required_string(file_selection, "operation", name)
     source_field = _required_string(file_selection, "source_field", name)
     processing_value = _get(entry, "processing", MISSING)
     processing = (
@@ -1041,7 +1047,7 @@ def _classification_source_config(
         enabled=True,
         classification_type=classification_type,
         retry_rejects=retry_rejects,
-        procedure=procedure,
+        operation=operation,
         source_field=source_field,
         variables=variables,
         path_regex=path_regex,

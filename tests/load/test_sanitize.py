@@ -1,9 +1,11 @@
 """The Loader's governed whole-file sanitization (row 589, step 4).
 
 The legacy file_operator sanitization tests, copied and pointed at the
-Loader-owned implementation, rey_lib.load.sanitize. Each selected row now opens
+Loader-owned implementation, rey_lib.load.sanitize. The step asks
+ManifestSource.get_for_operation once for its operation; each governed file opens
 exactly its own mutation as a DataFile and is sanitized through
-``Transform(sanitize)``; every legacy assertion is kept. The tests after the
+``Transform(sanitize)``, reading its facts off the object (backlog 619). Every
+legacy assertion is kept. The tests after the
 copied ones cover what the boundary added: the transform, the governed
 DataFiles an applied run returns, the dry run returning none, and a file with no
 registered DataFile type.
@@ -19,12 +21,11 @@ from unittest.mock import patch
 import pytest
 
 from rey_lib.config.config_namespace import Namespace
-from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import FileSanitizationCollisionPolicy
-from rey_lib.files.data_file import data_file_for
 from rey_lib.load import Transform
-from rey_lib.load import sanitize as loader_sanitize
+from rey_lib.load.manifest_source import ManifestSource
 from rey_lib.load.sanitize import SanitizationError, SanitizeTransform, run_file_sanitization
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 
@@ -54,25 +55,25 @@ def _ctx(tmp_path: Path, *rows: object) -> SimpleNamespace:
 
 def _record(record_id: int, file_id: int, path: Path,
             *, converted: bool = False) -> dict[str, object]:
-    """One row as the selection routine returns it.
+    """One governed file as the manifest retrieval routine returns it.
 
     The governed identity is control.file_manifest.file_manifest_id, a positive
     integer the database mints; the string identity was retired. The step
     translates it to file_id for the reference it builds.
     """
-    return {
-        "file_mutation_id": record_id,
-        "record_type": "source_file_mutation",
-        "file_manifest_id": file_id,
-        "file": {"path": str(path), "file_name": path.name},
-        "classification": {
+    return manifest_row(
+        file_id, record_id, path,
+        record_type="source_file_mutation",
+        file_name=path.name,
+        base_path="/data/alpha",
+        classification={
             "type": "file_name_regex",
             "values": {"client": "alpha", "nested": {"kind": "positions"}},
         },
         # An excel conversion left its operator on the mutation; a delivered
         # CSV has none. That is what the origin is read from.
-        **({"conversion": {"operator": "excel_conversion"}} if converted else {}),
-    }
+        conversion={"operator": "excel_conversion"} if converted else None,
+    )
 
 
 def _config(tmp_path: Path) -> dict[str, object]:
@@ -82,8 +83,8 @@ def _config(tmp_path: Path) -> dict[str, object]:
         # whether one was produced by an excel conversion or delivered as CSV
         # is read from the record's own conversion.operator.
         "file_selection": {
-            "procedure": "files_to_sanitize",
-            "source_field": "file.path",
+            "operation": "file_sanitization",
+            "source_field": "path",
         },
         # The feed is the step's, not each selection's: there is one selection.
         "feed": "bmo",
@@ -92,7 +93,7 @@ def _config(tmp_path: Path) -> dict[str, object]:
                 tmp_path
                 / "clean"
                 / "<classification.values.client>"
-                / "<file.file_name>"
+                / "<file_name>"
             ),
             "overwrite": False,
         },
@@ -139,32 +140,12 @@ def _result(path: Path, *, applied: bool = True) -> SimpleNamespace:
     )
 
 
-def _opened(control: SelectingControl, *, file_mutation_id: int) -> SimpleNamespace:
-    """ManifestSource opened at exactly the selected row's mutation."""
-    row = next(one for one in control.selected
-               if one["file_mutation_id"] == file_mutation_id)
-    return SimpleNamespace(data_file=lambda: data_file_for(
-        Path(row["file"]["path"]),
-        file_manifest_id=row["file_manifest_id"],
-        file_mutation_id=file_mutation_id,
-        classification=row["classification"],
-        base_path="/data/alpha",
-    ))
-
-
 @pytest.fixture(autouse=True)
 def _mute_file_reference_logging():
     with (
         patch("rey_lib.load.sanitize.log_input_file_reference"),
         patch("rey_lib.load.sanitize.log_artifact_reference"),
     ):
-        yield
-
-
-@pytest.fixture(autouse=True)
-def _selected_state_opens_as_a_data_file():
-    """Each selected row opens its own mutation, as ManifestSource does."""
-    with patch.object(loader_sanitize.ManifestSource, "create", side_effect=_opened):
         yield
 
 
@@ -373,8 +354,8 @@ def test_explicit_overwrite_selects_shared_overwrite_policy(run_log, tmp_path: P
         (
             {
                 "file_selection": {
-                    "procedure": "files_to_sanitize",
-                    "source_field": "file.path",
+                    "operation": "file_sanitization",
+                    "source_field": "path",
                 },
                 "feed": "bmo",
                 "outbox": "/out/file.csv",
@@ -388,8 +369,8 @@ def test_explicit_overwrite_selects_shared_overwrite_policy(run_log, tmp_path: P
         (
             {
                 "file_selection": {
-                    "procedure": "files_to_sanitize",
-                    "source_field": "file.path",
+                    "operation": "file_sanitization",
+                    "source_field": "path",
                 },
                 "feed": "bmo",
                 "outbox": {"path": "/out/file.csv", "overwrite": "yes"},
@@ -412,16 +393,24 @@ def test_explicit_overwrite_selects_shared_overwrite_policy(run_log, tmp_path: P
         (
             {
                 "outbox": {"path": "/out/file.csv"},
-                "file_selection": {"procedure": "files_to_sanitize"},
+                "file_selection": {"operation": "file_sanitization"},
             },
             "source_field",
+        ),
+        # The binding name the step used to be handed is retired (backlog 619).
+        (
+            {
+                "outbox": {"path": "/out/file.csv"},
+                "file_selection": {"procedure": "files_to_sanitize", "source_field": "path"},
+            },
+            "procedure is retired",
         ),
         (
             {
                 "outbox": {"path": "/out/file.csv"},
                 "file_selection": {
-                    "procedure": "files_to_sanitize",
-                    "source_field": "file.path",
+                    "operation": "file_sanitization",
+                    "source_field": "path",
                 },
                 "feed": "bmo",
             },
@@ -518,22 +507,22 @@ def test_sanitized_folder_rejects_unknown_keys_and_non_boolean_flag(run_log,
 
 # -- what the boundary added ---------------------------------------------------
 
+def _governed(record: dict[str, object]) -> ManifestSource:
+    """The governed object the step builds from the routine's row."""
+    return ManifestSource([record], opened_by="mutation")
+
+
 def _sanitizer(tmp_path: Path, record: dict[str, object], **outbox) -> SanitizeTransform:
     config = _config(tmp_path)
     config["outbox"].update(outbox)  # type: ignore[union-attr]
     return Transform(
-        values={"process": config, "record": record}, selected="sanitize",
+        values={"process": config, "record": _governed(record).template_context()},
+        selected="sanitize",
     ).resolve(_ctx(tmp_path, record))
 
 
 def _selected(record: dict[str, object]):
-    return data_file_for(
-        Path(record["file"]["path"]),  # type: ignore[index]
-        file_manifest_id=record["file_manifest_id"],
-        file_mutation_id=record["file_mutation_id"],
-        classification=record["classification"],
-        base_path="/data/alpha",
-    )
+    return _governed(record).data_file()
 
 
 def test_sanitize_is_resolved_through_the_one_resolver(tmp_path: Path) -> None:
@@ -610,12 +599,39 @@ def test_a_file_with_no_registered_data_file_type_stops_the_step(
     run_log, tmp_path: Path,
 ) -> None:
     record = _record(10, 1006, tmp_path / "source.unknown")
-    unregistered = SimpleNamespace(
-        data_file=lambda: (_ for _ in ()).throw(ConfigError("no DataFile for UNKNOWN")))
 
-    with patch.object(loader_sanitize.ManifestSource, "create", return_value=unregistered), \
-         patch("rey_lib.load.sanitize.sanitize_file") as shared:
+    with patch("rey_lib.load.sanitize.sanitize_file") as shared:
         with pytest.raises(SanitizationError, match="no registered DataFile type"):
             run_file_sanitization(_ctx(tmp_path, record), run_log, _config(tmp_path))
 
     shared.assert_not_called()
+
+
+# -- the governed object, not a selector row (backlog 619) --------------------
+
+def test_the_step_asks_once_for_its_operation(run_log, tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path, _record(10, 1006, tmp_path / "source.csv"))
+
+    with patch("rey_lib.load.sanitize.sanitize_file",
+               return_value=_result(tmp_path / "clean" / "source.csv")):
+        run_file_sanitization(ctx, run_log, _config(tmp_path))
+
+    assert ctx.shared_control.manifest_requests == [{
+        "installation_id": 1, "operation": "file_sanitization", "source_name": None,
+    }]
+
+
+def test_the_working_path_is_sanitized_not_the_inventoried_one(run_log, tmp_path: Path) -> None:
+    """An Excel sheet's CSV: the manifest is the workbook, the mutation is the CSV."""
+    sheet = tmp_path / "converted" / "book.Sheet1.csv"
+    record = _record(10, 416, sheet, converted=True)
+    record["file_name"] = "book.xlsx"  # the MANIFEST's name, fixed at inventory
+
+    with patch("rey_lib.load.sanitize.sanitize_file",
+               return_value=_result(tmp_path / "clean" / "book.Sheet1.csv")) as shared:
+        run_file_sanitization(_ctx(tmp_path, record), run_log, _config(tmp_path))
+
+    operation, reference = shared.call_args.args
+    assert reference.current_path == sheet
+    assert operation.destination_path == (tmp_path / "clean" / "alpha" / "book.Sheet1.csv").resolve()
+    assert operation.mutation_run_log_fields["source_origin"] == "excel_generated"

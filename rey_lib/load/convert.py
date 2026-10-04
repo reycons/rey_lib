@@ -39,7 +39,7 @@ It does not read YAML or participate in pipeline/workflow orchestration.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -121,6 +121,10 @@ class ConversionCandidate:
     source_path: Path
     values: Mapping[str, Any]
     destinations: ConversionDestinations
+    #: The governed file this candidate was resolved from, opened once by
+    #: ManifestSource.get_for_operation (backlog 619). Its workbook is opened
+    #: from it; no second read of the file's context is made.
+    governed: Any = field(default=None, compare=False, repr=False)
 
     @property
     def file_id(self) -> str:
@@ -157,7 +161,7 @@ class ExcelConversionConfig:
 
     name: str
     enabled: bool
-    procedure: str
+    operation: str
     source_field: str
     processing: str | None
     outbox: str
@@ -264,27 +268,32 @@ def select_conversion_candidates(
         )
 
     # Which workbooks are this step's work -- extensions, classification and
-    # what "not yet converted" means -- is the routine's, named by config.
+    # what "not yet converted" means -- is the routine's, for the operation the
+    # config declares. One read for the whole set (backlog 619).
     try:
-        rows = control.call_rows(config.procedure)
+        governed = ManifestSource.get_for_operation(
+            control, control.installation_id, config.operation,
+        )
     except Exception as exc:  # noqa: BLE001 -- reported as a selection failure.
         raise ConversionError(
             f"Excel conversion '{config.name}' cannot select workbooks "
-            f"through {config.procedure!r}: {exc}"
+            f"for operation {config.operation!r}: {exc}"
         ) from exc
 
     resolved: list[ConversionCandidate] = []
     rejected: list[RejectedCandidate] = []
     claimed: dict[tuple[int, str], int] = {}
 
-    # Stage one: turn each selected row into a candidate. Nothing here touches
-    # the filesystem, and nothing re-derives what the routine already resolved.
-    for row in rows:
-        candidate, rejection = _resolve_candidate(config, row)
+    # Stage one: turn each governed file into a candidate, from the object's
+    # own facts. Nothing here touches the filesystem, and nothing re-derives
+    # what the routine already resolved.
+    for selected in governed:
+        candidate, rejection = _resolve_candidate(config, selected.template_context())
         if rejection is not None:
             _reject(ctx, run_log, config, rejected, rejection)
             continue
         assert candidate is not None
+        candidate = replace(candidate, governed=selected)
         identity = (candidate.inventory_record_id, candidate.file_id)
         first = claimed.get(identity)
         if first is not None:
@@ -315,7 +324,7 @@ def select_conversion_candidates(
     return SourceSelection(
         candidates=tuple(candidates),
         rejected=tuple(rejected),
-        matched=len(rows),
+        matched=len(governed),
     )
 
 
@@ -376,7 +385,7 @@ def run_excel_conversion(
             status="skipped",
             message=(
                 f"Excel conversion '{config.name}' selected no workbook "
-                f"through {config.procedure!r}."
+                f"for operation {config.operation!r}."
             ),
             conversion_name=config.name,
             rejected_count=len(selection.rejected),
@@ -425,19 +434,12 @@ def _candidate_data_file(ctx: Any, candidate: ConversionCandidate) -> DataFile:
             disagreement between the two, and it stops the step.
     """
     mutation = candidate.mutation_context.source_record_id
-    if mutation is None:
+    selected = candidate.governed
+    if selected is None:
         raise ConversionError(
-            f"Governed file {candidate.file_id} was selected with no "
-            "file_mutation_id to open its workbook at."
+            f"Governed file {candidate.file_id} was selected with no governed "
+            "object to open its workbook from."
         )
-    control = getattr(ctx, "shared_control", None)
-    if control is None:
-        raise ConversionError(
-            "The governed file manifest is held in the control database, and "
-            "this context exposes no shared Control to open the selected "
-            "workbook through."
-        )
-    selected = ManifestSource.create(control, file_mutation_id=int(mutation))
     try:
         return selected.data_file()
     except ConfigError as exc:
@@ -534,13 +536,13 @@ def _resolve_inline_excel_conversion_config(
     if _has(entry, "inbox"):
         raise ConversionError(
             "Excel conversion inline configuration must not declare 'inbox'; "
-            "candidates are named by the file_selection procedure."
+            "candidates are named for the file_selection operation."
         )
     if _has(entry, "file_extensions"):
         raise ConversionError(
             "Excel conversion inline configuration must not declare "
             "'file_extensions'; which files are workbooks is owned by the "
-            "routine behind file_selection.procedure."
+            "manifest retrieval routine for file_selection.operation."
         )
     processing, processing_overwrite = _optional_folder_template(
         entry, "processing", name
@@ -553,7 +555,7 @@ def _resolve_inline_excel_conversion_config(
     return ExcelConversionConfig(
         name=name,
         enabled=enabled_value,
-        procedure=_procedure(entry, name),
+        operation=_operation(entry, name),
         source_field=_source_field(entry, name),
         processing=processing,
         outbox=outbox,
@@ -1070,20 +1072,28 @@ def _source_field(entry: Any, name: str) -> str:
     return value.strip()
 
 
-def _procedure(entry: Any, name: str) -> str:
-    """Return the logical binding that names this conversion's workbooks.
+def _operation(entry: Any, name: str) -> str:
+    """Return the operation whose remaining workbooks this conversion takes.
 
-    A procedure-map binding name, never a database routine: what it maps to,
-    which parameters it takes and how it is invoked stay in the map.
+    The manifest retrieval routine (control.f_file_manifest_get) answers which
+    governed files remain for it (backlog 619). The binding-name
+    ``file_selection.procedure`` is retired and refused by name.
     """
     file_selection = _get(entry, "file_selection") if _has(entry, "file_selection") else None
-    procedure = _get(file_selection, "procedure") if file_selection is not None else None
-    if not isinstance(procedure, str) or not procedure.strip():
+    if file_selection is not None and _has(file_selection, "procedure"):
+        raise ConversionError(
+            f"Excel conversion '{name}' file_selection.procedure is retired "
+            "(backlog 619): workbooks are retrieved by file_selection.operation "
+            "through the manifest retrieval routine. Replace 'procedure' with "
+            "'operation'."
+        )
+    operation = _get(file_selection, "operation") if file_selection is not None else None
+    if not isinstance(operation, str) or not operation.strip():
         raise ConversionError(
             f"Excel conversion '{name}' requires a 'file_selection' mapping "
-            "naming the procedure that selects its workbooks."
+            "naming the operation whose remaining workbooks it converts."
         )
-    return procedure.strip()
+    return operation.strip()
 
 def _is_config_mapping(value: Any) -> bool:
     """Return whether a value is a mapping- or Namespace-like config section."""

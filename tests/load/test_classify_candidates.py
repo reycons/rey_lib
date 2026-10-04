@@ -1,15 +1,14 @@
 """Focused tests for manifest-backed source-classification candidates.
 
 Copied from the legacy file_operator tests and pointed at the Loader-owned
-implementation, rey_lib.load.classify (row 589, step 2).
+implementation, rey_lib.load.classify (row 589, step 2). Each source asks
+ManifestSource.get_for_operation once, scoped to its own name, and each
+candidate is prepared from the governed object's facts (backlog 619).
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -17,16 +16,17 @@ from rey_lib.load.classify import ClassificationError
 from rey_lib.load.classify import (
     SourceClassificationCandidate,
     load_source_classification_candidates,
+    resolve_classification_source_configs,
 )
 from rey_lib.load import classify as source_classification
 
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 
 def _entry(
     *,
     name: str = "file_manifest",
-    procedure: str = "classification_candidates",
     source_field: str = "file_name",
     regex: str = r"(?P<value>never-matches-this-literal)",
     retry_rejects: object | None = None,
@@ -35,12 +35,12 @@ def _entry(
         "name": name,
         "enabled": True,
         "classification_type": "file_name_regex",
-        # The routine that names this source's work, and the field of the row
-        # it returns that holds the file. Which records are the work -- the
-        # record type, and excluding what is already classified -- is the
-        # routine's answer and is not filtered again here.
+        # The operation this source's work is retrieved for, and the field of
+        # the governed file that holds what is classified. Which records are the
+        # work -- the record type, and excluding what is already classified --
+        # is the routine's answer and is not filtered again here.
         "file_selection": {
-            "procedure": procedure,
+            "operation": "file_classification",
             "source_field": source_field,
         },
         "variables": [
@@ -62,29 +62,36 @@ def _process(*entries: object) -> dict[str, object]:
 
 
 def _ctx(*rows: object) -> SimpleNamespace:
-    """A context that reaches the control database, with its selector primed.
+    """A context that reaches the control database, with its retrieval primed.
 
     The governed manifest is a table there, so a context reaching it carries
-    the Control it is reached through -- and the rows are whatever this
-    source's routine returns.
+    the Control it is reached through -- and the rows are whatever the manifest
+    retrieval routine returns for this source.
     """
     control = SelectingControl()
     control.selected = [dict(row) for row in rows]
     return SimpleNamespace(shared_control=control)
 
 
-def _selector_row(file_manifest_id: object, **fields: object) -> dict[str, object]:
-    """One row as the selection routine returns it.
+def _inventoried(file_manifest_id: int, file_name: str) -> dict[str, object]:
+    """One inventoried governed file, as the routine returns it.
 
-    The governed identity, and whichever field the source names. There is no
-    record_type filtering here: the routine returned this row, so it is work.
+    The file's name is its working path's last segment, which is where the
+    governed object reads it from. There is no record_type filtering here: the
+    routine returned this file, so it is work.
     """
-    return {"file_manifest_id": file_manifest_id, **fields}
+    return manifest_row(
+        file_manifest_id, 100 + file_manifest_id, f"/data/feed/source/inbox/{file_name}",
+        record_type="source_file_inventory",
+    )
 
 
+def _config(**overrides: object):
+    return resolve_classification_source_configs(_process(_entry(**overrides)))[0]
 
-def test_the_rows_the_routine_returned_become_candidates(run_log) -> None:
-    """Every returned row is work; nothing is filtered again here.
+
+def test_the_files_the_routine_returned_become_candidates(run_log) -> None:
+    """Every returned file is work; nothing is filtered again here.
 
     The routine decides which records are this source's work -- the record
     type, the lifecycle link, and excluding what is already classified. Tests
@@ -92,74 +99,74 @@ def test_the_rows_the_routine_returned_become_candidates(run_log) -> None:
     database, and asserting it here would be a second opinion about a decision
     this module does not make.
     """
-    first = _selector_row(2, record_type="source_file_inventory", file_name="First.csv")
-    second = _selector_row(4, record_type="source_file_inventory", file_name="Second.csv")
-
     candidates = load_source_classification_candidates(
-        _ctx(first, second), run_log, _process(_entry()),
+        _ctx(_inventoried(2, "First.csv"), _inventoried(4, "Second.csv")),
+        run_log, _process(_entry()),
     )
 
-    assert [candidate.manifest_record for candidate in candidates] == [first, second]
     assert [candidate.value for candidate in candidates] == ["First.csv", "Second.csv"]
     assert [candidate.file_id for candidate in candidates] == [2, 4]
     assert [candidate.status for candidate in candidates] == ["ready", "ready"]
     assert [candidate.source_record_type for candidate in candidates] == [
         "source_file_inventory", "source_file_inventory",
     ]
-
-
-def test_each_source_asks_its_own_routine_by_name(run_log) -> None:
-    """The binding configuration named, and the source's own name with it."""
-    control = SelectingControl()
-    control.selected = [
-        _selector_row(1, record_type="source_file_inventory", file_name="A.csv"),
+    # Each carries its governed object, at the mutation the routine selected.
+    assert [candidate.governed.file_mutation_id for candidate in candidates] == [102, 104]
+    assert [candidate.manifest_record["file_mutation_id"] for candidate in candidates] == [
+        102, 104,
     ]
-    asked: list[tuple[str, dict]] = []
-    original = control.call_rows
 
-    def record(binding, variables=None, required=True):
-        asked.append((binding, dict(variables or {})))
-        return original(binding, variables, required)
 
-    control.call_rows = record  # type: ignore[method-assign]
-    ctx = SimpleNamespace(shared_control=control)
+def test_each_source_asks_once_scoped_to_its_own_name(run_log) -> None:
+    """One read per source; the database narrows to the source, never this module."""
+    ctx = _ctx(_inventoried(1, "A.csv"))
 
     load_source_classification_candidates(
-        ctx, run_log,
-        _process(
-            _entry(name="inbox", procedure="inbox_candidates"),
-            _entry(name="archive", procedure="archive_candidates"),
-        ),
+        ctx, run_log, _process(_entry(name="inbox"), _entry(name="archive")),
     )
 
-    assert asked == [
-        ("inbox_candidates", {"source_name": "inbox"}),
-        ("archive_candidates", {"source_name": "archive"}),
+    assert ctx.shared_control.manifest_requests == [
+        {"installation_id": 1, "operation": "file_classification", "source_name": "inbox"},
+        {"installation_id": 1, "operation": "file_classification", "source_name": "archive"},
     ]
 
 
-def test_missing_source_field_rejects_only_that_record(run_log) -> None:
+def test_a_source_field_the_object_does_not_carry_is_a_rejection(run_log) -> None:
     candidates = load_source_classification_candidates(
-        _ctx(
-            _selector_row(1, record_type="source_file_inventory"),
-            _selector_row(2, record_type="source_file_inventory", file_name="Valid.csv"),
-        ),
-        run_log, _process(_entry()),
+        _ctx(_inventoried(1, "Valid.csv")),
+        run_log, _process(_entry(source_field="file.path")),
     )
 
     assert candidates[0].status == "rejected"
     assert candidates[0].reason_code == "missing_source_field"
     assert candidates[0].file_id == 1
-    assert candidates[1].status == "ready"
-    assert candidates[1].value == "Valid.csv"
+
+
+# The guards below are _candidate's own. A governed object cannot carry these
+# values -- the database mints a positive integer id, and the name comes from
+# the working path -- so they are exercised on _candidate directly rather than
+# through a selection that can no longer produce them.
+
+def test_missing_source_field_rejects_only_that_record() -> None:
+    config = _config()
+    missing = source_classification._candidate(
+        config, {"file_manifest_id": 1, "record_type": "source_file_inventory"})
+    valid = source_classification._candidate(
+        config, {"file_manifest_id": 2, "record_type": "source_file_inventory",
+                 "file_name": "Valid.csv"})
+
+    assert missing.status == "rejected"
+    assert missing.reason_code == "missing_source_field"
+    assert missing.file_id == 1
+    assert valid.status == "ready"
+    assert valid.value == "Valid.csv"
 
 
 @pytest.mark.parametrize("value", [None, "", "   ", 42, False])
-def test_invalid_source_value_is_a_candidate_rejection(run_log, value: object) -> None:
-    candidate = load_source_classification_candidates(
-        _ctx(_selector_row(1, record_type="source_file_inventory", file_name=value)),
-        run_log, _process(_entry()),
-    )[0]
+def test_invalid_source_value_is_a_candidate_rejection(value: object) -> None:
+    candidate = source_classification._candidate(
+        _config(), {"file_manifest_id": 1, "record_type": "source_file_inventory",
+                    "file_name": value})
 
     assert candidate.status == "rejected"
     assert candidate.reason_code == "invalid_source_field"
@@ -167,16 +174,11 @@ def test_invalid_source_value_is_a_candidate_rejection(run_log, value: object) -
 
 
 @pytest.mark.parametrize("file_manifest_id", [None, 0, -1, "1", True])
-def test_an_ungoverned_identity_is_a_candidate_rejection(
-    run_log, file_manifest_id: object,
-) -> None:
+def test_an_ungoverned_identity_is_a_candidate_rejection(file_manifest_id: object) -> None:
     """A governed file id is a positive integer the database minted."""
-    candidate = load_source_classification_candidates(
-        _ctx(_selector_row(file_manifest_id,
-                           record_type="source_file_inventory",
-                           file_name="Valid.csv")),
-        run_log, _process(_entry()),
-    )[0]
+    candidate = source_classification._candidate(
+        _config(), {"file_manifest_id": file_manifest_id,
+                    "record_type": "source_file_inventory", "file_name": "Valid.csv"})
 
     assert candidate.status == "rejected"
     assert candidate.reason_code == "missing_file_id"
@@ -184,9 +186,22 @@ def test_an_ungoverned_identity_is_a_candidate_rejection(
     assert candidate.file_id is None
 
 
+def test_an_empty_working_path_is_a_candidate_rejection(run_log) -> None:
+    """Through the step: a governed file whose working path is blank has no name."""
+    row = _inventoried(1, "x.csv")
+    row["path"] = ""
+
+    (candidate,) = load_source_classification_candidates(
+        _ctx(row), run_log, _process(_entry()),
+    )
+
+    assert candidate.status == "rejected"
+    assert candidate.reason_code == "invalid_source_field"
+
+
 def test_candidate_is_immutable(run_log) -> None:
     candidate = load_source_classification_candidates(
-        _ctx(_selector_row(1, record_type="source_file_inventory", file_name="Valid.csv")),
+        _ctx(_inventoried(1, "Valid.csv")),
         run_log, _process(_entry()),
     )[0]
 
@@ -196,10 +211,8 @@ def test_candidate_is_immutable(run_log) -> None:
 
 
 def test_all_configuration_is_validated_before_any_selection(run_log) -> None:
-    """One broken source stops the run before any routine is asked."""
+    """One broken source stops the run before any manifest is read."""
     control = SelectingControl()
-    asked: list[str] = []
-    control.call_rows = lambda *a, **k: asked.append(a[0]) or []  # type: ignore[method-assign]
     broken = _entry(name="broken")
     broken["variables"] = []
 
@@ -209,7 +222,7 @@ def test_all_configuration_is_validated_before_any_selection(run_log) -> None:
             _process(_entry(), broken),
         )
 
-    assert asked == []
+    assert control.manifest_requests == []
 
 
 def test_a_selection_failure_surfaces_as_a_file_operator_error(run_log) -> None:
@@ -218,18 +231,27 @@ def test_a_selection_failure_surfaces_as_a_file_operator_error(run_log) -> None:
 
     control = SelectingControl()
 
-    def fail(*_args: object, **_kwargs: object):
+    def fail(**_filters: object):
         raise DatabaseError("the routine is not there")
 
-    control.call_rows = fail  # type: ignore[method-assign]
+    control.get_file_manifests = fail  # type: ignore[method-assign]
 
     with pytest.raises(ClassificationError) as excinfo:
         load_source_classification_candidates(
             SimpleNamespace(shared_control=control), run_log, _process(_entry()),
         )
 
-    assert "classification_candidates" in str(excinfo.value)
+    assert "file_classification" in str(excinfo.value)
     assert excinfo.value.__cause__ is not None
+
+
+def test_a_retired_procedure_key_is_refused_by_name(run_log) -> None:
+    entry = _entry()
+    entry["file_selection"] = {"procedure": "classification_candidates",
+                               "source_field": "file_name"}
+
+    with pytest.raises(ClassificationError, match="procedure is retired"):
+        load_source_classification_candidates(_ctx(), run_log, _process(entry))
 
 
 def test_a_context_without_a_control_is_refused(run_log) -> None:
@@ -242,8 +264,7 @@ def test_a_context_without_a_control_is_refused(run_log) -> None:
 
 def test_regex_is_not_applied_when_candidates_are_loaded(run_log) -> None:
     candidate = load_source_classification_candidates(
-        _ctx(_selector_row(1, record_type="source_file_inventory",
-                           file_name="does-not-match-configured-regex.csv")),
+        _ctx(_inventoried(1, "does-not-match-configured-regex.csv")),
         run_log, _process(_entry()),
     )[0]
 

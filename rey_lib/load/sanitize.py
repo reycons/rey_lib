@@ -97,7 +97,7 @@ class _DeclaredFolder:
 
 @dataclass(frozen=True)
 class _SanitizationConfig:
-    procedure: str
+    operation: str
     source_field: str
     feed: str
     policy: EffectiveSanitizationPolicy
@@ -123,16 +123,19 @@ def run_file_sanitization(
     # no governed root is refused even when nothing is selected.
     _governed_root(ctx)
 
-    # The database says which files these are, and each is named once, so there
-    # is nothing here to deduplicate and no origin to reconcile between two
-    # declared selections.
-    records = _files_to_sanitize(ctx, config.procedure)
+    # The database says which files these are, at which mutation, and each is
+    # named once, so there is nothing here to deduplicate and no origin to
+    # reconcile between two declared selections. One read for the whole set.
+    sources = _files_to_sanitize(ctx, config.operation)
 
     results: list[FileSanitizationResult] = []
-    for record in records:
-        data_file = _selected_data_file(ctx, record)
+    for source in sources:
+        data_file = _selected_data_file(source)
+        # The transform reads the governed file's own facts -- its path, its
+        # classification, its conversion provenance -- off the object, never
+        # off a selector row (backlog 619).
         sanitizer = Transform(
-            values={"process": inline_config, "record": record},
+            values={"process": inline_config, "record": source.template_context()},
             selected="sanitize",
         ).resolve(ctx)
         if apply:
@@ -142,40 +145,26 @@ def run_file_sanitization(
         results.append(sanitizer.result)
 
     return FileSanitizationBatchResult(
-        selected=len(records),
+        selected=len(sources),
         sanitized=sum(result.filesystem_applied for result in results),
         results=tuple(results),
     )
 
 
-def _selected_data_file(ctx: Any, record: Mapping[str, Any]) -> DataFile:
-    """Open exactly the selected row's governed state as a DataFile.
+def _selected_data_file(source: ManifestSource) -> DataFile:
+    """Open exactly the selected file's governed state as a DataFile.
 
     Raises:
-        SanitizationError: If the row names no mutation, or its file resolves to
-            no registered DataFile type. Sanitization has no rejection path, so
-            this stops the step, as every legacy per-row failure does.
+        SanitizationError: If the file resolves to no registered DataFile type.
+            Sanitization has no rejection path, so this stops the step, as every
+            legacy per-row failure does.
     """
-    mutation = record.get("file_mutation_id")
-    if mutation is None:
-        raise SanitizationError(
-            f"Selected row {record.get('file_manifest_id')!r} names no "
-            "file_mutation_id to sanitize."
-        )
-    control = getattr(ctx, "shared_control", None)
-    if control is None:
-        raise SanitizationError(
-            "The governed file manifest is held in the control database, and "
-            "this context exposes no shared Control to open the selected file "
-            "through."
-        )
-    selected = ManifestSource.create(control, file_mutation_id=int(mutation))
     try:
-        return selected.data_file()
+        return source.data_file()
     except ConfigError as exc:
         raise SanitizationError(
-            f"Selected row {mutation!r} names a file with no registered DataFile "
-            f"type, so it cannot be sanitized: {exc}"
+            f"Selected mutation {source.file_mutation_id!r} names a file with no "
+            f"registered DataFile type, so it cannot be sanitized: {exc}"
         ) from exc
 
 
@@ -187,9 +176,11 @@ class SanitizeTransform(FileTransform):
                                                  [+ redacted-sister DataFile]
 
     ``process`` is the step's inline process DECLARATION, validated here as the
-    step validates it. ``record`` is the selected row: the outbox template, the
-    source field and the source origin read it exactly as the legacy step did,
-    and it is never a DataFile property.
+    step validates it. ``record`` is the selected file's
+    ``ManifestSource.template_context()`` -- the governed object's own facts,
+    not a selector row (backlog 619): the outbox template, the source field and
+    the source origin read it exactly as the legacy step read its row, and it is
+    never a DataFile property.
     """
 
     def __init__(self, ctx: Any, *, process: Any, record: Any) -> None:
@@ -367,12 +358,12 @@ def _governed_output(source: DataFile, path: Path, file_mutation_id: int) -> Dat
     )
 
 
-def _files_to_sanitize(ctx: Any, procedure: str) -> list[Mapping[str, Any]]:
-    """Ask the binding configuration named which files still need sanitizing.
+def _files_to_sanitize(ctx: Any, operation: str) -> list[ManifestSource]:
+    """The governed files still to sanitize, one ManifestSource each.
 
-    The name is a logical procedure-map binding, so which routine answers, what
-    parameters it takes and how it is invoked are the map's. This knows only
-    what the process declared.
+    One read through the manifest retrieval routine for the declared operation
+    (backlog 619): which files remain, at which mutation, in this installation,
+    and without kicked-out files, is the database's answer.
     """
     control = getattr(ctx, "shared_control", None)
     if control is None:
@@ -382,13 +373,12 @@ def _files_to_sanitize(ctx: Any, procedure: str) -> list[Mapping[str, Any]]:
             "need sanitizing."
         )
     try:
-        rows = control.call_rows(procedure)
+        return ManifestSource.get_for_operation(control, control.installation_id, operation)
     except (ConfigError, DatabaseError) as exc:
         raise SanitizationError(
-            f"File sanitization cannot select files through {procedure!r}: "
+            f"File sanitization cannot select files for operation {operation!r}: "
             f"{exc}"
         ) from exc
-    return list(rows)
 
 
 def _source_origin(record: Mapping[str, Any]) -> str:
@@ -425,12 +415,18 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _SanitizationConfig:
         )
     if "selections" in inline_config:
         raise SanitizationError(
-            "File sanitization declares no selection of its own; the routine "
-            "named by file_selection.procedure names the files that still "
-            "need sanitizing. Remove 'selections'."
+            "File sanitization declares no selection of its own; the manifest "
+            "retrieval routine names the files that still need sanitizing for "
+            "file_selection.operation. Remove 'selections'."
         )
     file_selection = _required_mapping(inline_config, "file_selection")
-    procedure = _required_text(file_selection, "procedure")
+    if "procedure" in file_selection:
+        raise SanitizationError(
+            "File sanitization's file_selection.procedure is retired (backlog "
+            "619): files are retrieved by file_selection.operation through the "
+            "manifest retrieval routine. Replace 'procedure' with 'operation'."
+        )
+    operation = _required_text(file_selection, "operation")
     source_field = _required_text(file_selection, "source_field")
     outbox = _required_folder(inline_config, "outbox")
     feed = _required_text(inline_config, "feed")
@@ -458,7 +454,7 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _SanitizationConfig:
             f"File sanitization policy for feed {feed!r} is invalid: {exc}"
         ) from exc
     return _SanitizationConfig(
-        procedure=procedure,
+        operation=operation,
         source_field=source_field,
         feed=feed,
         policy=policy,

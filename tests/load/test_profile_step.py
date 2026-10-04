@@ -22,11 +22,12 @@ from rey_lib.files import file_routing
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.manifest import FileManifest
 from rey_lib.load import profile as workflow
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 PROFILE_CONFIG = {
     "file_selection": {
-        "procedure": "get_files_to_profile",
+        "operation": "data_profile",
         "source_field": "path",
     },
 }
@@ -43,14 +44,17 @@ def _profileable(path: Path) -> Path:
 
 def _ctx(tmp_path: Path, *selected: tuple[int, Path],
          data_profile_key: str | None = None) -> SimpleNamespace:
-    """A context whose selector returns these files, keyed by their mutations."""
+    """A context whose manifest retrieval returns these files, keyed by their
+    mutations. The MANIFEST's profile key and the classification's key fields
+    are what profiling reads (backlog 619)."""
     control = SelectingControl()
     control.selected = [
-        {"file_manifest_id": mutation_id,
-         "file_mutation_id": mutation_id,
-         "path": str(path),
-         "data_profile_key": data_profile_key or f"group_{mutation_id}",
-         "key_fields": ["feed", "record_type"]}
+        manifest_row(
+            mutation_id, mutation_id, path,
+            manifest_data_profile_key=data_profile_key or f"group_{mutation_id}",
+            classification={"type": "t", "values": {},
+                            "key_fields": ["feed", "record_type"]},
+        )
         for mutation_id, path in selected
     ]
     return SimpleNamespace(
@@ -77,22 +81,6 @@ def _run_log(tmp_path: Path, ctx: Any) -> Any:
 def _profiles(ctx: Any) -> list[dict]:
     return [row for row in ctx.shared_control.list_file_mutations()
             if row["record_type"] == "source_file_profile"]
-
-
-def _opened(control: Any, *, file_mutation_id: int) -> SimpleNamespace:
-    """ManifestSource opened at exactly the selected row's mutation."""
-    row = next(one for one in control.selected
-               if one["file_mutation_id"] == file_mutation_id)
-    return SimpleNamespace(data_file=lambda: data_file_for(
-        Path(row["path"]), file_manifest_id=row["file_manifest_id"],
-        file_mutation_id=file_mutation_id,
-    ))
-
-
-@pytest.fixture(autouse=True)
-def _selected_state_opens_as_a_data_file():
-    with patch.object(workflow.ManifestSource, "create", side_effect=_opened):
-        yield
 
 
 def _run(ctx: Any, run_log: Any, config: dict | None = None, *, apply: bool = True):
@@ -219,10 +207,13 @@ def _history(*moves: tuple[int, str]) -> list[dict]:
 
 
 def _original_at(original: Path, tmp_path: Path):
-    """ManifestSource opened at the original's processing state."""
+    """ManifestSource opened at the original's processing state -- by the
+    kickout. The step never opens its selection through create (backlog 619)."""
     def create(control: Any, *, file_mutation_id: int) -> Any:
         if file_mutation_id == 52:  # the sanitized copy the step profiles
-            return _opened(control, file_mutation_id=file_mutation_id)
+            raise AssertionError(
+                "the step opened its selection through create; it comes from "
+                "get_for_operation")
         return SimpleNamespace(
             data_file=lambda: data_file_for(
                 original, file_manifest_id=7, file_mutation_id=file_mutation_id,
@@ -293,3 +284,39 @@ def test_a_step_with_no_kickouts_declared_moves_nothing(tmp_path: Path) -> None:
     history.assert_not_called()
     move.assert_not_called()
     assert len(result.failures) == 1
+
+
+# -- the governed object, not a selector row (backlog 619) --------------------
+
+def test_the_step_asks_once_for_its_operation(tmp_path: Path) -> None:
+    source = _profileable(tmp_path / "source.csv")
+    ctx = _ctx(tmp_path, (1, source))
+
+    _run(ctx, _run_log(tmp_path, ctx), apply=False)
+
+    assert ctx.shared_control.manifest_requests == [{
+        "installation_id": 1, "operation": "data_profile", "source_name": None,
+    }]
+
+
+def test_the_manifests_profile_key_is_profiled_not_the_types(tmp_path: Path) -> None:
+    """The object's plain data_profile_key is the file TYPE's profile; profiling
+    groups by the MANIFEST's, as the retired selector projected it."""
+    source = _profileable(tmp_path / "source.csv")
+    ctx = _ctx(tmp_path, (1, source), data_profile_key="Manifest|Group")
+    ctx.shared_control.selected[0]["data_profile_key"] = "the-file-types-profile"
+
+    result = _run(ctx, _run_log(tmp_path, ctx))
+
+    assert result.profiled == 1
+    assert [row["data_profile_key"] for row in ctx.shared_control.data_profiles] == [
+        "Manifest|Group",
+    ]
+
+
+def test_a_retired_procedure_key_is_refused_by_name(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    config = {"file_selection": {"procedure": "get_files_to_profile", "source_field": "path"}}
+
+    with pytest.raises(workflow.ProfilingError, match="procedure is retired"):
+        _run(ctx, _run_log(tmp_path, ctx), config)

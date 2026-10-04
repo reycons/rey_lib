@@ -35,6 +35,7 @@ class SelectingControl(ControlDouble):
     def __init__(self) -> None:
         super().__init__()
         self.selected: list[dict] = []
+        self.manifest_requests: list[dict] = []
         self.run_log_records: list[dict] = []
         # The profile store, as the routines write it: one row per group per
         # representation, carrying the profile object as it was handed over.
@@ -299,6 +300,19 @@ class SelectingControl(ControlDouble):
     def call_rows(self, binding_name: str, variables: dict | None = None,
                   required: bool = True) -> list[dict]:
         """Whatever this test declared its selector returns."""
+        return [dict(row) for row in self.selected]
+
+    #: The installation the context names, as Control.installation_id reads it.
+    installation_id = 1
+
+    def get_file_manifests(self, **filters) -> list[dict]:
+        """The manifest retrieval routine: the flat rows this test declared.
+
+        Which files remain for an operation is the routine's answer, so the
+        test states it in ``selected`` (tests.support.manifest_rows); the
+        filters each step asked with are recorded in ``manifest_requests``.
+        """
+        self.manifest_requests.append(dict(filters))
         return [dict(row) for row in self.selected]
 
     def get_current_classification(self, file_manifest_id: int | None = None,

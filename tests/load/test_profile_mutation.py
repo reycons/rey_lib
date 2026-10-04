@@ -8,8 +8,8 @@ complete record.
 
 Copied from the legacy file_operator tests and pointed at the Loader-owned
 profiling, rey_lib.load.profile (row 589, step 5). The step tests run
-``run_record_type_profiling``; each selected state opens through ManifestSource
-as the step's does. The legacy "Profile Source" button test is not copied:
+``run_record_type_profiling``; the step reads each governed file off the
+ManifestSource objects get_for_operation builds (backlog 619). The legacy "Profile Source" button test is not copied:
 ``profile_source_object`` has no workflow caller and is not part of this step.
 """
 
@@ -22,32 +22,14 @@ from typing import Any
 from unittest.mock import patch
 
 from rey_lib.logs import log_file_manifest_record
-from rey_lib.files.data_file import data_file_for
 
 from rey_lib.load import profile as workflow
 
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 
 import pytest
-
-
-def _opened(control: Any, *, file_mutation_id: int) -> SimpleNamespace:
-    """ManifestSource opened at exactly the selected row's mutation."""
-    row = next(one for one in control.selected
-               if one["file_mutation_id"] == file_mutation_id)
-    return SimpleNamespace(data_file=lambda: data_file_for(
-        Path(row["path"]),
-        file_manifest_id=row["file_manifest_id"],
-        file_mutation_id=file_mutation_id,
-    ))
-
-
-@pytest.fixture(autouse=True)
-def _selected_state_opens_as_a_data_file():
-    """The step opens each selected state through ManifestSource."""
-    with patch.object(workflow.ManifestSource, "create", side_effect=_opened):
-        yield
 
 
 def _run_log(tmp_path: Path, control: Any) -> Any:
@@ -132,14 +114,13 @@ def _consumed_mutation(ctx: Any, file_manifest_id: int, source: Path) -> int:
 
 def _select(ctx: Any, file_manifest_id: int, file_mutation_id: int,
             source: Path) -> None:
-    """What the step's selector procedure returns: the file and the mutation."""
-    ctx.shared_control.selected = [{
-        "file_manifest_id": file_manifest_id,
-        "file_mutation_id": file_mutation_id,
-        "path": str(source),
-        "data_profile_key": PROFILE_KEY,
-        "key_fields": list(PROFILE_KEY_FIELDS),
-    }]
+    """What the manifest retrieval routine returns: the file at the mutation,
+    with the manifest's profile key and the classification's key fields."""
+    ctx.shared_control.selected = [manifest_row(
+        file_manifest_id, file_mutation_id, source,
+        manifest_data_profile_key=PROFILE_KEY,
+        classification={**CLASSIFICATION, "key_fields": list(PROFILE_KEY_FIELDS)},
+    )]
 
 
 #: The group these tests profile. One key, so a second run of the same file is
@@ -182,7 +163,7 @@ def _fields(ctx: Any, representation: str) -> list[dict[str, Any]]:
 
 PROFILE_CONFIG = {
     "file_selection": {
-        "procedure": "get_files_to_profile",
+        "operation": "data_profile",
         "source_field": "path",
     },
 }

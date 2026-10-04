@@ -27,7 +27,7 @@ def _candidate(
         "enabled": True,
         "classification_type": classification_type,
         "file_selection": {
-            "procedure": "classification_candidates",
+            "operation": "file_classification",
             "source_field": "file.file_name",
         },
         "variables": [
@@ -222,7 +222,7 @@ def test_business_record_type_remains_separate_from_lifecycle_record_type() -> N
         "enabled": True,
         "classification_type": "file_name_regex",
         "file_selection": {
-            "procedure": "classification_candidates",
+            "operation": "file_classification",
             "source_field": "file.file_name",
         },
         "variables": [

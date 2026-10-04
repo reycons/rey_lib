@@ -6,8 +6,10 @@ publication are exercised as one behaviour. Only the manifest selection boundary
 and evidence logging are stubbed.
 
 Copied from the legacy file_operator tests and pointed at the Loader-owned
-preparation, rey_lib.load.prepare (row 589, step 6). Each selected row opens
-through ManifestSource as the step's does; every assertion is kept.
+preparation, rey_lib.load.prepare (row 589, step 6). The step asks
+ManifestSource.get_for_operation once and reads every fact off the objects
+(backlog 619); the control double is primed with the routine's flat rows. Every
+assertion is kept.
 """
 
 from __future__ import annotations
@@ -22,10 +24,11 @@ from rey_lib.config.config_namespace import Namespace
 from rey_lib.encryption import sha256_file
 from rey_lib.logs import log_file_manifest_record
 
-from rey_lib.files.data_file import data_file_for
 from rey_lib.load import prepare as loader_prepare
+from rey_lib.load.manifest_source import ManifestSource
 from rey_lib.load.prepare import PreparationError, run_create_prepared_files
 
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 _FILE_ID = 1001
@@ -86,27 +89,22 @@ def _source(tmp_path: Path, lines: list[str], name: str = "CWATranMay26.csv") ->
 
 def _record(path: Path, record_id: int = _MUTATION_ID,
             file_id: str = _FILE_ID) -> dict:
-    return {
-        "record_id": record_id,
-        # What the selector returns: the mutation this step consumes, and the
-        # governed file it belongs to.
-        "file_mutation_id": record_id,
-        "file_manifest_id": file_id,
-        "record_type": "source_file_mutation",
-        "file_id": file_id,
-        "status": "success",
-        "action": "create",
-        "file": {
-            "path": str(path),
-            "file_name": path.name,
-            "base_name": path.stem,
-            "file_extension": path.suffix.removeprefix("."),
-        },
-        "result": {"reason": "file_sanitization"},
-        "classification": {"type": "file_name_regex", "values": {
+    """One governed file as the manifest retrieval routine returns it: the
+    mutation this step consumes, and the governed file it belongs to."""
+    return manifest_row(
+        file_id, record_id, path,
+        record_type="source_file_mutation",
+        status="success",
+        action="create",
+        result="file_sanitization",
+        file_name=path.name,
+        base_name=path.stem,
+        file_extension=path.suffix.removeprefix("."),
+        base_path="/data/bny",
+        classification={"type": "file_name_regex", "values": {
             "feed": "bny", "client_alias": "CWA",
             "record_type": "Tran", "data_date": _DATA_DATE}},
-    }
+    )
 
 
 def _identity(source: Path) -> str:
@@ -231,41 +229,22 @@ def _config(
 ) -> dict:
     return {
         "file_selection": {
-            "procedure": "get_files_to_prepare",
-            "source_field": "file.path",
+            "operation": "create_prepared_files",
+            "source_field": "path",
         },
         "preparation": {"headers": {"convert_to": "snake_case"}},
         "outbox": {
-            "path": str(tmp_path / "prepared" / "<file.file_name>"),
+            "path": str(tmp_path / "prepared" / "<file_name>"),
             "overwrite": outbox_overwrite,
         },
         "kickouts": {
             "path": str(
-                tmp_path / "kickouts" / "<file.base_name>.kickouts.jsonl"
+                tmp_path / "kickouts" / "<base_name>.kickouts.jsonl"
             ),
             "overwrite": kickouts_overwrite,
             "redacted_copy": redacted_copy,
         },
     }
-
-
-def _opened(control: SelectingControl, *, file_mutation_id: int) -> SimpleNamespace:
-    """ManifestSource opened at exactly the selected row's mutation."""
-    row = next(one for one in control.selected
-               if one.get("file_mutation_id") == file_mutation_id)
-    return SimpleNamespace(data_file=lambda: data_file_for(
-        Path(row["file"]["path"]),
-        file_manifest_id=row["file_manifest_id"],
-        file_mutation_id=file_mutation_id,
-        classification=row.get("classification"),
-    ))
-
-
-@pytest.fixture(autouse=True)
-def _selected_state_opens_as_a_data_file():
-    """Each selected row opens its own mutation, as the step's ManifestSource does."""
-    with patch.object(loader_prepare.ManifestSource, "create", side_effect=_opened):
-        yield
 
 
 @pytest.fixture(autouse=True)
@@ -279,10 +258,11 @@ def _mute_evidence():
 
 
 def _run(ctx, run_log, config, records, *, apply: bool = True):
-    """Declare what the step's selector returns, then run it.
+    """Declare what the manifest retrieval routine returns, then run the step.
 
-    The step names a routine and is handed rows; nothing about which files need
-    preparing is decided here, which is why the rows are simply stated.
+    The step names an operation and is handed governed files; nothing about
+    which files need preparing is decided here, which is why the rows are
+    simply stated.
     """
     ctx.shared_control.selected = list(records)
     return run_create_prepared_files(ctx, run_log, config, apply=apply)
@@ -1132,7 +1112,7 @@ def test_no_redacted_companion_when_the_folder_does_not_ask_for_one(run_log,
 # What the Loader boundary added (row 589, step 6)
 # ---------------------------------------------------------------------------
 
-from rey_lib.errors.error_utils import ConfigError  # noqa: E402
+from rey_lib.files.data_file import data_file_for  # noqa: E402
 from rey_lib.files import file_routing  # noqa: E402
 from rey_lib.files.manifest import FileManifest  # noqa: E402
 from rey_lib.load import Transform  # noqa: E402
@@ -1141,18 +1121,19 @@ from rey_lib.load.prepare import PrepareTransform  # noqa: E402
 _FILE_KICKOUTS = {"path": "<base_path>/work/kickouts/<file_name>", "overwrite": True}
 
 
+def _governed(record: dict) -> ManifestSource:
+    """The governed object the step builds from the routine's row."""
+    return ManifestSource([record], opened_by="mutation")
+
+
 def _preparer(tmp_path: Path, record: dict) -> PrepareTransform:
     config = loader_prepare._resolve_config(_config(tmp_path))
-    return Transform(values={"config": config, "record": record},
+    return Transform(values={"config": config, "record": _governed(record).template_context()},
                      selected="prepare").resolve(_ctx(tmp_path))
 
 
 def _selected(record: dict):
-    return data_file_for(Path(record["file"]["path"]),
-                         file_manifest_id=record["file_manifest_id"],
-                         file_mutation_id=record["file_mutation_id"],
-                         classification=record["classification"],
-                         base_path="/data/bny")
+    return _governed(record).data_file()
 
 
 def test_prepare_is_resolved_through_the_one_resolver(tmp_path: Path) -> None:
@@ -1200,7 +1181,8 @@ def _original(tmp_path: Path) -> Path:
 
 
 def _opening(original: Path, tmp_path: Path):
-    """The step opens the sanitized row; the kickout opens the original (3)."""
+    """The kickout opens the original (3) by its mutation. The step itself
+    never opens its selection through create any more (backlog 619)."""
     def create(control, *, file_mutation_id: int):
         if file_mutation_id == 3:
             return SimpleNamespace(
@@ -1210,7 +1192,9 @@ def _opening(original: Path, tmp_path: Path):
                     base_path=str(tmp_path / "bny")),
                 governed_context=lambda: {"file_name": original.name},
             )
-        return _opened(control, file_mutation_id=file_mutation_id)
+        raise AssertionError(
+            f"the step opened mutation {file_mutation_id} through create; its "
+            "selection comes from get_for_operation")
     return create
 
 
@@ -1293,11 +1277,10 @@ def test_a_dry_run_kicks_nothing_out(run_log, tmp_path: Path) -> None:
 
 def test_a_state_that_cannot_be_opened_is_a_file_failure(run_log, tmp_path: Path) -> None:
     source, _ = _tabular(tmp_path)
-    unopenable = SimpleNamespace(
-        data_file=lambda: (_ for _ in ()).throw(ConfigError("no DataFile for TXT")))
+    record = _record(source)
+    record["path"] = str(source.with_suffix(".unknown"))  # no registered DataFile type
 
-    with patch.object(loader_prepare.ManifestSource, "create", return_value=unopenable):
-        result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
+    result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [record])
 
     _only_failure(result, "cannot be opened for preparation")
 
@@ -1344,3 +1327,23 @@ def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
     kickout.assert_called_once()
     assert kickout.call_args.kwargs["operation"] == "create_prepared_files"
     assert kickout.call_args.kwargs["destination"] == _FILE_KICKOUTS["path"]
+
+
+def test_the_step_asks_once_for_its_operation(run_log, tmp_path: Path) -> None:
+    """One read for the operation's whole set (backlog 619)."""
+    source, _ = _tabular(tmp_path)
+    ctx = _ctx(tmp_path)
+
+    _run(ctx, run_log, _config(tmp_path), [_record(source)])
+
+    assert ctx.shared_control.manifest_requests == [{
+        "installation_id": 1, "operation": "create_prepared_files", "source_name": None,
+    }]
+
+
+def test_a_retired_procedure_key_is_refused_by_name(run_log, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config["file_selection"] = {"procedure": "get_files_to_prepare", "source_field": "path"}
+
+    with pytest.raises(PreparationError, match="procedure is retired"):
+        _run(_ctx(tmp_path), run_log, config, [])

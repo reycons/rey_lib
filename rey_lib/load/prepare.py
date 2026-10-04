@@ -164,7 +164,7 @@ class _DeclaredFolder:
 
 @dataclass(frozen=True)
 class _PreparedConfig:
-    procedure: str
+    operation: str
     source_field: str
     outbox: _DeclaredFolder
     kickouts: _DeclaredFolder
@@ -182,7 +182,7 @@ def run_create_prepared_files(
 ) -> CreatePreparedFilesBatchResult:
     """Create one prepared CSV per governed record selected by this process."""
     config = _resolve_config(inline_config)
-    work: dict[tuple[str, str], Mapping[str, Any]] = {}
+    work: dict[tuple[str, str], tuple[Mapping[str, Any], ManifestSource]] = {}
 
     control = getattr(ctx, "shared_control", None)
     if control is None:
@@ -190,16 +190,21 @@ def run_create_prepared_files(
             "The governed file manifest is held in the control database, and "
             "this context exposes no shared Control to select from it."
         )
+    # One read for the operation's whole set (backlog 619): which files remain,
+    # at which mutation, is the database's answer.
     try:
-        rows = control.call_rows(config.procedure)
+        governed = ManifestSource.get_for_operation(
+            control, control.installation_id, config.operation,
+        )
     except (ConfigError, DatabaseError) as exc:
         raise PreparationError(
-            f"create_prepared_files cannot select files through "
-            f"{config.procedure!r}: {exc}"
+            f"create_prepared_files cannot select files for operation "
+            f"{config.operation!r}: {exc}"
         ) from exc
 
-    for row in rows:
-        record = row
+    for selected in governed:
+        # The governed object's own facts, not a selector row.
+        record = selected.template_context()
         mutation_context = _mutation_context(record)
         source = _source_path(record, config.source_field)
         identity = (
@@ -209,18 +214,18 @@ def run_create_prepared_files(
         existing = work.get(identity)
         # Later committed evidence for one governed file supersedes earlier.
         if existing is not None and (
-            _manifest_record_id(record) <= _manifest_record_id(existing)
+            _manifest_record_id(record) <= _manifest_record_id(existing[0])
         ):
             continue
-        work[identity] = record
+        work[identity] = (record, selected)
 
     results: list[PreparedFileResult] = []
-    for record in work.values():
+    for record, selected in work.values():
         # One file's unusable evidence is that file's failure. Publication is
         # already all-or-nothing per file, so a failure here leaves no partial
         # output behind and the remaining selected files still run.
         try:
-            data_file = _selected_data_file(control, record)
+            data_file = _selected_data_file(selected)
             preparer = Transform(
                 values={"config": config, "record": record},
                 selected="prepare",
@@ -817,18 +822,24 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
     if "selections" in config:
         raise PreparationError(
             "create_prepared_files declares no selection of its own; the "
-            "routine named by file_selection.procedure names the files that "
-            "still need preparing. Remove 'selections'."
+            "manifest retrieval routine names the files that still need "
+            "preparing for file_selection.operation. Remove 'selections'."
         )
     file_selection = config.get("file_selection")
-    procedure = (file_selection or {}).get("procedure") if isinstance(
+    if isinstance(file_selection, Mapping) and "procedure" in file_selection:
+        raise PreparationError(
+            "create_prepared_files' file_selection.procedure is retired (backlog "
+            "619): files are retrieved by file_selection.operation through the "
+            "manifest retrieval routine. Replace 'procedure' with 'operation'."
+        )
+    operation = (file_selection or {}).get("operation") if isinstance(
         file_selection, Mapping) else None
     source_field = (file_selection or {}).get("source_field") if isinstance(
         file_selection, Mapping) else None
-    if not isinstance(procedure, str) or not procedure.strip():
+    if not isinstance(operation, str) or not operation.strip():
         raise PreparationError(
             "create_prepared_files requires a 'file_selection' mapping naming "
-            "the procedure that selects the files to prepare."
+            "the operation whose remaining files it prepares."
         )
     if not isinstance(source_field, str) or not source_field.strip():
         raise PreparationError(
@@ -852,7 +863,7 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
         )
 
     return _PreparedConfig(
-        procedure=procedure.strip(),
+        operation=operation.strip(),
         source_field=source_field.strip(),
         outbox=_required_folder(config, "outbox"),
         kickouts=_required_folder(config, "kickouts"),
@@ -999,25 +1010,20 @@ def _plain_config_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _selected_data_file(control: Any, record: Mapping[str, Any]) -> DataFile:
-    """Open exactly the selected row's governed state as a DataFile.
+def _selected_data_file(selected: ManifestSource) -> DataFile:
+    """Open exactly the selected file's governed state as a DataFile.
 
     Raises:
-        PreparationError: If the row names no mutation, or its state cannot be
-            opened (no registered DataFile type, no resolved path) -- a per-file
-            failure, kicked out and recorded like any other.
+        PreparationError: If its state cannot be opened (no registered DataFile
+            type, no resolved path) -- a per-file failure, kicked out and
+            recorded like any other.
     """
-    mutation = record.get("file_mutation_id")
-    if not isinstance(mutation, int) or isinstance(mutation, bool):
-        raise PreparationError(
-            f"Selected row {record.get('file_manifest_id')!r} names no "
-            "file_mutation_id to prepare."
-        )
     try:
-        return ManifestSource.create(control, file_mutation_id=mutation).data_file()
+        return selected.data_file()
     except (ConfigError, DataStructureError) as exc:
         raise PreparationError(
-            f"Selected row {mutation!r} cannot be opened for preparation: {exc}"
+            f"Selected mutation {selected.file_mutation_id!r} cannot be opened "
+            f"for preparation: {exc}"
         ) from exc
 
 

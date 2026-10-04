@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 from rey_lib.load import convert as excel_conversion
@@ -84,19 +85,6 @@ def lifecycle() -> _Lifecycle:
         yield captured
 
 
-def _opened(control: SelectingControl, *, file_mutation_id: int) -> SimpleNamespace:
-    """ManifestSource opened at exactly the selected row's mutation."""
-    row = next(one for one in control.selected
-               if one.get("file_mutation_id") == file_mutation_id)
-    return SimpleNamespace(data_file=lambda: data_file_for(
-        Path(str(row["path"])),
-        file_manifest_id=row["file_manifest_id"],
-        file_mutation_id=file_mutation_id,
-        classification=row.get("classification"),
-        base_path="/data/alpha",
-    ))
-
-
 @pytest.fixture(autouse=True)
 def _the_step_run_log_is_bound(run_log):
     """Bind the step's run log, as app_runtime does before any step runs.
@@ -109,13 +97,6 @@ def _the_step_run_log_is_bound(run_log):
         yield
     finally:
         clear_run()
-
-
-@pytest.fixture(autouse=True)
-def _selected_workbook_opens_as_a_data_file():
-    """Each candidate's workbook opens at its own mutation, as ManifestSource does."""
-    with patch.object(excel_conversion.ManifestSource, "create", side_effect=_opened):
-        yield
 
 
 _CONTROLS: dict[Path, SelectingControl] = {}
@@ -143,34 +124,30 @@ def _selector_row(
     values: dict[str, object] | None = None,
     classification: object = _UNSET,
 ) -> dict[str, object]:
-    """One row as the selection routine returns it.
+    """One governed file as the manifest retrieval routine returns it.
 
-    Only what ``_resolve_candidate`` consumes: the governed identity, the
+    The step reads what ``_resolve_candidate`` consumes off the ManifestSource
+    built from this row (backlog 619): the governed identity, the
     classification that supplies the destination values, and the file's current
-    path under the column the entry names. The routine resolves the current
-    location from the mutation history, so there is no inventory record to join
-    and no lineage to follow -- a governed file has one identity.
+    path. The routine resolves the current location from the mutation history,
+    so there is no inventory record to join and no lineage to follow -- a
+    governed file has one identity.
     """
-    row: dict[str, object] = {"file_manifest_id": file_manifest_id}
-    # The mutation the routine selected; the replacement opens the workbook at
-    # exactly this state through ManifestSource.
-    if isinstance(file_manifest_id, int) and not isinstance(file_manifest_id, bool):
-        row["file_mutation_id"] = 7000 + file_manifest_id
-    if path is not None:
-        row["path"] = str(path)
     if classification is _UNSET:
-        row["classification"] = {
+        classification = {
             "type": "file_name_regex",
             "source_field": "file.path",
             "values": dict(values) if values is not None else {"group": "alpha"},
         }
-    elif classification is not None:
-        row["classification"] = classification
-    return row
+    # The mutation the routine selected; the workbook opens at exactly it.
+    return manifest_row(
+        file_manifest_id, 7000 + int(file_manifest_id), path,
+        classification=classification, base_path="/data/alpha",
+    )
 
 
 def _selector_rows(tmp_path: Path, *rows: dict[str, object]) -> None:
-    """Prime what this test's selection routine returns."""
+    """Prime what this test's manifest retrieval returns."""
     _control(tmp_path).selected = [dict(row) for row in rows]
 
 
@@ -191,7 +168,7 @@ def _entry(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         # entry names that routine and the column of the returned row that
         # holds the workbook's current path.
         "file_selection": {
-            "procedure": "excel_candidates",
+            "operation": "excel_conversion",
             "source_field": "path",
         },
         "processing": str(tmp_path / "processing"),
@@ -272,7 +249,7 @@ def test_resolve_excel_conversion_config_returns_concrete_paths(
 
     assert resolved.name == "alpha"
     assert resolved.enabled is True
-    assert resolved.procedure == "excel_candidates"
+    assert resolved.operation == "excel_conversion"
     assert resolved.source_field == "path"
     assert resolved.processing == str(tmp_path / "processing")
     assert resolved.outbox == str(tmp_path / "outbox")
@@ -377,7 +354,7 @@ def test_resolver_requires_the_lifecycle_selector(tmp_path: Path) -> None:
 
 
 def test_the_selector_must_name_the_column_holding_the_workbook(tmp_path: Path) -> None:
-    entry = _entry(tmp_path, file_selection={"procedure": "excel_candidates"})
+    entry = _entry(tmp_path, file_selection={"operation": "excel_conversion"})
     with pytest.raises(ConversionError, match="source_field"):
         _config(_ctx(tmp_path, entry))
 
@@ -640,11 +617,12 @@ def test_duplicate_classifications_produce_one_conversion_attempt(run_log,
     tmp_path: Path,
 ) -> None:
     source = _source_file(tmp_path, "a.xls")
-    _selector_rows(
-        tmp_path,
-        _selector_row(1001, source),
-        _selector_row(1001, source),
-    )
+    # One governed file at TWO mutations. Two identical rows are one mutation,
+    # and get_for_operation builds one object per mutation (backlog 619), so
+    # the duplicate claim this guards against is the same file selected twice.
+    second = _selector_row(1001, source)
+    second["file_mutation_id"] = 9001
+    _selector_rows(tmp_path, _selector_row(1001, source), second)
     ctx = _ctx(tmp_path)
 
     with patch(
@@ -680,22 +658,23 @@ def test_inventory_path_is_the_only_path_used(run_log, tmp_path: Path) -> None:
     assert [item.source_path for item in selection.candidates] == [source.resolve()]
 
 
-def test_selection_is_routed_through_the_named_routine(run_log, tmp_path: Path) -> None:
-    """This module names a routine; it interprets no manifest filters."""
+def test_selection_is_one_read_for_the_declared_operation(run_log, tmp_path: Path) -> None:
+    """This module names an operation; it interprets no manifest filters."""
     _one_workbook(tmp_path)
     ctx = _ctx(tmp_path)
-    asked: list[str] = []
-    original = ctx.shared_control.call_rows
-
-    def record(binding, variables=None, required=True):
-        asked.append(binding)
-        return original(binding, variables, required)
-
-    ctx.shared_control.call_rows = record  # type: ignore[method-assign]
 
     select_conversion_candidates(ctx, run_log, _config(ctx))
 
-    assert asked == ["excel_candidates"]
+    assert ctx.shared_control.manifest_requests == [{
+        "installation_id": 1, "operation": "excel_conversion", "source_name": None,
+    }]
+
+
+def test_a_retired_procedure_key_is_refused_by_name(tmp_path: Path) -> None:
+    entry = _entry(tmp_path, file_selection={"procedure": "excel_candidates",
+                                             "source_field": "path"})
+    with pytest.raises(ConversionError, match="procedure is retired"):
+        _config(_ctx(tmp_path, entry))
 
 
 def test_no_directory_enumeration_occurs_during_selection(run_log, tmp_path: Path) -> None:
@@ -1194,8 +1173,9 @@ def test_declaring_extensions_inline_is_refused(tmp_path: Path, declared: object
     """Which files are workbooks is the routine's, however it is declared.
 
     This used to validate the shape of an inline file_extensions list. There is
-    no shape to validate: declaring one at all is refused, because the routine
-    behind file_selection.procedure owns which files are this step's work.
+    no shape to validate: declaring one at all is refused, because the manifest
+    retrieval routine owns which files are this step's work for
+    file_selection.operation.
     """
     with pytest.raises(ConversionError, match="must not declare 'file_extensions'"):
         _config(_ctx(tmp_path, _entry(tmp_path, file_extensions=declared)))
@@ -1323,10 +1303,9 @@ def test_a_workbook_with_no_registered_data_file_type_stops_the_step(
 ) -> None:
     _one_workbook(tmp_path)
     ctx = _ctx(tmp_path)
-    unregistered = SimpleNamespace(
-        data_file=lambda: (_ for _ in ()).throw(ConfigError("no DataFile for XLS")))
 
-    with patch.object(excel_conversion.ManifestSource, "create", return_value=unregistered), \
+    with patch.object(excel_conversion.ManifestSource, "data_file",
+                      side_effect=ConfigError("no DataFile for XLS")), \
          patch("rey_lib.load.convert.convert_workbook_to_csv") as converter:
         with pytest.raises(ConversionError, match="no registered DataFile type"):
             run_excel_conversion(ctx, run_log, _inline(ctx))

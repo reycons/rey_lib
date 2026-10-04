@@ -681,6 +681,26 @@ def _collect_profiling_work(
         )
 
 
+def _profiling_record(selected: ManifestSource) -> dict[str, Any]:
+    """What profiling reads of one governed file, from the object (backlog 619).
+
+    ``data_profile_key`` here is the MANIFEST's key, which classification wrote
+    -- the object's ``manifest_data_profile_key``. The object's own
+    ``data_profile_key`` is the file TYPE's profile, empty until a profile
+    exists, which is exactly when this step runs. ``key_fields`` likewise come
+    from the file's classification, not from its type. Both are what the
+    retired profile selector projected (control.data_profile_missing_vw).
+    """
+    classification = selected.file_facts.get("classification")
+    return {
+        **selected.template_context(),
+        "data_profile_key": selected.file_facts.get("manifest_data_profile_key"),
+        "key_fields": (
+            classification.get("key_fields") if isinstance(classification, Mapping) else None
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class ProfilingBatchResult:
     """What one profiling step did, for the handler to report as legacy did.
@@ -720,13 +740,20 @@ def run_record_type_profiling(
     continues. Only an unexpected exception escapes the loop.
     """
     file_selection = config.get("file_selection")
-    procedure = _value(file_selection, "procedure") if file_selection else None
+    if file_selection and _value(file_selection, "procedure") is not None:
+        raise ProfilingError(
+            "Loader workflow process 'profile_csv_record_types' "
+            "file_selection.procedure is retired (backlog 619): files are "
+            "retrieved by file_selection.operation through the manifest "
+            "retrieval routine. Replace 'procedure' with 'operation'."
+        )
+    operation = _value(file_selection, "operation") if file_selection else None
     source_field = _value(file_selection, "source_field") if file_selection else None
-    if not isinstance(procedure, str) or not procedure.strip():
+    if not isinstance(operation, str) or not operation.strip():
         raise ProfilingError(
             "Loader workflow process 'profile_csv_record_types' requires "
-            "a 'file_selection' mapping naming the procedure that selects the "
-            "files to profile."
+            "a 'file_selection' mapping naming the operation whose remaining "
+            "files it profiles."
         )
     if not isinstance(source_field, str) or not source_field.strip():
         raise ProfilingError(
@@ -742,16 +769,23 @@ def run_record_type_profiling(
             "Profiling reads the governed manifest from the control database, "
             "and this context exposes no shared Control to reach it through."
         )
+    # One read for the operation's whole set (backlog 619): which files remain
+    # to be profiled, at which mutation, is the database's answer.
     try:
-        rows = control.call_rows(procedure.strip())
+        governed = ManifestSource.get_for_operation(
+            control, control.installation_id, operation.strip(),
+        )
     except (ConfigError, DatabaseError) as exc:
         raise ProfilingError(
-            f"Profiling cannot select files through {procedure!r}: {exc}"
+            f"Profiling cannot select files for operation {operation!r}: {exc}"
         ) from exc
+    by_mutation = {selected.file_mutation_id: selected for selected in governed}
 
     work: dict[tuple[str, str], tuple[str, int, int, str, tuple[str, ...]]] = {}
-    records_read = len(rows)
-    _collect_profiling_work(rows, source_field, work)
+    records_read = len(governed)
+    _collect_profiling_work(
+        [_profiling_record(selected) for selected in governed], source_field, work,
+    )
 
     if not work or not apply:
         return ProfilingBatchResult(
@@ -763,9 +797,10 @@ def run_record_type_profiling(
     failures: list[str] = []
     for source, object_id, file_manifest_id, data_profile_key, key_fields in work.values():
         try:
-            # The selected state, opened at exactly the mutation the routine
-            # returned; profiling reads the file where that state placed it.
-            selected = ManifestSource.create(control, file_mutation_id=int(object_id))
+            # The selected state, already opened at exactly the mutation the
+            # routine returned; profiling reads the file where that state
+            # placed it. Hydrated once, by get_for_operation.
+            selected = by_mutation[int(object_id)]
             try:
                 data_file = selected.data_file()
             except (ConfigError, DataStructureError) as exc:

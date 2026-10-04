@@ -35,6 +35,8 @@ from rey_lib.load.transform import Transform
 from rey_lib.logs import FileManifestError
 from rey_lib.workflow import RunContext
 
+from rey_lib.load.manifest_source import ManifestSource
+from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
 
 _RECORD_TYPE = "source_file_inventory"
@@ -47,7 +49,7 @@ def _entry(classification_type: str = "configured_mechanism", **overrides) -> di
         "enabled": True,
         "classification_type": classification_type,
         "file_selection": {
-            "procedure": "classification_candidates",
+            "operation": "file_classification",
             "source_field": "file_name",
         },
         "variables": [
@@ -66,7 +68,7 @@ def _routed_entry(tmp_path: Path, **overrides) -> dict:
         "enabled": True,
         "classification_type": "file_name_regex",
         "file_selection": {
-            "procedure": "classification_candidates",
+            "operation": "file_classification",
             "source_field": "file.path",
         },
         "processing": str(tmp_path / "<classification.values.feed>" / "processing"),
@@ -477,6 +479,13 @@ def test_a_rejected_file_gets_no_key(run_log, tmp_path: Path) -> None:
 # -- the step ----------------------------------------------------------------
 
 def _candidate(entry: dict, mutation: int | None, path: str) -> SourceClassificationCandidate:
+    """A prepared candidate carrying the governed object it was prepared from,
+    as load_source_classification_candidates builds it (backlog 619)."""
+    governed = (
+        None if mutation is None
+        else ManifestSource([manifest_row(7, mutation, path, record_type=_RECORD_TYPE)],
+                            opened_by="mutation")
+    )
     return SourceClassificationCandidate(
         classification=resolve_classification_source_configs({"sources": [entry]})[0],
         manifest_record={"file_manifest_id": 7, "file_mutation_id": mutation,
@@ -485,6 +494,7 @@ def _candidate(entry: dict, mutation: int | None, path: str) -> SourceClassifica
         value=Path(path).name,
         file_id=7,
         status="ready",
+        governed=governed,
     )
 
 
@@ -493,21 +503,23 @@ def test_an_applied_run_opens_the_selected_mutation_and_carries_the_record_type(
 ) -> None:
     ctx, _ = _ctx(tmp_path)
     entry = _entry()
-    selected = _file(Path("/data/alpha/inbox/Example7.csv"))
 
     with patch.object(source_classification, "load_source_classification_candidates",
                       return_value=(_candidate(entry, 31, "/data/alpha/inbox/Example7.csv"),)), \
-         patch.object(source_classification.ManifestSource, "create") as create, \
+         patch.object(source_classification.ManifestSource, "create",
+                      side_effect=AssertionError("opened again through create")), \
          patch.object(source_classification, "Transform") as transform:
-        create.return_value.data_file.return_value = selected
-        transform.return_value.resolve.return_value.apply.return_value = (selected,)
+        transform.return_value.resolve.return_value.apply.return_value = ("classified",)
         result = run_source_file_classification(
             ctx, run_log, {"sources": [entry]}, RunContext(apply=True))
 
-    create.assert_called_once_with(ctx.shared_control, file_mutation_id=31)
     transform.assert_called_once_with(
         values={"source": entry, "source_record_type": _RECORD_TYPE}, selected="classify")
-    transform.return_value.resolve.return_value.apply.assert_called_once_with(selected)
+    # The DataFile of the candidate's own governed object, at its mutation --
+    # hydrated once by get_for_operation, never re-read (backlog 619).
+    (opened,) = transform.return_value.resolve.return_value.apply.call_args.args
+    assert (opened.path, opened.file_manifest_id, opened.file_mutation_id) == (
+        Path("/data/alpha/inbox/Example7.csv"), 7, 31)
     assert (result.candidates, result.classified, result.rejected) == (1, 1, 0)
 
 
@@ -516,12 +528,9 @@ def test_a_file_with_no_registered_data_file_type_is_a_rejection(
 ) -> None:
     ctx, _ = _ctx(tmp_path)
     entry = _entry()
-    unsupported = SimpleNamespace(
-        data_file=lambda: data_file_for(Path("/data/alpha/inbox/notes.unknown")))
 
     with patch.object(source_classification, "load_source_classification_candidates",
                       return_value=(_candidate(entry, 31, "/data/alpha/inbox/notes.unknown"),)), \
-         patch.object(source_classification.ManifestSource, "create", return_value=unsupported), \
          patch.object(source_classification, "log_run_record", return_value=123) as evidence, \
          patch.object(ClassifyTransform, "apply") as apply:
         result = run_source_file_classification(

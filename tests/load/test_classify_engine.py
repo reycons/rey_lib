@@ -46,7 +46,7 @@ def _config(
         # Which routine names this source's work, and which field of the row
         # it returns holds the file.
         "file_selection": {
-            "procedure": "classification_candidates",
+            "operation": "file_classification",
             "source_field": "path",
         },
         "variables": variables,
