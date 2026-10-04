@@ -35,6 +35,7 @@ from typing import Any, Callable, Mapping
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import file_routing
 from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.file_utils import move_file
 from rey_lib.files.file_routing import (
     CollisionPolicy,
     FileRoutingContext,
@@ -212,8 +213,7 @@ def file_kinds() -> tuple[FileKind, ...]:
     return tuple(_REGISTRY.values())
 
 
-@file_transform("move", fields=("role", "route", "operation", "name"),
-                required=("role",))
+@file_transform("move", fields=("role", "route", "operation", "name"), required=())
 class MoveTransform(FileTransform):
     """Move one governed file to a role's route.
 
@@ -230,7 +230,7 @@ class MoveTransform(FileTransform):
         self,
         ctx: Any,
         *,
-        role: str,
+        role: str | None = None,
         route: str | None = None,
         operation: str | None = None,
         name: str | None = None,
@@ -239,7 +239,9 @@ class MoveTransform(FileTransform):
 
         Args:
             ctx: The runtime context: its ``app_name`` and its ``data`` path.
-            role: processing | kickouts | failed | archive.
+            role: processing | kickouts | failed | archive. None for a plain
+                move of a file nothing governs to ``route`` -- the ETL load
+                path's configured movements.
             route: The destination DIRECTORY. ``<base_path>`` and ``<inbox>``
                 resolve from the file; ``<classification.*>`` resolves in
                 routing. Kickouts need none: their route is intrinsic,
@@ -251,8 +253,19 @@ class MoveTransform(FileTransform):
                 Unset keeps the file's own name, as every move did before.
 
         Raises:
-            ConfigError: If the role names no routing role.
+            ConfigError: If the role names no routing role, or a move has
+                neither a role nor a route.
         """
+        declared = str(route).strip() if route is not None else ""
+        self._ctx = ctx
+        self._operation = str(operation) if operation else None
+        self._name = str(name).strip() if name else None
+        if role is None or not str(role).strip():
+            if not declared:
+                raise ConfigError("Transform (move): a move needs a role or a route.")
+            self._role = None
+            self._route = declared
+            return
         try:
             self._role = FileRoutingRole(str(role).strip())
         except ValueError as exc:
@@ -260,16 +273,12 @@ class MoveTransform(FileTransform):
                 f"Transform (move): '{role}' is not a routing role. Roles: "
                 f"{', '.join(member.value for member in FileRoutingRole)}."
             ) from exc
-        declared = str(route).strip() if route is not None else ""
         if not declared and self._role is not FileRoutingRole.KICKOUTS:
             raise ConfigError(
                 f"Transform (move): the {self._role.value} role needs a route; "
                 "only kickouts has an intrinsic one."
             )
-        self._ctx = ctx
         self._route = declared or _KICKOUTS_ROUTE
-        self._operation = str(operation) if operation else None
-        self._name = str(name).strip() if name else None
 
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Move the file, and return it at its new path.
@@ -281,6 +290,8 @@ class MoveTransform(FileTransform):
             FileRoutingError: As routing refuses or fails; routing has already
                 recorded a failed move where the filesystem operation failed.
         """
+        if self._role is None:
+            return (self._plain_move(data_file),)
         _logger.debug(
             "Moving governed file %s (mutation %s) to %s for %s",
             data_file.file_manifest_id, data_file.file_mutation_id,
@@ -313,6 +324,38 @@ class MoveTransform(FileTransform):
             ),
         )
 
+    def _plain_move(self, data_file: DataFile) -> DataFile:
+        """Move a file nothing governs to the route, with run-log evidence.
+
+        No role, no governed roots and no mutation: the destination is where
+        the caller's own configuration says, as the ETL load path declares it.
+        A file already there is left alone.
+
+        Raises:
+            ConfigError: For a governed file -- a governed move names its role.
+            OSError: As the filesystem move fails.
+        """
+        if data_file.file_manifest_id is not None:
+            raise ConfigError(
+                "Transform (move): a governed file moves by role; only a file "
+                "nothing governs moves to a plain route."
+            )
+        source = Path(data_file.path)
+        destination = Path(self._route)
+        if (destination / (self._name or source.name)).resolve() == source.resolve():
+            return data_file
+        moved = move_file(
+            source,
+            destination,
+            self._name,
+            state_ctx=self._ctx,
+            run_log=bound_run_log(),
+            app=str(getattr(self._ctx, "app_name", "") or ""),
+            pipeline=getattr(self._ctx, "pipeline_name", None),
+            reason=self._operation or str(destination),
+        )
+        return data_file_for(moved, file_type=data_file.file_type, **data_file.settings)
+
     def plan(self, data_file: DataFile) -> Path:
         """Where :meth:`apply` would put this file, changing nothing.
 
@@ -324,6 +367,8 @@ class MoveTransform(FileTransform):
             ConfigError: As :meth:`apply` refuses.
             FileRoutingError: As routing refuses.
         """
+        if self._role is None:
+            return (Path(self._route) / (self._name or Path(data_file.path).name)).resolve()
         return self._route_file(data_file, dry_run=True)[0]
 
     def _route_file(self, data_file: DataFile, *, dry_run: bool) -> tuple[Path, int | None]:

@@ -101,9 +101,11 @@ def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
           keyed=False, moved=None, records=({"a": 1, "b": "x"},)):
     """Run _load_one_file with a recording adapter and a declared setting."""
     monkeypatch.setattr(load_operation, "_write_adapter", adapter)
+    # Every outcome passes through _route_file; what it records is which
+    # movement list the file went down (its fourth argument).
     monkeypatch.setattr(
-        load_operation, "execute_movements",
-        lambda *a, **k: moved.append(a) if moved is not None else None,
+        load_operation, "_route_file",
+        lambda *a, **k: moved.append(a[3]) if moved is not None else None,
     )
 
     load_block = SimpleNamespace(connection="c", destination_table="s.t")
@@ -196,8 +198,8 @@ class TestTheDestinationIsThere:
         path = tmp_path / "source.csv"
         path.write_text("a,WRONG\n1,x\n", encoding="utf-8")
         monkeypatch.setattr(load_operation, "_write_adapter", adapter)
-        monkeypatch.setattr(load_operation, "execute_movements",
-                            lambda *a, **k: moved.append(a))
+        monkeypatch.setattr(load_operation, "_route_file",
+                            lambda *a, **k: moved.append(a[3]))
 
         monkeypatch.setattr(
             load_operation, "shared_connection",
@@ -223,7 +225,7 @@ class TestTheDestinationIsThere:
 
         assert loaded == 0
         assert adapter.inserted == []
-        assert moved                            # went down movements.failure
+        assert moved == ["failure"]             # went down movements.failure
 
 
 class TestTheDestinationIsAbsentAndNotDeclared:
@@ -356,7 +358,7 @@ class TestTheDestinationIsAbsentAndCreationIsDeclared:
                        records=({"a": 1}, {"b": 2}))
 
         assert loaded == 0          # returned, not raised
-        assert moved                # and routed down movements.failure
+        assert moved == ["failure"]  # and routed down movements.failure
 
     def test_a_CONSISTENT_file_still_creates_and_loads(
         self, tmp_path: Path, monkeypatch, run_log

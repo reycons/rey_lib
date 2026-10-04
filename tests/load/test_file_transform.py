@@ -92,10 +92,35 @@ class TestTheKindRegistry:
 
         assert move is not None
         assert move.fields == ("role", "route", "operation", "name")
-        # Only the role is required (backlog 624): kickouts has an intrinsic
-        # route, and an unnamed operation is the bound workflow step's.
-        assert move.required == ("role",)
+        # Nothing is required by name (backlog 624): a move needs a role or a
+        # route, which the kind itself checks; kickouts has an intrinsic route.
+        assert move.required == ()
         assert move.builder is MoveTransform
+
+    def test_a_move_needs_a_role_or_a_route(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="a role or a route"):
+            Transform(values={}, selected="move").resolve(_ctx(tmp_path))
+
+    def test_a_plain_route_moves_an_ungoverned_file(self, tmp_path: Path) -> None:
+        """The ETL load path's configured movement: no role, no governed root."""
+        source = tmp_path / "inbox" / "a.csv"
+        source.parent.mkdir()
+        source.write_text("a\n1\n", encoding="utf-8")
+        destination = tmp_path / "elsewhere" / "rejected"
+
+        (moved,) = Transform(
+            values={"route": str(destination), "operation": "rejected_path"},
+            selected="move",
+        ).resolve(_ctx(tmp_path)).apply(data_file_for(source))
+
+        assert moved.path == destination / "a.csv"
+        assert moved.path.exists() and not source.exists()
+        assert moved.file_manifest_id is None
+
+    def test_a_governed_file_cannot_take_a_plain_route(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="moves by role"):
+            Transform(values={"route": str(tmp_path / "x")}, selected="move").resolve(
+                _ctx(tmp_path)).apply(_governed(tmp_path))
 
     def test_a_move_resolves_to_a_file_transform(self, tmp_path: Path) -> None:
         resolved = _move().resolve(_ctx(tmp_path))

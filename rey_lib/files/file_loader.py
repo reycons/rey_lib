@@ -92,6 +92,7 @@ __all__ = [
     # What the load operation calls back into. Public because two packages
     # use them, which is the definition of not private.
     "execute_movements",
+    "resolve_movement_source_path",
     "log_loader_step_failure",
     "namespace_to_plain",
     "resolve_ctx_path",
@@ -1176,7 +1177,7 @@ def execute_movements(
 
         if move is not None:
             from_key = getattr(move, "from", None)
-            src_path = _resolve_movement_source_path(paths, from_key, file_path)
+            src_path = resolve_movement_source_path(paths, from_key, file_path)
             dest_dir = resolve_path(paths, move.to, ctx=ctx)
             try:
                 if not src_path.exists():
@@ -1200,7 +1201,7 @@ def execute_movements(
 
         elif delete is not None:
             from_key = getattr(delete, "from", None)
-            src_path = _resolve_movement_source_path(paths, from_key, file_path)
+            src_path = resolve_movement_source_path(paths, from_key, file_path)
             try:
                 src_path.unlink(missing_ok=True)
                 _logger.debug("Deleted: %s", src_path.name)
@@ -1211,7 +1212,7 @@ def execute_movements(
                 )
 
 
-def _resolve_movement_source_path(
+def resolve_movement_source_path(
     paths: Any,
     from_key: Optional[str],
     file_path: Path,

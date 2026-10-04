@@ -75,8 +75,10 @@ from rey_lib.files.file_loader import (
     namespace_to_plain,
     resolve_ctx_path,
     resolve_path,
+    resolve_movement_source_path,
     resolve_pattern,
 )
+from rey_lib.files.file_routing import FileRoutingError
 from rey_lib.load.configured_load import ConfiguredLoad as _ConfiguredLoad
 from rey_lib.logs.log_utils import (
     get_logger,
@@ -215,14 +217,32 @@ def _route_file(
     if file_path is None:
         return
 
-    # An EMPTY list still goes through. A configured load declaring no moves
-    # for this outcome has a policy that moves nothing, which is not the same
-    # as having no policy -- and keeping the call means a configured load
-    # behaves exactly as it did before movements became a resolved value.
-    execute_movements(
-        getattr(movements, outcome, []), file_path, paths,
-        ctx=ctx, run_log=run_log,
-    )
+    # Deferred: rey_lib.load.transform imports this module.
+    from rey_lib.load.transform import Transform
+
+    # EVERY FILE MOVE IS Transform(kind="move") (rule 78, backlog 624): a
+    # configured move is a plain move of this ungoverned file to the path its
+    # data source names. A delete is not a move and stays the movement
+    # primitive's. A movement that fails is logged and never raised, so it
+    # cannot mask the load's own outcome -- as it always has been.
+    for instruction in getattr(movements, outcome, None) or []:
+        move = getattr(instruction, "move", None)
+        if move is None:
+            execute_movements([instruction], file_path, paths, ctx=ctx, run_log=run_log)
+            continue
+        source_path = resolve_movement_source_path(paths, getattr(move, "from", None), file_path)
+        destination = resolve_path(paths, move.to, ctx=ctx)
+        if not source_path.exists():
+            _logger.debug("Movement skipped -- source missing: %s", source_path)
+            continue
+        try:
+            Transform(
+                values={"route": str(destination), "operation": str(move.to)},
+                selected="move",
+            ).resolve(ctx).apply(data_file_for(source_path))
+        except (ConfigError, FileRoutingError, OSError) as exc:
+            _logger.error("Movement failed -- could not move '%s' to '%s': %s",
+                          source_path.name, destination, exc)
 
 def _build_transform(
     ctx: Any,
