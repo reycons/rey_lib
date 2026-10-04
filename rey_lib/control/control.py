@@ -1478,55 +1478,6 @@ class Control:
             return False
         return bool(dict(rows[0]).get("is_complete"))
 
-    def file_source_context(self, file_manifest_id: Optional[int] = None,
-                            file_mutation_id: Optional[int] = None,
-                            required: bool = True) -> list[dict[str, Any]]:
-        """The complete governed context for one file, as ONE dataset.
-
-        **The authoritative read model for a governed file.** Manifest, working
-        mutation, file type, data profile, profile fields and the persisted
-        transformation configuration arrive already joined, so a consumer never
-        asks what type belongs to this manifest, what profile to this type, what
-        fields to this profile or what columns to this transformation. There is
-        no second call to make.
-
-        Entered by either identity. A named mutation IS the working mutation; a
-        manifest alone resolves the effective one -- the highest
-        ``file_mutation_id`` among non-deleted mutations, which is the rule the
-        file selectors already use. **The routine decides; this does not.**
-        Supplying neither, or a pair that disagrees, raises rather than being
-        repaired.
-
-        **THE ROWS REPEAT, AND THAT IS THE SHAPE.** Profile fields and
-        transformation columns are independent one-to-many children, so parent
-        values repeat across rows and the caller materialises them by the
-        identities each row carries. Splitting this into several calls to avoid
-        repeated columns would put the joins back above the database.
-
-        **The profile fields are the REDACTED reading only.** The clear reading
-        carries values taken from the file itself, and publishing those through
-        a structural read is not what this contract is for.
-
-        Args:
-            file_manifest_id: The file's persistent identity, or None.
-            file_mutation_id: A specific materialised state, or None. Where
-                given it is preserved exactly and no effective-mutation rule is
-                consulted.
-            required: True, because a caller asking for a file's governed
-                context cannot proceed without one -- an empty list would be
-                indistinguishable from a file that has no configuration.
-
-        Returns:
-            The joined rows, one per profile field x transformation column.
-
-        installation_id is deliberately absent: the routine declares no
-        installation parameter and scopes through ``control.file_vw``.
-        """
-        return self._call_rows("file_source_context", {
-            "file_manifest_id": file_manifest_id,
-            "file_mutation_id": file_mutation_id,
-        }, required=required)
-
     def maintain_transform(self, file_type_id: Optional[int] = None,
                            action: str = "ensure",
                            transform_id: Optional[int] = None,

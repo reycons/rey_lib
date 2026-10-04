@@ -1,6 +1,6 @@
 """A governed file as a source, hydrated from one control contract.
 
-    control.f_file_source_context_get -> ManifestSource -> existing objects
+    control.f_file_manifest_get -> ManifestSource -> existing objects
 
 **WIRING, not a new architecture.** Every object a load needs already exists;
 what was missing was a way to populate them from a file that lives in Rey's own
