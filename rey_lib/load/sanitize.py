@@ -62,6 +62,7 @@ from rey_lib.logs import (
     bound_run_log,
     log_artifact_reference,
     log_input_file_reference,
+    log_run_record,
 )
 from rey_lib.logs.file_manifest import FileManifestError
 
@@ -84,6 +85,9 @@ class FileSanitizationBatchResult:
     selected: int
     sanitized: int
     results: tuple[FileSanitizationResult, ...]
+    #: One "<file>: <reason>" per file that could not be sanitized. Each was
+    #: kicked out by the common execution path and the batch went on.
+    failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,8 +120,11 @@ def run_file_sanitization(
     sanitized through ``Transform(sanitize)``: ``apply`` on an applied run,
     ``plan`` on a dry run. The run log is the bound one the transform writes
     through, as the legacy step wrote through the one it was handed.
+
+    One file that cannot be sanitized is a fact about that file: its original
+    is kicked out by the common execution path (backlog 624), its failure is
+    recorded here, and the batch goes on.
     """
-    del run_log
     config = _resolve_config(inline_config)
     # Resolved before selection, as the legacy step resolves it: a context with
     # no governed root is refused even when nothing is selected.
@@ -129,6 +136,7 @@ def run_file_sanitization(
     sources = _files_to_sanitize(ctx, config.operation)
 
     results: list[FileSanitizationResult] = []
+    failures: list[str] = []
     for source in sources:
         data_file = _selected_data_file(source)
         # The transform reads the governed file's own facts -- its path, its
@@ -138,16 +146,27 @@ def run_file_sanitization(
             values={"process": inline_config, "record": source.template_context()},
             selected="sanitize",
         ).resolve(ctx)
-        if apply:
-            sanitizer.apply(data_file)
-        else:
-            sanitizer.plan(data_file)
+        try:
+            if apply:
+                sanitizer.apply(data_file)
+            else:
+                sanitizer.plan(data_file)
+        except (SanitizationError, FileSanitizationError) as error:
+            failures.append(f"{data_file.path.name}: {error}")
+            log_run_record(run_log,
+                "ERROR",
+                message=f"Sanitization failed for '{data_file.path.name}': {error}",
+                path=str(data_file.path),
+                error_message={"failure_reason": str(error)},
+            )
+            continue
         results.append(sanitizer.result)
 
     return FileSanitizationBatchResult(
         selected=len(sources),
         sanitized=sum(result.filesystem_applied for result in results),
         results=tuple(results),
+        failures=tuple(failures),
     )
 
 
@@ -203,7 +222,9 @@ class SanitizeTransform(FileTransform):
         """What the last ``apply`` or ``plan`` did, as sanitization reported it."""
         return self._result
 
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    file_failures = (SanitizationError, FileSanitizationError)
+
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Sanitize the file, recording it, and return what was produced.
 
         Returns:

@@ -489,7 +489,7 @@ class ConvertTransform(FileTransform):
         self._config = config
         self._candidate = candidate
 
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Convert the workbook and return each CSV at its M10 mutation.
 
         The conversion reads the workbook where it is when conversion runs --

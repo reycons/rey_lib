@@ -34,6 +34,7 @@ __all__ = [
     "move_to_failed",
     "move_to_kickouts",
     "move_to_processing",
+    "move_ungoverned",
 ]
 
 _ROUTE_TOKEN = re.compile(r"<([^<>]+)>")
@@ -234,6 +235,82 @@ def move_to_archive(
 ) -> FileRoutingResult:
     """Move one governed file to its configured archive route."""
     return _move_to_role(ctx, file, destination_role=FileRoutingRole.ARCHIVE)
+
+
+def move_ungoverned(
+    ctx: FileRoutingContext,
+    current_path: str | Path,
+    *,
+    destination_role: FileRoutingRole,
+) -> Path:
+    """Move one file NOTHING governs yet to its configured route for a role.
+
+    The persistence half of a move for a file with no control.file_manifest row
+    -- in this lifecycle, an inbox file inventory could not record (backlog
+    624). Behaviour is a governed move's: a usable route and destination name,
+    every path inside the governed roots, the source a file, nothing to do when
+    it is already there, and the filesystem move with its run-log evidence
+    (``move_file``). What differs is persistence only: there is no manifest, so
+    there is NO mutation to record.
+
+    Returns:
+        Where the file now is (its own path when it was already there).
+
+    Raises:
+        FileRoutingError: As routing refuses or the move fails. No result is
+            attached: a routing result names a governed file.
+    """
+    original_path = Path(current_path).expanduser().resolve()
+    route = ctx.routes.get(destination_role)
+    if not isinstance(route, (str, Path)) or not str(route).strip():
+        raise FileRoutingError(
+            f"The configured {destination_role.value} route must be a non-empty path.")
+    if ctx.destination_name is not None and (
+        not isinstance(ctx.destination_name, str)
+        or not ctx.destination_name.strip()
+        or Path(ctx.destination_name).name != ctx.destination_name
+        or ctx.destination_name in {".", ".."}
+    ):
+        raise FileRoutingError("destination_name must be one non-empty filename, not a path.")
+    try:
+        destination_dir = _resolve_route(route, None)
+    except (TypeError, ValueError) as exc:
+        raise FileRoutingError(str(exc)) from exc
+    resulting_path = (destination_dir / (ctx.destination_name or original_path.name)).resolve()
+    for field, path in (
+        ("source", original_path),
+        ("destination route", destination_dir),
+        ("resulting", resulting_path),
+    ):
+        if not _inside_governed_roots(path, ctx.governed_roots):
+            raise FileRoutingError(
+                f"The {field} path is outside the configured governed roots: {path}")
+    if not original_path.is_file():
+        raise FileRoutingError(f"Source file not found: {original_path}")
+    if original_path == resulting_path or ctx.dry_run:
+        return resulting_path
+    if resulting_path.exists() and not resulting_path.is_file():
+        raise FileRoutingError(
+            f"Routing destination exists and is not a regular file: {resulting_path}")
+    try:
+        return move_file(
+            original_path,
+            destination_dir,
+            ctx.destination_name,
+            state_ctx=ctx.state_ctx,
+            run_log=ctx.run_log,
+            app=ctx.application_name,
+            pipeline=ctx.pipeline_name,
+            reason=destination_role.value,
+            original_source=original_path,
+            metadata=(
+                dict(ctx.file_operation_metadata)
+                if ctx.file_operation_metadata is not None
+                else None
+            ),
+        )
+    except OSError as exc:
+        raise FileRoutingError(str(exc)) from exc
 
 
 def _record_failed_move(

@@ -530,7 +530,7 @@ class ClassifyTransform(FileTransform):
         self._config = _classification_source_config(source, name)
         self._source_record_type = source_record_type
 
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Classify the file; record, plan, move and return it.
 
         Returns:

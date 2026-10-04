@@ -12,11 +12,11 @@ because the boundary required it:
   their own M17 mutations; ``plan`` is the dry run -- legacy's result with
   ``applied=False``, nothing published, no identity invented;
 * a file that cannot be prepared is KICKED OUT first (rule 75,
-  ``a_failed_file_is_kicked_out``): its ORIGINAL in processing moves to the
-  declared ``file_kickouts`` destination under operation
-  ``create_prepared_files`` -- which is also what stops the prepare selector
-  offering it again -- and then its failure is recorded (M18) as legacy did.
-  The step's own ``kickouts`` stays what it was: the ROW-kickout JSONL;
+  ``a_failed_file_is_kicked_out``) by the common execution path every
+  Transform kind runs through (backlog 624): its ORIGINAL, wherever it is,
+  moves to <inbox>/kickouts -- which is also what stops the manifest retrieval
+  offering it again -- and then the step records its failure (M18) as legacy
+  did. The step's own ``kickouts`` stays what it was: the ROW-kickout JSONL;
 * the error is ``PreparationError``, and the producer is the runtime context's
   application.
 
@@ -68,7 +68,6 @@ from rey_lib.errors.error_utils import AppError
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.files.governed_file import FileId
 from rey_lib.load.file_transform import FileTransform, file_transform
-from rey_lib.load.kickout import kick_out_original
 from rey_lib.load.manifest_source import ManifestSource
 from rey_lib.load.mutation_context import (
     MutationContextError,
@@ -169,9 +168,6 @@ class _PreparedConfig:
     outbox: _DeclaredFolder
     kickouts: _DeclaredFolder
     convert_headers_to: str
-    # Where a FILE that cannot be prepared goes (rule 75) -- distinct from
-    # ``kickouts``, which is the ROW-kickout JSONL. None leaves it in place.
-    file_kickouts: str | None = None
 
 
 def run_create_prepared_files(
@@ -236,19 +232,11 @@ def run_create_prepared_files(
             else:
                 results.append(preparer.plan(data_file))
         except (PreparationError, RedactionExhausted) as error:
-            # RULE 75: KICK THE FILE OUT, THEN RECORD THE FAILURE. A dry run
-            # writes nothing, so it moves nothing either. A redacted companion
-            # that cannot be built (RedactionExhausted, row 613) is this file's
-            # failure too: nothing was published, and the batch goes on.
-            if apply:
-                kick_out_original(
-                    ctx,
-                    destination=config.file_kickouts,
-                    file_manifest_id=int(record.get("file_manifest_id") or 0),
-                    source=Path(_optional_text(
-                        record_field(record, config.source_field)) or "unknown"),
-                    operation=_OPERATION,
-                )
+            # RULE 75: the original is already kicked out -- the common
+            # execution path did it before this error reached here (backlog
+            # 624). A dry run plans and never applies, so it moves nothing. A
+            # redacted companion that cannot be built (RedactionExhausted, row
+            # 613) is this file's failure too. Record it; the batch goes on.
             results.append(
                 _failed_result(ctx, record, error,
                                source_field=config.source_field,
@@ -826,6 +814,12 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
             "preparing for file_selection.operation. Remove 'selections'."
         )
     file_selection = config.get("file_selection")
+    if "file_kickouts" in config:
+        raise PreparationError(
+            "create_prepared_files' file_kickouts is retired (backlog 624): a file "
+            "that cannot be prepared has its original moved to <inbox>/kickouts by "
+            "the common execution path. Remove 'file_kickouts'."
+        )
     if isinstance(file_selection, Mapping) and "procedure" in file_selection:
         raise PreparationError(
             "create_prepared_files' file_selection.procedure is retired (backlog "
@@ -868,11 +862,6 @@ def _resolve_config(inline_config: Mapping[str, Any]) -> _PreparedConfig:
         outbox=_required_folder(config, "outbox"),
         kickouts=_required_folder(config, "kickouts"),
         convert_headers_to=convert_to,
-        file_kickouts=(
-            _required_folder(config, "file_kickouts").path
-            if config.get("file_kickouts") is not None
-            else None
-        ),
     )
 
 
@@ -1064,7 +1053,9 @@ class PrepareTransform(FileTransform):
         """What the last ``apply`` or ``plan`` did, as preparation reported it."""
         return self._result
 
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    file_failures = (PreparationError, RedactionExhausted)
+
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Prepare and publish the file, recording each artifact.
 
         Returns:

@@ -1114,12 +1114,8 @@ def test_no_redacted_companion_when_the_folder_does_not_ask_for_one(run_log,
 
 from rey_lib.files.data_file import data_file_for  # noqa: E402
 from rey_lib.files import file_routing  # noqa: E402
-from rey_lib.files.manifest import FileManifest  # noqa: E402
 from rey_lib.load import Transform  # noqa: E402
 from rey_lib.load.prepare import PrepareTransform  # noqa: E402
-
-_FILE_KICKOUTS = {"path": "<base_path>/work/kickouts/<file_name>", "overwrite": True}
-
 
 def _governed(record: dict) -> ManifestSource:
     """The governed object the step builds from the routine's row."""
@@ -1173,116 +1169,123 @@ def test_a_plan_publishes_nothing_and_returns_no_identity(run_log, tmp_path: Pat
     evidence.assert_not_called()
 
 
-def _original(tmp_path: Path) -> Path:
-    original = tmp_path / "bny" / "source" / "processing" / "CWATranMay26.csv"
-    original.parent.mkdir(parents=True)
+def _original(tmp_path: Path, where: str = "processing") -> Path:
+    """The ORIGINAL file: delivered to the inbox, now in ``where``."""
+    original = tmp_path / "bny" / "source" / where / "CWATranMay26.csv"
+    original.parent.mkdir(parents=True, exist_ok=True)
     original.write_text("anything\n", encoding="utf-8")
     return original
 
 
-def _opening(original: Path, tmp_path: Path):
-    """The kickout opens the original (3) by its mutation. The step itself
-    never opens its selection through create any more (backlog 619)."""
-    def create(control, *, file_mutation_id: int):
-        if file_mutation_id == 3:
-            return SimpleNamespace(
-                data_file=lambda: data_file_for(
-                    original, file_manifest_id=_FILE_ID, file_mutation_id=3,
-                    classification={"type": "t", "values": {}},
-                    base_path=str(tmp_path / "bny")),
-                governed_context=lambda: {"file_name": original.name},
-            )
-        raise AssertionError(
-            f"the step opened mutation {file_mutation_id} through create; its "
-            "selection comes from get_for_operation")
-    return create
+def _inbox(tmp_path: Path) -> Path:
+    return tmp_path / "bny" / "source" / "inbox"
 
 
-def _history(*moves: tuple[int, str]) -> list[dict]:
-    return [{"file_mutation_id": mutation, "action": "move", "status": "success",
-             "result": result, "deleted_in": None} for mutation, result in moves]
+def _with_original(record: dict, original: Path, tmp_path: Path, mutation: int = 3) -> dict:
+    """The row as f_file_manifest_get returns it: the original's facts with it."""
+    return {
+        **record,
+        "manifest_path": str(_inbox(tmp_path) / original.name),
+        "original_path": str(original),
+        "original_mutation_id": mutation,
+    }
+
+
+class _bound:
+    """The workflow step the run is in, as the coordinator binds it."""
+
+    def __init__(self, step_id: str = "create_prepared_files") -> None:
+        self.step_id = step_id
+
+    def __enter__(self) -> None:
+        from rey_lib.logs import bind_step
+        bind_step(step_id=self.step_id)
+
+    def __exit__(self, *_exc) -> None:
+        from rey_lib.logs import clear_step
+        clear_step()
 
 
 def test_a_file_that_cannot_be_prepared_is_kicked_out_then_recorded(
     run_log, tmp_path: Path,
 ) -> None:
-    """Rule 75: the ORIGINAL leaves processing first; then the M18 failure."""
+    """Rule 75: the ORIGINAL is kicked out first -- by the common execution
+    path, to its inbox's kickouts -- and then the step records the failure."""
     source = _source(tmp_path, ["Col One", "1"])  # no profile: cannot be prepared
     original = _original(tmp_path)
-    config = {**_config(tmp_path), "file_kickouts": _FILE_KICKOUTS}
     order: list[str] = []
 
     def moved(*_a, **_k):
         order.append("move")
-        return tmp_path / "bny" / "work" / "kickouts" / original.name
+        return _inbox(tmp_path) / "kickouts" / original.name
 
     def recorded(*_a, **kwargs):
         order.append(f"M18:{kwargs.get('status')}")
         return 77
 
-    with patch.object(FileManifest, "history", return_value=_history((3, "moved_to_processing"))), \
-         patch.object(loader_prepare.ManifestSource, "create", side_effect=_opening(original, tmp_path)), \
+    with _bound(), \
+         patch.object(loader_prepare.ManifestSource, "create",
+                      side_effect=AssertionError("no second read of the file")), \
          patch.object(file_routing, "move_file", side_effect=moved) as move, \
          patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation, \
          patch("rey_lib.load.prepare.log_governed_source_file_mutation", side_effect=recorded):
-        result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
+        result = _run(_ctx(tmp_path), run_log, _config(tmp_path),
+                      [_with_original(_record(source), original, tmp_path)])
 
     _only_failure(result, "requires a current clear profile")
-    assert move.call_args.args[:2] == (original, tmp_path / "bny" / "work" / "kickouts")
-    # The step's own operation: the prepare selector's `done` stops offering it.
+    assert move.call_args.args[:2] == (original, _inbox(tmp_path) / "kickouts")
     assert mutation.call_args.kwargs["operation"] == "create_prepared_files"
     assert mutation.call_args.kwargs["reason"] == "moved_to_kickouts"
+    assert mutation.call_args.kwargs["run_log_fields"] == {"source_record_id": 3}
     assert source.exists()  # the sanitized copy is never moved
     assert order == ["move", "M18:failed"]
 
 
-def test_an_original_no_longer_in_processing_is_not_moved(run_log, tmp_path: Path) -> None:
+def test_an_original_is_kicked_out_from_wherever_it_is(run_log, tmp_path: Path) -> None:
+    """One rule: not only from processing -- an archived original moves too."""
     source = _source(tmp_path, ["Col One", "1"])
-    original = _original(tmp_path)
-    config = {**_config(tmp_path), "file_kickouts": _FILE_KICKOUTS}
+    original = _original(tmp_path, where="archive")
 
-    with patch.object(FileManifest, "history",
-                      return_value=_history((3, "moved_to_processing"), (4, "moved_to_archive"))), \
-         patch.object(loader_prepare.ManifestSource, "create", side_effect=_opening(original, tmp_path)), \
-         patch.object(file_routing, "move_file") as move:
-        result = _run(_ctx(tmp_path), run_log, config, [_record(source)])
+    with _bound(), \
+         patch.object(file_routing, "move_file",
+                      return_value=_inbox(tmp_path) / "kickouts" / original.name) as move, \
+         patch.object(file_routing, "log_source_file_mutation", return_value=90):
+        result = _run(_ctx(tmp_path), run_log, _config(tmp_path),
+                      [_with_original(_record(source), original, tmp_path, mutation=4)])
 
-    move.assert_not_called()
+    assert move.call_args.args[:2] == (original, _inbox(tmp_path) / "kickouts")
     _only_failure(result, "requires a current clear profile")
 
 
-def test_without_file_kickouts_nothing_moves(run_log, tmp_path: Path) -> None:
-    source = _source(tmp_path, ["Col One", "1"])
+def test_a_retired_file_kickouts_key_is_refused_by_name(run_log, tmp_path: Path) -> None:
+    config = {**_config(tmp_path),
+              "file_kickouts": {"path": "<base_path>/work/kickouts/<file_name>"}}
 
-    with patch.object(FileManifest, "history") as history, \
-         patch.object(file_routing, "move_file") as move:
-        result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
-
-    history.assert_not_called()
-    move.assert_not_called()
-    _only_failure(result, "requires a current clear profile")
+    with pytest.raises(PreparationError, match="file_kickouts is retired"):
+        _run(_ctx(tmp_path), run_log, config, [])
 
 
 def test_a_dry_run_kicks_nothing_out(run_log, tmp_path: Path) -> None:
     source = _source(tmp_path, ["Col One", "1"])
-    config = {**_config(tmp_path), "file_kickouts": _FILE_KICKOUTS}
+    original = _original(tmp_path)
 
-    with patch.object(FileManifest, "history") as history, \
-         patch.object(file_routing, "move_file") as move:
-        _run(_ctx(tmp_path), run_log, config, [_record(source)], apply=False)
+    with _bound(), patch.object(file_routing, "move_file") as move:
+        _run(_ctx(tmp_path), run_log, _config(tmp_path),
+             [_with_original(_record(source), original, tmp_path)], apply=False)
 
-    history.assert_not_called()
     move.assert_not_called()
 
 
-def test_a_state_that_cannot_be_opened_is_a_file_failure(run_log, tmp_path: Path) -> None:
+def test_a_state_that_cannot_be_read_is_a_file_failure(run_log, tmp_path: Path) -> None:
+    """An unregistered type is still a DataFile (backlog 624); the operation
+    fails on it, and that is this file's failure."""
     source, _ = _tabular(tmp_path)
     record = _record(source)
-    record["path"] = str(source.with_suffix(".unknown"))  # no registered DataFile type
+    record["path"] = str(source.with_suffix(".unknown"))
 
     result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [record])
 
-    _only_failure(result, "cannot be opened for preparation")
+    _only_failure(result, "could not be read")
 
 
 def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
@@ -1290,8 +1293,9 @@ def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
 ) -> None:
     """Row 606 live finding: RedactionExhausted is this file's failure (rule 75).
 
-    The file is kicked out and recorded, nothing is published for it, and the
-    batch goes on to prepare the next file.
+    The file's original is kicked out by the common path and the failure
+    recorded, nothing is published for it, and the batch goes on to prepare
+    the next file.
     """
     from rey_lib.redaction.registry import RedactionExhausted
 
@@ -1303,7 +1307,8 @@ def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
         "Account Number,Trade Amount,Settle Date", "A-2,200,2026-05-02"],
         name="CWAHoldMay26.csv")
     _profile(tmp_path, second, source_record_id=11)
-    config = {**_config(tmp_path), "file_kickouts": _FILE_KICKOUTS}
+    original = _original(tmp_path)
+    config = _config(tmp_path)
     config["outbox"] = {**config["outbox"], "redacted_copy": True}
     real = loader_prepare.redacted_csv_text
     calls = {"n": 0}
@@ -1314,19 +1319,22 @@ def test_a_redacted_companion_that_cannot_be_built_is_a_file_failure(
             raise RedactionExhausted("Column 'asset_code': no replacement left")
         return real(*args, **kwargs)
 
-    with patch.object(loader_prepare, "redacted_csv_text", side_effect=exhausted_first), \
-         patch.object(loader_prepare, "kick_out_original") as kickout:
+    with _bound(), \
+         patch.object(loader_prepare, "redacted_csv_text", side_effect=exhausted_first), \
+         patch.object(file_routing, "move_file",
+                      return_value=_inbox(tmp_path) / "kickouts" / original.name) as move, \
+         patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation:
         result = _run(_ctx(tmp_path), run_log, config,
-                      [_record(first), _record(second, record_id=11)])
+                      [_with_original(_record(first), original, tmp_path),
+                       _record(second, record_id=11)])
 
     assert (result.selected, result.prepared, result.failed) == (2, 1, 1)
     failed = next(item for item in result.results if item.status == "failed")
     assert "no replacement left" in failed.reason
     assert not (tmp_path / "prepared" / first.name).exists()
     assert (tmp_path / "prepared" / second.name).exists()
-    kickout.assert_called_once()
-    assert kickout.call_args.kwargs["operation"] == "create_prepared_files"
-    assert kickout.call_args.kwargs["destination"] == _FILE_KICKOUTS["path"]
+    move.assert_called_once()
+    assert mutation.call_args.kwargs["operation"] == "create_prepared_files"
 
 
 def test_the_step_asks_once_for_its_operation(run_log, tmp_path: Path) -> None:

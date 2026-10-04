@@ -42,7 +42,7 @@ from rey_lib.files.file_routing import (
     FileRoutingRole,
     GovernedFileReference,
 )
-from rey_lib.logs import bound_run_log, get_logger
+from rey_lib.logs import bound_run_log, current_step, get_logger
 
 __all__ = [
     "FileKind", "FileTransform", "MoveTransform", "build_file_transform",
@@ -55,12 +55,79 @@ _logger = get_logger(__name__)
 #: DataFile's own ``base_path``; ``<classification.*>`` is routing's.
 _BASE_PATH_TOKEN = "<base_path>"
 
+#: The directory containing the ORIGINAL file as inventoried, from the file's
+#: own ``inbox`` (backlog 624). Kickouts live beneath it.
+_INBOX_TOKEN = "<inbox>"
+
+#: The kickouts route is intrinsic, not configured: every kicked-out original
+#: goes to the kickouts folder of the inbox it arrived in (backlog 624).
+_KICKOUTS_ROUTE = f"{_INBOX_TOKEN}/kickouts"
+
 
 class FileTransform(ABC):
-    """One operation on one governed file."""
+    """One operation on one governed file.
+
+    **THE ONE COMMON EXECUTION PATH** (backlog 624). :meth:`apply` is defined
+    here, once, and no kind may define its own: a kind implements
+    :meth:`_apply`. When ``_apply`` raises one of the kind's ``file_failures``
+    -- a terminal failure of THIS FILE, never a configuration error -- the
+    original file is moved to kickouts through ``Transform(kind="move",
+    role="kickouts")``, from the facts the input DataFile carries, and the same
+    error is raised again so the step's iteration records it and continues.
+    """
+
+    #: The errors that are a terminal failure of the file this kind operated
+    #: on. Empty catches nothing: the move kind declares none, which is also
+    #: why its own failure never triggers another move.
+    file_failures: tuple[type[BaseException], ...] = ()
+
+    #: The runtime context; every kind is built with it.
+    _ctx: Any
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Refuse a kind that would bypass the common execution path."""
+        super().__init_subclass__(**kwargs)
+        if "apply" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} defines apply(). A file-level kind implements "
+                "_apply(); apply() is FileTransform's, so every kind runs "
+                "through the one failure path (backlog 624)."
+            )
+
+    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+        """Run this kind's operation on exactly this file; on a terminal
+        failure of the file, move its original to kickouts and raise again.
+
+        Args:
+            data_file: The file, at the state the caller selected.
+
+        Returns:
+            What ``_apply`` returns.
+        """
+        try:
+            return self._apply(data_file)
+        except self.file_failures:
+            original_path = data_file.original_path or str(data_file.path)
+            original = data_file_for(Path(original_path), **{
+                **data_file.governed_facts(),
+                "file_mutation_id": (
+                    data_file.original_mutation_id
+                    if data_file.original_path
+                    else data_file.file_mutation_id
+                ),
+                "original_path": original_path,
+            })
+            try:
+                build_file_transform(self._ctx, "move", {"role": "kickouts"}).apply(original)
+            except (ConfigError, file_routing.FileRoutingError, OSError) as kickout_error:
+                # The file's failure is the error to raise; a move that could
+                # not be made must not replace it. Routing has recorded it.
+                _logger.warning("'%s' could not be kicked out: %s",
+                                Path(original_path).name, kickout_error)
+            raise
 
     @abstractmethod
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Operate on exactly this governed file, and return what it leaves.
 
         Args:
@@ -124,7 +191,7 @@ def file_kinds() -> tuple[FileKind, ...]:
 
 
 @file_transform("move", fields=("role", "route", "operation", "name"),
-                required=("role", "route", "operation"))
+                required=("role",))
 class MoveTransform(FileTransform):
     """Move one governed file to a role's route.
 
@@ -133,13 +200,17 @@ class MoveTransform(FileTransform):
     changing nothing.
     """
 
+    #: Its own failure is never kicked out: routing has recorded the failed
+    #: move, and a second move would recurse.
+    file_failures = ()
+
     def __init__(
         self,
         ctx: Any,
         *,
         role: str,
-        route: str,
-        operation: str,
+        route: str | None = None,
+        operation: str | None = None,
         name: str | None = None,
     ) -> None:
         """Hold the move's configuration and the runtime it runs in.
@@ -147,10 +218,12 @@ class MoveTransform(FileTransform):
         Args:
             ctx: The runtime context: its ``app_name`` and its ``data`` path.
             role: processing | kickouts | failed | archive.
-            route: The destination DIRECTORY. ``<base_path>`` resolves from the
-                file; ``<classification.*>`` resolves in routing.
-            operation: The operation this move serves -- the caller's, which
-                the move's evidence states.
+            route: The destination DIRECTORY. ``<base_path>`` and ``<inbox>``
+                resolve from the file; ``<classification.*>`` resolves in
+                routing. Kickouts need none: their route is intrinsic,
+                ``<inbox>/kickouts`` (backlog 624).
+            operation: The operation this move serves, which the move's
+                evidence states. Unset: the bound workflow step's.
             name: The destination file name, where the caller resolved one (a
                 declared destination such as ``{kickouts}/<file_name>``).
                 Unset keeps the file's own name, as every move did before.
@@ -165,18 +238,24 @@ class MoveTransform(FileTransform):
                 f"Transform (move): '{role}' is not a routing role. Roles: "
                 f"{', '.join(member.value for member in FileRoutingRole)}."
             ) from exc
+        declared = str(route).strip() if route is not None else ""
+        if not declared and self._role is not FileRoutingRole.KICKOUTS:
+            raise ConfigError(
+                f"Transform (move): the {self._role.value} role needs a route; "
+                "only kickouts has an intrinsic one."
+            )
         self._ctx = ctx
-        self._route = str(route)
-        self._operation = str(operation)
+        self._route = declared or _KICKOUTS_ROUTE
+        self._operation = str(operation) if operation else None
         self._name = str(name).strip() if name else None
 
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Move the file, and return it at its new path.
 
         Raises:
-            ConfigError: If the file is not governed, the route needs a
-                ``base_path`` the file does not carry, or the runtime has no
-                application name or ``data`` path.
+            ConfigError: If the route needs a ``base_path`` or ``inbox`` the
+                file does not carry, no operation is stated or bound, or the
+                runtime has no application name or ``data`` path.
             FileRoutingError: As routing refuses or fails; routing has already
                 recorded a failed move where the filesystem operation failed.
         """
@@ -185,15 +264,12 @@ class MoveTransform(FileTransform):
             data_file.file_manifest_id, data_file.file_mutation_id,
             self._role.value, self._operation,
         )
-        result = self._route_file(data_file, dry_run=False)
+        resulting_path, recorded = self._route_file(data_file, dry_run=False)
         # UNCHANGED is the file already where the route puts it: the same
-        # state, so the same mutation. Every other outcome that returns is a
-        # move routing recorded, and that record is the new state.
-        file_mutation_id = (
-            data_file.file_mutation_id
-            if result.file_manifest_record_id is None
-            else result.file_manifest_record_id
-        )
+        # state, so the same mutation. Every other governed outcome that
+        # returns is a move routing recorded, and that record is the new state.
+        # An ungoverned move records no mutation.
+        file_mutation_id = data_file.file_mutation_id if recorded is None else recorded
         facts = {**data_file.governed_facts(), "file_mutation_id": file_mutation_id}
         # MOVING THE ORIGINAL MOVES WHERE THE ORIGINAL IS (backlog 624). When
         # this file is the original -- a classify move to processing, an
@@ -204,11 +280,11 @@ class MoveTransform(FileTransform):
             or Path(data_file.original_path).expanduser().resolve()
             == Path(data_file.path).expanduser().resolve()
         ):
-            facts["original_path"] = str(result.resulting_path)
+            facts["original_path"] = str(resulting_path)
             facts["original_mutation_id"] = file_mutation_id
         return (
             data_file_for(
-                result.resulting_path,
+                resulting_path,
                 file_type=data_file.file_type,
                 **facts,
                 **data_file.settings,
@@ -226,26 +302,63 @@ class MoveTransform(FileTransform):
             ConfigError: As :meth:`apply` refuses.
             FileRoutingError: As routing refuses.
         """
-        return self._route_file(data_file, dry_run=True).resulting_path
+        return self._route_file(data_file, dry_run=True)[0]
 
-    def _route_file(self, data_file: DataFile, *, dry_run: bool) -> FileRoutingResult:
-        """Hand this file to the routing primitive for this move's role."""
+    def _route_file(self, data_file: DataFile, *, dry_run: bool) -> tuple[Path, int | None]:
+        """Hand this file to routing, and say where it is and what recorded it.
+
+        One move; routing distinguishes PERSISTENCE beneath it. A governed file
+        goes through the role's governed wrapper (the move plus its mutation);
+        a file nothing governs yet goes through the one ungoverned primitive
+        (the move and its run-log evidence -- there is no manifest to record a
+        mutation against).
+
+        Returns:
+            Where the file is after the move, and the mutation that recorded
+            it -- None when nothing was recorded (unchanged, planned, or an
+            ungoverned file).
+        """
+        context = replace(self._routing_context(data_file), dry_run=dry_run)
         if data_file.file_manifest_id is None:
-            raise ConfigError(
-                f"Transform (move): {data_file!r} carries no governed identity, "
-                "so there is no governed file to move."
+            return (
+                file_routing.move_ungoverned(
+                    context, data_file.path, destination_role=self._role),
+                None,
             )
         # Looked up when called, from routing's published wrappers: one per
         # role, and the module's own -- never a copy taken at import.
         move = getattr(file_routing, f"move_to_{self._role.value}")
-        return move(
-            replace(self._routing_context(data_file), dry_run=dry_run),
+        result: FileRoutingResult = move(
+            context,
             GovernedFileReference(
                 file_id=data_file.file_manifest_id,
                 current_path=data_file.path,
                 classification=data_file.classification,
             ),
         )
+        return result.resulting_path, result.file_manifest_record_id
+
+    def _operation_for_evidence(self) -> str:
+        """The operation the move states: the caller's, else the bound step's.
+
+        A kickout is made by the common execution path on a kind's behalf, so
+        nobody names an operation for it; the workflow step it happened in is
+        bound (``current_step``), and that is what the move served.
+
+        Raises:
+            ConfigError: If none is named and no step is bound -- the mutation
+                must state an operation, and guessing one is not allowed.
+        """
+        if self._operation:
+            return self._operation
+        step = current_step() or {}
+        operation = str(step.get("step_id") or "").strip()
+        if not operation:
+            raise ConfigError(
+                "Transform (move): no operation was named and no workflow step is "
+                "bound, so the move cannot state what it served."
+            )
+        return operation
 
     def _routing_context(self, data_file: DataFile) -> FileRoutingContext:
         """The routing primitive's operation-scoped context for this move."""
@@ -265,7 +378,7 @@ class MoveTransform(FileTransform):
             state_ctx=self._ctx,
             run_log=bound_run_log(),
             application_name=application_name,
-            operation=self._operation,
+            operation=self._operation_for_evidence(),
             routes={self._role: _route_for(self._route, data_file)},
             governed_roots=(governed_root,),
             dry_run=False,
@@ -284,22 +397,24 @@ class MoveTransform(FileTransform):
 
 
 def _route_for(route: str, data_file: DataFile) -> str:
-    """The route with ``<base_path>`` resolved from the file.
+    """The route with ``<base_path>`` and ``<inbox>`` resolved from the file.
 
     Raises:
-        ConfigError: If the route names ``<base_path>`` and the file carries
-            none.
+        ConfigError: If the route names one the file carries none of.
     """
-    if _BASE_PATH_TOKEN not in route:
-        return route
-    base_path = str(data_file.base_path or "").strip()
-    if not base_path:
-        raise ConfigError(
-            f"Transform (move): the route '{route}' needs the file's base_path, "
-            f"and governed file {data_file.file_manifest_id} at mutation "
-            f"{data_file.file_mutation_id} carries none."
-        )
-    return route.replace(_BASE_PATH_TOKEN, base_path)
+    for token, value in ((_BASE_PATH_TOKEN, data_file.base_path),
+                         (_INBOX_TOKEN, data_file.inbox)):
+        if token not in route:
+            continue
+        resolved = str(value or "").strip()
+        if not resolved:
+            raise ConfigError(
+                f"Transform (move): the route '{route}' needs the file's "
+                f"{token.strip('<>')}, and file {data_file.file_manifest_id} at "
+                f"mutation {data_file.file_mutation_id} carries none."
+            )
+        route = route.replace(token, resolved)
+    return route
 
 
 def build_file_transform(

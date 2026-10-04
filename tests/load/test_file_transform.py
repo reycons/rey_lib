@@ -92,8 +92,9 @@ class TestTheKindRegistry:
 
         assert move is not None
         assert move.fields == ("role", "route", "operation", "name")
-        # The destination name is optional: unset keeps the file's own name.
-        assert move.required == ("role", "route", "operation")
+        # Only the role is required (backlog 624): kickouts has an intrinsic
+        # route, and an unnamed operation is the bound workflow step's.
+        assert move.required == ("role",)
         assert move.builder is MoveTransform
 
     def test_a_move_resolves_to_a_file_transform(self, tmp_path: Path) -> None:
@@ -107,8 +108,8 @@ class TestTheKindRegistry:
             _move().executed_declaration()
 
     def test_an_incomplete_move_is_refused_by_name(self, tmp_path: Path) -> None:
-        with pytest.raises(ConfigError, match="route"):
-            _move(route="").resolve(_ctx(tmp_path))
+        with pytest.raises(ConfigError, match="needs a route"):
+            _move(role="processing", route="").resolve(_ctx(tmp_path))
 
     def test_an_unknown_role_is_refused_by_name(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="'elsewhere' is not a routing role"):
@@ -147,9 +148,26 @@ class TestTheMove:
         evidence.assert_not_called()
         assert original.path.exists()
 
-    def test_an_ungoverned_file_is_refused(self, tmp_path: Path) -> None:
-        with pytest.raises(ConfigError, match="no governed identity"):
-            _move().resolve(_ctx(tmp_path)).apply(data_file_for(tmp_path / "a.csv"))
+    def test_an_ungoverned_file_is_moved_with_no_mutation(self, tmp_path: Path) -> None:
+        """Routing distinguishes persistence, not behaviour (backlog 624)."""
+        inbox = tmp_path / "feed" / "source" / "inbox"
+        inbox.mkdir(parents=True)
+        raw = inbox / "a.csv"
+        raw.write_text("a,b\n", encoding="utf-8")
+        destination = inbox / "kickouts" / "a.csv"
+
+        with patch.object(file_routing, "move_file", return_value=destination) as move, \
+             patch.object(file_routing, "log_source_file_mutation") as evidence:
+            (moved,) = Transform(
+                values={"role": "kickouts", "operation": "inventory_source_files"},
+                selected="move",
+            ).resolve(_ctx(tmp_path)).apply(
+                data_file_for(raw, inbox=str(inbox), original_path=str(raw)))
+
+        assert move.call_args.args[:2] == (raw, inbox / "kickouts")
+        evidence.assert_not_called()
+        assert moved.path == destination
+        assert moved.file_manifest_id is None
 
     def test_a_route_needing_base_path_refuses_a_file_without_one(
         self, tmp_path: Path,
@@ -165,3 +183,116 @@ class TestTheMove:
 
         with pytest.raises(ConfigError, match="app_name"):
             _move().resolve(ctx).apply(_governed(tmp_path))
+
+
+# -- the one common execution path (backlog 624) -------------------------------
+
+from rey_lib.errors.error_utils import AppError  # noqa: E402
+from rey_lib.logs import bind_step, clear_step  # noqa: E402
+from rey_lib.load.file_transform import file_transform  # noqa: E402
+
+
+class _FileFailed(AppError):
+    """A terminal failure of the file a test kind operated on."""
+
+
+@file_transform("test_failing_kind", fields=())
+class _FailingKind(FileTransform):
+    """A kind whose operation always fails its file."""
+
+    file_failures = (_FileFailed,)
+
+    def __init__(self, ctx) -> None:
+        self._ctx = ctx
+
+    def _apply(self, data_file):
+        raise _FileFailed(f"cannot handle {data_file.path.name}")
+
+
+def _sanitized_copy_of_an_original_in_processing(root: Path):
+    """A derived copy whose original is in processing, at mutation 30."""
+    inbox = root / "feed" / "source" / "inbox"
+    original = _governed(root)  # feed/source/processing/a.csv
+    copy = root / "feed" / "work" / "sanitized_csv" / "a.csv"
+    copy.parent.mkdir(parents=True)
+    copy.write_text("a,b\n", encoding="utf-8")
+    return data_file_for(
+        copy, file_manifest_id=7, file_mutation_id=55,
+        classification=original.classification, base_path=original.base_path,
+        inbox=str(inbox), original_path=str(original.path), original_mutation_id=30,
+    ), original
+
+
+class TestTheCommonExecutionPath:
+    """A kind's terminal file failure moves the ORIGINAL to <inbox>/kickouts."""
+
+    def test_the_original_is_kicked_out_and_the_failure_raised_again(
+        self, tmp_path: Path,
+    ) -> None:
+        failing, original = _sanitized_copy_of_an_original_in_processing(tmp_path)
+        kickouts = tmp_path / "feed" / "source" / "inbox" / "kickouts"
+        bind_step(step_id="profile_csv_record_types")
+        try:
+            with patch.object(file_routing, "move_file",
+                              return_value=kickouts / "a.csv") as move, \
+                 patch.object(file_routing, "log_source_file_mutation",
+                              return_value=88) as evidence:
+                with pytest.raises(_FileFailed, match="cannot handle a.csv"):
+                    Transform(values={}, selected="test_failing_kind").resolve(
+                        _ctx(tmp_path)).apply(failing)
+        finally:
+            clear_step()
+
+        # The ORIGINAL moved, from where it is, to its inbox's kickouts --
+        # never the copy the kind failed on.
+        assert move.call_args.args[:2] == (original.path, kickouts)
+        assert evidence.call_args.kwargs["reason"] == "moved_to_kickouts"
+        assert evidence.call_args.kwargs["operation"] == "profile_csv_record_types"
+        assert evidence.call_args.kwargs["run_log_fields"] == {"source_record_id": 30}
+
+    def test_a_kind_that_defines_apply_is_refused(self) -> None:
+        with pytest.raises(TypeError, match="defines apply"):
+            class _Bypassing(FileTransform):  # noqa: F841
+                def apply(self, data_file):
+                    return ()
+
+                def _apply(self, data_file):
+                    return ()
+
+    def test_a_failed_move_is_not_kicked_out_again(self, tmp_path: Path) -> None:
+        original = _governed(tmp_path, inbox=str(tmp_path / "feed" / "source" / "inbox"))
+
+        with patch.object(file_routing, "move_file",
+                          side_effect=OSError("disk full")) as move, \
+             patch.object(file_routing, "log_source_file_mutation", return_value=1):
+            with pytest.raises(file_routing.FileRoutingError):
+                _move(route=None).resolve(_ctx(tmp_path)).apply(original)
+
+        assert move.call_count == 1
+
+    def test_kickouts_route_is_intrinsic(self, tmp_path: Path) -> None:
+        inbox = tmp_path / "feed" / "source" / "inbox"
+        original = _governed(tmp_path, inbox=str(inbox))
+
+        planned = Transform(values={"role": "kickouts", "operation": "x"},
+                            selected="move").resolve(_ctx(tmp_path)).plan(original)
+
+        assert planned == inbox / "kickouts" / "a.csv"
+
+    def test_an_unnamed_operation_with_no_bound_step_is_refused(self, tmp_path: Path) -> None:
+        original = _governed(tmp_path, inbox=str(tmp_path / "feed" / "source" / "inbox"))
+        clear_step()
+
+        with pytest.raises(ConfigError, match="no workflow step is bound"):
+            Transform(values={"role": "kickouts"}, selected="move").resolve(
+                _ctx(tmp_path)).plan(original)
+
+    def test_moving_the_original_moves_its_facts(self, tmp_path: Path) -> None:
+        original = _governed(tmp_path, original_path=None)
+        destination = tmp_path / "feed" / "work" / "kickouts" / "a.csv"
+
+        with patch.object(file_routing, "move_file", return_value=destination), \
+             patch.object(file_routing, "log_source_file_mutation", return_value=41):
+            (moved,) = _move().resolve(_ctx(tmp_path)).apply(original)
+
+        assert (moved.original_path, moved.original_mutation_id) == (str(destination), 41)

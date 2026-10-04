@@ -595,16 +595,45 @@ def test_a_sanitization_that_applied_nothing_returns_no_file(
     assert sanitizer.result is failed
 
 
-def test_a_file_with_no_registered_data_file_type_stops_the_step(
+def test_a_file_that_cannot_be_sanitized_is_kicked_out_and_the_batch_goes_on(
     run_log, tmp_path: Path,
 ) -> None:
-    record = _record(10, 1006, tmp_path / "source.unknown")
+    """Backlog 624: one bad file no longer stops the step. Its ORIGINAL is moved
+    to its inbox's kickouts by the common execution path, its failure is
+    recorded, and the next file is still sanitized."""
+    from rey_lib.files import file_routing
+    from rey_lib.files.sanitization import FileSanitizationError
+    from rey_lib.logs import bind_step, clear_step
 
-    with patch("rey_lib.load.sanitize.sanitize_file") as shared:
-        with pytest.raises(SanitizationError, match="no registered DataFile type"):
-            run_file_sanitization(_ctx(tmp_path, record), run_log, _config(tmp_path))
+    inbox = tmp_path / "feed" / "source" / "inbox"
+    original = tmp_path / "feed" / "source" / "processing" / "bad.unknown"
+    original.parent.mkdir(parents=True)
+    original.write_text("x", encoding="utf-8")
+    bad = {**_record(10, 1006, original), "manifest_path": str(inbox / "bad.unknown"),
+           "original_path": str(original), "original_mutation_id": 3}
+    good = _record(20, 2002, tmp_path / "good.csv")
 
-    shared.assert_not_called()
+    def shared(operation, reference):
+        if reference.current_path.name == "bad.unknown":
+            raise FileSanitizationError("no reader for '.unknown'")
+        return _result(tmp_path / "clean" / "good.csv")
+
+    bind_step(step_id="sanitize_file")
+    try:
+        with patch("rey_lib.load.sanitize.sanitize_file", side_effect=shared), \
+             patch.object(file_routing, "move_file",
+                          return_value=inbox / "kickouts" / "bad.unknown") as move, \
+             patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation:
+            result = run_file_sanitization(_ctx(tmp_path, bad, good), run_log, _config(tmp_path))
+    finally:
+        clear_step()
+
+    assert move.call_args.args[:2] == (original.resolve(), inbox / "kickouts")
+    assert mutation.call_args.kwargs["reason"] == "moved_to_kickouts"
+    assert mutation.call_args.kwargs["operation"] == "sanitize_file"
+    assert result.selected == 2
+    assert result.sanitized == 1
+    assert [failure.split(":")[0] for failure in result.failures] == ["bad.unknown"]
 
 
 # -- the governed object, not a selector row (backlog 619) --------------------
