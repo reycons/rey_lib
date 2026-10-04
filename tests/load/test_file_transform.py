@@ -202,11 +202,17 @@ class _FailingKind(FileTransform):
 
     file_failures = (_FileFailed,)
 
+    #: What happened, in order, across the failure path.
+    events: list[str] = []
+
     def __init__(self, ctx) -> None:
         self._ctx = ctx
 
     def _apply(self, data_file):
         raise _FileFailed(f"cannot handle {data_file.path.name}")
+
+    def _record_failure(self, data_file, error):
+        _FailingKind.events.append(f"recorded:{error}")
 
 
 def _sanitized_copy_of_an_original_in_processing(root: Path):
@@ -249,6 +255,48 @@ class TestTheCommonExecutionPath:
         assert evidence.call_args.kwargs["reason"] == "moved_to_kickouts"
         assert evidence.call_args.kwargs["operation"] == "profile_csv_record_types"
         assert evidence.call_args.kwargs["run_log_fields"] == {"source_record_id": 30}
+
+    def test_the_kind_records_its_failure_after_the_kickout(self, tmp_path: Path) -> None:
+        """Rule 75 (4): kicked out first, then the kind's own record, then raise."""
+        failing, _original = _sanitized_copy_of_an_original_in_processing(tmp_path)
+        kickouts = tmp_path / "feed" / "source" / "inbox" / "kickouts"
+        _FailingKind.events = []
+
+        def moved(*_a, **_k):
+            _FailingKind.events.append("moved")
+            return kickouts / "a.csv"
+
+        bind_step(step_id="profile_csv_record_types")
+        try:
+            with patch.object(file_routing, "move_file", side_effect=moved), \
+                 patch.object(file_routing, "log_source_file_mutation", return_value=88):
+                with pytest.raises(_FileFailed):
+                    Transform(values={}, selected="test_failing_kind").resolve(
+                        _ctx(tmp_path)).apply(failing)
+        finally:
+            clear_step()
+
+        assert _FailingKind.events == ["moved", "recorded:cannot handle a.csv"]
+
+    def test_the_failure_is_recorded_even_when_the_kickout_fails(
+        self, tmp_path: Path,
+    ) -> None:
+        """A move that cannot be made must not lose the failure's evidence."""
+        failing, _original = _sanitized_copy_of_an_original_in_processing(tmp_path)
+        _FailingKind.events = []
+
+        bind_step(step_id="profile_csv_record_types")
+        try:
+            with patch.object(file_routing, "move_file",
+                              side_effect=OSError("disk full")), \
+                 patch.object(file_routing, "log_source_file_mutation", return_value=88):
+                with pytest.raises(_FileFailed, match="cannot handle a.csv"):
+                    Transform(values={}, selected="test_failing_kind").resolve(
+                        _ctx(tmp_path)).apply(failing)
+        finally:
+            clear_step()
+
+        assert _FailingKind.events == ["recorded:cannot handle a.csv"]
 
     def test_a_kind_that_defines_apply_is_refused(self) -> None:
         with pytest.raises(TypeError, match="defines apply"):

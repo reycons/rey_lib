@@ -152,13 +152,9 @@ def run_file_sanitization(
             else:
                 sanitizer.plan(data_file)
         except (SanitizationError, FileSanitizationError) as error:
+            # Kicked out (applied runs), then recorded, by the kind (rules 75
+            # and 78); the batch reports it and goes on.
             failures.append(f"{data_file.path.name}: {error}")
-            log_run_record(run_log,
-                "ERROR",
-                message=f"Sanitization failed for '{data_file.path.name}': {error}",
-                path=str(data_file.path),
-                error_message={"failure_reason": str(error)},
-            )
             continue
         results.append(sanitizer.result)
 
@@ -224,6 +220,17 @@ class SanitizeTransform(FileTransform):
 
     file_failures = (SanitizationError, FileSanitizationError)
 
+    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+        """This file's ERROR record: after the kickout when applied
+        (FileTransform.apply), and by :meth:`plan` on a dry run, which moves
+        nothing. The step records nothing (rule 78)."""
+        log_run_record(bound_run_log(),
+            "ERROR",
+            message=f"Sanitization failed for '{data_file.path.name}': {error}",
+            path=str(data_file.path),
+            error_message={"failure_reason": str(error)},
+        )
+
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Sanitize the file, recording it, and return what was produced.
 
@@ -242,7 +249,11 @@ class SanitizeTransform(FileTransform):
             Sanitization's own result. No governed DataFile is returned, because
             no mutation exists to identify one.
         """
-        result, _produced = self._sanitize(data_file, dry_run=True)
+        try:
+            result, _produced = self._sanitize(data_file, dry_run=True)
+        except self.file_failures as error:
+            self._record_failure(data_file, error)
+            raise
         return result
 
     def _sanitize(

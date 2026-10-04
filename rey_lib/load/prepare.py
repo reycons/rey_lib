@@ -63,7 +63,6 @@ from rey_lib.logs import (
 from rey_lib.redaction.redactors import redact_delimited
 from rey_lib.redaction.registry import RedactionRegistry
 
-from rey_lib.data.errors import DataStructureError
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.files.governed_file import FileId
@@ -217,31 +216,22 @@ def run_create_prepared_files(
 
     results: list[PreparedFileResult] = []
     for record, selected in work.values():
-        # One file's unusable evidence is that file's failure. Publication is
-        # already all-or-nothing per file, so a failure here leaves no partial
-        # output behind and the remaining selected files still run.
+        # The step only applies the kind (rule 78, backlog 624). A file that
+        # cannot be prepared is the kind's to record; the common execution path
+        # has already kicked out its original when the error arrives here, and
+        # the batch goes on. A dry run plans and never applies.
+        preparer = Transform(
+            values={"config": config, "record": record, "apply": apply},
+            selected="prepare",
+        ).resolve(ctx)
         try:
-            data_file = _selected_data_file(selected)
-            preparer = Transform(
-                values={"config": config, "record": record},
-                selected="prepare",
-            ).resolve(ctx)
             if apply:
-                preparer.apply(data_file)
-                results.append(preparer.result)
+                preparer.apply(selected.data_file())
             else:
-                results.append(preparer.plan(data_file))
-        except (PreparationError, RedactionExhausted) as error:
-            # RULE 75: the original is already kicked out -- the common
-            # execution path did it before this error reached here (backlog
-            # 624). A dry run plans and never applies, so it moves nothing. A
-            # redacted companion that cannot be built (RedactionExhausted, row
-            # 613) is this file's failure too. Record it; the batch goes on.
-            results.append(
-                _failed_result(ctx, record, error,
-                               source_field=config.source_field,
-                               apply=apply)
-            )
+                preparer.plan(selected.data_file())
+        except (PreparationError, RedactionExhausted):
+            pass
+        results.append(preparer.result)
 
     return CreatePreparedFilesBatchResult(
         selected=len(work),
@@ -999,24 +989,7 @@ def _plain_config_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _selected_data_file(selected: ManifestSource) -> DataFile:
-    """Open exactly the selected file's governed state as a DataFile.
-
-    Raises:
-        PreparationError: If its state cannot be opened (no registered DataFile
-            type, no resolved path) -- a per-file failure, kicked out and
-            recorded like any other.
-    """
-    try:
-        return selected.data_file()
-    except (ConfigError, DataStructureError) as exc:
-        raise PreparationError(
-            f"Selected mutation {selected.file_mutation_id!r} cannot be opened "
-            f"for preparation: {exc}"
-        ) from exc
-
-
-@file_transform("prepare", fields=("config", "record"))
+@file_transform("prepare", fields=("config", "record", "apply"), required=("config", "record"))
 class PrepareTransform(FileTransform):
     """Prepare one governed sanitized file.
 
@@ -1026,10 +999,19 @@ class PrepareTransform(FileTransform):
 
     ``config`` is the step's validated preparation. ``record`` is the selected
     row: the templates, the source field and the governed identity read it
-    exactly as legacy did, and it is never a DataFile property.
+    exactly as legacy did, and it is never a DataFile property. ``apply``
+    says whether this is an applied run, so a failure is recorded as governed
+    evidence only when it is.
+
+    A FILE THAT CANNOT BE PREPARED IS RECORDED HERE (rules 75 and 78, backlog
+    624): applied, by :meth:`_record_failure` after the common path has kicked
+    the original out; planned, by :meth:`plan` itself, which moves nothing.
+    The step records nothing.
     """
 
-    def __init__(self, ctx: Any, *, config: _PreparedConfig, record: Any) -> None:
+    def __init__(
+        self, ctx: Any, *, config: _PreparedConfig, record: Any, apply: Any = True,
+    ) -> None:
         """Keep the validated preparation and the row it prepares.
 
         Raises:
@@ -1046,6 +1028,7 @@ class PrepareTransform(FileTransform):
         self._ctx = ctx
         self._config = config
         self._record = _plain_mapping(record)
+        self._apply_run = apply is not False
         self._result: PreparedFileResult | None = None
 
     @property
@@ -1081,10 +1064,25 @@ class PrepareTransform(FileTransform):
             Preparation's own result, ``applied`` False. No governed DataFile,
             because no mutation exists to identify one.
         """
-        result, _produced = _prepare_one_file(
-            self._ctx, bound_run_log(), self._config, self._record, apply=False)
+        try:
+            result, _produced = _prepare_one_file(
+                self._ctx, bound_run_log(), self._config, self._record, apply=False)
+        except (PreparationError, RedactionExhausted) as error:
+            self._fail(error)
+            raise
         self._result = result
         return result
+
+    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+        """After the kickout: record this file's failure (FileTransform.apply)."""
+        self._fail(error)
+
+    def _fail(self, error: BaseException) -> None:
+        """Record this file's failure, and hold it as the item result."""
+        self._result = _failed_result(
+            self._ctx, self._record, error,
+            source_field=self._config.source_field, apply=self._apply_run,
+        )
 
 
 # ---------------------------------------------------------------------------

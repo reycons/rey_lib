@@ -33,7 +33,6 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from rey_lib.data.data_profile import DataProfile, FieldProfile, ProfileField
-from rey_lib.data.errors import DataStructureError
 from rey_lib.encryption import sha256_file
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.files.csv import normalized_header
@@ -796,18 +795,11 @@ def run_record_type_profiling(
     profiled = 0
     failures: list[str] = []
     for source, object_id, file_manifest_id, data_profile_key, key_fields in work.values():
+        # The selected state, already opened at exactly the mutation the
+        # routine returned (hydrated once, by get_for_operation). A selected
+        # state with no path is a structural failure and stops the step.
+        data_file = by_mutation[int(object_id)].data_file()
         try:
-            # The selected state, already opened at exactly the mutation the
-            # routine returned; profiling reads the file where that state
-            # placed it. Hydrated once, by get_for_operation.
-            selected = by_mutation[int(object_id)]
-            try:
-                data_file = selected.data_file()
-            except DataStructureError as exc:
-                # A state that resolved no path: there is no file to profile.
-                raise ProfilingError(
-                    f"'{Path(source).name}' cannot be opened for profiling: {exc}"
-                ) from exc
             Transform(
                 values={
                     "config": config,
@@ -819,20 +811,9 @@ def run_record_type_profiling(
             ).resolve(ctx).apply(data_file)
             profiled += 1
         except ProfilingError as error:
-            # RULE 75: the original is already kicked out -- Transform's common
-            # execution path did it before this error reached here (backlog
-            # 624). Record the failure; the batch goes on.
+            # Kicked out, then recorded, by the kind (rules 75 and 78); the
+            # batch reports it and goes on.
             failures.append(f"{Path(source).name}: {error}")
-            # Each fact in the field that holds it. ERROR has no typed payload
-            # column -- by contract its whole payload is the failure object --
-            # so source_path and failure_reason as loose fields were refused and
-            # the reason never reached the log at all.
-            log_run_record(run_log,
-                "ERROR",
-                message=f"Profiling failed for '{Path(source).name}': {error}",
-                path=str(source),
-                error_message={"failure_reason": str(error)},
-            )
 
     return ProfilingBatchResult(
         records_read=records_read, selected=len(work), profiled=profiled,
@@ -856,6 +837,20 @@ class ProfileTransform(FileTransform):
     """
 
     file_failures = (ProfilingError,)
+
+    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+        """After the kickout: this file's ERROR record (FileTransform.apply).
+
+        Each fact in the field that holds it. ERROR has no typed payload
+        column -- by contract its whole payload is the failure object -- so the
+        reason goes in error_message rather than as a loose field.
+        """
+        log_run_record(bound_run_log(),
+            "ERROR",
+            message=f"Profiling failed for '{Path(data_file.path).name}': {error}",
+            path=str(data_file.path),
+            error_message={"failure_reason": str(error)},
+        )
 
     def __init__(
         self,

@@ -72,8 +72,14 @@ class FileTransform(ABC):
     :meth:`_apply`. When ``_apply`` raises one of the kind's ``file_failures``
     -- a terminal failure of THIS FILE, never a configuration error -- the
     original file is moved to kickouts through ``Transform(kind="move",
-    role="kickouts")``, from the facts the input DataFile carries, and the same
-    error is raised again so the step's iteration records it and continues.
+    role="kickouts")``, from the facts the input DataFile carries; then the
+    kind records its own failure (:meth:`_record_failure`), whether or not the
+    move succeeded; then the same error is raised again so the step's
+    iteration counts it and continues. The step records nothing (rules 75 and
+    78):
+
+        _apply -> declared failure -> Transform(move, kickouts)
+               -> _record_failure -> raise
     """
 
     #: The errors that are a terminal failure of the file this kind operated
@@ -96,7 +102,8 @@ class FileTransform(ABC):
 
     def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Run this kind's operation on exactly this file; on a terminal
-        failure of the file, move its original to kickouts and raise again.
+        failure of the file, move its original to kickouts, record the
+        failure, and raise again.
 
         Args:
             data_file: The file, at the state the caller selected.
@@ -106,7 +113,7 @@ class FileTransform(ABC):
         """
         try:
             return self._apply(data_file)
-        except self.file_failures:
+        except self.file_failures as error:
             original_path = data_file.original_path or str(data_file.path)
             original = data_file_for(Path(original_path), **{
                 **data_file.governed_facts(),
@@ -124,7 +131,22 @@ class FileTransform(ABC):
                 # not be made must not replace it. Routing has recorded it.
                 _logger.warning("'%s' could not be kicked out: %s",
                                 Path(original_path).name, kickout_error)
+            # AFTER the kickout attempt, moved or not, so the failure's own
+            # evidence is never lost to a move that could not be made.
+            self._record_failure(data_file, error)
             raise
+
+    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+        """Record this kind's own failure of this file. Nothing by default.
+
+        Called by :meth:`apply` after the kickout attempt and before the error
+        is raised again. A kind that records a failure overrides it; the step
+        never records one.
+
+        Args:
+            data_file: The file the kind failed on, as it was handed in.
+            error: The declared failure ``_apply`` raised.
+        """
 
     @abstractmethod
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:

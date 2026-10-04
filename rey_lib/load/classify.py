@@ -401,19 +401,24 @@ def _classify_selected(
     entry: Any,
     candidate: SourceClassificationCandidate,
 ) -> bool:
-    """Classify one selected row through ``Transform(classify)``.
+    """Apply ``Transform(classify)`` to one selected file; nothing else.
 
-    Returns whether it was classified. A row already rejected when it was
-    prepared is recorded exactly as a rejection always was -- evidence, then the
-    lifecycle append -- and the step continues. A file the classify kind
-    rejects terminally (``ClassificationRejected``) has been recorded and kicked
-    out by the common execution path; the step continues.
+    Returns whether it was classified. The step records nothing itself (rule
+    78, backlog 624): the classify kind classifies the file from its own
+    DataFile, records the outcome -- a rejection included -- and raises a
+    terminal rejection as ``ClassificationRejected``, which the common
+    execution path kicks out. The step counts it and continues.
+
+    Raises:
+        ClassificationError: If the candidate carries no governed object, which
+            load_source_classification_candidates always attaches.
     """
     selected = candidate.governed
-    if candidate.status == "rejected" or selected is None:
-        _record_rejection(ctx, run_log, _classify_candidate(candidate))
-        return False
-
+    if selected is None:
+        raise ClassificationError(
+            f"Source classification candidate {candidate.file_id!r} was selected "
+            "with no governed object to open."
+        )
     try:
         return bool(
             Transform(
@@ -429,10 +434,11 @@ def _record_rejection(
     ctx: Any, run_log: Any,
     outcome: SourceClassificationOutcome,
 ) -> None:
-    """Persist a rejection as the legacy path did: evidence, then the append.
+    """Persist a rejection: evidence, then the lifecycle append.
 
-    A rejection produces no result, so the append writes no mutation; the
-    reason lives on the evidence record, which is its only home.
+    The classify kind's (rule 78): called by ClassifyTransform._record_failure
+    after the kickout. A rejection produces no result, so the append writes no
+    mutation; the reason lives on the evidence record, which is its only home.
     """
     run_log_id = _record_classification_evidence(run_log, outcome)
     manifest_record = serialize_source_file_classification_record(
@@ -539,6 +545,13 @@ class ClassifyTransform(FileTransform):
         self._ctx = ctx
         self._config = _classification_source_config(source, name)
         self._source_record_type = source_record_type
+        self._rejection: SourceClassificationOutcome | None = None
+
+    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+        """After the kickout: record the terminal rejection, evidence then the
+        lifecycle append, exactly as an inline rejection is recorded."""
+        if self._rejection is not None:
+            _record_rejection(self._ctx, bound_run_log(), self._rejection)
 
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Classify the file; record, plan, move and return it.
@@ -549,8 +562,9 @@ class ClassifyTransform(FileTransform):
             or nothing, for a rejection by a source that retries its rejects.
 
         Raises:
-            ClassificationRejected: For a recorded rejection by a source that
-                does not retry its rejects; the original is kicked out.
+            ClassificationRejected: For a rejection by a source that does not
+                retry its rejects; the original is kicked out, then the
+                rejection is recorded (:meth:`_record_failure`).
             ClassificationError: At the first durability failure: evidence that
                 did not commit, a file that cannot be routed, a record that could
                 not be appended, or a move that did not land on the destination
@@ -567,8 +581,18 @@ class ClassifyTransform(FileTransform):
                 reason_code="no_registered_data_file",
                 reason=f"No registered DataFile type: {data_file.refusal}",
             )
-        run_log_id = _record_classification_evidence(bound_run_log(), outcome)
         classified = outcome.status == "classified"
+        # A TERMINAL REJECTION IS RECORDED AFTER THE KICKOUT (rule 75): raised
+        # here unrecorded, and written by _record_failure once the common path
+        # has moved the original. A retried rejection is not kicked out, so it
+        # is recorded inline below like any outcome.
+        if not classified and not self._config.retry_rejects:
+            self._rejection = outcome
+            raise ClassificationRejected(
+                f"Source classification rejected '{data_file.path.name}' "
+                f"({outcome.reason_code}): {outcome.reason}"
+            )
+        run_log_id = _record_classification_evidence(bound_run_log(), outcome)
 
         governed = data_file
         if classified:
@@ -626,12 +650,7 @@ class ClassifyTransform(FileTransform):
                 f"the file manifest: {exc}"
             ) from exc
         if not classified:
-            if self._config.retry_rejects:
-                return ()
-            raise ClassificationRejected(
-                f"Source classification rejected '{data_file.path.name}' "
-                f"({outcome.reason_code}): {outcome.reason}"
-            )
+            return ()
         recorded = _restated(governed, file_mutation_id=manifest_record_id)
 
         # Recorded; now move. A failure here leaves the file where it has been

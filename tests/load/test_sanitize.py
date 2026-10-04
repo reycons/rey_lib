@@ -603,7 +603,8 @@ def test_a_file_that_cannot_be_sanitized_is_kicked_out_and_the_batch_goes_on(
     recorded, and the next file is still sanitized."""
     from rey_lib.files import file_routing
     from rey_lib.files.sanitization import FileSanitizationError
-    from rey_lib.logs import bind_step, clear_step
+    from rey_lib.load import sanitize as loader_sanitize
+    from rey_lib.logs import bind_run, bind_step, clear_run, clear_step
 
     inbox = tmp_path / "feed" / "source" / "inbox"
     original = tmp_path / "feed" / "source" / "processing" / "bad.unknown"
@@ -618,15 +619,33 @@ def test_a_file_that_cannot_be_sanitized_is_kicked_out_and_the_batch_goes_on(
             raise FileSanitizationError("no reader for '.unknown'")
         return _result(tmp_path / "clean" / "good.csv")
 
+    order: list[str] = []
+
+    def moved(*_a, **_k):
+        order.append("move")
+        return inbox / "kickouts" / "bad.unknown"
+
+    real_record = loader_sanitize.log_run_record
+
+    def recorded(run_log_, record_type, **fields):
+        if record_type == "ERROR":
+            order.append("ERROR")
+        return real_record(run_log_, record_type, **fields)
+
+    bind_run(run_log)
     bind_step(step_id="sanitize_file")
     try:
         with patch("rey_lib.load.sanitize.sanitize_file", side_effect=shared), \
-             patch.object(file_routing, "move_file",
-                          return_value=inbox / "kickouts" / "bad.unknown") as move, \
-             patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation:
+             patch.object(file_routing, "move_file", side_effect=moved) as move, \
+             patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation, \
+             patch.object(loader_sanitize, "log_run_record", side_effect=recorded):
             result = run_file_sanitization(_ctx(tmp_path, bad, good), run_log, _config(tmp_path))
     finally:
         clear_step()
+        clear_run()
+
+    # Rule 75: the original is kicked out first, then the kind records it.
+    assert order == ["move", "ERROR"]
 
     assert move.call_args.args[:2] == (original.resolve(), inbox / "kickouts")
     assert mutation.call_args.kwargs["reason"] == "moved_to_kickouts"

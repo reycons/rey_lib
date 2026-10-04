@@ -172,17 +172,29 @@ def test_a_terminal_rejection_is_recorded_then_kicked_out_to_its_inbox(
         original_path=str(source), original_mutation_id=7,
     )
 
+    order: list[str] = []
+
+    def _evidence(*_a, **_k):
+        order.append("evidence")
+        return 124
+
+    def _moved(*_a, **_k):
+        order.append("move")
+        return 456
+
     bind_step(step_id="classify_source_files")
     try:
         with patch.object(source_classification, "log_run_record",
-                          return_value=124) as evidence, \
+                          side_effect=_evidence) as evidence, \
              patch.object(file_routing, "log_source_file_mutation",
-                          return_value=456) as mutation:
+                          side_effect=_moved) as mutation:
             with pytest.raises(ClassificationRejected, match="path_regex_mismatch"):
                 _classify(ctx, _entry(), rejected)
     finally:
         clear_step()
 
+    # Rule 75: kicked out first, then the rejection is recorded.
+    assert order == ["move", "evidence"]
     assert evidence.call_args.kwargs["reason_code"] == "path_regex_mismatch"
     assert control.mutations == []
     assert (source.parent / "kickouts" / source.name).exists()

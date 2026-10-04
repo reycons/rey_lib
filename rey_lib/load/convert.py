@@ -90,6 +90,14 @@ __all__ = [
 class ConversionError(AppError):
     """Raised when a governed workbook conversion cannot proceed."""
 
+
+class _WorkbookNotConverted(ConversionError):
+    """The converter itself failed on the workbook: nothing was produced.
+
+    Distinguished from the other ConversionErrors (evidence that did not
+    commit) because only this one is recorded as a failed conversion.
+    """
+
 _CLASSIFIED_STATUS = "classified"
 _MISSING_SOURCE_REASONS = frozenset(
     {"missing_classification_path", "missing_inventory_path", "missing_source_file"}
@@ -426,14 +434,9 @@ def run_excel_conversion(
                 values={"config": config, "candidate": candidate},
                 selected="convert",
             ).resolve(ctx).apply(workbook)
-        except ConversionError as error:
+        except ConversionError:
+            # Kicked out and recorded by the kind (rules 75 and 78); counted.
             failed += 1
-            log_validation_result(run_log,
-                validation_name="excel_conversion_workbook",
-                status="failed",
-                message=str(error),
-                conversion_name=config.name,
-            )
             continue
         if candidate.destinations.archive is not None:
             Transform(
@@ -519,6 +522,24 @@ class ConvertTransform(FileTransform):
     #: A workbook that cannot be converted is a failure of that file: the
     #: common execution path kicks its original out (backlog 624).
     file_failures = (ConversionError,)
+
+    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+        """After the kickout: the failed conversion, then the workbook's result.
+
+        A converter failure is recorded as a failed conversion mutation; every
+        ConversionError is reported as this workbook's failed validation.
+        """
+        if isinstance(error, _WorkbookNotConverted):
+            _record_failed_conversion(
+                self._ctx, self._candidate, self._candidate.source_path,
+                error.__cause__ or error,
+            )
+        log_validation_result(bound_run_log(),
+            validation_name="excel_conversion_workbook",
+            status="failed",
+            message=str(error),
+            conversion_name=self._config.name,
+        )
 
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
         """Convert the workbook and return each CSV at its M10 mutation.
@@ -666,9 +687,9 @@ def _convert_claimed_workbook(
         Each converted CSV's path and the M10 mutation that recorded it.
 
     Raises:
-        ConversionError: When the workbook cannot be converted -- after the
-            failed conversion is recorded, so the evidence exists whatever
-            happens to the file next.
+        ConversionError: When the workbook cannot be converted. The failed
+            conversion is recorded by ConvertTransform._record_failure, after
+            the common execution path has kicked the original out (rule 75).
     """
 
     original_source = candidate.source_path
@@ -689,10 +710,9 @@ def _convert_claimed_workbook(
             include_empty_sheets=config.include_empty_sheets,
             overwrite=candidate.destinations.folder_overwrite["outbox"],
         )
-    except Exception as conversion_error:  # noqa: BLE001 -- recorded, then this file's failure
+    except Exception as conversion_error:  # noqa: BLE001 -- this file's failure
         # The conversion ran against a governed workbook and produced nothing.
-        _record_failed_conversion(ctx, candidate, original_source, conversion_error)
-        raise ConversionError(
+        raise _WorkbookNotConverted(
             f"Workbook conversion failed for '{original_source.name}': {conversion_error}"
         ) from conversion_error
 

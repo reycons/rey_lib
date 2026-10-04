@@ -1127,6 +1127,10 @@ def test_kickout_move_is_recorded_when_conversion_fails(run_log,
         ("converted_csv", "failed"),
     ]
     assert created[0].get("path") is None
+    # Rule 75: the original is kicked out first, then the failure is recorded.
+    assert [record.get("result") for record in lifecycle.mutations] == [
+        "moved_to_processing", "moved_to_kickouts", "converted_csv",
+    ]
 
 
 def test_uncommitted_move_evidence_prevents_the_manifest_append(run_log, 
