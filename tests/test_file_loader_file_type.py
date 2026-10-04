@@ -171,11 +171,10 @@ class TestTheConfiguredTypeReachesTheReader:
                             supports_provider_capability=lambda *_a, **_k: False),
         )
 
-        # The refusal is the REGISTRY's now: an unknown token names no
-        # DataFile, so building the source is where it is caught. That is the
-        # same boundary moving with the object, not a weaker check.
+        # The refusal is the REGISTRY's: an unknown token names no format, so
+        # the file is an UntypedFile (backlog 624) and its reader refuses.
         with pytest.raises(ConfigError) as raised:
-            data_file_for(_csv(tmp_path), file_type="NO_SUCH_FORMAT")
+            data_file_for(_csv(tmp_path), file_type="NO_SUCH_FORMAT").read()
 
         assert "NO_SUCH_FORMAT" in str(raised.value)
 

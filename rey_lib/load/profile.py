@@ -8,23 +8,20 @@ because the boundary required it:
 * each selected state is opened through ``ManifestSource`` at exactly the
   mutation the selector named, and profiled from that DataFile's path;
 * a file that cannot be profiled is KICKED OUT (rule 75,
-  ``a_failed_file_is_kicked_out``): the ORIGINAL at its processing state --
-  never the sanitized copy that was profiled -- moves to the declared kickouts
-  destination through ``Transform(move)``, and only then is the failure
-  recorded and counted. The kickout never raises; a move that cannot be made
-  is logged and the file still counts as failed;
+  ``a_failed_file_is_kicked_out``) by Transform's common execution path: the
+  ORIGINAL -- never the sanitized copy that was profiled -- moves to
+  ``<inbox>/kickouts`` (backlog 624), and the step records and counts the
+  failure. A kickout move that cannot be made is logged and the file still
+  counts as failed;
 * the error is ``ProfilingError``; the profiler's application is the runtime
   context's and its version is the one the application supplies.
 
     selected row -> ManifestSource(file_mutation_id) -> DataFile (sanitized)
       -> build_csv_parts / build_clean_single_file_profile -> DataProfile
       -> run-log evidence -> M16 profile record -> profile store
-    on failure:
-      FileManifest.history -> the original's latest live successful move
-      (result moved_to_processing) -> ManifestSource -> DataFile
-      -> kickouts.path resolved from that governed record
-      -> Transform(move, role=kickouts, name=<resolved file name>)
-      -> ERROR record, failure counted
+    on failure (ProfilingError, the profile kind's file failure):
+      the DataFile's original facts -> Transform(move, role=kickouts)
+      -> <inbox>/kickouts -> ERROR record, failure counted
 """
 
 from __future__ import annotations

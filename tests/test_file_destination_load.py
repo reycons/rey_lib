@@ -252,11 +252,12 @@ class TestEachFormatReachesItsOwnWriter:
         """The EXISTING resolver, doing what it already does.
 
         No destination-format field exists, because this is the answer: a path
-        that does not say what it is is refused before a load starts, rather
-        than guessed at and written wrongly.
+        that does not say what it is is refused rather than guessed at and
+        written wrongly. Every physical file is a DataFile (an UntypedFile, backlog
+        624), so the refusal is its writer's.
         """
         with pytest.raises(ConfigError) as raised:
-            data_file_for(tmp_path / "rows.unknown")
+            data_file_for(tmp_path / "rows.unknown").write([{"a": 1}])
 
         assert "rows.unknown" in str(raised.value)
 
