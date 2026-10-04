@@ -333,14 +333,15 @@ class FileManifest:
 
             selected mutation + scope -> the DB returns the scope's records
             -> per manifest, cut at the selected mutation's record type
-            -> newest first, reverse each after the cut: undo its change,
-               delete its record
+            -> newest first, reverse the boundary and everything after it:
+               undo its change, delete its record
             -> a file with no mutation left: delete its manifest
 
         The selected mutation is the anchor and its record type the lifecycle
         boundary. Its own manifest is cut at the selected mutation exactly;
-        every other manifest at its latest mutation of that record type, which
-        stays. A manifest with no mutation of that type has nothing reversed.
+        every other manifest at its latest mutation of that record type. The
+        boundary is reversed with what follows it. A manifest with no mutation
+        of that type has nothing reversed.
         A selected file, with no mutation, is reversed whole.
 
         Args:
@@ -434,7 +435,7 @@ class FileManifest:
     def _after_boundary(
         records: list[Mapping[str, Any]], anchor: Mapping[str, Any],
     ) -> list[Mapping[str, Any]]:
-        """The records after each manifest's boundary, newest first.
+        """Each manifest's boundary and the records after it, newest first.
 
         The anchor's manifest is cut at the anchor; every other manifest at its
         latest record of the anchor's record type. A manifest without one is
@@ -448,7 +449,7 @@ class FileManifest:
                 cut[manifest] = int(row["file_mutation_id"])
         return [row for row in records
                 if int(row["file_manifest_id"]) in cut
-                and int(row["file_mutation_id"]) > cut[int(row["file_manifest_id"])]]
+                and int(row["file_mutation_id"]) >= cut[int(row["file_manifest_id"])]]
 
     @staticmethod
     def _reverse(row: Mapping[str, Any], candidate_of: Any, reverse_of: Any) -> Optional[str]:

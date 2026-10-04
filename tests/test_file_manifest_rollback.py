@@ -2,7 +2,7 @@
 
     selected mutation + scope -> the request returns every record of the scope
     -> per manifest, cut at the selected mutation's record type
-    -> newest first, reverse each after the cut: undo its change, delete its record
+    -> newest first, reverse the boundary and what follows: undo, delete its record
     -> a file with no mutation left: delete its manifest
 """
 
@@ -100,9 +100,9 @@ def test_each_manifest_is_cut_at_the_selected_record_type(tmp_path: Path) -> Non
 
     result = FileManifest(control).rollback(scope="run", file_mutation_id=2)
 
-    # File 7 after 2, file 8 after its classification 5; file 9 has none, so
-    # nothing of it. The boundaries themselves stay.
-    assert [row["file_mutation_id"] for row in result["mutations"]] == [6, 4, 3]
+    # File 7 from 2, file 8 from its classification 5; file 9 has none, so
+    # nothing of it. The boundaries are reversed too.
+    assert [row["file_mutation_id"] for row in result["mutations"]] == [6, 5, 4, 3, 2]
     assert result["boundary"] == {"file_mutation_id": 2,
                                   "record_type": "source_file_classification"}
     assert (control.deleted_mutations, control.deleted_manifests) == ([], [])
@@ -114,7 +114,7 @@ def test_the_anchor_manifest_is_cut_at_the_selected_mutation(tmp_path: Path) -> 
 
     result = FileManifest(control).rollback(scope="file", file_mutation_id=3)
 
-    assert [row["file_mutation_id"] for row in result["mutations"]] == [4]
+    assert [row["file_mutation_id"] for row in result["mutations"]] == [4, 3]
 
 
 def test_rollback_reverses_the_selected_records(tmp_path: Path) -> None:
@@ -123,11 +123,11 @@ def test_rollback_reverses_the_selected_records(tmp_path: Path) -> None:
 
     result = FileManifest(control).rollback(scope="run", file_mutation_id=2, dry_run=False)
 
-    assert result["reversed"] == [6, 4, 3]
-    assert control.deleted_mutations == [6, 4, 3]
+    assert result["reversed"] == [6, 5, 4, 3, 2]
+    assert control.deleted_mutations == [6, 5, 4, 3, 2]
     assert not files["sanitized"].exists()
     assert files["inbox"].exists() and not files["processing"].exists()
-    assert control.deleted_manifests == []  # every file keeps its boundary
+    assert control.deleted_manifests == [8]  # 7 keeps its inventory; 8 has nothing left
 
 
 def test_a_selected_file_is_reversed_whole(tmp_path: Path) -> None:
@@ -149,9 +149,9 @@ def test_a_failed_reversal_stops_and_keeps_its_record(tmp_path: Path) -> None:
 
     result = FileManifest(control).rollback(scope="run", file_mutation_id=2, dry_run=False)
 
-    assert result["reversed"] == [6, 4]
+    assert result["reversed"] == [6, 5, 4]
     assert result["failed"]["file_mutation_id"] == 3
-    assert control.deleted_mutations == [6, 4]
+    assert control.deleted_mutations == [6, 5, 4]
 
 
 def test_a_mutation_outside_the_scope_records_is_refused(tmp_path: Path) -> None:
