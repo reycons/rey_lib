@@ -26,13 +26,14 @@ from rey_lib.files.data_file import data_file_for
 from rey_lib.load import classify as source_classification
 from rey_lib.load.classify import (
     ClassificationError,
+    ClassificationRejected,
     ClassifyTransform,
     SourceClassificationCandidate,
     resolve_classification_source_configs,
     run_source_file_classification,
 )
 from rey_lib.load.transform import Transform
-from rey_lib.logs import FileManifestError
+from rey_lib.logs import FileManifestError, bind_step, clear_step
 from rey_lib.workflow import RunContext
 
 from rey_lib.load.manifest_source import ManifestSource
@@ -142,10 +143,12 @@ def test_a_classified_file_is_recorded_and_returned(run_log, tmp_path: Path) -> 
 def test_a_rejected_file_writes_evidence_only_and_returns_nothing(
     run_log, tmp_path: Path,
 ) -> None:
+    """A source that retries its rejects records the rejection and keeps the file."""
     ctx, control = _ctx(tmp_path)
 
     with patch.object(source_classification, "log_run_record", return_value=124) as evidence:
-        result = _classify(ctx, _entry(), _file(Path("/data/alpha/inbox/Example7.json")))
+        result = _classify(ctx, _entry(retry_rejects=True),
+                           _file(Path("/data/alpha/inbox/Example7.json")))
 
     # A rejection produces no result and so writes no mutation -- its reason
     # lives on the evidence record, which is its only home.
@@ -153,6 +156,37 @@ def test_a_rejected_file_writes_evidence_only_and_returns_nothing(
     assert control.mutations == []
     assert evidence.call_args.kwargs["status"] == "rejected"
     assert evidence.call_args.kwargs["reason_code"] == "path_regex_mismatch"
+
+
+def test_a_terminal_rejection_is_recorded_then_kicked_out_to_its_inbox(
+    run_log, tmp_path: Path,
+) -> None:
+    """retry_rejects false: the kind raises its file failure after recording it,
+    and the common execution path moves the original to <inbox>/kickouts."""
+    ctx, control = _ctx(tmp_path)
+    source = tmp_path / "alpha" / "inbox" / "Example7.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("{}", encoding="utf-8")
+    rejected = data_file_for(
+        source, file_manifest_id=7, file_mutation_id=7, inbox=str(source.parent),
+        original_path=str(source), original_mutation_id=7,
+    )
+
+    bind_step(step_id="classify_source_files")
+    try:
+        with patch.object(source_classification, "log_run_record",
+                          return_value=124) as evidence, \
+             patch.object(file_routing, "log_source_file_mutation",
+                          return_value=456) as mutation:
+            with pytest.raises(ClassificationRejected, match="path_regex_mismatch"):
+                _classify(ctx, _entry(), rejected)
+    finally:
+        clear_step()
+
+    assert evidence.call_args.kwargs["reason_code"] == "path_regex_mismatch"
+    assert control.mutations == []
+    assert (source.parent / "kickouts" / source.name).exists()
+    assert mutation.call_args.kwargs["reason"] == "moved_to_kickouts"
 
 
 # -- record, then move -------------------------------------------------------
@@ -243,7 +277,7 @@ def test_a_rejected_file_never_routes_when_processing_is_configured(
 
     with patch.object(file_routing, "move_to_processing") as route, \
          patch.object(source_classification, "log_run_record", return_value=123):
-        result = _classify(ctx, _routed_entry(tmp_path), outside)
+        result = _classify(ctx, _routed_entry(tmp_path, retry_rejects=True), outside)
 
     route.assert_not_called()
     assert result == ()
@@ -471,7 +505,8 @@ def test_a_rejected_file_gets_no_key(run_log, tmp_path: Path) -> None:
     ctx, control = _ctx(tmp_path)
     file_id = _governed(control, "unmatched.csv")
 
-    _classify_all(ctx, _grouping_entry(), (file_id, "unmatched.csv"))
+    with pytest.raises(ClassificationRejected):
+        _classify_all(ctx, _grouping_entry(), (file_id, "unmatched.csv"))
 
     assert _key_of(control, file_id) is None
 
@@ -526,17 +561,17 @@ def test_an_applied_run_opens_the_selected_mutation_and_carries_the_record_type(
 def test_a_file_with_no_registered_data_file_type_is_a_rejection(
     run_log, tmp_path: Path,
 ) -> None:
+    """An UntypedFile reaches the classify kind, which rejects it terminally;
+    the step counts it and goes on (backlog 624)."""
     ctx, _ = _ctx(tmp_path)
     entry = _entry()
 
     with patch.object(source_classification, "load_source_classification_candidates",
                       return_value=(_candidate(entry, 31, "/data/alpha/inbox/notes.unknown"),)), \
-         patch.object(source_classification, "log_run_record", return_value=123) as evidence, \
-         patch.object(ClassifyTransform, "apply") as apply:
+         patch.object(source_classification, "log_run_record", return_value=123) as evidence:
         result = run_source_file_classification(
             ctx, run_log, {"sources": [entry]}, RunContext(apply=True))
 
-    apply.assert_not_called()
     assert (result.candidates, result.classified, result.rejected) == (1, 0, 1)
     assert evidence.call_args.kwargs["reason_code"] == "no_registered_data_file"
     assert evidence.call_args.kwargs["source_record_type"] == _RECORD_TYPE

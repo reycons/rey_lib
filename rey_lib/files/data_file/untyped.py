@@ -43,6 +43,11 @@ class UntypedFile(DataFile):
         """No registered format token: the empty token."""
         return ""
 
+    @property
+    def refusal(self) -> str:
+        """Why no format claims this file, as data_file_for stated it."""
+        return self._refusal
+
     def source_structure(self) -> list[str]:
         """Refused: with no format there is no structure to state."""
         raise ConfigError(self._refusal)

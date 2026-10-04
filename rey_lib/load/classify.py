@@ -31,7 +31,7 @@ from typing import Any, Mapping, Sequence
 
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.files import FileRoutingError
-from rey_lib.files.data_file import DataFile
+from rey_lib.files.data_file import DataFile, UntypedFile
 from rey_lib.files.governed_file import FileId, is_governed_file_id
 from rey_lib.load.file_transform import FileTransform, file_transform
 from rey_lib.load.manifest_source import ManifestSource
@@ -48,6 +48,17 @@ from rey_lib.workflow import RunContext
 
 class ClassificationError(AppError):
     """A classification scope, source or outcome that cannot proceed."""
+
+
+class ClassificationRejected(ClassificationError):
+    """A file terminally rejected by classification: recorded, then kicked out.
+
+    The classify kind's one file failure (backlog 624). It is raised only after
+    the rejection's evidence and lifecycle record are written, for a source that
+    does not retry its rejects, so the common execution path moves the original
+    to ``<inbox>/kickouts``. Every other ClassificationError is a durability or
+    configuration failure and kicks nothing out.
+    """
 
 
 _CLASSIFICATION_RECORD_TYPE = "source_file_classification"
@@ -393,10 +404,10 @@ def _classify_selected(
     """Classify one selected row through ``Transform(classify)``.
 
     Returns whether it was classified. A row already rejected when it was
-    prepared, and a file whose type resolves to NO REGISTERED DataFile, are
-    recorded exactly as a rejection always was -- evidence, then the
-    lifecycle append -- and the step continues. The criterion is the DataFile
-    registry, never a list of suffixes.
+    prepared is recorded exactly as a rejection always was -- evidence, then the
+    lifecycle append -- and the step continues. A file the classify kind
+    rejects terminally (``ClassificationRejected``) has been recorded and kicked
+    out by the common execution path; the step continues.
     """
     selected = candidate.governed
     if candidate.status == "rejected" or selected is None:
@@ -404,23 +415,14 @@ def _classify_selected(
         return False
 
     try:
-        data_file = selected.data_file()
-    except ConfigError as exc:
-        _record_rejection(ctx, run_log, SourceClassificationOutcome(
-            candidate=candidate,
-            status="rejected",
-            values={},
-            reason_code="no_registered_data_file",
-            reason=f"No registered DataFile type: {exc}",
-        ))
+        return bool(
+            Transform(
+                values={"source": entry, "source_record_type": candidate.source_record_type},
+                selected="classify",
+            ).resolve(ctx).apply(selected.data_file())
+        )
+    except ClassificationRejected:
         return False
-
-    return bool(
-        Transform(
-            values={"source": entry, "source_record_type": candidate.source_record_type},
-            selected="classify",
-        ).resolve(ctx).apply(data_file)
-    )
 
 
 def _record_rejection(
@@ -517,7 +519,15 @@ class ClassifyTransform(FileTransform):
     ``source`` is the classification source's DECLARATION, validated here as
     the step validates it. ``source_record_type`` is the selected row's record
     type, carried for the evidence and never a DataFile property.
+
+    A file of no registered format (an ``UntypedFile``) is a rejection,
+    ``no_registered_data_file``; the criterion is the DataFile registry, never a
+    list of suffixes. A rejection is recorded, and -- unless the source retries
+    its rejects -- raised as ``ClassificationRejected``, so the common execution
+    path kicks the original out.
     """
+
+    file_failures = (ClassificationRejected,)
 
     def __init__(self, ctx: Any, *, source: Any, source_record_type: Any = None) -> None:
         """Validate the source declaration this transform classifies by.
@@ -536,16 +546,27 @@ class ClassifyTransform(FileTransform):
         Returns:
             The file in processing (or where it was, when the source declares
             no processing route), carrying its classification and base_path --
-            or nothing, for a file the configuration does not match.
+            or nothing, for a rejection by a source that retries its rejects.
 
         Raises:
+            ClassificationRejected: For a recorded rejection by a source that
+                does not retry its rejects; the original is kicked out.
             ClassificationError: At the first durability failure: evidence that
                 did not commit, a file that cannot be routed, a record that could
                 not be appended, or a move that did not land on the destination
                 the record names.
         """
         candidate = _candidate(self._config, _selected_record(data_file, self._source_record_type))
-        outcome = _classify_candidate(candidate)
+        if not isinstance(data_file, UntypedFile):
+            outcome = _classify_candidate(candidate)
+        else:
+            outcome = SourceClassificationOutcome(
+                candidate=candidate,
+                status="rejected",
+                values={},
+                reason_code="no_registered_data_file",
+                reason=f"No registered DataFile type: {data_file.refusal}",
+            )
         run_log_id = _record_classification_evidence(bound_run_log(), outcome)
         classified = outcome.status == "classified"
 
@@ -605,7 +626,12 @@ class ClassifyTransform(FileTransform):
                 f"the file manifest: {exc}"
             ) from exc
         if not classified:
-            return ()
+            if self._config.retry_rejects:
+                return ()
+            raise ClassificationRejected(
+                f"Source classification rejected '{data_file.path.name}' "
+                f"({outcome.reason_code}): {outcome.reason}"
+            )
         recorded = _restated(governed, file_mutation_id=manifest_record_id)
 
         # Recorded; now move. A failure here leaves the file where it has been
