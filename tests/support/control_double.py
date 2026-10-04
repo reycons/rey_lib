@@ -206,44 +206,6 @@ class ControlDouble:
             rows.append(out)
         return rows
 
-    def rollback_data_profiles_by_run(self, run_id: int,
-                                      required: bool = True) -> dict[str, Any]:
-        """Remove what one run's profiling wrote, as the routine does.
-
-        This double holds no profile store, so there is nothing to remove and
-        the counts are zero. It exists because the rollback execution calls it
-        unconditionally: a double without it turns a missing method into an
-        AttributeError in the middle of a governed batch, which is neither the
-        failure nor the place a reader would look for it.
-        """
-        return {
-            "o_manifests_cleared": 0,
-            "o_file_types_deleted": 0,
-            "o_profiles_deleted": 0,
-        }
-
-    def complete_file_rollback(self, file_mutation_ids: list[int],
-                               required: bool = True) -> None:
-        """Transition the named pending rows; refuse anything else.
-
-        The row is the unit, not the request: what stays requested is what is
-        still owed.
-        """
-        for wanted in list(file_mutation_ids or []):
-            for row in self.mutations:
-                if (row["file_mutation_id"] == wanted
-                        and row["rollback_request_in"] == 1
-                        and row["rollback_complete_in"] == 0):
-                    row["rollback_request_in"] = 0
-                    row["rollback_complete_in"] = 1
-                    row["rollback_batch_step_id"] = self.batch_step_id
-                    break
-            else:
-                raise ValueError(
-                    f"file_mutation {wanted} is not pending rollback")
-
-    # -- internals -----------------------------------------------------------
-
     def _file(self, file_manifest_id: int) -> Optional[dict[str, Any]]:
         return next((row for row in self.files
                      if row["file_manifest_id"] == file_manifest_id), None)

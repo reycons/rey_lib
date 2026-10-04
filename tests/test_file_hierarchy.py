@@ -283,29 +283,6 @@ def test_moved_primary_does_not_mark_historical_inventory_stage_current(
     assert all(stage.is_current_primary is False for stage in page.stages)
 
 
-def test_a_reversed_mutation_no_longer_says_where_the_file_is(store) -> None:
-    """Rollback is state on the mutation, not a record beside it.
-
-    A reversed mutation stays in the history and stays on the page. It simply
-    stops participating in current-state resolution, so the file's location is
-    whatever the newest surviving mutation says.
-    """
-    file_id = store.inventory("file-a", "feed", "a.csv", "/in/a.csv")
-    reversed_move = store.mutate("file-a", "move", path="/work/a.csv")
-    # dry_run=False, because the default is the preview: one predicate and one
-    # shape serve both, so asking without saying so marks nothing.
-    store.manifest.request_rollback(dry_run=False, file_mutation_id=reversed_move)
-    store.manifest.complete_rollback([reversed_move])
-    store.mutate("file-a", "move", path="/processing/a.csv")
-
-    page = build_file_hierarchy_stages(store.ctx, file_id)
-
-    assert page.current_path == "/processing/a.csv"
-    assert page.lifecycle_status == "active"
-    # The reversed mutation is still shown; it is history either way.
-    assert reversed_move in [stage.record_id for stage in page.stages]
-
-
 def test_profiles_join_only_by_exact_governed_file_id(store) -> None:
     """A profile belongs to the file it names, by identity and nothing else."""
     file_id = store.inventory("file-a", "feed", "a.csv", "/in/a.csv")

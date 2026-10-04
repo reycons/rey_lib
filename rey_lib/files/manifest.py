@@ -302,34 +302,16 @@ class FileManifest:
 
     # -- rollback ------------------------------------------------------------
 
-    def request_rollback(self, *, dry_run: bool = True,
-                         file_mutation_id: Optional[int] = None,
-                         file_manifest_id: Optional[int] = None,
-                         batch_step_id: Optional[int] = None,
-                         batch_id: Optional[int] = None,
-                         run_id: Optional[int] = None) -> list[dict[str, Any]]:
-        """Return the rollback set for one scope, marking it unless previewing.
-
-        Exactly one scope. Under ``dry_run`` nothing is written, so this is the
-        preview as well as the request -- one predicate, one shape, no way for
-        the two to describe different reversals. A row that can be reversed
-        carries the command that reverses it.
-        """
-        return self._control.request_file_rollback(
-            dry_run=dry_run, file_mutation_id=file_mutation_id,
-            file_manifest_id=file_manifest_id, batch_step_id=batch_step_id,
-            batch_id=batch_id, run_id=run_id,
-        )
-
     def rollback(
         self,
         *,
-        scope: str = "file",
+        scope: Optional[str] = None,
         file_manifest_id: Optional[int] = None,
         file_mutation_id: Optional[int] = None,
+        run_id: Optional[int] = None,
         dry_run: bool = True,
     ) -> dict[str, Any]:
-        """Take governed files back to a point in their history (backlog 612).
+        """Take governed files back to a point in their history (backlog 612, 638).
 
             selected mutation + scope -> the DB returns the scope's records
             -> per manifest, cut at the selected mutation's record type
@@ -342,12 +324,16 @@ class FileManifest:
         every other manifest at its latest mutation of that record type. The
         boundary is reversed with what follows it. A manifest with no mutation
         of that type has nothing reversed.
-        A selected file, with no mutation, is reversed whole.
+        A selected file, with no mutation, is reversed whole. A run (scope run,
+        the Run History rollback) reverses every mutation that run wrote: no
+        boundary.
 
         Args:
-            scope: file, run, file_type, batch_step, batch or installation.
+            scope: file, run, file_type, batch_step, batch or installation;
+                run for a run, file otherwise, when not given.
             file_manifest_id: The selected file, when no mutation was selected.
             file_mutation_id: The selected mutation.
+            run_id: The run, from Run History. Its scope is run and nothing else.
             dry_run: Return the mutations that would be reversed, changing nothing.
 
         Returns:
@@ -357,8 +343,9 @@ class FileManifest:
             ``manifests_deleted``.
 
         Raises:
-            ValueError: Unless exactly one of the file or the mutation is given,
-                or when the selected mutation is not among the scope's records.
+            ValueError: Unless exactly one of the file, the mutation or the run
+                is given, when a run is given another scope than run, or when
+                the selected mutation is not among the scope's records.
         """
         # The reverse behaviour per action already exists; it is used, not copied.
         from rey_lib.files.log_run_rollback import (
@@ -366,20 +353,32 @@ class FileManifest:
             _resolved_compensation,
         )
 
-        if (file_manifest_id is None) == (file_mutation_id is None):
+        if sum(given is not None for given in
+               (file_manifest_id, file_mutation_id, run_id)) != 1:
             raise ValueError(
-                "FileManifest.rollback needs the selected file or the selected "
-                "mutation, exactly one."
+                "FileManifest.rollback needs the selected file, the selected "
+                "mutation or the run, exactly one."
             )
-        records = sorted(
-            self._control.request_file_rollback(
+        scope = scope or ("run" if run_id is not None else "file")
+        if run_id is not None:
+            if scope != "run":
+                raise ValueError(
+                    f"A run is rolled back with scope run, not {scope!r}."
+                )
+            # The mutations the run wrote, as the request has always answered.
+            requested = self._control.request_file_rollback(
+                dry_run=True, run_id=int(run_id))
+        else:
+            requested = self._control.request_file_rollback(
                 dry_run=True,
                 scope=scope,
                 anchor_file_manifest_id=(
                     int(file_manifest_id) if file_mutation_id is None else None),
                 rollback_to_mutation_id=(
                     int(file_mutation_id) if file_mutation_id is not None else None),
-            ),
+            )
+        records = sorted(
+            requested,
             key=lambda row: int(row["file_mutation_id"]),
             reverse=True,
         )
@@ -400,6 +399,7 @@ class FileManifest:
             "scope": scope,
             "file_manifest_id": file_manifest_id,
             "file_mutation_id": file_mutation_id,
+            "run_id": run_id,
             "boundary": boundary,
             "dry_run": bool(dry_run),
             "mutations": mutations,
@@ -473,15 +473,6 @@ class FileManifest:
         except OSError as exc:
             return str(exc)
         return None
-
-    def complete_rollback(self, file_mutation_ids: list[int]) -> None:
-        """Close the rollbacks whose reversals ran, named one by one.
-
-        The row is the unit, not the request. What stays requested is what is
-        still owed, and it keeps its mutation so the next rollback can pick it
-        up -- which is how the service finishes work an earlier run could not.
-        """
-        self._control.complete_file_rollback(list(file_mutation_ids))
 
     def current_classification(
         self, file_manifest_id: Optional[int] = None,

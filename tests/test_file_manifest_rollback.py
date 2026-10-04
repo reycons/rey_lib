@@ -154,6 +154,30 @@ def test_a_failed_reversal_stops_and_keeps_its_record(tmp_path: Path) -> None:
     assert control.deleted_mutations == [6, 5, 4]
 
 
+def test_a_run_reads_its_mutations_and_reverses_them_all(tmp_path: Path) -> None:
+    files = _files(tmp_path)
+    rows = [row for row in _scope(files) if row["file_mutation_id"] in (3, 4)]
+    control = _Control(rows, {7: 4})
+
+    preview = FileManifest(control).rollback(run_id=330)
+
+    (sent,) = control.requests
+    assert sent == {"dry_run": True, "run_id": 330}
+    assert preview["scope"] == "run" and preview["boundary"] is None
+    assert [row["file_mutation_id"] for row in preview["mutations"]] == [4, 3]
+
+    result = FileManifest(control).rollback(run_id=330, dry_run=False)
+
+    assert result["reversed"] == [4, 3]
+    assert files["inbox"].exists() and not files["sanitized"].exists()
+    assert control.deleted_manifests == []  # inventory and classification remain
+
+
+def test_a_run_is_rolled_back_with_scope_run_only(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="scope run"):
+        FileManifest(_Control([], {})).rollback(run_id=330, scope="file")
+
+
 def test_a_mutation_outside_the_scope_records_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not among the scope's records"):
         FileManifest(_Control([], {})).rollback(file_mutation_id=2)
@@ -162,5 +186,7 @@ def test_a_mutation_outside_the_scope_records_is_refused(tmp_path: Path) -> None
 def test_exactly_one_of_file_or_mutation(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exactly one"):
         FileManifest(_Control([], {})).rollback(file_manifest_id=7, file_mutation_id=2)
+    with pytest.raises(ValueError, match="exactly one"):
+        FileManifest(_Control([], {})).rollback(file_mutation_id=2, run_id=330)
     with pytest.raises(ValueError, match="exactly one"):
         FileManifest(_Control([], {})).rollback()
