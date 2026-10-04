@@ -91,6 +91,10 @@ class FileTransform(ABC):
     #: The runtime context; every kind is built with it.
     _ctx: Any
 
+    #: The file's latest state within this apply, where the kind moved it
+    #: before failing; None when the input is still its state.
+    _current: DataFile | None = None
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Refuse a kind that would bypass the common execution path."""
         super().__init_subclass__(**kwargs)
@@ -112,16 +116,22 @@ class FileTransform(ABC):
         Returns:
             What ``_apply`` returns.
         """
+        self._current = None
         try:
             return self._apply(data_file)
         except self.file_failures as error:
-            original_path = data_file.original_path or str(data_file.path)
+            # The file's state as the kind last left it: a kind that moves its
+            # file before failing (convert claims its workbook into processing)
+            # names that state in ``_current``, so the ORIGINAL is kicked out
+            # from where it now is.
+            state = self._current or data_file
+            original_path = state.original_path or str(state.path)
             original = data_file_for(Path(original_path), **{
-                **data_file.governed_facts(),
+                **state.governed_facts(),
                 "file_mutation_id": (
-                    data_file.original_mutation_id
-                    if data_file.original_path
-                    else data_file.file_mutation_id
+                    state.original_mutation_id
+                    if state.original_path
+                    else state.file_mutation_id
                 ),
                 "original_path": original_path,
             })

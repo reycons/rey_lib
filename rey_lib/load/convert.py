@@ -422,13 +422,7 @@ def run_excel_conversion(
     # execution path; it is recorded here and the batch goes on.
     failed = 0
     for candidate in selection.candidates:
-        workbook = _candidate_data_file(ctx, candidate)
-        if candidate.destinations.processing is not None:
-            (workbook,) = Transform(
-                values={"role": "processing", "operation": _OPERATOR_NAME,
-                        "route": str(candidate.destinations.processing)},
-                selected="move",
-            ).resolve(ctx).apply(workbook)
+        workbook = _candidate_data_file(candidate)
         try:
             Transform(
                 values={"config": config, "candidate": candidate},
@@ -437,13 +431,6 @@ def run_excel_conversion(
         except ConversionError:
             # Kicked out and recorded by the kind (rules 75 and 78); counted.
             failed += 1
-            continue
-        if candidate.destinations.archive is not None:
-            Transform(
-                values={"role": "archive", "operation": _OPERATOR_NAME,
-                        "route": str(candidate.destinations.archive)},
-                selected="move",
-            ).resolve(ctx).apply(workbook)
 
     log_row_count(run_log,
         count_name="workbooks_converted",
@@ -454,29 +441,23 @@ def run_excel_conversion(
     return 1 if failed else 0
 
 
-def _candidate_data_file(ctx: Any, candidate: ConversionCandidate) -> DataFile:
+def _candidate_data_file(candidate: ConversionCandidate) -> DataFile:
     """Open the candidate's workbook at exactly the mutation the selector named.
 
+    Every physical file is a DataFile (an unregistered format is an
+    UntypedFile), so opening refuses only a candidate with no governed object,
+    which selection always attaches -- a structural failure that stops the step.
+
     Raises:
-        ConversionError: If the candidate names no consumed mutation, or its
-            workbook resolves to no registered DataFile type. Every candidate
-            passed ``is_supported_workbook``, so this is a refusal for a
-            disagreement between the two, and it stops the step.
+        ConversionError: If the candidate carries no governed object.
     """
-    mutation = candidate.mutation_context.source_record_id
     selected = candidate.governed
     if selected is None:
         raise ConversionError(
             f"Governed file {candidate.file_id} was selected with no governed "
             "object to open its workbook from."
         )
-    try:
-        return selected.data_file()
-    except ConfigError as exc:
-        raise ConversionError(
-            f"Selected workbook {candidate.source_path} (mutation {mutation}) has "
-            f"no registered DataFile type, so it cannot be converted: {exc}"
-        ) from exc
+    return selected.data_file()
 
 
 def _application(ctx: Any) -> str:
@@ -542,28 +523,47 @@ class ConvertTransform(FileTransform):
         )
 
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
-        """Convert the workbook and return each CSV at its M10 mutation.
+        """Claim the workbook, convert it, and dispose of it (backlog 628).
 
-        Converts the workbook WHERE THIS DATAFILE IS -- the step has already
-        moved it to processing through ``Transform(kind="move")`` when one is
-        declared. Convert moves nothing itself (backlog 624).
+            workbook -> Transform(move, processing) -> convert -> CSVs
+                     -> Transform(move, archive)
+
+        Each move is the move kind, when the candidate declares its route. A
+        workbook that cannot be converted is kicked out by the common path
+        from where this kind last placed it -- processing, once claimed.
 
         Returns:
             One DataFile per converted CSV, or nothing when the workbook
             produced no output.
         """
+        destinations = self._candidate.destinations
+        workbook = data_file
+        if destinations.processing is not None:
+            (workbook,) = Transform(
+                values={"role": "processing", "operation": _OPERATOR_NAME,
+                        "route": str(destinations.processing)},
+                selected="move",
+            ).resolve(self._ctx).apply(workbook)
+            self._current = workbook
         produced = _convert_claimed_workbook(
-            self._ctx, bound_run_log(), self._config, self._candidate, Path(data_file.path))
+            self._ctx, bound_run_log(), self._config, self._candidate, Path(workbook.path))
         # The conversion produces CSV by definition, so the type is declared,
         # never derived from the output's name.
-        return tuple(
+        outputs = tuple(
             data_file_for(
                 Path(path),
                 file_type="CSV",
-                **{**data_file.governed_facts(), "file_mutation_id": mutation},
+                **{**workbook.governed_facts(), "file_mutation_id": mutation},
             )
             for path, mutation in produced
         )
+        if destinations.archive is not None:
+            Transform(
+                values={"role": "archive", "operation": _OPERATOR_NAME,
+                        "route": str(destinations.archive)},
+                selected="move",
+            ).resolve(self._ctx).apply(workbook)
+        return outputs
 
 
 def _resolve_inline_excel_conversion_config(

@@ -11,6 +11,8 @@ copied ones cover what the boundary added.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 import inspect
 import os
@@ -1352,16 +1354,20 @@ def test_a_dry_run_never_reaches_the_transform(run_log, tmp_path: Path) -> None:
     opened.assert_not_called()
 
 
-def test_a_workbook_with_no_registered_data_file_type_stops_the_step(
+def test_a_candidate_with_no_governed_object_stops_the_step(
     run_log, tmp_path: Path,
 ) -> None:
+    """Structural, not a file's failure: nothing is kicked out or converted."""
     _one_workbook(tmp_path)
     ctx = _ctx(tmp_path)
+    config = _config(ctx)
+    selection = select_conversion_candidates(ctx, run_log, config)
+    orphan = replace(selection.candidates[0], governed=None)
 
-    with patch.object(excel_conversion.ManifestSource, "data_file",
-                      side_effect=ConfigError("no DataFile for XLS")), \
+    with patch("rey_lib.load.convert.select_conversion_candidates",
+               return_value=replace(selection, candidates=(orphan,))), \
          patch("rey_lib.load.convert.convert_workbook_to_csv") as converter:
-        with pytest.raises(ConversionError, match="no registered DataFile type"):
+        with pytest.raises(ConversionError, match="no governed object"):
             run_excel_conversion(ctx, run_log, _inline(ctx))
 
     converter.assert_not_called()
