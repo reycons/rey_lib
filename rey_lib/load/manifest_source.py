@@ -639,6 +639,11 @@ class ManifestSource:
             inbox=str(Path(manifest_path).parent) if manifest_path else None,
             original_path=self.file_facts.get("original_path"),
             original_mutation_id=self.file_facts.get("original_mutation_id"),
+            # What the selected state is, and the file's profile group
+            # (backlog 630): the facts kinds used to read off a template row.
+            record_type=self.file_facts.get("record_type"),
+            conversion=self.file_facts.get("conversion"),
+            data_profile_key=self.file_facts.get("manifest_data_profile_key"),
             **settings,
         )
 

@@ -27,6 +27,8 @@ describe them.
 
 from __future__ import annotations
 
+import re
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +96,9 @@ class DataFile(ABC):
         inbox: str | None = None,
         original_path: str | None = None,
         original_mutation_id: int | None = None,
+        record_type: str | None = None,
+        conversion: Mapping[str, Any] | None = None,
+        data_profile_key: str | None = None,
         **settings: Any,
     ) -> None:
         """Hold the file, its format settings and, when governed, its identity.
@@ -116,6 +121,12 @@ class DataFile(ABC):
                 sanitized copy's original is the delivered file).
             original_mutation_id: The original's current governed state; None
                 for a file nothing governs.
+            record_type: What the selected state's mutation records (backlog
+                630) -- a fact of THAT state, so a rebuilt file states its own.
+            conversion: The conversion that produced the selected state, where
+                one did; a fact of that state.
+            data_profile_key: The governed file's profile group, as its
+                classification named it -- the manifest's, so it carries over.
             settings: Format-specific settings a subtype declares -- delimiter,
                 sheet, field widths. Held rather than interpreted here.
         """
@@ -130,6 +141,9 @@ class DataFile(ABC):
         self.inbox = inbox
         self.original_path = original_path
         self.original_mutation_id = original_mutation_id
+        self.record_type = record_type
+        self.conversion = dict(conversion) if conversion is not None else None
+        self.data_profile_key = data_profile_key
         self.settings = settings
 
     def governed_facts(self) -> dict[str, Any]:
@@ -148,6 +162,31 @@ class DataFile(ABC):
             "inbox": self.inbox,
             "original_path": self.original_path,
             "original_mutation_id": self.original_mutation_id,
+            "data_profile_key": self.data_profile_key,
+        }
+
+    def template_context(self) -> dict[str, Any]:
+        """The fields a configured template or source field may name, from this
+        file's own facts (backlog 630).
+
+        ``<file_name>`` and ``<base_name>`` are the WORKING names -- this
+        path's last segment, and that without its last extension, by the rule
+        the selectors applied (not ``Path.stem``, which keeps a leading-dot
+        name whole). ``<base_path>`` and ``<classification.*>`` are the
+        governed classification at this state.
+        """
+        path = str(self.path)
+        file_name = re.sub(r"^.*/", "", path)
+        return {
+            "file_manifest_id": self.file_manifest_id,
+            "file_mutation_id": self.file_mutation_id,
+            "path": path,
+            "file_name": file_name,
+            "base_name": re.sub(r"\.[^.]*$", "", file_name),
+            "base_path": self.base_path,
+            "classification": self.classification,
+            "record_type": self.record_type,
+            "conversion": self.conversion,
         }
 
     @property

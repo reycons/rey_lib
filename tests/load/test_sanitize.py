@@ -516,7 +516,7 @@ def _sanitizer(tmp_path: Path, record: dict[str, object], **outbox) -> SanitizeT
     config = _config(tmp_path)
     config["outbox"].update(outbox)  # type: ignore[union-attr]
     return Transform(
-        values={"process": config, "record": _governed(record).template_context()},
+        values={"process": config},
         selected="sanitize",
     ).resolve(_ctx(tmp_path, record))
 

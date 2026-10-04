@@ -1124,8 +1124,7 @@ def _governed(record: dict) -> ManifestSource:
 
 def _preparer(tmp_path: Path, record: dict) -> PrepareTransform:
     config = loader_prepare._resolve_config(_config(tmp_path))
-    return Transform(values={"config": config, "record": _governed(record).template_context()},
-                     selected="prepare").resolve(_ctx(tmp_path))
+    return Transform(values={"config": config}, selected="prepare").resolve(_ctx(tmp_path))
 
 
 def _selected(record: dict):

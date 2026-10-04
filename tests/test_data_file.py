@@ -167,13 +167,14 @@ class TestConstruction:
         untyped = data_file_for(
             tmp_path / "notes.unknown", file_manifest_id=3, file_mutation_id=7,
             base_path="/b", inbox=str(tmp_path), original_path="/o/notes.unknown",
-            original_mutation_id=5,
+            original_mutation_id=5, data_profile_key="feed|notes",
         )
 
         assert untyped.governed_facts() == {
             "file_manifest_id": 3, "file_mutation_id": 7, "classification": None,
             "base_path": "/b", "inbox": str(tmp_path),
             "original_path": "/o/notes.unknown", "original_mutation_id": 5,
+            "data_profile_key": "feed|notes",
         }
 
 

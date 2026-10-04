@@ -12,8 +12,8 @@ boundary requires:
     ``_persist_source_classification_outcome`` did;
   * the move to processing goes through ``MoveTransform`` (``plan`` -> record ->
     ``apply`` -> verify), not through routing called directly;
-  * the selected row's ``record_type`` travels in the step's candidate context
-    (the classify kind's ``source_record_type``), never as a DataFile property;
+  * the selected state's ``record_type`` is the DataFile's own fact (backlog
+    630), read by the kind; nothing row-shaped is handed in;
   * a selected file whose type resolves to no registered DataFile is a
     rejection (``no_registered_data_file``);
   * failures are ``ClassificationError``.
@@ -422,7 +422,7 @@ def _classify_selected(
     try:
         return bool(
             Transform(
-                values={"source": entry, "source_record_type": candidate.source_record_type},
+                values={"source": entry},
                 selected="classify",
             ).resolve(ctx).apply(selected.data_file())
         )
@@ -516,15 +516,15 @@ def _record_classification_evidence(
     return run_log_id
 
 
-@file_transform("classify", fields=("source", "source_record_type"), required=("source",))
+@file_transform("classify", fields=("source",), required=("source",))
 class ClassifyTransform(FileTransform):
     """Classify one governed file, and route it to processing.
 
         DataFile (selected state) -> classify -> DataFile (in processing)
 
     ``source`` is the classification source's DECLARATION, validated here as
-    the step validates it. ``source_record_type`` is the selected row's record
-    type, carried for the evidence and never a DataFile property.
+    the step validates it. Everything about the file, its record type
+    included, is read off the DataFile (backlog 630).
 
     A file of no registered format (an ``UntypedFile``) is a rejection,
     ``no_registered_data_file``; the criterion is the DataFile registry, never a
@@ -535,7 +535,7 @@ class ClassifyTransform(FileTransform):
 
     file_failures = (ClassificationRejected,)
 
-    def __init__(self, ctx: Any, *, source: Any, source_record_type: Any = None) -> None:
+    def __init__(self, ctx: Any, *, source: Any) -> None:
         """Validate the source declaration this transform classifies by.
 
         Raises:
@@ -544,7 +544,6 @@ class ClassifyTransform(FileTransform):
         name = str(_get(source, "name", "") or "").strip()
         self._ctx = ctx
         self._config = _classification_source_config(source, name)
-        self._source_record_type = source_record_type
         self._rejection: SourceClassificationOutcome | None = None
 
     def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
@@ -570,7 +569,7 @@ class ClassifyTransform(FileTransform):
                 not be appended, or a move that did not land on the destination
                 the record names.
         """
-        candidate = _candidate(self._config, _selected_record(data_file, self._source_record_type))
+        candidate = _candidate(self._config, _selected_record(data_file))
         if not isinstance(data_file, UntypedFile):
             outcome = _classify_candidate(candidate)
         else:
@@ -685,18 +684,18 @@ class ClassifyTransform(FileTransform):
         return (recorded,)
 
 
-def _selected_record(data_file: DataFile, source_record_type: Any) -> dict[str, Any]:
+def _selected_record(data_file: DataFile) -> dict[str, Any]:
     """The selected state, in the shape the classification mechanics read.
 
-    The DataFile's identity and the path it was opened at, at the addresses a
-    source's ``source_field`` may name, plus the selected row's record type,
-    carried in from the step.
+    Built from the DataFile's own facts only (backlog 630): its identity, its
+    record type and the path it was opened at, at the addresses a source's
+    ``source_field`` may name.
     """
     path = str(data_file.path)
     return {
         "file_manifest_id": data_file.file_manifest_id,
         "file_mutation_id": data_file.file_mutation_id,
-        "record_type": source_record_type,
+        "record_type": data_file.record_type,
         "path": path,
         "file_name": data_file.path.name,
         "file": {"path": path, "file_name": data_file.path.name},

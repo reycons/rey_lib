@@ -221,7 +221,7 @@ def run_create_prepared_files(
         # has already kicked out its original when the error arrives here, and
         # the batch goes on. A dry run plans and never applies.
         preparer = Transform(
-            values={"config": config, "record": record, "apply": apply},
+            values={"config": config, "apply": apply},
             selected="prepare",
         ).resolve(ctx)
         try:
@@ -989,7 +989,7 @@ def _plain_config_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@file_transform("prepare", fields=("config", "record", "apply"), required=("config", "record"))
+@file_transform("prepare", fields=("config", "apply"), required=("config",))
 class PrepareTransform(FileTransform):
     """Prepare one governed sanitized file.
 
@@ -997,9 +997,9 @@ class PrepareTransform(FileTransform):
                                            [+ redacted companion]
                                            [+ row kickouts (+ redacted)]
 
-    ``config`` is the step's validated preparation. ``record`` is the selected
-    row: the templates, the source field and the governed identity read it
-    exactly as legacy did, and it is never a DataFile property. ``apply``
+    ``config`` is the step's validated preparation. Everything about the file --
+    the templates' fields, the source field, the governed identity -- is read
+    off the DataFile (``DataFile.template_context()``, backlog 630). ``apply``
     says whether this is an applied run, so a failure is recorded as governed
     evidence only when it is.
 
@@ -1009,25 +1009,19 @@ class PrepareTransform(FileTransform):
     The step records nothing.
     """
 
-    def __init__(
-        self, ctx: Any, *, config: _PreparedConfig, record: Any, apply: Any = True,
-    ) -> None:
+    def __init__(self, ctx: Any, *, config: _PreparedConfig, apply: Any = True) -> None:
         """Keep the validated preparation and the row it prepares.
 
         Raises:
-            PreparationError: If either is not what the step produces.
+            PreparationError: If the preparation is not what the step produces.
         """
         if not isinstance(config, _PreparedConfig):
             raise PreparationError(
                 "Transform (prepare) requires the step's validated preparation."
             )
-        if not _is_mapping_like(record):
-            raise PreparationError(
-                "Transform (prepare) requires the selected row as a mapping."
-            )
         self._ctx = ctx
         self._config = config
-        self._record = _plain_mapping(record)
+        self._record: dict[str, Any] = {}
         self._apply_run = apply is not False
         self._result: PreparedFileResult | None = None
 
@@ -1044,6 +1038,7 @@ class PrepareTransform(FileTransform):
         Returns:
             Each published artifact as a DataFile at its own M17 mutation.
         """
+        self._record = data_file.template_context()
         result, produced = _prepare_one_file(
             self._ctx, bound_run_log(), self._config, self._record, apply=True)
         self._result = result
@@ -1064,6 +1059,7 @@ class PrepareTransform(FileTransform):
             Preparation's own result, ``applied`` False. No governed DataFile,
             because no mutation exists to identify one.
         """
+        self._record = data_file.template_context()
         try:
             result, _produced = _prepare_one_file(
                 self._ctx, bound_run_log(), self._config, self._record, apply=False)

@@ -143,7 +143,7 @@ def run_file_sanitization(
         # classification, its conversion provenance -- off the object, never
         # off a selector row (backlog 619).
         sanitizer = Transform(
-            values={"process": inline_config, "record": source.template_context()},
+            values={"process": inline_config},
             selected="sanitize",
         ).resolve(ctx)
         try:
@@ -183,7 +183,7 @@ def _selected_data_file(source: ManifestSource) -> DataFile:
         ) from exc
 
 
-@file_transform("sanitize", fields=("process", "record"))
+@file_transform("sanitize", fields=("process",))
 class SanitizeTransform(FileTransform):
     """Sanitize one governed file, and publish its redacted sister if declared.
 
@@ -191,26 +191,19 @@ class SanitizeTransform(FileTransform):
                                                  [+ redacted-sister DataFile]
 
     ``process`` is the step's inline process DECLARATION, validated here as the
-    step validates it. ``record`` is the selected file's
-    ``ManifestSource.template_context()`` -- the governed object's own facts,
-    not a selector row (backlog 619): the outbox template, the source field and
-    the source origin read it exactly as the legacy step read its row, and it is
-    never a DataFile property.
+    step validates it. Everything about the file -- the outbox template's
+    fields, the source field, the source origin -- is read off the DataFile
+    (``DataFile.template_context()``, backlog 630).
     """
 
-    def __init__(self, ctx: Any, *, process: Any, record: Any) -> None:
+    def __init__(self, ctx: Any, *, process: Any) -> None:
         """Validate the process declaration this transform sanitizes by.
 
         Raises:
-            SanitizationError: If the declaration or the row is invalid.
+            SanitizationError: If the declaration is invalid.
         """
-        if not _is_mapping_like(record):
-            raise SanitizationError(
-                "File sanitization requires the selected row as a mapping."
-            )
         self._ctx = ctx
         self._config = _resolve_config(process)
-        self._record = _plain_mapping(record)
         self._result: FileSanitizationResult | None = None
 
     @property
@@ -263,7 +256,7 @@ class SanitizeTransform(FileTransform):
         ctx = self._ctx
         run_log = bound_run_log()
         config = self._config
-        record = self._record
+        record = data_file.template_context()
         application = str(getattr(ctx, "app_name", "") or "")
         governed_root = _governed_root(ctx)
         feed = config.feed

@@ -5,7 +5,7 @@ evidence-first guarantee the legacy persistence made is asserted against the
 Loader-owned ClassifyTransform that now owns it.
 
     selected row
-      |- source_record_type ------------------------------> run-log evidence
+      |- record_type (a DataFile fact) ---------------------> run-log evidence
       `- file_mutation_id -> ManifestSource -> DataFile -> ClassifyTransform
             no match -> evidence, the append (no mutation), ()
             match    -> evidence -> plan -> record -> move -> verify
@@ -96,18 +96,16 @@ def _file(path: Path, file_id: int = 7, *, create: bool = False):
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("a,b\n1,2\n", encoding="utf-8")
-    return data_file_for(path, file_manifest_id=file_id, file_mutation_id=file_id)
+    return data_file_for(path, file_manifest_id=file_id, file_mutation_id=file_id,
+                         record_type=_RECORD_TYPE)
 
 
 def _inbox(tmp_path: Path, name: str = "Example7.csv"):
     return _file(tmp_path / "alpha" / "inbox" / name, create=True)
 
 
-def _classify(ctx, entry, data_file, record_type: str = _RECORD_TYPE):
-    return Transform(
-        values={"source": entry, "source_record_type": record_type},
-        selected="classify",
-    ).resolve(ctx).apply(data_file)
+def _classify(ctx, entry, data_file):
+    return Transform(values={"source": entry}, selected="classify").resolve(ctx).apply(data_file)
 
 
 # -- the outcome -------------------------------------------------------------
@@ -386,7 +384,8 @@ def test_a_failed_move_is_chained_through_the_classification_error(
 def test_the_evidence_is_the_legacy_evidence_including_the_record_type(
     run_log, tmp_path: Path,
 ) -> None:
-    """Behavioural parity: source_record_type comes from the selected row."""
+    """Behavioural parity: source_record_type is the selected state's record
+    type, now the DataFile's own fact (backlog 630)."""
     ctx, _ = _ctx(tmp_path)
 
     with patch.object(source_classification, "log_run_record", return_value=123) as evidence, \
@@ -561,7 +560,7 @@ def test_an_applied_run_opens_the_selected_mutation_and_carries_the_record_type(
             ctx, run_log, {"sources": [entry]}, RunContext(apply=True))
 
     transform.assert_called_once_with(
-        values={"source": entry, "source_record_type": _RECORD_TYPE}, selected="classify")
+        values={"source": entry}, selected="classify")
     # The DataFile of the candidate's own governed object, at its mutation --
     # hydrated once by get_for_operation, never re-read (backlog 619).
     (opened,) = transform.return_value.resolve.return_value.apply.call_args.args

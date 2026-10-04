@@ -58,6 +58,38 @@ def _move(**values) -> Transform:
 class TestTheGovernedDataFile:
     """A DataFile carries the identity of exactly the state it was built from."""
 
+    def test_its_template_context_is_the_one_kinds_were_handed(self) -> None:
+        """Backlog 630: the fields a template or source field may name come off
+        the DataFile, and are exactly what ManifestSource handed the kinds."""
+        source = ManifestSource(
+            [_row(path="/data/feed/work/sanitized_csv/Hold.May.csv",
+                  record_type="source_file_mutation",
+                  conversion={"operator": "excel_conversion", "name": "alpha"},
+                  classification={"type": "t", "values": {"feed": "feed"}},
+                  base_path="/data/feed", manifest_data_profile_key="feed|hold")],
+            opened_by="mutation",
+        )
+
+        built = source.data_file()
+
+        assert built.template_context() == source.template_context()
+        assert built.record_type == "source_file_mutation"
+        assert built.conversion == {"operator": "excel_conversion", "name": "alpha"}
+        assert built.data_profile_key == "feed|hold"
+
+    def test_a_rebuilt_file_keeps_its_profile_group_not_its_state_facts(self) -> None:
+        """record_type and conversion describe the selected state; a file an
+        operation leaves behind is a new state and states its own."""
+        built = ManifestSource(
+            [_row(record_type="source_file_mutation", manifest_data_profile_key="k")],
+            opened_by="mutation",
+        ).data_file()
+
+        facts = built.governed_facts()
+
+        assert facts["data_profile_key"] == "k"
+        assert "record_type" not in facts and "conversion" not in facts
+
     def test_an_ungoverned_file_carries_none(self, tmp_path: Path) -> None:
         plain = data_file_for(tmp_path / "a.csv")
 

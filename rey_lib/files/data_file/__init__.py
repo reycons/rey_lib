@@ -80,6 +80,9 @@ def data_file_for(
     inbox: str | None = None,
     original_path: str | None = None,
     original_mutation_id: int | None = None,
+    record_type: str | None = None,
+    conversion: Mapping[str, Any] | None = None,
+    data_profile_key: str | None = None,
     **settings: Any,
 ) -> DataFile:
     """Return the DataFile for this path.
@@ -98,6 +101,9 @@ def data_file_for(
         inbox: The directory containing the original file as inventoried.
         original_path: Where the original file physically is now.
         original_mutation_id: The original's current governed state.
+        record_type: What the selected state's mutation records.
+        conversion: The conversion that produced the selected state.
+        data_profile_key: The governed file's profile group.
         settings: Format-specific settings passed to the subtype.
 
     Returns:
@@ -118,6 +124,8 @@ def data_file_for(
         "classification": classification, "base_path": base_path,
         "inbox": inbox, "original_path": original_path,
         "original_mutation_id": original_mutation_id,
+        "record_type": record_type, "conversion": conversion,
+        "data_profile_key": data_profile_key,
     }
     if not token:
         return UntypedFile(source, refusal=(
