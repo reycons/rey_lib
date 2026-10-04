@@ -508,10 +508,7 @@ class ConvertTransform(FileTransform):
             data_file_for(
                 Path(path),
                 file_type="CSV",
-                file_manifest_id=data_file.file_manifest_id,
-                file_mutation_id=mutation,
-                classification=data_file.classification,
-                base_path=data_file.base_path,
+                **{**data_file.governed_facts(), "file_mutation_id": mutation},
             )
             for path, mutation in produced
         )

@@ -346,15 +346,13 @@ class SanitizeTransform(FileTransform):
 def _governed_output(source: DataFile, path: Path, file_mutation_id: int) -> DataFile:
     """A file this step produced, at the mutation that recorded it.
 
-    It is the same governed file, so its manifest identity, classification and
-    base path are the source's; only the path and the state are new.
+    It is the same governed file, so its governed facts -- identity,
+    classification, base path and its original's -- are the source's; only the
+    path and the state are new.
     """
     return data_file_for(
         Path(path),
-        file_manifest_id=source.file_manifest_id,
-        file_mutation_id=file_mutation_id,
-        classification=source.classification,
-        base_path=source.base_path,
+        **{**source.governed_facts(), "file_mutation_id": file_mutation_id},
     )
 
 

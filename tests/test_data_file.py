@@ -25,6 +25,7 @@ import pytest
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import (
     DataFile,
+    UntypedFile,
     data_file_for,
     registered_formats,
 )
@@ -129,17 +130,21 @@ class TestConstruction:
     def test_a_suffix_that_names_nothing_is_refused_by_name(
         self, tmp_path: Path
     ) -> None:
-        """Refused, not defaulted to CSV.
+        """Not defaulted to CSV: an UntypedFile whose content is refused by name.
 
         Guessing would pick a reader that fails later and somewhere else,
-        reporting a parse error for what is a configuration mistake.
+        reporting a parse error for what is a configuration mistake. The file
+        is still a DataFile (backlog 624) -- it can be moved and kicked out --
+        but no reader is chosen for it.
         """
         path = tmp_path / "mystery.dat"
         path.write_text("a,b\n", encoding="utf-8")
 
-        with pytest.raises(ConfigError) as raised:
-            data_file_for(path)
+        untyped = data_file_for(path)
 
+        assert isinstance(untyped, UntypedFile)
+        with pytest.raises(ConfigError) as raised:
+            untyped.read()
         assert ".dat" in str(raised.value)
 
     def test_an_unknown_declared_type_is_refused_by_name(
@@ -150,10 +155,26 @@ class TestConstruction:
         XLSX used to be the case here; it is a DataFile now (row 602), so the
         refusal is shown with a format the hierarchy still does not have.
         """
-        with pytest.raises(ConfigError) as raised:
-            data_file_for(tmp_path / "book.parquet", file_type="PARQUET")
+        untyped = data_file_for(tmp_path / "book.parquet", file_type="PARQUET")
 
+        assert isinstance(untyped, UntypedFile)
+        with pytest.raises(ConfigError) as raised:
+            untyped.validate()
         assert "PARQUET" in str(raised.value)
+
+    def test_an_untyped_file_carries_its_governed_facts(self, tmp_path: Path) -> None:
+        """Every physical file is a DataFile, with every fact a DataFile carries."""
+        untyped = data_file_for(
+            tmp_path / "notes.unknown", file_manifest_id=3, file_mutation_id=7,
+            base_path="/b", inbox=str(tmp_path), original_path="/o/notes.unknown",
+            original_mutation_id=5,
+        )
+
+        assert untyped.governed_facts() == {
+            "file_manifest_id": 3, "file_mutation_id": 7, "classification": None,
+            "base_path": "/b", "inbox": str(tmp_path),
+            "original_path": "/o/notes.unknown", "original_mutation_id": 5,
+        }
 
 
 class TestTheSuffixMapCannotDrift:

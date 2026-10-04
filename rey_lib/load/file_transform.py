@@ -194,15 +194,23 @@ class MoveTransform(FileTransform):
             if result.file_manifest_record_id is None
             else result.file_manifest_record_id
         )
+        facts = {**data_file.governed_facts(), "file_mutation_id": file_mutation_id}
+        # MOVING THE ORIGINAL MOVES WHERE THE ORIGINAL IS (backlog 624). When
+        # this file is the original -- a classify move to processing, an
+        # archive move, a kickout -- the result's original facts are the new
+        # location and state; a derived file's original stays where it was.
+        if (
+            data_file.original_path is None
+            or Path(data_file.original_path).expanduser().resolve()
+            == Path(data_file.path).expanduser().resolve()
+        ):
+            facts["original_path"] = str(result.resulting_path)
+            facts["original_mutation_id"] = file_mutation_id
         return (
             data_file_for(
                 result.resulting_path,
                 file_type=data_file.file_type,
-                encoding=data_file.encoding,
-                file_manifest_id=data_file.file_manifest_id,
-                file_mutation_id=file_mutation_id,
-                classification=data_file.classification,
-                base_path=data_file.base_path,
+                **facts,
                 **data_file.settings,
             ),
         )

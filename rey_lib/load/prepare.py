@@ -1078,10 +1078,7 @@ class PrepareTransform(FileTransform):
                 Path(path),
                 # The prepared files are CSV; the row kickouts are JSONL. Each
                 # path's own suffix says which, as the producer named it.
-                file_manifest_id=data_file.file_manifest_id,
-                file_mutation_id=mutation,
-                classification=data_file.classification,
-                base_path=data_file.base_path,
+                **{**data_file.governed_facts(), "file_mutation_id": mutation},
             )
             for path, mutation in produced
         )

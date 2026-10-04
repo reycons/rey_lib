@@ -249,7 +249,16 @@ class Target:
             )
         held = self.configuration()
         if self.selected_kind() == "file":
-            return data_file_for(str(held["out-file"]))
+            destination = data_file_for(str(held["out-file"]))
+            # A destination is WRITTEN, so it must name a format with a writer.
+            # data_file_for represents any physical file (an UntypedFile when
+            # no format claims it, backlog 624); a load target still refuses
+            # one here, before anything is built or read.
+            if not destination.file_type:
+                raise ConfigError(
+                    f"Target (file): '{held['out-file']}' names no writable format."
+                )
+            return destination
         policy = self.write_policy()
         # APPEND IS THE DEFAULT, spelled: every flag false, as it has always been.
         return (

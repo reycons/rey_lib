@@ -91,6 +91,9 @@ class DataFile(ABC):
         file_mutation_id: int | None = None,
         classification: Mapping[str, Any] | None = None,
         base_path: str | None = None,
+        inbox: str | None = None,
+        original_path: str | None = None,
+        original_mutation_id: int | None = None,
         **settings: Any,
     ) -> None:
         """Hold the file, its format settings and, when governed, its identity.
@@ -106,6 +109,13 @@ class DataFile(ABC):
                 state.
             base_path: Where the governed file's lifecycle is rooted, at that
                 state.
+            inbox: The directory containing the ORIGINAL file as inventoried
+                (backlog 624). Where its kickouts go: <inbox>/kickouts.
+            original_path: Where the ORIGINAL file physically is now -- what a
+                failure moves to kickouts, which may not be this file (a
+                sanitized copy's original is the delivered file).
+            original_mutation_id: The original's current governed state; None
+                for a file nothing governs.
             settings: Format-specific settings a subtype declares -- delimiter,
                 sheet, field widths. Held rather than interpreted here.
         """
@@ -117,7 +127,28 @@ class DataFile(ABC):
             dict(classification) if classification is not None else None
         )
         self.base_path = base_path
+        self.inbox = inbox
+        self.original_path = original_path
+        self.original_mutation_id = original_mutation_id
         self.settings = settings
+
+    def governed_facts(self) -> dict[str, Any]:
+        """This file's governed facts, as ``data_file_for`` takes them.
+
+        For building the DataFile an operation leaves behind: the same governed
+        file at a new path and state, so a caller passes these and states only
+        the new ``file_mutation_id``. One list, so a new fact is carried by
+        every rebuild rather than by the ones somebody remembered.
+        """
+        return {
+            "file_manifest_id": self.file_manifest_id,
+            "file_mutation_id": self.file_mutation_id,
+            "classification": self.classification,
+            "base_path": self.base_path,
+            "inbox": self.inbox,
+            "original_path": self.original_path,
+            "original_mutation_id": self.original_mutation_id,
+        }
 
     @property
     @abstractmethod

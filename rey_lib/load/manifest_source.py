@@ -628,12 +628,17 @@ class ManifestSource:
         # THE GOVERNED IDENTITY OF EXACTLY THIS STATE: the mutation this source
         # was opened at, and the classification and base_path its rows carry.
         # Which state that is was the caller's selection, made before create().
+        manifest_path = self.file_facts.get("manifest_path")
         return data_file_for(
             Path(self.path), file_type=self.layout or "",
             file_manifest_id=self.file_manifest_id,
             file_mutation_id=self.file_mutation_id,
             classification=self.file_facts.get("classification"),
             base_path=self.file_facts.get("base_path"),
+            # The original file's facts (backlog 624), from the same rows.
+            inbox=str(Path(manifest_path).parent) if manifest_path else None,
+            original_path=self.file_facts.get("original_path"),
+            original_mutation_id=self.file_facts.get("original_mutation_id"),
             **settings,
         )
 
@@ -887,6 +892,11 @@ _FILE_FACTS: tuple[str, ...] = (
     # same-named data_profile_key above: that is the file type's profile and
     # is empty until a profile exists (backlog 619).
     "conversion", "manifest_data_profile_key",
+    # The ORIGINAL file (backlog 624): where it was inventoried -- its inbox is
+    # that path's directory -- and where it physically is now, at which state.
+    # Carried on the DataFile so a failing operation can move the original
+    # without reaching back here.
+    "manifest_path", "original_path", "original_mutation_id",
 )
 
 

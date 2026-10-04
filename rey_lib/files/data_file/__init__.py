@@ -27,11 +27,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from rey_lib.files.data_file.base import DEFAULT_ENCODING, DataFile
+from rey_lib.files.data_file.untyped import UntypedFile
 from rey_lib.files.file_utils import file_type_for_suffix
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "DataFile",
+    "UntypedFile",
     "data_file",
     "data_file_for",
     "registered_formats",
@@ -75,6 +77,9 @@ def data_file_for(
     file_mutation_id: int | None = None,
     classification: Mapping[str, Any] | None = None,
     base_path: str | None = None,
+    inbox: str | None = None,
+    original_path: str | None = None,
+    original_mutation_id: int | None = None,
     **settings: Any,
 ) -> DataFile:
     """Return the DataFile for this path.
@@ -90,39 +95,43 @@ def data_file_for(
         file_mutation_id: The governed state the caller selected.
         classification: The governed classification at that state.
         base_path: The governed lifecycle root at that state.
+        inbox: The directory containing the original file as inventoried.
+        original_path: Where the original file physically is now.
+        original_mutation_id: The original's current governed state.
         settings: Format-specific settings passed to the subtype.
 
     Returns:
-        The subtype registered for that format.
-
-    Raises:
-        ValueError: If the format is unknown, or if no type was declared and
-            the suffix does not name one. Refused by name rather than guessed
-            at: a load that silently picked the wrong reader would fail later
-            and somewhere else.
+        The subtype registered for that format -- or, where no registered
+        subtype claims it, an ``UntypedFile`` (backlog 624): every physical
+        file is a DataFile, so every file can be moved, kicked out and
+        governed. Reading one refuses by name, with the same message this
+        function used to raise, so an unknown format still fails at the first
+        operation that needs its content rather than being guessed at.
     """
     _discover()
     source = Path(path)
     token = (file_type or file_type_for_suffix(source.suffix)).strip().upper()
 
+    facts = {
+        "encoding": encoding,
+        "file_manifest_id": file_manifest_id, "file_mutation_id": file_mutation_id,
+        "classification": classification, "base_path": base_path,
+        "inbox": inbox, "original_path": original_path,
+        "original_mutation_id": original_mutation_id,
+    }
     if not token:
-        raise ConfigError(
+        return UntypedFile(source, refusal=(
             f"Cannot tell what kind of file '{source.name}' is: no file_type "
             f"was declared and '{source.suffix}' names no known format. "
             f"Known formats: {sorted(_REGISTRY)}."
-        )
+        ), **facts, **settings)
     if token not in _REGISTRY:
-        raise ConfigError(
+        return UntypedFile(source, refusal=(
             f"Unsupported file_type '{token}'. "
             f"Known formats: {sorted(_REGISTRY)}."
-        )
+        ), **facts, **settings)
 
-    return _REGISTRY[token](
-        source, encoding=encoding,
-        file_manifest_id=file_manifest_id, file_mutation_id=file_mutation_id,
-        classification=classification, base_path=base_path,
-        **settings,
-    )
+    return _REGISTRY[token](source, **facts, **settings)
 
 
 def _discover() -> None:
