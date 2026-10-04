@@ -1865,8 +1865,20 @@ class Control:
                               batch_step_id: Optional[int] = None,
                               batch_id: Optional[int] = None,
                               run_id: Optional[int] = None,
+                              scope: Optional[str] = None,
+                              anchor_file_manifest_id: Optional[int] = None,
+                              rollback_to_mutation_id: Optional[int] = None,
+                              boundary_record_type: Optional[str] = None,
                               required: bool = True) -> list[dict[str, Any]]:
         """Return the rollback set for one scope, marking it unless previewing.
+
+        A named ``scope`` (file, run, file_type, batch_step, batch,
+        installation) is resolved by the routine from its anchor -- the
+        selected ``rollback_to_mutation_id``, or ``anchor_file_manifest_id``
+        when a file was selected -- and only mutations past the boundary are
+        returned (backlog 612): for one file the selected mutation exactly; for
+        a multi-file scope each file's latest mutation of
+        ``boundary_record_type`` (by default the selected mutation's).
 
         Exactly one scope is supplied. Under ``dry_run`` nothing is written and
         the rows come back with no rollback identity; otherwise each row is a
@@ -1888,6 +1900,10 @@ class Control:
             "rollback_batch_step_id":   batch_step_id,
             "rollback_batch_id":        batch_id,
             "rollback_run_id":          run_id,
+            "rollback_scope":           scope,
+            "rollback_anchor_file_manifest_id": anchor_file_manifest_id,
+            "rollback_to_mutation_id":  rollback_to_mutation_id,
+            "rollback_boundary_record_type": boundary_record_type,
             "rollback_execution_run_id": self._execution_run_id(),
         }, required=required)
 

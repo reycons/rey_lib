@@ -1,8 +1,10 @@
-"""FileManifest.rollback(criteria): governed history, reversed newest first (backlog 612).
+"""FileManifest.rollback(criteria): the request function's set, reversed (backlog 612).
 
-    read the mutations after the boundary
+    criteria -> the rollback request returns the mutations to reverse
     -> newest first, reverse each: undo its change, delete its record
-    -> nothing left: delete the manifest
+    -> a file with no mutation left: delete its manifest
+
+The request function decides the set; rollback reverses exactly what it returns.
 """
 
 from __future__ import annotations
@@ -16,29 +18,37 @@ from rey_lib.files.manifest import FileManifest
 
 
 class _Control:
-    """The three control calls rollback makes, over an in-memory history."""
+    """The rollback request answers with ``answer``; deletes are recorded."""
 
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self.rows = rows
+    def __init__(self, answer: list[dict[str, Any]], remaining: dict[int, int]) -> None:
+        self.answer = answer
+        self.remaining = dict(remaining)  # file_manifest_id -> mutation count
+        self.requests: list[dict[str, Any]] = []
         self.deleted_mutations: list[int] = []
         self.deleted_manifests: list[int] = []
-        self.requests: list[dict[str, Any]] = []
 
     def request_file_rollback(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.requests.append(kwargs)
-        assert kwargs["dry_run"] is True  # rollback only ever reads through it
-        return [dict(row) for row in self.rows
-                if row["file_manifest_id"] == kwargs["file_manifest_id"]]
+        return [dict(row) for row in self.answer]
 
     def delete_file_mutation(self, file_mutation_id: int) -> None:
         self.deleted_mutations.append(file_mutation_id)
+        for row in self.answer:
+            if row["file_mutation_id"] == file_mutation_id:
+                self.remaining[row["file_manifest_id"]] -= 1
+
+    def list_file_mutations(self, file_manifest_id: int | None = None,
+                            file_mutation_id: int | None = None) -> list[dict[str, Any]]:
+        if file_mutation_id is not None:
+            return [{"file_mutation_id": file_mutation_id,
+                     "record_type": "source_file_classification"}]
+        return [{}] * self.remaining[file_manifest_id]
 
     def delete_file_manifest(self, file_manifest_id: int) -> None:
         self.deleted_manifests.append(file_manifest_id)
 
 
-def _history(tmp_path: Path) -> tuple[list[dict[str, Any]], dict[str, Path]]:
-    """inventory -> classify -> move to processing -> create a sanitized copy."""
+def _files(tmp_path: Path) -> dict[str, Path]:
     inbox = tmp_path / "source" / "inbox" / "a.csv"
     processing = tmp_path / "source" / "processing" / "a.csv"
     sanitized = tmp_path / "work" / "sanitized_csv" / "a.csv"
@@ -46,90 +56,83 @@ def _history(tmp_path: Path) -> tuple[list[dict[str, Any]], dict[str, Path]]:
     processing.write_text("a\n1\n", encoding="utf-8")
     sanitized.parent.mkdir(parents=True)
     sanitized.write_text("a\n1\n", encoding="utf-8")
-    rows = [
-        {"file_mutation_id": 1, "file_manifest_id": 7, "record_type": "source_file_inventory",
-         "action": "record_only", "status": "success", "path": str(inbox),
-         "restore_to_path": None, "command": None, "rollback_action": "delete_record"},
-        {"file_mutation_id": 2, "file_manifest_id": 7, "record_type": "source_file_classification",
-         "action": "record_only", "status": "success", "path": str(inbox),
-         "restore_to_path": str(inbox), "command": None, "rollback_action": "delete_record"},
-        {"file_mutation_id": 3, "file_manifest_id": 7, "record_type": "source_file_mutation",
-         "action": "move", "status": "success", "path": str(processing),
-         "restore_to_path": str(inbox), "command": "mv", "rollback_action": "move_back"},
+    return {"inbox": inbox, "processing": processing, "sanitized": sanitized}
+
+
+def _after_classification(files: dict[str, Path]) -> list[dict[str, Any]]:
+    """What the request returns for file 7 rolled back to its classification."""
+    return [
         {"file_mutation_id": 4, "file_manifest_id": 7, "record_type": "source_file_mutation",
-         "action": "create", "status": "success", "path": str(sanitized),
-         "restore_to_path": str(processing), "command": "rm", "rollback_action": "delete_file"},
-        {"file_mutation_id": 9, "file_manifest_id": 8, "record_type": "source_file_inventory",
-         "action": "record_only", "status": "success", "path": "/other",
-         "restore_to_path": None, "command": None, "rollback_action": "delete_record"},
+         "action": "create", "path": str(files["sanitized"]),
+         "restore_to_path": str(files["processing"]), "command": "rm"},
+        {"file_mutation_id": 3, "file_manifest_id": 7, "record_type": "source_file_mutation",
+         "action": "move", "path": str(files["processing"]),
+         "restore_to_path": str(files["inbox"]), "command": "mv"},
     ]
-    return rows, {"inbox": inbox, "processing": processing, "sanitized": sanitized}
 
 
-def test_a_dry_run_returns_the_mutations_and_changes_nothing(tmp_path: Path) -> None:
-    rows, files = _history(tmp_path)
-    control = _Control(rows)
+def test_the_criteria_go_to_the_request_function(tmp_path: Path) -> None:
+    control = _Control([], {7: 2})
 
-    result = FileManifest(control).rollback(7, to_file_mutation_id=2, dry_run=True)
+    FileManifest(control).rollback(scope="run", file_mutation_id=2,
+                                   boundary_record_type="source_file_classification")
+
+    (sent,) = control.requests
+    assert sent == {"dry_run": True, "scope": "run", "anchor_file_manifest_id": None,
+                    "rollback_to_mutation_id": 2,
+                    "boundary_record_type": "source_file_classification"}
+
+
+def test_a_dry_run_returns_the_requested_set_and_changes_nothing(tmp_path: Path) -> None:
+    files = _files(tmp_path)
+    control = _Control(_after_classification(files), {7: 4})
+
+    result = FileManifest(control).rollback(file_mutation_id=2)
 
     assert [row["file_mutation_id"] for row in result["mutations"]] == [4, 3]
+    assert result["boundary"] == {"file_mutation_id": 2,
+                                  "record_type": "source_file_classification"}
     assert (control.deleted_mutations, control.deleted_manifests) == ([], [])
     assert files["sanitized"].exists() and files["processing"].exists()
 
 
-def test_rollback_to_a_mutation_keeps_it_and_reverses_what_came_after(tmp_path: Path) -> None:
-    rows, files = _history(tmp_path)
-    control = _Control(rows)
+def test_rollback_reverses_exactly_the_requested_set(tmp_path: Path) -> None:
+    files = _files(tmp_path)
+    control = _Control(_after_classification(files), {7: 4})
 
-    result = FileManifest(control).rollback(7, to_file_mutation_id=2, dry_run=False)
+    result = FileManifest(control).rollback(file_mutation_id=2, dry_run=False)
 
-    # Newest first: the sanitized copy is deleted, then the file moves back.
     assert result["reversed"] == [4, 3]
     assert control.deleted_mutations == [4, 3]
     assert not files["sanitized"].exists()
     assert files["inbox"].exists() and not files["processing"].exists()
-    # The boundary and everything before it stay; so does the manifest.
-    assert control.deleted_manifests == []
-    assert result["manifest_deleted"] is False
+    assert control.deleted_manifests == []  # inventory and classification remain
 
 
-def test_rolling_back_everything_deletes_the_manifest(tmp_path: Path) -> None:
-    rows, files = _history(tmp_path)
-    control = _Control(rows)
+def test_a_file_with_nothing_left_has_its_manifest_deleted(tmp_path: Path) -> None:
+    files = _files(tmp_path)
+    control = _Control(_after_classification(files), {7: 2})
 
-    result = FileManifest(control).rollback(7, dry_run=False)
+    result = FileManifest(control).rollback(file_manifest_id=7, dry_run=False)
 
-    assert control.deleted_mutations == [4, 3, 2, 1]
     assert control.deleted_manifests == [7]
-    assert result["manifest_deleted"] is True
-    assert files["inbox"].exists()
+    assert result["manifests_deleted"] == [7]
 
 
 def test_a_failed_reversal_stops_and_keeps_its_record(tmp_path: Path) -> None:
-    rows, files = _history(tmp_path)
-    files["processing"].unlink()  # the file is in neither place: nothing to move back
-    control = _Control(rows)
+    files = _files(tmp_path)
+    files["processing"].unlink()  # in neither place: nothing to move back
+    control = _Control(_after_classification(files), {7: 4})
 
-    result = FileManifest(control).rollback(7, dry_run=False)
+    result = FileManifest(control).rollback(file_mutation_id=2, dry_run=False)
 
     assert result["reversed"] == [4]
     assert result["failed"]["file_mutation_id"] == 3
     assert control.deleted_mutations == [4]
-    assert control.deleted_manifests == []
 
 
-def test_another_files_mutation_is_not_a_boundary(tmp_path: Path) -> None:
-    rows, _ = _history(tmp_path)
-
-    with pytest.raises(ValueError, match="not one of file 7"):
-        FileManifest(_Control(rows)).rollback(7, to_file_mutation_id=9, dry_run=True)
-
-
-def test_other_files_are_never_touched(tmp_path: Path) -> None:
-    rows, _ = _history(tmp_path)
-    control = _Control(rows)
-
-    FileManifest(control).rollback(7, dry_run=False)
-
-    assert 9 not in control.deleted_mutations
-    assert control.requests[0]["file_manifest_id"] == 7
+def test_exactly_one_of_file_or_mutation(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        FileManifest(_Control([], {})).rollback(file_manifest_id=7, file_mutation_id=2)
+    with pytest.raises(ValueError, match="exactly one"):
+        FileManifest(_Control([], {})).rollback()
