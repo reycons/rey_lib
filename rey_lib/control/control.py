@@ -52,6 +52,31 @@ _logger = get_logger(__name__)
 #: would be inventing the answer.
 _UNKNOWN_OUTCOME = "unknown"
 
+#: control.file_manifest's columns, in the table's order, and the name each has
+#: in the flat projection f_file_manifest_get returns (control.transform_flat_vw,
+#: backlog 618). Six are renamed there because the projection uses the plain
+#: name for the WORKING MUTATION's fact: its `path`, `data_profile_key` (the
+#: file type's profile) and `batch_step_id` are not the manifest's. Reading the
+#: plain names off a flat row would return those, with no error.
+_FILE_MANIFEST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("file_manifest_id", "file_manifest_id"),
+    ("path", "manifest_path"),
+    ("file_name", "file_name"),
+    ("base_name", "base_name"),
+    ("file_extension", "file_extension"),
+    ("checksum_sha256", "checksum_sha256"),
+    ("size_bytes", "size_bytes"),
+    ("source_name", "source_name"),
+    ("evidence", "evidence"),
+    ("producer", "manifest_producer"),
+    ("created_ts", "inventoried_ts"),
+    ("last_updated_ts", "manifest_updated_ts"),
+    ("data_profile_key", "manifest_data_profile_key"),
+    ("installation_id", "installation_id"),
+    ("file_type_id", "file_type_id"),
+    ("batch_step_id", "manifest_batch_step_id"),
+)
+
 
 def _name_of(record: Any) -> str:
     """Return a config record's name, namespace or mapping."""
@@ -1607,11 +1632,23 @@ class Control:
 
     def get_file_manifest(self, file_manifest_id: int,
                           required: bool = True) -> Optional[dict[str, Any]]:
-        """Return one file's current state, or None when it was never recorded."""
+        """Return one file's current state, or None when it was never recorded.
+
+        The routine returns the manifest's flat projection -- one row per
+        mutation x profile field x transform column -- and this reduces it to
+        the control.file_manifest row callers have always received. The
+        manifest's own columns repeat unchanged on every row of one manifest,
+        so the first row carries them; they are read by their manifest_* names
+        (see _FILE_MANIFEST_COLUMNS), never by the plain names the projection
+        gives the working mutation.
+        """
         rows = self._call_rows("get_file_manifest",
                                {"file_manifest_id": file_manifest_id},
                                required=required)
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        first = rows[0]
+        return {column: first[source] for column, source in _FILE_MANIFEST_COLUMNS}
 
     def find_file_manifest(self, path: Optional[str] = None,
                            checksum_sha256: Optional[str] = None,
