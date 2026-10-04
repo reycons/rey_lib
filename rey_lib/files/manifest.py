@@ -321,6 +321,106 @@ class FileManifest:
             batch_id=batch_id, run_id=run_id,
         )
 
+    def rollback(
+        self,
+        file_manifest_id: int,
+        *,
+        to_file_mutation_id: Optional[int] = None,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Take one governed file back to a point in its own history (backlog 612).
+
+            read the mutations after the boundary
+            -> newest first, reverse each: undo its change, delete its record
+            -> nothing left: delete the manifest -- the file is no longer governed
+
+        Forward, a mutation performs a change and writes its record; reversing
+        it undoes the change and deletes that record. There is no other cleanup.
+
+        Args:
+            file_manifest_id: The governed file.
+            to_file_mutation_id: The boundary: this mutation and every earlier
+                one are kept, every later one is reversed. None reverses them all.
+            dry_run: Return the mutations that would be reversed, changing nothing.
+
+        Returns:
+            ``mutations`` (what is, or would be, reversed, newest first),
+            ``reversed`` (what was), ``failed`` (the first reversal that could
+            not be done, which stops the rollback and keeps its record), and
+            ``manifest_deleted``.
+
+        Raises:
+            ValueError: If ``to_file_mutation_id`` is not one of this file's
+                mutations.
+        """
+        # Deferred: the reverse behaviour lives beside the mutation evidence it
+        # reverses, and that module imports from this package.
+        from rey_lib.files.log_run_rollback import (
+            _reversal_candidate,
+            _resolved_compensation,
+        )
+
+        # The history, newest first, each mutation with where its change came
+        # from (restore_to_path): the request routine's dry run writes nothing.
+        history = self._control.request_file_rollback(
+            dry_run=True, file_manifest_id=int(file_manifest_id))
+        history = sorted(history, key=lambda row: int(row["file_mutation_id"]), reverse=True)
+        if to_file_mutation_id is not None and not any(
+            int(row["file_mutation_id"]) == int(to_file_mutation_id) for row in history
+        ):
+            raise ValueError(
+                f"Mutation {to_file_mutation_id} is not one of file "
+                f"{file_manifest_id}'s mutations."
+            )
+        mutations = [
+            row for row in history
+            if to_file_mutation_id is None
+            or int(row["file_mutation_id"]) > int(to_file_mutation_id)
+        ]
+        result: dict[str, Any] = {
+            "file_manifest_id": int(file_manifest_id),
+            "to_file_mutation_id": to_file_mutation_id,
+            "dry_run": bool(dry_run),
+            "mutations": mutations,
+            "reversed": [],
+            "failed": None,
+            "manifest_deleted": False,
+        }
+        if dry_run:
+            return result
+
+        for row in mutations:
+            # Reverse the change. A mutation with nothing physical to undo has
+            # no command; its reverse is deleting its record.
+            if str(row.get("command") or "").strip():
+                candidate = _reversal_candidate(row)
+                try:
+                    reverse = _resolved_compensation(candidate)
+                except KeyError:
+                    result["failed"] = {"file_mutation_id": row["file_mutation_id"],
+                                        "reason": f"no reverse behaviour for action "
+                                                  f"{row.get('action')!r}"}
+                    return result
+                problem = reverse.validate(candidate)
+                if problem is not None:
+                    result["failed"] = {"file_mutation_id": row["file_mutation_id"],
+                                        "reason": problem}
+                    return result
+                try:
+                    reverse.execute(candidate)
+                except OSError as exc:
+                    result["failed"] = {"file_mutation_id": row["file_mutation_id"],
+                                        "reason": str(exc)}
+                    return result
+            # Then the persistence: the record of a change that no longer exists.
+            self._control.delete_file_mutation(int(row["file_mutation_id"]))
+            result["reversed"].append(int(row["file_mutation_id"]))
+
+        if to_file_mutation_id is None:
+            self._control.delete_file_manifest(int(file_manifest_id))
+            result["manifest_deleted"] = True
+        return result
+
     def complete_rollback(self, file_mutation_ids: list[int]) -> None:
         """Close the rollbacks whose reversals ran, named one by one.
 

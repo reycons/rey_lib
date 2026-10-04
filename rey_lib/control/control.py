@@ -1906,6 +1906,28 @@ class Control:
             "rollback_execution_run_id":  self._execution_run_id(),
         }, required=required)
 
+    def delete_file_mutation(self, file_mutation_id: int, required: bool = True) -> None:
+        """Delete one mutation record: the persistence half of reversing it.
+
+        A forward mutation writes its record; reversing it deletes that record
+        once its change is undone (FileManifest.rollback, backlog 612).
+        """
+        self._call("delete_file_mutation", {
+            "file_mutation_id": int(file_mutation_id),
+            "rollback_execution_run_id": self._execution_run_id(),
+        }, required=required)
+
+    def delete_file_manifest(self, file_manifest_id: int, required: bool = True) -> None:
+        """Delete one governed file's manifest record.
+
+        Only once every mutation of it has been reversed and deleted: the file
+        is back to before it was governed (FileManifest.rollback, backlog 612).
+        """
+        self._call("delete_file_manifest", {
+            "file_manifest_id": int(file_manifest_id),
+            "rollback_execution_run_id": self._execution_run_id(),
+        }, required=required)
+
     def rollback_data_profiles_by_run(self, run_id: int,
                                       required: bool = True) -> dict[str, Any]:
         """Remove what one run's profiling wrote, and say how much.
