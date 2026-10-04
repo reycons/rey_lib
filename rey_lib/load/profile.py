@@ -47,11 +47,14 @@ from rey_lib.load.layouts.delimited import (
 )
 from rey_lib.load.manifest_source import ManifestSource
 from rey_lib.load.profile_errors import ProfilingError
-from rey_lib.load.kickout import kick_out_original
+from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.load.file_transform import FileTransform, file_transform
+from rey_lib.load.transform import Transform
 from rey_lib.load.record_templates import record_field
 from rey_lib.logs import (
     PROFILE_RECORD_TYPE,
     FileManifestError,
+    bound_run_log,
     get_logger,
     log_file_manifest_record,
     log_run_record,
@@ -803,27 +806,25 @@ def run_record_type_profiling(
             selected = by_mutation[int(object_id)]
             try:
                 data_file = selected.data_file()
-            except (ConfigError, DataStructureError) as exc:
-                # A file with no registered type, or a state that resolved no
-                # path, cannot be profiled: a per-file failure (rule 75).
+            except DataStructureError as exc:
+                # A state that resolved no path: there is no file to profile.
                 raise ProfilingError(
                     f"'{Path(source).name}' cannot be opened for profiling: {exc}"
                 ) from exc
-            _store_profile_library_record(ctx, run_log,
-                Path(data_file.path),
-                config,
-                file_manifest_id,
-                object_id,
-                data_profile_key,
-                key_fields,
-                profiler_version=profiler_version,
-            )
+            Transform(
+                values={
+                    "config": config,
+                    "data_profile_key": data_profile_key,
+                    "key_fields": key_fields,
+                    "profiler_version": profiler_version,
+                },
+                selected="profile",
+            ).resolve(ctx).apply(data_file)
             profiled += 1
         except ProfilingError as error:
-            # RULE 75: KICK THE FILE OUT, THEN RECORD THE FAILURE. The original
-            # leaves processing for the declared kickouts destination; the
-            # failure is recorded whether or not that move could be made.
-            _kickout_original(ctx, config, file_manifest_id, Path(source))
+            # RULE 75: the original is already kicked out -- Transform's common
+            # execution path did it before this error reached here (backlog
+            # 624). Record the failure; the batch goes on.
             failures.append(f"{Path(source).name}: {error}")
             # Each fact in the field that holds it. ERROR has no typed payload
             # column -- by contract its whole payload is the failure object --
@@ -842,22 +843,55 @@ def run_record_type_profiling(
     )
 
 
-def _kickout_original(
-    ctx: Any,
-    config: Mapping[str, Any],
-    file_manifest_id: int,
-    source: Path,
-) -> None:
-    """Move the ORIGINAL of a file that could not be profiled to its kickouts.
+@file_transform("profile", fields=("config", "data_profile_key", "key_fields",
+                                  "profiler_version"), required=("config",))
+class ProfileTransform(FileTransform):
+    """Profile one governed file into the profile library: a Transform kind.
 
-    The shared rule-75 mechanism (``rey_lib.load.kickout``), with this step's
-    declared ``kickouts`` destination and its operation. Never raises.
+        DataFile -> profile -> DataFile at the profiling mutation
+
+    The profiling operation is ``_store_profile_library_record``, moved behind
+    the one Transform rather than run inline by the step (backlog 624). It
+    writes one ``record_only`` profiling mutation -- profiling changes nothing
+    about the file -- and the same file is returned at that real mutation.
+    A file that cannot be profiled raises ProfilingError, and the common
+    execution path kicks its original out.
     """
-    declared = config.get("kickouts")
-    kick_out_original(
-        ctx,
-        destination=_value(declared, "path") if declared else None,
-        file_manifest_id=file_manifest_id,
-        source=source,
-        operation=_OPERATION,
-    )
+
+    file_failures = (ProfilingError,)
+
+    def __init__(
+        self,
+        ctx: Any,
+        *,
+        config: Any,
+        data_profile_key: str = "",
+        key_fields: Sequence[str] = (),
+        profiler_version: str = "",
+    ) -> None:
+        """Hold the step's profiling settings and the group this file is in."""
+        self._ctx = ctx
+        self._config = config
+        self._data_profile_key = str(data_profile_key or "")
+        self._key_fields = tuple(key_fields or ())
+        self._profiler_version = profiler_version
+
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+        """Profile the file; return it at the profiling mutation it recorded."""
+        mutation_id = _store_profile_library_record(
+            self._ctx, bound_run_log(),
+            Path(data_file.path),
+            self._config,
+            data_file.file_manifest_id,
+            data_file.file_mutation_id,
+            self._data_profile_key,
+            self._key_fields,
+            profiler_version=self._profiler_version,
+        )
+        return (
+            data_file_for(
+                data_file.path, file_type=data_file.file_type,
+                **{**data_file.governed_facts(), "file_mutation_id": mutation_id},
+                **data_file.settings,
+            ),
+        )

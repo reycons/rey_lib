@@ -20,7 +20,6 @@ import pytest
 
 from rey_lib.files import file_routing
 from rey_lib.files.data_file import data_file_for
-from rey_lib.files.manifest import FileManifest
 from rey_lib.load import profile as workflow
 from tests.support.manifest_rows import manifest_row
 from tests.support.selecting_control import SelectingControl
@@ -84,8 +83,19 @@ def _profiles(ctx: Any) -> list[dict]:
 
 
 def _run(ctx: Any, run_log: Any, config: dict | None = None, *, apply: bool = True):
-    return workflow.run_record_type_profiling(
-        ctx, run_log, config or PROFILE_CONFIG, apply=apply, profiler_version="test")
+    """Run the step with its run log bound and its step bound, as the workflow
+    coordinator does before any step runs: the profile kind writes through the
+    bound run log, and a kickout states the bound step (backlog 624)."""
+    from rey_lib.logs import bind_run, bind_step, clear_run, clear_step
+
+    bind_run(run_log)
+    bind_step(step_id="profile_csv_record_types")
+    try:
+        return workflow.run_record_type_profiling(
+            ctx, run_log, config or PROFILE_CONFIG, apply=apply, profiler_version="test")
+    finally:
+        clear_step()
+        clear_run()
 
 
 # -- the legacy step tests, on the batch result --------------------------------
@@ -176,81 +186,58 @@ def test_a_dry_run_profiles_and_writes_nothing(tmp_path: Path) -> None:
 
 # -- rule 75: the original is kicked out, then the failure is recorded ---------
 
-KICKOUT_CONFIG = {
-    **PROFILE_CONFIG,
-    # As the Loader YAML declares it, after the workflow's {kickouts} token.
-    "kickouts": {"path": "<base_path>/work/kickouts/<file_name>", "overwrite": True},
-}
+def _failing_sanitized_copy(
+    tmp_path: Path, where: str = "processing",
+) -> tuple[Path, Path, Path, SimpleNamespace]:
+    """A sanitized copy that cannot be profiled, and its ORIGINAL in ``where``.
 
-
-def _failing_sanitized_copy(tmp_path: Path) -> tuple[Path, Path, SimpleNamespace]:
-    """A sanitized copy that cannot be profiled, and its original in processing."""
+    The row carries the original's facts, as f_file_manifest_get returns them:
+    its inventoried path (so its inbox) and where it is now, at which state.
+    """
     feed = tmp_path / "alpha"
-    original = feed / "source" / "processing" / "Trades.csv"
+    inbox = feed / "source" / "inbox"
+    original = feed / "source" / where / "Trades.csv"
     original.parent.mkdir(parents=True)
     original.write_text("anything\n", encoding="utf-8")
     sanitized = feed / "work" / "sanitized_csv" / "Trades.csv"
     sanitized.parent.mkdir(parents=True)
     sanitized.write_text("", encoding="utf-8")
     ctx = _ctx(tmp_path, (52, sanitized))
-    ctx.shared_control.selected[0]["file_manifest_id"] = 7
-    return original, sanitized, ctx
-
-
-def _history(*moves: tuple[int, str]) -> list[dict]:
-    return [
-        {"file_mutation_id": 1, "action": "create", "status": "success",
-         "result": None, "deleted_in": None},
-        *({"file_mutation_id": mutation, "action": "move", "status": "success",
-           "result": result, "deleted_in": None} for mutation, result in moves),
-    ]
-
-
-def _original_at(original: Path, tmp_path: Path):
-    """ManifestSource opened at the original's processing state -- by the
-    kickout. The step never opens its selection through create (backlog 619)."""
-    def create(control: Any, *, file_mutation_id: int) -> Any:
-        if file_mutation_id == 52:  # the sanitized copy the step profiles
-            raise AssertionError(
-                "the step opened its selection through create; it comes from "
-                "get_for_operation")
-        return SimpleNamespace(
-            data_file=lambda: data_file_for(
-                original, file_manifest_id=7, file_mutation_id=file_mutation_id,
-                classification={"type": "t", "values": {}},
-                base_path=str(tmp_path / "alpha")),
-            governed_context=lambda: {"file_name": original.name},
-        )
-    return create
+    ctx.shared_control.selected[0].update({
+        "file_manifest_id": 7,
+        "manifest_path": str(inbox / "Trades.csv"),
+        "original_path": str(original),
+        "original_mutation_id": 3,
+    })
+    return original, sanitized, inbox, ctx
 
 
 def test_a_failed_profile_kicks_out_the_original_then_records_the_failure(
     tmp_path: Path,
 ) -> None:
-    original, sanitized, ctx = _failing_sanitized_copy(tmp_path)
+    original, sanitized, inbox, ctx = _failing_sanitized_copy(tmp_path)
     order: list[str] = []
-    destination = tmp_path / "alpha" / "work" / "kickouts" / "Trades.csv"
 
     def moved(*_args: Any, **_kw: Any) -> Path:
         order.append("move")
-        return destination
+        return inbox / "kickouts" / "Trades.csv"
 
     def logged(_run_log: Any, record_type: str, **_kw: Any) -> int:
         order.append(record_type)
         return 44
 
-    with patch.object(FileManifest, "history", return_value=_history((3, "moved_to_processing"))), \
-         patch.object(workflow.ManifestSource, "create", side_effect=_original_at(original, tmp_path)), \
+    with patch.object(workflow.ManifestSource, "create",
+                      side_effect=AssertionError("no second read of the file")), \
          patch.object(file_routing, "move_file", side_effect=moved) as move, \
          patch.object(file_routing, "log_source_file_mutation", return_value=90) as mutation, \
          patch.object(workflow, "log_run_record", side_effect=logged):
-        result = _run(ctx, _run_log(tmp_path, ctx), KICKOUT_CONFIG)
+        result = _run(ctx, _run_log(tmp_path, ctx))
 
-    # The ORIGINAL left processing for the declared destination; the sanitized
-    # copy that was profiled is untouched.
-    assert move.call_args.args[:2] == (original, tmp_path / "alpha" / "work" / "kickouts")
+    # The ORIGINAL left processing for its inbox's kickouts -- moved by the
+    # common execution path; the sanitized copy that was profiled is untouched.
+    assert move.call_args.args[:2] == (original, inbox / "kickouts")
     assert mutation.call_args.kwargs["reason"] == "moved_to_kickouts"
-    assert mutation.call_args.kwargs["operation"] == "record_type_profiling"
+    assert mutation.call_args.kwargs["operation"] == "profile_csv_record_types"
     assert mutation.call_args.kwargs["run_log_fields"] == {"source_record_id": 3}
     assert sanitized.exists()
     # Kickout first, then the failure (rule 75); the step still fails.
@@ -258,32 +245,33 @@ def test_a_failed_profile_kicks_out_the_original_then_records_the_failure(
     assert result.failures and result.failures[0].startswith("Trades.csv: ")
 
 
-def test_an_original_no_longer_in_processing_is_not_moved(tmp_path: Path) -> None:
-    original, _sanitized, ctx = _failing_sanitized_copy(tmp_path)
+def test_an_original_is_kicked_out_from_wherever_it_is(tmp_path: Path) -> None:
+    """One rule: an archived original moves too."""
+    original, _sanitized, inbox, ctx = _failing_sanitized_copy(tmp_path, where="archive")
 
-    with patch.object(FileManifest, "history",
-                      return_value=_history((3, "moved_to_processing"), (4, "moved_to_archive"))), \
-         patch.object(workflow.ManifestSource, "create", side_effect=_original_at(original, tmp_path)), \
-         patch.object(file_routing, "move_file") as move, \
+    with patch.object(file_routing, "move_file",
+                      return_value=inbox / "kickouts" / "Trades.csv") as move, \
+         patch.object(file_routing, "log_source_file_mutation", return_value=90), \
          patch.object(workflow, "log_run_record", return_value=44) as run_logged:
-        result = _run(ctx, _run_log(tmp_path, ctx), KICKOUT_CONFIG)
+        result = _run(ctx, _run_log(tmp_path, ctx))
 
-    move.assert_not_called()
+    assert move.call_args.args[:2] == (original, inbox / "kickouts")
     assert [c.args[1] for c in run_logged.call_args_list].count("ERROR") == 1
     assert len(result.failures) == 1
 
 
-def test_a_step_with_no_kickouts_declared_moves_nothing(tmp_path: Path) -> None:
-    original, _sanitized, ctx = _failing_sanitized_copy(tmp_path)
+def test_a_step_declares_no_kickouts(tmp_path: Path) -> None:
+    """The destination is intrinsic: a kickouts setting is not read at all."""
+    original, _sanitized, inbox, ctx = _failing_sanitized_copy(tmp_path)
+    config = {**PROFILE_CONFIG, "kickouts": {"path": "/somewhere/else/<file_name>"}}
 
-    with patch.object(FileManifest, "history") as history, \
-         patch.object(file_routing, "move_file") as move, \
+    with patch.object(file_routing, "move_file",
+                      return_value=inbox / "kickouts" / "Trades.csv") as move, \
+         patch.object(file_routing, "log_source_file_mutation", return_value=90), \
          patch.object(workflow, "log_run_record", return_value=44):
-        result = _run(ctx, _run_log(tmp_path, ctx))
+        _run(ctx, _run_log(tmp_path, ctx), config)
 
-    history.assert_not_called()
-    move.assert_not_called()
-    assert len(result.failures) == 1
+    assert move.call_args.args[:2] == (original, inbox / "kickouts")
 
 
 # -- the governed object, not a selector row (backlog 619) --------------------

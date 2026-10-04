@@ -169,6 +169,20 @@ PROFILE_CONFIG = {
 }
 
 
+def _profiled(ctx: Any, run_log: Any):
+    """Run the step with its run log bound, as the workflow coordinator does:
+    the profile kind writes through the bound run log (backlog 624)."""
+    from rey_lib.logs import bind_run, clear_run
+
+    bind_run(run_log)
+    try:
+        return workflow.run_record_type_profiling(
+            ctx, run_log, PROFILE_CONFIG, apply=True, profiler_version="test",
+        )
+    finally:
+        clear_run()
+
+
 def _wide_source(path: Path, first: str = "A") -> Path:
     """A file long enough to have an identifiable header."""
     path.write_text(
@@ -196,9 +210,7 @@ def test_an_existing_schema_5_sidecar_is_ignored_by_workflow_profiling(
     legacy.write_text(legacy_text, encoding="utf-8")
     source_before = source.read_bytes()
 
-    result = workflow.run_record_type_profiling(
-        ctx, run_log, PROFILE_CONFIG, apply=True, profiler_version="test",
-    )
+    result = _profiled(ctx, run_log)
 
     assert (result.profiled, result.failures) == (1, ())
     profile = _profiles(ctx)[-1]
@@ -236,9 +248,7 @@ def test_both_representations_are_written_on_the_one_mutation(
     consumed = _consumed_mutation(ctx, file_manifest_id, source)
     _select(ctx, file_manifest_id, consumed, source)
 
-    result = workflow.run_record_type_profiling(
-        ctx, run_log, PROFILE_CONFIG, apply=True, profiler_version="test",
-    )
+    result = _profiled(ctx, run_log)
 
     assert (result.profiled, result.failures) == (1, ())
     profile = _profiles(ctx)[-1]
