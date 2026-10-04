@@ -18,18 +18,36 @@ import pytest
 from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.files import manifest as manifest_module
 from rey_lib.files.manifest import FileManifest
+from rey_lib.load import Transform
 from rey_lib.load.inventory import (
     InventoryError,
+    InventoryTransform,
     enumerate_inventory_files,
     inventory_source_config,
     resolve_inventory_source_configs,
     run_source_inventory,
 )
+from rey_lib.files.data_file import data_file_for
+from rey_lib.logs import bind_run, clear_run
 
 
 # ---------------------------------------------------------------------------
 # Fixtures and builders
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _the_step_run_log_is_bound(run_log):
+    """Bind the step's run log, as the workflow does before any step runs.
+
+    The inventory kind records each file it does not inventory through the
+    bound run log; in production that is the run log the step is handed.
+    """
+    bind_run(run_log)
+    try:
+        yield
+    finally:
+        clear_run()
 
 
 def _entry(tmp_path: Path, **overrides: object) -> dict:
@@ -534,8 +552,16 @@ def test_missing_source_directory_yields_no_records(run_log, tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_a_file_that_changes_during_inventory_is_failed(run_log, tmp_path: Path, monkeypatch) -> None:
-    """Checksum and size must describe one stable file state."""
+def _not_inventoried(run_log) -> list[dict]:
+    return [record for record in _run_log_records(run_log)
+            if record.get("validation_name") == "source_inventory_file"]
+
+
+def test_a_file_that_changes_during_inventory_is_left_for_the_next_pass(
+    run_log, tmp_path: Path, monkeypatch,
+) -> None:
+    """Checksum and size must describe one stable file state; a file still being
+    written is not ready, so it stays in the inbox and fails nothing."""
     inbox = _inbox(tmp_path, "bmo", "AcmeHoldMay26.xlsx")
     source = inbox / "AcmeHoldMay26.xlsx"
     ctx = _ctx(tmp_path)
@@ -546,8 +572,93 @@ def test_a_file_that_changes_during_inventory_is_failed(run_log, tmp_path: Path,
 
     monkeypatch.setattr(manifest_module, "sha256_file", _growing)
 
-    assert run_source_inventory(ctx, run_log, _process_config(_entry(tmp_path))) == 1
+    assert run_source_inventory(ctx, run_log, _process_config(_entry(tmp_path))) == 0
     assert _manifest_rows(ctx) == []
+    assert source.exists()
+    assert not (inbox / "kickouts").exists()
+    (record,) = _not_inventoried(run_log)
+    assert record["status"] == "skipped"
+    assert "next pass" in record["message"]
+
+
+def test_a_file_gone_before_it_is_read_is_recorded_and_skipped(
+    run_log, tmp_path: Path, monkeypatch,
+) -> None:
+    inbox = _inbox(tmp_path, "bmo", "AcmeHoldMay26.xlsx")
+    source = inbox / "AcmeHoldMay26.xlsx"
+    ctx = _ctx(tmp_path)
+
+    def _vanished(path):
+        raise FileNotFoundError(2, "No such file or directory", str(source))
+
+    monkeypatch.setattr(manifest_module, "sha256_file", _vanished)
+
+    assert run_source_inventory(ctx, run_log, _process_config(_entry(tmp_path))) == 0
+    assert _manifest_rows(ctx) == []
+    assert not (inbox / "kickouts").exists()
+    (record,) = _not_inventoried(run_log)
+    assert record["status"] == "skipped"
+
+
+def test_an_unreadable_file_fails_and_stays_where_it_is(
+    run_log, tmp_path: Path, monkeypatch,
+) -> None:
+    inbox = _inbox(tmp_path, "bmo", "AcmeHoldMay26.xlsx")
+    source = inbox / "AcmeHoldMay26.xlsx"
+    ctx = _ctx(tmp_path)
+
+    def _denied(path):
+        raise PermissionError(13, "Permission denied", str(source))
+
+    monkeypatch.setattr(manifest_module, "sha256_file", _denied)
+
+    assert run_source_inventory(ctx, run_log, _process_config(_entry(tmp_path))) == 1
+    assert source.exists()
+    assert not (inbox / "kickouts").exists()
+    (record,) = _not_inventoried(run_log)
+    assert record["status"] == "failed"
+
+
+def test_a_database_failure_fails_the_step_and_moves_nothing(
+    run_log, tmp_path: Path,
+) -> None:
+    inbox = _inbox(tmp_path, "bmo", "AcmeHoldMay26.xlsx")
+    ctx = _ctx(tmp_path)
+
+    class _Refusing(_InsertingControl):
+        def inventory_file_result(self, required=True, **values):
+            raise DatabaseError("routine refused")
+
+    ctx.shared_control = _Refusing()
+
+    with pytest.raises(DatabaseError, match="routine refused"):
+        run_source_inventory(ctx, run_log, _process_config(_entry(tmp_path)))
+
+    assert (inbox / "AcmeHoldMay26.xlsx").exists()
+    assert not (inbox / "kickouts").exists()
+
+
+def test_the_inventory_kind_returns_the_governed_data_file(tmp_path: Path) -> None:
+    """physical DataFile -> Transform(inventory) -> governed DataFile, with the
+    manifest identity and no invented mutation."""
+    source = _inbox(tmp_path, "bmo", "a.csv") / "a.csv"
+    ctx = _ctx(tmp_path)
+
+    inventory = Transform(values={"source_name": "feed_inbox"},
+                          selected="inventory").resolve(ctx)
+    (governed,) = inventory.apply(data_file_for(source))
+
+    assert isinstance(inventory, InventoryTransform)
+    assert (governed.path, governed.file_manifest_id, governed.file_mutation_id) == (
+        source, 1, None)
+    assert (governed.inbox, governed.original_path, governed.original_mutation_id) == (
+        str(source.parent), str(source), None)
+    assert inventory.counts.inventoried == 1
+
+
+def test_the_inventory_kind_declares_no_file_failure() -> None:
+    """Inventory decides whether a file is safe to govern; it kicks nothing out."""
+    assert InventoryTransform.file_failures == ()
 
 
 def test_a_context_without_a_control_is_a_structured_failure(run_log, tmp_path: Path) -> None:
@@ -612,7 +723,7 @@ def test_neither_flag_is_already_inventoried(tmp_path: Path) -> None:
 def test_a_missing_file_is_a_failed_outcome_not_an_exception(tmp_path: Path) -> None:
     outcome = FileManifest(_InsertingControl()).inventory(tmp_path / "gone.csv")
 
-    assert outcome.status == "failed"
+    assert (outcome.status, outcome.failure) == ("failed", "missing")
     assert outcome.reason
 
 
@@ -625,7 +736,8 @@ def test_a_routine_failure_is_a_failed_outcome(tmp_path: Path) -> None:
 
     outcome = FileManifest(_Refusing()).inventory(source)
 
-    assert (outcome.status, outcome.reason) == ("failed", "routine refused")
+    assert (outcome.status, outcome.reason, outcome.failure) == (
+        "failed", "routine refused", "database")
 
 
 def test_no_row_is_a_failed_outcome(tmp_path: Path) -> None:
@@ -637,5 +749,5 @@ def test_no_row_is_a_failed_outcome(tmp_path: Path) -> None:
 
     outcome = FileManifest(_Silent()).inventory(source)
 
-    assert outcome.status == "failed"
+    assert (outcome.status, outcome.failure) == ("failed", "database")
     assert "no result" in outcome.reason

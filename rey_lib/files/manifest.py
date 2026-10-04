@@ -55,8 +55,16 @@ class InventoryOutcome:
 
     ``status`` is ``inventoried``, ``inventory_recorded``,
     ``already_inventoried`` or ``failed``. A failure carries its ``reason``
-    and nothing else; the created flags are the routine's answer, read off the
-    row it returned.
+    and what KIND of failure it was (``failure``), and nothing else; the
+    created flags are the routine's answer, read off the row it returned.
+
+    The kind is what a failure means, so a caller handles each by that meaning
+    rather than generically (backlog 624):
+
+        missing     the file is no longer there -- nothing to govern
+        unstable    its size moved while it was hashed -- still being written
+        unreadable  it is there and could not be read
+        database    the manifest could not record it -- a system failure
     """
 
     status: str
@@ -64,11 +72,12 @@ class InventoryOutcome:
     file_manifest_id: Optional[int] = None
     manifest_created: bool = False
     inventory_created: bool = False
+    failure: Optional[str] = None
 
     @classmethod
-    def failed(cls, reason: str) -> "InventoryOutcome":
-        """A candidate that could not be inventoried, and why."""
-        return cls(status="failed", reason=reason)
+    def failed(cls, reason: str, failure: str) -> "InventoryOutcome":
+        """A candidate that could not be inventoried, why, and what kind of failure."""
+        return cls(status="failed", reason=reason, failure=failure)
 
 
 class FileManifest:
@@ -134,12 +143,15 @@ class FileManifest:
             size_before = source_file.stat().st_size
             checksum = sha256_file(source_file)
             size_after = source_file.stat().st_size
+        except FileNotFoundError as exc:
+            return InventoryOutcome.failed(str(exc), "missing")
         except OSError as exc:
-            return InventoryOutcome.failed(str(exc))
+            return InventoryOutcome.failed(str(exc), "unreadable")
 
         if size_before != size_after:
             return InventoryOutcome.failed(
-                f"the file changed during inventory (size {size_before} -> {size_after})"
+                f"the file changed during inventory (size {size_before} -> {size_after})",
+                "unstable",
             )
 
         try:
@@ -155,11 +167,12 @@ class FileManifest:
                 producer=producer,
             )
         except (ConfigError, DatabaseError) as exc:
-            return InventoryOutcome.failed(str(exc))
+            return InventoryOutcome.failed(str(exc), "database")
 
         if not row:
             return InventoryOutcome.failed(
-                "the file manifest returned no result for the inventoried file"
+                "the file manifest returned no result for the inventoried file",
+                "database",
             )
 
         manifest_created = bool(row.get("o_manifest_created"))

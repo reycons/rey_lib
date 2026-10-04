@@ -3,8 +3,18 @@ Governed source-file inventory, the Loader's.
 
 Inventories the source sets declared by one workflow process configuration:
 each enabled source is enumerated by glob, configured exclusions are rejected,
-and every accepted candidate is handed to ``FileManifest.inventory``, which
-records it.
+and every accepted candidate is applied to ``Transform(kind="inventory")``
+(backlog 624):
+
+    physical DataFile -> Transform(inventory) -> governed DataFile
+
+Inventory is the boundary that decides whether a physical file is safe to
+govern, so a failure is handled by what it means, never as a kickout:
+
+    missing     recorded and skipped; there is nothing to kick out
+    unstable    left in the inbox for the next pass (still being written)
+    unreadable  recorded as a failed file; it stays where it is
+    database    the step fails; no file moves
 
 Copied from the legacy file_operator implementation (``source_inventory`` and
 the inventory half of ``discovery``) into its final Loader-owned location, with
@@ -22,6 +32,8 @@ Ownership boundaries:
   * this module owns source resolution, enumeration, exclusions, the per-source
     lifecycle and the counts;
   * ``FileManifest.inventory`` owns one candidate's facts and its persistence;
+  * the inventory kind owns one candidate's outcome -- what each result and
+    failure means, and the counts -- and returns the governed DataFile;
   * ``rey_lib.logs`` owns the validation results and counts it writes.
 
 Inventory never moves, renames, copies, converts, deletes, or otherwise
@@ -36,11 +48,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from rey_lib.errors.error_utils import AppError
+from rey_lib.errors.error_utils import AppError, DatabaseError
+from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.files.file_utils import visible_files
 from rey_lib.files.manifest import FileManifest
+from rey_lib.load.file_transform import FileTransform, file_transform
+from rey_lib.load.transform import Transform
 from rey_lib.logs import (
     FileManifestError,
+    bound_run_log,
     get_logger,
     log_row_count,
     log_validation_result,
@@ -50,6 +66,7 @@ __all__ = [
     "InventoryEnumeration",
     "InventoryError",
     "InventorySourceConfig",
+    "InventoryTransform",
     "enumerate_inventory_files",
     "inventory_source_config",
     "resolve_inventory_source_configs",
@@ -79,6 +96,10 @@ class _InventoryCounts:
     inventory_recorded: int = 0
     already_inventoried: int = 0
     rejected: int = 0
+    #: Gone before it could be read: nothing to govern, nothing to kick out.
+    skipped: int = 0
+    #: Its size moved while it was hashed: left in the inbox for the next pass.
+    not_ready: int = 0
     failed: int = 0
 
     def absorb(self, other: "_InventoryCounts") -> None:
@@ -87,6 +108,8 @@ class _InventoryCounts:
         self.inventory_recorded += other.inventory_recorded
         self.already_inventoried += other.already_inventoried
         self.rejected += other.rejected
+        self.skipped += other.skipped
+        self.not_ready += other.not_ready
         self.failed += other.failed
 
 
@@ -112,9 +135,15 @@ def run_source_inventory(ctx: Any, run_log: Any, process_config: Any) -> int:
     Returns
     -------
     int
-        Zero when every source completed and every eligible file was either
-        inventoried or already present; one when any source failed or any file
-        could not be inventoried.
+        Zero when every source completed and every eligible file was
+        inventoried, already present, gone or not yet ready; one when any source
+        failed or any file could not be read.
+
+    Raises
+    ------
+    DatabaseError
+        When the manifest cannot record a file: a system failure fails the
+        step, and no file is moved.
     """
     configs = resolve_inventory_source_configs(process_config)
 
@@ -138,21 +167,20 @@ def _inventory_source(
     ctx: Any, run_log: Any,
     config: "InventorySourceConfig",
 ) -> _InventoryCounts:
-    """Enumerate one source set and inventory each newly governed file."""
+    """Enumerate one source set and apply the inventory kind to each file.
+
+    The step only enumerates: what each file's outcome means, and its count,
+    are the kind's.
+    """
     enumeration = enumerate_inventory_files(config)
-    counts = _InventoryCounts(rejected=len(enumeration.rejected))
-
+    inventory = Transform(
+        values={"source_name": config.name}, selected="inventory",
+    ).resolve(ctx)
     for record in enumeration.accepted:
-        outcome = _inventory_file(ctx, run_log, config, record)
-        if outcome == "inventoried":
-            counts.inventoried += 1
-        elif outcome == "inventory_recorded":
-            counts.inventory_recorded += 1
-        elif outcome == "already_inventoried":
-            counts.already_inventoried += 1
-        else:
-            counts.failed += 1
+        inventory.apply(data_file_for(Path(record["source_file"])))
 
+    counts = inventory.counts
+    counts.rejected = len(enumeration.rejected)
     log_validation_result(run_log,
         validation_name="source_inventory_source",
         status="passed" if not counts.failed else "failed",
@@ -161,46 +189,112 @@ def _inventory_source(
             f"{counts.inventory_recorded} observation(s) recorded for files "
             f"whose baseline was missing, "
             f"{counts.already_inventoried} already inventoried, "
-            f"{counts.rejected} rejected, {counts.failed} failed."
+            f"{counts.rejected} rejected, {counts.skipped} gone, "
+            f"{counts.not_ready} not yet ready, {counts.failed} failed."
         ),
         source_name=config.name,
     )
     return counts
 
 
-def _inventory_file(
-    ctx: Any, run_log: Any,
-    config: "InventorySourceConfig",
-    record: dict[str, Any],
-) -> str:
+@file_transform("inventory", fields=("source_name",), required=("source_name",))
+class InventoryTransform(FileTransform):
+    """Govern one physical file: record it in the manifest, return it governed.
+
+        physical DataFile -> FileManifest.inventory -> governed DataFile
+
+    The governed DataFile carries its ``file_manifest_id`` and no mutation: the
+    routine does not return the baseline's id, and none is invented. Its inbox
+    and original are where it was found.
+
+    DECLARES NO FILE FAILURE. Inventory decides whether a file is safe to
+    govern, and nothing it meets is a terminal file-specific rejection, so
+    nothing here is kicked out. Each failure is handled by its meaning (see the
+    module docstring); a database failure raises and fails the step.
+
+    ``counts`` accumulates every outcome across the files this instance applies
+    to, so the step reports them without interpreting any.
     """
-    Inventory one accepted candidate through ``FileManifest.inventory``.
 
-    Returns ``"inventoried"``, ``"inventory_recorded"``, ``"already_inventoried"``
-    or ``"failed"``. A failure is recorded with its exact reason and the run
-    goes on.
-    """
-    path = str(record["source_file"])
+    def __init__(self, ctx: Any, *, source_name: Any) -> None:
+        """Hold the configured inventory source the files were found under."""
+        self._ctx = ctx
+        self._source_name = str(source_name or "").strip()
+        self.counts = _InventoryCounts()
 
-    control = getattr(ctx, "shared_control", None)
-    if control is None:
-        _record_file_failure(ctx, run_log, config.name, path,
-            "the governed manifest is held in the control database, and this "
-            "context exposes no shared Control to reach it through")
-        return "failed"
+    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+        """Inventory the file; return it governed, or nothing when it is not.
 
-    # The inventory record identifies the configured inventory source, not a
-    # classified feed. Deriving a feed here would reintroduce the classification
-    # coupling that a later lifecycle step owns.
-    outcome = FileManifest(control).inventory(
-        path,
-        source_name=config.name,
-        evidence=None,
-        producer={"application": str(getattr(ctx, "app_name", "") or "")},
-    )
-    if outcome.status == "failed":
-        _record_file_failure(ctx, run_log, config.name, path, outcome.reason or "")
-    return outcome.status
+        Raises:
+            DatabaseError: When the manifest could not record the file.
+        """
+        path = str(data_file.path)
+        control = getattr(self._ctx, "shared_control", None)
+        if control is None:
+            self.counts.failed += 1
+            self._record(path, "failed",
+                "the governed manifest is held in the control database, and this "
+                "context exposes no shared Control to reach it through")
+            return ()
+
+        # The inventory record identifies the configured inventory source, not a
+        # classified feed. Deriving a feed here would reintroduce the
+        # classification coupling that a later lifecycle step owns.
+        outcome = FileManifest(control).inventory(
+            path,
+            source_name=self._source_name,
+            evidence=None,
+            producer={"application": str(getattr(self._ctx, "app_name", "") or "")},
+        )
+        if outcome.status == "failed":
+            return self._failed(path, outcome.failure, outcome.reason or "")
+
+        if outcome.status == "inventoried":
+            self.counts.inventoried += 1
+        elif outcome.status == "inventory_recorded":
+            self.counts.inventory_recorded += 1
+        else:
+            self.counts.already_inventoried += 1
+        return (data_file_for(
+            data_file.path,
+            encoding=data_file.encoding,
+            file_manifest_id=outcome.file_manifest_id,
+            inbox=str(data_file.path.parent),
+            original_path=path,
+        ),)
+
+    def _failed(self, path: str, failure: Any, reason: str) -> tuple[DataFile, ...]:
+        """Handle one failure by what it means. Nothing is moved.
+
+        Raises:
+            DatabaseError: For a manifest that could not record the file.
+        """
+        if failure == "database":
+            raise DatabaseError(
+                f"Inventory source '{self._source_name}' could not record '{path}'; "
+                f"the step stops and no file is moved: {reason}"
+            )
+        if failure == "missing":
+            self.counts.skipped += 1
+            self._record(path, "skipped", f"it is no longer there: {reason}")
+        elif failure == "unstable":
+            self.counts.not_ready += 1
+            self._record(path, "skipped",
+                f"it is still being written and is left for the next pass: {reason}")
+        else:
+            self.counts.failed += 1
+            self._record(path, "failed", reason)
+        return ()
+
+    def _record(self, path: str, status: str, reason: str) -> None:
+        """Record one file that was not inventoried, with its exact reason."""
+        log_validation_result(bound_run_log(),
+            validation_name="source_inventory_file",
+            status=status,
+            message=f"'{path}' was not inventoried: {reason}",
+            source_name=self._source_name,
+            path=path,
+        )
 
 
 def _record_source_failure(ctx: Any, run_log: Any, source_name: str, exc: Exception) -> None:
@@ -213,22 +307,6 @@ def _record_source_failure(ctx: Any, run_log: Any, source_name: str, exc: Except
     )
 
 
-def _record_file_failure(
-    ctx: Any, run_log: Any,
-    source_name: str,
-    path: str,
-    reason: Exception | str,
-) -> None:
-    """Record one file that could not be inventoried, with its exact reason."""
-    log_validation_result(run_log,
-        validation_name="source_inventory_file",
-        status="failed",
-        message=f"'{path}' was not inventoried: {reason}",
-        source_name=source_name,
-        path=path,
-    )
-
-
 def _log_totals(ctx: Any, run_log: Any, totals: _InventoryCounts, failed_sources: int) -> None:
     """Emit the deterministic aggregate counts for the whole inventory run."""
     for count_name, count in (
@@ -236,6 +314,8 @@ def _log_totals(ctx: Any, run_log: Any, totals: _InventoryCounts, failed_sources
         ("source_files_inventory_recorded", totals.inventory_recorded),
         ("source_files_already_inventoried", totals.already_inventoried),
         ("source_files_rejected", totals.rejected),
+        ("source_files_skipped", totals.skipped),
+        ("source_files_not_ready", totals.not_ready),
         ("source_files_failed", totals.failed),
         ("inventory_sources_failed", failed_sources),
     ):
