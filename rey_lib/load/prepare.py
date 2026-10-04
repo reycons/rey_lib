@@ -177,7 +177,6 @@ def run_create_prepared_files(
 ) -> CreatePreparedFilesBatchResult:
     """Create one prepared CSV per governed record selected by this process."""
     config = _resolve_config(inline_config)
-    work: dict[tuple[str, str], tuple[Mapping[str, Any], ManifestSource]] = {}
 
     control = getattr(ctx, "shared_control", None)
     if control is None:
@@ -197,25 +196,10 @@ def run_create_prepared_files(
             f"{config.operation!r}: {exc}"
         ) from exc
 
-    for selected in governed:
-        # The governed object's own facts, not a selector row.
-        record = selected.template_context()
-        mutation_context = _mutation_context(record)
-        source = _source_path(record, config.source_field)
-        identity = (
-            mutation_context.file_id,
-            str(Path(source).expanduser().resolve()),
-        )
-        existing = work.get(identity)
-        # Later committed evidence for one governed file supersedes earlier.
-        if existing is not None and (
-            _manifest_record_id(record) <= _manifest_record_id(existing[0])
-        ):
-            continue
-        work[identity] = (record, selected)
-
+    # The database chose the work: the latest mutation per (file, path)
+    # (backlog 629). The step loops it and calls the kind; nothing is shaped.
     results: list[PreparedFileResult] = []
-    for record, selected in work.values():
+    for selected in governed:
         # The step only applies the kind (rule 78, backlog 624). A file that
         # cannot be prepared is the kind's to record; the common execution path
         # has already kicked out its original when the error arrives here, and
@@ -234,7 +218,7 @@ def run_create_prepared_files(
         results.append(preparer.result)
 
     return CreatePreparedFilesBatchResult(
-        selected=len(work),
+        selected=len(governed),
         prepared=sum(result.applied for result in results),
         failed=sum(result.status == "failed" for result in results),
         results=tuple(results),

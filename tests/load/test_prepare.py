@@ -588,12 +588,13 @@ def test_folder_declarations_are_read_from_loaded_config_namespaces(run_log, tmp
 # ---------------------------------------------------------------------------
 
 
-def test_only_selected_records_are_prepared_once_each(run_log, tmp_path: Path) -> None:
+def test_the_step_prepares_exactly_what_the_selection_returns(run_log, tmp_path: Path) -> None:
+    """Backlog 629: which mutation of a (file, path) is the work -- the latest
+    -- is the selection stage's answer (f_file_manifest_get), so the step
+    neither de-duplicates nor re-orders; it prepares each selected file once."""
     source, _ = _tabular(tmp_path)
-    record = _record(source)
-    superseded = _record(source, record_id=4)
 
-    result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [superseded, record])
+    result = _run(_ctx(tmp_path), run_log, _config(tmp_path), [_record(source)])
 
     assert result.selected == 1
     assert result.prepared == 1

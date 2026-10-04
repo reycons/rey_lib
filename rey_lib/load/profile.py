@@ -46,7 +46,6 @@ from rey_lib.load.profile_errors import ProfilingError
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.load.file_transform import FileTransform, file_transform
 from rey_lib.load.transform import Transform
-from rey_lib.load.record_templates import record_field
 from rey_lib.logs import (
     PROFILE_RECORD_TYPE,
     FileManifestError,
@@ -619,85 +618,12 @@ def _persist_profile(
     control.maintain_transform(int(file_type_id))
 
 
-def _collect_profiling_work(
-    records: Any,
-    source_field: str,
-    work: dict[tuple[str, str], tuple[str, int, int, str, tuple[str, ...]]],
-) -> None:
-    """Add each selected output, keyed by governed identity and current path.
-
-    One workbook-level file_id may govern several individually named converted
-    CSV outputs. Each selected mutation record remains a distinct profiling
-    object through its unique manifest record_id.
-
-    The source manifest row is the profile identity; file_id remains manifest
-    lineage and is not duplicated into the profile record.
-    """
-    for record in records:
-        source = record_field(record, source_field)
-        if not isinstance(source, str) or not source.strip():
-            raise ProfilingError(
-                f"Selected row {record.get('file_mutation_id')!r} has no "
-                f"{source_field!r} to profile."
-            )
-        source_record_id = record.get("file_mutation_id")
-        if (
-            not isinstance(source_record_id, int)
-            or isinstance(source_record_id, bool)
-            or source_record_id <= 0
-        ):
-            raise ProfilingError(
-                f"Selected manifest record {source_record_id!r} requires a "
-                "positive integer record_id for profile identity."
-            )
-        file_manifest_id = record.get("file_manifest_id")
-        if (
-            not isinstance(file_manifest_id, int)
-            or isinstance(file_manifest_id, bool)
-            or file_manifest_id <= 0
-        ):
-            raise ProfilingError(
-                f"Selected mutation {source_record_id!r} names no governed "
-                "file to record its profile against."
-            )
-        normalized_source = str(Path(source).expanduser().resolve())
-        identity = (str(source_record_id), normalized_source)
-        work.setdefault(
-            identity,
-            (
-                normalized_source,
-                source_record_id,
-                file_manifest_id,
-                # Written by classification and read from the manifest. Never
-                # rebuilt here: classification owns what a file groups as.
-                str(record.get("data_profile_key") or ""),
-                # The field names that key was built from, recorded on the
-                # classification mutation and projected back by the selector.
-                # Read for the same reason as the key itself and never rebuilt:
-                # one construction, in the step that owns it.
-                tuple(str(field) for field in (record.get("key_fields") or ())),
-            ),
-        )
-
-
-def _profiling_record(selected: ManifestSource) -> dict[str, Any]:
-    """What profiling reads of one governed file, from the object (backlog 619).
-
-    ``data_profile_key`` here is the MANIFEST's key, which classification wrote
-    -- the object's ``manifest_data_profile_key``. The object's own
-    ``data_profile_key`` is the file TYPE's profile, empty until a profile
-    exists, which is exactly when this step runs. ``key_fields`` likewise come
-    from the file's classification, not from its type. Both are what the
-    retired profile selector projected (control.data_profile_missing_vw).
-    """
-    classification = selected.file_facts.get("classification")
-    return {
-        **selected.template_context(),
-        "data_profile_key": selected.file_facts.get("manifest_data_profile_key"),
-        "key_fields": (
-            classification.get("key_fields") if isinstance(classification, Mapping) else None
-        ),
-    }
+def _key_fields(data_file: DataFile) -> tuple[str, ...]:
+    """The field names the file's profile key was built from, as its
+    classification recorded them; empty when it recorded none."""
+    classification = data_file.classification
+    fields = classification.get("key_fields") if isinstance(classification, Mapping) else None
+    return tuple(str(field) for field in (fields or ()))
 
 
 @dataclass(frozen=True)
@@ -747,20 +673,12 @@ def run_record_type_profiling(
             "retrieval routine. Replace 'procedure' with 'operation'."
         )
     operation = _value(file_selection, "operation") if file_selection else None
-    source_field = _value(file_selection, "source_field") if file_selection else None
     if not isinstance(operation, str) or not operation.strip():
         raise ProfilingError(
             "Loader workflow process 'profile_csv_record_types' requires "
             "a 'file_selection' mapping naming the operation whose remaining "
             "files it profiles."
         )
-    if not isinstance(source_field, str) or not source_field.strip():
-        raise ProfilingError(
-            "Loader workflow process 'profile_csv_record_types' requires "
-            "'file_selection.source_field', naming the field of the selected "
-            "row that holds the file to profile."
-        )
-    source_field = source_field.strip()
 
     control = getattr(ctx, "shared_control", None)
     if control is None:
@@ -778,51 +696,37 @@ def run_record_type_profiling(
         raise ProfilingError(
             f"Profiling cannot select files for operation {operation!r}: {exc}"
         ) from exc
-    by_mutation = {selected.file_mutation_id: selected for selected in governed}
-
-    work: dict[tuple[str, str], tuple[str, int, int, str, tuple[str, ...]]] = {}
-    records_read = len(governed)
-    _collect_profiling_work(
-        [_profiling_record(selected) for selected in governed], source_field, work,
-    )
-
-    if not work or not apply:
+    # The database chose the work (one mutation per file, the latest); the
+    # step loops it and calls the kind (backlog 629). Nothing is shaped here.
+    if not governed or not apply:
         return ProfilingBatchResult(
-            records_read=records_read, selected=len(work), profiled=0,
+            records_read=len(governed), selected=len(governed), profiled=0,
             failures=(), applied=apply,
         )
 
     profiled = 0
     failures: list[str] = []
-    for source, object_id, file_manifest_id, data_profile_key, key_fields in work.values():
-        # The selected state, already opened at exactly the mutation the
-        # routine returned (hydrated once, by get_for_operation). A selected
-        # state with no path is a structural failure and stops the step.
-        data_file = by_mutation[int(object_id)].data_file()
+    for selected in governed:
+        # A selected state with no path is a structural failure and stops the step.
+        data_file = selected.data_file()
         try:
             Transform(
-                values={
-                    "config": config,
-                    "data_profile_key": data_profile_key,
-                    "key_fields": key_fields,
-                    "profiler_version": profiler_version,
-                },
+                values={"config": config, "profiler_version": profiler_version},
                 selected="profile",
             ).resolve(ctx).apply(data_file)
             profiled += 1
         except ProfilingError as error:
             # Kicked out, then recorded, by the kind (rules 75 and 78); the
             # batch reports it and goes on.
-            failures.append(f"{Path(source).name}: {error}")
+            failures.append(f"{Path(data_file.path).name}: {error}")
 
     return ProfilingBatchResult(
-        records_read=records_read, selected=len(work), profiled=profiled,
+        records_read=len(governed), selected=len(governed), profiled=profiled,
         failures=tuple(failures), applied=True,
     )
 
 
-@file_transform("profile", fields=("config", "data_profile_key", "key_fields",
-                                  "profiler_version"), required=("config",))
+@file_transform("profile", fields=("config", "profiler_version"), required=("config",))
 class ProfileTransform(FileTransform):
     """Profile one governed file into the profile library: a Transform kind.
 
@@ -834,6 +738,10 @@ class ProfileTransform(FileTransform):
     about the file -- and the same file is returned at that real mutation.
     A file that cannot be profiled raises ProfilingError, and the common
     execution path kicks its original out.
+
+    The file's profile group is the DataFile's own fact (backlog 629/630):
+    ``data_profile_key`` is the manifest's, written by classification, and the
+    key fields are its classification's ``key_fields`` -- never rebuilt here.
     """
 
     file_failures = (ProfilingError,)
@@ -857,15 +765,11 @@ class ProfileTransform(FileTransform):
         ctx: Any,
         *,
         config: Any,
-        data_profile_key: str = "",
-        key_fields: Sequence[str] = (),
         profiler_version: str = "",
     ) -> None:
-        """Hold the step's profiling settings and the group this file is in."""
+        """Hold the step's profiling settings."""
         self._ctx = ctx
         self._config = config
-        self._data_profile_key = str(data_profile_key or "")
-        self._key_fields = tuple(key_fields or ())
         self._profiler_version = profiler_version
 
     def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
@@ -876,8 +780,8 @@ class ProfileTransform(FileTransform):
             self._config,
             data_file.file_manifest_id,
             data_file.file_mutation_id,
-            self._data_profile_key,
-            self._key_fields,
+            str(data_file.data_profile_key or ""),
+            _key_fields(data_file),
             profiler_version=self._profiler_version,
         )
         return (
