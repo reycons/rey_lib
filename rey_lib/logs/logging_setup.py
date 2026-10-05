@@ -8,6 +8,7 @@ import stat
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD, JsonlHandler
 from rey_lib.logs.record_enrichment import require_run_id
@@ -55,11 +56,47 @@ class _TimestampFilter(logging.Filter):
         return True
 
 
+def redacted_url(url: Any) -> str:
+    """``url`` as scheme, host, port and path only: no query, fragment or userinfo.
+
+    What may be logged about an HTTP request. A query or a fragment can carry
+    keys and data values, and userinfo carries credentials.
+    """
+    parts = urlsplit(str(url))
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _redact_httpx_record(record: logging.LogRecord) -> None:
+    """Remove query, fragment and userinfo from the URLs in an httpx record.
+
+    httpx logs every request at INFO with its full URL ('HTTP Request: GET
+    <url> ...'). Method, host, path and status stay; only the URL's sensitive
+    parts go.
+    """
+    if record.name != "httpx" or not isinstance(record.args, tuple):
+        return
+    record.args = tuple(
+        redacted_url(arg) if str(arg).startswith(("http://", "https://")) else arg
+        for arg in record.args
+    )
+
+
 class _ProviderWarningFilter(logging.Filter):
-    """Promote provider back-pressure messages that libraries log too softly."""
+    """Promote provider back-pressure messages that libraries log too softly,
+    and keep URL query values out of httpx's request records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Return True after promoting known provider warning messages."""
+        """Return True after redacting httpx URLs and promoting known provider
+        warning messages."""
+        _redact_httpx_record(record)
         message = record.getMessage()
         if _is_too_many_requests_record(record.name, message):
             record.levelno = logging.WARNING
