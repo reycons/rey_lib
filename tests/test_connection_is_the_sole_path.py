@@ -99,10 +99,14 @@ class TestConnectionIsTheRuntimePath:
         # private is the translation itself -- _effective_connection_name is
         # called by resolve() alone, so aliasing cannot be applied anywhere but
         # the single resolution point.
+        #
+        # is_database_connection is the question a database-only consumer asks
+        # of the heterogeneous list (backlog 673), answered beside the dispatch.
         assert set(connection.__all__) == {
             "Connection", "ConnectionOwner", "CONNECTION_ALIASES_ATTR",
             "build_connections", "call_routine", "connection_owner",
-            "shared_connection", "validate_connection_aliases"}
+            "is_database_connection", "shared_connection",
+            "validate_connection_aliases"}
 
     def test_composition_checks_the_configuration_and_holds_nothing(self) -> None:
         """The boundary validates and registers; it does not become the holder.

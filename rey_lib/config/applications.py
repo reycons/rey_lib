@@ -48,7 +48,24 @@ _CHOICE_SOURCES: dict[str, str] = {
     "pipelines": "pipelines",
     "tools": "tools",
     "connections": "connections",
+    # Every connection that is a database (backlog 673). ``connections`` keeps
+    # meaning every provider; a parameter that can only name a database asks
+    # for this one.
+    "database_connections": "connections",
     "data_sources": "data_sources",
+}
+
+
+def _database_members(members: Any) -> list[Any]:
+    """The connections[] records that are databases."""
+    from rey_lib.db.connection import is_database_connection  # noqa: PLC0415
+
+    return [member for member in (members or []) if is_database_connection(member)]
+
+
+#: The sources that offer a SUBSET of their collection, and the selection.
+_CHOICE_FILTERS: dict[str, Any] = {
+    "database_connections": _database_members,
 }
 
 
@@ -719,7 +736,8 @@ def _choices(entry: dict[str, Any], ctx: Any, application: str) -> tuple[str, ..
             f"its choices from '{named}', which is not on the context. "
             "Applications are built after the collections they read."
         )
-    return _member_names(members)
+    selected = _CHOICE_FILTERS.get(named)
+    return _member_names(selected(members) if selected else members)
 
 
 def _member_names(members: Any) -> tuple[str, ...]:

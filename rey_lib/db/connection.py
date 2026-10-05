@@ -63,6 +63,7 @@ __all__ = [
     "build_connections",
     "connection_owner",
     "call_routine",
+    "is_database_connection",
     "shared_connection",
     "validate_connection_aliases",
 ]
@@ -72,6 +73,10 @@ __all__ = [
 # context into each step's snapshot, so a map kept here crosses the process
 # boundary with the run and a module global would not.
 CONNECTION_ALIASES_ATTR = "connection_aliases"
+
+# The provider whose records are HTTP endpoints, not databases. Named here, at
+# the dispatch, and nowhere else: a consumer asks is_database_connection.
+_HTTP_PROVIDER = "http"
 
 _db = DBAdapter()
 
@@ -339,10 +344,7 @@ class ConnectionOwner:
         # AN HTTP ENDPOINT IS A CONNECTION TOO, declared in the same list and
         # held by the same owner -- only the object differs. Imported here so
         # rey_lib.web_utils is never an import-time dependency of rey_lib.db.
-        provider = getattr(record, "provider", None)
-        if provider is None and isinstance(record, dict):
-            provider = record.get("provider")
-        if str(provider or "") == "http":
+        if _provider_of(record) == _HTTP_PROVIDER:
             from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
 
             built: Any = HttpConnection(record, ctx=ctx)
@@ -483,6 +485,33 @@ def validate_connection_aliases(ctx: Any) -> None:
                 f"'{runtime}={aliases[runtime]}'. An alias is one hop -- name the "
                 f"connection each configured name should reach directly."
             )
+
+
+def _provider_of(record: Any) -> str:
+    """The provider a connections[] record declares, whether a Namespace or a dict."""
+    provider = getattr(record, "provider", None)
+    if provider is None and isinstance(record, dict):
+        provider = record.get("provider")
+    return str(provider or "")
+
+
+def is_database_connection(item: Any) -> bool:
+    """Whether ``item`` is a database connection -- a built one or its record.
+
+    The question a database-only consumer asks of the heterogeneous connection
+    list (backlog 673): a list of database choices, a command that opens a
+    handle. Answered beside the dispatch that builds each kind, so no consumer
+    names the providers that are not databases. The registry itself still
+    resolves and returns every connection.
+
+    Args:
+        item: A built connection, or a ``connections[]`` record.
+
+    Returns:
+        True for a database ``Connection`` or a record that resolves to one --
+        both carry the declared ``provider``, as an ``HttpConnection`` does.
+    """
+    return _provider_of(item) != _HTTP_PROVIDER
 
 
 def build_connections(ctx: Any) -> dict[str, Connection]:

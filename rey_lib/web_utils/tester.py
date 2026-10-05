@@ -221,7 +221,6 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, HttpTransportError) as exc:
         _logger.error("http tester: %s", exc)
         return 1
-    finally:
-        connection.close()
+    # The connection is shared: runtime shutdown closes it, never a consumer.
     sys.stdout.write(render(result))
     return 0
