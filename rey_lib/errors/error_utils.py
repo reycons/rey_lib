@@ -312,7 +312,8 @@ class HttpTransportError(AppError):
 
     A transport failure only -- DNS, connect, timeout, protocol. A response that
     arrived with any status is not this error: interpreting it belongs to the
-    caller, which keeps transport and provider errors distinct.
+    caller, which keeps transport and provider errors distinct. The corehttp
+    transport failure is its cause.
     """
 
 
