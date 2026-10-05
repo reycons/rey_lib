@@ -53,7 +53,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
 from rey_lib.data.data_transform import IdentityTransform
@@ -293,6 +293,47 @@ def _build_transform(
             persistence=persistence,
         )
     return _build_identity_transform(transform_cfg)
+
+
+def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
+    """Build the HTTPTransform an ``http`` Transform declares (backlog 671).
+
+    **THE SINGLE PLACE AN HTTPTransform IS BUILT.** The connection is the shared
+    one its name resolves to, and must be an HTTP connection; the adapter is the
+    one registered under its name. Nothing is sent here.
+
+    Args:
+        ctx: Application context, for the connection lookup.
+        declared: ``Transform.executed_declaration()`` for an ``http`` kind --
+            ``connection``, ``adapter`` and ``options``.
+
+    Returns:
+        The HTTPTransform.
+
+    Raises:
+        ConfigError: If the connection is not an HTTP connection, or no adapter
+            is registered under that name.
+    """
+    from rey_lib.data.http_transform import (  # noqa: PLC0415
+        HTTPTransform, http_adapter_for, http_adapters,
+    )
+    from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
+
+    name = str(declared["connection"])
+    connection = shared_connection(ctx, name)
+    if not isinstance(connection, HttpConnection):
+        raise ConfigError(
+            f"Transform (http): connection '{name}' is a "
+            f"{getattr(connection, 'provider', 'non-http')} connection, not http."
+        )
+    adapter_name = str(declared["adapter"])
+    adapter = http_adapter_for(adapter_name)
+    if adapter is None:
+        raise ConfigError(
+            f"Transform (http): no HTTP adapter is registered as '{adapter_name}'. "
+            f"Adapters: {', '.join(http_adapters()) or 'none'}."
+        )
+    return HTTPTransform(connection, adapter, declared.get("options") or {})
 
 
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:

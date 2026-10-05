@@ -49,6 +49,7 @@ from rey_lib.data.data_transform import (
     IdentityTransform,
 )
 from rey_lib.data.errors import DataStructureError, TransformError
+from rey_lib.data.http_transform import HTTPTransform, HttpAdapter, http_adapter
 
 __all__ = [
     "IDENTITY_EXECUTION",
@@ -61,9 +62,12 @@ __all__ = [
     "DeclaredTransform",
     "ExecutionForm",
     "FieldProfile",
+    "HTTPTransform",
+    "HttpAdapter",
     "IdentityTransform",
     "ProfileField",
     "authorable_starters",
+    "http_adapter",
     "is_exported",
     "profile_for",
 ]

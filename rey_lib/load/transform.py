@@ -87,6 +87,22 @@ TRANSFORM_PARAMETERS: tuple[str, ...] = ("transform", "transform-file")
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TRANSFORM_KINDS}
 
+#: RECORD KINDS THAT EXIST BUT ARE NOT OFFERED. Selectable by name and resolved
+#: like any record kind, but kept out of TRANSFORM_KINDS, TRANSFORM_FIELDS and
+#: :meth:`Transform.kinds`, so nothing that draws the choices shows them.
+#: ``http`` (backlog 671) moves into TRANSFORM_KINDS when its configuration,
+#: preview and run are exposed (backlog 668).
+_HIDDEN_KINDS: dict[str, _Kind] = {
+    kind.id: kind for kind in (
+        _Kind("http", ("connection", "adapter", "options"), ("connection", "adapter")),
+    )
+}
+
+#: Every field the hidden kinds hold.
+_HIDDEN_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
+    name for kind in _HIDDEN_KINDS.values() for name in kind.fields
+))
+
 # THE FILE-LEVEL KINDS -- what is done to a governed file rather than to its
 # records -- are a REGISTRY OF THEIR OWN (``rey_lib.load.file_transform``),
 # deliberately kept out of TRANSFORM_KINDS and :meth:`Transform.kinds`, which
@@ -99,6 +115,8 @@ def _kind_of(kind_id: str) -> Optional[_Kind]:
     """The record kind, or the registered file-level kind, called ``kind_id``."""
     if kind_id in _BY_ID:
         return _BY_ID[kind_id]
+    if kind_id in _HIDDEN_KINDS:
+        return _HIDDEN_KINDS[kind_id]
     registered = file_kind(kind_id)
     if registered is None:
         return None
@@ -107,7 +125,10 @@ def _kind_of(kind_id: str) -> Optional[_Kind]:
 
 def _is_file_kind(kind_id: str) -> bool:
     """Whether ``kind_id`` is a registered file-level kind."""
-    return kind_id not in _BY_ID and file_kind(kind_id) is not None
+    return (
+        kind_id not in _BY_ID and kind_id not in _HIDDEN_KINDS
+        and file_kind(kind_id) is not None
+    )
 
 
 def _file_fields() -> tuple[str, ...]:
@@ -248,7 +269,8 @@ class Transform:
             ValueError: If the field is not a Transform field. A source or a
                 destination setting handed to a transform is a wiring fault.
         """
-        if name not in TRANSFORM_FIELDS and name not in _file_fields():
+        if (name not in TRANSFORM_FIELDS and name not in _HIDDEN_FIELDS
+                and name not in _file_fields()):
             raise ConfigError(
                 f"Transform: '{name}' is not a transform field. "
                 f"Fields: {', '.join((*TRANSFORM_FIELDS, *_file_fields()))}."
@@ -553,7 +575,8 @@ class Transform:
         Returns:
             None for ``identity``; the parsed declaration for ``declaration``
             (inline YAML or JSON text, or a mapping) and ``yaml`` (the file,
-            read here); the stored declaration for ``manifest``.
+            read here); the stored declaration for ``manifest``; for ``http``,
+            the connection and adapter names and the options as a mapping.
 
         Raises:
             ConfigError: If the selected kind is incomplete, or a declaration is
@@ -573,6 +596,15 @@ class Transform:
             )
         if kind == "identity":
             return None
+        if kind == "http":
+            # NAMES ONLY: the connection, the adapter and its options. The
+            # connection's credential is an env reference held by the
+            # connection, never here.
+            return {
+                "connection": str(held["connection"]),
+                "adapter": str(held["adapter"]),
+                "options": _json_mapping(held.get("options")) or {},
+            }
         if kind == "declaration":
             return _declared(held["transform"], "transform")
         if kind == "yaml":
@@ -593,8 +625,9 @@ class Transform:
         Returns:
             An ``IdentityTransform`` for ``identity``; a ``ColumnTransform`` for
             every other record kind, carrying its ``TransformPersistence`` where
-            the configuration holds one; a ``FileTransform`` for a registered
-            file-level kind (``rey_lib.load.file_transform``).
+            the configuration holds one; an ``HTTPTransform`` for ``http``
+            (``load_operation._build_http_transform``); a ``FileTransform`` for
+            a registered file-level kind (``rey_lib.load.file_transform``).
 
         Raises:
             ConfigError: As :meth:`executed_declaration` refuses, or where a
@@ -608,6 +641,9 @@ class Transform:
                     f"Transform ({kind}) is missing: {', '.join(missing)}."
                 )
             return build_file_transform(ctx, kind, self.configuration())
+        if kind == "http":
+            declared = self.executed_declaration()
+            return load_operation._build_http_transform(ctx, declared)
         declared = self.executed_declaration()
         # GOVERNED PERSISTENCE travels only where it is held, for the kinds
         # authored here.
