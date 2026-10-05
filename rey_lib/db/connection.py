@@ -336,7 +336,18 @@ class ConnectionOwner:
                 f"connection: '{name}' is not configured. Known connections: "
                 f"{', '.join(sorted(definitions)) or 'none'}."
             )
-        built = Connection(record, ctx=ctx)
+        # AN HTTP ENDPOINT IS A CONNECTION TOO, declared in the same list and
+        # held by the same owner -- only the object differs. Imported here so
+        # rey_lib.web_utils is never an import-time dependency of rey_lib.db.
+        provider = getattr(record, "provider", None)
+        if provider is None and isinstance(record, dict):
+            provider = record.get("provider")
+        if str(provider or "") == "http":
+            from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
+
+            built: Any = HttpConnection(record, ctx=ctx)
+        else:
+            built = Connection(record, ctx=ctx)
         self._owned[key] = built
         return built
 

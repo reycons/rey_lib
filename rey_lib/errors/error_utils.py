@@ -16,6 +16,7 @@ DatabaseError         Raised when a database operation fails — connection, DDL
 StateError            Raised when a JSON state file cannot be read or written.
 FtpConnectionError    Raised when an FTP connection cannot be established.
 FtpDownloadError      Raised when a file download fails or is incomplete.
+HttpTransportError    Raised when an HTTP request could not be sent or answered.
 validate_path         Validate that a required path exists on disk.
 validate_required     Validate that a required string value is non-empty.
 """
@@ -34,6 +35,7 @@ __all__ = [
     "StateError",
     "FtpConnectionError",
     "FtpDownloadError",
+    "HttpTransportError",
     "build_error_record_payload",
     "build_process_failure_payload",
     "build_safe_error_payload",
@@ -303,6 +305,15 @@ class FtpConnectionError(AppError):
 
 class FtpDownloadError(AppError):
     """Raised when a file download fails or is incomplete."""
+
+
+class HttpTransportError(AppError):
+    """Raised when an HTTP request could not be sent or no response came back.
+
+    A transport failure only -- DNS, connect, timeout, protocol. A response that
+    arrived with any status is not this error: interpreting it belongs to the
+    caller, which keeps transport and provider errors distinct.
+    """
 
 
 # ---------------------------------------------------------------------------
