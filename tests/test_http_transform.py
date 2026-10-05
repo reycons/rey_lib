@@ -94,6 +94,7 @@ def _connection(handler: Any, **overrides: Any) -> HttpConnection:
 @pytest.fixture(autouse=True)
 def _adapters(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("EXAMPLE_API_KEY", _SECRET)
+    http_transform._discover_adapters()
     before = dict(http_transform._ADAPTERS)
     http_adapter("echo")(_Echo)
     http_adapter("elsewhere")(_Elsewhere)
@@ -281,6 +282,18 @@ class TestTheBoundary:
 
         lines = [r.getMessage() for r in caplog.records if r.name == "rey_lib.data.http_transform"]
         assert lines == ["http transform: 1 record(s) through adapter _Echo on connection web"]
+
+    def test_adapters_are_discovered_on_the_first_lookup_only(self) -> None:
+        probe = (
+            "import sys, rey_lib.data\n"
+            "name = 'rey_lib.data.http_adapters.openfigi'\n"
+            "print(name in sys.modules)\n"
+            "from rey_lib.data.http_transform import http_adapter_for\n"
+            "print(type(http_adapter_for('openfigi')).__name__, name in sys.modules)\n"
+        )
+        found = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+
+        assert found.stdout.split() == ["False", "OpenFigiAdapter", "True"]
 
     def test_rey_lib_data_does_not_import_the_http_layer(self) -> None:
         probe = "import sys, rey_lib.data; print('rey_lib.web_utils' in sys.modules)"

@@ -17,11 +17,16 @@ authenticated connection to follow redirects.
 
 **Adapters are a registry.** Each registers itself with :func:`http_adapter`,
 the way a file-level kind registers with ``@file_transform``; nothing keeps a
-central list.
+central list. Adapter modules live in ONE package, ``rey_lib.data.http_adapters``,
+imported once on the first lookup -- as ``rey_lib.files.data_file`` discovers its
+formats -- so ``import rey_lib.data`` loads no adapter (backlog 667).
 """
 
 from __future__ import annotations
 
+import functools
+import importlib
+import pkgutil
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
@@ -87,14 +92,28 @@ def http_adapter(name: str) -> Callable[[type[HttpAdapter]], type[HttpAdapter]]:
     return register
 
 
+@functools.cache
+def _discover_adapters() -> None:
+    """Import every module of ``rey_lib.data.http_adapters`` once, so each registers.
+
+    Lazy, on the first lookup, so importing this module -- or ``rey_lib.data`` --
+    loads no adapter, and an adapter module can import from this one.
+    """
+    package = importlib.import_module("rey_lib.data.http_adapters")
+    for module in pkgutil.iter_modules(package.__path__):
+        importlib.import_module(f"{package.__name__}.{module.name}")
+
+
 def http_adapter_for(name: str) -> Optional[HttpAdapter]:
     """An instance of the adapter registered as ``name``, or None."""
+    _discover_adapters()
     registered = _ADAPTERS.get(name)
     return registered() if registered is not None else None
 
 
 def http_adapters() -> tuple[str, ...]:
     """Every registered adapter name, in registration order."""
+    _discover_adapters()
     return tuple(_ADAPTERS)
 
 
