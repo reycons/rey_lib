@@ -209,6 +209,9 @@ def serialize_source_file_mutation(
     operation: str = "",
     reason: str = "",
     recorded_at: str | None = None,
+    transform_id: int | None = None,
+    transform_snapshot: Mapping[str, Any] | None = None,
+    destination: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one authoritative canonical filesystem-mutation manifest record.
 
@@ -292,6 +295,15 @@ def serialize_source_file_mutation(
         # function neither reads nor interprets it; it only places it in the
         # one canonical section it is allowed to occupy.
         record["conversion"] = dict(conversion)
+    # WHAT THE EXECUTION WAS, as its Transform and Destination stated it: the
+    # saved setting, the definition that ran, and where it wrote. Placed as
+    # given, like conversion; a mutation that executed no transform has none.
+    if transform_id is not None:
+        record["transform_id"] = int(transform_id)
+    if transform_snapshot is not None:
+        record["transform_snapshot"] = dict(transform_snapshot)
+    if destination is not None:
+        record["destination"] = dict(destination)
     if outcome:
         record["result"] = outcome
     # producer identifies what produced the mutation, not merely which
@@ -323,6 +335,9 @@ def log_source_file_mutation(
     reason: str = "",
     message: str = "",
     run_log_fields: Mapping[str, Any] | None = None,
+    transform_id: int | None = None,
+    transform_snapshot: Mapping[str, Any] | None = None,
+    destination: Mapping[str, Any] | None = None,
 ) -> int:
     """Commit run evidence, then append its linked mutation manifest record.
 
@@ -386,6 +401,9 @@ def log_source_file_mutation(
             conversion=conversion,
             operation=operation,
             reason=reason,
+            transform_id=transform_id,
+            transform_snapshot=transform_snapshot,
+            destination=destination,
         )
         manifest_record_id = log_file_manifest_record(ctx, record)
         return SourceFileMutationEvidenceResult(

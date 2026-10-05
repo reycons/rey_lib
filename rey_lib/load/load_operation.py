@@ -80,6 +80,10 @@ from rey_lib.files.file_loader import (
 )
 from rey_lib.files.file_routing import FileRoutingError
 from rey_lib.load.configured_load import ConfiguredLoad as _ConfiguredLoad
+from rey_lib.load.mutation_context import (
+    build_mutation_context,
+    log_governed_source_file_mutation,
+)
 from rey_lib.logs.log_utils import (
     get_logger,
     log_enter,
@@ -1681,6 +1685,12 @@ def _load_one_file(
     loader: Any = None,
     movements: Any = None,
     load_name: str = "",
+    file_manifest_id: Optional[int] = None,
+    file_mutation_id: Optional[int] = None,
+    reason: str = "",
+    transform_id: Optional[int] = None,
+    transform_snapshot: Optional[dict[str, Any]] = None,
+    destination_identity: Optional[dict[str, Any]] = None,
 ) -> int:
     """Transfer one source into one target, through one transform.
 
@@ -1887,6 +1897,24 @@ def _load_one_file(
                 **_source_path_field(source),
             )
             _route_file(ctx, run_log, movements, "success", source, paths)
+            if file_manifest_id is not None:
+                log_governed_source_file_mutation(
+                    ctx,
+                    build_mutation_context({
+                        "file_id": file_manifest_id,
+                        "source_record_id": file_mutation_id,
+                    }),
+                    action="create" if writes_a_file else "load",
+                    status="success",
+                    source_path=str(getattr(source, "path", "") or ""),
+                    destination_path=str(target.path) if writes_a_file else "",
+                    application_name=ctx.app_name,
+                    operation="load",
+                    reason=reason,
+                    transform_id=transform_id,
+                    transform_snapshot=transform_snapshot,
+                    destination=destination_identity,
+                )
             log_exit(ctx, f"_load_one_file done: {source!r}", _logger)
             return inserted
 
@@ -1948,6 +1976,24 @@ def _load_one_file(
         )
 
         _route_file(ctx, run_log, movements, "success", source, paths)
+        if file_manifest_id is not None:
+            log_governed_source_file_mutation(
+                ctx,
+                build_mutation_context({
+                    "file_id": file_manifest_id,
+                    "source_record_id": file_mutation_id,
+                }),
+                action="create" if writes_a_file else "load",
+                status="success",
+                source_path=str(getattr(source, "path", "") or ""),
+                destination_path=str(target.path) if writes_a_file else "",
+                application_name=ctx.app_name,
+                operation="load",
+                reason=reason,
+                transform_id=transform_id,
+                transform_snapshot=transform_snapshot,
+                destination=destination_identity,
+            )
         log_exit(ctx, f"_load_one_file done: {source!r}", _logger)
         return len(rows)
 
@@ -1984,6 +2030,25 @@ def _load_one_file(
             **_related_path_field(source),
         )
         _route_file(ctx, run_log, movements, "failure", source, paths)
+        if file_manifest_id is not None:
+            log_governed_source_file_mutation(
+                ctx,
+                build_mutation_context({
+                    "file_id": file_manifest_id,
+                    "source_record_id": file_mutation_id,
+                }),
+                action="create" if writes_a_file else "load",
+                status="failed",
+                source_path=str(getattr(source, "path", "") or ""),
+                destination_path=str(target.path) if writes_a_file else "",
+                application_name=ctx.app_name,
+                operation="load",
+                reason=reason,
+                transform_id=transform_id,
+                transform_snapshot=transform_snapshot,
+                destination=destination_identity,
+                message=str(exc),
+            )
         log_exit(ctx, f"_load_one_file failed: {source!r}", _logger)
         if movements is None:
             # A single load has no routing policy and no batch to carry on

@@ -108,6 +108,9 @@ def log_governed_source_file_mutation(
     reason: str = "",
     message: str = "",
     run_log_fields: Mapping[str, Any] | None = None,
+    transform_id: int | None = None,
+    transform_snapshot: Mapping[str, Any] | None = None,
+    destination: Mapping[str, Any] | None = None,
 ) -> int:
     """Write one mutation using only previously resolved governed context."""
     if not isinstance(mutation_context, MutationContext):
@@ -131,4 +134,7 @@ def log_governed_source_file_mutation(
         reason=reason,
         message=message,
         run_log_fields=run_log_fields,
+        transform_id=transform_id,
+        transform_snapshot=transform_snapshot,
+        destination=destination,
     )

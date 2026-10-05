@@ -221,6 +221,9 @@ class FileManifest:
         clear_profile: Optional[dict[str, Any]] = None,
         redacted_profile: Optional[dict[str, Any]] = None,
         base_path: str = "",
+        transform_id: Optional[int] = None,
+        transform_snapshot: Optional[dict[str, Any]] = None,
+        destination: Optional[dict[str, Any]] = None,
     ) -> int:
         """Append one event to a file's history, and return the mutation's id.
 
@@ -240,6 +243,10 @@ class FileManifest:
         Classifying is something that happens to a file, so it is recorded here
         like every other thing that happens to one -- and recording it twice
         leaves both, which is what makes reclassification non-destructive.
+
+        ``transform_id``, ``transform_snapshot`` and ``destination`` belong to
+        an executed transform: the saved setting, the definition that ran, and
+        where it wrote.
         """
         return int(self._control.append_file_mutation(
             file_manifest_id, record_type=record_type, action=action,
@@ -250,6 +257,8 @@ class FileManifest:
             classification=classification,
             clear_profile=clear_profile, redacted_profile=redacted_profile,
             base_path=base_path or None,
+            transform_id=transform_id, transform_snapshot=transform_snapshot,
+            destination=destination,
         ))
 
     # -- reading -------------------------------------------------------------

@@ -28,7 +28,7 @@ from rey_lib.files.data_file.base import DataFile
 from rey_lib.load import load_operation
 from rey_lib.load.manifest_source import SourceContextReader
 from rey_lib.load.shape import derived_load_shape
-from rey_lib.load.source import Source
+from rey_lib.load.source import Source, _as_int
 from rey_lib.load.target import Target
 from rey_lib.load.transform import Transform
 
@@ -94,12 +94,46 @@ def run_selected_load(
     resolved_transform = transform.resolve(ctx)
     resolved_target = target.resolve(ctx)
 
+    # THE GOVERNED IDENTITY IS THE SOURCE OBJECT'S, whatever kind executes: a
+    # Source populated from a governed file keeps it while a query runs.
+    governed = {
+        name: held
+        for name, held in (
+            ("file_manifest_id", _as_int(source.value("file-manifest-id"))),
+            ("file_mutation_id", _as_int(source.value("file-mutation-id"))),
+        )
+        if held is not None
+    }
+    if governed:
+        # WHAT THE LOAD DID, as the Destination states it: its write policy
+        # for a table, its format for a file.
+        governed["reason"] = (
+            f"transform_to_file_{resolved_target.file_type}"
+            if isinstance(resolved_target, DataFile)
+            else f"load_to_table_{target.write_policy()}"
+        )
+        # WHAT RAN, read from the objects that ran it: the Transform's saved
+        # setting and executed definition, and the Destination's identity.
+        persistence = transform.value("persistence")
+        saved = dict(persistence).get("transform_id") if persistence else None
+        governed["transform_id"] = int(saved) if saved is not None else None
+        governed["transform_snapshot"] = {
+            "kind": transform.selected_kind(),
+            "declaration": transform.executed_declaration(),
+        }
+        governed["destination_identity"] = (
+            {"path": str(target.value("out-file")), "file_type": resolved_target.file_type}
+            if isinstance(resolved_target, DataFile)
+            else resolved_target[0].to_dict()
+        )
+
     # THE TRANSFER BOUNDARY, as every load path reaches it.
     if isinstance(resolved_target, DataFile):
         return load_operation._load_one_file(
             resolved_source, resolved_transform, resolved_target,
             ctx=ctx, run_log=run_log, movements=None,
             load_name=f"query:{resolved_target.path.name}",
+            **governed,
         )
     identity, loader = resolved_target
     name = ".".join(part for part in (identity.catalog, identity.schema, identity.name) if part)
@@ -107,6 +141,7 @@ def run_selected_load(
         resolved_source, resolved_transform, identity,
         ctx=ctx, run_log=run_log, loader=loader, movements=None,
         load_name=name if shape in ("direct", "manifest") else f"query:{name}",
+        **governed,
     )
 
 
@@ -204,4 +239,12 @@ def load_arguments(source: Source, transform: Transform, target: Target) -> dict
             if value in (None, "", False):
                 continue
             arguments[name] = value
+    # THE GOVERNED IDENTITY TRAVELS WITH THE SOURCE, whatever kind is selected:
+    # a database Source populated from a governed file still names that file,
+    # and the load's mutation is recorded against it. The kind is unchanged --
+    # neither field is one the selected kind infers from.
+    for name in ("file-manifest-id", "file-mutation-id"):
+        value = source.value(name)
+        if value not in (None, "", False):
+            arguments.setdefault(name, value)
     return arguments

@@ -1538,6 +1538,9 @@ class Control:
                              clear_profile: Optional[dict[str, Any]] = None,
                              redacted_profile: Optional[dict[str, Any]] = None,
                              base_path: Optional[str] = None,
+                             transform_id: Optional[int] = None,
+                             transform_snapshot: Optional[dict[str, Any]] = None,
+                             destination: Optional[dict[str, Any]] = None,
                              required: bool = True) -> Optional[int]:
         """Append one event to a file's history.
 
@@ -1565,6 +1568,9 @@ class Control:
             "clear_profile":     clear_profile,
             "redacted_profile":  redacted_profile,
             "base_path":         base_path,
+            "transform_id":       transform_id,
+            "transform_snapshot": transform_snapshot,
+            "destination":        destination,
         }, required=required)
 
     def get_current_classification(self, file_manifest_id: Optional[int] = None,

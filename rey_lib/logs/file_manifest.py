@@ -78,6 +78,9 @@ _CANONICAL_ROOT_FIELDS: tuple[str, ...] = (
     "redacted_profile",
     "rollback",
     "conversion",
+    "transform_id",
+    "transform_snapshot",
+    "destination",
     "result",
     "producer",
 )
@@ -271,6 +274,9 @@ def write_record_to_control(ctx: Any, record: dict[str, Any]) -> int:
             conversion=record.get("conversion"),
             result=record.get("result"),
             rollback=record.get("rollback"),
+            transform_id=record.get("transform_id"),
+            transform_snapshot=record.get("transform_snapshot"),
+            destination=record.get("destination"),
             # Two representations of one profiling event. They are written
             # together on one mutation or not at all: a profile is complete or
             # absent, never half-recorded.
