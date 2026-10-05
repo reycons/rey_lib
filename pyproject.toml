@@ -79,6 +79,8 @@ rey-format-sql = "rey_lib.artifacts.cli:main"
 rey-format-artifact = "rey_lib.artifacts.cli:main"
 rey-validate-yaml = "rey_lib.artifacts.cli:validate_yaml_main"
 rey-validate-config = "rey_lib.artifacts.cli:validate_config_main"
+# Manual tooling only (backlog 672): not a client surface.
+rey-http-tester = "rey_lib.web_utils.tester:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
