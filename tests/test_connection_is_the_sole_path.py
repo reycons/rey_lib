@@ -100,12 +100,13 @@ class TestConnectionIsTheRuntimePath:
         # called by resolve() alone, so aliasing cannot be applied anywhere but
         # the single resolution point.
         #
-        # is_database_connection is the question a database-only consumer asks
-        # of the heterogeneous list (backlog 673), answered beside the dispatch.
+        # is_database_connection and is_http_connection are the questions a
+        # consumer of one kind asks of the heterogeneous list (backlogs 673,
+        # 668), answered beside the dispatch.
         assert set(connection.__all__) == {
             "Connection", "ConnectionOwner", "CONNECTION_ALIASES_ATTR",
             "build_connections", "call_routine", "connection_owner",
-            "is_database_connection", "shared_connection",
+            "is_database_connection", "is_http_connection", "shared_connection",
             "validate_connection_aliases"}
 
     def test_composition_checks_the_configuration_and_holds_nothing(self) -> None:

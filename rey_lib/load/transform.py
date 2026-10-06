@@ -17,6 +17,8 @@ transform object, a context or a secret.
     identity     (nothing)                     -> IdentityTransform
     declaration  transform                     -> ColumnTransform
     yaml         transform-file                -> ColumnTransform
+    http         http-connection, http-adapter,  -> HTTPTransform
+                 http-options
     manifest     declaration, persistence      -> ColumnTransform
 
 **MANIFEST AND YAML ARE CONFIGURATION ORIGINS, not implementations.** A stored
@@ -65,6 +67,10 @@ class _Kind:
     id: str
     fields: tuple[str, ...]
     required: tuple[str, ...]
+    #: The field naming the connection this kind SENDS RECORDS THROUGH, for a
+    #: kind whose execution reaches outside Rey; None for a local one. What
+    #: makes a preview of it an outbound operation (backlog 668, 663 inv. 4).
+    outbound_via: Optional[str] = None
 
 
 #: The kinds a Transform can be, in the order a reader is offered them.
@@ -72,6 +78,13 @@ TRANSFORM_KINDS: tuple[_Kind, ...] = (
     _Kind("identity", (), ()),
     _Kind("declaration", ("transform",), ("transform",)),
     _Kind("yaml", ("transform-file",), ("transform-file",)),
+    # Records sent through a named HTTP connection by a registered adapter
+    # (backlogs 671, 668). The field names are the load command's flat
+    # parameter namespace; executed_declaration normalises them.
+    _Kind(
+        "http", ("http-connection", "http-adapter", "http-options"),
+        ("http-connection", "http-adapter"), outbound_via="http-connection",
+    ),
     # `persistence` is never required to EXECUTE: a declaration defines the
     # transform, and the identities only say where it can be written back.
     _Kind("manifest", ("declaration", "persistence"), ("declaration",)),
@@ -83,25 +96,11 @@ TRANSFORM_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 ))
 
 #: The fields the loader declares as parameters -- the externally typed subset.
-TRANSFORM_PARAMETERS: tuple[str, ...] = ("transform", "transform-file")
+TRANSFORM_PARAMETERS: tuple[str, ...] = (
+    "transform", "transform-file", "http-connection", "http-adapter", "http-options",
+)
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TRANSFORM_KINDS}
-
-#: RECORD KINDS THAT EXIST BUT ARE NOT OFFERED. Selectable by name and resolved
-#: like any record kind, but kept out of TRANSFORM_KINDS, TRANSFORM_FIELDS and
-#: :meth:`Transform.kinds`, so nothing that draws the choices shows them.
-#: ``http`` (backlog 671) moves into TRANSFORM_KINDS when its configuration,
-#: preview and run are exposed (backlog 668).
-_HIDDEN_KINDS: dict[str, _Kind] = {
-    kind.id: kind for kind in (
-        _Kind("http", ("connection", "adapter", "options"), ("connection", "adapter")),
-    )
-}
-
-#: Every field the hidden kinds hold.
-_HIDDEN_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
-    name for kind in _HIDDEN_KINDS.values() for name in kind.fields
-))
 
 # THE FILE-LEVEL KINDS -- what is done to a governed file rather than to its
 # records -- are a REGISTRY OF THEIR OWN (``rey_lib.load.file_transform``),
@@ -115,8 +114,6 @@ def _kind_of(kind_id: str) -> Optional[_Kind]:
     """The record kind, or the registered file-level kind, called ``kind_id``."""
     if kind_id in _BY_ID:
         return _BY_ID[kind_id]
-    if kind_id in _HIDDEN_KINDS:
-        return _HIDDEN_KINDS[kind_id]
     registered = file_kind(kind_id)
     if registered is None:
         return None
@@ -125,10 +122,7 @@ def _kind_of(kind_id: str) -> Optional[_Kind]:
 
 def _is_file_kind(kind_id: str) -> bool:
     """Whether ``kind_id`` is a registered file-level kind."""
-    return (
-        kind_id not in _BY_ID and kind_id not in _HIDDEN_KINDS
-        and file_kind(kind_id) is not None
-    )
+    return kind_id not in _BY_ID and file_kind(kind_id) is not None
 
 
 def _file_fields() -> tuple[str, ...]:
@@ -241,6 +235,31 @@ class Transform:
         kind = _kind_of(self.selected_kind())
         return {name: self._values.get(name) for name in kind.fields}
 
+    def outbound(self, max_preview_records: int) -> Optional[dict[str, Any]]:
+        """Where the selected kind sends records, as generic metadata -- or None.
+
+        A fact about the transform's EXECUTION EFFECT (663 invariant 4): a kind
+        that sends records outside Rey says so, and a preview of it is an
+        outbound operation a reader must ask for explicitly. Read from the
+        configuration alone -- nothing is resolved or sent, and no context is
+        needed.
+
+        Args:
+            max_preview_records: The most records a preview would send -- the
+                previewing surface's own limit, stated back with the fact.
+
+        Returns:
+            None for a local kind; otherwise ``{"connection": <name>,
+            "max_preview_records": <limit>}``.
+        """
+        kind = _kind_of(self.selected_kind())
+        if kind is None or kind.outbound_via is None:
+            return None
+        return {
+            "connection": str(self._values.get(kind.outbound_via) or ""),
+            "max_preview_records": int(max_preview_records),
+        }
+
     def validate(self) -> list[str]:
         """What the selected kind still needs, or nothing where it is complete."""
         kind = _kind_of(self.selected_kind())
@@ -269,8 +288,7 @@ class Transform:
             ValueError: If the field is not a Transform field. A source or a
                 destination setting handed to a transform is a wiring fault.
         """
-        if (name not in TRANSFORM_FIELDS and name not in _HIDDEN_FIELDS
-                and name not in _file_fields()):
+        if name not in TRANSFORM_FIELDS and name not in _file_fields():
             raise ConfigError(
                 f"Transform: '{name}' is not a transform field. "
                 f"Fields: {', '.join((*TRANSFORM_FIELDS, *_file_fields()))}."
@@ -601,9 +619,9 @@ class Transform:
             # connection's credential is an env reference held by the
             # connection, never here.
             return {
-                "connection": str(held["connection"]),
-                "adapter": str(held["adapter"]),
-                "options": _json_mapping(held.get("options")) or {},
+                "connection": str(held["http-connection"]),
+                "adapter": str(held["http-adapter"]),
+                "options": _json_mapping(held.get("http-options")) or {},
             }
         if kind == "declaration":
             return _declared(held["transform"], "transform")

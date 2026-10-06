@@ -52,8 +52,23 @@ _CHOICE_SOURCES: dict[str, str] = {
     # meaning every provider; a parameter that can only name a database asks
     # for this one.
     "database_connections": "connections",
+    # Every HTTP connection, selected positively (backlog 668).
+    "http_connections": "connections",
     "data_sources": "data_sources",
 }
+
+#: Sources answered by a RUNTIME REGISTRY in code rather than a collection on
+#: ctx: the choices are what the code registers, not what an installation says.
+_REGISTRY_CHOICES: dict[str, Any] = {
+    "http_transform_adapters": lambda: _registered_http_transform_adapters(),
+}
+
+
+def _registered_http_transform_adapters() -> tuple[str, ...]:
+    """The registered HTTP transform adapters' names."""
+    from rey_lib.data.http_transform import http_transform_adapters  # noqa: PLC0415
+
+    return http_transform_adapters()
 
 
 def _database_members(members: Any) -> list[Any]:
@@ -63,9 +78,17 @@ def _database_members(members: Any) -> list[Any]:
     return [member for member in (members or []) if is_database_connection(member)]
 
 
+def _http_members(members: Any) -> list[Any]:
+    """The connections[] records that are HTTP connections."""
+    from rey_lib.db.connection import is_http_connection  # noqa: PLC0415
+
+    return [member for member in (members or []) if is_http_connection(member)]
+
+
 #: The sources that offer a SUBSET of their collection, and the selection.
 _CHOICE_FILTERS: dict[str, Any] = {
     "database_connections": _database_members,
+    "http_connections": _http_members,
 }
 
 
@@ -722,12 +745,15 @@ def _choices(entry: dict[str, Any], ctx: Any, application: str) -> tuple[str, ..
     named = str(entry.get("possible_values_from") or "").strip()
     if not named:
         return tuple(str(value) for value in (entry.get("possible_values") or []))
+    registry = _REGISTRY_CHOICES.get(named)
+    if registry is not None:
+        return tuple(sorted(registry()))
     collection = _CHOICE_SOURCES.get(named)
     if collection is None:
         raise ConfigError(
             f"Application '{application}' parameter '{entry.get('name')}' names "
             f"choice source '{named}', which is not one of: "
-            f"{', '.join(sorted(_CHOICE_SOURCES))}."
+            f"{', '.join(sorted({*_CHOICE_SOURCES, *_REGISTRY_CHOICES}))}."
         )
     members = getattr(ctx, collection, None)
     if members is None:

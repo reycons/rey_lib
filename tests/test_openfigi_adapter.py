@@ -326,9 +326,10 @@ class TestThroughTheTransform:
         provider = _Provider()
         connection = _connection(provider)
         monkeypatch.setattr(load_operation, "shared_connection", lambda _ctx, _name: connection)
+        # The operator configuration for an authenticated connection: batch_size 100.
         transform = Transform({
-            "connection": "openfigi", "adapter": "openfigi",
-            "options": {"id_column": "symbol", "id_type": "TICKER", "batch_size": 100},
+            "http-connection": "openfigi", "http-adapter": "openfigi",
+            "http-options": {"id_column": "symbol", "id_type": "TICKER", "batch_size": 100},
         }, selected="http")
 
         built = transform.resolve(SimpleNamespace())

@@ -35,7 +35,7 @@ from rey_lib.errors.error_utils import ConfigError, HttpTransportError
 from rey_lib.load import Source, Target, Transform, run_selected_load
 from rey_lib.load import load_operation
 from rey_lib.load.execution import preview_selected
-from rey_lib.load.transform import TRANSFORM_FIELDS, TRANSFORM_KINDS
+from rey_lib.load.transform import TRANSFORM_FIELDS, TRANSFORM_PARAMETERS
 from rey_lib.web_utils import HttpConnection, HttpRequest
 
 _SECRET = "synthetic-api-key"
@@ -119,8 +119,12 @@ def csv_file(tmp_path: Path) -> Path:
     return held
 
 
-def _http(**values: Any) -> Transform:
-    return Transform({"connection": "web", "adapter": "echo", **values}, selected="http")
+def _http(connection: str = "web", adapter: str = "echo", options: Any = None) -> Transform:
+    """An http Transform, through the load command's parameter names (backlog 668)."""
+    values = {"http-connection": connection, "http-adapter": adapter}
+    if options is not None:
+        values["http-options"] = options
+    return Transform(values, selected="http")
 
 
 class TestTheAdapterRegistry:
@@ -132,22 +136,45 @@ class TestTheAdapterRegistry:
         assert http_transform_adapter_for("nobody") is None
 
 
-class TestTheKindIsHidden:
-    def test_it_is_not_offered(self) -> None:
-        assert "http" not in Transform.kinds()
-        assert "http" not in {kind.id for kind in TRANSFORM_KINDS}
-        assert not {"connection", "adapter", "options"} & set(TRANSFORM_FIELDS)
+class TestTheKindIsOffered:
+    """Hidden in 671; offered since 668, under the load command's parameter names."""
 
-    def test_it_is_in_force_only_when_selected(self) -> None:
-        assert Transform({"connection": "web", "adapter": "echo"}).selected_kind() == "identity"
-        assert _http().selected_kind() == "http"
+    def test_it_is_offered_with_its_parameters(self) -> None:
+        assert "http" in Transform.kinds()
+        assert {"http-connection", "http-adapter", "http-options"} <= set(TRANSFORM_FIELDS)
+        assert {"http-connection", "http-adapter", "http-options"} <= set(TRANSFORM_PARAMETERS)
+
+    def test_its_values_select_it(self) -> None:
+        values = {"http-connection": "web", "http-adapter": "echo"}
+
+        assert Transform(values).selected_kind() == "http"
 
     def test_connection_and_adapter_are_required(self) -> None:
-        assert Transform(selected="http").validate() == ["connection", "adapter"]
+        assert Transform(selected="http").validate() == ["http-connection", "http-adapter"]
 
     def test_an_incomplete_one_is_refused_at_resolve(self) -> None:
-        with pytest.raises(ConfigError, match="missing: connection, adapter"):
+        with pytest.raises(ConfigError, match="missing: http-connection, http-adapter"):
             Transform(selected="http").resolve(SimpleNamespace())
+
+
+class TestOutbound:
+    """The execution-effect fact a preview gate reads (663 invariant 4)."""
+
+    def test_an_http_transform_is_outbound_through_its_connection(self) -> None:
+        assert _http().outbound(50) == {"connection": "web", "max_preview_records": 50}
+
+    def test_it_is_stated_without_resolving_anything(self, wire: list[httpx.Request]) -> None:
+        _http(connection="not-configured").outbound(50)
+
+        assert wire == []
+
+    @pytest.mark.parametrize("transform", [
+        Transform(),
+        Transform({"transform": '{"columns": [{"source": "a", "name": "a"}]}'}),
+        Transform({"transform-file": "/t.yaml"}),
+    ])
+    def test_a_local_kind_is_not_outbound(self, transform: Transform) -> None:
+        assert transform.outbound(50) is None
 
 
 class TestResolution:

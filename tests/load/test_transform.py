@@ -54,18 +54,22 @@ def builds(monkeypatch: pytest.MonkeyPatch) -> list[tuple[tuple[Any, ...], dict[
 
 class TestTheVocabulary:
 
-    def test_the_kinds_are_the_four(self) -> None:
-        assert Transform.kinds() == ("identity", "declaration", "yaml", "manifest")
+    def test_the_kinds_are_the_five(self) -> None:
+        # http offered since backlog 668.
+        assert Transform.kinds() == ("identity", "declaration", "yaml", "http", "manifest")
 
     def test_the_fields_are_everything_the_transform_holds(self) -> None:
         assert TRANSFORM_FIELDS == (
-            "transform", "transform-file", "declaration", "persistence",
+            "transform", "transform-file", "http-connection", "http-adapter",
+            "http-options", "declaration", "persistence",
         )
 
     def test_the_loader_parameters_are_the_typed_subset(self) -> None:
         # declaration and persistence are the Transform's fields, and not
         # parameters any loader invocation types.
-        assert TRANSFORM_PARAMETERS == ("transform", "transform-file")
+        assert TRANSFORM_PARAMETERS == (
+            "transform", "transform-file", "http-connection", "http-adapter", "http-options",
+        )
         assert set(TRANSFORM_PARAMETERS) <= set(TRANSFORM_FIELDS)
 
     def test_persistence_is_never_required_to_execute(self) -> None:

@@ -64,6 +64,7 @@ __all__ = [
     "connection_owner",
     "call_routine",
     "is_database_connection",
+    "is_http_connection",
     "shared_connection",
     "validate_connection_aliases",
 ]
@@ -512,6 +513,23 @@ def is_database_connection(item: Any) -> bool:
         both carry the declared ``provider``, as an ``HttpConnection`` does.
     """
     return _provider_of(item) != _HTTP_PROVIDER
+
+
+def is_http_connection(item: Any) -> bool:
+    """Whether ``item`` is an HTTP connection -- a built one or its record.
+
+    POSITIVE SELECTION (backlog 668): the http provider, not "anything that is
+    not a database", so a later non-database provider is never offered where an
+    HTTP connection is asked for. Answered beside the dispatch, as
+    :func:`is_database_connection` is.
+
+    Args:
+        item: A built connection, or a ``connections[]`` record.
+
+    Returns:
+        True for an ``HttpConnection`` or a record that resolves to one.
+    """
+    return _provider_of(item) == _HTTP_PROVIDER
 
 
 def build_connections(ctx: Any) -> dict[str, Connection]:
