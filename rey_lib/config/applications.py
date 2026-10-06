@@ -57,6 +57,35 @@ _CHOICE_SOURCES: dict[str, str] = {
     "data_sources": "data_sources",
 }
 
+#: The empty form of each collection a choice source reads, as it is written:
+#: a list, except ``tools``, which is a mapping of groups (backlog 293).
+_EMPTY_COLLECTION: dict[str, Any] = {"tools": {}}
+
+
+def with_choice_collections(raw: dict[str, Any]) -> dict[str, Any]:
+    """The configuration with every choice-source collection present, empty where undeclared.
+
+    A registration is the same in every installation; the collections its
+    choices read are per installation. One that an installation does not
+    declare is therefore ordinary, and is answered as an empty collection --
+    so a collection MISSING from the context still means one thing only: it
+    was read before it was built (backlog 293).
+
+    Args:
+        raw: The assembled configuration, before it is wrapped as the context.
+
+    Returns:
+        The same configuration with each collection set where it was absent.
+        A declared collection is never touched.
+    """
+    filled = dict(raw)
+    for collection in sorted(set(_CHOICE_SOURCES.values())):
+        if filled.get(collection) is None:
+            empty = _EMPTY_COLLECTION.get(collection, [])
+            filled[collection] = type(empty)()
+    return filled
+
+
 #: Sources answered by a RUNTIME REGISTRY in code rather than a collection on
 #: ctx: the choices are what the code registers, not what an installation says.
 _REGISTRY_CHOICES: dict[str, Any] = {

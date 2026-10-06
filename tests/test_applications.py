@@ -14,6 +14,7 @@ nobody implemented is refused instead of answered with nothing.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -463,3 +464,42 @@ class TestPlacementAndPlaceholder:
         built = build([declaration(parameters=[{"name": "table"}])])[0]
 
         assert built.parameters[0].placement == "form"
+
+
+class TestEveryChoiceCollectionIsPresent:
+    """Backlog 293: an undeclared collection is empty; a missing one is a build-order fault."""
+
+    def test_undeclared_collections_are_filled_empty_in_their_written_form(self) -> None:
+        from rey_lib.config.applications import with_choice_collections
+
+        assert with_choice_collections({}) == {
+            "connections": [], "data_sources": [], "pipelines": [], "tools": {},
+            "workflows": [],
+        }
+
+    def test_a_declared_collection_is_never_touched(self) -> None:
+        from rey_lib.config.applications import with_choice_collections
+
+        declared = [{"name": "fidelity"}]
+
+        assert with_choice_collections({"data_sources": declared})["data_sources"] is declared
+
+    def test_an_empty_collection_offers_no_choices_rather_than_failing(self) -> None:
+        built = build([declaration(parameters=[
+            {"name": "data-source", "value_type": "choice",
+             "possible_values_from": "data_sources"},
+        ])], data_sources=[])[0]
+
+        assert built.parameters[0].possible_values == ()
+
+    def test_the_built_context_carries_every_collection(self, tmp_path: Path) -> None:
+        from rey_lib.config.context_builder import ContextBuilder
+
+        ctx = ContextBuilder(
+            {}, config_dir=tmp_path, config_path=tmp_path / "config.yaml",
+            runtime_path_tokens={},
+        ).build()
+
+        assert (ctx.data_sources, ctx.pipelines, ctx.workflows, ctx.connections) == (
+            [], [], [], [],
+        )

@@ -22,7 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from rey_lib.config.applications import build_applications
+from rey_lib.config.applications import build_applications, with_choice_collections
 from rey_lib.config.config_loader import _merge_compatible_collection
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_paths import (
@@ -95,6 +95,9 @@ class ContextBuilder:
         """
         raw = _apply_compatibility_aliases(self._raw)
         raw = _assemble_ctx_data(raw, self._config_dir)
+        # EVERY CHOICE-SOURCE COLLECTION PRESENT, empty where this installation
+        # declares none (backlog 293): absence then means a build-order fault.
+        raw = with_choice_collections(raw)
         ctx = Namespace(raw)
 
         self._resolve_paths_onto(ctx)
