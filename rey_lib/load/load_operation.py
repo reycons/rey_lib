@@ -315,7 +315,7 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
             is registered under that name.
     """
     from rey_lib.data.http_transform import (  # noqa: PLC0415
-        HTTPTransform, http_adapter_for, http_adapters,
+        HTTPTransform, http_transform_adapter_for, http_transform_adapters,
     )
     from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
 
@@ -327,11 +327,11 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
             f"{getattr(connection, 'provider', 'non-http')} connection, not http."
         )
     adapter_name = str(declared["adapter"])
-    adapter = http_adapter_for(adapter_name)
+    adapter = http_transform_adapter_for(adapter_name)
     if adapter is None:
         raise ConfigError(
             f"Transform (http): no HTTP adapter is registered as '{adapter_name}'. "
-            f"Adapters: {', '.join(http_adapters()) or 'none'}."
+            f"Adapters: {', '.join(http_transform_adapters()) or 'none'}."
         )
     return HTTPTransform(connection, adapter, declared.get("options") or {})
 

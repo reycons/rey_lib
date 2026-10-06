@@ -15,9 +15,9 @@ service only through Rey's public HTTP surface -- ``rey_lib.web_utils``
 -- with paths relative to the connection's base URL, and never asks an
 authenticated connection to follow redirects.
 
-**Adapters are a registry.** Each registers itself with :func:`http_adapter`,
+**Adapters are a registry.** Each registers itself with :func:`http_transform_adapter`,
 the way a file-level kind registers with ``@file_transform``; nothing keeps a
-central list. Adapter modules live in ONE package, ``rey_lib.data.http_adapters``,
+central list. Adapter modules live in ONE package, ``rey_lib.data.http_transform_adapters``,
 imported once on the first lookup -- as ``rey_lib.files.data_file`` discovers its
 formats -- so ``import rey_lib.data`` loads no adapter (backlog 667).
 """
@@ -37,14 +37,23 @@ if TYPE_CHECKING:
     from rey_lib.web_utils import HttpConnection
 
 __all__ = [
-    "HTTPTransform", "HttpAdapter", "http_adapter", "http_adapter_for", "http_adapters",
+    "HTTPTransform", "HttpTransformAdapter", "http_transform_adapter",
+    "http_transform_adapter_for", "http_transform_adapters",
 ]
 
 _logger = get_logger(__name__)
 
 
-class HttpAdapter(ABC):
-    """One provider's API contract, applied to a load's records."""
+class HttpTransformAdapter(ABC):
+    """One provider's API contract, applied to a load's records.
+
+    **A RECORD-TRANSFORM STRATEGY, NOT REY'S HTTP PROVIDER ABSTRACTION.** It
+    turns a record set into a provider's HTTP operations and the answers back
+    into records, for HTTPTransform and nothing else. Other HTTP consumers --
+    single-resource fetches, downloads, uploads, metadata clients -- use
+    ``rey_lib.web_utils`` directly and are not forced through this contract or
+    its registry.
+    """
 
     @abstractmethod
     def output_columns(self, input_columns: list[str]) -> list[str]:
@@ -81,39 +90,39 @@ class HttpAdapter(ABC):
         """
 
 
-_ADAPTERS: dict[str, type[HttpAdapter]] = {}
+_ADAPTERS: dict[str, type[HttpTransformAdapter]] = {}
 
 
-def http_adapter(name: str) -> Callable[[type[HttpAdapter]], type[HttpAdapter]]:
-    """Register the decorated HttpAdapter under ``name``."""
-    def register(cls: type[HttpAdapter]) -> type[HttpAdapter]:
+def http_transform_adapter(name: str) -> Callable[[type[HttpTransformAdapter]], type[HttpTransformAdapter]]:
+    """Register the decorated HttpTransformAdapter under ``name``."""
+    def register(cls: type[HttpTransformAdapter]) -> type[HttpTransformAdapter]:
         _ADAPTERS[name] = cls
         return cls
     return register
 
 
 @functools.cache
-def _discover_adapters() -> None:
-    """Import every module of ``rey_lib.data.http_adapters`` once, so each registers.
+def _discover_transform_adapters() -> None:
+    """Import every module of ``rey_lib.data.http_transform_adapters`` once, so each registers.
 
     Lazy, on the first lookup, so importing this module -- or ``rey_lib.data`` --
     loads no adapter, and an adapter module can import from this one.
     """
-    package = importlib.import_module("rey_lib.data.http_adapters")
+    package = importlib.import_module("rey_lib.data.http_transform_adapters")
     for module in pkgutil.iter_modules(package.__path__):
         importlib.import_module(f"{package.__name__}.{module.name}")
 
 
-def http_adapter_for(name: str) -> Optional[HttpAdapter]:
+def http_transform_adapter_for(name: str) -> Optional[HttpTransformAdapter]:
     """An instance of the adapter registered as ``name``, or None."""
-    _discover_adapters()
+    _discover_transform_adapters()
     registered = _ADAPTERS.get(name)
     return registered() if registered is not None else None
 
 
-def http_adapters() -> tuple[str, ...]:
+def http_transform_adapters() -> tuple[str, ...]:
     """Every registered adapter name, in registration order."""
-    _discover_adapters()
+    _discover_transform_adapters()
     return tuple(_ADAPTERS)
 
 
@@ -123,7 +132,7 @@ class HTTPTransform(DeclaredTransform):
     def __init__(
         self,
         connection: "HttpConnection",
-        adapter: HttpAdapter,
+        adapter: HttpTransformAdapter,
         options: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Hold the connection, the adapter and its options; send nothing.

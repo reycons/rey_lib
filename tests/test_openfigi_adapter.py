@@ -22,9 +22,9 @@ import httpx
 import pytest
 from corehttp.transport.httpx import HttpXTransport
 
-from rey_lib.data.http_adapters import openfigi
-from rey_lib.data.http_adapters.openfigi import OUTPUT_COLUMNS, OpenFigiAdapter, OpenFigiError
-from rey_lib.data.http_transform import HTTPTransform, http_adapter_for
+from rey_lib.data.http_transform_adapters import openfigi
+from rey_lib.data.http_transform_adapters.openfigi import OUTPUT_COLUMNS, OpenFigiAdapter, OpenFigiError
+from rey_lib.data.http_transform import HTTPTransform, http_transform_adapter_for
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import Transform
 from rey_lib.load import load_operation
@@ -109,7 +109,7 @@ def _records(*symbols: str) -> list[dict[str, Any]]:
 
 class TestRegistration:
     def test_it_is_discovered_as_openfigi(self) -> None:
-        assert isinstance(http_adapter_for("openfigi"), OpenFigiAdapter)
+        assert isinstance(http_transform_adapter_for("openfigi"), OpenFigiAdapter)
 
 
 class TestOptions:

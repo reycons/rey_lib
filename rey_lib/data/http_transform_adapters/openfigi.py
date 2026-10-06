@@ -44,7 +44,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from rey_lib.data.http_transform import HttpAdapter, http_adapter
+from rey_lib.data.http_transform import HttpTransformAdapter, http_transform_adapter
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.logs import get_logger
 from rey_lib.web_utils import HttpConnection, HttpRequest, HttpResponse
@@ -179,8 +179,8 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
 
 
-@http_adapter("openfigi")
-class OpenFigiAdapter(HttpAdapter):
+@http_transform_adapter("openfigi")
+class OpenFigiAdapter(HttpTransformAdapter):
     """OpenFIGI v3 /mapping: each record's identifier mapped to its FIGI candidates."""
 
     def output_columns(self, input_columns: list[str]) -> list[str]:

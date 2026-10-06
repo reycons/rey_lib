@@ -28,7 +28,7 @@ from corehttp.transport.httpx import HttpXTransport
 
 from rey_lib.data import http_transform
 from rey_lib.data.http_transform import (
-    HTTPTransform, HttpAdapter, http_adapter, http_adapter_for, http_adapters,
+    HTTPTransform, HttpTransformAdapter, http_transform_adapter, http_transform_adapter_for, http_transform_adapters,
 )
 from rey_lib.db.connection import Connection
 from rey_lib.errors.error_utils import ConfigError, HttpTransportError
@@ -41,7 +41,7 @@ from rey_lib.web_utils import HttpConnection, HttpRequest
 _SECRET = "synthetic-api-key"
 
 
-class _Echo(HttpAdapter):
+class _Echo(HttpTransformAdapter):
     """Adds `echoed` to each record from one POST of all records, by position."""
 
     def output_columns(self, input_columns: list[str]) -> list[str]:
@@ -94,10 +94,10 @@ def _connection(handler: Any, **overrides: Any) -> HttpConnection:
 @pytest.fixture(autouse=True)
 def _adapters(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("EXAMPLE_API_KEY", _SECRET)
-    http_transform._discover_adapters()
+    http_transform._discover_transform_adapters()
     before = dict(http_transform._ADAPTERS)
-    http_adapter("echo")(_Echo)
-    http_adapter("elsewhere")(_Elsewhere)
+    http_transform_adapter("echo")(_Echo)
+    http_transform_adapter("elsewhere")(_Elsewhere)
     yield
     http_transform._ADAPTERS.clear()
     http_transform._ADAPTERS.update(before)
@@ -125,11 +125,11 @@ def _http(**values: Any) -> Transform:
 
 class TestTheAdapterRegistry:
     def test_a_registered_adapter_is_found_by_name(self) -> None:
-        assert isinstance(http_adapter_for("echo"), _Echo)
-        assert "echo" in http_adapters()
+        assert isinstance(http_transform_adapter_for("echo"), _Echo)
+        assert "echo" in http_transform_adapters()
 
     def test_an_unregistered_name_answers_none(self) -> None:
-        assert http_adapter_for("nobody") is None
+        assert http_transform_adapter_for("nobody") is None
 
 
 class TestTheKindIsHidden:
@@ -286,10 +286,10 @@ class TestTheBoundary:
     def test_adapters_are_discovered_on_the_first_lookup_only(self) -> None:
         probe = (
             "import sys, rey_lib.data\n"
-            "name = 'rey_lib.data.http_adapters.openfigi'\n"
+            "name = 'rey_lib.data.http_transform_adapters.openfigi'\n"
             "print(name in sys.modules)\n"
-            "from rey_lib.data.http_transform import http_adapter_for\n"
-            "print(type(http_adapter_for('openfigi')).__name__, name in sys.modules)\n"
+            "from rey_lib.data.http_transform import http_transform_adapter_for\n"
+            "print(type(http_transform_adapter_for('openfigi')).__name__, name in sys.modules)\n"
         )
         found = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
 
