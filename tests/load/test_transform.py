@@ -576,3 +576,72 @@ class TestTheInForceDeclaration:
         self, values: dict[str, Any], kind: str, expected: Optional[dict[str, Any]],
     ) -> None:
         assert Transform(values, selected=kind).in_force_declaration() == expected
+
+
+class TestFromSource:
+    """The Transform reads its Source to create itself (backlog 677)."""
+
+    @staticmethod
+    def _csv(tmp_path: Any) -> str:
+        held = tmp_path / "in.csv"
+        held.write_text("a,b\n1,x\n", encoding="utf-8")
+        return str(held)
+
+    def test_it_starts_from_the_columns_the_source_carries(self, tmp_path: Any) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.load import Source
+
+        built = Transform.from_source(
+            SimpleNamespace(), Source({"file": self._csv(tmp_path)}),
+            {"selected": "declaration"},
+        )
+
+        assert built.source_columns() == ["a", "b"]
+        assert [one.get("source") for one in built.columns()] == ["a", "b"]
+
+    def test_a_given_declaration_is_kept_as_it_is(self, tmp_path: Any) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.load import Source
+
+        declared = {"columns": [{"source": "a", "name": "renamed"}]}
+        built = Transform.from_source(
+            SimpleNamespace(), Source({"file": self._csv(tmp_path)}),
+            {"values": {"transform": json.dumps(declared)}, "selected": "declaration"},
+        )
+
+        assert built.executed_declaration()["columns"][0]["name"] == "renamed"
+        assert built.source_columns() == ["a", "b"]
+
+    def test_an_incomplete_source_starts_with_no_columns(self) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.load import Source
+
+        built = Transform.from_source(SimpleNamespace(), Source(selected="database"))
+
+        assert built.source_columns() == []
+
+    def test_an_unreadable_source_starts_with_no_columns(self, tmp_path: Any) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.load import Source
+
+        built = Transform.from_source(
+            SimpleNamespace(), Source({"file": str(tmp_path / "absent.csv")}),
+        )
+
+        assert built.source_columns() == []
+
+    def test_it_keeps_neither_the_source_nor_the_context(self, tmp_path: Any) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.load import Source
+
+        source = Source({"file": self._csv(tmp_path)})
+        ctx = SimpleNamespace()
+        built = Transform.from_source(ctx, source)
+
+        assert all(value is not source and value is not ctx for value in vars(built).values())
+        assert built.declaration() == Transform().declaration()

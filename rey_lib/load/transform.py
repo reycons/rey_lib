@@ -49,15 +49,19 @@ from typing import Any, Mapping, Optional
 
 from rey_lib.config.config_loader import parse_yaml
 from rey_lib.data.column_transform import TransformPersistence, authorable_starters
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
 from rey_lib.load.file_transform import build_file_transform, file_kind, file_kinds
 from rey_lib.errors.error_utils import StateError
+from rey_lib.logs import get_logger
 
 __all__ = [
     "COLUMN_FIELDS", "Transform", "TRANSFORM_FIELDS", "TRANSFORM_KINDS", "TRANSFORM_PARAMETERS",
 ]
+
+
+_logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -196,6 +200,49 @@ class Transform:
             values=dict(declaration.get("values") or {}),
             selected=declaration.get("selected") or None,
         )
+
+    @classmethod
+    def from_source(
+        cls,
+        ctx: Any,
+        source: Any,
+        declaration: Optional[Mapping[str, Any]] = None,
+    ) -> "Transform":
+        """Build a Transform that starts from what its Source carries (backlog 677).
+
+        THE TRANSFORM READS ITS SOURCE TO CREATE ITSELF. Built from its
+        declarative form exactly as :meth:`from_declaration`, then told the
+        columns the Source carries -- read through the one existing reading,
+        ``rey_lib.load.execution.source_columns`` -- as the context its initial
+        mapping is completed against.
+
+        INITIALISATION ONLY. The Source is read once, here; neither it nor the
+        context is kept, and nothing is re-read later. A declaration given is
+        kept as it is: the columns are context, never a field, so a profiled
+        declaration is never overwritten. A Source that cannot be read yet --
+        incomplete, or not resolvable -- starts the Transform with no columns.
+
+        Args:
+            ctx: The runtime context, to resolve the Source.
+            source: The canonical Source this Transform transforms.
+            declaration: This Transform's declarative form, if it has one.
+
+        Returns:
+            The Transform, its source columns observed where they could be read.
+        """
+        from rey_lib.load.execution import source_columns  # noqa: PLC0415
+
+        built = cls.from_declaration(declaration or {})
+        try:
+            columns = source_columns(ctx, source)
+        except (AppError, ValueError, OSError) as exc:
+            _logger.debug(
+                "transform: the source could not be read for its initial columns (%s)",
+                type(exc).__name__,
+            )
+            columns = []
+        built.observe_source_columns(columns)
+        return built
 
     def declaration(self) -> dict[str, Any]:
         """The declarative form: what was said, and what was chosen.
