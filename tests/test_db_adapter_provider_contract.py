@@ -168,6 +168,29 @@ class TestSupportIsResolvedNotListed:
         _with_backend(monkeypatch, _Backend("bulk_insert"))
         assert adapter.supports_provider_capability(object(), "bulk_insert") is True
 
+    def test_a_provider_whose_driver_is_absent_answers_false(
+        self, adapter: DBAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An absent driver is "this installation cannot", never a raise (backlog 326)."""
+        def absent(_provider: str) -> Any:
+            raise ModuleNotFoundError("No module named 'pyodbc'")
+
+        monkeypatch.setattr(adapter_module, "_backend", absent)
+
+        assert adapter.supports_provider_capability(object(), "bulk_insert") is False
+
+    def test_a_backend_that_fails_otherwise_still_raises(
+        self, adapter: DBAdapter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only an ImportError is an absence; anything else is a fault."""
+        def broken(_provider: str) -> Any:
+            raise RuntimeError("backend failed while importing")
+
+        monkeypatch.setattr(adapter_module, "_backend", broken)
+
+        with pytest.raises(RuntimeError):
+            adapter.supports_provider_capability(object(), "bulk_insert")
+
     def test_an_unknown_capability_raises_rather_than_answering_false(
         self, adapter: DBAdapter, monkeypatch: pytest.MonkeyPatch
     ) -> None:
