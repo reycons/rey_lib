@@ -188,9 +188,6 @@ class Transform:
         # CONTEXT, NOT CONFIGURATION: the columns the source was last observed
         # to carry. Never in `declaration()`, never persisted.
         self._source_columns: tuple[str, ...] = ()
-        # EPHEMERAL OUTPUT, not configuration: the last preview produced through
-        # this transform. Never in `declaration()`, never persisted or run.
-        self._preview: Optional[dict[str, Any]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -376,18 +373,6 @@ class Transform:
     def source_columns(self) -> list[str]:
         """The columns the source was last observed to carry."""
         return list(self._source_columns)
-
-    def observe_preview(self, preview: Optional[Mapping[str, Any]]) -> None:
-        """Hold the last preview produced through this transform, or None.
-
-        Ephemeral output: nothing about what is declared, selected or valid
-        changes, and it is never part of the declarative form.
-        """
-        self._preview = deepcopy(dict(preview)) if preview is not None else None
-
-    def current_preview(self) -> Optional[dict[str, Any]]:
-        """The last preview produced through this transform, or None."""
-        return deepcopy(self._preview) if self._preview is not None else None
 
     # -- persistence ---------------------------------------------------------
 
