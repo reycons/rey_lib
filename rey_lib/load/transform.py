@@ -17,8 +17,8 @@ transform object, a context or a secret.
     identity     (nothing)                     -> IdentityTransform
     declaration  transform                     -> ColumnTransform
     yaml         transform-file                -> ColumnTransform
-    http         http-connection, http-adapter,  -> HTTPTransform
-                 http-options
+    http         http-connection, http-adapter,  -> HTTPTransform (a ColumnTransform
+                 http-options, http-transform       from http-transform, then the adapter)
     manifest     declaration, persistence      -> ColumnTransform
 
 **MANIFEST AND YAML ARE CONFIGURATION ORIGINS, not implementations.** A stored
@@ -85,8 +85,10 @@ TRANSFORM_KINDS: tuple[_Kind, ...] = (
     # Records sent through a named HTTP connection by a registered adapter
     # (backlogs 671, 668). The field names are the load command's flat
     # parameter namespace; executed_declaration normalises them.
+    # `http-transform` is the column mapping applied BEFORE sending (backlog
+    # 679): authored as Declaration's is, never required.
     _Kind(
-        "http", ("http-connection", "http-adapter", "http-options"),
+        "http", ("http-connection", "http-adapter", "http-options", "http-transform"),
         ("http-connection", "http-adapter"), outbound_via="http-connection",
     ),
     # `persistence` is never required to EXECUTE: a declaration defines the
@@ -102,6 +104,7 @@ TRANSFORM_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 #: The fields the loader declares as parameters -- the externally typed subset.
 TRANSFORM_PARAMETERS: tuple[str, ...] = (
     "transform", "transform-file", "http-connection", "http-adapter", "http-options",
+    "http-transform",
 )
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TRANSFORM_KINDS}
@@ -139,7 +142,9 @@ def _file_fields() -> tuple[str, ...]:
 COLUMN_FIELDS: tuple[str, ...] = ("source", "name", "datatype", "export", "type", "transform")
 
 #: Where each authorable kind keeps its declaration.
-_AUTHORED_IN: dict[str, str] = {"declaration": "transform", "manifest": "declaration"}
+_AUTHORED_IN: dict[str, str] = {
+    "declaration": "transform", "http": "http-transform", "manifest": "declaration",
+}
 
 #: The persisted facts held per entry, beside the declaration and never in it.
 _ALIGNED: tuple[str, ...] = ("column_ids", "column_ordinals")
@@ -612,13 +617,14 @@ class Transform:
         aligned: Optional[dict[str, list[Any]]],
     ) -> None:
         """Put the whole authored declaration back where its kind keeps it."""
-        kind = self.selected_kind()
+        field = _AUTHORED_IN[self.selected_kind()]
         written = {**declared, "columns": columns}
-        if kind == "declaration":
-            # JSON text: the loader parameter's own form, read by `parse_yaml`.
-            self._values["transform"] = json.dumps(written, indent=2)
+        if field in TRANSFORM_PARAMETERS:
+            # JSON text: the loader parameter's own form, read by `parse_yaml`
+            # -- Declaration's `transform` and HTTP's `http-transform`.
+            self._values[field] = json.dumps(written, indent=2)
         else:
-            self._values["declaration"] = written
+            self._values[field] = written
         # ONLY WHAT IS HELD. No stored fact is manufactured for a declaration
         # that was never stored, nor a key a persistence never had.
         if aligned:
@@ -641,7 +647,8 @@ class Transform:
             None for ``identity``; the parsed declaration for ``declaration``
             (inline YAML or JSON text, or a mapping) and ``yaml`` (the file,
             read here); the stored declaration for ``manifest``; for ``http``,
-            the connection and adapter names and the options as a mapping.
+            the connection and adapter names, the options as a mapping, and
+            the column declaration applied before sending, or None.
 
         Raises:
             ConfigError: If the selected kind is incomplete, or a declaration is
@@ -669,6 +676,12 @@ class Transform:
                 "connection": str(held["http-connection"]),
                 "adapter": str(held["http-adapter"]),
                 "options": _http_options(held.get("http-options")),
+                # THE AUTHORED MAPPING, or None: no declaration is manufactured
+                # for a mapping that was only ever described (backlog 679).
+                "declaration": (
+                    _declared(held["http-transform"], "http-transform")
+                    if _held(held.get("http-transform")) else None
+                ),
             }
         if kind == "declaration":
             return _declared(held["transform"], "transform")

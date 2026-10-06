@@ -305,7 +305,7 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
     Args:
         ctx: Application context, for the connection lookup.
         declared: ``Transform.executed_declaration()`` for an ``http`` kind --
-            ``connection``, ``adapter`` and ``options``.
+            ``connection``, ``adapter``, ``options`` and ``declaration``.
 
     Returns:
         The HTTPTransform.
@@ -333,7 +333,14 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
             f"Transform (http): no HTTP adapter is registered as '{adapter_name}'. "
             f"Adapters: {', '.join(http_transform_adapters()) or 'none'}."
         )
-    return HTTPTransform(connection, adapter, declared.get("options") or {})
+    # THE MAPPING BEFORE SENDING, where one is authored (backlog 679): built by
+    # the single builder, so it is a ColumnTransform with its secrets resolved
+    # exactly as anywhere else. None is a genuine pass-through.
+    mapping = (
+        _build_transform(ctx, None, declared["declaration"])
+        if declared.get("declaration") else None
+    )
+    return HTTPTransform(connection, adapter, declared.get("options") or {}, mapping)
 
 
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:

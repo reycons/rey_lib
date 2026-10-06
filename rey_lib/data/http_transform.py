@@ -30,7 +30,7 @@ import pkgutil
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
-from rey_lib.data.data_transform import DeclaredTransform
+from rey_lib.data.data_transform import DataTransform, DeclaredTransform
 from rey_lib.logs import get_logger
 
 if TYPE_CHECKING:
@@ -134,34 +134,47 @@ class HTTPTransform(DeclaredTransform):
         connection: "HttpConnection",
         adapter: HttpTransformAdapter,
         options: Optional[Mapping[str, Any]] = None,
+        mapping: Optional[DataTransform] = None,
     ) -> None:
-        """Hold the connection, the adapter and its options; send nothing.
+        """Hold the connection, the adapter, its options and the mapping; send nothing.
 
         Args:
             connection: The named HTTP connection, already resolved.
             adapter: The provider adapter.
             options: The adapter's configuration.
+            mapping: The column mapping applied to the records BEFORE they are
+                sent (backlog 679) -- the existing ``ColumnTransform``, built by
+                its single builder -- or None for a pass-through. It is applied
+                here, once; the adapter only ever sees its output.
         """
         super().__init__()
         self.connection = connection
         self.adapter = adapter
         self.options: dict[str, Any] = dict(options or {})
+        self.mapping = mapping
 
     def transform(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """The records the adapter produces from these, through the connection."""
+        """The records the adapter produces from these, mapped first, through the connection."""
         _logger.debug(
-            "http transform: %d record(s) through adapter %s on connection %s",
+            "http transform: %d record(s) through adapter %s on connection %s%s",
             len(records), type(self.adapter).__name__, self.connection.name,
+            ", mapped first" if self.mapping is not None else "",
         )
-        return self.adapter.apply(list(records), self.connection, dict(self.options))
+        sent = self.mapping.transform(list(records)) if self.mapping is not None else list(records)
+        return self.adapter.apply(sent, self.connection, dict(self.options))
 
     def columns_for_names(self, actual: list[str]) -> list[str]:
         """The produced columns, given the INPUT column names.
 
-        Asked by a preview of the source's names. The adapter answers from the
+        Asked by a preview of the source's names. The mapping, where there is
+        one, answers which columns it produces; the adapter answers from those
         names alone -- nothing is sent.
         """
-        return list(self.adapter.output_columns(list(actual)))
+        mapped = (
+            self.mapping.columns_for_names(list(actual))
+            if self.mapping is not None else list(actual)
+        )
+        return list(self.adapter.output_columns(list(mapped)))
 
     def _columns_for(self, records: list[dict[str, Any]]) -> list[str]:
         """The PRODUCED records' own columns, for ``logical_schema``."""

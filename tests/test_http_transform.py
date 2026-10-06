@@ -322,7 +322,10 @@ class TestThroughTheLoadPath:
     def test_what_ran_is_recorded_without_a_secret(self) -> None:
         declared = _http(options={"path": "echo"}).executed_declaration()
 
-        assert declared == {"connection": "web", "adapter": "echo", "options": {"path": "echo"}}
+        assert declared == {
+            "connection": "web", "adapter": "echo", "options": {"path": "echo"},
+            "declaration": None,
+        }
         assert _SECRET not in json.dumps(declared)
 
 
@@ -368,3 +371,121 @@ class TestTheBoundary:
         found = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
 
         assert found.stdout.strip() == "False"
+
+
+class _Recorder(HttpTransformAdapter):
+    """Records exactly what it was handed; adds one column; sends nothing."""
+
+    handed: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+
+    def output_columns(self, input_columns: list[str]) -> list[str]:
+        return [*input_columns, "seen"]
+
+    def apply(self, records: Any, connection: HttpConnection, options: Any) -> Any:
+        type(self).handed.append(([dict(one) for one in records], dict(options)))
+        return [{**one, "seen": "yes"} for one in records]
+
+
+_MAPPING = {"columns": [
+    {"source": "cusip", "name": "lookup_id"},
+    {"source": "note", "name": "note", "export": False},
+    {"source": "asset_id", "name": "asset_id"},
+]}
+
+
+class TestTheMappingBeforeSending:
+    """http-transform: the existing ColumnTransform, applied before the adapter (backlog 679)."""
+
+    @pytest.fixture(autouse=True)
+    def _recorder(self) -> Any:
+        _Recorder.handed = []
+        http_transform_adapter("recorder")(_Recorder)
+        yield
+
+    @staticmethod
+    def _built(wire: list[httpx.Request], mapping: Any = _MAPPING) -> HTTPTransform:
+        values = {"http-connection": "web", "http-adapter": "recorder"}
+        if mapping is not None:
+            values["http-transform"] = json.dumps(mapping)
+        return Transform(values, selected="http").resolve(SimpleNamespace())
+
+    def test_records_are_mapped_before_the_adapter_sees_them(self, wire: list[httpx.Request]) -> None:
+        built = self._built(wire)
+
+        produced = built.transform([{"cusip": "X1", "note": "n", "asset_id": "7"}])
+
+        (handed, _options), = _Recorder.handed
+        assert handed == [{"lookup_id": "X1", "asset_id": "7"}]
+        assert produced == [{"lookup_id": "X1", "asset_id": "7", "seen": "yes"}]
+
+    def test_a_dropped_column_never_reaches_the_adapter_or_the_result(
+        self, wire: list[httpx.Request],
+    ) -> None:
+        produced = self._built(wire).transform([{"cusip": "X1", "note": "n", "asset_id": "7"}])
+
+        (handed, _options), = _Recorder.handed
+        assert "note" not in handed[0]
+        assert "note" not in produced[0]
+
+    def test_mapping_happens_exactly_once_and_the_adapter_gets_no_declaration(
+        self, wire: list[httpx.Request], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rey_lib.data.column_transform import ColumnTransform
+
+        calls: list[int] = []
+        real = ColumnTransform.transform
+        monkeypatch.setattr(
+            ColumnTransform, "transform",
+            lambda self, records: calls.append(len(records)) or real(self, records),
+        )
+        built = self._built(wire)
+
+        built.transform([{"cusip": "X1", "note": "n", "asset_id": "7"}])
+
+        assert calls == [1]
+        (_handed, options), = _Recorder.handed
+        assert options == {}
+        assert "columns" not in json.dumps(options)
+
+    def test_preview_columns_are_the_mapped_columns_and_the_adapters(
+        self, wire: list[httpx.Request],
+    ) -> None:
+        built = self._built(wire)
+
+        assert built.columns_for_names(["cusip", "note", "asset_id"]) == [
+            "lookup_id", "asset_id", "seen",
+        ]
+        assert _Recorder.handed == [] and wire == []
+
+    def test_no_declaration_is_a_genuine_pass_through(self, wire: list[httpx.Request]) -> None:
+        built = self._built(wire, mapping=None)
+
+        produced = built.transform([{"cusip": "X1", "note": "n"}])
+
+        assert built.mapping is None
+        assert produced == [{"cusip": "X1", "note": "n", "seen": "yes"}]
+
+    def test_the_executed_declaration_records_the_authored_mapping(self) -> None:
+        declared = Transform(
+            {"http-connection": "web", "http-adapter": "recorder",
+             "http-transform": json.dumps(_MAPPING)}, selected="http",
+        ).executed_declaration()
+
+        assert declared["declaration"]["columns"][0] == {"source": "cusip", "name": "lookup_id"}
+
+    def test_no_declaration_is_manufactured_from_the_described_mapping(self) -> None:
+        held = Transform({"http-connection": "web", "http-adapter": "recorder"}, selected="http")
+        held.observe_source_columns(["cusip", "asset_id"])
+
+        assert [one["source"] for one in held.columns()] == ["cusip", "asset_id"]
+        assert held.value("http-transform") is None
+        assert held.executed_declaration()["declaration"] is None
+
+    def test_it_is_authored_like_a_declaration(self) -> None:
+        held = Transform({"http-connection": "web", "http-adapter": "recorder"}, selected="http")
+        held.observe_source_columns(["cusip", "asset_id"])
+
+        held.edit_column(0, "name", "lookup_id")
+
+        assert json.loads(held.value("http-transform"))["columns"][0]["name"] == "lookup_id"
+        assert held.executed_declaration()["declaration"]["columns"][0]["name"] == "lookup_id"

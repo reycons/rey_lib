@@ -341,6 +341,33 @@ class TestThroughTheTransform:
         assert len(provider.requests) == 1
 
 
+class TestTheMappingBeforeSending:
+    def test_id_column_names_the_column_after_mapping(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # backlog 679: `symbol` is renamed `lookup_id` before sending, and the
+        # options name the renamed column.
+        provider = _Provider()
+        connection = _connection(provider)
+        monkeypatch.setattr(load_operation, "shared_connection", lambda _ctx, _name: connection)
+        mapping = {"columns": [
+            {"source": "symbol", "name": "lookup_id"},
+            {"source": "note", "name": "note", "export": False},
+        ]}
+        transform = Transform({
+            "http-connection": "openfigi", "http-adapter": "openfigi",
+            "http-options": {"id_column": "lookup_id", "id_type": "TICKER"},
+            "http-transform": json.dumps(mapping),
+        }, selected="http")
+
+        rows = transform.resolve(SimpleNamespace()).transform(_records("IBM"))
+
+        assert json.loads(provider.requests[0].content) == [
+            {"idType": "TICKER", "idValue": "IBM"},
+        ]
+        assert "note" not in rows[0] and rows[0]["lookup_id"] == "IBM"
+
+
 class TestLogging:
     def test_no_identifier_or_value_is_logged(
         self, caplog: pytest.LogCaptureFixture, waits: list[float],

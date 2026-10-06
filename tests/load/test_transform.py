@@ -61,7 +61,7 @@ class TestTheVocabulary:
     def test_the_fields_are_everything_the_transform_holds(self) -> None:
         assert TRANSFORM_FIELDS == (
             "transform", "transform-file", "http-connection", "http-adapter",
-            "http-options", "declaration", "persistence",
+            "http-options", "http-transform", "declaration", "persistence",
         )
 
     def test_the_loader_parameters_are_the_typed_subset(self) -> None:
@@ -69,6 +69,7 @@ class TestTheVocabulary:
         # parameters any loader invocation types.
         assert TRANSFORM_PARAMETERS == (
             "transform", "transform-file", "http-connection", "http-adapter", "http-options",
+            "http-transform",
         )
         assert set(TRANSFORM_PARAMETERS) <= set(TRANSFORM_FIELDS)
 
