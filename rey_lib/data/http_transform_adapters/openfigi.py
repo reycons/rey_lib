@@ -29,6 +29,8 @@ endpoints, are not used.
 Options
 -------
 id_column (required)  the input column holding the identifier
+isin_column (required) the input column holding the ISIN that gives each record's
+                      home market -- US and CA only (backlog 689)
 id_type (required)    the OpenFIGI idType of every job, e.g. TICKER, ID_ISIN
 job                   constant job properties, from the documented list only
 batch_size            jobs per request, 1..100, default 5 -- OpenFIGI documents
@@ -73,26 +75,22 @@ _ID_TYPES: tuple[str, ...] = (
     "VENDOR_INDEX_CODE",
 )
 
-#: Each documented candidate property, and the column it is written to.
+#: The selected candidate's properties, and the column each is written to.
 _CANDIDATE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("figi", "figi_figi"),
-    ("name", "figi_name"),
-    ("ticker", "figi_ticker"),
-    ("exchCode", "figi_exch_code"),
-    ("marketSector", "figi_market_sector"),
-    ("securityType", "figi_security_type"),
-    ("securityType2", "figi_security_type2"),
     ("compositeFIGI", "figi_composite_figi"),
     ("shareClassFIGI", "figi_share_class_figi"),
-    ("securityDescription", "figi_security_description"),
-    ("metadata", "figi_metadata"),
 )
 
-#: The columns every output row adds after its input record's own, in order.
+#: The columns every output row adds after its input record's own, in order:
+#: ONE ROW PER RECORD, enriched with the selected candidate (backlog 689).
 OUTPUT_COLUMNS: tuple[str, ...] = (
-    "figi_job", "figi_status", "figi_candidate_count", "figi_message",
-    *(column for _, column in _CANDIDATE_COLUMNS),
+    "figi_status", "figi_message", *(column for _, column in _CANDIDATE_COLUMNS),
 )
+
+#: Each supported ISIN country, and the exchCode of its country composite.
+#: US AND CA ONLY in this slice (backlog 689).
+_HOME_MARKETS: dict[str, str] = {"US": "US", "CA": "CN"}
 
 _DEFAULT_BATCH_SIZE = 5
 _MAX_BATCH_SIZE = 100
@@ -130,6 +128,7 @@ class _Settings:
     """The validated options."""
 
     id_column: str
+    isin_column: str
     id_type: str
     job: dict[str, Any]
     batch_size: int
@@ -145,6 +144,9 @@ class _Settings:
         id_column = str(options.get("id_column") or "").strip()
         if not id_column:
             raise ConfigError("openfigi: option id_column is required.")
+        isin_column = str(options.get("isin_column") or "").strip()
+        if not isin_column:
+            raise ConfigError("openfigi: option isin_column is required.")
         id_type = str(options.get("id_type") or "").strip()
         if not id_type:
             raise ConfigError("openfigi: option id_type is required.")
@@ -165,7 +167,7 @@ class _Settings:
         max_retries = _whole(options.get("max_retries"), _DEFAULT_MAX_RETRIES, "max_retries")
         if max_retries < 0:
             raise ConfigError("openfigi: option max_retries must not be negative.")
-        return cls(id_column, id_type, dict(job), batch_size, max_retries)
+        return cls(id_column, isin_column, id_type, dict(job), batch_size, max_retries)
 
 
 def _whole(value: Any, default: int, name: str) -> int:
@@ -204,6 +206,7 @@ class OpenFigiAdapter(HttpTransformAdapter):
         """OpenFIGI's options, as documented in this module (backlog 687)."""
         return [
             {"name": "id_column", "required": True, "kind": "column"},
+            {"name": "isin_column", "required": True, "kind": "column"},
             {"name": "id_type", "required": True, "kind": "choice", "choices": list(_ID_TYPES)},
             {"name": "batch_size", "required": False, "kind": "integer",
              "default": _DEFAULT_BATCH_SIZE},
@@ -229,11 +232,12 @@ class OpenFigiAdapter(HttpTransformAdapter):
                 one-result-per-job contract.
         """
         settings = _Settings.of(options)
-        if records and settings.id_column not in records[0]:
-            raise ConfigError(
-                f"openfigi: option id_column '{settings.id_column}' is not a column "
-                "of the records."
-            )
+        for name, column in (("id_column", settings.id_column),
+                             ("isin_column", settings.isin_column)):
+            if records and column not in records[0]:
+                raise ConfigError(
+                    f"openfigi: option {name} '{column}' is not a column of the records."
+                )
         produced: list[dict[str, Any]] = []
         wait = 0.0
         batches = range(0, len(records), settings.batch_size)
@@ -258,7 +262,7 @@ class OpenFigiAdapter(HttpTransformAdapter):
                 results = {position: answer for (position, _), answer in zip(sent, answers)}
             for offset, record in enumerate(batch):
                 position = start + offset
-                produced.extend(_rows(record, position, results.get(position), settings))
+                produced.append(_row(record, position, results.get(position), settings))
         return produced
 
     def _send(
@@ -319,36 +323,61 @@ def _retry_wait(response: HttpResponse, attempt: int) -> float:
     return min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt))
 
 
-def _rows(
+def _row(
     record: Mapping[str, Any],
     position: int,
     answer: Optional[Mapping[str, Any]],
     settings: _Settings,
-) -> list[dict[str, Any]]:
-    """The output rows for one input record: one per candidate, else one."""
-    def row(status: str, count: int, message: str, candidate: Mapping[str, Any]) -> dict:
+) -> dict[str, Any]:
+    """The ONE output row for one input record: it, enriched with its selection.
+
+    Every candidate is read here and none is emitted: the record's home-market
+    composite is selected (backlog 689), and the record keeps its own columns.
+    """
+    def row(status: str, message: str, candidate: Mapping[str, Any]) -> dict[str, Any]:
         return {
             **record,
-            "figi_job": position,
             "figi_status": status,
-            "figi_candidate_count": count,
             "figi_message": message,
             **{column: _text(candidate.get(name)) for name, column in _CANDIDATE_COLUMNS},
         }
 
     if answer is None:
-        return [row("no_match", 0, f"no identifier in {settings.id_column}", {})]
+        return row("no_match", f"no identifier in {settings.id_column}", {})
     if not isinstance(answer, Mapping):
         raise OpenFigiError(f"openfigi: job {position} result is not an object.")
     if "error" in answer:
-        return [row("error", 0, _text(answer["error"]), {})]
+        return row("error", _text(answer["error"]), {})
     candidates = answer.get("data")
-    if candidates:
-        if not isinstance(candidates, list) or not all(
-            isinstance(candidate, Mapping) for candidate in candidates
-        ):
-            raise OpenFigiError(f"openfigi: job {position} data is not a list of objects.")
-        return [row("matched", len(candidates), "", candidate) for candidate in candidates]
-    if "warning" in answer or candidates == []:
-        return [row("no_match", 0, _text(answer.get("warning")), {})]
-    raise OpenFigiError(f"openfigi: job {position} result has no data, warning or error.")
+    if not candidates:
+        if "warning" in answer or candidates == []:
+            return row("no_match", _text(answer.get("warning")), {})
+        raise OpenFigiError(f"openfigi: job {position} result has no data, warning or error.")
+    if not isinstance(candidates, list) or not all(
+        isinstance(candidate, Mapping) for candidate in candidates
+    ):
+        raise OpenFigiError(f"openfigi: job {position} data is not a list of objects.")
+    country = str(record.get(settings.isin_column) or "").strip()[:2].upper()
+    home = _HOME_MARKETS.get(country)
+    if home is None:
+        return row(
+            "unsupported_home_market",
+            f"ISIN country '{country}' is outside US/CA" if country
+            else f"no ISIN in {settings.isin_column}",
+            {},
+        )
+    # THE HOME-COUNTRY COMPOSITE, never one of its venue listings.
+    composites = {
+        str(candidate.get("figi")): candidate for candidate in candidates
+        if candidate.get("exchCode") == home
+        and candidate.get("figi") and candidate.get("figi") == candidate.get("compositeFIGI")
+    }
+    if not composites:
+        return row(
+            "no_home_listing",
+            f"no {home} composite among {len(candidates)} candidate(s)", {},
+        )
+    if len(composites) > 1:
+        return row("ambiguous", f"{len(composites)} {home} composites", {})
+    (selected,) = composites.values()
+    return row("matched", "", selected)

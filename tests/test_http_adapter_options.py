@@ -29,11 +29,12 @@ def test_openfigi_declares_its_options() -> None:
     declared = http_transform_adapter_for("openfigi").options()
 
     assert [(one["name"], one["kind"], one["required"]) for one in declared] == [
-        ("id_column", "column", True), ("id_type", "choice", True),
+        ("id_column", "column", True), ("isin_column", "column", True),
+        ("id_type", "choice", True),
         ("batch_size", "integer", False), ("max_retries", "integer", False),
         ("job", "properties", False),
     ]
-    assert "ID_CUSIP" in declared[1]["choices"]
+    assert "ID_CUSIP" in declared[2]["choices"]
 
 
 def test_the_transform_answers_them_with_values_and_column_choices() -> None:

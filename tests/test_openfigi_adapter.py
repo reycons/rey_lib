@@ -1,8 +1,9 @@
 """The OpenFIGI v3 mapping adapter (backlog 667).
 
 Asserted: registration by discovery; the options contract; batching in input
-order with positional correlation; one row per candidate, a no-match or an
-error still one row; the fixed output schema, answered without a request;
+order with positional correlation; ONE ROW PER RECORD, enriched with its
+home-market composite and nothing else (backlog 689); the fixed output schema,
+answered without a request;
 rate-limit and retry behaviour for 429, 500 and 503; configuration statuses;
 the request shape; the transform end to end; logs without values.
 
@@ -35,10 +36,13 @@ _SECRET = "synthetic-api-key"
 Reply = Callable[[list[dict[str, Any]], int], httpx.Response]
 
 
-def _candidate(figi: str, ticker: str) -> dict[str, Any]:
-    return {"figi": figi, "name": f"{ticker} CO", "ticker": ticker, "exchCode": "US",
+def _candidate(
+    figi: str, ticker: str, exch: str = "US", composite: Optional[str] = None,
+) -> dict[str, Any]:
+    """One listing. A country composite unless ``composite`` names another FIGI."""
+    return {"figi": figi, "name": f"{ticker} CO", "ticker": ticker, "exchCode": exch,
             "marketSector": "Equity", "securityType": "Common Stock",
-            "securityType2": "Common Stock", "compositeFIGI": figi,
+            "securityType2": "Common Stock", "compositeFIGI": composite or figi,
             "shareClassFIGI": "BBG001S5N8V8", "securityDescription": ticker}
 
 
@@ -99,12 +103,16 @@ def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 def _apply(provider: _Provider, records: list[dict[str, Any]], **options: Any) -> list[dict]:
     return OpenFigiAdapter().apply(
-        records, _connection(provider), {"id_column": "symbol", "id_type": "TICKER", **options},
+        records, _connection(provider),
+        {"id_column": "symbol", "isin_column": "isin", "id_type": "TICKER", **options},
     )
 
 
-def _records(*symbols: str) -> list[dict[str, Any]]:
-    return [{"symbol": symbol, "note": f"n{index}"} for index, symbol in enumerate(symbols)]
+def _records(*symbols: str, isin: str = "US0000000000") -> list[dict[str, Any]]:
+    return [
+        {"symbol": symbol, "note": f"n{index}", "isin": isin}
+        for index, symbol in enumerate(symbols)
+    ]
 
 
 class TestRegistration:
@@ -114,8 +122,9 @@ class TestRegistration:
 
 class TestOptions:
     @pytest.mark.parametrize(("options", "message"), [
-        ({"id_type": "TICKER"}, "id_column is required"),
-        ({"id_column": "symbol"}, "id_type is required"),
+        ({"id_type": "TICKER", "isin_column": "isin"}, "id_column is required"),
+        ({"id_column": "symbol", "id_type": "TICKER"}, "isin_column is required"),
+        ({"id_column": "symbol", "isin_column": "isin"}, "id_type is required"),
         ({"job": ["exchCode"]}, "job must be a mapping"),
         ({"job": {"exchCode": "US", "colour": "red"}}, "does not document: colour"),
         ({"batch_size": 0}, "batch_size must be 1..100"),
@@ -128,8 +137,8 @@ class TestOptions:
     ) -> None:
         provider = _Provider()
         # The two required options are given unless the case is about one of them.
-        required = {} if {"id_column", "id_type"} & set(options) else {
-            "id_column": "symbol", "id_type": "TICKER",
+        required = {} if {"id_column", "id_type", "isin_column"} & set(options) else {
+            "id_column": "symbol", "isin_column": "isin", "id_type": "TICKER",
         }
 
         with pytest.raises(ConfigError, match=message):
@@ -142,6 +151,20 @@ class TestOptions:
         with pytest.raises(ConfigError, match="'ticker' is not a column"):
             _apply(provider, _records("A"), id_column="ticker")
         assert provider.requests == []
+
+    def test_an_isin_column_the_records_lack_is_refused(self) -> None:
+        provider = _Provider()
+
+        with pytest.raises(ConfigError, match="isin_column 'code' is not a column"):
+            _apply(provider, _records("A"), isin_column="code")
+        assert provider.requests == []
+
+    def test_it_declares_isin_column_as_a_required_column(self) -> None:
+        declared = {one["name"]: one for one in OpenFigiAdapter().options()}
+
+        assert (declared["isin_column"]["kind"], declared["isin_column"]["required"]) == (
+            "column", True,
+        )
 
 
 class TestBatchingAndCorrelation:
@@ -160,8 +183,8 @@ class TestBatchingAndCorrelation:
 
         assert [len(jobs) for jobs in provider.jobs()] == [10, 10, 5]
         assert [job["idValue"] for jobs in provider.jobs() for job in jobs] == symbols
-        assert [(row["figi_job"], row["symbol"], row["figi_figi"]) for row in rows] == [
-            (n, f"S{n}", f"BBG-S{n}") for n in range(25)
+        assert [(row["symbol"], row["figi_figi"]) for row in rows] == [
+            (f"S{n}", f"BBG-S{n}") for n in range(25)
         ]
 
     def test_a_record_without_an_identifier_is_not_sent(self) -> None:
@@ -170,8 +193,8 @@ class TestBatchingAndCorrelation:
         rows = _apply(provider, _records("A", "", "B"))
 
         assert [job["idValue"] for job in provider.jobs()[0]] == ["A", "B"]
-        assert [(row["figi_job"], row["figi_status"]) for row in rows] == [
-            (0, "matched"), (1, "no_match"), (2, "matched"),
+        assert [(row["symbol"], row["figi_status"]) for row in rows] == [
+            ("A", "matched"), ("", "no_match"), ("B", "matched"),
         ]
         assert rows[1]["figi_message"] == "no identifier in symbol"
 
@@ -182,20 +205,66 @@ class TestBatchingAndCorrelation:
             _apply(provider, _records("A", "B"))
 
 
-class TestResults:
-    def test_one_row_per_candidate_and_none_dropped(self) -> None:
-        rows = _apply(_Provider(), _records("AMB"))
+def _listings(*candidates: dict[str, Any]) -> Reply:
+    """Answer every job with the same listings."""
+    return lambda jobs, _call: httpx.Response(200, json=[{"data": list(candidates)} for _ in jobs])
 
-        assert [(row["figi_status"], row["figi_candidate_count"], row["figi_figi"])
-                for row in rows] == [("matched", 2, "BBG0000A"), ("matched", 2, "BBG0000B")]
-        assert all(row["symbol"] == "AMB" and row["note"] == "n0" for row in rows)
+
+class TestResults:
+    def test_one_row_per_record_with_its_home_composite(self) -> None:
+        # MANY LISTINGS, ONE ROW: the US composite, never a venue line.
+        reply = _listings(
+            _candidate("BBG-UN", "VVV", "UN", composite="BBG-US"),
+            _candidate("BBG-US", "VVV", "US"),
+            _candidate("BBG-UQ", "VVV", "UQ", composite="BBG-US"),
+        )
+
+        (row,) = _apply(_Provider(reply), _records("VVV"))
+
+        assert (row["figi_status"], row["figi_figi"], row["figi_composite_figi"]) == (
+            "matched", "BBG-US", "BBG-US",
+        )
+        assert row["figi_share_class_figi"] == "BBG001S5N8V8"
+        assert (row["symbol"], row["note"], row["isin"]) == ("VVV", "n0", "US0000000000")
+
+    def test_a_canadian_isin_selects_the_cn_composite_over_a_us_otc_line(self) -> None:
+        reply = _listings(_candidate("BBG-EMLAF", "EMLAF", "US"), _candidate("BBG-CN", "EMP", "CN"))
+
+        (row,) = _apply(_Provider(reply), _records("EMP", isin="CA0000000000"))
+
+        assert (row["figi_status"], row["figi_figi"]) == ("matched", "BBG-CN")
+
+    def test_no_home_composite_is_no_home_listing(self) -> None:
+        reply = _listings(_candidate("BBG-EMLAF", "EMLAF", "US"))
+
+        (row,) = _apply(_Provider(reply), _records("EMP", isin="CA0000000000"))
+
+        assert (row["figi_status"], row["figi_message"], row["figi_figi"]) == (
+            "no_home_listing", "no CN composite among 1 candidate(s)", "",
+        )
+
+    def test_two_home_composites_are_ambiguous(self) -> None:
+        (row,) = _apply(_Provider(), _records("AMB"))
+
+        assert (row["figi_status"], row["figi_message"], row["figi_figi"]) == (
+            "ambiguous", "2 US composites", "",
+        )
+
+    @pytest.mark.parametrize(("isin", "message"), [
+        ("AU0000000000", "ISIN country 'AU' is outside US/CA"),
+        ("", "no ISIN in isin"),
+    ])
+    def test_a_market_outside_us_ca_is_unsupported(self, isin: str, message: str) -> None:
+        (row,) = _apply(_Provider(), _records("A", isin=isin))
+
+        assert (row["figi_status"], row["figi_message"], row["figi_figi"]) == (
+            "unsupported_home_market", message, "",
+        )
 
     def test_a_warning_is_one_no_match_row(self) -> None:
         (row,) = _apply(_Provider(), _records("NONE"))
 
-        assert (row["figi_status"], row["figi_candidate_count"], row["figi_message"]) == (
-            "no_match", 0, "No identifier found.",
-        )
+        assert (row["figi_status"], row["figi_message"]) == ("no_match", "No identifier found.")
         assert row["figi_figi"] == ""
 
     def test_a_job_error_is_one_error_row_not_raised(self) -> None:
@@ -203,19 +272,16 @@ class TestResults:
 
         assert (row["figi_status"], row["figi_message"]) == ("error", "Invalid idValue format.")
 
-    def test_every_row_carries_exactly_the_declared_columns(self) -> None:
+    def test_every_row_carries_exactly_the_record_and_the_five(self) -> None:
         rows = _apply(_Provider(), _records("A", "AMB", "NONE", "BAD"))
 
-        expected = OpenFigiAdapter().output_columns(["symbol", "note"])
+        expected = OpenFigiAdapter().output_columns(["symbol", "note", "isin"])
+        assert len(rows) == 4
         assert all(list(row) == expected for row in rows)
-        assert expected[2:] == list(OUTPUT_COLUMNS)
-
-    def test_metadata_is_kept_as_text(self) -> None:
-        reply = lambda jobs, _call: httpx.Response(200, json=[{"data": [{"metadata": {"k": 1}}]}])
-
-        (row,) = _apply(_Provider(reply), _records("A"))
-
-        assert row["figi_metadata"] == '{"k": 1}'
+        assert expected[3:] == list(OUTPUT_COLUMNS) == [
+            "figi_status", "figi_message", "figi_figi", "figi_composite_figi",
+            "figi_share_class_figi",
+        ]
 
     def test_output_columns_sends_nothing(self) -> None:
         provider = _Provider()
@@ -329,15 +395,20 @@ class TestThroughTheTransform:
         # The operator configuration for an authenticated connection: batch_size 100.
         transform = Transform({
             "http-connection": "openfigi", "http-adapter": "openfigi",
-            "http-options": {"id_column": "symbol", "id_type": "TICKER", "batch_size": 100},
+            "http-options": {
+                "id_column": "symbol", "isin_column": "isin", "id_type": "TICKER",
+                "batch_size": 100,
+            },
         }, selected="http")
 
         built = transform.resolve(SimpleNamespace())
         rows = built.transform(_records("A", "AMB"))
 
         assert isinstance(built.adapter, OpenFigiAdapter)
-        assert [row["figi_figi"] for row in rows] == ["BBG-A", "BBG0000A", "BBG0000B"]
-        assert built.columns_for_names(["symbol", "note"]) == list(rows[0])
+        assert [(row["figi_status"], row["figi_figi"]) for row in rows] == [
+            ("matched", "BBG-A"), ("ambiguous", ""),
+        ]
+        assert built.columns_for_names(["symbol", "note", "isin"]) == list(rows[0])
         assert len(provider.requests) == 1
 
 
@@ -353,10 +424,11 @@ class TestTheMappingBeforeSending:
         mapping = {"columns": [
             {"source": "symbol", "name": "lookup_id"},
             {"source": "note", "name": "note", "export": False},
+            {"source": "isin", "name": "isin"},
         ]}
         transform = Transform({
             "http-connection": "openfigi", "http-adapter": "openfigi",
-            "http-options": {"id_column": "lookup_id", "id_type": "TICKER"},
+            "http-options": {"id_column": "lookup_id", "isin_column": "isin", "id_type": "TICKER"},
             "http-transform": json.dumps(mapping),
         }, selected="http")
 
