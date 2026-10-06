@@ -157,6 +157,47 @@ class TestTheKindIsOffered:
             Transform(selected="http").resolve(SimpleNamespace())
 
 
+class TestHttpOptions:
+    """http-options is never silently collapsed to {} (backlog 668 defect)."""
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_empty_or_unset_is_no_options(self, value: Any) -> None:
+        assert _http(options=value).executed_declaration()["options"] == {}
+
+    def test_a_json_object_is_parsed(self) -> None:
+        declared = _http(options='{"id_column": "cusip", "batch_size": 100}')
+
+        assert declared.executed_declaration()["options"] == {
+            "id_column": "cusip", "batch_size": 100,
+        }
+
+    def test_a_mapping_is_taken_as_it_is(self) -> None:
+        assert _http(options={"id_column": "cusip"}).executed_declaration()["options"] == {
+            "id_column": "cusip",
+        }
+
+    @pytest.mark.parametrize(("text", "kind"), [
+        ('["id_column"]', "list"), ('"cusip"', "str"), ("100", "int"),
+    ])
+    def test_valid_json_that_is_not_an_object_is_refused(self, text: str, kind: str) -> None:
+        with pytest.raises(ConfigError, match=f"http-options must be a JSON object, got {kind}"):
+            _http(options=text).executed_declaration()
+
+    def test_invalid_json_is_refused_naming_http_options(self) -> None:
+        with pytest.raises(ConfigError, match="http-options is not valid JSON"):
+            _http(options='{"id_column": "cusip"').executed_declaration()
+
+    def test_curly_quotes_are_named(self) -> None:
+        with pytest.raises(ConfigError, match="Curly quotes are not JSON quotes"):
+            _http(options="{\u201cid_column\u201d: \u201ccusip\u201d}").executed_declaration()
+
+    def test_resolve_refuses_before_anything_is_sent(self, wire: list[httpx.Request]) -> None:
+        with pytest.raises(ConfigError, match="http-options is not valid JSON"):
+            _http(options="{not json").resolve(SimpleNamespace())
+
+        assert wire == []
+
+
 class TestOutbound:
     """The execution-effect fact a preview gate reads (663 invariant 4)."""
 

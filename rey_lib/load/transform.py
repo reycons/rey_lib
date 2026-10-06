@@ -621,7 +621,7 @@ class Transform:
             return {
                 "connection": str(held["http-connection"]),
                 "adapter": str(held["http-adapter"]),
-                "options": _json_mapping(held.get("http-options")) or {},
+                "options": _http_options(held.get("http-options")),
             }
         if kind == "declaration":
             return _declared(held["transform"], "transform")
@@ -685,6 +685,41 @@ def _json_mapping(value: Any) -> Optional[dict[str, Any]]:
     except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _http_options(value: Any) -> dict[str, Any]:
+    """An http transform's options as a mapping -- never a silent ``{}``.
+
+    Empty or unset is no options; a mapping, or JSON text of an object, is the
+    options. Anything else is refused by name, so a configuration fault is
+    never mistaken for options that were not given (backlog 668). What the
+    options MEAN is the adapter's to validate.
+
+    Raises:
+        ConfigError: Non-empty text that is not valid JSON, or valid JSON that
+            is not an object.
+    """
+    if not _held(value):
+        return {}
+    if isinstance(value, Mapping):
+        return deepcopy(dict(value))
+    text = str(value).strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        curly = " Curly quotes are not JSON quotes." if any(
+            mark in text for mark in "\u201c\u201d\u2018\u2019"
+        ) else ""
+        raise ConfigError(
+            f"Transform (http): http-options is not valid JSON ({exc.msg} at "
+            f"position {exc.pos}).{curly}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ConfigError(
+            "Transform (http): http-options must be a JSON object, got "
+            f"{type(parsed).__name__}."
+        )
+    return parsed
 
 
 def _entries(declared: Mapping[str, Any]) -> list[tuple[int, dict[str, Any]]]:
