@@ -833,7 +833,8 @@ class DBAdapter:
         if provider in {"postgres", "mysql"}:
             from rey_lib.db._sqlalchemy import metadata_list_schemas
 
-            return metadata_list_schemas(conn, catalog)
+            # ORDERED HERE, whatever the provider answered (backlog 278).
+            return sorted(metadata_list_schemas(conn, catalog), key=lambda item: item["name"])
         objects = _backend(provider).list_database_objects(conn, catalog)
         names = {
             str(obj.get("schema") or obj.get("name") or "")
@@ -1028,7 +1029,9 @@ class DBAdapter:
 
         Returns:
             ``{"schemas": [...], "tables": [...], "views": [...]}`` as the
-            inspection layer assembled it.
+            inspection layer assembled it, each collection in name order
+            (backlog 278). A table's columns keep their ordinal order, which
+            is meaningful.
 
         Raises:
             UnsupportedDatabaseCapabilityError: When the provider answers about
@@ -1037,7 +1040,14 @@ class DBAdapter:
         self._require_metadata_capability(conn, "columns")
         from rey_lib.db._sqlalchemy import inspect_schema
 
-        return inspect_schema(conn, schema)
+        inspected = inspect_schema(conn, schema)
+        # ORDERED HERE, whatever the provider answered (backlog 278).
+        return {
+            **inspected,
+            "schemas": sorted(inspected.get("schemas") or []),
+            "tables": sorted(inspected.get("tables") or [], key=lambda item: item["name"]),
+            "views": sorted(inspected.get("views") or [], key=lambda item: item["name"]),
+        }
 
     def get_object_ddl(self, conn: Any, obj: dict[str, Any]) -> str:
         """Return one database object's provider-native DDL.
@@ -1128,10 +1138,13 @@ class DBAdapter:
             if capability == "tables":
                 from rey_lib.db._sqlalchemy import metadata_list_tables
 
-                return metadata_list_tables(conn, catalog, schema)
-            from rey_lib.db._sqlalchemy import metadata_list_views
+                listed = metadata_list_tables(conn, catalog, schema)
+            else:
+                from rey_lib.db._sqlalchemy import metadata_list_views
 
-            return metadata_list_views(conn, catalog, schema)
+                listed = metadata_list_views(conn, catalog, schema)
+            # ORDERED HERE, as the other branch is (backlog 278).
+            return sorted(listed, key=lambda item: (item["schema"], item["name"]))
 
         relation_type = capability.rstrip("s")
         objects = _backend(provider).list_database_objects(conn, catalog)

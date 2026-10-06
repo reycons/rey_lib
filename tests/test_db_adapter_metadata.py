@@ -483,3 +483,49 @@ def test_sqlserver_stays_outside_the_metadata_increment() -> None:
     assert adapter.supports(conn, "schemas") is False
     with pytest.raises(UnsupportedDatabaseCapabilityError, match="provider 'sqlserver'"):
         adapter.list_schemas(conn)
+
+
+@pytest.mark.parametrize(
+    ("provider", "backend"),
+    [("postgres", postgres_utils), ("mysql", mysql_utils)],
+)
+def test_listings_are_ordered_whatever_the_provider_answers(
+    provider: str,
+    backend: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog 278: the adapter owns ordering, not the provider's Inspector."""
+    from rey_lib.db import _sqlalchemy
+
+    conn = _sqlalchemy_connection(provider)
+    monkeypatch.setattr(backend, "get_current_database", lambda _conn: "subject")
+    monkeypatch.setattr(_sqlalchemy, "metadata_list_schemas", lambda _conn, catalog: [
+        {"catalog": catalog, "name": "zeta"}, {"catalog": catalog, "name": "alpha"},
+    ])
+    monkeypatch.setattr(_sqlalchemy, "metadata_list_tables", lambda _conn, catalog, schema: [
+        {"catalog": catalog, "schema": "s", "name": "orders"},
+        {"catalog": catalog, "schema": "s", "name": "accounts"},
+    ])
+    monkeypatch.setattr(_sqlalchemy, "metadata_list_views", lambda _conn, catalog, schema: [
+        {"catalog": catalog, "schema": "s", "name": "v_z"},
+        {"catalog": catalog, "schema": "s", "name": "v_a"},
+    ])
+    monkeypatch.setattr(_sqlalchemy, "inspect_schema", lambda _conn, schema: {
+        "schemas": ["zeta", "alpha"],
+        "tables": [{"name": "orders", "columns": [{"name": "z"}, {"name": "a"}]},
+                   {"name": "accounts", "columns": []}],
+        "views": [{"name": "v_z"}, {"name": "v_a"}],
+    })
+    adapter = DBAdapter()
+    try:
+        assert [one["name"] for one in adapter.list_schemas(conn)] == ["alpha", "zeta"]
+        assert [one["name"] for one in adapter.list_tables(conn, "s")] == ["accounts", "orders"]
+        assert [one["name"] for one in adapter.list_views(conn, "s")] == ["v_a", "v_z"]
+        metadata = adapter.get_schema_metadata(conn, "s")
+        assert metadata["schemas"] == ["alpha", "zeta"]
+        assert [one["name"] for one in metadata["tables"]] == ["accounts", "orders"]
+        assert [one["name"] for one in metadata["views"]] == ["v_a", "v_z"]
+        # Columns keep their ordinal order: it is meaningful.
+        assert [one["name"] for one in metadata["tables"][1]["columns"]] == ["z", "a"]
+    finally:
+        conn.close()
