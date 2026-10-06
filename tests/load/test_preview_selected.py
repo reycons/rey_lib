@@ -2,7 +2,8 @@
 
 Asserted: an incomplete Source answers nothing; a complete one is resolved,
 sampled and shown through the Transform it is paired with; an incomplete
-Transform shows the rows as they came; and "there is more" is stated.
+Transform is refused as a load refuses it; what the Transform shows is what
+the preview executes (backlog 681); and "there is more" is stated.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from rey_lib.errors.error_utils import ConfigError
 
 from rey_lib.load import Source, Transform
 from rey_lib.load.execution import preview_selected, source_columns
@@ -51,14 +54,34 @@ class TestPreviewSelected:
         assert [row["a_out"] for row in found.rows] == ["1", "2", "3"]
         assert found.truncated is False
 
-    def test_an_incomplete_transform_shows_the_rows_as_they_came(self, csv_file: Path) -> None:
+    def test_an_incomplete_transform_is_refused_never_passed_through(self, csv_file: Path) -> None:
+        with pytest.raises(ConfigError, match=r"Transform \(declaration\) is missing: transform"):
+            preview_selected(
+                SimpleNamespace(), Source({"file": str(csv_file)}),
+                Transform(selected="declaration"), limit=10,
+            )
+
+    def test_an_untouched_grid_executes_as_the_pass_through_it_shows(self, csv_file: Path) -> None:
+        shown = Transform(selected="declaration")
+        shown.observe_source_columns(["a", "b"])
+
         found = preview_selected(
-            SimpleNamespace(), Source({"file": str(csv_file)}),
-            Transform(selected="declaration"), limit=10,
+            SimpleNamespace(), Source({"file": str(csv_file)}), shown, limit=10,
         )
 
         assert list(found.columns) == ["a", "b"]
         assert found.rows[0] == {"a": "1", "b": "x"}
+
+    def test_a_partial_declaration_executes_every_column_it_shows(self, csv_file: Path) -> None:
+        shown = _renaming()
+        shown.observe_source_columns(["a", "b"])
+
+        found = preview_selected(
+            SimpleNamespace(), Source({"file": str(csv_file)}), shown, limit=10,
+        )
+
+        assert list(found.columns) == ["a_out", "b"]
+        assert found.rows[0] == {"a_out": "1", "b": "x"}
 
     def test_more_than_asked_for_is_stated(self, csv_file: Path) -> None:
         found = preview_selected(

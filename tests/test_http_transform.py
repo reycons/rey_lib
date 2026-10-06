@@ -279,6 +279,24 @@ class TestThroughTheLoadPath:
         assert [row["echoed"] for row in found.rows] == ["1!", "2!", "3!"]
         assert len(wire) == 1
 
+    def test_the_held_transform_previews_what_it_shows(
+        self, wire: list[httpx.Request], csv_file: Path,
+    ) -> None:
+        # ONE PATH (backlog 681): the shown mapping, an edit to it, and an
+        # options change made afterwards all reach the adapter on the next preview.
+        held = _http()
+        held.observe_source_columns(["a", "b"])
+        held.edit_column(1, "name", "b_out")
+        source = Source({"file": str(csv_file)})
+
+        first = preview_selected(SimpleNamespace(), source, held, limit=10)
+        held.update("http-options", {"path": "elsewhere"})
+        preview_selected(SimpleNamespace(), source, held, limit=10)
+
+        assert list(first.columns) == ["a", "b_out", "echoed"]
+        assert first.rows[0] == {"a": "1", "b_out": "x", "echoed": "1!"}
+        assert [one.url.path for one in wire] == ["/v1/echo", "/v1/elsewhere"]
+
     def test_a_load_hands_the_http_transform_to_the_boundary(
         self, wire: list[httpx.Request], csv_file: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -473,12 +491,18 @@ class TestTheMappingBeforeSending:
 
         assert declared["declaration"]["columns"][0] == {"source": "cusip", "name": "lookup_id"}
 
-    def test_no_declaration_is_manufactured_from_the_described_mapping(self) -> None:
+    def test_the_shown_mapping_is_the_one_executed(self) -> None:
+        # WHAT IS SHOWN IS WHAT EXECUTES (backlog 681): nothing is written to
+        # the field, and the mapping the grid shows is applied before sending.
         held = Transform({"http-connection": "web", "http-adapter": "recorder"}, selected="http")
         held.observe_source_columns(["cusip", "asset_id"])
 
-        assert [one["source"] for one in held.columns()] == ["cusip", "asset_id"]
         assert held.value("http-transform") is None
+        assert held.executed_declaration()["declaration"] == {"columns": held.columns()}
+
+    def test_nothing_shown_and_nothing_authored_maps_nothing(self) -> None:
+        held = Transform({"http-connection": "web", "http-adapter": "recorder"}, selected="http")
+
         assert held.executed_declaration()["declaration"] is None
 
     def test_it_is_authored_like_a_declaration(self) -> None:

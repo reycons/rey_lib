@@ -325,10 +325,19 @@ class Transform:
         }
 
     def validate(self) -> list[str]:
-        """What the selected kind still needs, or nothing where it is complete."""
+        """What the selected kind still needs, or nothing where it is complete.
+
+        WHAT IS SHOWN IS CONFIGURED (backlog 681): the field a kind's grid
+        authors is satisfied by the mapping :meth:`columns` shows, so an
+        untouched pass-through grid is a complete transform.
+        """
         kind = _kind_of(self.selected_kind())
         held = self.configuration()
-        return [name for name in kind.required if not _held(held.get(name))]
+        shown = _AUTHORED_IN.get(kind.id) if self.columns() else None
+        return [
+            name for name in kind.required
+            if not _held(held.get(name)) and name != shown
+        ]
 
     # -- changing ------------------------------------------------------------
 
@@ -668,6 +677,9 @@ class Transform:
             )
         if kind == "identity":
             return None
+        # WHAT IS SHOWN IS WHAT EXECUTES (backlog 681): the mapping the grid
+        # shows, where it shows one; otherwise the authored text as it stands.
+        shown = self._shown_declaration()
         if kind == "http":
             # NAMES ONLY: the connection, the adapter and its options. The
             # connection's credential is an env reference held by the
@@ -676,18 +688,36 @@ class Transform:
                 "connection": str(held["http-connection"]),
                 "adapter": str(held["http-adapter"]),
                 "options": _http_options(held.get("http-options")),
-                # THE AUTHORED MAPPING, or None: no declaration is manufactured
-                # for a mapping that was only ever described (backlog 679).
-                "declaration": (
+                # THE SHOWN MAPPING, applied before sending; None only where
+                # nothing is shown or authored.
+                "declaration": shown if shown is not None else (
                     _declared(held["http-transform"], "http-transform")
                     if _held(held.get("http-transform")) else None
                 ),
             }
         if kind == "declaration":
-            return _declared(held["transform"], "transform")
+            return shown if shown is not None else _declared(held["transform"], "transform")
         if kind == "yaml":
             return _declared_in(held["transform-file"])
-        return _plain(held["declaration"], "declaration")
+        return shown if shown is not None else _plain(held["declaration"], "declaration")
+
+    def _shown_declaration(self) -> Optional[dict[str, Any]]:
+        """The declaration the grid shows -- every source column represented -- or None.
+
+        None where the kind has no grid, where nothing is shown, or where the
+        authored field holds text that is not JSON: hand-written text is
+        executed as it is, never replaced by a pass-through.
+        """
+        field = _AUTHORED_IN.get(self.selected_kind())
+        if field is None:
+            return None
+        declared = self.in_force_declaration()
+        if declared is None and _held(self._values.get(field)):
+            return None
+        columns = self.columns()
+        if not columns:
+            return None
+        return {**(declared or {}), "columns": columns}
 
     def resolve(self, ctx: Any) -> Any:
         """The transform the selected configuration applies, as the load builds it.

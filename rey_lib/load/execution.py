@@ -184,7 +184,7 @@ def preview_selected(
     The Source and Transform each resolve through their own contract, as
     :func:`run_selected_load` resolves them, and the resolved source is SAMPLED
     rather than read. A Source that is not complete is answered empty; a
-    Transform that is not complete shows the rows as they came.
+    Transform that is not complete is refused, as a load refuses it.
 
     Args:
         ctx: The runtime context, for configured connections.
@@ -198,15 +198,20 @@ def preview_selected(
         The produced columns, the records, and whether the source held more.
 
     Raises:
-        ConfigError: If a named source or transform cannot be resolved.
+        ConfigError: If the selected Transform is not complete, or a named
+            source or transform cannot be resolved.
     """
     if source.validate():
         return load_operation.LoadPreview()
+    # THE SELECTED TRANSFORM, OR ITS REFUSAL (backlog 681): never a pass-through
+    # stood in for one that is not complete -- the refusal a load makes.
+    missing = transform.validate()
+    if missing:
+        raise ConfigError(
+            f"Transform ({transform.selected_kind()}) is missing: {', '.join(missing)}."
+        )
     resolved = source.resolve(ctx, reader=reader, adapter=load_operation._read_adapter)
-    built = (
-        load_operation._build_transform(ctx, None, None)
-        if transform.validate() else transform.resolve(ctx)
-    )
+    built = transform.resolve(ctx)
     # ONE MORE THAN ASKED FOR, which is how "there is more" is established.
     sampled = resolved.sample(limit + 1)
     return load_operation.LoadPreview(

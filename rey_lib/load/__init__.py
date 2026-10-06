@@ -33,9 +33,11 @@ from rey_lib.load.transform import Transform
 from rey_lib.load.target import Target
 from rey_lib.load.shape import derived_load_shape
 from rey_lib.load.execution import run_selected_load
+from rey_lib.load.linked_load import LinkedLoad
 
 __all__ = [
     "ConfiguredLoad",
+    "LinkedLoad",
     "LoadOneFile",
     "ManifestSource",
     "Source",

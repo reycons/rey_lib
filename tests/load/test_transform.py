@@ -665,3 +665,39 @@ class TestFormFields:
         held = Transform({"transform": "{}", "http-transform": "{}"})
         assert held.value("transform") == "{}"
         assert held.value("http-transform") == "{}"
+
+
+class TestWhatIsShownIsWhatExecutes:
+    """The mapping the grid shows is the mapping that executes (backlog 681)."""
+
+    def test_an_untouched_grid_is_a_complete_declaration(self) -> None:
+        shown = _authoring("a", "b")
+
+        assert shown.validate() == []
+        assert shown.executed_declaration() == {
+            "columns": [{"source": "a", "name": "a"}, {"source": "b", "name": "b"}],
+        }
+
+    def test_a_partial_declaration_executes_every_column_it_shows(self) -> None:
+        shown = _authoring("a", "b", declared={"columns": [{"source": "a", "name": "a_out"}]})
+
+        assert shown.executed_declaration()["columns"] == shown.columns()
+        assert [one["name"] for one in shown.executed_declaration()["columns"]] == ["a_out", "b"]
+
+    def test_hand_written_text_executes_as_it_stands(self) -> None:
+        written = Transform(
+            {"transform": "columns:\n  - source: a\n    name: a_out\n"}, selected="declaration",
+        )
+        written.observe_source_columns(["a", "b"])
+
+        assert written.executed_declaration() == {"columns": [{"source": "a", "name": "a_out"}]}
+
+    def test_without_source_columns_the_declaration_is_unchanged(self) -> None:
+        # THE CLI SHAPE: nothing observed, so only what was declared executes.
+        declared = {"columns": [{"source": "a", "name": "a_out"}]}
+        told = Transform({"transform": json.dumps(declared)}, selected="declaration")
+
+        assert told.executed_declaration() == declared
+
+    def test_nothing_shown_still_needs_its_declaration(self) -> None:
+        assert Transform(selected="declaration").validate() == ["transform"]
