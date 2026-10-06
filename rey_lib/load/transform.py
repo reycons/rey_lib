@@ -264,6 +264,21 @@ class Transform:
         """Every kind a Transform can be, in offering order."""
         return tuple(kind.id for kind in TRANSFORM_KINDS)
 
+    @staticmethod
+    def form_fields() -> dict[str, list[str]]:
+        """Each kind's fields that are drawn as controls beside its mapping grid.
+
+        A kind's fields less the one its grid AUTHORS (``_AUTHORED_IN``): that
+        field is written by the grid's operations -- ``edit_column`` and its
+        siblings -- and is never a second, editable representation of the same
+        state. It stays a field of the kind -- held, configurable and typed on
+        the CLI -- and is only not drawn (backlog 679).
+        """
+        return {
+            kind.id: [name for name in kind.fields if name != _AUTHORED_IN.get(kind.id)]
+            for kind in TRANSFORM_KINDS
+        }
+
     def selected_kind(self) -> str:
         """The kind in force.
 

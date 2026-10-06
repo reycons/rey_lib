@@ -646,3 +646,22 @@ class TestFromSource:
 
         assert all(value is not source and value is not ctx for value in vars(built).values())
         assert built.declaration() == Transform().declaration()
+
+
+class TestFormFields:
+    """The fields drawn beside each grid: never the field the grid authors (backlog 679)."""
+
+    def test_each_kind_less_its_authored_field(self) -> None:
+        assert Transform.form_fields() == {
+            "identity": [],
+            "declaration": [],
+            "yaml": ["transform-file"],
+            "http": ["http-connection", "http-adapter", "http-options"],
+            "manifest": ["persistence"],
+        }
+
+    def test_the_authored_fields_are_still_fields_of_their_kinds(self) -> None:
+        assert {"transform", "http-transform", "declaration"} <= set(TRANSFORM_FIELDS)
+        held = Transform({"transform": "{}", "http-transform": "{}"})
+        assert held.value("transform") == "{}"
+        assert held.value("http-transform") == "{}"
