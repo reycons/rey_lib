@@ -70,6 +70,20 @@ class HttpTransformAdapter(ABC):
             The produced records' column names, in order.
         """
 
+    def options(self) -> list[dict[str, Any]]:
+        """The options this adapter takes, as descriptors a surface can draw.
+
+        Each is ``{"name", "required", "kind"}``, with ``"choices"`` and
+        ``"default"`` where the option has them. ``kind`` is ``column`` (one of
+        the mapped columns), ``choice`` (one of ``choices``), ``integer`` or
+        ``properties`` (a mapping whose keys are among ``choices``). DESCRIPTIVE
+        ONLY: validating the options stays :meth:`apply`'s (backlog 687).
+
+        Returns:
+            The declared options, in order; none where an adapter declares none.
+        """
+        return []
+
     @abstractmethod
     def apply(
         self,

@@ -656,7 +656,7 @@ class TestFormFields:
             "identity": [],
             "declaration": [],
             "yaml": ["transform-file"],
-            "http": ["http-connection", "http-adapter", "http-options"],
+            "http": ["http-connection", "http-adapter"],
             "manifest": ["persistence"],
         }
 

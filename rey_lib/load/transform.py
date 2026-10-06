@@ -146,6 +146,10 @@ _AUTHORED_IN: dict[str, str] = {
     "declaration": "transform", "http": "http-transform", "manifest": "declaration",
 }
 
+#: The field each kind's OPTIONS TABLE authors (backlog 687): written by
+#: :meth:`Transform.edit_option`, never drawn as a control.
+_OPTIONS_IN: dict[str, str] = {"http": "http-options"}
+
 #: The persisted facts held per entry, beside the declaration and never in it.
 _ALIGNED: tuple[str, ...] = ("column_ids", "column_ordinals")
 
@@ -269,10 +273,14 @@ class Transform:
         field is written by the grid's operations -- ``edit_column`` and its
         siblings -- and is never a second, editable representation of the same
         state. It stays a field of the kind -- held, configurable and typed on
-        the CLI -- and is only not drawn (backlog 679).
+        the CLI -- and is only not drawn (backlog 679). Nor is the field its
+        options table authors (``_OPTIONS_IN``, backlog 687).
         """
         return {
-            kind.id: [name for name in kind.fields if name != _AUTHORED_IN.get(kind.id)]
+            kind.id: [
+                name for name in kind.fields
+                if name not in (_AUTHORED_IN.get(kind.id), _OPTIONS_IN.get(kind.id))
+            ]
             for kind in TRANSFORM_KINDS
         }
 
@@ -498,6 +506,56 @@ class Transform:
             key: list(held.get(key) or ())
             for key in _ALIGNED if key == "column_ids" or key in held
         }
+
+    def http_options(self) -> list[dict[str, Any]]:
+        """The selected adapter's declared options, each with its current value.
+
+        Empty unless ``http`` is selected and its adapter is registered. A
+        ``column`` option is offered the mapping's exported output names; held
+        options that are not readable JSON show no values rather than failing
+        a read -- an edit refuses them (backlog 687).
+        """
+        from rey_lib.data.http_transform import http_transform_adapter_for  # noqa: PLC0415
+
+        if self.selected_kind() != "http":
+            return []
+        adapter = http_transform_adapter_for(str(self._values.get("http-adapter") or ""))
+        if adapter is None:
+            return []
+        held = _json_mapping(self._values.get("http-options")) or {}
+        exported = [
+            str(entry.get("name") or entry.get("source") or "")
+            for entry in self.columns() if entry.get("export") is not False
+        ]
+        return [
+            {
+                **declared,
+                **({"choices": exported} if declared["kind"] == "column" else {}),
+                "value": held.get(declared["name"]),
+            }
+            for declared in adapter.options()
+        ]
+
+    def edit_option(self, name: str, value: Any) -> None:
+        """Set one declared option of the selected adapter, or clear it.
+
+        The value is held as its declared kind says: an ``integer`` as a whole
+        number, ``properties`` as a mapping, the rest as text. Written into
+        ``http-options`` as its loader parameter's JSON text.
+
+        Raises:
+            ConfigError: The adapter declares no such option, the held options
+                are not readable, or the value is not of the option's kind.
+        """
+        declared = next((one for one in self.http_options() if one["name"] == name), None)
+        if declared is None:
+            raise ConfigError(f"Transform (http): the adapter takes no option '{name}'.")
+        held = _http_options(self._values.get("http-options"))
+        if _held(value):
+            held[name] = _option_value(declared, value)
+        else:
+            held.pop(name, None)
+        self._values["http-options"] = json.dumps(held, indent=2) if held else ""
 
     def edit_column(self, at: int, field: str, value: Any) -> None:
         """Change one field of one entry, and nothing else about it.
@@ -775,6 +833,30 @@ def _json_mapping(value: Any) -> Optional[dict[str, Any]]:
     except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _option_value(declared: Mapping[str, Any], value: Any) -> Any:
+    """One option's value as its declared kind holds it.
+
+    Raises:
+        ConfigError: Not a whole number for ``integer``; not a mapping, or JSON
+            text of one, for ``properties``; not one of ``choices`` for ``choice``.
+    """
+    name, kind = declared["name"], declared["kind"]
+    if kind == "integer":
+        try:
+            return int(str(value).strip())
+        except ValueError as exc:
+            raise ConfigError(f"Transform (http): option {name} must be a whole number.") from exc
+    if kind == "properties":
+        held = _json_mapping(value)
+        if held is None:
+            raise ConfigError(f"Transform (http): option {name} must be a JSON object.")
+        return held
+    text = str(value).strip()
+    if kind == "choice" and text not in (declared.get("choices") or ()):
+        raise ConfigError(f"Transform (http): '{text}' is not a choice of option {name}.")
+    return text
 
 
 def _http_options(value: Any) -> dict[str, Any]:

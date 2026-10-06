@@ -60,6 +60,19 @@ _JOB_PROPERTIES: frozenset[str] = frozenset({
     "contractSize", "coupon", "expiration", "maturity", "stateCode",
 })
 
+#: The idType values OpenFIGI documents for /v3/mapping, as
+#: GET /v3/mapping/values/idType answered on 2026-10-06. STATIC FOR NOW: a
+#: declared source replaces this (backlog 688).
+_ID_TYPES: tuple[str, ...] = (
+    "BARCLAYS_TICKER", "BASE_TICKER", "COMPOSITE_ID_BB_GLOBAL", "ID_BB", "ID_BB_8_CHR",
+    "ID_BB_GLOBAL", "ID_BB_GLOBAL_SHARE_CLASS_LEVEL", "ID_BB_SEC_NUM_DES", "ID_BB_UNIQUE",
+    "ID_CINS", "ID_COMMON", "ID_CUSIP", "ID_CUSIP_8_CHR", "ID_EXCH_SYMBOL",
+    "ID_FULL_EXCHANGE_SYMBOL", "ID_ISIN", "ID_ITALY", "ID_SEDOL", "ID_SHORT_CODE",
+    "ID_TRACE", "ID_WERTPAPIER", "OCC_SYMBOL", "OPRA_SYMBOL", "TICKER",
+    "TRADEBOOK_TICKER", "TRADING_SYSTEM_IDENTIFIER", "UNIQUE_ID_FUT_OPT",
+    "VENDOR_INDEX_CODE",
+)
+
 #: Each documented candidate property, and the column it is written to.
 _CANDIDATE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("figi", "figi_figi"),
@@ -186,6 +199,19 @@ class OpenFigiAdapter(HttpTransformAdapter):
     def output_columns(self, input_columns: list[str]) -> list[str]:
         """The input columns, then :data:`OUTPUT_COLUMNS`. Sends nothing."""
         return [*input_columns, *OUTPUT_COLUMNS]
+
+    def options(self) -> list[dict[str, Any]]:
+        """OpenFIGI's options, as documented in this module (backlog 687)."""
+        return [
+            {"name": "id_column", "required": True, "kind": "column"},
+            {"name": "id_type", "required": True, "kind": "choice", "choices": list(_ID_TYPES)},
+            {"name": "batch_size", "required": False, "kind": "integer",
+             "default": _DEFAULT_BATCH_SIZE},
+            {"name": "max_retries", "required": False, "kind": "integer",
+             "default": _DEFAULT_MAX_RETRIES},
+            {"name": "job", "required": False, "kind": "properties",
+             "choices": sorted(_JOB_PROPERTIES)},
+        ]
 
     def apply(
         self,
