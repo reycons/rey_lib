@@ -1879,11 +1879,13 @@ def _load_one_file(
                 # it to rejected_path would strand a good file for a fault it
                 # did not cause; every later file would fail identically
                 # anyway.
+                # BOTH REMEDIES (backlog 511): a load given by arguments has
+                # no 'load:' block, and is told to pass --create.
                 raise ConfigError(
                     f"load '{load_name}' requires destination "
-                    f"{schema}.{table}, and it does not exist. Set "
-                    f"create_destination_table: true under that load's 'load:' "
-                    f"block to have the loader create it."
+                    f"{schema}.{table}, and it does not exist. To have the "
+                    f"loader create it, pass --create, or for a configured load "
+                    f"set create_destination_table: true under its 'load:' block."
                 )
 
         # NO FORMAT BRANCH, and no format name either. Every source reaching

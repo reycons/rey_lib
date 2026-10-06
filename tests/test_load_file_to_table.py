@@ -126,6 +126,8 @@ class TestItLoadsWithNoConfiguration:
             _load(tmp_path, monkeypatch, run_log, adapter)
 
         assert "testing.asset" in str(raised.value)
+        # A load given by arguments has no 'load:' block: --create is its remedy.
+        assert "pass --create" in str(raised.value)
 
     def test_the_schema_is_INFERRED_since_nothing_declares_it(
         self, tmp_path: Path, monkeypatch, run_log
