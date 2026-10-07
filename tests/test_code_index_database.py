@@ -13,6 +13,8 @@ import pytest
 
 from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.repository_map.code_index import CodeIndexWriter, IndexedRepository
+from rey_lib.repository_map.architecture_projection import ArchitectureProjectionError
+from rey_lib.repository_map.architecture_publication import owned_seam_tokens
 from rey_lib.repository_map.code_index_database import CodeIndexDatabaseWriter
 
 
@@ -388,3 +390,112 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
             "authority", "public_seam", "must_not_bypass", "evidence", "status",
             "superseded_by_key", "notes",
         ]
+
+
+class _Symbols(_Adapter):
+    """Answers the seam lookup from the identities it holds."""
+
+    def __init__(self, held: set[str]) -> None:
+        super().__init__()
+        self._held = held
+        self.lookups: list[list[str]] = []
+
+    def execute_sql(self, _conn: Any, sql_text: str, named_params: dict[str, Any],
+                    _result_mode: str) -> Any:
+        if "symbol_vw" in sql_text:
+            self.lookups.append(list(named_params["wanted"]))
+            return [{"dotted_identity": one} for one in named_params["wanted"]
+                    if one in self._held]
+        self.statements.append(sql_text)
+        return None
+
+
+def _canonical(key: str, reference: str, seam: str, status: str = "active") -> dict[str, Any]:
+    return {"object_key": key, "concept_key": "c", "responsibility": "r",
+            "implementation_reference": reference, "authority": "a",
+            "public_seam": seam, "must_not_bypass": "b", "evidence": "e",
+            "status": status, "superseded_by_key": "", "notes": ""}
+
+
+_TABLE = "rey_lib.db.database_objects.DatabaseTable"
+
+
+class TestSeamsResolveBeforeAnythingIsPublished:
+    """Gate 4 (backlog 754): every member a seam names on its own object exists."""
+
+    def test_an_unresolved_member_refuses_before_anything_is_cleared_or_staged(self) -> None:
+        adapter = _Symbols(held={f"{_TABLE}.create"})
+        rows = [_canonical("database.table", _TABLE, "DatabaseTable.create / DatabaseTable.gone")]
+
+        with pytest.raises(ArchitectureProjectionError,
+                           match=r"database\.table: DatabaseTable\.gone"):
+            CodeIndexDatabaseWriter(adapter, None).replace_architecture([], [], rows)
+
+        assert adapter.statements == [] and adapter.inserts == []
+
+    def test_resolved_members_publish_as_before_after_one_lookup(self) -> None:
+        adapter = _Symbols(held={f"{_TABLE}.create", f"{_TABLE}.drop"})
+        rows = [_canonical("database.table", _TABLE, "DatabaseTable.create / DatabaseTable.drop")]
+
+        CodeIndexDatabaseWriter(adapter, None).replace_architecture([], [], rows)
+
+        assert adapter.lookups == [[f"{_TABLE}.create", f"{_TABLE}.drop"]]
+        assert "CALL code.p_publish(false, true)" in adapter.statements
+
+    def test_what_cannot_be_read_without_guessing_is_not_asked(self) -> None:
+        """Shorthand continuations, prose, another class's member and inactive
+        entries are not validated, so none of them is looked up -- only the
+        one explicit member of an owner's own object is."""
+        adapter = _Symbols(held=set())
+        rows = [
+            _canonical("loader.source", "rey_lib.load.source.Source",
+                       "Source.from_declaration / select / update"),
+            _canonical("logging.logger", "rey_lib.logs.logging_setup.get_logger",
+                       "get_logger(__name__).debug / info / warning"),
+            _canonical("errors.error", "rey_lib.errors.error_utils.AppError",
+                       "raise AppError, or one that extends it / Other.report(context)"),
+            _canonical("old.table", _TABLE, "DatabaseTable.gone", status="superseded"),
+        ]
+
+        with pytest.raises(ArchitectureProjectionError, match=r"loader\.source: Source\.from_declaration"):
+            CodeIndexDatabaseWriter(adapter, None).replace_architecture([], [], rows)
+
+        # Only Source.from_declaration is explicit on its own object; it is the
+        # one identity asked for, and its absence refuses like any other.
+        assert adapter.lookups == [["rey_lib.load.source.Source.from_declaration"]]
+
+
+class TestOwnedSeamTokens:
+    """Only explicit members of the entry's own object are taken."""
+
+    def test_explicit_members_of_the_owner_pair_with_their_indexed_identity(self) -> None:
+        row = _canonical("database.query", "rey_lib.db.database_query.DatabaseQuery",
+                         "DatabaseQuery.rows / DatabaseQuery.run / DatabaseQuery.rows")
+
+        assert owned_seam_tokens(row) == [
+            ("DatabaseQuery.rows", "rey_lib.db.database_query.DatabaseQuery.rows"),
+            ("DatabaseQuery.run", "rey_lib.db.database_query.DatabaseQuery.run"),
+        ]
+
+    def test_another_class_named_in_the_seam_is_ignored(self) -> None:
+        """The gate checks the owner's declared seam, not every reference in it."""
+        row = _canonical("console.messaging", "rey_console.message.Message",
+                         "Message.deliver; Condition.kind / OtherClass.method")
+
+        assert owned_seam_tokens(row) == [
+            ("Message.deliver", "rey_console.message.Message.deliver"),
+        ]
+
+    def test_shorthand_continuations_and_call_forms_are_not_read(self) -> None:
+        row = _canonical("tree.projection", "rey_console.tree_projection.TreeProjections",
+                         "TreeProjections.of / holding / release")
+        prose = _canonical("logging.logger", "rey_lib.logs.logging_setup.get_logger",
+                           "get_logger(__name__).debug / info / warning")
+
+        assert [token for token, _ in owned_seam_tokens(row)] == ["TreeProjections.of"]
+        assert owned_seam_tokens(prose) == []
+
+    def test_an_inactive_entry_names_nothing(self) -> None:
+        assert owned_seam_tokens(
+            _canonical("old", _TABLE, "DatabaseTable.gone", status="superseded")
+        ) == []

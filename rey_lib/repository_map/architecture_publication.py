@@ -23,6 +23,7 @@ Nothing here writes to a database. It returns rows; the caller stages them.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ from rey_lib.repository_map.architecture_projection import (
     _parsed_architecture,
 )
 
-__all__ = ["ArchitectureRows", "architecture_rows"]
+__all__ = ["ArchitectureRows", "architecture_rows", "owned_seam_tokens"]
 
 logger = get_logger(__name__)
 
@@ -210,3 +211,40 @@ def _canonical_row(entry: Any, concept_key: str) -> dict[str, Any]:
             )
         row[column] = value
     return row
+
+
+#: An explicit ``Name.member`` in a seam: a name, a dot, a member, as words.
+_SEAM_TOKEN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b")
+
+
+def owned_seam_tokens(row: dict[str, Any]) -> list[tuple[str, str]]:
+    """The explicit members a canonical entry's seam names on its own object (backlog 754).
+
+    Only what the seam states outright is taken: a ``Class.member`` whose class
+    is this entry's own object. Each is paired with the indexed identity it
+    must resolve to -- the entry's ``implementation_reference`` and the
+    member, which is how the code index spells ``dotted_identity`` for Python
+    and TypeScript alike.
+
+    Deliberately not read, because none of it can be read without guessing:
+    a shorthand continuation (``Class.a / b / c`` -- only ``Class.a`` is
+    explicit), prose and call forms (``get_logger(__name__).debug``), another
+    class's member, and any entry that is not active.
+
+    Args:
+        row: One staged ``canonical_object_stage`` row.
+
+    Returns:
+        ``(token, dotted_identity)`` pairs, in the order the seam names them,
+        each once.
+    """
+    if str(row.get("status") or "") != "active":
+        return []
+    reference = str(row.get("implementation_reference") or "")
+    owner = reference.rsplit(".", 1)[-1]
+    found: list[tuple[str, str]] = []
+    for name, member in _SEAM_TOKEN.findall(str(row.get("public_seam") or "")):
+        pair = (f"{name}.{member}", f"{reference}.{member}")
+        if name == owner and pair not in found:
+            found.append(pair)
+    return found

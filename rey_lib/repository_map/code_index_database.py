@@ -32,8 +32,11 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
+from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.logs.logging_setup import get_logger
+from rey_lib.repository_map.architecture_projection import ArchitectureProjectionError
+from rey_lib.repository_map.architecture_publication import owned_seam_tokens
 from rey_lib.repository_map.code_index import IndexedRepository
 
 __all__ = ["CodeIndexDatabaseWriter"]
@@ -248,12 +251,17 @@ class CodeIndexDatabaseWriter:
         authored side and never touches the scan, which is what lets a scan run
         without republishing architecture and the reverse.
 
-        **Nothing is resolved here.** A ``realized_by`` reference is staged as
-        authored, and ``code.p_publish`` refuses the promotion unless every one
-        of them resolves to exactly one place against the scan already
-        published. That check is the schema's and must not be anticipated in
-        Python: two implementations of one rule are two answers waiting to
-        disagree.
+        **Nothing the schema resolves is resolved here.** A ``realized_by``
+        reference is staged as authored, and ``code.p_publish`` refuses the
+        promotion unless every one of them resolves to exactly one place
+        against the scan already published. That check is the schema's and
+        must not be anticipated in Python: two implementations of one rule are
+        two answers waiting to disagree.
+
+        **The one exception is a seam, which the schema does not check.**
+        Before anything is cleared or staged, every member a seam names on its
+        own object must exist in that scan (backlog 754, gate 4); see
+        ``_require_seams_resolve``.
 
         Args:
             concepts: One row per concept, naming its parent by
@@ -262,7 +270,12 @@ class CodeIndexDatabaseWriter:
             canonical_objects: One row per authored canonical owner. REQUIRED:
                 the promotion replaces the registry with what is staged, so an
                 omitted list would publish an empty registry.
+
+        Raises:
+            ArchitectureProjectionError: If a seam names a member its own
+                object does not have. Nothing is cleared, staged or published.
         """
+        self._require_seams_resolve(canonical_objects)
         self._clear_architecture_staging()
         self._stage("concept_stage", concepts, _CONCEPT_COLUMNS)
         self._stage("realization_stage", realizations, _REALIZATION_COLUMNS)
@@ -273,6 +286,43 @@ class CodeIndexDatabaseWriter:
         )
         self._call("p_publish", "false, true")
         logger.info("Promoted the staged architecture to the live index")
+
+    def _require_seams_resolve(self, canonical_objects: list[dict[str, Any]]) -> None:
+        """Refuse a seam naming a member its own object does not have.
+
+        One read for every entry: which of the identities the seams name the
+        published scan actually holds. An entry naming nothing checkable --
+        shorthand, prose, another class's member, or not active -- asks
+        nothing (``owned_seam_tokens``). Whether every public method appears in
+        its seam is NOT asked: a seam is the governed surface, not a listing.
+        """
+        named = [
+            (str(row.get("object_key") or ""), token, identity)
+            for row in canonical_objects
+            for token, identity in owned_seam_tokens(row)
+        ]
+        if not named:
+            return
+        held = {
+            row["dotted_identity"]
+            for row in DatabaseQuery(
+                # A list binds as JSON text on this provider (postgres_utils.
+                # _adapt_parameters), so the set is unpacked here: still one read.
+                f"SELECT dotted_identity FROM {SCHEMA}.symbol_vw "
+                "WHERE dotted_identity IN "
+                "(SELECT jsonb_array_elements_text(CAST(:wanted AS jsonb)))",
+                {"wanted": sorted({identity for _key, _token, identity in named})},
+            ).rows(self._connection, self._adapter)
+        }
+        missing = [
+            f"{object_key}: {token}"
+            for object_key, token, identity in named if identity not in held
+        ]
+        if missing:
+            raise ArchitectureProjectionError(
+                "A canonical seam names a member its object does not have, so "
+                "nothing was published: " + "; ".join(missing) + "."
+            )
 
     def _clear_architecture_staging(self) -> None:
         """Empty the authored staging before filling it.
