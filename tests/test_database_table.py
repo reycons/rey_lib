@@ -144,9 +144,17 @@ class TestDatabaseTypeIsTheOneTranslation:
         with pytest.raises(ConfigError, match="oracle"):
             DatabaseType("oracle").column_type(LogicalType("integer"))
 
+    @pytest.mark.parametrize(("provider", "expected"), [
+        ("postgres", "BOOLEAN"), ("mysql", "BOOLEAN"), ("sqlserver", "BIT"),
+        ("duckdb", "BOOLEAN"),
+    ])
+    def test_boolean_is_each_providers_own_spelling(self, provider: str, expected: str) -> None:
+        """Backlog 386: one entry per provider in the one translation."""
+        assert DatabaseType(provider).column_type(LogicalType("boolean")) == expected
+
     def test_a_kind_rey_does_not_have_is_refused(self) -> None:
-        with pytest.raises(ConfigError, match="boolean"):
-            LogicalType("boolean")
+        with pytest.raises(ConfigError, match="geometry"):
+            LogicalType("geometry")
 
 
 class TestExistsIsTheTablesQuestion:

@@ -71,6 +71,7 @@ class TestTheLogicalSchema:
             ({"type": "regex_extract", "cast_to": "float"},
              LogicalType("decimal", precision=18, scale=6)),
             ({"type": "regex_extract", "cast_to": "integer"}, LogicalType("integer")),
+            ({"type": "boolean"}, LogicalType("boolean")),
         ],
     )
     def test_a_DECLARED_type_wins_over_the_values(

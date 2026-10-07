@@ -130,6 +130,7 @@ AUTHORABLE_STARTERS: dict[str, dict[str, Any]] = {
         "type": "time", "format": "HH:mm:ss", "output_format": "HH:mm:ss",
     },
     "numeric": {"type": "numeric", "strip_chars": ","},
+    "boolean": {"type": "boolean"},
     "regex_extract": {"type": "regex_extract", "source": "", "pattern": "", "group": 1},
     "regex_date": {
         "type": "regex_date", "source": "", "pattern": "", "format": "yyMMdd", "group": 1,
@@ -156,11 +157,12 @@ AUTHORABLE_STARTERS: dict[str, dict[str, Any]] = {
 #: LOOKS LIKE in a source -- email, ssn, name -- which is a different question
 #: from what a destination column should be.
 #:
-#: ``boolean`` IS ABSENT, and deliberately: every member here renders as a string
-#: this estate already emits, and boolean is the one that would mean inventing a
-#: physical type in shared code. It waits for somewhere a provider can answer.
+#: ``boolean`` is here since backlog 386, because a provider now answers for it:
+#: how each destination spells it is ``DatabaseType``'s. Declaring it says what
+#: the output IS and converts nothing -- the ``boolean`` transform is how a value
+#: becomes one.
 OUTPUT_DATATYPES: tuple[str, ...] = (
-    "text", "integer", "decimal", "date", "datetime",
+    "text", "integer", "decimal", "date", "datetime", "boolean",
 )
 
 
@@ -614,6 +616,9 @@ def _apply_transform_v2(
                 (value or "").strip() if isinstance(value, str) else "", transform_cfg,
             )
 
+        if transform_type == "boolean":
+            return _transform_boolean(value, db_col)
+
         if transform_type == "regex_extract":
             return _transform_regex_extract(raw_row, transform_cfg)
 
@@ -986,6 +991,35 @@ def _transform_numeric(value: str, cfg: dict) -> Optional[float]:
     except ValueError:
         _logger.debug("Cannot parse '%s' as numeric — returning None.", value)
         return None
+
+
+#: The words that mean true and false, compared after trimming and ignoring
+#: case (backlog 386). A driver's own ``True`` and ``False`` arrive here as text
+#: and are among them.
+_TRUE_TOKENS: frozenset[str] = frozenset({"true", "t", "yes", "y", "1"})
+_FALSE_TOKENS: frozenset[str] = frozenset({"false", "f", "no", "n", "0"})
+
+
+def _transform_boolean(value: Optional[str], column: str) -> Optional[bool]:
+    """One value as a boolean, or None where it is blank.
+
+    Raises:
+        TransformError: For a value that is neither a true nor a false word,
+            naming the column and the value -- never read for truthiness.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    word = text.lower()
+    if word in _TRUE_TOKENS:
+        return True
+    if word in _FALSE_TOKENS:
+        return False
+    raise TransformError(
+        f"Column '{column}': {text!r} is not a boolean. "
+        "True is true, t, yes, y or 1; false is false, f, no, n or 0.",
+        column=column,
+    )
 
 
 def _transform_regex_extract(raw_row: dict[str, str], cfg: dict) -> Any:

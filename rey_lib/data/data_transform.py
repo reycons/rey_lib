@@ -57,6 +57,7 @@ _TRANSFORM_LOGICAL_TYPE: dict[str, LogicalType] = {
     "time":       LogicalType("time"),
     "regex_date": LogicalType("date"),
     "numeric":    LogicalType("decimal", precision=18, scale=6),
+    "boolean":    LogicalType("boolean"),
 }
 
 #: A STATED output datatype (``column_transform.OUTPUT_DATATYPES``), as the
@@ -69,6 +70,7 @@ _DECLARED_LOGICAL_TYPE: dict[str, Any] = {
     "decimal":  lambda _observed: LogicalType("decimal", precision=18, scale=6),
     "date":     lambda _observed: LogicalType("date"),
     "datetime": lambda _observed: LogicalType("datetime"),
+    "boolean":  lambda _observed: LogicalType("boolean"),
 }
 
 

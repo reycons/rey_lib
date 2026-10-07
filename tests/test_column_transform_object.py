@@ -418,12 +418,9 @@ class TestADeclaredOutputDatatype:
 
             assert rendered and rendered[0][1], datatype
 
-    def test_boolean_is_not_published(self) -> None:
-        """It is the one member that would mean inventing a physical type in
-        shared code. Deferred to the row that would give a provider somewhere
-        to answer.
-        """
-        assert "boolean" not in OUTPUT_DATATYPES
+    def test_boolean_is_published(self) -> None:
+        """Backlog 386: a provider now answers for it, through DatabaseType."""
+        assert "boolean" in OUTPUT_DATATYPES
 
 
 class TestTheStartersOfferBothFormats:
@@ -709,3 +706,61 @@ class TestDeclaredPassThrough:
         ))
 
         assert held.transform([{"A": "1", "B": "2"}]) == [{"kept": "1"}]
+
+
+class TestBoolean:
+    """Backlog 386: the datatype says what the output is; the transform converts."""
+
+    @pytest.mark.parametrize(("raw", "expected"), [
+        ("true", True), ("t", True), ("yes", True), ("y", True), ("1", True),
+        ("false", False), ("f", False), ("no", False), ("n", False), ("0", False),
+        ("  TRUE ", True), ("Yes", True), ("F", False), (" No", False),
+        (True, True), (False, False),
+    ])
+    def test_the_approved_words_convert(self, raw: object, expected: bool) -> None:
+        held = ColumnTransform(_declaration(
+            {"source": "A", "name": "a", "transform": {"type": "boolean"}},
+        ))
+
+        assert held.transform([{"A": raw}]) == [{"a": expected}]
+
+    @pytest.mark.parametrize("raw", ["", "   ", None])
+    def test_a_blank_is_none(self, raw: object) -> None:
+        held = ColumnTransform(_declaration(
+            {"source": "A", "name": "a", "transform": {"type": "boolean"}},
+        ))
+
+        assert held.transform([{"A": raw}]) == [{"a": None}]
+
+    @pytest.mark.parametrize("raw", ["maybe", "2", "on", "-1", "truthy"])
+    def test_anything_else_is_refused_naming_column_and_value(self, raw: str) -> None:
+        held = ColumnTransform(_declaration(
+            {"source": "A", "name": "flag", "transform": {"type": "boolean"}},
+        ))
+
+        with pytest.raises(TransformError) as raised:
+            held.transform([{"A": raw}])
+
+        assert raised.value.column == "flag"
+        assert "flag" in str(raised.value) and repr(raw) in str(raised.value)
+
+    def test_the_datatype_alone_converts_nothing(self) -> None:
+        held = ColumnTransform(
+            _declaration({"source": "A", "name": "a", "datatype": "boolean"}),
+        )
+        produced = held.transform([{"A": " yes "}])
+
+        assert produced == [{"a": "yes"}]  # the undeclared-rule trim, nothing more
+        assert held.logical_schema(produced) == [("a", LogicalType("boolean"))]
+
+    def test_the_transform_alone_makes_the_column_boolean(self) -> None:
+        held = ColumnTransform(_declaration(
+            {"source": "A", "name": "a", "transform": {"type": "boolean"}},
+        ))
+
+        produced = held.transform([{"A": "y"}])
+
+        assert held.logical_schema(produced) == [("a", LogicalType("boolean"))]
+
+    def test_it_is_an_authorable_starter(self) -> None:
+        assert authorable_starters()["boolean"] == {"type": "boolean"}

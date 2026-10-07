@@ -33,18 +33,21 @@ _PHYSICAL: dict[tuple[str, str], tuple[str, str]] = {
     ("postgres", "date"): ("DATE", "DATE"),
     ("postgres", "datetime"): ("TIMESTAMP", "TIMESTAMP"),
     ("postgres", "time"): ("TIME", "TIME"),
+    ("postgres", "boolean"): ("BOOLEAN", "BOOLEAN"),
     ("mysql", "text"): ("VARCHAR({length})", "TEXT"),
     ("mysql", "integer"): ("INT", "INT"),
     ("mysql", "decimal"): ("DECIMAL({precision}, {scale})", "DECIMAL"),
     ("mysql", "date"): ("DATE", "DATE"),
     ("mysql", "datetime"): ("DATETIME", "DATETIME"),
     ("mysql", "time"): ("TIME", "TIME"),
+    ("mysql", "boolean"): ("BOOLEAN", "BOOLEAN"),
     ("sqlserver", "text"): ("NVARCHAR({length})", "NVARCHAR(MAX)"),
     ("sqlserver", "integer"): ("INT", "INT"),
     ("sqlserver", "decimal"): ("DECIMAL({precision}, {scale})", "DECIMAL"),
     ("sqlserver", "date"): ("DATE", "DATE"),
     ("sqlserver", "datetime"): ("DATETIME2", "DATETIME2"),
     ("sqlserver", "time"): ("TIME", "TIME"),
+    ("sqlserver", "boolean"): ("BIT", "BIT"),
     # DuckDB's VARCHAR is unbounded and a declared length is not enforced, so a
     # bounded text column is VARCHAR as well.
     ("duckdb", "text"): ("VARCHAR", "VARCHAR"),
@@ -53,6 +56,7 @@ _PHYSICAL: dict[tuple[str, str], tuple[str, str]] = {
     ("duckdb", "date"): ("DATE", "DATE"),
     ("duckdb", "datetime"): ("TIMESTAMP", "TIMESTAMP"),
     ("duckdb", "time"): ("TIME", "TIME"),
+    ("duckdb", "boolean"): ("BOOLEAN", "BOOLEAN"),
 }
 
 

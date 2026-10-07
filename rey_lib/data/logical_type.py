@@ -24,8 +24,10 @@ __all__ = ["LOGICAL_KINDS", "LogicalType"]
 
 
 #: The kinds a column may mean. ``time`` is here because the ``time`` transform
-#: produces it; ``boolean`` arrives with backlog 386.
-LOGICAL_KINDS: tuple[str, ...] = ("text", "integer", "decimal", "date", "datetime", "time")
+#: produces it; ``boolean`` arrived with backlog 386.
+LOGICAL_KINDS: tuple[str, ...] = (
+    "text", "integer", "decimal", "date", "datetime", "time", "boolean",
+)
 
 
 @dataclass(frozen=True)
