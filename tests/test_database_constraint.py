@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from rey_lib.db import database_objects
 from rey_lib.db import db_adapter as adapter_module
 from rey_lib.db import mysql_utils, postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import (
@@ -27,7 +28,7 @@ from rey_lib.db.database_objects import (
     DatabasePrimaryKey,
     DatabaseTable,
 )
-from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import DatabaseError
 
 _QUOTE = {
@@ -162,7 +163,7 @@ def _export(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, provider: str, **bac
         **backend,
     )
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: namespace)
-    DBAdapter().export_database_ddl(
+    DatabaseDdlExport.export(
         types.SimpleNamespace(provider=provider), output_root=str(tmp_path),
     )
 
@@ -210,9 +211,14 @@ def test_duckdb_emits_its_indexes_but_not_its_constraints(
     monkeypatch.setattr(
         DatabaseTable, "create_includes_indexes", classmethod(lambda _c, *_a: False),
     )
+    # Replaced through the one read_ddl contract, so the export asking the
+    # listed index for its own DDL reaches it (backlog 723).
     monkeypatch.setattr(
         "rey_lib.db.database_objects.DatabaseIndex.read_ddl",
-        classmethod(lambda _c, _conn, _table, name, _adapter: asked.append(name) or "CREATE INDEX x;"),
+        database_objects._ReadDdl(
+            lambda _c, _conn, _table, name, _adapter=None, **_k: asked.append(name)
+            or "CREATE INDEX x;",
+        ),
     )
     _export(
         tmp_path, monkeypatch, "postgres",

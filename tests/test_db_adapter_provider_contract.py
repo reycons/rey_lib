@@ -115,6 +115,9 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     # What a catalog says about one user-defined type, for
     # DatabaseUserDefinedType.read_ddl (backlog 695).
     "user_type_catalog": ("user_type_catalog", ("schema", "name")),
+    # The inventory the database objects claim their entries from
+    # (DatabaseObjectListing, backlog 723).
+    "list_database_objects": ("list_database_objects", ()),
 }
 
 

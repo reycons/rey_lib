@@ -24,7 +24,8 @@ one, so the same value is what the Console's tree draws.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from types import MethodType
+from typing import Any, ClassVar, Iterable
 
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db.database_type import DatabaseType
@@ -37,6 +38,8 @@ __all__ = [
     "DatabaseForeignKey",
     "DatabaseIndex",
     "DatabaseObjectIdentity",
+    "DatabaseObjectListing",
+    "DatabaseObjectReference",
     "DatabasePrimaryKey",
     "DatabaseProcedure",
     "DatabaseRoutineIdentity",
@@ -103,6 +106,123 @@ class DatabaseRoutineIdentity:
 
 
 @dataclass(frozen=True)
+class DatabaseObjectReference:
+    """Which canonical object another depends on: an identity, never the object (backlog 723).
+
+    Kind, schema and name address it. A child's table and a routine's
+    signature are carried as well, so two objects are never collapsed into one
+    reference. A value with no behaviour; an empty name is a reference the
+    inventory could not state.
+    """
+
+    kind: str
+    schema: str
+    name: str
+    table: str = ""
+    signature: str = ""
+
+
+#: The canonical kind words, and the words a provider's inventory uses for
+#: each. The vocabulary is the database objects' (backlog 723), each of which
+#: states its own ``KIND``.
+_KIND_ALIASES: dict[str, str] = {
+    "schema": "schemas",
+    "schemas": "schemas",
+    "type": "types",
+    "types": "types",
+    "sequence": "sequences",
+    "sequences": "sequences",
+    "table": "tables",
+    "tables": "tables",
+    "constraint": "constraints",
+    "constraints": "constraints",
+    "index": "indexes",
+    "indexes": "indexes",
+    "view": "views",
+    "views": "views",
+    "function": "functions",
+    "functions": "functions",
+    "procedure": "procedures",
+    "procedures": "procedures",
+    "trigger": "triggers",
+    "triggers": "triggers",
+}
+
+
+def _kind_of(value: str) -> str:
+    """A known kind in its canonical word; an unknown one stays as it is.
+
+    Never a table by default: a kind no object owns must reach the listing's
+    refusal, not become a DatabaseTable.
+    """
+    raw = (value or "").strip().lower()
+    if raw in _KIND_ALIASES:
+        return _KIND_ALIASES[raw]
+    singular = raw.rstrip("s")
+    if singular in _KIND_ALIASES:
+        return _KIND_ALIASES[singular]
+    return raw
+
+
+class _ReadDdl:
+    """``read_ddl``: asked of a type with an address, or of an object for its own (723).
+
+    One DDL contract under one name. Asked of the class, the caller addresses
+    the object exactly as before. Asked of an object -- one a listing built --
+    the object is the address: its identity, its table and name, or its
+    schema's name. There is no second DDL method.
+    """
+
+    def __init__(self, read: Any) -> None:
+        self._read = read
+        self.__doc__ = read.__doc__
+
+    def __get__(self, obj: Any, owner: type) -> Any:
+        if obj is None:
+            return MethodType(self._read, owner)
+        read = self._read
+
+        def own(conn: Any, adapter: Any = None, **options: Any) -> str:
+            return read(owner, conn, *_address(obj), adapter, **options)
+
+        own.__doc__ = read.__doc__
+        return own
+
+
+def _address(obj: Any) -> tuple[Any, ...]:
+    """How an object addresses its own DDL: what its ``read_ddl`` is asked with."""
+    if isinstance(obj, DatabaseSchema):
+        return (obj.schema,)
+    identity = getattr(obj, "identity", None)
+    if identity is not None:
+        return (identity,)
+    if getattr(obj, "table", None) is None:
+        raise DatabaseError(
+            f"{type(obj).__name__} '{obj.name}' carries no table; "
+            f"ask the type for its DDL with one."
+        )
+    return (obj.table, obj.name)
+
+
+def _reference(obj: Any) -> DatabaseObjectReference:
+    """The object's canonical reference, from its own identity."""
+    kind = type(obj).KIND
+    if isinstance(obj, DatabaseSchema):
+        return DatabaseObjectReference(kind=kind, schema=obj.schema, name=obj.schema)
+    identity = getattr(obj, "identity", None)
+    if identity is not None:
+        return DatabaseObjectReference(
+            kind=kind, schema=identity.schema, name=identity.name,
+            signature=str(getattr(identity, "signature", "") or ""),
+        )
+    table = obj.table
+    return DatabaseObjectReference(
+        kind=kind, schema=table.schema if table else "", name=obj.name,
+        table=table.name if table else "",
+    )
+
+
+@dataclass(frozen=True)
 class DatabaseColumn:
     """One column, in the position the provider reported it.
 
@@ -154,8 +274,31 @@ class DatabasePrimaryKey:
     name: str
     columns: tuple[str, ...] = ()
     ddl: str = ""
+    table: DatabaseObjectIdentity | None = None
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "constraints"
+    reference = property(_reference)
+
+    @staticmethod
+    def _owns_constraint(kind: str) -> bool:
+        """Which constraint kinds are this type's: the one partition, to list and to write."""
+        return kind == "primary_key"
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabasePrimaryKey", ...]:
+        """Every primary key the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabasePrimaryKey":
+        """One primary key this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
         *, database_name: str = "",
@@ -171,7 +314,7 @@ class DatabasePrimaryKey:
             UnsupportedDatabaseCapabilityError: If the provider answers neither.
         """
         return _constraint_ddl(
-            cls.__name__, lambda kind: kind == "primary_key", conn, table, name, adapter,
+            cls.__name__, cls._owns_constraint, conn, table, name, adapter,
             database_name=database_name,
         )
 
@@ -194,8 +337,31 @@ class DatabaseForeignKey:
     referenced_table: str = ""
     referenced_columns: tuple[str, ...] = ()
     ddl: str = ""
+    table: DatabaseObjectIdentity | None = None
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "constraints"
+    reference = property(_reference)
+
+    @staticmethod
+    def _owns_constraint(kind: str) -> bool:
+        """Which constraint kinds are this type's: the one partition, to list and to write."""
+        return kind == "foreign_key"
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseForeignKey", ...]:
+        """Every foreign key the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseForeignKey":
+        """One foreign key this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
         *, database_name: str = "",
@@ -211,7 +377,7 @@ class DatabaseForeignKey:
             UnsupportedDatabaseCapabilityError: If the provider answers neither.
         """
         return _constraint_ddl(
-            cls.__name__, lambda kind: kind == "foreign_key", conn, table, name, adapter,
+            cls.__name__, cls._owns_constraint, conn, table, name, adapter,
             database_name=database_name,
         )
 
@@ -234,8 +400,26 @@ class DatabaseIndex:
     columns: tuple[str, ...] = ()
     unique: bool = False
     ddl: str = ""
+    table: DatabaseObjectIdentity | None = None
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "indexes"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseIndex", ...]:
+        """Every index the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseIndex":
+        """One index this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
         *, database_name: str = "",
@@ -298,8 +482,34 @@ class DatabaseConstraint:
     columns: tuple[str, ...] = ()
     kind: str = ""
     ddl: str = ""
+    table: DatabaseObjectIdentity | None = None
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "constraints"
+    reference = property(_reference)
+
+    @staticmethod
+    def _owns_constraint(kind: str) -> bool:
+        """Which constraint kinds are this type's: the one partition, to list and to write."""
+        return kind not in ("primary_key", "foreign_key")
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseConstraint", ...]:
+        """Every unique or check constraint the database holds, unread (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseConstraint":
+        """One constraint this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(
+            name=_row_name(row), kind=str(row.get("kind") or ""),
+            table=_row_table(row), depends_on=_depends_on(row),
+        )
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
         *, database_name: str = "",
@@ -315,7 +525,7 @@ class DatabaseConstraint:
             UnsupportedDatabaseCapabilityError: If the provider answers neither.
         """
         return _constraint_ddl(
-            cls.__name__, lambda kind: kind not in ("primary_key", "foreign_key"),
+            cls.__name__, cls._owns_constraint,
             conn, table, name, adapter, database_name=database_name,
         )
 
@@ -338,8 +548,25 @@ class DatabaseSequence:
 
     identity: DatabaseObjectIdentity
     ddl: str = ""
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "sequences"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseSequence", ...]:
+        """Every sequence the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseSequence":
+        """One sequence this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
     ) -> str:
@@ -397,8 +624,25 @@ class DatabaseUserDefinedType:
     identity: DatabaseObjectIdentity
     kind: str = ""
     ddl: str = ""
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "types"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseUserDefinedType", ...]:
+        """Every user-defined type the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseUserDefinedType":
+        """One user-defined type this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
     ) -> str:
@@ -451,8 +695,26 @@ class DatabaseTrigger:
 
     name: str
     ddl: str = ""
+    table: DatabaseObjectIdentity | None = None
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "triggers"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseTrigger", ...]:
+        """Every trigger the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseTrigger":
+        """One trigger this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(name=_row_name(row), table=_row_table(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
     ) -> str:
@@ -495,6 +757,23 @@ class DatabaseTable:
     constraints: tuple[DatabaseConstraint, ...] = ()
     ddl: str = ""
     initial_select: str = ""
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "tables"
+    reference = property(_reference)
+
+    @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseTable", ...]:
+        """Every table the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseTable":
+        """One table this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
 
     @classmethod
     def exists(
@@ -731,7 +1010,7 @@ class DatabaseTable:
         """
         return _creation_fact(_CREATE_INCLUDES_INDEXES, "indexes", conn, adapter)
 
-    @classmethod
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
         *, database_name: str = "",
@@ -803,8 +1082,25 @@ class DatabaseView:
     columns: tuple[DatabaseColumn, ...] = ()
     ddl: str = ""
     initial_select: str = ""
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "views"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseView", ...]:
+        """Every view the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseView":
+        """One view this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(identity=_row_identity(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
     ) -> str:
@@ -864,8 +1160,25 @@ class DatabaseProcedure:
     identity: DatabaseRoutineIdentity
     ddl: str = ""
     invocation: str = ""
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "procedures"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseProcedure", ...]:
+        """Every procedure the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseProcedure":
+        """One procedure this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(identity=_row_routine_identity(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseRoutineIdentity, adapter: Any = None,
     ) -> str:
@@ -907,8 +1220,25 @@ class DatabaseFunction:
     identity: DatabaseRoutineIdentity
     ddl: str = ""
     invocation: str = ""
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "functions"
+    reference = property(_reference)
 
     @classmethod
+    def list(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> tuple["DatabaseFunction", ...]:
+        """Every function the database holds, unread, from its inventory (backlog 723)."""
+        return _listed(cls, conn, database, adapter)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseFunction":
+        """One function this type claimed, addressed as its ``read_ddl`` addresses it."""
+        return cls(identity=_row_routine_identity(row), depends_on=_depends_on(row))
+
+    @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseRoutineIdentity, adapter: Any = None,
     ) -> str:
@@ -953,6 +1283,18 @@ class DatabaseSchema:
     views: tuple[DatabaseView, ...] = ()
     procedures: tuple[DatabaseProcedure, ...] = ()
     functions: tuple[DatabaseFunction, ...] = ()
+    depends_on: tuple[DatabaseObjectReference, ...] = ()
+
+    #: Its kind in the canonical vocabulary (backlog 723).
+    KIND: ClassVar[str] = "schemas"
+    reference = property(_reference)
+
+    @classmethod
+    def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseSchema":
+        """One schema this type claimed, unread, addressed by its name."""
+        return cls(
+            connection="", catalog="", schema=_row_schema(row), depends_on=_depends_on(row),
+        )
 
     @classmethod
     def list(
@@ -977,7 +1319,7 @@ class DatabaseSchema:
             if str(entry.get("name") or "")
         )
 
-    @classmethod
+    @_ReadDdl
     def read_ddl(cls, conn: Any, schema: str, adapter: Any = None) -> str:
         """This schema's own CREATE SCHEMA (backlog 695).
 
@@ -1077,6 +1419,179 @@ _NO_EXPLICIT_NULL: frozenset[str] = frozenset({"duckdb"})
 #: Providers whose table DDL is not part of the surrounding transaction, so a
 #: created table is committed as it always has been there.
 _COMMITS_TABLE_DDL: frozenset[str] = frozenset({"sqlserver", "mysql"})
+
+
+@dataclass(frozen=True)
+class DatabaseObjectListing:
+    """One database's objects, each claimed by exactly one canonical type (backlog 723).
+
+    A listing, not a model: it reads the provider's inventory once, has every
+    entry claimed by exactly one database-object type, lets that type build the
+    object, and carries the provider and database the objects were listed
+    from. Raw inventory exists only long enough to find its owner; what this
+    holds are canonical objects.
+    """
+
+    provider: str
+    database: str
+    objects: tuple[Any, ...] = ()
+
+    @classmethod
+    def read(
+        cls, conn: Any, database: str | None = None, adapter: Any = None,
+    ) -> "DatabaseObjectListing":
+        """List the database, every entry owned exactly once.
+
+        Raises:
+            DatabaseError: When an entry is claimed by no type -- naming its
+                kind -- or by more than one, or the inventory is malformed.
+                An object Rey has no owner for is refused, never dropped: an
+                export missing it would look complete.
+        """
+        adapter = adapter or _adapter()
+        provider = adapter.provider(conn)
+        rows = _inventory(adapter, conn, database, provider)
+        objects: list[Any] = []
+        for row in rows:
+            owners = [owner for owner in _LISTED if _claims(owner, row)]
+            kind = _kind_of(str(row.get("object_type") or ""))
+            where = f"{kind}:{_row_schema(row)}.{_row_name(row)}"
+            if not owners:
+                raise DatabaseError(f"No database object owns the DDL of a '{kind}' ({where}).")
+            if len(owners) > 1:
+                named = ", ".join(owner.__name__ for owner in owners)
+                raise DatabaseError(
+                    f"'{kind}' {where} is claimed by {named}; exactly one database "
+                    f"object owns each."
+                )
+            objects.append(owners[0]._from_inventory(row))
+        listed = next(
+            (str(row.get("database")).strip() for row in rows
+             if str(row.get("database") or "").strip()),
+            "",
+        )
+        return cls(
+            provider=provider,
+            database=listed or database or _connection_database(conn),
+            objects=tuple(objects),
+        )
+
+
+#: Every type an inventory entry may belong to. Each claims its own entries
+#: (``KIND``, and for constraints its own partition) and builds its own object.
+_LISTED: tuple[type, ...] = (
+    DatabaseSchema,
+    DatabaseUserDefinedType,
+    DatabaseSequence,
+    DatabaseTable,
+    DatabasePrimaryKey,
+    DatabaseForeignKey,
+    DatabaseConstraint,
+    DatabaseIndex,
+    DatabaseView,
+    DatabaseFunction,
+    DatabaseProcedure,
+    DatabaseTrigger,
+)
+
+
+def _inventory(
+    adapter: Any, conn: Any, database: str | None, provider: str = "",
+) -> list[dict[str, Any]]:
+    """The provider's inventory, refused where it is not one entry per named object."""
+    rows = adapter.list_database_objects(conn, database)
+    provider = provider or adapter.provider(conn)
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise DatabaseError(
+            f"Provider '{provider}' list_database_objects() must return list[dict]."
+        )
+    for row in rows:
+        if not _row_name(row):
+            raise DatabaseError(f"Provider '{provider}' returned object with empty name.")
+    return rows
+
+
+def _claims(owner: type, row: dict[str, Any]) -> bool:
+    """Whether ``owner`` claims this inventory entry: its kind, and its own partition."""
+    if _kind_of(str(row.get("object_type") or "")) != owner.KIND:
+        return False
+    owns = getattr(owner, "_owns_constraint", None)
+    return owns is None or owns(str(row.get("kind") or ""))
+
+
+def _listed(owner: type, conn: Any, database: str | None, adapter: Any) -> tuple[Any, ...]:
+    """One type's objects, by the same claim and build the listing uses."""
+    adapter = adapter or _adapter()
+    return tuple(
+        owner._from_inventory(row)
+        for row in _inventory(adapter, conn, database)
+        if _claims(owner, row)
+    )
+
+
+def _row_schema(row: dict[str, Any]) -> str:
+    return str(row.get("schema") or "public").strip() or "public"
+
+
+def _row_name(row: dict[str, Any]) -> str:
+    return str(row.get("name") or "").strip()
+
+
+def _row_identity(row: dict[str, Any]) -> DatabaseObjectIdentity:
+    return DatabaseObjectIdentity(
+        connection="", catalog="", schema=_row_schema(row), name=_row_name(row),
+    )
+
+
+def _row_routine_identity(row: dict[str, Any]) -> DatabaseRoutineIdentity:
+    return DatabaseRoutineIdentity(
+        connection="", catalog="", schema=_row_schema(row), name=_row_name(row),
+        signature=str(row.get("signature") or ""),
+    )
+
+
+def _row_table(row: dict[str, Any]) -> DatabaseObjectIdentity:
+    """The table a child entry belongs to."""
+    return DatabaseObjectIdentity(
+        connection="", catalog="", schema=_row_schema(row),
+        name=str(row.get("table") or "").strip(),
+    )
+
+
+def _depends_on(row: dict[str, Any]) -> tuple[DatabaseObjectReference, ...]:
+    """What the entry depends on, as canonical references."""
+    return tuple(_dependency(dep) for dep in (row.get("dependencies") or []))
+
+
+def _dependency(dep: Any) -> DatabaseObjectReference:
+    """One stated dependency as a reference; one it cannot state has no name."""
+    unstated = DatabaseObjectReference(kind="", schema="", name="")
+    if isinstance(dep, str):
+        kind, colon, rest = dep.strip().partition(":")
+        schema, dot, name = rest.partition(".")
+        if not (colon and dot and name):
+            return unstated
+        return DatabaseObjectReference(kind=_kind_of(kind), schema=schema, name=name)
+    if isinstance(dep, dict):
+        name = str(dep.get("name") or "").strip()
+        if not name:
+            return unstated
+        return DatabaseObjectReference(
+            kind=_kind_of(str(dep.get("object_type") or "table")),
+            schema=str(dep.get("schema") or "public").strip() or "public",
+            name=name,
+        )
+    return unstated
+
+
+def _connection_database(conn: Any) -> str:
+    """The database a connection names, where the inventory named none."""
+    candidate = (
+        getattr(conn, "database", None)
+        or getattr(getattr(conn, "info", None), "dbname", None)
+        or getattr(getattr(conn, "info", None), "database", None)
+    )
+    return str(candidate).strip() if candidate else "database"
 
 
 def _adapter() -> Any:

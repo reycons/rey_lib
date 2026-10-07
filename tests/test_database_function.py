@@ -16,7 +16,7 @@ import pytest
 
 from rey_lib.db import db_adapter as adapter_module
 from rey_lib.db.database_objects import DatabaseFunction, DatabaseRoutineIdentity
-from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import UnsupportedDatabaseCapabilityError
 
 _IDENTITY = DatabaseRoutineIdentity(
@@ -83,7 +83,7 @@ def test_the_ddl_export_asks_the_function_by_identity(
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
     conn = types.SimpleNamespace(provider="postgres")
 
-    DBAdapter().export_database_ddl(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
 
     assert asked == [("control", "run_total", "integer", "function")]
     (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "run_total" in p.name]

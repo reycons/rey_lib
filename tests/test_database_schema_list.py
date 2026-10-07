@@ -13,6 +13,7 @@ from typing import Any
 import duckdb
 import pytest
 
+from rey_lib.db import db_adapter, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseSchema
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import UnsupportedDatabaseCapabilityError
@@ -49,10 +50,32 @@ def test_an_unnamed_entry_is_not_a_schema() -> None:
     assert [s.schema for s in DatabaseSchema.list(object(), "c", adapter)] == ["control"]
 
 
-def test_a_provider_that_cannot_list_schemas_is_refused_by_name() -> None:
-    """SQL Server declares no schema listing: refused, not answered with none."""
+def test_a_provider_that_cannot_list_schemas_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused, not answered with none."""
+    monkeypatch.setitem(db_adapter._PROVIDER_METADATA_CAPABILITIES, "sqlserver", frozenset())
+
     with pytest.raises(UnsupportedDatabaseCapabilityError, match="provider 'sqlserver'"):
         DatabaseSchema.list(SimpleNamespace(provider="sqlserver"), "c", DBAdapter())
+
+
+def test_sql_server_lists_its_schemas_from_its_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 720 refusal is gone: SQL Server answers from its object inventory (723)."""
+    monkeypatch.setattr(sqlserver_utils, "get_current_database", lambda _conn: "NaviStage")
+    monkeypatch.setattr(sqlserver_utils, "list_database_objects", lambda _conn, database=None: [
+        {"object_type": "schema", "schema": "staging", "name": "staging"},
+        {"object_type": "schema", "schema": "dbo", "name": "dbo"},
+        {"object_type": "table", "schema": "dbo", "name": "trade"},
+    ])
+
+    listed = DatabaseSchema.list(SimpleNamespace(provider="sqlserver"), "c", DBAdapter())
+
+    assert [(s.catalog, s.schema) for s in listed] == [
+        ("NaviStage", "dbo"), ("NaviStage", "staging"),
+    ]
 
 
 def test_duckdb_lists_its_schemas_end_to_end() -> None:

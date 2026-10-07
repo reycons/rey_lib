@@ -1,0 +1,191 @@
+"""DatabaseObjectListing: every inventory entry has exactly one canonical owner (backlog 723).
+
+The provider's inventory is read once; each entry is claimed by exactly one
+database-object type, which builds the object. An entry no type claims is
+refused naming its kind -- never dropped -- and one several claim is refused
+naming them. Each type's own ``list`` uses the same claim and build.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from rey_lib.db import database_objects
+from rey_lib.db.database_objects import (
+    DatabaseConstraint,
+    DatabaseForeignKey,
+    DatabaseIndex,
+    DatabaseObjectIdentity,
+    DatabaseObjectListing,
+    DatabaseObjectReference,
+    DatabasePrimaryKey,
+    DatabaseProcedure,
+    DatabaseSchema,
+    DatabaseTable,
+)
+from rey_lib.db import postgres_utils
+from rey_lib.errors.error_utils import DatabaseError
+
+_INVENTORY: list[dict[str, Any]] = [
+    {"database": "rey", "object_type": "schema", "schema": "control", "name": "control"},
+    {"database": "rey", "object_type": "table", "schema": "control", "name": "run",
+     "dependencies": [{"object_type": "schema", "schema": "control", "name": "control"}]},
+    {"database": "rey", "object_type": "constraint", "kind": "primary_key",
+     "schema": "control", "name": "run_pk", "table": "run",
+     "dependencies": ["tables:control.run"]},
+    {"database": "rey", "object_type": "constraint", "kind": "foreign_key",
+     "schema": "control", "name": "run_fk", "table": "run"},
+    {"database": "rey", "object_type": "constraint", "kind": "check",
+     "schema": "control", "name": "run_ck", "table": "run"},
+    {"database": "rey", "object_type": "index", "schema": "control", "name": "run_ix",
+     "table": "run"},
+    {"database": "rey", "object_type": "procedure", "schema": "control", "name": "load",
+     "signature": "integer"},
+]
+
+
+class _Adapter:
+    """The inventory primitive and what a schema's DDL needs, counting inventory reads."""
+
+    def __init__(self, inventory: Any) -> None:
+        self.inventory = inventory
+        self.reads = 0
+
+    def provider(self, _conn: Any) -> str:
+        return "postgres"
+
+    def quote_identifier(self, _conn: Any, name: str) -> str:
+        return postgres_utils.quote_identifier(name)
+
+    def list_database_objects(self, _conn: Any, database: str | None = None) -> Any:
+        self.reads += 1
+        return self.inventory
+
+
+def test_each_entry_becomes_the_object_of_its_one_owner() -> None:
+    adapter = _Adapter(_INVENTORY)
+
+    listing = DatabaseObjectListing.read(object(), None, adapter)
+
+    assert [type(obj).__name__ for obj in listing.objects] == [
+        "DatabaseSchema", "DatabaseTable", "DatabasePrimaryKey", "DatabaseForeignKey",
+        "DatabaseConstraint", "DatabaseIndex", "DatabaseProcedure",
+    ]
+    assert (listing.provider, listing.database) == ("postgres", "rey")
+    assert adapter.reads == 1  # read once, whatever the number of types
+
+
+def test_the_constraint_partition_is_the_constraint_types_own() -> None:
+    """No owner map: each type claims its own kinds, the same partition its DDL uses."""
+    listing = DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY))
+    constraints = [
+        obj for obj in listing.objects
+        if isinstance(obj, (DatabasePrimaryKey, DatabaseForeignKey, DatabaseConstraint))
+    ]
+
+    assert [(type(obj).__name__, obj.name) for obj in constraints] == [
+        ("DatabasePrimaryKey", "run_pk"),
+        ("DatabaseForeignKey", "run_fk"),
+        ("DatabaseConstraint", "run_ck"),
+    ]
+    assert not hasattr(database_objects, "_CONSTRAINT_OWNER")
+
+
+def test_an_unowned_kind_is_refused_naming_it_never_dropped() -> None:
+    adapter = _Adapter([*_INVENTORY, {"object_type": "rule", "schema": "control", "name": "r"}])
+
+    with pytest.raises(DatabaseError, match="No database object owns the DDL of a 'rule'"):
+        DatabaseObjectListing.read(object(), None, adapter)
+
+
+def test_an_entry_several_types_claim_is_refused_naming_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(database_objects, "_LISTED", (DatabaseTable, DatabaseTable))
+
+    with pytest.raises(DatabaseError, match="claimed by DatabaseTable, DatabaseTable"):
+        DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY[1:2]))
+
+
+def test_a_malformed_inventory_is_refused() -> None:
+    with pytest.raises(DatabaseError, match=r"must return list\[dict\]"):
+        DatabaseObjectListing.read(object(), None, _Adapter("not a list"))
+    with pytest.raises(DatabaseError, match="empty name"):
+        DatabaseObjectListing.read(object(), None, _Adapter([{"object_type": "table"}]))
+
+
+def test_references_keep_a_child_s_table_and_a_routine_s_signature() -> None:
+    listing = DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY))
+    by_name = {obj.reference.name: obj for obj in listing.objects}
+
+    assert by_name["run_ix"].reference == DatabaseObjectReference(
+        kind="indexes", schema="control", name="run_ix", table="run",
+    )
+    assert by_name["load"].reference == DatabaseObjectReference(
+        kind="procedures", schema="control", name="load", signature="integer",
+    )
+    assert by_name["run"].depends_on == (
+        DatabaseObjectReference(kind="schemas", schema="control", name="control"),
+    )
+    assert by_name["run_pk"].depends_on == (
+        DatabaseObjectReference(kind="tables", schema="control", name="run"),
+    )
+
+
+def test_each_type_s_list_uses_the_same_claim_and_build() -> None:
+    adapter = _Adapter(_INVENTORY)
+
+    assert [obj.identity.name for obj in DatabaseTable.list(object(), None, adapter)] == ["run"]
+    assert [obj.name for obj in DatabasePrimaryKey.list(object(), None, adapter)] == ["run_pk"]
+    assert [obj.name for obj in DatabaseConstraint.list(object(), None, adapter)] == ["run_ck"]
+    (procedure,) = DatabaseProcedure.list(object(), None, adapter)
+    assert procedure.identity.signature == "integer"
+
+
+def test_the_database_is_the_inventory_s_then_the_caller_s_then_the_connection_s() -> None:
+    nameless = [{"object_type": "schema", "schema": "s", "name": "s"}]
+
+    assert DatabaseObjectListing.read(object(), "asked", _Adapter(nameless)).database == "asked"
+
+    class _Conn:
+        database = "attached"
+
+    assert DatabaseObjectListing.read(_Conn(), None, _Adapter(nameless)).database == "attached"
+
+
+class TestReadDdlIsOneContract:
+    """Asked of the type with an address, or of a listed object for its own (M3)."""
+
+    def test_a_listed_object_addresses_its_own_ddl(self) -> None:
+        adapter = _Adapter(_INVENTORY)
+        (schema,) = [
+            obj for obj in DatabaseObjectListing.read(object(), None, adapter).objects
+            if isinstance(obj, DatabaseSchema)
+        ]
+
+        assert schema.read_ddl(object(), adapter) == DatabaseSchema.read_ddl(
+            object(), "control", adapter,
+        ) == 'CREATE SCHEMA IF NOT EXISTS "control";'
+
+    def test_the_type_is_still_asked_with_an_address(self) -> None:
+        table = DatabaseObjectIdentity(connection="", catalog="", schema="s", name="t")
+
+        class _Index(_Adapter):
+            def index_column_catalog(self, *_a: Any, **_k: Any) -> dict:
+                return {"unique": False, "primary": False, "columns": ["a"]}
+
+            def provider(self, _conn: Any) -> str:
+                return "mysql"
+
+            def quote_identifier(self, _conn: Any, name: str) -> str:
+                return f"`{name}`"
+
+        assert DatabaseIndex.read_ddl(object(), table, "ix", _Index([])) == (
+            "CREATE INDEX `ix` ON `s`.`t` (`a`);"
+        )
+
+    def test_a_child_with_no_table_cannot_address_itself(self) -> None:
+        with pytest.raises(DatabaseError, match="carries no table"):
+            DatabaseIndex(name="ix").read_ddl(object(), _Adapter([]))

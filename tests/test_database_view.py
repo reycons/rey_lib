@@ -17,6 +17,7 @@ import pytest
 from rey_lib.db import duckdb_utils, mysql_utils, postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseSchema, DatabaseView
 from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import DatabaseError
 
 _QUOTE = {
@@ -176,7 +177,7 @@ def test_the_ddl_export_writes_a_view_s_own_ddl(
          "dependencies": []},
     ])
 
-    DBAdapter().export_database_ddl(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
 
     (written,) = [
         path for path in tmp_path.rglob("*") if path.is_file() and "trade_vw" in path.name

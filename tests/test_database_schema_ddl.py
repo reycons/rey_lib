@@ -14,10 +14,12 @@ from typing import Any
 
 import pytest
 
+from rey_lib.db import database_objects
 from rey_lib.db import db_adapter as adapter_module
 from rey_lib.db import duckdb_utils, mysql_utils, postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseSchema, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import DatabaseError
 
 _QUOTE = {
@@ -74,7 +76,7 @@ def _export(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, listed: list[dict]) 
         quote_identifier=postgres_utils.quote_identifier,
     )
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
-    DBAdapter().export_database_ddl(
+    DatabaseDdlExport.export(
         types.SimpleNamespace(provider="postgres"), output_root=str(tmp_path),
     )
 
@@ -108,5 +110,6 @@ def test_an_unknown_listed_type_is_refused_not_made_a_table(
 
 
 def test_a_known_alias_still_normalises_to_its_canonical_type() -> None:
-    assert adapter_module._normalise_object_type("Index") == "indexes"
-    assert adapter_module._normalise_object_type("rule") == "rule"
+    """The kind vocabulary is the database objects' (backlog 723)."""
+    assert database_objects._kind_of("Index") == "indexes"
+    assert database_objects._kind_of("rule") == "rule"

@@ -442,11 +442,13 @@ def test_duckdb_reports_only_existing_metadata_capabilities(
 
 
 def test_sqlserver_stays_outside_the_metadata_increment() -> None:
+    """Schemas are listed from its inventory now (backlog 723); catalogs are not."""
     conn = SimpleNamespace(provider="sqlserver")
     adapter = DBAdapter()
-    assert adapter.supports(conn, "schemas") is False
+    assert adapter.supports(conn, "schemas") is True
+    assert adapter.supports(conn, "catalogs") is False
     with pytest.raises(UnsupportedDatabaseCapabilityError, match="provider 'sqlserver'"):
-        adapter.list_schemas(conn)
+        adapter.list_catalogs(conn)
 
 
 @pytest.mark.parametrize(

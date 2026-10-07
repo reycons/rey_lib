@@ -19,7 +19,7 @@ import pytest
 from rey_lib.db import db_adapter as adapter_module
 from rey_lib.db import mysql_utils, postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseIndex, DatabaseObjectIdentity
-from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import DatabaseError
 
 _QUOTE = {
@@ -190,7 +190,7 @@ def test_the_ddl_export_asks_the_index_by_its_table(
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
     conn = types.SimpleNamespace(provider="sqlserver")
 
-    DBAdapter().export_database_ddl(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
 
     assert asked == [("control", "run_log", "run_log_status_idx")]
     (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "run_log_status_idx" in p.name]

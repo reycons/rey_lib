@@ -17,7 +17,7 @@ import pytest
 from rey_lib.db import db_adapter as adapter_module
 from rey_lib.db import postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseProcedure, DatabaseRoutineIdentity
-from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import DatabaseError, UnsupportedDatabaseCapabilityError
 
 _IDENTITY = DatabaseRoutineIdentity(
@@ -145,7 +145,7 @@ def test_the_ddl_export_asks_the_procedure_by_identity(
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
     conn = types.SimpleNamespace(provider="postgres")
 
-    DBAdapter().export_database_ddl(conn, output_root=str(tmp_path))
+    DatabaseDdlExport.export(conn, output_root=str(tmp_path))
 
     assert asked == [("control", "load_runs", "integer", "procedure")]
     (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "load_runs" in p.name]

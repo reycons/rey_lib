@@ -18,7 +18,7 @@ import pytest
 from rey_lib.db import db_adapter as adapter_module
 from rey_lib.db import postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseUserDefinedType
-from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.ddl_export import DatabaseDdlExport
 from rey_lib.errors.error_utils import DatabaseError
 
 _IDENTITY = DatabaseObjectIdentity(connection="c", catalog="rey", schema="control", name="mood")
@@ -138,7 +138,7 @@ def test_the_ddl_export_asks_the_type_by_its_identity(
     )
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)
 
-    DBAdapter().export_database_ddl(
+    DatabaseDdlExport.export(
         types.SimpleNamespace(provider="postgres"), output_root=str(tmp_path),
     )
 
