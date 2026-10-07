@@ -57,7 +57,7 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
         load_operation, "_write_adapter",
         SimpleNamespace(provider=lambda _conn: "postgres",
                             quote_identifier=lambda _conn, name: f'"{name}"',
-                            fetch_rows=lambda *_a, **_k: [{"present": 1}],
+                            table_exists=lambda *_a, **_k: True,
                             get_table_columns=lambda *_a, **_k: ["a", "b"],
                             # No native path, so the reader is still reached.
                             supports_provider_capability=lambda *_a, **_k: False),
@@ -169,7 +169,7 @@ class TestTheConfiguredTypeReachesTheReader:
             load_operation, "_write_adapter",
             SimpleNamespace(provider=lambda _conn: "postgres",
                             quote_identifier=lambda _conn, name: f'"{name}"',
-                            fetch_rows=lambda *_a, **_k: [{"present": 1}],
+                            table_exists=lambda *_a, **_k: True,
                             get_table_columns=lambda *_a, **_k: ["a", "b"],
                             # No native path, so the reader is still reached.
                             supports_provider_capability=lambda *_a, **_k: False),

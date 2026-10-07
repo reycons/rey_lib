@@ -48,7 +48,9 @@ class _Connector:
     def quote_identifier(self, _conn: Any, name: str) -> str:
         return _QUOTE[self._provider](name)
 
-    def index_column_catalog(self, _conn: Any, schema: str, table: str, index: str) -> dict:
+    def index_column_catalog(
+        self, _conn: Any, schema: str, table: str, index: str, **_k: Any,
+    ) -> dict:
         self.asked.append(("catalog", schema, table, index))
         return self.catalog
 
@@ -182,7 +184,7 @@ def test_the_ddl_export_asks_the_index_by_its_table(
              "name": "run_log_status_idx", "table": "run_log", "dependencies": []},
         ],
         quote_identifier=sqlserver_utils.quote_identifier,
-        index_column_catalog=lambda _c, schema, table, index: asked.append(
+        index_column_catalog=lambda _c, schema, table, index, **_k: asked.append(
             (schema, table, index)) or _ORDINARY,
     )
     monkeypatch.setattr(adapter_module, "_backend", lambda _provider: backend)

@@ -727,8 +727,8 @@ def quote_identifier(name: str) -> str:
 def execute_statement(conn: duckdb.DuckDBPyConnection, sql_text: str) -> int:
     """Run one statement on this connection and return what it touched.
 
-    The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
-    adapter writes the statement, this runs it the way DuckDB runs one. It
+    The provider half of ``DatabaseTable.delete_all_rows`` and ``drop``: the
+    table writes the statement, this runs it the way DuckDB runs one. It
     does NOT commit -- DuckDB's statements are atomic on their own unless the
     caller opened a transaction, which stays the caller's.
 
@@ -790,6 +790,148 @@ def table_native_definition(
         conn,
         "SELECT sql FROM duckdb_tables() WHERE schema_name = :schema AND table_name = :table",
         {"schema": schema, "table": table},
+    )
+    return str(rows[0]["sql"]) if rows else ""
+
+
+def schema_metadata(
+    conn: duckdb.DuckDBPyConnection, schema: str, *, database_name: str = "",
+) -> dict[str, Any]:
+    """The schema's structure facts, in the shape every provider answers (backlog 725).
+
+    ``database_name`` is accepted and not used: DuckDB reads the connection's catalog
+    (backlog 727; SQL Server's reads use it).
+
+    A metadata primitive, from DuckDB's own catalog functions and the current
+    database only: tables with their keys, indexes and constraints, and views,
+    by name. A foreign key's referenced table is in the same schema (DuckDB
+    reports no schema for it). NOT NULL entries are column facts and are not
+    constraints here. No column facts and no view definitions; nothing here
+    constructs a database object.
+    """
+    where = {"schema": schema}
+    names = [str(row["table_name"]) for row in fetch_rows(
+        conn,
+        "SELECT table_name FROM duckdb_tables() WHERE schema_name = :schema "
+        "AND database_name = current_database() AND NOT internal ORDER BY table_name",
+        where,
+    )]
+    tables: dict[str, dict[str, Any]] = {
+        name: {"name": name, "primary_key": {}, "foreign_keys": [], "indexes": [],
+               "unique_constraints": [], "check_constraints": []}
+        for name in names
+    }
+    for row in fetch_rows(
+        conn,
+        "SELECT table_name, constraint_type, constraint_name, constraint_column_names, "
+        "referenced_table, referenced_column_names FROM duckdb_constraints() "
+        "WHERE schema_name = :schema AND database_name = current_database() "
+        "ORDER BY table_name, constraint_index",
+        where,
+    ):
+        table = tables.get(str(row["table_name"]))
+        if table is None:
+            continue
+        kind = str(row["constraint_type"]).upper()
+        name = row["constraint_name"]
+        columns = [str(c) for c in (row["constraint_column_names"] or [])]
+        if kind == "PRIMARY KEY":
+            table["primary_key"] = {"name": name, "constrained_columns": columns}
+        elif kind == "FOREIGN KEY":
+            table["foreign_keys"].append({
+                "name": name, "constrained_columns": columns, "referred_schema": schema,
+                "referred_table": row["referenced_table"],
+                "referred_columns": [str(c) for c in (row["referenced_column_names"] or [])],
+            })
+        elif kind == "UNIQUE":
+            table["unique_constraints"].append({"name": name, "column_names": columns})
+        elif kind == "CHECK":
+            table["check_constraints"].append({"name": name})
+    for row in fetch_rows(
+        conn,
+        "SELECT table_name, index_name, is_unique, expressions FROM duckdb_indexes() "
+        "WHERE schema_name = :schema AND database_name = current_database() "
+        "ORDER BY table_name, index_name",
+        where,
+    ):
+        table = tables.get(str(row["table_name"]))
+        if table is None:
+            continue
+        expressions = str(row["expressions"] or "").strip().strip("[]")
+        table["indexes"].append({
+            "name": row["index_name"],
+            "column_names": [part.strip() for part in expressions.split(",") if part.strip()],
+            "unique": bool(row["is_unique"]),
+        })
+    views = [{"name": str(row["view_name"])} for row in fetch_rows(
+        conn,
+        "SELECT view_name FROM duckdb_views() WHERE schema_name = :schema "
+        "AND database_name = current_database() AND NOT internal ORDER BY view_name",
+        where,
+    )]
+    return {"tables": list(tables.values()), "views": views}
+
+
+def table_column_catalog(
+    conn: duckdb.DuckDBPyConnection, schema: str, table: str, *, database_name: str = "",
+) -> list[dict[str, Any]]:
+    """One table's or view's columns as DuckDB's catalog states them, in column order.
+
+    ``database_name`` is accepted and not used: DuckDB reads the connection's catalog
+    (backlog 727; SQL Server's reads use it).
+
+    A metadata primitive (backlog 724): what the server says, not DDL, read
+    from ``duckdb_columns()``. The default is already SQL text. Empty when
+    there is no such table.
+
+    Returns:
+        ``{"name", "type", "default", "nullable"}`` per column.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT column_name, data_type, column_default, is_nullable "
+        "FROM duckdb_columns() "
+        "WHERE schema_name = :schema AND table_name = :table AND NOT internal "
+        "ORDER BY column_index",
+        {"schema": schema, "table": table},
+    )
+    return [
+        {
+            "name": str(row["column_name"]),
+            "type": str(row["data_type"]),
+            "default": row["column_default"],
+            "nullable": bool(row["is_nullable"]),
+        }
+        for row in rows
+    ]
+
+
+def table_exists(
+    conn: duckdb.DuckDBPyConnection, catalog: str, schema: str, table: str,
+) -> bool:
+    """Whether information_schema.tables holds a row for this schema and name.
+
+    A metadata primitive (backlog 698): the provider's catalog answer only --
+    what "exists" means is DatabaseTable's. ``catalog`` takes no part here.
+    """
+    return bool(fetch_rows(
+        conn,
+        "SELECT 1 AS present FROM information_schema.tables "
+        "WHERE table_schema = :schema AND table_name = :table",
+        {"schema": schema, "table": table},
+    ))
+
+
+def view_native_definition(conn: duckdb.DuckDBPyConnection, schema: str, view: str) -> str:
+    """The CREATE VIEW statement DuckDB's catalog holds (duckdb_views()).
+
+    A metadata primitive (backlog 698): retrieved, never composed here. Empty
+    when there is none.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT sql FROM duckdb_views() WHERE schema_name = :schema AND view_name = :view",
+        {"schema": schema, "view": view},
     )
     return str(rows[0]["sql"]) if rows else ""
 

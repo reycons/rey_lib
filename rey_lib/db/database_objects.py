@@ -16,7 +16,7 @@ canonical table object (backlog 690): it owns what a table's existence means,
 creating one from a Rey logical schema, and widening a column -- the table DDL
 and the provider differences in it -- reaching the database only through the
 connector's primitives (``DBAdapter.provider`` / ``quote_identifier`` /
-``execute_statement`` / ``fetch_rows``), with every column type from
+``execute_statement`` / ``table_exists``), with every column type from
 ``DatabaseType``. An operation is handed the connection; the object never keeps
 one, so the same value is what the Console's tree draws.
 """
@@ -158,6 +158,7 @@ class DatabasePrimaryKey:
     @classmethod
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+        *, database_name: str = "",
     ) -> str:
         """This primary key's own standalone DDL (backlog 695).
 
@@ -171,6 +172,7 @@ class DatabasePrimaryKey:
         """
         return _constraint_ddl(
             cls.__name__, lambda kind: kind == "primary_key", conn, table, name, adapter,
+            database_name=database_name,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -196,6 +198,7 @@ class DatabaseForeignKey:
     @classmethod
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+        *, database_name: str = "",
     ) -> str:
         """This foreign key's own standalone DDL (backlog 695).
 
@@ -209,6 +212,7 @@ class DatabaseForeignKey:
         """
         return _constraint_ddl(
             cls.__name__, lambda kind: kind == "foreign_key", conn, table, name, adapter,
+            database_name=database_name,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -234,6 +238,7 @@ class DatabaseIndex:
     @classmethod
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+        *, database_name: str = "",
     ) -> str:
         """This index's own DDL (backlog 695).
 
@@ -250,7 +255,9 @@ class DatabaseIndex:
         """
         adapter = adapter or _adapter()
         where = f"{table.schema}.{table.name}.{name}"
-        catalog = adapter.index_column_catalog(conn, table.schema, table.name, name)
+        catalog = adapter.index_column_catalog(
+            conn, table.schema, table.name, name, database_name=database_name,
+        )
         if not catalog:
             raise DatabaseError(f"index not found: {where}")
         if catalog["primary"]:
@@ -295,6 +302,7 @@ class DatabaseConstraint:
     @classmethod
     def read_ddl(
         cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+        *, database_name: str = "",
     ) -> str:
         """This unique or check constraint's own standalone DDL (backlog 695).
 
@@ -308,7 +316,7 @@ class DatabaseConstraint:
         """
         return _constraint_ddl(
             cls.__name__, lambda kind: kind not in ("primary_key", "foreign_key"),
-            conn, table, name, adapter,
+            conn, table, name, adapter, database_name=database_name,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -501,17 +509,35 @@ class DatabaseTable:
         with "no columns".
         """
         adapter = adapter or _adapter()
-        catalog_prefix = (
-            f"{adapter.quote_identifier(conn, identity.catalog)}."
-            if identity.catalog and adapter.provider(conn) == "sqlserver" else ""
+        # How the provider's catalog is asked is the connector's (backlog 698).
+        return adapter.table_exists(conn, identity.catalog, identity.schema, identity.name)
+
+    @classmethod
+    def read(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> "DatabaseTable":
+        """This one table, read back as a schema read would build it (backlog 727).
+
+        Addressed exactly as ``create`` and ``exists`` address it: every read
+        is of the identity's catalog, so a table in another database on the
+        server (SQL Server) is read from that database, and providers to
+        which a catalog means nothing ignore it. Built by the same ``_table``
+        as a schema read -- there is one way a table is constructed.
+
+        Raises:
+            DatabaseError: When the schema holds no such table.
+        """
+        adapter = adapter or _adapter()
+        read = adapter.get_schema_metadata(
+            conn, identity.schema, database_name=identity.catalog,
         )
-        rows = adapter.fetch_rows(
-            conn,
-            f"SELECT 1 AS present FROM {catalog_prefix}information_schema.tables "
-            "WHERE table_schema = :schema AND table_name = :table",
-            {"schema": identity.schema, "table": identity.name},
-        )
-        return bool(rows)
+        for entry in read.get("tables") or []:
+            if str(entry.get("name") or "") == identity.name:
+                return _table(
+                    adapter, conn, identity.connection, identity.catalog, identity.schema,
+                    entry, identity.catalog,
+                )
+        raise DatabaseError(f"table not found: {_named(identity)}")
 
     @classmethod
     def create(
@@ -520,7 +546,7 @@ class DatabaseTable:
         identity: DatabaseObjectIdentity,
         columns: list[tuple[str, LogicalType]],
         adapter: Any = None,
-    ) -> bool:
+    ) -> "DatabaseTable":
         """Create this table from a Rey logical schema, where it is not already there.
 
         Every column is nullable, typed by ``DatabaseType`` for the
@@ -533,10 +559,12 @@ class DatabaseTable:
         fails goes away with it.
 
         Returns:
-            True if this call created it; False if it was already there.
+            The table as the server now holds it, read back through ``read``
+            -- whether this call created it or it was already there (backlog 727).
 
         Raises:
-            DatabaseError: If no columns are given, or the DDL fails.
+            DatabaseError: If no columns are given, the DDL fails, or the
+                table cannot be read back.
         """
         adapter = adapter or _adapter()
         if not columns:
@@ -544,7 +572,7 @@ class DatabaseTable:
                 f"DatabaseTable.create: no columns given for {_named(identity)}."
             )
         if cls.exists(conn, identity, adapter):
-            return False
+            return cls.read(conn, identity, adapter)
         provider = adapter.provider(conn)
         types = DatabaseType(provider)
         # DatabaseType resolves each physical type; each column writes its own
@@ -560,7 +588,7 @@ class DatabaseTable:
         _run(adapter, conn, identity, f"CREATE TABLE {table} (\n\t{listed}\n)")
         if provider in _COMMITS_TABLE_DDL:
             conn.commit()
-        return True
+        return cls.read(conn, identity, adapter)
 
     def widen_column(
         self, conn: Any, column: str, logical: LogicalType, adapter: Any = None,
@@ -592,6 +620,92 @@ class DatabaseTable:
         _run(adapter, conn, self.identity, f"ALTER TABLE {table} {change}")
 
     @classmethod
+    def drop(cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None) -> None:
+        """Destroy this table itself, not merely its contents (backlog 722).
+
+        **NAMED FOR WHAT IT DOES.** It is not called `recreate`: a load mode
+        that rebuilds a destination is built FROM this and a create.
+
+        **DESTRUCTIVE AT SCHEMA LEVEL, and that is the whole difference from
+        ``delete_all_rows``.** Emptying a table keeps the thing it empties; this
+        does not. WHAT THE TABLE OWNS GOES WITH IT -- its indexes, its
+        constraints, its triggers -- and nothing here rebuilds any of them.
+
+        What happens to objects that merely DEPEND on the table -- a view over
+        it, a foreign key from elsewhere -- is the provider's answer: the drop
+        may be refused, or may reach further. This does not decide it, and a
+        caller that needs to know must ask the database it is talking to.
+
+        ``DROP TABLE``, with no ``CASCADE``, through the connector's
+        ``quote_identifier`` and ``execute_statement``. It does not commit.
+
+        Raises:
+            DatabaseError: Naming the table, if the drop fails.
+            UnsupportedDatabaseCapabilityError: If the provider cannot run it.
+        """
+        adapter = adapter or _adapter()
+        table = _qualified(adapter, conn, identity)
+        _run(adapter, conn, identity, f"DROP TABLE {table}")
+
+    @classmethod
+    def delete_all_rows(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> int:
+        """Remove every row from this table, leaving the table itself (backlog 722).
+
+        **NAMED FOR WHAT IT DOES.** It is not called `replace`: a load mode
+        that replaces a destination's contents is built FROM this.
+
+        What it does NOT do, each because something else does:
+
+        - it does not DROP the table. The schema, its constraints, its grants,
+          its indexes and its triggers survive, because emptying a table is not
+          the same act as destroying and rebuilding one;
+        - it does not reset identity or sequence state. A sequence continues
+          from where it was; anyone wanting it reset is asking for a different
+          operation and should ask for it by name;
+        - it does not create anything. A destination that is not there is
+          ``create``'s business.
+
+        ``DELETE FROM`` is the same statement on every provider; only the
+        spelling of the name and the running of the statement differ, and
+        those are the connector's ``quote_identifier`` and
+        ``execute_statement``. It does not commit: whether the statement sits
+        in a transaction is the connection's, and is the caller's to manage.
+
+        Returns:
+            Rows removed, as the ENGINE counted them. Zero means the table was
+            already empty -- a real answer, not a failure.
+
+        Raises:
+            DatabaseError: Naming the table, if the delete fails.
+            UnsupportedDatabaseCapabilityError: If the provider cannot run it.
+        """
+        adapter = adapter or _adapter()
+        table = _qualified(adapter, conn, identity)
+        # The provider's own count, carried: coercing it here would be having
+        # an opinion about an answer this did not produce.
+        return _run(adapter, conn, identity, f"DELETE FROM {table}")
+
+    @classmethod
+    def column_names(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> list[str]:
+        """This table's column names, in ordinal order (backlog 722).
+
+        Asked through the connector's ``get_table_columns`` primitive, with the
+        schema as providers have always received it: ``catalog.schema`` where
+        the identity names a catalog. Empty when the table is not there -- a
+        table that exists always has at least one column.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot describe a table.
+        """
+        adapter = adapter or _adapter()
+        schema = f"{identity.catalog}.{identity.schema}" if identity.catalog else identity.schema
+        return adapter.get_table_columns(conn, schema, identity.name)
+
+    @classmethod
     def create_includes_constraints(cls, conn: Any, adapter: Any = None) -> bool:
         """Whether this table's CREATE TABLE also creates its keys and constraints.
 
@@ -620,6 +734,7 @@ class DatabaseTable:
     @classmethod
     def read_ddl(
         cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+        *, database_name: str = "",
     ) -> str:
         """This table's own DDL (backlog 695).
 
@@ -643,7 +758,9 @@ class DatabaseTable:
             ).rstrip()
             _found(definition, identity)
             return definition if definition.endswith(";") else definition + ";"
-        columns = adapter.table_column_catalog(conn, identity.schema, identity.name)
+        columns = adapter.table_column_catalog(
+            conn, identity.schema, identity.name, database_name=database_name,
+        )
         _found(columns, identity)
         # schema.table, as table DDL has always been written: the catalog a
         # read carries is the connection's own database, not the statement's.
@@ -707,39 +824,19 @@ class DatabaseView:
         qualified = ".".join(
             adapter.quote_identifier(conn, part) for part in (identity.schema, identity.name)
         )
-        names = {"schema": identity.schema, "view": identity.name}
-        if provider == "postgres":
-            rows = adapter.fetch_rows(
-                conn,
-                "SELECT pg_get_viewdef(c.oid, true) AS definition "
-                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                "WHERE n.nspname = :schema AND c.relname = :view",
-                names,
-            )
-            definition = rows[0]["definition"] if rows else ""
+        if provider not in ("postgres", "mysql", "sqlserver", "duckdb"):
+            raise DatabaseError(f"DatabaseView.read_ddl: provider '{provider}' has no view DDL.")
+        # The server's definition is a retrieved fact (backlog 698); the DDL is
+        # the view's.
+        definition = adapter.view_native_definition(conn, identity.schema, identity.name)
+        if provider in _VIEW_DEFINITION_IS_BODY:
             return f"CREATE OR REPLACE VIEW {qualified} AS\n{definition};"
         if provider == "mysql":
-            rows = adapter.fetch_rows(conn, f"SHOW CREATE VIEW {qualified}", {})
-            return str((rows[0] if rows else {}).get("Create View") or "").rstrip() + ";"
+            return definition.rstrip() + ";"
         if provider == "sqlserver":
-            rows = adapter.fetch_rows(
-                conn,
-                "SELECT OBJECT_DEFINITION(OBJECT_ID(:qualified)) AS definition",
-                {"qualified": qualified},
-            )
-            definition = rows[0]["definition"] if rows else None
-            return str(definition).rstrip() + "\nGO" if definition else ""
-        if provider == "duckdb":
-            # The catalog's own statement. SHOW CREATE VIEW, used before this
-            # moved here, is not DuckDB syntax and produced nothing.
-            rows = adapter.fetch_rows(
-                conn,
-                "SELECT sql FROM duckdb_views() "
-                "WHERE schema_name = :schema AND view_name = :view",
-                names,
-            )
-            return str(rows[0]["sql"]).rstrip() if rows else ""
-        raise DatabaseError(f"DatabaseView.read_ddl: provider '{provider}' has no view DDL.")
+            return definition.rstrip() + "\nGO" if definition else ""
+        # DuckDB's catalog statement already ends.
+        return definition.rstrip()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -858,6 +955,29 @@ class DatabaseSchema:
     functions: tuple[DatabaseFunction, ...] = ()
 
     @classmethod
+    def list(
+        cls, conn: Any, connection: str, adapter: Any = None,
+    ) -> tuple["DatabaseSchema", ...]:
+        """Every schema the connection holds, each unread (backlog 720).
+
+        Schema enumeration is the schema's: one ``DatabaseSchema`` per schema,
+        carrying its connection, catalog and name and nothing it holds --
+        what a schema contains is ``read``'s answer. Ordered by name.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: Naming the provider, where it
+                cannot enumerate schemas. Refused, never answered with none: a
+                provider that cannot list schemas is not a database with zero.
+        """
+        adapter = adapter or _adapter()
+        return tuple(
+            cls(connection=connection, catalog=str(entry.get("catalog") or ""),
+                schema=str(entry.get("name") or ""))
+            for entry in adapter.list_schemas(conn)
+            if str(entry.get("name") or "")
+        )
+
+    @classmethod
     def read_ddl(cls, conn: Any, schema: str, adapter: Any = None) -> str:
         """This schema's own CREATE SCHEMA (backlog 695).
 
@@ -946,6 +1066,10 @@ class DatabaseSchema:
         }
 
 
+#: Providers whose server supplies a view's SELECT body rather than a statement;
+#: DatabaseView writes the CREATE around it (backlog 698).
+_VIEW_DEFINITION_IS_BODY: frozenset[str] = frozenset({"postgres"})
+
 #: Providers whose column definition takes no explicit NULL: a nullable column
 #: is written without one. Column-definition semantics, so DatabaseColumn's.
 _NO_EXPLICIT_NULL: frozenset[str] = frozenset({"duckdb"})
@@ -975,10 +1099,13 @@ def _qualified(adapter: Any, conn: Any, identity: DatabaseObjectIdentity) -> str
     )
 
 
-def _run(adapter: Any, conn: Any, identity: DatabaseObjectIdentity, statement: str) -> None:
-    """Run one table statement, naming the table where it fails."""
+def _run(adapter: Any, conn: Any, identity: DatabaseObjectIdentity, statement: str) -> int:
+    """Run one table statement, naming the table where it fails.
+
+    Returns the engine's own count, carried as the provider reported it.
+    """
     try:
-        adapter.execute_statement(conn, statement)
+        return adapter.execute_statement(conn, statement)
     except DatabaseError as exc:
         raise DatabaseError(f"{_named(identity)}: {exc}") from exc
 
@@ -1028,32 +1155,46 @@ def _table(
     catalog: str,
     schema: str,
     read: dict[str, Any],
+    database_name: str = "",
 ) -> DatabaseTable:
-    """One table, from the schema read plus its own DDL."""
+    """One table, from the schema read plus its own DDL.
+
+    Its columns are the catalog's facts (backlog 724), asked through the
+    connector's table_column_catalog -- the same facts the table's DDL is
+    written from. Every read here is of ``database_name`` -- the one the
+    schema read was of -- so the table is built from one database (backlog 727).
+    """
     name = str(read.get("name") or "")
-    columns = _columns(read.get("columns"))
+    columns = _columns(adapter.table_column_catalog(
+        handle, schema, name, database_name=database_name,
+    ))
     identity = DatabaseObjectIdentity(
         connection=connection, catalog=catalog, schema=schema, name=name,
     )
     return DatabaseTable(
         identity=identity,
         columns=_described(adapter, handle, columns),
-        primary_key=_primary_key(adapter, handle, identity, read.get("primary_key")),
+        primary_key=_primary_key(
+            adapter, handle, identity, read.get("primary_key"), database_name,
+        ),
         foreign_keys=tuple(
-            _foreign_key(adapter, handle, identity, entry)
+            _foreign_key(adapter, handle, identity, entry, database_name)
             for entry in read.get("foreign_keys") or []
         ),
         indexes=tuple(
-            _index(adapter, handle, identity, entry) for entry in read.get("indexes") or []
+            _index(adapter, handle, identity, entry, database_name)
+            for entry in read.get("indexes") or []
         ),
         constraints=tuple(
-            _constraint(adapter, handle, identity, entry)
+            _constraint(adapter, handle, identity, entry, database_name)
             for entry in read.get("unique_constraints") or []
         ) + tuple(
-            _check(adapter, handle, identity, entry)
+            _check(adapter, handle, identity, entry, database_name)
             for entry in read.get("check_constraints") or []
         ),
-        ddl=_table_ddl(adapter, handle, connection, catalog, schema, name),
+        ddl=_table_ddl(
+            adapter, handle, connection, catalog, schema, name, database_name,
+        ),
         initial_select=_initial_select(schema, name, columns),
     )
 
@@ -1069,21 +1210,22 @@ def _view(
     """One view.
 
     Its columns are asked for separately: the bulk schema read describes a
-    view by its definition, and a view's columns are a second question.
+    view by its definition, and a view's columns are a second question --
+    answered by the catalog's facts, through the connector's
+    table_column_catalog, as a table's are (backlog 724).
     """
     name = str(read.get("name") or "")
-    try:
-        described = adapter.get_columns(handle, schema, name)
-    except Exception:
-        described = []
-    columns = _described(adapter, handle, _columns(described))
-    definition = str(read.get("definition") or "")
+    columns = _described(
+        adapter, handle, _columns(adapter.table_column_catalog(handle, schema, name)),
+    )
     return DatabaseView(
         identity=DatabaseObjectIdentity(
             connection=connection, catalog=catalog, schema=schema, name=name,
         ),
         columns=columns,
-        ddl=_view_ddl(adapter, handle, connection, catalog, schema, name) or definition,
+        # The view's DDL is DatabaseView.read_ddl's alone (backlog 725): no
+        # second definition from the structure read stands in for it.
+        ddl=_view_ddl(adapter, handle, connection, catalog, schema, name),
         initial_select=_initial_select(schema, name, columns),
     )
 
@@ -1177,6 +1319,7 @@ def _columns(read: Any) -> tuple[DatabaseColumn, ...]:
 
 def _primary_key(
     adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: Any,
+    database_name: str = "",
 ) -> DatabasePrimaryKey | None:
     """The primary key, or nothing when the relation has none.
 
@@ -1191,12 +1334,13 @@ def _primary_key(
     name = str(read.get("name") or "")
     return DatabasePrimaryKey(
         name=name, columns=columns,
-        ddl=_child_object_ddl(DatabasePrimaryKey, adapter, handle, table, name),
+        ddl=_child_object_ddl(DatabasePrimaryKey, adapter, handle, table, name, database_name),
     )
 
 
 def _foreign_key(
     adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
+    database_name: str = "",
 ) -> DatabaseForeignKey:
     """One foreign key, and what it points at."""
     name = str(read.get("name") or "")
@@ -1206,12 +1350,13 @@ def _foreign_key(
         referenced_schema=str(read.get("referred_schema") or ""),
         referenced_table=str(read.get("referred_table") or ""),
         referenced_columns=_names(read.get("referred_columns")),
-        ddl=_child_object_ddl(DatabaseForeignKey, adapter, handle, table, name),
+        ddl=_child_object_ddl(DatabaseForeignKey, adapter, handle, table, name, database_name),
     )
 
 
 def _index(
     adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
+    database_name: str = "",
 ) -> DatabaseIndex:
     """One index of ``table``, with the DDL it writes itself (backlog 695)."""
     name = str(read.get("name") or "")
@@ -1219,12 +1364,13 @@ def _index(
         name=name,
         columns=_names(read.get("column_names")),
         unique=bool(read.get("unique", False)),
-        ddl=_child_object_ddl(DatabaseIndex, adapter, handle, table, name),
+        ddl=_child_object_ddl(DatabaseIndex, adapter, handle, table, name, database_name),
     )
 
 
 def _child_object_ddl(
     owner: Any, adapter: Any, handle: Any, table: DatabaseObjectIdentity, name: str,
+    database_name: str = "",
 ) -> str:
     """One index's, key's or constraint's standalone DDL, as it writes it.
 
@@ -1233,13 +1379,14 @@ def _child_object_ddl(
     if not name:
         return ""
     try:
-        return owner.read_ddl(handle, table, name, adapter)
+        return owner.read_ddl(handle, table, name, adapter, database_name=database_name)
     except Exception:
         return ""
 
 
 def _constraint(
     adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
+    database_name: str = "",
 ) -> DatabaseConstraint:
     """One unique constraint, in the provider's own word for its kind."""
     name = str(read.get("name") or "")
@@ -1247,19 +1394,20 @@ def _constraint(
         name=name,
         columns=_names(read.get("column_names")),
         kind="unique",
-        ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name),
+        ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name, database_name),
     )
 
 
 def _check(
     adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
+    database_name: str = "",
 ) -> DatabaseConstraint:
     """One check constraint. It constrains an expression, not a column list."""
     name = str(read.get("name") or "")
     return DatabaseConstraint(
         name=name,
         kind="check",
-        ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name),
+        ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name, database_name),
     )
 
 
@@ -1356,13 +1504,14 @@ def _found(read: Any, identity: DatabaseObjectIdentity) -> None:
 
 def _table_ddl(
     adapter: Any, handle: Any, connection: str, catalog: str, schema: str, name: str,
+    database_name: str = "",
 ) -> str:
     """One table's DDL, as the table writes it, or nothing when it cannot be produced."""
     identity = DatabaseObjectIdentity(
         connection=connection, catalog=catalog, schema=schema, name=name,
     )
     try:
-        return DatabaseTable.read_ddl(handle, identity, adapter)
+        return DatabaseTable.read_ddl(handle, identity, adapter, database_name=database_name)
     except Exception:
         return ""
 
@@ -1391,6 +1540,8 @@ def _constraint_ddl(
     table: DatabaseObjectIdentity,
     name: str,
     adapter: Any,
+    *,
+    database_name: str = "",
 ) -> str:
     """One key's or constraint's standalone DDL, written by ``owner``.
 
@@ -1400,7 +1551,9 @@ def _constraint_ddl(
     """
     adapter = adapter or _adapter()
     where = f"{table.schema}.{table.name}.{name}"
-    catalog = adapter.constraint_catalog(conn, table.schema, table.name, name)
+    catalog = adapter.constraint_catalog(
+        conn, table.schema, table.name, name, database_name=database_name,
+    )
     if not catalog:
         raise DatabaseError(f"constraint not found: {where}")
     kind = str(catalog["kind"])

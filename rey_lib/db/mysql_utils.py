@@ -208,8 +208,8 @@ def quote_identifier(value: str) -> str:
 def execute_statement(conn: Any, sql_text: str) -> int:
 	"""Run one statement on this connection and return what it touched.
 
-	The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
-	adapter writes the statement, this runs it the way this driver runs one.
+	The provider half of ``DatabaseTable.delete_all_rows`` and ``drop``: the
+	table writes the statement, this runs it the way this driver runs one.
 	It does NOT commit -- whether the statement sits in a transaction is the
 	connection's, and is the caller's to manage.
 
@@ -291,8 +291,13 @@ _CONSTRAINT_KIND: dict[str, str] = {
 }
 
 
-def constraint_catalog(conn: Any, schema: str, table: str, name: str) -> dict[str, Any]:
+def constraint_catalog(
+	conn: Any, schema: str, table: str, name: str, *, database_name: str = "",
+) -> dict[str, Any]:
 	"""One constraint on one table as MySQL's catalog states it.
+
+	``database_name`` is accepted and not used: a MySQL database is the schema
+	(backlog 727; SQL Server's reads use it).
 
 	A metadata primitive: what the server says, not DDL. Columns and the
 	columns they reference in key order. Empty when the table has no such
@@ -343,8 +348,13 @@ def constraint_catalog(conn: Any, schema: str, table: str, name: str) -> dict[st
 	}
 
 
-def index_column_catalog(conn: Any, schema: str, table: str, index: str) -> dict[str, Any]:
+def index_column_catalog(
+	conn: Any, schema: str, table: str, index: str, *, database_name: str = "",
+) -> dict[str, Any]:
 	"""One index on one table as MySQL's catalog states it.
+
+	``database_name`` is accepted and not used: a MySQL database is the schema
+	(backlog 727; SQL Server's reads use it).
 
 	A metadata primitive: what the server says, not DDL. Columns in key order.
 	MySQL names a primary key's index PRIMARY. Empty when the table has no
@@ -368,6 +378,97 @@ def index_column_catalog(conn: Any, schema: str, table: str, index: str) -> dict
 		"primary": index == "PRIMARY",
 		"columns": [str(row["column_name"]) for row in rows if row["column_name"] is not None],
 	}
+
+
+def schema_metadata(
+	conn: Any, schema: str, *, database_name: str = "",
+) -> dict[str, Any]:
+	"""The schema's structure facts, in the shape every provider answers (backlog 725).
+
+	``database_name`` is accepted and not used: a MySQL database is the schema
+	(backlog 727; SQL Server's reads use it).
+
+	A metadata primitive: tables with their keys, indexes and constraints, and
+	views, by name -- read through the SQLAlchemy inspector. No column facts and
+	no view definitions; DatabaseSchema.read builds the objects.
+	"""
+	from rey_lib.db._sqlalchemy import inspect_schema_structure  # noqa: PLC0415
+
+	return inspect_schema_structure(conn, schema)
+
+
+def table_column_catalog(
+	conn: Any, schema: str, table: str, *, database_name: str = "",
+) -> list[dict[str, Any]]:
+	"""One table's or view's columns as MySQL's catalog states them, in column order.
+
+	``database_name`` is accepted and not used: a MySQL database is the schema
+	(backlog 727; SQL Server's reads use it).
+
+	A metadata primitive (backlog 724): what the server says, not DDL. Each type
+	is the declared COLUMN_TYPE (``varchar(12)``, ``int unsigned``). MySQL
+	reports a literal default unquoted, so it is returned as SQL text -- a
+	literal quoted, an expression default (DEFAULT_GENERATED, CURRENT_TIMESTAMP)
+	as it is -- so a column definition written from it is valid. Empty when
+	there is no such table.
+
+	Returns:
+		``{"name", "type", "default", "nullable"}`` per column.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT column_name AS name, column_type AS type, column_default AS default_value, "
+		"is_nullable AS is_nullable, extra AS extra "
+		"FROM information_schema.columns "
+		"WHERE table_schema = :schema AND table_name = :table "
+		"ORDER BY ordinal_position",
+		{"schema": schema, "table": table},
+	)
+	return [
+		{
+			"name": str(row["name"]),
+			"type": str(row["type"]),
+			"default": _sql_default(row["default_value"], str(row["extra"] or "")),
+			"nullable": str(row["is_nullable"]).upper() == "YES",
+		}
+		for row in rows
+	]
+
+
+def _sql_default(value: Any, extra: str) -> str | None:
+	"""A MySQL column default as SQL text: literals quoted, expressions as they are."""
+	if value is None:
+		return None
+	text = str(value)
+	if "DEFAULT_GENERATED" in extra.upper() or text.upper().startswith("CURRENT_TIMESTAMP"):
+		return text
+	return "'" + text.replace("'", "''") + "'"
+
+
+def table_exists(conn: Any, catalog: str, schema: str, table: str) -> bool:
+	"""Whether information_schema.tables holds a row for this schema and name.
+
+	A metadata primitive (backlog 698): the provider's catalog answer only --
+	what "exists" means is DatabaseTable's. ``catalog`` takes no part here.
+	"""
+	return bool(fetch_rows(
+		conn,
+		"SELECT 1 AS present FROM information_schema.tables "
+		"WHERE table_schema = :schema AND table_name = :table",
+		{"schema": schema, "table": table},
+	))
+
+
+def view_native_definition(conn: Any, schema: str, view: str) -> str:
+	"""The CREATE VIEW statement MySQL itself reports (SHOW CREATE VIEW).
+
+	A metadata primitive (backlog 698): retrieved, never composed here. Empty
+	when there is none.
+	"""
+	rows = fetch_rows(
+		conn, f"SHOW CREATE VIEW {quote_identifier(schema)}.{quote_identifier(view)}", {},
+	)
+	return str((rows[0] if rows else {}).get("Create View") or "")
 
 
 def load_sql(name: str) -> str:

@@ -79,16 +79,35 @@ class _Adapter:
     def quote_identifier(self, _conn: Any, name: str) -> str:
         return f'"{name}"'
 
-    def fetch_rows(self, _conn: Any, _sql_text: str, params: dict[str, Any]) -> list[dict]:
-        self.asked.append(("view", str(params.get("view"))))
-        return [{"definition": " SELECT run_id FROM control.run_log"}]
+    def view_native_definition(self, _conn: Any, _schema: str, view: str) -> str:
+        """The view's body as PostgreSQL supplies it; DatabaseView writes the DDL (698)."""
+        self.asked.append(("view", view))
+        return " SELECT run_id FROM control.run_log"
 
-    def table_column_catalog(self, _conn: Any, schema: str, table: str) -> list[dict]:
-        """A table's columns as the catalog states them; the table composes its DDL."""
+    def table_column_catalog(
+        self, _conn: Any, schema: str, table: str, **_k: Any,
+    ) -> list[dict]:
+        """A table's or view's columns as the catalog states them (backlog 724).
+
+        The one column-fact source: the schema read builds its columns from it
+        and the table composes its DDL from it. Answered from this test's own
+        scripted read, so both agree by construction.
+        """
         self.asked.append(("table", table))
-        return [{"name": "run_id", "type": "bigint", "default": None, "nullable": False}]
+        for entry in self._read.get("tables") or []:
+            if entry.get("name") == table:
+                return [
+                    {"name": column["name"], "type": column["type"],
+                     "default": column.get("default"), "nullable": column.get("nullable", True)}
+                    for column in entry.get("columns") or []
+                ]
+        if any(view.get("name") == table for view in self._read.get("views") or []):
+            return [{"name": "run_id", "type": "BIGINT", "default": None, "nullable": False}]
+        return []
 
-    def index_column_catalog(self, _conn: Any, _schema: str, table: str, index: str) -> dict:
+    def index_column_catalog(
+        self, _conn: Any, _schema: str, table: str, index: str, **_k: Any,
+    ) -> dict:
         """An index as the catalog states it; the index reads its own DDL (695)."""
         self.asked.append(("index", index))
         return {"unique": False, "primary": False, "columns": ["status"]}
@@ -98,7 +117,9 @@ class _Adapter:
 
     _KINDS = {"pkey": "primary_key", "fkey": "foreign_key", "key": "unique", "ck": "check"}
 
-    def constraint_catalog(self, _conn: Any, _schema: str, table: str, name: str) -> dict:
+    def constraint_catalog(
+        self, _conn: Any, _schema: str, table: str, name: str, **_k: Any,
+    ) -> dict:
         """A key or constraint as the catalog states it; it reads its own DDL (695)."""
         self.asked.append(("constraint", name))
         return {"kind": self._KINDS[name.rsplit("_", 1)[-1]], "columns": []}
@@ -107,9 +128,6 @@ class _Adapter:
         self, _conn: Any, _schema: str, _table: str, name: str,
     ) -> str:
         return {"run_log_status_ck": "CHECK (status <> '')"}.get(name, "PRIMARY KEY (run_id)")
-
-    def get_columns(self, conn: Any, schema: str, name: str) -> list[dict[str, Any]]:
-        return [{"name": "run_id", "type": "BIGINT", "nullable": False, "default": None}]
 
     def list_procedures(self, conn: Any, schema: str) -> list[dict[str, Any]]:
         if self._no_routines:
@@ -128,12 +146,6 @@ class _Adapter:
         return self._routine_source(kind, {
             "object_type": kind, "schema": schema, "name": name, "signature": signature,
         })
-
-    def get_procedure_definition(self, conn: Any, identity: dict[str, Any]) -> str:
-        return self._routine_source("procedure", identity)
-
-    def get_function_definition(self, conn: Any, identity: dict[str, Any]) -> str:
-        return self._routine_source("function", identity)
 
     def _routine_source(self, kind: str, identity: dict[str, Any]) -> str:
         if identity.get("object_type") != kind:
@@ -176,7 +188,12 @@ def test_a_table_carries_what_it_is_made_of(monkeypatch: pytest.MonkeyPatch) -> 
     assert table.indexes[0].columns == ("status",)
     assert table.constraints[0].kind == "unique"
     # The table's own DDL, composed from its catalog's columns (backlog 695).
-    assert table.ddl == 'CREATE TABLE "control"."run_log" (\n    "run_id" bigint NOT NULL\n);'
+    # One column-fact source (backlog 724): the DDL lists exactly the columns read.
+    assert table.ddl == (
+        'CREATE TABLE "control"."run_log" (\n'
+        '    "run_id" BIGINT NOT NULL,\n'
+        '    "status" TEXT DEFAULT \'pending\' NULL\n);'
+    )
 
 
 def test_a_check_constraint_is_built_beside_the_unique_ones(
@@ -272,7 +289,12 @@ def test_a_supplied_definition_arrives_non_empty(
     table = schema.tables[0]
 
     # The table's own DDL, composed from its catalog's columns (backlog 695).
-    assert table.ddl == 'CREATE TABLE "control"."run_log" (\n    "run_id" bigint NOT NULL\n);'
+    # One column-fact source (backlog 724): the DDL lists exactly the columns read.
+    assert table.ddl == (
+        'CREATE TABLE "control"."run_log" (\n'
+        '    "run_id" BIGINT NOT NULL,\n'
+        '    "status" TEXT DEFAULT \'pending\' NULL\n);'
+    )
     assert table.columns[0].ddl == '"run_id" BIGINT NOT NULL'
     assert table.primary_key is not None and table.primary_key.ddl
     assert table.foreign_keys[0].ddl

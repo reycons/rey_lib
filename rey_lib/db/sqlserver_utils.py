@@ -541,8 +541,8 @@ def quote_identifier(value: str) -> str:
 def execute_statement(conn: pyodbc.Connection, sql_text: str) -> int:
 	"""Run one statement on this connection and return what it touched.
 
-	The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
-	adapter writes the statement, this runs it the way pyodbc runs one. It does
+	The provider half of ``DatabaseTable.delete_all_rows`` and ``drop``: the
+	table writes the statement, this runs it the way pyodbc runs one. It does
 	NOT commit -- the transaction is the caller's to manage.
 
 	Args:
@@ -606,29 +606,43 @@ def fetch_rows(
 		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
 
 
+def _database_prefix(database_name: str) -> str:
+	"""``[database].`` before a catalog view, or nothing for the connected database.
+
+	The same qualification ``table_exists`` writes for a named database. An
+	identifier cannot be bound, so it is quoted here instead (backlog 727).
+	"""
+	return f"{quote_identifier(database_name)}." if database_name else ""
+
+
 def table_column_catalog(
-	conn: pyodbc.Connection, schema: str, table: str,
+	conn: pyodbc.Connection, schema: str, table: str, *, database_name: str = "",
 ) -> list[dict[str, Any]]:
-	"""One table's columns as SQL Server's catalog states them, in column order.
+	"""One table's or view's columns as SQL Server's catalog states them, in column order.
+
+	A ``database_name`` names the database whose catalog is read -- the one a
+	table in another database on this server sits in (backlog 727); empty
+	reads the connected database.
 
 	A metadata primitive: what the server says, not DDL. Each type is the
 	declaration SQL Server uses for it, parameters included. Empty when there
-	is no such table.
+	is no such table or view (backlog 726).
 
 	Returns:
 		``{"name", "type", "default", "nullable"}`` per column.
 	"""
+	db = _database_prefix(database_name)
 	rows = fetch_rows(
 		conn,
 		"SELECT c.name AS name, ty.name AS type_name, c.max_length AS max_length, "
 		"c.precision AS precision, c.scale AS scale, c.is_nullable AS is_nullable, "
 		"dc.definition AS default_value "
-		"FROM sys.columns c "
-		"JOIN sys.types ty ON ty.user_type_id = c.user_type_id "
-		"LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id "
-		"JOIN sys.tables t ON t.object_id = c.object_id "
-		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
-		"WHERE s.name = :schema AND t.name = :table "
+		f"FROM {db}sys.columns c "
+		f"JOIN {db}sys.types ty ON ty.user_type_id = c.user_type_id "
+		f"LEFT JOIN {db}sys.default_constraints dc ON dc.object_id = c.default_object_id "
+		f"JOIN {db}sys.objects o ON o.object_id = c.object_id AND o.type IN ('U', 'V') "
+		f"JOIN {db}sys.schemas s ON s.schema_id = o.schema_id "
+		"WHERE s.name = :schema AND o.name = :table "
 		"ORDER BY c.column_id",
 		{"schema": schema, "table": table},
 	)
@@ -640,6 +654,213 @@ def table_column_catalog(
 			),
 			"default": row["default_value"] or None,
 			"nullable": bool(row["is_nullable"]),
+		}
+		for row in rows
+	]
+
+
+def schema_metadata(
+	conn: pyodbc.Connection, schema: str, *, database_name: str = "",
+) -> dict[str, Any]:
+	"""The schema's structure facts, in the shape every provider answers (backlog 725).
+
+	A ``database_name`` names the database whose catalog is read -- the one a
+	table in another database on this server sits in (backlog 727); empty
+	reads the connected database.
+
+	A metadata primitive, from SQL Server's own catalog views: tables with their
+	primary key, foreign keys, indexes (other than a key's or unique
+	constraint's backing index), unique and check constraints; views by name.
+	No column facts and no view definitions; nothing here constructs a database
+	object.
+	"""
+	db = _database_prefix(database_name)
+	where = {"schema": schema}
+	tables: dict[str, dict[str, Any]] = {
+		str(row["name"]): {
+			"name": str(row["name"]), "primary_key": {}, "foreign_keys": [], "indexes": [],
+			"unique_constraints": [], "check_constraints": [],
+		}
+		for row in fetch_rows(
+			conn,
+			f"SELECT t.name AS name FROM {db}sys.tables t JOIN {db}sys.schemas s "
+			"ON s.schema_id = t.schema_id WHERE s.name = :schema ORDER BY t.name",
+			where,
+		)
+	}
+	keys: dict[tuple[str, str], dict[str, Any]] = {}
+	for row in fetch_rows(
+		conn,
+		"SELECT t.name AS table_name, k.name AS key_name, k.type AS key_type, "
+		f"c.name AS column_name FROM {db}sys.key_constraints k "
+		f"JOIN {db}sys.tables t ON t.object_id = k.parent_object_id "
+		f"JOIN {db}sys.schemas s ON s.schema_id = t.schema_id "
+		f"JOIN {db}sys.index_columns ic ON ic.object_id = k.parent_object_id "
+		"AND ic.index_id = k.unique_index_id "
+		f"JOIN {db}sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+		"WHERE s.name = :schema ORDER BY t.name, k.name, ic.key_ordinal",
+		where,
+	):
+		table = tables.get(str(row["table_name"]))
+		if table is None:
+			continue
+		key = keys.get((table["name"], str(row["key_name"])))
+		if key is None:
+			if str(row["key_type"]).strip() == "PK":
+				key = table["primary_key"] = {"name": row["key_name"], "constrained_columns": []}
+			else:
+				key = {"name": row["key_name"], "column_names": []}
+				table["unique_constraints"].append(key)
+			keys[(table["name"], str(row["key_name"]))] = key
+		key.get("constrained_columns", key.get("column_names")).append(str(row["column_name"]))
+	foreign: dict[tuple[str, str], dict[str, Any]] = {}
+	for row in fetch_rows(
+		conn,
+		"SELECT t.name AS table_name, fk.name AS fk_name, pc.name AS column_name, "
+		"rs.name AS referred_schema, rt.name AS referred_table, rc.name AS referred_column "
+		f"FROM {db}sys.foreign_keys fk "
+		f"JOIN {db}sys.tables t ON t.object_id = fk.parent_object_id "
+		f"JOIN {db}sys.schemas s ON s.schema_id = t.schema_id "
+		f"JOIN {db}sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id "
+		f"JOIN {db}sys.columns pc ON pc.object_id = fkc.parent_object_id "
+		"AND pc.column_id = fkc.parent_column_id "
+		f"JOIN {db}sys.tables rt ON rt.object_id = fkc.referenced_object_id "
+		f"JOIN {db}sys.schemas rs ON rs.schema_id = rt.schema_id "
+		f"JOIN {db}sys.columns rc ON rc.object_id = fkc.referenced_object_id "
+		"AND rc.column_id = fkc.referenced_column_id "
+		"WHERE s.name = :schema ORDER BY t.name, fk.name, fkc.constraint_column_id",
+		where,
+	):
+		table = tables.get(str(row["table_name"]))
+		if table is None:
+			continue
+		fk = foreign.get((table["name"], str(row["fk_name"])))
+		if fk is None:
+			fk = {"name": row["fk_name"], "constrained_columns": [],
+				"referred_schema": row["referred_schema"],
+				"referred_table": row["referred_table"], "referred_columns": []}
+			table["foreign_keys"].append(fk)
+			foreign[(table["name"], str(row["fk_name"]))] = fk
+		fk["constrained_columns"].append(str(row["column_name"]))
+		fk["referred_columns"].append(str(row["referred_column"]))
+	indexes: dict[tuple[str, str], dict[str, Any]] = {}
+	for row in fetch_rows(
+		conn,
+		"SELECT t.name AS table_name, i.name AS index_name, i.is_unique AS is_unique, "
+		f"c.name AS column_name FROM {db}sys.indexes i "
+		f"JOIN {db}sys.tables t ON t.object_id = i.object_id "
+		f"JOIN {db}sys.schemas s ON s.schema_id = t.schema_id "
+		f"JOIN {db}sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+		f"JOIN {db}sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+		"WHERE s.name = :schema AND i.name IS NOT NULL AND i.type > 0 "
+		"AND i.is_primary_key = 0 AND i.is_unique_constraint = 0 AND ic.key_ordinal > 0 "
+		"ORDER BY t.name, i.name, ic.key_ordinal",
+		where,
+	):
+		table = tables.get(str(row["table_name"]))
+		if table is None:
+			continue
+		index = indexes.get((table["name"], str(row["index_name"])))
+		if index is None:
+			index = {"name": row["index_name"], "column_names": [],
+				"unique": bool(row["is_unique"])}
+			table["indexes"].append(index)
+			indexes[(table["name"], str(row["index_name"]))] = index
+		index["column_names"].append(str(row["column_name"]))
+	for row in fetch_rows(
+		conn,
+		f"SELECT t.name AS table_name, cc.name AS check_name FROM {db}sys.check_constraints cc "
+		f"JOIN {db}sys.tables t ON t.object_id = cc.parent_object_id "
+		f"JOIN {db}sys.schemas s ON s.schema_id = t.schema_id "
+		"WHERE s.name = :schema ORDER BY t.name, cc.name",
+		where,
+	):
+		table = tables.get(str(row["table_name"]))
+		if table is not None:
+			table["check_constraints"].append({"name": row["check_name"]})
+	views = [{"name": str(row["name"])} for row in fetch_rows(
+		conn,
+		f"SELECT v.name AS name FROM {db}sys.views v JOIN {db}sys.schemas s "
+		"ON s.schema_id = v.schema_id WHERE s.name = :schema ORDER BY v.name",
+		where,
+	)]
+	return {"tables": list(tables.values()), "views": views}
+
+
+def table_exists(conn: pyodbc.Connection, catalog: str, schema: str, table: str) -> bool:
+	"""Whether information_schema.tables holds a row for this schema and name.
+
+	A metadata primitive (backlog 698): the provider's catalog answer only --
+	what "exists" means is DatabaseTable's. A ``catalog`` names the database
+	whose own information_schema is asked.
+	"""
+	prefix = f"{quote_identifier(catalog)}." if catalog else ""
+	return bool(fetch_rows(
+		conn,
+		f"SELECT 1 AS present FROM {prefix}information_schema.tables "
+		"WHERE table_schema = :schema AND table_name = :table",
+		{"schema": schema, "table": table},
+	))
+
+
+def view_native_definition(conn: pyodbc.Connection, schema: str, view: str) -> str:
+	"""The view's CREATE VIEW as SQL Server stores it (OBJECT_DEFINITION).
+
+	A metadata primitive (backlog 698): retrieved by name, never composed here.
+	Empty when there is none.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT OBJECT_DEFINITION(OBJECT_ID(:qualified)) AS definition",
+		{"qualified": f"{quote_identifier(schema)}.{quote_identifier(view)}"},
+	)
+	definition = rows[0]["definition"] if rows else None
+	return str(definition) if definition else ""
+
+
+# Each routine kind's listing: the sys.objects types it answers for, fixed.
+_ROUTINE_LISTINGS: dict[str, str] = {
+	kind: (
+		"SELECT s.name AS schema_name, o.name AS routine_name "
+		"FROM sys.objects o "
+		"JOIN sys.schemas s ON s.schema_id = o.schema_id "
+		f"WHERE o.type IN ({object_types}) AND o.is_ms_shipped = 0 "
+		"AND (:schema IS NULL OR s.name = :schema) "
+		"ORDER BY s.name, o.name"
+	)
+	for kind, object_types in (
+		("procedure", "'P'"),
+		("function", "'FN', 'IF', 'TF'"),
+	)
+}
+
+
+def list_routines(
+	conn: pyodbc.Connection,
+	catalog: str,
+	schema: str | None,
+	kind: str,
+) -> list[dict[str, str]]:
+	"""Return one routine kind from the connected database's catalog (backlog 726).
+
+	SQL Server does not overload a routine name, so a name is unique within its
+	schema and the returned signature is always empty -- the same reason
+	``get_routine_definition`` takes no part of the signature in finding one.
+	The connection is to ``catalog`` already; it is not otherwise used.
+
+	Raises:
+		DatabaseError: When ``kind`` is not a routine kind.
+	"""
+	statement = _ROUTINE_LISTINGS.get(kind)
+	if statement is None:
+		raise DatabaseError(f"sqlserver_utils: unsupported routine kind '{kind}'.")
+
+	rows = fetch_rows(conn, statement, {"schema": schema or None})
+	return [
+		{
+			"schema": str(row["schema_name"]),
+			"name": str(row["routine_name"]),
+			"signature": "",
 		}
 		for row in rows
 	]
@@ -765,8 +986,13 @@ _CONSTRAINT_KIND: dict[str, str] = {
 
 def constraint_catalog(
 	conn: pyodbc.Connection, schema: str, table: str, name: str,
+	*, database_name: str = "",
 ) -> dict[str, Any]:
 	"""One constraint on one table as SQL Server's catalog states it.
+
+	A ``database_name`` names the database whose catalog is read -- the one a
+	table in another database on this server sits in (backlog 727); empty
+	reads the connected database.
 
 	A metadata primitive: what the server says, not DDL. Columns and the
 	columns they reference in key order. Empty when the table has no such
@@ -776,11 +1002,12 @@ def constraint_catalog(
 		``{"kind", "columns", "referenced_schema", "referenced_table",
 		"referenced_columns", "check"}``.
 	"""
+	db = _database_prefix(database_name)
 	found = fetch_rows(
 		conn,
-		"SELECT o.object_id AS object_id, o.type AS type FROM sys.objects o "
-		"JOIN sys.tables t ON t.object_id = o.parent_object_id "
-		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
+		f"SELECT o.object_id AS object_id, o.type AS type FROM {db}sys.objects o "
+		f"JOIN {db}sys.tables t ON t.object_id = o.parent_object_id "
+		f"JOIN {db}sys.schemas s ON s.schema_id = t.schema_id "
 		"WHERE s.name = :schema AND t.name = :table AND o.name = :name",
 		{"schema": schema, "table": table, "name": name},
 	)
@@ -795,10 +1022,10 @@ def constraint_catalog(
 	if kind in ("primary_key", "unique"):
 		catalog["columns"] = [str(row["column_name"]) for row in fetch_rows(
 			conn,
-			"SELECT c.name AS column_name FROM sys.key_constraints k "
-			"JOIN sys.index_columns ic ON ic.object_id = k.parent_object_id "
+			f"SELECT c.name AS column_name FROM {db}sys.key_constraints k "
+			f"JOIN {db}sys.index_columns ic ON ic.object_id = k.parent_object_id "
 			"AND ic.index_id = k.unique_index_id "
-			"JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+			f"JOIN {db}sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
 			"WHERE k.object_id = :object_id ORDER BY ic.key_ordinal",
 			{"object_id": object_id},
 		)]
@@ -807,12 +1034,12 @@ def constraint_catalog(
 			conn,
 			"SELECT pc.name AS column_name, rs.name AS referenced_schema, "
 			"rt.name AS referenced_table, rc.name AS referenced_column "
-			"FROM sys.foreign_key_columns fkc "
-			"JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id "
+			f"FROM {db}sys.foreign_key_columns fkc "
+			f"JOIN {db}sys.columns pc ON pc.object_id = fkc.parent_object_id "
 			"AND pc.column_id = fkc.parent_column_id "
-			"JOIN sys.tables rt ON rt.object_id = fkc.referenced_object_id "
-			"JOIN sys.schemas rs ON rs.schema_id = rt.schema_id "
-			"JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id "
+			f"JOIN {db}sys.tables rt ON rt.object_id = fkc.referenced_object_id "
+			f"JOIN {db}sys.schemas rs ON rs.schema_id = rt.schema_id "
+			f"JOIN {db}sys.columns rc ON rc.object_id = fkc.referenced_object_id "
 			"AND rc.column_id = fkc.referenced_column_id "
 			"WHERE fkc.constraint_object_id = :object_id ORDER BY fkc.constraint_column_id",
 			{"object_id": object_id},
@@ -825,7 +1052,7 @@ def constraint_catalog(
 	elif kind == "check":
 		clauses = fetch_rows(
 			conn,
-			"SELECT definition AS check_clause FROM sys.check_constraints "
+			f"SELECT definition AS check_clause FROM {db}sys.check_constraints "
 			"WHERE object_id = :object_id",
 			{"object_id": object_id},
 		)
@@ -835,8 +1062,13 @@ def constraint_catalog(
 
 def index_column_catalog(
 	conn: pyodbc.Connection, schema: str, table: str, index: str,
+	*, database_name: str = "",
 ) -> dict[str, Any]:
 	"""One index on one table as SQL Server's catalog states it.
+
+	A ``database_name`` names the database whose catalog is read -- the one a
+	table in another database on this server sits in (backlog 727); empty
+	reads the connected database.
 
 	A metadata primitive: what the server says, not DDL. Columns in key order.
 	Empty when the table has no such index.
@@ -844,14 +1076,15 @@ def index_column_catalog(
 	Returns:
 		``{"unique", "primary", "columns"}``.
 	"""
+	db = _database_prefix(database_name)
 	rows = fetch_rows(
 		conn,
 		"SELECT i.is_unique AS is_unique, i.is_primary_key AS is_primary, c.name AS column_name "
-		"FROM sys.indexes i "
-		"JOIN sys.tables t ON t.object_id = i.object_id "
-		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
-		"JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
-		"JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+		f"FROM {db}sys.indexes i "
+		f"JOIN {db}sys.tables t ON t.object_id = i.object_id "
+		f"JOIN {db}sys.schemas s ON s.schema_id = t.schema_id "
+		f"JOIN {db}sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+		f"JOIN {db}sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
 		"WHERE s.name = :schema AND t.name = :table AND i.name = :index "
 		"ORDER BY ic.key_ordinal",
 		{"schema": schema, "table": table, "index": index},

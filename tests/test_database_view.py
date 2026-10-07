@@ -1,8 +1,8 @@
 """DatabaseView owns its own DDL (backlog 695).
 
 A view's DDL used to be a branch in each provider's ``get_object_ddl``; it is
-``DatabaseView.read_ddl`` now, reaching the database through the connector's
-primitives. Asserted per provider against a scripted connector, and for DuckDB
+``DatabaseView.read_ddl`` now. The server's definition is a retrieved fact
+(``view_native_definition``, backlog 698); the DDL is the view's. Asserted per provider against a scripted connector, and for DuckDB
 end to end against a real in-memory database -- the provider whose old
 statement did not parse.
 """
@@ -30,12 +30,12 @@ _IDENTITY = DatabaseObjectIdentity(connection="c", catalog="rey", schema="contro
 
 
 class _Connector:
-    """The primitives, as one provider, answering every read with ``rows``."""
+    """The primitives, as one provider, answering a view's definition with ``definition``."""
 
-    def __init__(self, provider: str, rows: list[dict]) -> None:
+    def __init__(self, provider: str, definition: str = "") -> None:
         self._provider = provider
-        self.rows = rows
-        self.reads: list[tuple[str, dict]] = []
+        self.definition = definition
+        self.asked: list[tuple[str, str]] = []
 
     def provider(self, _conn: Any) -> str:
         return self._provider
@@ -43,59 +43,80 @@ class _Connector:
     def quote_identifier(self, _conn: Any, name: str) -> str:
         return _QUOTE.get(self._provider, postgres_utils.quote_identifier)(name)
 
-    def fetch_rows(self, _conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict]:
-        self.reads.append((sql_text, dict(params)))
-        return self.rows
+    def view_native_definition(self, _conn: Any, schema: str, view: str) -> str:
+        self.asked.append((schema, view))
+        return self.definition
 
 
-def test_postgres_writes_create_or_replace_from_its_definition() -> None:
-    connector = _Connector("postgres", [{"definition": " SELECT 1 AS run_id"}])
+def test_postgres_writes_create_or_replace_around_the_body_it_supplies() -> None:
+    """PostgreSQL supplies the SELECT body; the view writes the statement (698)."""
+    connector = _Connector("postgres", " SELECT 1 AS run_id")
 
     ddl = DatabaseView.read_ddl(object(), _IDENTITY, connector)
 
     assert ddl == 'CREATE OR REPLACE VIEW "control"."run_vw" AS\n SELECT 1 AS run_id;'
-    ((sql_text, params),) = connector.reads
-    assert "pg_get_viewdef" in sql_text
-    assert params == {"schema": "control", "view": "run_vw"}
+    assert connector.asked == [("control", "run_vw")]
 
 
 def test_mysql_answers_with_its_own_create_view() -> None:
-    connector = _Connector(
-        "mysql", [{"View": "run_vw", "Create View": "CREATE VIEW `run_vw` AS select 1 "}],
+    connector = _Connector("mysql", "CREATE VIEW `run_vw` AS select 1 ")
+
+    assert DatabaseView.read_ddl(object(), _IDENTITY, connector) == (
+        "CREATE VIEW `run_vw` AS select 1;"
     )
 
-    ddl = DatabaseView.read_ddl(object(), _IDENTITY, connector)
 
-    assert ddl == "CREATE VIEW `run_vw` AS select 1;"
-    assert connector.reads[0][0] == "SHOW CREATE VIEW `control`.`run_vw`"
+def test_sql_server_ends_the_batch() -> None:
+    connector = _Connector("sqlserver", "CREATE VIEW control.run_vw AS SELECT 1\n")
 
-
-def test_sql_server_reads_the_definition_by_name_and_ends_the_batch() -> None:
-    connector = _Connector(
-        "sqlserver", [{"definition": "CREATE VIEW control.run_vw AS SELECT 1\n"}],
+    assert DatabaseView.read_ddl(object(), _IDENTITY, connector) == (
+        "CREATE VIEW control.run_vw AS SELECT 1\nGO"
     )
-
-    ddl = DatabaseView.read_ddl(object(), _IDENTITY, connector)
-
-    assert ddl == "CREATE VIEW control.run_vw AS SELECT 1\nGO"
-    assert connector.reads[0][1] == {"qualified": "[control].[run_vw]"}
 
 
 def test_sql_server_with_no_definition_is_empty() -> None:
-    connector = _Connector("sqlserver", [{"definition": None}])
-
-    assert DatabaseView.read_ddl(object(), _IDENTITY, connector) == ""
+    assert DatabaseView.read_ddl(object(), _IDENTITY, _Connector("sqlserver", "")) == ""
 
 
 def test_the_catalog_a_read_carries_is_not_written_into_the_statement() -> None:
-    connector = _Connector("postgres", [{"definition": "SELECT 1"}])
+    connector = _Connector("postgres", "SELECT 1")
 
     assert '"rey"' not in DatabaseView.read_ddl(object(), _IDENTITY, connector)
 
 
 def test_an_unknown_provider_is_refused_by_name() -> None:
     with pytest.raises(DatabaseError, match="oracle"):
-        DatabaseView.read_ddl(object(), _IDENTITY, _Connector("oracle", []))
+        DatabaseView.read_ddl(object(), _IDENTITY, _Connector("oracle"))
+
+
+class TestTheViewDefinitionPrimitive:
+    """How each provider's server is asked for a view's definition (698)."""
+
+    def _capture(self, monkeypatch: pytest.MonkeyPatch, module: Any, rows: list[dict]) -> list:
+        asked: list[tuple[str, dict]] = []
+        monkeypatch.setattr(module, "fetch_rows", lambda _c, sql, params: asked.append(
+            (sql, dict(params))) or rows)
+        return asked
+
+    def test_postgres_asks_pg_get_viewdef_by_schema_and_name(self, monkeypatch) -> None:
+        asked = self._capture(monkeypatch, postgres_utils, [{"definition": " SELECT 1"}])
+
+        assert postgres_utils.view_native_definition(object(), "control", "run_vw") == " SELECT 1"
+        ((sql_text, params),) = asked
+        assert "pg_get_viewdef" in sql_text
+        assert params == {"schema": "control", "view": "run_vw"}
+
+    def test_mysql_asks_show_create_view(self, monkeypatch) -> None:
+        asked = self._capture(monkeypatch, mysql_utils, [{"Create View": "CREATE VIEW v"}])
+
+        assert mysql_utils.view_native_definition(object(), "control", "run_vw") == "CREATE VIEW v"
+        assert asked[0][0] == "SHOW CREATE VIEW `control`.`run_vw`"
+
+    def test_sql_server_asks_object_definition_by_name(self, monkeypatch) -> None:
+        asked = self._capture(monkeypatch, sqlserver_utils, [{"definition": None}])
+
+        assert sqlserver_utils.view_native_definition(object(), "control", "run_vw") == ""
+        assert asked[0][1] == {"qualified": "[control].[run_vw]"}
 
 
 def test_duckdb_answers_from_its_catalog_end_to_end() -> None:
@@ -116,8 +137,9 @@ class _SchemaAdapter(_Connector):
     def get_schema_metadata(self, _conn: Any, _schema: str) -> dict:
         return {"tables": [], "views": [{"name": "run_vw", "definition": "SELECT 1"}]}
 
-    def get_columns(self, *_a: Any) -> list[dict]:
-        return [{"name": "run_id", "type": "INTEGER", "nullable": False}]
+    def table_column_catalog(self, *_a: Any, **_k: Any) -> list[dict]:
+        """The view's columns as the catalog states them (backlog 724)."""
+        return [{"name": "run_id", "type": "integer", "default": None, "nullable": False}]
 
     def list_procedures(self, *_a: Any) -> list:
         return []
@@ -127,7 +149,7 @@ class _SchemaAdapter(_Connector):
 
 
 def test_a_schema_read_carries_the_view_s_own_ddl() -> None:
-    adapter = _SchemaAdapter("postgres", [{"definition": " SELECT 1 AS run_id"}])
+    adapter = _SchemaAdapter("postgres", " SELECT 1 AS run_id")
 
     schema = DatabaseSchema.read(object(), "c", "rey", "control", adapter)
 

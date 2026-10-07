@@ -209,7 +209,7 @@ _PROVIDER_METADATA_CAPABILITIES: dict[str, frozenset[str]] = {
     "postgres": _SQLALCHEMY_METADATA_CAPABILITIES,
     "mysql": _SQLALCHEMY_METADATA_CAPABILITIES,
     "duckdb": frozenset({"catalogs", "schemas", "tables", "views"}),
-    "sqlserver": frozenset(),
+    "sqlserver": frozenset({"procedures", "functions"}),
 }
 
 # The provider contract: the methods this adapter publishes and fulfils by
@@ -239,9 +239,9 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # remains the guaranteed way to load anything, so support is an
         # opportunity rather than a requirement.
         "insert_from_path",
-        # THE TWO PRIMITIVES the adapter's own table operations are built from
-        # -- `delete_all_rows` and `drop_table` are written ONCE, in DBAdapter,
-        # and need from a provider only what genuinely differs: how it spells
+        # THE TWO PRIMITIVES DatabaseTable's statements are built from -- its
+        # `drop` and `delete_all_rows` are written ONCE (backlog 722), and
+        # need from a provider only what genuinely differs: how it spells
         # an identifier, and how its driver runs one statement on a connection
         # and counts what it touched. Required, not optional: a provider
         # without them fails the contract test rather than a load.
@@ -256,6 +256,15 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # by the providers it applies to and refused by name elsewhere.
         "table_column_catalog",
         "table_native_definition",
+        # Whether a provider's catalog holds a table, and a view's definition as
+        # the server supplies it (backlog 698): facts only -- existence and
+        # view DDL semantics stay DatabaseTable's and DatabaseView's.
+        "table_exists",
+        "view_native_definition",
+        # The schema's structure facts -- tables with keys, indexes and
+        # constraints, views -- in one shape for every provider (backlog 725).
+        # Facts only: DatabaseSchema.read builds the objects.
+        "schema_metadata",
         # A routine's own definition, as the server stores it (backlog 695):
         # the fact DatabaseProcedure (and later DatabaseFunction) reads its DDL
         # from. ``kind`` says which routine; the semantics stay the object's.
@@ -960,58 +969,6 @@ class DBAdapter:
             )
         return inspect(conn, schema)
 
-    def get_primary_key(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-    ) -> dict[str, Any]:
-        """Return a normalized primary-key record, including the empty-PK shape."""
-        provider = self._require_metadata_capability(conn, "primary_keys")
-        catalog = self._metadata_catalog(conn, provider)
-        from rey_lib.db._sqlalchemy import metadata_get_primary_key
-
-        return metadata_get_primary_key(conn, catalog, schema, table)
-
-    def get_foreign_keys(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-    ) -> list[dict[str, Any]]:
-        """Return normalized foreign keys for a table."""
-        provider = self._require_metadata_capability(conn, "foreign_keys")
-        catalog = self._metadata_catalog(conn, provider)
-        from rey_lib.db._sqlalchemy import metadata_get_foreign_keys
-
-        return metadata_get_foreign_keys(conn, catalog, schema, table)
-
-    def get_indexes(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-    ) -> list[dict[str, Any]]:
-        """Return normalized indexes for a table."""
-        provider = self._require_metadata_capability(conn, "indexes")
-        catalog = self._metadata_catalog(conn, provider)
-        from rey_lib.db._sqlalchemy import metadata_get_indexes
-
-        return metadata_get_indexes(conn, catalog, schema, table)
-
-    def get_unique_constraints(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-    ) -> list[dict[str, Any]]:
-        """Return normalized unique constraints for a table."""
-        provider = self._require_metadata_capability(conn, "unique_constraints")
-        catalog = self._metadata_catalog(conn, provider)
-        from rey_lib.db._sqlalchemy import metadata_get_unique_constraints
-
-        return metadata_get_unique_constraints(conn, catalog, schema, table)
-
     def get_check_constraints(
         self,
         conn: Any,
@@ -1065,46 +1022,40 @@ class DBAdapter:
         """
         return self._list_routines(conn, "functions", schema)
 
-    def get_schema_metadata(self, conn: Any, schema: str) -> dict[str, Any]:
-        """Return one schema's relations, each with what it is made of.
+    def get_schema_metadata(
+        self, conn: Any, schema: str, *, database_name: str = "",
+    ) -> dict[str, Any]:
+        """Return one schema's structure facts, in one shape for every provider.
 
-        The provider's own bulk schema read: every table with its columns,
-        primary key, foreign keys, indexes, unique and check constraints, and every
-        view with its definition, in one pass rather than a read per relation.
+        A dispatch to the provider's ``schema_metadata`` primitive (backlog
+        725): every table with its primary key, foreign keys, indexes, unique
+        and check constraints, and every view, by name. Facts only --
+        DatabaseSchema.read builds the objects. No column facts (those are
+        table_column_catalog's) and no view definitions (DatabaseView.read_ddl's).
 
         Args:
             conn: Open connection.
             schema: The schema to read.
+            database_name: The database the schema sits in, where the provider
+                can read one other than the connected database (SQL Server);
+                empty for the connected one (backlog 727).
 
         Returns:
-            ``{"schemas": [...], "tables": [...], "views": [...]}`` as the
-            inspection layer assembled it, each collection in name order
-            (backlog 278). A table's columns keep their ordinal order, which
-            is meaningful.
+            ``{"tables": [...], "views": [...]}``, each in name order
+            (backlog 278).
 
         Raises:
-            UnsupportedDatabaseCapabilityError: When the provider answers about
-                no columns, which is what makes a relation describable.
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
         """
-        self._require_metadata_capability(conn, "columns")
-        from rey_lib.db._sqlalchemy import inspect_schema
-
-        inspected = inspect_schema(conn, schema)
+        # The provider answers the structure facts (backlog 725); this only
+        # dispatches and keeps the common contract and order.
+        read = self._require_provider_capability(conn, "schema_metadata")
+        inspected = read(conn, schema, database_name=database_name)
         # ORDERED HERE, whatever the provider answered (backlog 278).
         return {
-            **inspected,
-            "schemas": sorted(inspected.get("schemas") or []),
             "tables": sorted(inspected.get("tables") or [], key=lambda item: item["name"]),
             "views": sorted(inspected.get("views") or [], key=lambda item: item["name"]),
         }
-
-    def get_procedure_definition(self, conn: Any, identity: dict[str, Any]) -> str:
-        """Return one procedure's provider-native definition SQL."""
-        return self._routine_definition(conn, "procedures", identity)
-
-    def get_function_definition(self, conn: Any, identity: dict[str, Any]) -> str:
-        """Return one function's provider-native definition SQL."""
-        return self._routine_definition(conn, "functions", identity)
 
     def _require_metadata_capability(self, conn: Any, capability: str) -> str:
         provider = self._provider_for_conn(conn)
@@ -1209,35 +1160,6 @@ class DBAdapter:
             key=lambda item: (item["schema"], item["name"], item["signature"]),
         )
 
-    def _routine_definition(
-        self,
-        conn: Any,
-        capability: str,
-        identity: dict[str, Any],
-    ) -> str:
-        """Resolve one routine's definition from a normalized routine identity."""
-        provider = self._require_metadata_capability(conn, capability)
-        kind = _ROUTINE_KINDS[capability]
-        requested_type = str(identity.get("object_type") or kind)
-        if requested_type != kind:
-            raise ConfigError(
-                f"DBAdapter: routine identity object_type '{requested_type}' does "
-                f"not match the requested '{kind}' definition."
-            )
-        name = str(identity.get("name") or "")
-        if not name:
-            raise ConfigError("DBAdapter: routine identity requires a name.")
-        return str(
-            _backend(provider).get_routine_definition(
-                conn,
-                self._metadata_catalog(conn, provider),
-                str(identity.get("schema") or ""),
-                name,
-                str(identity.get("signature") or ""),
-                kind,
-            )
-        )
-
     # ------------------------------------------------------------------
     # Stored procedures
     # ------------------------------------------------------------------
@@ -1332,92 +1254,6 @@ class DBAdapter:
     # Staging / bulk insert
     # ------------------------------------------------------------------
 
-    def delete_all_rows(self, conn: Any, schema: str, table: str) -> int:
-        """Remove every row from ``schema.table``, leaving the table itself.
-
-        **THE PRIMITIVE, NAMED FOR WHAT IT DOES.** It is not called `replace`:
-        a load mode that replaces a destination's contents is built FROM this,
-        and a provider should not know that such a mode exists.
-
-        What it does NOT do, each because something else does:
-
-        - it does not DROP the table. The schema, its constraints, its grants,
-          its indexes and its triggers survive, because emptying a table is not
-          the same act as destroying and rebuilding one;
-        - it does not reset identity or sequence state. A sequence continues
-          from where it was; anyone wanting it reset is asking for a different
-          operation and should ask for it by name;
-        - it does not create anything. A destination that is not there is
-          `create`'s business.
-
-        **WRITTEN ONCE, HERE.** ``DELETE FROM`` is the same statement on every
-        provider; only the spelling of the name and the running of the
-        statement differ, and those are the provider's ``quote_identifier`` and
-        ``execute_statement``. It does not commit: whether the statement sits
-        in a transaction is the connection's, and is the caller's to manage.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        schema : str
-            Target schema (or database.schema).
-        table : str
-            Target table name.
-
-        Returns
-        -------
-        int
-            Rows removed, as the ENGINE counted them. Zero means the table was
-            already empty -- a real answer, not a failure.
-
-        Raises
-        ------
-        UnsupportedDatabaseCapabilityError
-            If the connection's provider cannot do it.
-        """
-        # The provider's own count, carried. `bulk_insert` and
-        # `insert_from_path` hand theirs back the same way: coercing here would
-        # be this layer having an opinion about an answer it did not produce.
-        return self._run_table_statement(conn, "DELETE FROM", schema, table)
-
-    def drop_table(self, conn: Any, schema: str, table: str) -> None:
-        """Destroy ``schema.table`` itself, not merely its contents.
-
-        **THE PRIMITIVE, NAMED FOR WHAT IT DOES.** It is not called `recreate`:
-        a load mode that rebuilds a destination is built FROM this and a create,
-        and a provider should not know that such a mode exists.
-
-        **DESTRUCTIVE AT SCHEMA LEVEL, and that is the whole difference from
-        ``delete_all_rows``.** Emptying a table keeps the thing it empties; this
-        does not. WHAT THE TABLE OWNS GOES WITH IT -- its indexes, its
-        constraints, its triggers -- and nothing here rebuilds any of them.
-
-        What happens to objects that merely DEPEND on the table -- a view over
-        it, a foreign key from elsewhere -- is the provider's answer: the drop
-        may be refused, or may reach further. This layer does not decide it, and
-        a caller that needs to know must ask the database it is talking to.
-
-        **WRITTEN ONCE, HERE**, as ``delete_all_rows`` is: ``DROP TABLE``,
-        with no ``CASCADE``, through the provider's ``quote_identifier`` and
-        ``execute_statement``. It does not commit.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        schema : str
-            Target schema (or database.schema).
-        table : str
-            Target table name.
-
-        Raises
-        ------
-        UnsupportedDatabaseCapabilityError
-            If the connection's provider cannot do it.
-        """
-        self._run_table_statement(conn, "DROP TABLE", schema, table)
-
     # -- connector primitives (backlog 690) ------------------------------------
     # What database objects need to reach a database: which provider a
     # connection is, how it spells an identifier, and running one statement or
@@ -1457,18 +1293,45 @@ class DBAdapter:
         return self._require_provider_capability(conn, "fetch_rows")(conn, sql_text, params)
 
     def table_column_catalog(
-        self, conn: Any, schema: str, table: str,
+        self, conn: Any, schema: str, table: str, *, database_name: str = "",
     ) -> list[dict[str, Any]]:
         """One table's columns as the provider's catalog states them.
 
         Name, type, default and nullability per column. A metadata primitive,
         not DDL. Empty when there is no such table.
 
+        ``database_name`` names the database the table sits in, where the
+        provider can read one other than the connected database (backlog 727).
+
         Raises:
             UnsupportedDatabaseCapabilityError: If the provider does not answer this.
         """
         read = self._require_provider_capability(conn, "table_column_catalog")
-        return read(conn, schema, table)
+        return read(conn, schema, table, database_name=database_name)
+
+    def table_exists(self, conn: Any, catalog: str, schema: str, table: str) -> bool:
+        """Whether the provider's catalog holds a table of this schema and name.
+
+        A metadata primitive, not what "exists" means -- that is DatabaseTable's.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "table_exists")
+        return bool(read(conn, catalog, schema, table))
+
+    def view_native_definition(self, conn: Any, schema: str, view: str) -> str:
+        """A view's definition exactly as the destination database supplies it.
+
+        Retrieved, never generated -- for some providers a full statement, for
+        PostgreSQL the SELECT body. Turning it into DDL is DatabaseView's. Empty
+        when there is none.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "view_native_definition")
+        return str(read(conn, schema, view))
 
     def table_native_definition(self, conn: Any, schema: str, table: str) -> str:
         """The complete table definition the destination database itself supplies.
@@ -1483,7 +1346,7 @@ class DBAdapter:
         return read(conn, schema, table)
 
     def index_column_catalog(
-        self, conn: Any, schema: str, table: str, index: str,
+        self, conn: Any, schema: str, table: str, index: str, *, database_name: str = "",
     ) -> dict[str, Any]:
         """One index on one table as the provider's catalog states it.
 
@@ -1491,11 +1354,14 @@ class DBAdapter:
         columns in order. A metadata primitive, not DDL. Empty when the table
         has no such index.
 
+        ``database_name`` names the database the table sits in, where the
+        provider can read one other than the connected database (backlog 727).
+
         Raises:
             UnsupportedDatabaseCapabilityError: If the provider does not answer this.
         """
         read = self._require_provider_capability(conn, "index_column_catalog")
-        return read(conn, schema, table, index)
+        return read(conn, schema, table, index, database_name=database_name)
 
     def index_native_definition(self, conn: Any, schema: str, table: str, index: str) -> str:
         """The index definition the destination database itself supplies.
@@ -1510,7 +1376,7 @@ class DBAdapter:
         return read(conn, schema, table, index)
 
     def constraint_catalog(
-        self, conn: Any, schema: str, table: str, name: str,
+        self, conn: Any, schema: str, table: str, name: str, *, database_name: str = "",
     ) -> dict[str, Any]:
         """One constraint on one table as the provider's catalog states it.
 
@@ -1518,11 +1384,14 @@ class DBAdapter:
         check's expression. A metadata primitive, not DDL. Empty when the
         table has no such constraint.
 
+        ``database_name`` names the database the table sits in, where the
+        provider can read one other than the connected database (backlog 727).
+
         Raises:
             UnsupportedDatabaseCapabilityError: If the provider does not answer this.
         """
         read = self._require_provider_capability(conn, "constraint_catalog")
-        return read(conn, schema, table, name)
+        return read(conn, schema, table, name, database_name=database_name)
 
     def constraint_native_definition(
         self, conn: Any, schema: str, table: str, name: str,
@@ -1604,22 +1473,6 @@ class DBAdapter:
         """
         read = self._require_provider_capability(conn, "get_routine_definition")
         return str(read(conn, "", schema, name, signature, kind))
-
-    def _run_table_statement(
-        self, conn: Any, verb: str, schema: str, table: str,
-    ) -> int:
-        """Run ``<verb> <schema>.<table>`` through this provider's two primitives.
-
-        The statement is the adapter's; the provider spells the names and runs
-        it. A schema of ``database.schema`` -- the qualification some backends
-        use -- is quoted part by part, so each part is one identifier.
-        """
-        quote = self._require_provider_capability(conn, "quote_identifier")
-        execute = self._require_provider_capability(conn, "execute_statement")
-        qualified = ".".join(
-            quote(part) for part in (*str(schema).split("."), str(table))
-        )
-        return execute(conn, f"{verb} {qualified}")
 
     def get_table_columns(
         self,

@@ -74,10 +74,19 @@ class _Adapter(ConnectorPrimitives):
         self.calls.append("table_exists")
         return self._exists
 
-    def drop_table(self, _conn, schema, table) -> None:
-        self.calls.append("drop_table")
-        self.dropped.append((schema, table))
-        self._exists = False
+    def execute_statement(self, conn, sql_text: str) -> int:
+        """DROP and DELETE arrive as DatabaseTable writes them (backlog 722)."""
+        for verb, call, kept in (("DROP TABLE ", "drop_table", self.dropped),
+                                 ("DELETE FROM ", "delete_all_rows", self.emptied)):
+            if sql_text.startswith(verb):
+                schema, table = (part.strip('"') for part in
+                                 sql_text[len(verb):].split('"."'))
+                self.calls.append(call)
+                kept.append((schema, table))
+                if call == "drop_table":
+                    self._exists = False
+                return 0
+        return super().execute_statement(conn, sql_text)
 
     def get_table_columns(self, _conn, _schema, _table) -> list[str]:
         self.calls.append("get_table_columns")
@@ -88,11 +97,6 @@ class _Adapter(ConnectorPrimitives):
         self.created.append((schema, table, defs))
         self._exists = True
         return True
-
-    def delete_all_rows(self, _conn, schema, table) -> int:
-        self.calls.append("delete_all_rows")
-        self.emptied.append((schema, table))
-        return 0
 
     def bulk_insert(self, _conn, schema, table, records, columns) -> int:
         self.calls.append("bulk_insert")
@@ -380,13 +384,14 @@ class TestTheReplacePolicy:
         # DatabaseTable.create asks once more before its DDL: it owns what "exists" means.
         assert adapter.calls == ["table_exists", "table_exists", "create", "bulk_insert"]
 
-    def test_it_is_the_connector_that_is_asked(self) -> None:
-        """The loader names no provider and spells no SQL. It asks the adapter,
-        which is the one boundary a database operation crosses.
+    def test_it_is_the_table_that_is_asked(self) -> None:
+        """The loader names no provider and spells no SQL. It asks the table,
+        which owns emptying itself (backlog 722).
         """
         source = inspect.getsource(DataLoader)
 
-        assert "self.adapter.delete_all_rows" in source
+        assert "DatabaseTable.delete_all_rows" in source
+        assert "self.adapter.delete_all_rows" not in source
         for named in ("postgres", "mysql", "sqlserver", "duckdb",
                       "DELETE", "TRUNCATE"):
             assert named not in source, named
@@ -453,10 +458,11 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
 
         assert adapter.created == [("s", "t", _CREATED)]
 
-    def test_it_is_the_connector_that_is_asked(self) -> None:
+    def test_it_is_the_table_that_is_asked(self) -> None:
         source = inspect.getsource(DataLoader)
 
-        assert "self.adapter.drop_table" in source
+        assert "DatabaseTable.drop" in source
+        assert "self.adapter.drop_table" not in source
         # `DROP TABLE` is the statement; "a drop" is English, and the comments
         # here explain the operation in words. It is SQL that must not be
         # written, not the noun.

@@ -62,7 +62,9 @@ class _Connector:
     def quote_identifier(self, _conn: Any, name: str) -> str:
         return _QUOTE[self._provider](name)
 
-    def constraint_catalog(self, _conn: Any, schema: str, table: str, name: str) -> dict:
+    def constraint_catalog(
+        self, _conn: Any, schema: str, table: str, name: str, **_k: Any,
+    ) -> dict:
         self.asked.append(("catalog", schema, table, name))
         return self.catalog
 
@@ -171,9 +173,9 @@ def test_the_export_asks_the_owning_object_by_kind_and_table(
     asked: list[tuple] = []
     _export(
         tmp_path, monkeypatch, "sqlserver",
-        constraint_catalog=lambda _c, schema, table, name: asked.append(
+        constraint_catalog=lambda _c, schema, table, name, **_k: asked.append(
             (schema, table, name)) or _FOREIGN,
-        index_column_catalog=lambda *_a: {"unique": False, "primary": False, "columns": ["s"]},
+        index_column_catalog=lambda *_a, **_k: {"unique": False, "primary": False, "columns": ["s"]},
     )
 
     assert asked == [("control", "run_log", "run_log_batch_fkey")]
@@ -190,8 +192,8 @@ def test_where_the_table_creates_its_children_the_export_does_not_emit_them(
     """MySQL: SHOW CREATE TABLE already creates every key and index."""
     _export(
         tmp_path, monkeypatch, "mysql",
-        constraint_catalog=lambda *_a: pytest.fail("a child is not emitted separately"),
-        index_column_catalog=lambda *_a: pytest.fail("a child is not emitted separately"),
+        constraint_catalog=lambda *_a, **_k: pytest.fail("a child is not emitted separately"),
+        index_column_catalog=lambda *_a, **_k: pytest.fail("a child is not emitted separately"),
     )
 
     assert not [p for p in tmp_path.rglob("*") if p.is_file() and "run_log_" in p.name]
@@ -214,7 +216,7 @@ def test_duckdb_emits_its_indexes_but_not_its_constraints(
     )
     _export(
         tmp_path, monkeypatch, "postgres",
-        constraint_catalog=lambda *_a: pytest.fail("a constraint is not emitted separately"),
+        constraint_catalog=lambda *_a, **_k: pytest.fail("a constraint is not emitted separately"),
     )
 
     assert asked == ["run_log_status_idx"]

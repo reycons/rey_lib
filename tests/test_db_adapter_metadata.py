@@ -9,7 +9,7 @@ import duckdb
 import pytest
 from sqlalchemy import create_engine
 
-from rey_lib.db import mysql_utils, postgres_utils
+from rey_lib.db import mysql_utils, postgres_utils, sqlserver_utils
 from rey_lib.db._sqlalchemy import ReyConnection
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import (
@@ -112,44 +112,6 @@ def test_sqlalchemy_providers_return_the_same_normalized_contract(
                 "default": "7",
             },
         ]
-        assert adapter.get_primary_key(conn, "main", "parent") == {
-            "catalog": "subject",
-            "schema": "main",
-            "table": "parent",
-            "name": "pk_parent",
-            "columns": ["id"],
-        }
-        assert adapter.get_primary_key(conn, "main", "no_primary_key") == {
-            "catalog": "subject",
-            "schema": "main",
-            "table": "no_primary_key",
-            "name": None,
-            "columns": [],
-        }
-        foreign_keys = adapter.get_foreign_keys(conn, "main", "child")
-        assert foreign_keys[0]["name"] == "fk_child_parent"
-        assert foreign_keys[0]["columns"] == ["parent_id"]
-        assert foreign_keys[0]["referenced_table"] == "parent"
-        assert foreign_keys[0]["referenced_columns"] == ["id"]
-        assert adapter.get_indexes(conn, "main", "child") == [
-            {
-                "catalog": "subject",
-                "schema": "main",
-                "table": "child",
-                "name": "ix_child_parent",
-                "columns": ["parent_id"],
-                "unique": False,
-            }
-        ]
-        assert adapter.get_unique_constraints(conn, "main", "parent") == [
-            {
-                "catalog": "subject",
-                "schema": "main",
-                "table": "parent",
-                "name": "uq_parent_code",
-                "columns": ["code"],
-            }
-        ]
         # Backlog 571: a check constraint, by name, with the expression it checks.
         assert adapter.get_check_constraints(conn, "main", "parent") == [
             {
@@ -162,12 +124,10 @@ def test_sqlalchemy_providers_return_the_same_normalized_contract(
         ]
         assert adapter.get_check_constraints(conn, "main", "child") == []
 
+        # Keys, indexes and unique constraints are the database objects'
+        # (DatabaseSchema.read); their DBAdapter readers are retired (720).
         for value in (
             columns,
-            adapter.get_primary_key(conn, "main", "parent"),
-            foreign_keys,
-            adapter.get_indexes(conn, "main", "child"),
-            adapter.get_unique_constraints(conn, "main", "parent"),
             adapter.get_check_constraints(conn, "main", "parent"),
         ):
             _assert_rey_primitives(value)
@@ -290,15 +250,8 @@ def test_postgres_overloaded_function_definition_resolves_by_signature(
     conn = _StubConnection("postgres", [[("CREATE FUNCTION audit_trade(bigint)",)]])
     monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "reporting")
 
-    definition = DBAdapter().get_function_definition(
-        conn,
-        {
-            "catalog": "reporting",
-            "schema": "public",
-            "name": "audit_trade",
-            "object_type": "function",
-            "signature": "bigint",
-        },
+    definition = DBAdapter().routine_native_definition(
+        conn, "public", "audit_trade", "bigint", "function",
     )
 
     assert definition == "CREATE FUNCTION audit_trade(bigint);"
@@ -316,14 +269,8 @@ def test_postgres_missing_routine_reports_its_full_identity(
     monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "reporting")
 
     with pytest.raises(DatabaseError, match=r"public.audit_trade\(bigint\)"):
-        DBAdapter().get_function_definition(
-            conn,
-            {
-                "schema": "public",
-                "name": "audit_trade",
-                "object_type": "function",
-                "signature": "bigint",
-            },
+        DBAdapter().routine_native_definition(
+            conn, "public", "audit_trade", "bigint", "function",
         )
 
 
@@ -359,32 +306,15 @@ def test_mysql_routine_definition_validates_identifiers_before_quoting(
     conn = _StubConnection("mysql", [[{"Create Procedure": "CREATE PROCEDURE x"}]])
     monkeypatch.setattr(mysql_utils, "get_current_database", lambda _conn: "reporting")
     adapter = DBAdapter()
-    identity = {
-        "schema": "reporting",
-        "name": "refresh_totals",
-        "object_type": "procedure",
-        "signature": "",
-    }
 
-    assert adapter.get_procedure_definition(conn, identity) == "CREATE PROCEDURE x;"
+    assert adapter.routine_native_definition(
+        conn, "reporting", "refresh_totals", "", "procedure",
+    ) == "CREATE PROCEDURE x;"
 
     with pytest.raises(DatabaseError, match="Invalid MySQL identifier"):
-        adapter.get_procedure_definition(
+        adapter.routine_native_definition(
             _StubConnection("mysql", [[]]),
-            {**identity, "name": "refresh`; DROP TABLE t; --"},
-        )
-
-
-def test_routine_identity_type_must_match_the_requested_definition(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    conn = _StubConnection("postgres", [[]])
-    monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "reporting")
-
-    with pytest.raises(ConfigError, match="does not match the requested"):
-        DBAdapter().get_procedure_definition(
-            conn,
-            {"schema": "public", "name": "audit_trade", "object_type": "function"},
+            "reporting", "refresh`; DROP TABLE t; --", "", "procedure",
         )
 
 
@@ -404,10 +334,51 @@ def test_providers_without_routines_report_through_supports(
     finally:
         duck.close()
 
-    sqlserver = SimpleNamespace(provider="sqlserver")
-    assert adapter.supports(sqlserver, "functions") is False
-    with pytest.raises(UnsupportedDatabaseCapabilityError, match="provider 'sqlserver'"):
-        adapter.list_functions(sqlserver)
+
+def test_sql_server_routines_reach_its_listing_and_normalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog 726: SQL Server lists its routines through the same adapter path."""
+    asked: list[tuple[str, dict]] = []
+    monkeypatch.setattr(sqlserver_utils, "get_current_database", lambda _conn: "rey")
+    monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda _c, sql_text, params: asked.append(
+        (sql_text, dict(params))) or [{"schema_name": "control", "routine_name": "load_runs"}])
+    conn = SimpleNamespace(provider="sqlserver")
+    adapter = DBAdapter()
+
+    assert adapter.supports(conn, "procedures") is True
+    assert adapter.supports(conn, "functions") is True
+    assert adapter.list_procedures(conn, "control") == [
+        {
+            "catalog": "rey",
+            "schema": "control",
+            "name": "load_runs",
+            "object_type": "procedure",
+            # SQL Server does not overload a routine name.
+            "signature": "",
+        }
+    ]
+    ((sql_text, params),) = asked
+    assert "o.type IN ('P')" in sql_text
+    assert params == {"schema": "control"}
+
+
+def test_sql_server_lists_each_function_type_and_every_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[tuple[str, dict]] = []
+    monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda _c, sql_text, params: asked.append(
+        (sql_text, dict(params))) or [])
+
+    assert sqlserver_utils.list_routines(object(), "rey", None, "function") == []
+    ((sql_text, params),) = asked
+    assert "o.type IN ('FN', 'IF', 'TF')" in sql_text
+    assert params == {"schema": None}
+
+
+def test_sql_server_refuses_an_unknown_routine_kind() -> None:
+    with pytest.raises(DatabaseError, match="unsupported routine kind 'trigger'"):
+        sqlserver_utils.list_routines(object(), "rey", "control", "trigger")
 
 
 def test_duckdb_reports_only_existing_metadata_capabilities(
@@ -503,10 +474,9 @@ def test_listings_are_ordered_whatever_the_provider_answers(
         {"catalog": catalog, "schema": "s", "name": "orders"},
         {"catalog": catalog, "schema": "s", "name": "accounts"},
     ])
-    monkeypatch.setattr(_sqlalchemy, "inspect_schema", lambda _conn, schema: {
-        "schemas": ["zeta", "alpha"],
-        "tables": [{"name": "orders", "columns": [{"name": "z"}, {"name": "a"}]},
-                   {"name": "accounts", "columns": []}],
+    # The structure read (backlog 725): names, keys and constraints only.
+    monkeypatch.setattr(_sqlalchemy, "inspect_schema_structure", lambda _conn, schema: {
+        "tables": [{"name": "orders"}, {"name": "accounts"}],
         "views": [{"name": "v_z"}, {"name": "v_a"}],
     })
     adapter = DBAdapter()
@@ -514,10 +484,8 @@ def test_listings_are_ordered_whatever_the_provider_answers(
         assert [one["name"] for one in adapter.list_schemas(conn)] == ["alpha", "zeta"]
         assert [one["name"] for one in adapter.list_tables(conn, "s")] == ["accounts", "orders"]
         metadata = adapter.get_schema_metadata(conn, "s")
-        assert metadata["schemas"] == ["alpha", "zeta"]
+        assert set(metadata) == {"tables", "views"}
         assert [one["name"] for one in metadata["tables"]] == ["accounts", "orders"]
         assert [one["name"] for one in metadata["views"]] == ["v_a", "v_z"]
-        # Columns keep their ordinal order: it is meaningful.
-        assert [one["name"] for one in metadata["tables"][1]["columns"]] == ["z", "a"]
     finally:
         conn.close()

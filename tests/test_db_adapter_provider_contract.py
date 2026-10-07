@@ -42,7 +42,9 @@ class _Backend:
     def _recorder(self, name: str):
         def _call(*_args, **_kwargs):
             self.calls.append(name)
-            return "answered"
+            # A structure read is ordered by the adapter, so it is answered in
+            # its shape (backlog 725); anything else, with a marker.
+            return {} if name == "schema_metadata" else "answered"
         return _call
 
 
@@ -76,16 +78,22 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     # caller that did not ask for support first must still get a named
     # refusal rather than an AttributeError from inside the call.
     "insert_from_path": ("insert_from_path", ("schema", "table", "/tmp/source.csv", ["a"])),
-    # THE PRIMITIVES `delete_all_rows` and `drop_table` are written from. A
-    # provider missing either cannot empty or drop a destination, and the load
-    # must be told which primitive is missing, by name.
-    "quote_identifier": ("delete_all_rows", ("schema", "table")),
-    "execute_statement": ("delete_all_rows", ("schema", "table")),
+    # THE PRIMITIVES DatabaseTable's `drop` and `delete_all_rows` are written
+    # from (backlog 722). A provider missing either cannot empty or drop a
+    # destination, and the load must be told which primitive is missing, by name.
+    "quote_identifier": ("quote_identifier", ("name",)),
+    "execute_statement": ("execute_statement", ("DELETE FROM t",)),
     # The read DatabaseTable asks a catalog with (backlog 690).
     "fetch_rows": ("fetch_rows", ("SELECT 1", {})),
     # What a catalog says about one table, for DatabaseTable.read_ddl (backlog 695).
     "table_column_catalog": ("table_column_catalog", ("schema", "table")),
     "table_native_definition": ("table_native_definition", ("schema", "table")),
+    # Existence and view-definition facts, for DatabaseTable.exists and
+    # DatabaseView.read_ddl (backlog 698).
+    "table_exists": ("table_exists", ("catalog", "schema", "table")),
+    "view_native_definition": ("view_native_definition", ("schema", "view")),
+    # The schema's structure facts, for DatabaseSchema.read (backlog 725).
+    "schema_metadata": ("get_schema_metadata", ("schema",)),
     # A routine's stored source, for DatabaseProcedure.read_ddl (backlog 695).
     "get_routine_definition": (
         "routine_native_definition", ("schema", "name", "", "procedure"),
@@ -262,14 +270,14 @@ class TestSupportIsResolvedNotListed:
     def test_table_semantics_are_not_a_provider_capability(self) -> None:
         """Existence and creation are DatabaseTable's, not the connector's (backlog 690).
 
-        A provider answers primitives -- it runs a read with named parameters
-        -- and the table decides what "exists" means and how it is created.
+        A provider answers primitives -- the existence FACT is one (backlog
+        698), asked through DatabaseTable.exists -- and the table decides what
+        "exists" means and how it is created.
         """
         from rey_lib.db import postgres_utils
 
-        for moved in ("table_exists", "create_staging_table_if_not_exists"):
-            assert moved not in _PROVIDER_CONTRACT_CAPABILITIES
-            assert not hasattr(postgres_utils, moved)
+        assert "create_staging_table_if_not_exists" not in _PROVIDER_CONTRACT_CAPABILITIES
+        assert not hasattr(postgres_utils, "create_staging_table_if_not_exists")
 
 
 class TestEveryProviderHasThePrimitives:

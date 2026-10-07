@@ -2,7 +2,7 @@
 
 No database is opened. A connector double answers the four primitives
 ``DatabaseTable`` uses -- ``provider``, ``quote_identifier`` (each provider's
-real one), ``execute_statement`` and ``fetch_rows`` -- and records what it was
+real one), ``execute_statement`` and ``table_exists`` (698) -- and records what it was
 asked, so what is asserted is what the TABLE decided for each provider.
 """
 
@@ -49,12 +49,18 @@ class _Conn:
 class _Connector:
     """The four primitives, as one provider, recording what was asked."""
 
-    def __init__(self, provider: str, *, present: bool = False, fail: Exception | None = None):
+    def __init__(
+        self, provider: str, *, present: bool = False, fail: Exception | None = None,
+        keyed: bool = False, listed: bool = True,
+    ):
         self._provider = provider
         self.present = present
         self.fail = fail
+        self.keyed = keyed
+        self.listed = listed
         self.statements: list[str] = []
-        self.reads: list[tuple[str, dict]] = []
+        self.asked: list[tuple[str, str, str]] = []
+        self.read_from: list[tuple[str, str]] = []
 
     def provider(self, _conn: Any) -> str:
         return self._provider
@@ -68,9 +74,44 @@ class _Connector:
         self.statements.append(sql_text)
         return 0
 
-    def fetch_rows(self, _conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict]:
-        self.reads.append((sql_text, dict(params)))
-        return [{"present": 1}] if self.present else []
+    def table_exists(self, _conn: Any, catalog: str, schema: str, table: str) -> bool:
+        self.asked.append((catalog, schema, table))
+        return self.present
+
+    # The read-back (backlog 727): the schema's structure, then each fact
+    # _table asks, every one recorded with the database it was asked of.
+
+    def get_schema_metadata(
+        self, _conn: Any, schema: str, *, database_name: str = "",
+    ) -> dict[str, Any]:
+        self.read_from.append(("schema_metadata", database_name))
+        return {"views": [], "tables": [{
+            "name": "trade", "foreign_keys": [], "check_constraints": [],
+            "primary_key": {"name": "trade_pk", "constrained_columns": ["trade_id"]}
+            if self.keyed else {},
+            "indexes": [{"name": "trade_ix", "column_names": ["symbol"], "unique": False}]
+            if self.keyed else [],
+            "unique_constraints": [],
+        }] if schema == "staging" and self.listed else []}
+
+    def table_column_catalog(
+        self, _conn: Any, _schema: str, _table: str, *, database_name: str = "",
+    ) -> list[dict]:
+        self.read_from.append(("table_column_catalog", database_name))
+        return [{"name": "trade_id", "type": "INTEGER", "default": None, "nullable": True}]
+
+    def constraint_catalog(
+        self, _conn: Any, _schema: str, _table: str, _name: str, *, database_name: str = "",
+    ) -> dict:
+        self.read_from.append(("constraint_catalog", database_name))
+        return {"kind": "primary_key", "columns": ["trade_id"], "referenced_schema": "",
+                "referenced_table": "", "referenced_columns": [], "check": None}
+
+    def index_column_catalog(
+        self, _conn: Any, _schema: str, _table: str, _index: str, *, database_name: str = "",
+    ) -> dict:
+        self.read_from.append(("index_column_catalog", database_name))
+        return {"unique": False, "primary": False, "columns": ["symbol"]}
 
 
 def _identity(catalog: str = "") -> DatabaseObjectIdentity:
@@ -109,14 +150,13 @@ class TestDatabaseTypeIsTheOneTranslation:
 
 class TestExistsIsTheTablesQuestion:
 
-    def test_it_asks_the_catalog_with_named_parameters(self) -> None:
+    def test_it_asks_the_connector_s_existence_fact(self) -> None:
+        """What "exists" means is the table's; how the catalog is asked is the
+        connector's (backlog 698)."""
         connector = _Connector("postgres", present=True)
 
         assert DatabaseTable.exists(_Conn(), _identity(), connector) is True
-        ((sql_text, params),) = connector.reads
-        assert "information_schema.tables" in sql_text
-        assert ":schema" in sql_text and ":table" in sql_text
-        assert params == {"schema": "staging", "table": "trade"}
+        assert connector.asked == [("", "staging", "trade")]
 
     def test_an_absent_table_is_False(self) -> None:
         assert DatabaseTable.exists(_Conn(), _identity(), _Connector("mysql")) is False
@@ -126,16 +166,43 @@ class TestExistsIsTheTablesQuestion:
 
         DatabaseTable.exists(_Conn(), _identity(catalog="NaviStage"), connector)
 
-        assert "FROM [NaviStage].information_schema.tables" in connector.reads[0][0]
+        assert connector.asked == [("NaviStage", "staging", "trade")]
 
     def test_a_failed_read_is_reported_not_answered_False(self) -> None:
         """A lost connection must not read as "the table is not there"."""
         class _Failing(_Connector):
-            def fetch_rows(self, *_a: Any) -> list[dict]:
+            def table_exists(self, *_a: Any) -> bool:
                 raise DatabaseError("connection closed")
 
         with pytest.raises(DatabaseError, match="connection closed"):
             DatabaseTable.exists(_Conn(), _identity(), _Failing("postgres"))
+
+
+class TestTheExistencePrimitive:
+    """How each provider's catalog is asked (backlog 698)."""
+
+    @pytest.mark.parametrize("module", [postgres_utils, mysql_utils, duckdb_utils])
+    def test_it_asks_information_schema_with_named_parameters(
+        self, module: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked: list[tuple[str, dict]] = []
+        monkeypatch.setattr(module, "fetch_rows", lambda _c, sql, params: asked.append(
+            (sql, dict(params))) or [{"present": 1}])
+
+        assert module.table_exists(object(), "ignored", "staging", "trade") is True
+        ((sql_text, params),) = asked
+        assert "information_schema.tables" in sql_text
+        assert params == {"schema": "staging", "table": "trade"}
+
+    def test_sql_server_asks_the_named_database_s_own_catalog(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked: list[str] = []
+        monkeypatch.setattr(sqlserver_utils, "fetch_rows",
+                            lambda _c, sql, _params: asked.append(sql) or [])
+
+        assert sqlserver_utils.table_exists(object(), "NaviStage", "staging", "trade") is False
+        assert "FROM [NaviStage].information_schema.tables" in asked[0]
 
 
 class TestCreate:
@@ -151,8 +218,9 @@ class TestCreate:
     ) -> None:
         connector = _Connector(provider)
 
-        assert DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector) is True
+        created = DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector)
 
+        assert created.identity == _identity()  # the table read back (backlog 727)
         (ddl,) = connector.statements
         assert ddl.startswith(f"CREATE TABLE {table} (\n\t{first_column},")
         assert "IF NOT EXISTS" not in ddl  # existence is the table's own question
@@ -179,7 +247,9 @@ class TestCreate:
     def test_an_existing_table_is_left_untouched(self) -> None:
         connector = _Connector("postgres", present=True)
 
-        assert DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector) is False
+        found = DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector)
+
+        assert found.identity == _identity()  # read back as it is (backlog 727)
         assert connector.statements == []
 
     def test_no_columns_is_refused_rather_than_creating_an_empty_table(self) -> None:
@@ -203,6 +273,88 @@ class TestCreate:
 
         with pytest.raises(DatabaseError, match="staging.trade: permission denied"):
             DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector)
+
+
+class TestCreateReadsTheTableBack:
+    """create returns the table read back, from the database it addressed (backlog 727)."""
+
+    def test_the_connected_database_is_read_when_the_identity_names_none(self) -> None:
+        connector = _Connector("postgres", keyed=True)
+
+        table = DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector)
+
+        assert [column.name for column in table.columns] == ["trade_id"]
+        assert table.primary_key is not None and table.primary_key.name == "trade_pk"
+        assert [index.name for index in table.indexes] == ["trade_ix"]
+        assert {database for _read, database in connector.read_from} == {""}
+
+    def test_sql_server_reads_every_fact_from_the_named_database(self) -> None:
+        """If create can address the table, read addresses the same one."""
+        connector = _Connector("sqlserver", present=True, keyed=True)
+
+        table = DatabaseTable.create(
+            _Conn(), _identity(catalog="NaviStage"), _COLUMNS, connector,
+        )
+
+        assert table.identity == _identity(catalog="NaviStage")
+        assert {read for read, _database in connector.read_from} == {
+            "schema_metadata", "table_column_catalog", "constraint_catalog",
+            "index_column_catalog",
+        }
+        assert {database for _read, database in connector.read_from} == {"NaviStage"}
+
+    def test_a_table_the_read_does_not_find_is_refused_by_name(self) -> None:
+        connector = _Connector("postgres", listed=False)
+
+        with pytest.raises(DatabaseError, match="table not found: staging.trade"):
+            DatabaseTable.create(_Conn(), _identity(), _COLUMNS, connector)
+
+
+class TestSqlServerReadsTheNamedDatabase:
+    """Each read _table makes qualifies SQL Server's catalog views (backlog 727)."""
+
+    def _capture(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        asked: list[str] = []
+        monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda _c, sql_text, _p: asked.append(
+            sql_text) or [])
+        return asked
+
+    @pytest.mark.parametrize(("read", "arguments"), [
+        ("schema_metadata", ("staging",)),
+        ("table_column_catalog", ("staging", "trade")),
+        ("constraint_catalog", ("staging", "trade", "trade_pk")),
+        ("index_column_catalog", ("staging", "trade", "trade_ix")),
+    ])
+    def test_a_named_database_qualifies_every_catalog_view(
+        self, monkeypatch: pytest.MonkeyPatch, read: str, arguments: tuple,
+    ) -> None:
+        asked = self._capture(monkeypatch)
+
+        getattr(sqlserver_utils, read)(object(), *arguments, database_name="NaviStage")
+
+        assert asked
+        for sql_text in asked:
+            assert "[NaviStage].sys." in sql_text
+            assert " sys." not in sql_text
+
+    def test_no_name_reads_the_connected_database(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked = self._capture(monkeypatch)
+
+        sqlserver_utils.table_column_catalog(object(), "staging", "trade")
+
+        assert "FROM sys.columns" in asked[0] and "]." not in asked[0].split("WHERE")[0]
+
+    def test_the_adapter_carries_the_name_to_the_provider(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked = self._capture(monkeypatch)
+        conn = type("_Handle", (), {"provider": "sqlserver"})()
+
+        DBAdapter().get_schema_metadata(conn, "staging", database_name="NaviStage")
+
+        assert all("[NaviStage].sys." in sql_text for sql_text in asked)
 
 
 class TestWidenColumn:
@@ -233,7 +385,9 @@ class _CatalogConnector(_Connector):
         self.columns = columns or []
         self.native = native
 
-    def table_column_catalog(self, _conn: Any, _schema: str, _table: str) -> list[dict]:
+    def table_column_catalog(
+        self, _conn: Any, _schema: str, _table: str, **_k: Any,
+    ) -> list[dict]:
         return self.columns
 
     def table_native_definition(self, _conn: Any, _schema: str, _table: str) -> str:
@@ -308,7 +462,9 @@ class TestTheCatalogPrimitives:
     def test_sql_server_states_each_type_as_it_declares_it(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda *_a: [
+        asked: list[str] = []
+        monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda _c, sql_text, _p: asked.append(
+            sql_text) or [
             {"name": "symbol", "type_name": "nvarchar", "max_length": 24, "precision": 0,
              "scale": 0, "is_nullable": True, "default_value": None},
         ])
@@ -316,6 +472,8 @@ class TestTheCatalogPrimitives:
         assert sqlserver_utils.table_column_catalog(object(), "s", "t") == [
             {"name": "symbol", "type": "nvarchar(12)", "default": None, "nullable": True},
         ]
+        # A view's columns are answered as a table's are (backlog 726).
+        assert "sys.objects" in asked[0] and "o.type IN ('U', 'V')" in asked[0]
 
     def test_mysql_retrieves_show_create_table(self, monkeypatch: pytest.MonkeyPatch) -> None:
         asked: list[str] = []

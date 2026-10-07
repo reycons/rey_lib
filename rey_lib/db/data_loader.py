@@ -142,8 +142,8 @@ class DataLoader:
         """
         if not DatabaseTable.exists(conn, target, self.adapter):
             return None
-        schema, table = adapter_destination(target)
-        return self.adapter.get_table_columns(conn, schema, table)
+        # What the destination's columns are is the table's (backlog 722).
+        return DatabaseTable.column_names(conn, target, self.adapter)
 
     def load(
         self,
@@ -201,7 +201,7 @@ class DataLoader:
             # Issued in the same transaction boundary as the insert below, as
             # the replace removal is. WHAT A ROLLBACK THEN DOES TO A DROP is
             # the database's own semantics and is not promised here.
-            self.adapter.drop_table(conn, schema, table)
+            DatabaseTable.drop(conn, target, self.adapter)
             exists = False
 
         if not exists:
@@ -222,9 +222,9 @@ class DataLoader:
             # -- the worst outcome available, because it destroys what was
             # there and puts nothing in its place.
             #
-            # The connector is asked; which provider is on the other end, and
-            # how it spells this, is not this object's business.
-            self.adapter.delete_all_rows(conn, schema, table)
+            # The table is asked (backlog 722); which provider is on the other
+            # end, and how it spells this, is not this object's business.
+            DatabaseTable.delete_all_rows(conn, target, self.adapter)
 
         try:
             return self._insert(conn, target, records, names)

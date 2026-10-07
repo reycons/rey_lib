@@ -79,13 +79,16 @@ def test_a_mysql_schema_read_now_carries_column_definitions() -> None:
             "columns": [{"name": "symbol", "type": "VARCHAR(12)", "nullable": False}],
         }], "views": []},
         table_native_definition=lambda *_a: "CREATE TABLE `trade` (`symbol` varchar(12))",
+        table_column_catalog=lambda _conn, _schema, _table, **_k: [
+            {"name": "symbol", "type": "varchar(12)", "default": None, "nullable": False},
+        ],
         list_procedures=lambda *_a: [], list_functions=lambda *_a: [],
     )
 
     schema = DatabaseSchema.read(object(), "c", "rey", "rey", adapter)
 
     (column,) = schema.tables[0].columns
-    assert column.ddl == "`symbol` VARCHAR(12) NOT NULL"
+    assert column.ddl == "`symbol` varchar(12) NOT NULL"
 
 
 def test_no_adapter_or_provider_writes_column_ddl_any_more() -> None:

@@ -2099,8 +2099,8 @@ def quote_identifier(name: str) -> str:
 def execute_statement(conn: Any, sql_text: str) -> int:
     """Run one statement on this connection and return what it touched.
 
-    The provider half of ``DBAdapter.delete_all_rows`` and ``drop_table``: the
-    adapter writes the statement, this runs it the way this driver runs one.
+    The provider half of ``DatabaseTable.delete_all_rows`` and ``drop``: the
+    table writes the statement, this runs it the way this driver runs one.
     It does NOT commit -- whether the statement sits in a transaction is the
     connection's, and is the caller's to manage.
 
@@ -2142,8 +2142,61 @@ def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[st
         raise DatabaseError(f"fetch_rows failed: {exc}") from exc
 
 
-def table_column_catalog(conn: Any, schema: str, table: str) -> list[dict[str, Any]]:
+def schema_metadata(
+    conn: Any, schema: str, *, database_name: str = "",
+) -> dict[str, Any]:
+    """The schema's structure facts, in the shape every provider answers (backlog 725).
+
+    ``database_name`` is accepted and not used: a PostgreSQL connection reads only its own database
+    (backlog 727; SQL Server's reads use it).
+
+    A metadata primitive: tables with their keys, indexes and constraints, and
+    views, by name -- read through the SQLAlchemy inspector. No column facts
+    and no view definitions; DatabaseSchema.read builds the objects.
+    """
+    from rey_lib.db._sqlalchemy import inspect_schema_structure  # noqa: PLC0415
+
+    return inspect_schema_structure(conn, schema)
+
+
+def table_exists(conn: Any, catalog: str, schema: str, table: str) -> bool:
+    """Whether information_schema.tables holds a row for this schema and name.
+
+    A metadata primitive (backlog 698): the provider's catalog answer only --
+    what "exists" means is DatabaseTable's. ``catalog`` takes no part here.
+    """
+    return bool(fetch_rows(
+        conn,
+        "SELECT 1 AS present FROM information_schema.tables "
+        "WHERE table_schema = :schema AND table_name = :table",
+        {"schema": schema, "table": table},
+    ))
+
+
+def view_native_definition(conn: Any, schema: str, view: str) -> str:
+    """The view's SELECT body as PostgreSQL reports it (``pg_get_viewdef``).
+
+    A metadata primitive (backlog 698): the server's fact only -- PostgreSQL
+    supplies the body, not a statement; turning it into DDL is DatabaseView's.
+    Empty when there is no such view.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT pg_get_viewdef(c.oid, true) AS definition "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = :schema AND c.relname = :view",
+        {"schema": schema, "view": view},
+    )
+    return str((rows[0] if rows else {}).get("definition") or "")
+
+
+def table_column_catalog(
+    conn: Any, schema: str, table: str, *, database_name: str = "",
+) -> list[dict[str, Any]]:
     """One table's columns as PostgreSQL's catalog states them, in ordinal order.
+
+    ``database_name`` is accepted and not used: a PostgreSQL connection reads only its own database
+    (backlog 727; SQL Server's reads use it).
 
     A metadata primitive: what the server says, not DDL. Read from
     ``pg_attribute`` rather than ``information_schema.columns``, which is
@@ -2180,8 +2233,13 @@ _CONSTRAINT_KIND: dict[str, str] = {
 }
 
 
-def constraint_catalog(conn: Any, schema: str, table: str, name: str) -> dict[str, Any]:
+def constraint_catalog(
+    conn: Any, schema: str, table: str, name: str, *, database_name: str = "",
+) -> dict[str, Any]:
     """One constraint on one table as PostgreSQL's catalog states it.
+
+    ``database_name`` is accepted and not used: a PostgreSQL connection reads only its own database
+    (backlog 727; SQL Server's reads use it).
 
     A metadata primitive: what the server says, not DDL. Columns and the
     columns they reference in key order. Empty when the table has no such
@@ -2337,8 +2395,13 @@ def constraint_native_definition(conn: Any, schema: str, table: str, name: str) 
     return str((rows[0] if rows else {}).get("definition") or "")
 
 
-def index_column_catalog(conn: Any, schema: str, table: str, index: str) -> dict[str, Any]:
+def index_column_catalog(
+    conn: Any, schema: str, table: str, index: str, *, database_name: str = "",
+) -> dict[str, Any]:
     """One index on one table as PostgreSQL's catalog states it.
+
+    ``database_name`` is accepted and not used: a PostgreSQL connection reads only its own database
+    (backlog 727; SQL Server's reads use it).
 
     A metadata primitive: what the server says, not DDL. Key columns in key
     order; an expression key has no column name and is left out. Empty when
