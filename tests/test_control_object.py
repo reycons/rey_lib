@@ -23,7 +23,7 @@ import pytest
 
 import rey_lib.control as control_package
 from rey_lib.control import Control
-from rey_lib.errors.error_utils import ConfigError, StateError
+from rey_lib.errors.error_utils import AppError, ConfigError, StateError
 
 
 def _map(name: str = "control", sql_bindings: Any = None) -> SimpleNamespace:
@@ -218,7 +218,7 @@ class TestDestructionClosesTheBatchItOwns:
     def test_a_close_failure_is_recorded_and_teardown_continues(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Logged with its error through the logger, not raised out of destruction."""
+        """Reported through AppError, not raised out of destruction (rule 79)."""
         recorded: list[dict] = []
 
         control = self._owning(run_outcome="success")
@@ -236,8 +236,12 @@ class TestDestructionClosesTheBatchItOwns:
             control.close()          # must not raise
 
         logged = [r for r in caplog.records if r.levelname == "ERROR"]
-        assert [r.exc_info[1] for r in logged] == [failure]
-        assert "could not be closed" in logged[0].getMessage()
+        # A non-AppError is reported as an AppError, its cause kept.
+        assert len(logged) == 1
+        assert type(logged[0].exc_info[1]) is AppError
+        assert logged[0].exc_info[1].__cause__ is failure
+        assert "at teardown" in logged[0].getMessage()
+        assert "control unreachable" not in logged[0].getMessage()
         # Nothing but the logger writes an ERROR record.
         assert recorded == []
         # Teardown still released everything.

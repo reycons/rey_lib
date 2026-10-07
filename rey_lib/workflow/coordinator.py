@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.config.config_utils import record_config_file_references
 from rey_lib.config.inventory import to_plain_data
-from rey_lib.errors.error_utils import build_safe_error_payload
+from rey_lib.errors.error_utils import AppError, build_safe_error_payload
 from rey_lib.logs import (
     bind_step,
     bind_run,
@@ -173,7 +173,8 @@ def _pre_execution_failure(
         StepOutcome(step_id, label, process, "failed", error=message)
     )
     run.status = "failed"
-    _logger.error("%s", message)
+    # Propagated -- the caller raises the returned WorkflowError -- so not
+    # reported here: the AppError boundary reports it once (rule 79).
     log_run_complete(run_log,
         "failed",
         message=message,
@@ -496,8 +497,13 @@ def run_workflow(
                     failed_step_sequence=sequence,
                 )
                 failure_message = str(error_payload["message"])
-                _logger.error("workflow '%s' step '%s' failed: %s", name, step_id, exc,
-                              exc_info=exc)
+                # Handled -- recorded, and the workflow returns a failed run
+                # rather than raising -- so reported here (rule 79).
+                error = exc if isinstance(exc, AppError) else WorkflowError(
+                    f"workflow '{name}' step '{step_id}' failed")
+                if error is not exc:
+                    error.__cause__ = exc
+                error.report(f"workflow '{name}' step '{step_id}'", source=__name__)
                 failure_id = log_step_failure(run_log, **error_payload)
                 log_step_end(run_log, step_name, "failed", message=failure_message,
                              duration_ms=monotonic_ms(step_started))

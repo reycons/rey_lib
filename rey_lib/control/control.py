@@ -39,7 +39,7 @@ from rey_lib.db.connection import shared_connection
 from rey_lib.db.procedure_map import (
     execute_mapped_routine, get_procedure_map, resolve_routine_binding,
 )
-from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
+from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError, StateError
 from rey_lib.logs import get_logger
 
 __all__ = ["Control"]
@@ -266,15 +266,18 @@ class Control:
             pass
 
     def _record_close_failure(self, exc: BaseException) -> None:
-        """Log a batch that would not close, then let teardown continue.
+        """Report a batch that would not close, then let teardown continue.
 
-        Through the logger, which persists it to the bound run when there is
-        one. Not re-raised: destruction raising would fail a collection that
-        is releasing everything else correctly, and would replace whatever
-        error ended the run with one about bookkeeping.
+        Handled here, so reported here, through AppError (rule 79). Not
+        re-raised: destruction raising would fail a collection that is
+        releasing everything else correctly, and would replace whatever error
+        ended the run with one about bookkeeping.
         """
-        _logger.error("Batch %s could not be closed at teardown: %s",
-                      self.batch_id, exc, exc_info=exc)
+        error = exc if isinstance(exc, AppError) else AppError(
+            f"unexpected {type(exc).__name__}")
+        if error is not exc:
+            error.__cause__ = exc
+        error.report(f"closing batch {self.batch_id} at teardown", source=__name__)
 
     def __getattr__(self, name: str) -> Any:
         """Fall through to the context for anything Control does not hold.

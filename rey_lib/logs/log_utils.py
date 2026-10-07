@@ -66,7 +66,6 @@ from rey_lib.logs.logging_setup import (
     get_logger,
     log_enter,
     log_exit,
-    log_row_values,
     setup_logging,
 )
 from rey_lib.logs.record_enrichment import (
@@ -98,7 +97,6 @@ __all__ = [
     "log_file_metadata",
     "log_enter",
     "log_exit",
-    "log_row_values",
     "format_jsonl_records",
     "build_jsonl_event_table",
     "build_artifact_manifest_entries",

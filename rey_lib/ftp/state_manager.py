@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from rey_lib.errors.error_utils import StateError
+from rey_lib.errors.error_utils import FtpDownloadError, StateError
 from rey_lib.files.json import JsonReadError, read_json_file
 from rey_lib.files.file_utils import write_file
 from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
@@ -471,10 +471,11 @@ def abandon_to_failed_file(
     except OSError as exc:
         raise StateError(f"Cannot write failed file '{failed_file}'.") from exc
 
-    log.error(
-        "ABANDONED after %d retries: %s/%s — see %s and %s",
-        retry_count, remote_path, filename, failed_file, log_file,
-    )
+    # Handled -- recorded in the failed file -- so reported here (rule 79).
+    FtpDownloadError(
+        f"abandoned after {retry_count} retries: {remote_path}/{filename} "
+        f"-- see {failed_file} and {log_file}"
+    ).report(f"abandoning {filename}", source=__name__)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

@@ -163,21 +163,13 @@ class KeyedFile(DataFile):
                 if actual == expected:
                     continue
 
-                # Column names, never values -- these files carry data.
-                _logger.error(
-                    "Load key validation failed at record %d of %d\n"
-                    "Missing from the record: %s\n"
-                    "Not in the destination:  %s",
-                    position,
-                    len(records),
-                    ", ".join(sorted(expected - actual)) or "(none)",
-                    ", ".join(sorted(actual - expected)) or "(none)",
-                )
-                # SHORT, because this is what the run log records. The
-                # diagnosis above goes to the logger; putting it here instead
-                # would change recorded evidence.
+                # The diagnosis is failure evidence, so it travels on the error
+                # (rule 79). Column names, never values -- these files carry data.
                 raise DataStructureError(
-                    "Record keys do not match the destination columns",
+                    f"Record keys do not match the destination columns at record "
+                    f"{position} of {len(records)}: missing "
+                    f"[{', '.join(sorted(expected - actual))}], not in the destination "
+                    f"[{', '.join(sorted(actual - expected))}]",
                     validation_name="load_record_keys",
                 )
             return
@@ -193,16 +185,8 @@ class KeyedFile(DataFile):
 
             missing = sorted(required - keys)
             extra = sorted(keys - required)
-            # Column names, never values -- these files carry data.
-            _logger.error(
-                "Record consistency failed at record %d of %d\n"
-                "Missing from the record: %s\n"
-                "Not in the first record: %s",
-                ordinal,
-                len(records),
-                ", ".join(missing) or "(none)",
-                ", ".join(extra) or "(none)",
-            )
+            # Column names, never values -- these files carry data. The error
+            # carries the diagnosis (rule 79).
             detail = ", ".join(
                 part for part in (
                     f"missing {missing}" if missing else "",
@@ -210,8 +194,8 @@ class KeyedFile(DataFile):
                 ) if part
             )
             raise DataStructureError(
-                f"'{self.path.name}' record {ordinal} does not match the "
-                f"first record's fields: {detail}.",
+                f"'{self.path.name}' record {ordinal} of {len(records)} does not "
+                f"match the first record's fields: {detail}.",
                 validation_name="load_record_consistency",
             )
 

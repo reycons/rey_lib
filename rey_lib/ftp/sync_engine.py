@@ -328,7 +328,8 @@ def _download_one(
         record_downloaded(state, remote_path, filename, modified_dt)
         return True
     except FtpDownloadError as exc:
-        log.error("Download failed — %s/%s: %s", remote_path, filename, exc)
+        # Handled -- retried on a later run -- so reported here (rule 79).
+        exc.report(f"downloading {remote_path}/{filename}", source=__name__)
         return False
 
 
@@ -360,10 +361,12 @@ def _log_summary(
         for filename in failed:
             log.warning("  ↻ %s", filename)
 
+    # A summary, not a failure event: each abandonment was reported once when
+    # it happened (rule 79).
     if abandoned:
-        log.error("Abandoned (exceeded max retries): %d", len(abandoned))
+        log.warning("Abandoned (exceeded max retries): %d", len(abandoned))
         for filename in abandoned:
-            log.error("  ✗ %s", filename)
+            log.warning("  ✗ %s", filename)
 
     log.info("--- End summary ---")
 

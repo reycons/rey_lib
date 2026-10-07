@@ -244,7 +244,11 @@ def test_process_failure_payload_reports_missing_diagnostics() -> None:
 def test_run_app_operation_failure_records_error_and_reraises(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A failure is logged with its error, and the run completes against its STEP_FAILURE."""
+    """A propagated failure is not reported here; the run completes against its STEP_FAILURE.
+
+    run_app_operation re-raises, so the AppError boundary in app_runtime
+    reports the error once (rule 79) -- this records the lifecycle only.
+    """
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.log"), app_name="rey_loader")
     start_test_run(ctx)
     run_log = _log(ctx, tmp_path)
@@ -255,8 +259,8 @@ def test_run_app_operation_failure_records_error_and_reraises(
     with caplog.at_level("ERROR"), pytest.raises(ValueError) as raised:
         lifecycle_run_app_operation(ctx, run_log, "load", fail)
 
-    logged = [r for r in caplog.records if r.levelname == "ERROR"]
-    assert [r.exc_info[1] for r in logged] == [raised.value]
+    assert raised.value.args == ("password=hunter2 failed",)
+    assert [r for r in caplog.records if r.levelname == "ERROR"] == []
     records = _read(Path(run_log.path()))
     by_type = {record["record_type"]: record for record in records}
     assert [record["record_type"] for record in records] == [
@@ -572,7 +576,8 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
 def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An exception is logged with its error; STEP_FAILURE is what completion references."""
+    """A step failure is reported as a WorkflowError, its cause kept; STEP_FAILURE is
+    what completion references."""
     from rey_lib.logs import current_step
     from rey_lib.workflow import RunContext, run_workflow
 
@@ -593,8 +598,11 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
         result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "failed"
+    from rey_lib.workflow.engine import WorkflowError
+
     logged = [r for r in caplog.records if r.levelname == "ERROR" and r.exc_info]
-    assert [type(r.exc_info[1]) for r in logged] == [RuntimeError]
+    assert [type(r.exc_info[1]) for r in logged] == [WorkflowError]
+    assert type(logged[0].exc_info[1].__cause__) is RuntimeError
     records = _read(Path(run_log.path()))
     failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
     complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
@@ -1218,47 +1226,6 @@ def test_a_caller_may_classify_any_record(tmp_path: Path) -> None:
             if r["record_type"] == "INFO"][0]
     assert note[SENSITIVE_FIELD] is True
     assert note["info"] == {"note": "x"}
-
-
-def test_row_values_are_marked_and_kept_whole(tmp_path: Path) -> None:
-    """log_row_values classifies intrinsically, and suppresses nothing.
-
-    Every record it can emit carries an actual database value, so there is no
-    argument for a caller to unset. Dormant today -- nothing calls it -- which
-    is why the classification belongs in the helper rather than in a caller
-    somebody writes later.
-    """
-    import logging
-
-    from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
-    from rey_lib.logs.logging_setup import log_row_values
-
-    emitted: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            emitted.append(record)
-
-    logger = logging.getLogger("test_row_values")
-    logger.setLevel(logging.ERROR)
-    logger.addHandler(_Capture())
-    try:
-        log_row_values(
-            logger, "rejected", 7,
-            {"surname": "Okonkwo", "salary": 91000},
-            {"surname": "text", "salary": "integer"},
-        )
-    finally:
-        logger.handlers.clear()
-
-    # One header plus one per column, and every one classified.
-    assert len(emitted) == 3
-    assert all(getattr(r, SENSITIVE_FIELD) is True for r in emitted)
-
-    # The values are still there. Marked secret, not removed.
-    rendered = " ".join(r.getMessage() for r in emitted)
-    assert "Okonkwo" in rendered
-    assert "91000" in rendered
 
 
 def test_row_value_records_route_to_the_shared_column(tmp_path: Path) -> None:

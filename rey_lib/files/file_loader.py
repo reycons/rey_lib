@@ -51,10 +51,12 @@ from rey_lib.logs.log_utils import (
     log_validation_result,
 )
 from rey_lib.data.errors import DataStructureError
+from rey_lib.files.file_routing import FileRoutingError
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import (
+    AppError,
     ConfigError,
     DatabaseError,
     build_safe_error_payload,
@@ -267,10 +269,11 @@ def _run_file_movements_pipeline(data_source: Any) -> int:
     try:
         return apply_file_movements(data_source.paths, file_movements)
     except (ConfigError, DataStructureError) as exc:
-        _logger.error(
-            "Invalid file_movements config for %s: %s",
-            getattr(data_source, "name", "<unknown>"),
-            exc,
+        # Handled -- the movements are skipped -- so reported here (rule 79).
+        exc.report(
+            f"applying file_movements for data source "
+            f"{getattr(data_source, 'name', '<unknown>')}",
+            source=__name__,
         )
         return 0
 
@@ -331,7 +334,10 @@ def _match_transform(
                     if match_header(stripped, cfg_dict):
                         return cfg, stripped
     except OSError as exc:
-        _logger.error("Cannot read file '%s': %s", file_path.name, exc)
+        # Handled -- the file is treated as matching nothing -- so reported here.
+        error = AppError(f"unexpected {type(exc).__name__}")
+        error.__cause__ = exc
+        error.report(f"reading {file_path.name} to match a transform", source=__name__)
 
     return None, None
 
@@ -473,12 +479,12 @@ def load_files_to_callback(
                     rows_loaded,
                 )
             except _NON_FATAL_PIPELINE_ERRORS as exc:
-                _logger.error(
-                    "Callback load failed for '%s': %s",
-                    file_path.name,
-                    exc,
-                    exc_info=True,
-                )
+                # Handled -- failure movements, then the next file -- so reported here.
+                error = exc if isinstance(exc, AppError) else AppError(
+                    f"unexpected {type(exc).__name__}")
+                if error is not exc:
+                    error.__cause__ = exc
+                error.report(f"loading {file_path.name} through the callback", source=__name__)
                 execute_movements(load_cfg.movements.failure, file_path, data_source.paths,
                                    ctx=ctx, run_log=run_log)
 
@@ -570,10 +576,11 @@ def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
     transforms = _coerce_transform_cfgs(data_source.transforms)
     matched_cfg, header_line = _match_transform(file_path, transforms)
     if matched_cfg is None or header_line is None:
-        _logger.error(
-            "No header match across %d transform(s) — file rejected: %s",
-            len(transforms), file_path.name,
-        )
+        # Handled -- the file is rejected -- so reported here (rule 79).
+        DataStructureError(
+            f"No header match across {len(transforms)} transform(s)",
+            validation_name="transform_header",
+        ).report(f"rejecting {file_path.name}", source=__name__)
         log_validation_result(run_log,
             validation_name="transform_header",
             status="failed",
@@ -726,7 +733,10 @@ def _transform_one_file(
 
     try:
         if header_line is None and not _validate_header(file_path, transform_cfg):
-            _logger.error("Header mismatch — file rejected: %s", file_path.name)
+            # Handled -- the file is rejected -- so reported here (rule 79).
+            DataStructureError(
+                "Header mismatch", validation_name="transform_header",
+            ).report(f"rejecting {file_path.name}", source=__name__)
             log_validation_result(run_log,
                 validation_name="transform_header",
                 status="failed",
@@ -809,15 +819,12 @@ def _transform_one_file(
                 path=str(file_path),
                 error_count=len(errors),
             )
-            for row_num, col, raw_value, err in errors:
-                _logger.error(
-                    "Transform error — file=%s row=%d col=%s value=%r: %s",
-                    file_path.name,
-                    row_num,
-                    col,
-                    raw_value,
-                    err,
-                )
+            # Handled -- the file is rejected and its rows written to the
+            # rejections file -- so one error is reported here. Row values are
+            # never logged (rule 79).
+            TransformError(f"{len(errors)} transform error(s)").report(
+                f"rejecting {file_path.name}", source=__name__,
+            )
 
             _write_rejections(ctx, file_path, errors)
             execute_movements(
@@ -890,10 +897,12 @@ def _transform_one_file(
         return True
 
     except _NON_FATAL_PIPELINE_ERRORS as exc:
-        _logger.error(
-            "Unexpected error transforming '%s': %s",
-            file_path.name, exc, exc_info=True,
-        )
+        # Handled -- failure movements, return False -- so reported here.
+        error = exc if isinstance(exc, AppError) else AppError(
+            f"unexpected {type(exc).__name__}")
+        if error is not exc:
+            error.__cause__ = exc
+        error.report(f"transforming {file_path.name}", source=__name__)
         log_loader_step_failure(
             ctx,
             run_log, exc,
@@ -1012,23 +1021,14 @@ def _validate_header(file_path: Path, transform_cfg: Any) -> bool:
 
 					matched = match_header(stripped, cfg_dict)
 
-					if not matched:
-
-						expected = cfg_dict.get("header")
-
-						_logger.error(
-							"Header validation failed for '%s'\n"
-							"Expected:\n%s\n\n"
-							"Actual:\n%s",
-							file_path.name,
-							expected,
-							stripped,
-						)
-
+					# A mismatch is the caller's to handle and report (rule 79).
 					return matched
 
 	except OSError as exc:
-		_logger.error("Cannot read file '%s': %s", file_path.name, exc)
+		# Handled -- the header is treated as not matching -- so reported here.
+		error = AppError(f"unexpected {type(exc).__name__}")
+		error.__cause__ = exc
+		error.report(f"reading {file_path.name} to validate its header", source=__name__)
 
 	return False
 
@@ -1180,10 +1180,10 @@ def execute_movements(
                 )
                 _logger.debug("Moved: %s → %s", src_path.name, dest_dir)
             except OSError as exc:
-                _logger.error(
-                    "Movement failed — could not move '%s' to '%s': %s",
-                    src_path.name, dest_dir, exc,
-                )
+                # Handled -- the next movement still runs -- so reported here.
+                error = FileRoutingError(f"could not move {src_path.name} to {dest_dir}")
+                error.__cause__ = exc
+                error.report(f"executing movements for {file_path.name}", source=__name__)
 
         elif delete is not None:
             from_key = getattr(delete, "from", None)
@@ -1192,10 +1192,10 @@ def execute_movements(
                 src_path.unlink(missing_ok=True)
                 _logger.debug("Deleted: %s", src_path.name)
             except OSError as exc:
-                _logger.error(
-                    "Movement failed — could not delete '%s': %s",
-                    src_path.name, exc,
-                )
+                # Handled -- the next movement still runs -- so reported here.
+                error = FileRoutingError(f"could not delete {src_path.name}")
+                error.__cause__ = exc
+                error.report(f"executing movements for {file_path.name}", source=__name__)
 
 
 def resolve_movement_source_path(

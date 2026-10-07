@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rey_lib.config.config_utils import dump_yaml
+from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import get_logger
 
 _logger = get_logger(__name__)
@@ -144,6 +145,10 @@ def _ensure_dir(path: Path, result: FolderMakerResult) -> None:
             result.created.append(str(path))
             _logger.debug("created dir: %s", path)
         except OSError as exc:
+            # Handled -- recorded for the result -- so reported here (rule 79).
+            error = AppError(f"unexpected {type(exc).__name__}")
+            error.__cause__ = exc
+            error.report(f"mkdir {path}", source=__name__)
             result.errors.append(f"mkdir failed: {path} — {exc}")
 
 
@@ -155,6 +160,10 @@ def _ensure_gitkeep(path: Path, result: FolderMakerResult) -> None:
             gk.touch()
             result.created.append(str(gk))
         except OSError as exc:
+            # Handled -- recorded for the result -- so reported here (rule 79).
+            error = AppError(f"unexpected {type(exc).__name__}")
+            error.__cause__ = exc
+            error.report(f"touch {gk}", source=__name__)
             result.errors.append(f"touch failed: {gk} — {exc}")
 
 
@@ -174,6 +183,10 @@ def _ensure_yaml(
         result.created.append(str(path))
         _logger.debug("created file: %s", path)
     except OSError as exc:
+        # Handled -- recorded for the result -- so reported here (rule 79).
+        error = AppError(f"unexpected {type(exc).__name__}")
+        error.__cause__ = exc
+        error.report(f"writing {path}", source=__name__)
         result.errors.append(f"write failed: {path} — {exc}")
 
 
@@ -192,6 +205,10 @@ def _ensure_env_template(
         result.created.append(str(path))
         _logger.debug("created file: %s", path)
     except OSError as exc:
+        # Handled -- recorded for the result -- so reported here (rule 79).
+        error = AppError(f"unexpected {type(exc).__name__}")
+        error.__cause__ = exc
+        error.report(f"writing {path}", source=__name__)
         result.errors.append(f"write failed: {path} — {exc}")
 
 
@@ -476,10 +493,11 @@ def _print_result(result: FolderMakerResult) -> None:
         print(f"\nAlready existed ({len(result.existed)}):")
         for p in result.existed:
             print(f"  = {p}")
+    # Command output: each failure was reported where it was caught (rule 79).
     if result.errors:
-        _logger.error("Errors (%d):", len(result.errors))
+        print(f"\nErrors ({len(result.errors)}):")
         for e in result.errors:
-            _logger.error("  ! %s", e)
+            print(f"  ! {e}")
 
 
 def main() -> None:

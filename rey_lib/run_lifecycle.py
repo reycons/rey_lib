@@ -117,13 +117,10 @@ def run_app_operation(
     from rey_lib.logs.log_utils import (
         bind_run,
         clear_run,
-        get_logger,
         log_run_complete,
         log_run_start,
         log_step_failure,
     )
-
-    logger = get_logger(__name__)
 
     # App semantic base (SGC_Rey_Log_Nest_Level_Phase_1). The shared app boundary,
     # so every app establishes level 3 here regardless of how it was invoked.
@@ -144,7 +141,9 @@ def run_app_operation(
             failed_step_name=operation,
         )
         failure_message = str(error_payload.get("message") or str(exc))
-        logger.error("%s", failure_message, exc_info=exc)
+        # Propagated (raised below), so not reported here: the AppError
+        # boundary in app_runtime reports it once (rule 79). The run records
+        # below are lifecycle evidence, not the ERROR record.
         failure_id = log_step_failure(run_log, **error_payload)
         # Ownership-return (SGC_Rey_Log_Hierarchy_Shared_Run_State_Correction): the app
         # may have descended into workflow/analysis/other deeper scopes that left the
@@ -169,7 +168,8 @@ def run_app_operation(
             failure_message = (
                 f"app operation '{operation}' returned nonzero result {result}."
             )
-            logger.error("%s", failure_message, exc_info=AppError(failure_message))
+            # Handled -- the result is returned -- so reported here (rule 79).
+            AppError(failure_message).report(f"app operation '{operation}'", source=__name__)
             failure_id = log_step_failure(run_log,
                 failed_step_id=operation,
                 failed_step_name=operation,

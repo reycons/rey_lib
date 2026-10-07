@@ -110,7 +110,7 @@ class TestTheEvidenceSurvivedTheMove:
         recorded = _recorded(tmp_path, monkeypatch, run_log, source, "CSV")
 
         assert recorded["validation_name"] == "load_header"
-        assert recorded["message"] == "Header mismatch"
+        assert recorded["message"].startswith("Header mismatch for 'wrong.csv'")
         assert recorded["status"] == "failed"
 
     def test_a_key_mismatch_is_still_called_load_record_keys(
@@ -127,20 +127,19 @@ class TestTheEvidenceSurvivedTheMove:
         recorded = _recorded(tmp_path, monkeypatch, run_log, source, "JSONL")
 
         assert recorded["validation_name"] == "load_record_keys"
-        assert recorded["message"] == (
+        assert recorded["message"].startswith(
             "Record keys do not match the destination columns"
         )
 
-    def test_the_recorded_message_stays_SHORT(
+    def test_the_diagnosis_travels_on_the_error(
         self, tmp_path: Path, monkeypatch, run_log
     ) -> None:
-        """The detail belongs in the log, not in the recorded evidence.
+        """The column diagnosis is failure evidence, so it is the error's (rule 79).
 
-        Both checks emit a full diagnosis -- which columns were missing, which
-        were unexpected -- through the logger, exactly as the validators did
-        before they moved. Putting that text on the exception instead would
-        have changed what the run log stores, which is the sort of drift a
-        move like this makes easy and nobody notices.
+        It used to go to the logger at ERROR while the recorded message stayed
+        short; under rule 79 nothing but AppError writes ERROR, so the
+        diagnosis -- column names, never values -- is on the DataStructureError
+        and is what the run log records. Still one line.
         """
         source = tmp_path / "wrong.csv"
         source.write_text("a,WRONG\n1,x\n", encoding="utf-8")
@@ -148,7 +147,7 @@ class TestTheEvidenceSurvivedTheMove:
         recorded = _recorded(tmp_path, monkeypatch, run_log, source, "CSV")
 
         assert "\n" not in recorded["message"]
-        assert "WRONG" not in recorded["message"]
+        assert "WRONG" in recorded["message"]
 
     def test_the_rejected_file_reaches_the_failure_movements(
         self, tmp_path: Path, monkeypatch, run_log

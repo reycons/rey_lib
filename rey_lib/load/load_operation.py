@@ -65,7 +65,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
 from rey_lib.db.query_source import QuerySource
-from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_loader import (
@@ -233,8 +233,12 @@ def _route_file(
                 selected="move",
             ).resolve(ctx).apply(data_file_for(source_path))
         except (ConfigError, FileRoutingError, OSError) as exc:
-            _logger.error("Movement failed -- could not move '%s' to '%s': %s",
-                          source_path.name, destination, exc)
+            # Handled -- the next movement still runs -- so reported here (rule 79).
+            error = exc if isinstance(exc, AppError) else FileRoutingError(
+                f"could not move {source_path.name} to {destination}")
+            if error is not exc:
+                error.__cause__ = exc
+            error.report(f"moving {source_path.name} to {destination}", source=__name__)
 
 def _build_transform(
     ctx: Any,
@@ -1495,7 +1499,8 @@ def _reject_structure(
     Returns:
         0. A file fault is not a run fault.
     """
-    _logger.error("%s — source rejected: %r", structure_exc, source)
+    # Handled -- the source is rejected, 0 rows -- so reported here (rule 79).
+    structure_exc.report(f"rejecting source {source!r}", source=__name__)
     log_validation_result(run_log,
         validation_name=structure_exc.validation_name,
         status="failed",
@@ -1934,10 +1939,6 @@ def _load_one_file(
                     "Nothing to roll back for %r: %s",
                     source, rollback_exc,
                 )
-        _logger.error(
-            "Database error loading %r — rolled back: %s",
-            source, exc, exc_info=exc,
-        )
         log_loader_step_failure(
             ctx,
             run_log, exc,
@@ -1969,9 +1970,13 @@ def _load_one_file(
         if movements is None:
             # A single load has no routing policy and no batch to carry on
             # with: its one transfer failing IS the load failing, so the error
-            # propagates and the run ends failed. Returning 0 here reported a
-            # failed load as a successful one of zero rows.
+            # propagates and the run ends failed -- and is reported once, by the
+            # boundary, not here (rule 79). Returning 0 here reported a failed
+            # load as a successful one of zero rows.
             raise
+        # Handled -- rolled back and routed to failure, 0 rows -- so this
+        # branch consumes the error and reports it (rule 79).
+        exc.report(f"loading {source!r}, rolled back", source=__name__)
         return 0
 
 def _configured_columns(transform_cfg: Any) -> Optional[list[str]]:

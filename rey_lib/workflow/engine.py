@@ -159,7 +159,13 @@ def run_steps(
         try:
             outcome = step.handler(context)
         except Exception as exc:  # noqa: BLE001 — fail closed: record and stop
-            _logger.error("%s: step '%s' failed: %s", name, step.name, exc)
+            # Handled -- a failed WorkflowResult is returned -- so reported
+            # here (rule 79).
+            error = exc if isinstance(exc, AppError) else WorkflowError(
+                f"{name}: step '{step.name}' failed")
+            if error is not exc:
+                error.__cause__ = exc
+            error.report(f"{name}: step '{step.name}'", source=__name__)
             results.append(StepResult(step.name, "failed", str(exc)))
             context.metadata["status"] = "failed"
             context.metadata["steps"] = [vars(r) for r in results]

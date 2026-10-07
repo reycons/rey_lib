@@ -23,11 +23,9 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.data.errors import DataStructureError
-from rey_lib.logs import get_logger
 
 __all__ = ["QuerySource"]
 
-_logger = get_logger(__name__)
 
 #: What is read to learn the columns. One row, because a result set states its
 #: columns whether or not it has any -- but a database will not describe a
@@ -158,19 +156,12 @@ class QuerySource:
         if actual == expected_columns:
             return
 
-        _logger.error(
-            "Load structure validation failed for %r\n"
-            "Expected destination columns:\n%s\n\n"
-            "Actual query columns:\n%s",
-            self,
-            ",".join(expected_columns),
-            ",".join(actual),
-        )
-        # SHORT, because this is what the run log records. The diagnosis above
-        # goes to the logger; putting it here instead would change recorded
-        # evidence.
+        # The diagnosis is failure evidence, so it travels on the error
+        # (rule 79), never in an ERROR log line.
         raise DataStructureError(
-            "Structure mismatch", validation_name="load_structure",
+            f"Structure mismatch for {self!r}: expected destination columns "
+            f"[{','.join(expected_columns)}], actual query columns [{','.join(actual)}]",
+            validation_name="load_structure",
         )
 
     def read_validated(

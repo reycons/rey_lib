@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from rey_lib.artifacts.api import artifact_config_from_ctx, process_artifact
-from rey_lib.artifacts.errors import ArtifactProcessingError
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.file_utils import read_text_file, write_file
 from rey_lib.logs import get_logger
 
@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     Returns
     -------
     int
-        Process exit code (0 success, non-zero on error).
+        0 on success. A failure is raised as its AppError (rule 79).
     """
     args = _parse_args(argv)
 
@@ -52,11 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     ctx = build_ctx_from_path(args.config_path, app_name=args.app)
     config = artifact_config_from_ctx(ctx)
     if not config:
-        _logger.error(
-            "no artifact_processing config found in ctx (config-path=%s, app=%s)",
-            args.config_path, args.app,
+        # Fatal: raised, not logged -- AppError owns ERROR logging (rule 79).
+        raise ConfigError(
+            f"no artifact_processing config found in ctx "
+            f"(config-path={args.config_path}, app={args.app})"
         )
-        return 2
 
     # stdin/stdout are streams (no file); actual files go through the shared
     # file utilities so file handling is consistent across the system.
@@ -65,11 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         content = read_text_file(args.file)
 
-    try:
-        result = process_artifact(content, args.artifact_type, config)
-    except ArtifactProcessingError as exc:
-        _logger.error("%s", exc)
-        return 1
+    result = process_artifact(content, args.artifact_type, config)
 
     if args.in_place and args.file != "-":
         write_file(Path(args.file), result, file_type="TEXT", reason="format_artifact")
@@ -131,7 +127,7 @@ def validate_config_main(argv: list[str] | None = None) -> int:
 
     Builds the ctx from ``--config-path`` and validates the effective
     artifact_processing routes (engines registered, config_path resolves).
-    Reports through the Rey logger; exit code 0 when valid, 1 otherwise.
+    Returns 0 when valid; an invalid config is raised as one ConfigError.
     """
     parser = argparse.ArgumentParser(
         prog="rey-validate-config",
@@ -147,9 +143,11 @@ def validate_config_main(argv: list[str] | None = None) -> int:
     ctx = build_ctx_from_path(args.config_path, app_name=args.app)
     errors = validate_artifact_processing(ctx)
     if errors:
-        for error in errors:
-            _logger.error("%s", error)
-        return 1
+        # Fatal: one ConfigError carrying every finding (rule 79).
+        raise ConfigError(
+            f"artifact_processing config invalid ({len(errors)} error(s)): "
+            + "; ".join(str(error) for error in errors)
+        )
     _logger.info("artifact_processing config valid (config-path=%s)", args.config_path)
     return 0
 

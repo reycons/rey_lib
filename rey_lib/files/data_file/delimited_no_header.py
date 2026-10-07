@@ -43,11 +43,9 @@ from typing import Any
 from rey_lib.files.data_file import data_file
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file.base import DataFile
-from rey_lib.logs import get_logger
 
 __all__ = ["DelimitedNoHeaderFile"]
 
-_logger = get_logger(__name__)
 
 
 @data_file("DELIMITED_NO_HEADER")
@@ -167,16 +165,12 @@ class DelimitedNoHeaderFile(DataFile):
 
         declared = self.declared_columns
         if expected_columns is not None and declared and declared != expected_columns:
-            _logger.error(
-                "Declared columns do not match the destination for '%s'\n"
-                "Expected table columns:\n%s\n\n"
-                "Declared columns:\n%s",
-                self.path.name,
-                ",".join(expected_columns),
-                ",".join(declared),
-            )
+            # The diagnosis is failure evidence, so it travels on the error
+            # (rule 79), never in an ERROR log line.
             raise DataStructureError(
-                "Header mismatch", validation_name="load_header"
+                f"Header mismatch for '{self.path.name}': expected table columns "
+                f"[{','.join(expected_columns)}], declared columns [{','.join(declared)}]",
+                validation_name="load_header",
             )
 
         width = (

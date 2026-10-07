@@ -631,7 +631,7 @@ def _log_missing_source(
     config: ExcelConversionConfig,
     rejection: RejectedCandidate,
 ) -> None:
-    """Log an unresolvable governed source through the common error path.
+    """Report an unresolvable governed source through AppError (rule 79).
 
     The classification record owns the current governed path; this process only
     proves that the referenced file is still there. A file that has gone missing
@@ -639,12 +639,11 @@ def _log_missing_source(
     search for the file on the filesystem.
     """
 
-    error = ConversionError(rejection.reason)
-    _log.error(
-        "Excel conversion '%s' cannot resolve a governed source: %s",
-        config.name,
-        rejection.reason,
-        exc_info=error,
+    # Handled -- the candidate is skipped -- so reported here. The reason is
+    # the error's evidence, never the log message.
+    ConversionError(rejection.reason).report(
+        f"Excel conversion {config.name} cannot resolve a governed source",
+        source=__name__,
     )
 
 

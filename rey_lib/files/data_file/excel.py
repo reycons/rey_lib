@@ -100,16 +100,12 @@ class ExcelDataFile(DataFile):
         if actual == expected_columns:
             return
 
-        _logger.error(
-            "Load header validation failed for '%s'\n"
-            "Expected table columns:\n%s\n\n"
-            "Actual file columns:\n%s",
-            self.path.name,
-            ",".join(expected_columns),
-            ",".join(actual),
-        )
+        # The diagnosis is failure evidence, so it travels on the error
+        # (rule 79), never in an ERROR log line.
         raise DataStructureError(
-            "Header mismatch", validation_name="load_header"
+            f"Header mismatch for '{self.path.name}': expected table columns "
+            f"[{','.join(expected_columns)}], actual file columns [{','.join(actual)}]",
+            validation_name="load_header",
         )
 
     def read_validated(

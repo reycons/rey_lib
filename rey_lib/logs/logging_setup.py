@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD, JsonlHandler
+from rey_lib.errors.error_utils import AppError
+from rey_lib.logs.jsonl_handler import JsonlHandler
 from rey_lib.logs.record_enrichment import require_run_id
 
 
@@ -389,7 +390,11 @@ class _UngovernedStderr:
             return
         self._reporting = True
         try:
-            get_logger("rey_lib.logs").error("ungoverned stderr write: %s", line)
+            # Handled -- the write is absorbed -- so reported here, through
+            # AppError (rule 79). The line is the error's evidence and goes
+            # through sanitization with it; the context names only the event.
+            error = AppError(f"ungoverned stderr write: {line}")
+            error.report("ungoverned stderr write", source="rey_lib.logs")
         finally:
             self._reporting = False
 
@@ -482,32 +487,3 @@ def log_exit(ctx: Any, msg: str, logger: logging.Logger) -> None:
     ctx.log_depth   = max(0, ctx.log_depth - 1)
     _current_depth  = ctx.log_depth
     logger.debug("← %s", msg)
-
-
-def log_row_values(
-	logger: logging.Logger,
-	message: str,
-	row_num: int,
-	row: dict[str, Any],
-	column_types: dict[str, str],
-) -> None:
-	# Every record this writes carries an actual database value, so the
-	# classification is intrinsic: there is no argument for a caller to unset,
-	# because there is no call of this that is not data.
-	#
-	# Classification only. The value stays exactly as it was, readable by
-	# whoever is authorized to read it -- the flag decides who that is, and
-	# removes nothing.
-	logger.error(
-		"%s row=%d", message, row_num,
-		extra={SENSITIVE_FIELD: True},
-	)
-
-	for col, value in row.items():
-		logger.error(
-			"  col=%s datatype=%s value=%r",
-			col,
-			column_types.get(col, "UNKNOWN"),
-			value,
-			extra={SENSITIVE_FIELD: True},
-		)

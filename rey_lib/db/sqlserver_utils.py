@@ -351,25 +351,8 @@ def bulk_insert(
 		return row_count
 
 	except pyodbc.Error as exc:
-		_logger.error(
-			"bulk_insert failed table=%s.%s",
-			schema,
-			table,
-		)
-
-		_logger.error(
-			"bulk_insert columns=%s",
-			columns,
-		)
-
-		if value_rows:
-			for col, val in zip(columns, value_rows[0]):
-				_logger.error(
-					"bulk_insert first_row column=%s value=%r",
-					col,
-					val,
-				)
-
+		# Propagated, so not reported here: the AppError boundary reports it
+		# once (rule 79). Row values are never logged.
 		raise DatabaseError(
 			f"bulk_insert failed for {schema}.{table}: {exc}"
 		) from exc

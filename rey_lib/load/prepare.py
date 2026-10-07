@@ -317,10 +317,13 @@ def _failed_result(
     """
     source = _optional_text(record_field(record, config.source_field))
     file_id = _optional_text(record.get("file_manifest_id"))
-    # The failure itself goes through the logger with its error, which is what
-    # writes the run's ERROR record.
-    _log.error("Prepared file for '%s' could not be created: %s", source, error,
-               exc_info=error)
+    # Handled -- recorded as a failed item -- so reported here, through
+    # AppError, which writes the run's ERROR record (rule 79).
+    failure = error if isinstance(error, AppError) else PreparationError(
+        f"unexpected {type(error).__name__}")
+    if failure is not error:
+        failure.__cause__ = error
+    failure.report(f"preparing the file for {source}", source=__name__)
     if apply:
         try:
             log_governed_source_file_mutation(

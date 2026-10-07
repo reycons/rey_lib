@@ -275,11 +275,12 @@ def test_the_logging_rule_forbids_the_logging_api_not_program_output() -> None:
     assert logging_rule.forbidden_target_globs == ("logging.getLogger",)
 
 
-def test_cli_output_in_folder_maker_reports_and_logs_errors() -> None:
-    """_print_result prints its report; its errors go through the logger.
+def test_cli_output_in_folder_maker_prints_its_report_and_reports_errors_where_caught() -> None:
+    """_print_result prints its whole report; each failure is an AppError (rule 79).
 
-    The created/existed lines are the tool's product and stay on stdout. An
-    error is an error, so it is logged rather than written to stderr.
+    The created/existed/errors sections are the tool's product and stay on
+    stdout. Each failure was reported through AppError.report where it was
+    caught, so the printed section is not a second ERROR path.
     """
     import inspect
 
@@ -287,9 +288,12 @@ def test_cli_output_in_folder_maker_reports_and_logs_errors() -> None:
 
     source = inspect.getsource(folder_maker._print_result)
 
-    assert source.count("print(") == 4
+    assert source.count("print(") == 6
     assert "file=sys.stderr" not in source
-    assert source.count("_logger.error(") == 2
+    assert "_logger.error(" not in source
+    for catcher in (folder_maker._ensure_dir, folder_maker._ensure_gitkeep,
+                    folder_maker._ensure_yaml, folder_maker._ensure_env_template):
+        assert ".report(" in inspect.getsource(catcher)
 
 
 def test_the_file_family_does_not_reach_into_the_load(violations) -> None:
