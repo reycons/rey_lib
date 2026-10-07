@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from rey_lib.db import connection as connection_module
-from rey_lib.errors.error_utils import StateError
+from rey_lib.errors.error_utils import AppError, StateError
 from rey_lib.runtime import (
     collect_runtime,
     register_runtime_object,
@@ -213,9 +213,13 @@ class TestTheBootstrapLifecycle:
         monkeypatch.setattr(bootstrap, "build_ctx_for_app",
                             lambda *a, **k: _ctx(broken))
 
-        with pytest.raises(ValueError, match="the real failure"):
+        with pytest.raises(AppError, match="unexpected ValueError") as raised:
             with bootstrap.app_runtime("cfg", "app", "run"):
                 raise ValueError("the real failure")
+
+        # Normalised at the boundary, the original kept as its cause (703).
+        assert isinstance(raised.value.__cause__, ValueError)
+        assert str(raised.value.__cause__) == "the real failure"
 
         # Cleanup was still attempted, and said so through the logger.
         assert broken.closes == 1

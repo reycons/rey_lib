@@ -283,6 +283,23 @@ class AppError(Exception):
     class DataImportError(MyProjectError): ...
     """
 
+    def report(self, context: str, *, source: str) -> None:
+        """Log this error once at ERROR (backlog 703, rule 79).
+
+        The only way an application failure becomes an ERROR record: AppError
+        owns it, and nothing else calls a logger's error. The error travels as
+        ``exc_info``, so the logging handler records its type and sanitizes
+        its text; the message is ``context`` alone.
+
+        Args:
+            context: Operational context -- what was being done. Never this
+                error's text.
+            source: The caller's ``__name__``: where the failure was handled.
+        """
+        from rey_lib.logs import get_logger  # noqa: PLC0415 -- errors loads no logging
+
+        get_logger(source).error(context, exc_info=self)
+
 class ConfigError(AppError):
     """Raised when configuration is invalid, missing, or cannot be loaded."""
 

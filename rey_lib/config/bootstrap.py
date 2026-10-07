@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.logs import (
     classified, finalize_run_phases, get_logger, setup_logging,
 )
@@ -1031,6 +1031,20 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         # not be replaced.
         failed = bool(exc.code)
         raise
+    # THE APPLICATION ERROR BOUNDARY (backlog 703, rule 79). What crosses it is
+    # an AppError, reported here once; anything else is normalised into one,
+    # its cause kept. SystemExit, KeyboardInterrupt and other non-Exception
+    # exits are not errors on this path.
+    except AppError as exc:
+        failed = True
+        exc.report("the application run ended on an error", source=__name__)
+        raise
+    except Exception as exc:
+        failed = True
+        error = AppError(f"unexpected {type(exc).__name__}")
+        error.__cause__ = exc
+        error.report("the application run ended on an unexpected error", source=__name__)
+        raise error from exc
     except BaseException:
         failed = True
         raise
@@ -1057,8 +1071,14 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
                 # Never replace the error that ended the run, and never turn a
                 # successful run into a failed one because its record could not
                 # be closed. The run still happened.
-                _logger.error("Could not record terminal status for run %s: %s",
-                              getattr(run, "run_id", "?"), exc)
+                error = exc if isinstance(exc, AppError) else AppError(
+                    f"unexpected {type(exc).__name__}")
+                if error is not exc:
+                    error.__cause__ = exc
+                error.report(
+                    f"recording the terminal status of run {getattr(run, 'run_id', '?')}",
+                    source=__name__,
+                )
 
         # THE OUTCOME, AS A FACT -- not a shutdown instruction. Control closes
         # its own batch when it is collected, a few lines below; what it cannot
