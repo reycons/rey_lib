@@ -36,9 +36,10 @@ from rey_lib.db.query_source import QuerySource
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
 from rey_lib.errors.error_utils import ConfigError
+from tests.support.connector_double import ConnectorPrimitives
 
 
-class _Table:
+class _Table(ConnectorPrimitives):
     """A write adapter, for the one case here that ends at a database."""
 
     def __init__(self, columns: list[str]) -> None:
@@ -47,7 +48,7 @@ class _Table:
     def supports_provider_capability(self, _conn, _capability) -> bool:
         return False
 
-    def table_exists(self, *_args, **_kwargs) -> bool:
+    def has_table(self, *_args, **_kwargs) -> bool:
         return True
 
     def get_table_columns(self, *_args, **_kwargs) -> list[str]:

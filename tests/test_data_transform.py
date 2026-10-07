@@ -21,6 +21,7 @@ from rey_lib.data.data_transform import (
     ExecutionForm,
     IdentityTransform,
 )
+from rey_lib.data.logical_type import LogicalType
 
 
 class TestIdentityIsActuallyIdentity:
@@ -64,15 +65,16 @@ class TestTheLogicalSchema:
     @pytest.mark.parametrize(
         "declared,expected",
         [
-            ({"type": "date"}, "DATE"),
-            ({"type": "datetime"}, "TIMESTAMP"),
-            ({"type": "numeric"}, "DECIMAL(18, 6)"),
-            ({"type": "regex_extract", "cast_to": "float"}, "DECIMAL(18, 6)"),
-            ({"type": "regex_extract", "cast_to": "integer"}, "INTEGER"),
+            ({"type": "date"}, LogicalType("date")),
+            ({"type": "datetime"}, LogicalType("datetime")),
+            ({"type": "numeric"}, LogicalType("decimal", precision=18, scale=6)),
+            ({"type": "regex_extract", "cast_to": "float"},
+             LogicalType("decimal", precision=18, scale=6)),
+            ({"type": "regex_extract", "cast_to": "integer"}, LogicalType("integer")),
         ],
     )
     def test_a_DECLARED_type_wins_over_the_values(
-        self, declared: dict, expected: str
+        self, declared: dict, expected: LogicalType
     ) -> None:
         """Configuration knows things the data does not.
 
@@ -95,7 +97,7 @@ class TestTheLogicalSchema:
         assert defs[0][0] == "n"
         assert defs[0][1] != ""
 
-    def test_text_that_infers_as_nothing_becomes_a_varchar_with_headroom(
+    def test_text_that_infers_as_nothing_becomes_text_with_headroom(
         self
     ) -> None:
         """Sized from what was observed, plus room, with a floor.
@@ -105,12 +107,12 @@ class TestTheLogicalSchema:
         """
         defs = IdentityTransform().logical_schema([{"t": "abcdefghijklmno"}])
 
-        assert defs == [("t", "VARCHAR(25)")]
+        assert defs == [("t", LogicalType("text", length=25))]
 
     def test_a_short_column_still_gets_the_minimum_width(self) -> None:
         defs = IdentityTransform().logical_schema([{"t": "ab!"}])
 
-        assert defs == [("t", "VARCHAR(20)")]
+        assert defs == [("t", LogicalType("text", length=20))]
 
     def test_the_widest_value_decides_the_width(self) -> None:
         """Every record, not the first -- the first may be the short one."""
@@ -118,7 +120,7 @@ class TestTheLogicalSchema:
             [{"t": "ab!"}, {"t": "a much longer value than that one"}]
         )
 
-        assert defs == [("t", "VARCHAR(43)")]
+        assert defs == [("t", LogicalType("text", length=43))]
 
     def test_a_declared_column_absent_from_the_records_is_not_invented(
         self
@@ -264,37 +266,12 @@ class TestTheOptionalExecutionForm:
                 assert engine not in line.lower(), line
 
 
-class TestDatetimeIsTheNeutralTimestamp:
-    """Backlog 385: `datetime` emits the neutral TIMESTAMP, and each provider renders it."""
+class TestTheSchemaIsLogicalOnly:
+    """Backlog 690: no physical type name leaves the transform layer."""
 
-    @staticmethod
-    def _declared_datetime() -> str:
-        ((_name, sql_type),) = IdentityTransform({"value": {"type": "datetime"}}).logical_schema(
-            [{"value": "2026-10-07 09:00:00"}],
-        )
-        return sql_type
+    def test_every_answer_is_a_logical_type(self) -> None:
+        defs = IdentityTransform({
+            "d": {"type": "datetime"}, "n": {"type": "numeric"},
+        }).logical_schema([{"d": "2026-10-07 09:00:00", "n": "1.5", "t": "x", "i": "7"}])
 
-    @pytest.mark.parametrize(("provider", "rendered"), [
-        ("sqlserver_utils", "DATETIME2"),
-        ("mysql_utils", "DATETIME"),
-        ("duckdb_utils", "TIMESTAMP"),
-    ])
-    def test_each_translating_provider_renders_its_own_datetime(
-        self, provider: str, rendered: str,
-    ) -> None:
-        import importlib
-
-        module = importlib.import_module(f"rey_lib.db.{provider}")
-
-        assert module._map_type(self._declared_datetime()) == rendered
-
-    def test_postgres_takes_the_neutral_type_as_its_own(self) -> None:
-        # Postgres's vocabulary IS the neutral one: the type is used as written,
-        # and only validated. DATETIME2, which this used to emit, is not a
-        # PostgreSQL type at all.
-        from rey_lib.db import postgres_utils
-
-        sql_type = self._declared_datetime()
-        postgres_utils._validate_column_type(sql_type)
-
-        assert sql_type == "TIMESTAMP"
+        assert all(isinstance(logical, LogicalType) for _name, logical in defs)

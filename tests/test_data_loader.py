@@ -22,9 +22,15 @@ import pytest
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.data_loader import DataLoader
+from rey_lib.data.logical_type import LogicalType
+from tests.support.connector_double import ConnectorPrimitives
 
-_DEFS = [("a", "INTEGER"), ("b", "VARCHAR(20)")]
+_DEFS = [("a", LogicalType("integer")), ("b", LogicalType("text", length=20))]
+#: How DatabaseTable writes ``_DEFS`` for PostgreSQL, the double's provider.
+_CREATED = [("a", "INTEGER"), ("b", "VARCHAR(20)")]
 _RECORDS = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+#: A value too long for ``b``: what a truncation is about.
+_OVERFLOWING = [{"a": 1, "b": "x" * 25}, {"a": 2, "b": "y"}]
 
 
 class _Conn:
@@ -41,7 +47,7 @@ class _Conn:
         self.rollbacks += 1
 
 
-class _Adapter:
+class _Adapter(ConnectorPrimitives):
     """An adapter that records calls instead of reaching a database."""
 
     def __init__(self, *, exists: bool, insert_error: Exception | None = None,
@@ -64,19 +70,20 @@ class _Adapter:
         """
         return False
 
-    def table_exists(self, _conn, _schema, _table) -> bool:
+    def has_table(self, _conn, _schema, _table) -> bool:
         self.calls.append("table_exists")
         return self._exists
 
     def drop_table(self, _conn, schema, table) -> None:
         self.calls.append("drop_table")
         self.dropped.append((schema, table))
+        self._exists = False
 
     def get_table_columns(self, _conn, _schema, _table) -> list[str]:
         self.calls.append("get_table_columns")
         return ["a", "b"]
 
-    def create_staging_table_if_not_exists(self, _conn, schema, table, defs):
+    def record_create(self, _conn, schema, table, defs):
         self.calls.append("create")
         self.created.append((schema, table, defs))
         self._exists = True
@@ -214,8 +221,9 @@ class TestTheCreatePolicy:
         )
 
         assert loaded == 2
-        assert adapter.calls == ["table_exists", "create", "bulk_insert"]
-        assert adapter.created[0][2] == _DEFS
+        # DatabaseTable.create asks once more before its DDL: it owns what "exists" means.
+        assert adapter.calls == ["table_exists", "table_exists", "create", "bulk_insert"]
+        assert adapter.created[0][2] == _CREATED
 
 
 class TestTheInsert:
@@ -265,60 +273,36 @@ class TestTheInsert:
 
 
 class TestTheTruncationRetry:
-    """The least-covered path in the loader, and the easiest to lose."""
+    """The least-covered path in the loader, and the easiest to lose.
 
-    def _widening(self, calls: list) -> Any:
-        def _widen(conn, target, records, column_defs) -> bool:
-            calls.append((conn, records, column_defs))
-            return True
-        return _widen
+    Widening is the loader's own, through DatabaseTable (backlog 690): an
+    overflowing bounded text column is made wide enough, and the insert is
+    retried once.
+    """
 
-    def test_a_truncation_widens_and_retries_exactly_once(self) -> None:
-        calls: list = []
+    def test_a_truncation_widens_the_overflowing_column_and_retries_once(self) -> None:
         adapter = _Adapter(exists=True, truncation=True,
                            insert_error=DatabaseError("too long"))
 
-        loaded = _loader(adapter, widen_columns=self._widening(calls)).load(
-            _Conn(), _TARGET, _RECORDS, _DEFS
-        )
+        loaded = _loader(adapter).load(_Conn(), _TARGET, _OVERFLOWING, _DEFS)
 
         assert loaded == 2
-        assert len(calls) == 1
         assert adapter.calls.count("bulk_insert") == 2
+        # Only b overflowed: the longest value plus the margin.
+        assert adapter.altered == ['ALTER TABLE "s"."t" ALTER COLUMN "b" TYPE VARCHAR(35)']
 
-    def test_the_callback_gets_the_connection_load_was_given(self) -> None:
-        """Identity, not just that it fired.
-
-        The contract that stops a future implementation quietly resolving its
-        own connection -- which is what the current one does, and why the
-        argument exists at all.
-        """
-        calls: list = []
-        conn = _Conn()
-        adapter = _Adapter(exists=True, truncation=True,
-                           insert_error=DatabaseError("too long"))
-
-        _loader(adapter, widen_columns=self._widening(calls)).load(
-            conn, _TARGET, _RECORDS, _DEFS
-        )
-
-        assert calls[0][0] is conn
-
-    def test_a_NON_truncation_error_never_reaches_the_callback(self) -> None:
+    def test_a_NON_truncation_error_widens_nothing(self) -> None:
         """Widening a column would not repair an unrelated failure."""
-        calls: list = []
         adapter = _Adapter(exists=True, truncation=False,
                            insert_error=DatabaseError("permission denied"))
 
         with pytest.raises(DatabaseError):
-            _loader(adapter, widen_columns=self._widening(calls)).load(
-                _Conn(), _TARGET, _RECORDS, _DEFS
-            )
+            _loader(adapter).load(_Conn(), _TARGET, _OVERFLOWING, _DEFS)
 
-        assert calls == []
+        assert getattr(adapter, "altered", []) == []
 
-    def test_no_callback_means_a_truncation_is_simply_reported(self) -> None:
-        """The direct path configures no widening, and must still be usable."""
+    def test_a_truncation_nothing_overflowed_is_reported(self) -> None:
+        """Retrying an identical insert would fail identically."""
         adapter = _Adapter(exists=True, truncation=True,
                            insert_error=DatabaseError("too long"))
 
@@ -326,36 +310,23 @@ class TestTheTruncationRetry:
             _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert adapter.calls.count("bulk_insert") == 1
+        assert getattr(adapter, "altered", []) == []
 
-    def test_widening_that_changed_nothing_re_raises(self) -> None:
-        """Retrying an identical insert would fail identically."""
-        adapter = _Adapter(exists=True, truncation=True,
+    def test_a_table_the_rollback_took_is_created_again_wider(self) -> None:
+        """Transactional DDL: the table this load created went with the rollback."""
+        adapter = _Adapter(exists=False, truncation=True,
                            insert_error=DatabaseError("too long"))
-
-        with pytest.raises(DatabaseError):
-            _loader(adapter,
-                    widen_columns=lambda *_a: False).load(
-                _Conn(), _TARGET, _RECORDS, _DEFS
-            )
-
-        assert adapter.calls.count("bulk_insert") == 1
-
-    def test_a_load_with_no_widening_touches_no_application_context(
-        self
-    ) -> None:
-        """The widening callback is the ONLY indirect ctx dependency.
-
-        Asserted behaviourally rather than by reading the module, because a
-        future path reaching ctx some other way would look like an ordinary
-        call and pass the structural check.
-        """
-        adapter = _Adapter(exists=False)
+        conn = _Conn()
+        conn.rollback = lambda: setattr(adapter, "_exists", False)
 
         loaded = _loader(adapter, create_destination=True).load(
-            _Conn(), _TARGET, _RECORDS, _DEFS
+            conn, _TARGET, _OVERFLOWING, _DEFS
         )
 
         assert loaded == 2
+        assert [defs for _s, _t, defs in adapter.created] == [
+            _CREATED, [("a", "INTEGER"), ("b", "VARCHAR(35)")],
+        ]
 
 
 class TestTheReplacePolicy:
@@ -406,7 +377,8 @@ class TestTheReplacePolicy:
         ).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert adapter.emptied == []
-        assert adapter.calls == ["table_exists", "create", "bulk_insert"]
+        # DatabaseTable.create asks once more before its DDL: it owns what "exists" means.
+        assert adapter.calls == ["table_exists", "table_exists", "create", "bulk_insert"]
 
     def test_it_is_the_connector_that_is_asked(self) -> None:
         """The loader names no provider and spells no SQL. It asks the adapter,
@@ -437,9 +409,9 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
 
         assert loaded == 2
         assert adapter.dropped == [("s", "t")]
-        assert adapter.created == [("s", "t", _DEFS)]
+        assert adapter.created == [("s", "t", _CREATED)]
         assert adapter.calls == ["table_exists", "get_table_columns",
-                                 "drop_table", "create", "bulk_insert"]
+                                 "drop_table", "table_exists", "create", "bulk_insert"]
 
     def test_it_never_merely_empties(self) -> None:
         """THE FAILURE THAT WOULD LOOK LIKE SUCCESS. Emptying instead of
@@ -466,7 +438,8 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
         )
 
         assert adapter.dropped == []
-        assert adapter.calls == ["table_exists", "create", "bulk_insert"]
+        # DatabaseTable.create asks once more before its DDL: it owns what "exists" means.
+        assert adapter.calls == ["table_exists", "table_exists", "create", "bulk_insert"]
 
     def test_it_alone_authorizes_creating_what_is_absent(self) -> None:
         """Recreate implies the table may be built, so a load declaring it and
@@ -478,7 +451,7 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
             _Conn(), _TARGET, _RECORDS, _DEFS
         )
 
-        assert adapter.created == [("s", "t", _DEFS)]
+        assert adapter.created == [("s", "t", _CREATED)]
 
     def test_it_is_the_connector_that_is_asked(self) -> None:
         source = inspect.getsource(DataLoader)

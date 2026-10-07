@@ -121,18 +121,6 @@ _read_adapter = DBAdapter()
 # Matches {ctx.attr} and {data_source.attr} tokens in LLM prompt templates.
 _PROMPT_TOKEN_RE = re.compile(r"\{(ctx|data_source)\.([^}]+)\}")
 
-# Buffer added to the observed max length when widening a string column,
-# so a one-character overflow doesn't immediately trigger another resize.
-_COLUMN_EXPAND_BUFFER = 10
-
-# Pre-compiled regexes for the only two type families the library knows
-# how to widen automatically. Any other declared type is skipped -- the
-# app must size those correctly up front.
-_WIDENABLE_TYPE_PATTERNS = (
-    ("NVARCHAR", re.compile(r"^NVARCHAR\((\d+)\)$")),
-    ("VARCHAR",  re.compile(r"^VARCHAR\((\d+)\)$")),
-)
-
 
 def load_files(
     ctx: Any, run_log,
@@ -419,7 +407,6 @@ def _destination_identity(
     )
 
 def _build_data_loader(
-    ctx: Any,
     create_declared: bool,
     replace_declared: bool = False,
     recreate_declared: bool = False,
@@ -433,23 +420,14 @@ def _build_data_loader(
     and arrives per call, so this builds POLICY only -- what the load may do,
     which is not a property of the object it writes to.
 
-    The widening callback is bound here because widening is CONFIGURED
-    behaviour -- a declared routine, never inline DDL -- and its parameters
-    travel through ``ctx``. This is the boundary that still holds ``ctx``; the
-    loader never learns how widening is configured. The destination reaches it
-    per call now, rather than being closed over, for the same reason it is no
-    longer held.
+    Widening an overflowing text column is the loader's own, through
+    ``DatabaseTable`` (backlog 690): nothing about it is configured here.
     """
     return _DataLoader(
         adapter=_write_adapter,
         create_destination=create_declared,
         replace_destination=replace_declared,
         recreate_destination=recreate_declared,
-        widen_columns=(
-            lambda _conn, target, records, defs: _alter_oversized_columns(
-                ctx, *adapter_destination(target), records, defs,
-            )
-        ),
     )
 
 def _configured_load(
@@ -515,7 +493,7 @@ def _configured_load(
                                  ctx=ctx),
         load_one_file=_load_one,
         transform=_build_identity_transform(transform_cfg),
-        loader=_build_data_loader(ctx, create_declared),
+        loader=_build_data_loader(create_declared),
         target=target,
         file_type=getattr(transform_cfg, "file_type", "CSV"),
         encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
@@ -609,7 +587,7 @@ def load_file_to_table(
         # and no declared columns -- exactly what such a load means.
         transform=_build_transform(ctx, None, transform),
         loader=_build_data_loader(
-            ctx, create_destination, replace_destination, recreate_destination,
+            create_destination, replace_destination, recreate_destination,
         ),
         file_type=file_type,
         encoding=encoding,
@@ -708,7 +686,7 @@ def load_query_to_table(
         ctx=ctx,
         run_log=run_log,
         loader=_build_data_loader(
-            ctx, create_destination, replace_destination, recreate_destination,
+            create_destination, replace_destination, recreate_destination,
         ),
         # None, not an empty policy. A load with no file has nothing to route,
         # which is not the same as a policy that routes nothing.
@@ -1470,118 +1448,6 @@ def _execute_one_hook_procedure(
 
     return row_columns
 
-def _alter_oversized_columns(
-    ctx: Any,
-    schema: str,
-    table: str,
-    rows: list[dict[str, Any]],
-    column_defs: list[tuple[str, str]],
-) -> bool:
-    """
-note:: this function must call a configure stored procedure or sql file. no DDL should ever be contained on this file.
-
-    Widen any columns whose values exceeded their declared length by
-    running the configured ``alter_column_data_type`` sql_config once
-    per affected column.
-
-    Parameters
-    ----------
-    ctx : Any
-        Application context. Must expose ``ctx.sql_configs`` containing
-        an entry named ``alter_column_data_type``.
-    schema : str
-        Target schema — may be ``database.schema`` for cross-db inserts.
-    table : str
-        Target table name.
-    rows : list[dict[str, Any]]
-        Rows that failed to insert — scanned for observed string lengths.
-    column_defs : list[tuple[str, str]]
-        Current ``(column_name, sql_type)`` pairs for the staging table.
-
-    Returns
-    -------
-    bool
-        ``True`` if at least one column was altered and the caller should
-        retry the bulk insert. ``False`` if no column needed widening or
-        the affected columns were of unsupported type families.
-
-    Raises
-    ------
-    ConfigError
-        When ctx has no ``alter_column_data_type`` sql_config configured.
-    """
-    sql_cfg      = _find_sql_config(ctx, "alter_column_data_type")
-    fq_table     = f"{schema}.{table}"
-    expanded_any = False
-    open_conns: dict[str, Any] = {}
-
-    try:
-        for col_name, col_type in column_defs:
-            new_type = _compute_expanded_type(
-                col_type, _max_string_len(rows, col_name)
-            )
-            if new_type is None:
-                continue
-
-            # The sql_config's params point at these ctx attrs — set them
-            # immediately before the call so each invocation widens the
-            # right column.
-            object.__setattr__(ctx, "alter_table",     fq_table)
-            object.__setattr__(ctx, "alter_column",    col_name)
-            object.__setattr__(ctx, "alter_data_type", new_type)
-
-            _execute_one_hook(ctx, None, sql_cfg, open_conns, None)
-            _logger.info(
-                "Altered column '%s.%s' to %s", fq_table, col_name, new_type,
-            )
-            expanded_any = True
-    finally:
-        # Committed but not closed: the commit is this work's transaction, the
-        # connection is shared and outlives it.
-        for conn in open_conns.values():
-            try:
-                conn.commit()
-            except Exception:  # noqa: BLE001 — commit must never mask the error above
-                pass
-        open_conns.clear()
-
-    return expanded_any
-
-def _compute_expanded_type(
-    current_type: str,
-    max_observed: int,
-) -> Optional[str]:
-    """
-    Return the new DataType string for a column that overflowed, or
-    ``None`` when no expansion is needed or possible.
-
-    Recognizes NVARCHAR(n) and VARCHAR(n) only. Any other declared type
-    is the app's responsibility to size correctly up front — rey_lib
-    will not invent type conversions.
-    """
-    if max_observed <= 0:
-        return None
-    upper = (current_type or "").upper().strip()
-    for prefix, pattern in _WIDENABLE_TYPE_PATTERNS:
-        m = pattern.match(upper)
-        if not m:
-            continue
-        current_len = int(m.group(1))
-        if max_observed <= current_len:
-            return None
-        return f"{prefix}({max_observed + _COLUMN_EXPAND_BUFFER})"
-    return None
-
-def _max_string_len(rows: list[dict[str, Any]], col_name: str) -> int:
-    """
-    Maximum string length of ``col_name`` across all rows. None values and
-    missing keys count as length 0.
-    """
-    return max(
-        (len(str(row.get(col_name, "") or "")) for row in rows),
-        default=0,
-    )
-
 def _source_path_field(source: Any) -> dict[str, str]:
     """The ``path`` evidence field, for a source that has one.
 
@@ -1850,7 +1716,7 @@ def _load_one_file(
         if not writes_a_file:
             if loader is None:
                 loader = _build_data_loader(
-                    ctx, _create_destination_declared(load_cfg),
+                    _create_destination_declared(load_cfg),
                 )
 
             # THE CONNECTION IS DERIVED FROM THE TARGET, and this is the first
@@ -1996,8 +1862,8 @@ def _load_one_file(
         # output to this file -- but it is explicit rather than absent, so the
         # pipeline is one shape whether or not a transform is configured.
         rows        = transform.transform(rows)
-        column_defs = transform.logical_schema(rows)
-        columns     = [name for name, _sql_type in column_defs]
+        logical_columns = transform.logical_schema(rows)
+        columns         = [name for name, _logical in logical_columns]
 
         # THE WRITE, and the only place the two target families differ.
         #
@@ -2011,7 +1877,7 @@ def _load_one_file(
         if writes_a_file:
             target.write(rows)
         else:
-            loader.load(conn, target, rows, column_defs, expected_columns)
+            loader.load(conn, target, rows, logical_columns, expected_columns)
 
         _logger.info(
             "Loaded: %r → %s  rows=%d",

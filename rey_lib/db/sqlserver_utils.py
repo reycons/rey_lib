@@ -40,8 +40,8 @@ call_proc_with_output(conn, proc_name, named_input_params, output_param_specs)
     Execute a stored procedure and capture named output parameter values.
 load_sql(name)
     Return the preloaded SQL string for a named query.
-create_staging_table_if_not_exists(conn, schema, table, column_defs)
-    Create a staging table if it does not already exist.
+fetch_rows(conn, sql_text, params)
+    Run one read query with named :name parameters and return its rows.
 is_truncation_error(exc)
     Return True when exc is the SQL Server truncation error (8152) — the
     caller decides what remediation (proc / SQL) to run, driven by
@@ -74,7 +74,7 @@ __all__ = [
     "call_proc",
     "call_proc_with_output",
     "load_sql",
-    "create_staging_table_if_not_exists",
+    "fetch_rows",
     "is_truncation_error",
 ]
 
@@ -88,28 +88,6 @@ _logger = get_logger(__name__)
 # (e.g. 'NVARCHAR(150)') already produced by _build_column_defs continue
 # to work without change.
 # ---------------------------------------------------------------------------
-
-_NEUTRAL_TYPE_MAP: dict[str, str] = {
-    "TEXT":      "NVARCHAR(MAX)",
-    "VARCHAR":   "NVARCHAR(500)",
-    "TIMESTAMP": "DATETIME2",
-    "INTEGER":   "INT",
-}
-
-# Matches VARCHAR(n) with an explicit length, e.g. VARCHAR(150).
-_VARCHAR_N_RE = re.compile(r"^VARCHAR\s*\((\d+)\)$", re.IGNORECASE)
-
-
-def _map_type(sql_type: str) -> str:
-    """Return the SQL Server equivalent of a neutral type, or the type unchanged."""
-    upper = sql_type.strip().upper()
-    if upper in _NEUTRAL_TYPE_MAP:
-        return _NEUTRAL_TYPE_MAP[upper]
-    m = _VARCHAR_N_RE.match(upper)
-    if m:
-        return f"NVARCHAR({m.group(1)})"
-    return sql_type
-
 
 # ---------------------------------------------------------------------------
 # Module-level state — set once at startup by init_db()
@@ -574,57 +552,6 @@ def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
 	return [row[0] for row in cur.fetchall()]
 
 
-def table_exists(conn: Any, schema: str, table: str) -> bool:
-	"""
-	Return whether one SQL Server table exists.
-
-	Answered from information_schema over the raw cursor, the same way this
-	module answers every other metadata question: a SQL Server connection is
-	a pyodbc connection, not a SQLAlchemy one, so the shared inspector the
-	other providers use cannot see it.
-
-	``schema`` may be either:
-	- schema
-	- database.schema
-
-	Not ``bool(get_table_columns(...))``: that answers about columns, and a
-	caller deciding whether to CREATE needs "no such table" kept apart from
-	"no columns".
-	"""
-
-	database_name = None
-	schema_name = schema
-
-	if "." in schema:
-		parts = schema.split(".", 1)
-
-		database_name = parts[0]
-		schema_name = parts[1]
-
-	if database_name:
-		sql = f"""
-			SELECT
-				1
-			FROM {database_name}.information_schema.tables
-			WHERE table_schema = ?
-				AND table_name = ?
-		"""
-	else:
-		sql = """
-			SELECT
-				1
-			FROM information_schema.tables
-			WHERE table_schema = ?
-				AND table_name = ?
-		"""
-
-	cur = conn.cursor()
-
-	cur.execute(sql, schema_name, table)
-
-	return cur.fetchone() is not None
-
-
 def quote_identifier(value: str) -> str:
 	return "[" + value.replace("]", "]]") + "]"
 
@@ -658,6 +585,45 @@ def execute_statement(conn: pyodbc.Connection, sql_text: str) -> int:
 		raise DatabaseError(f"execute_statement failed: {exc}") from exc
 
 
+#: A named ``:name`` parameter -- never a ``::`` cast or part of a word.
+_NAMED_PARAMETER = re.compile(r"(?<![:\w]):([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def fetch_rows(
+	conn: pyodbc.Connection, sql_text: str, params: dict[str, Any],
+) -> list[dict[str, Any]]:
+	"""Run one read query with named ``:name`` parameters and return its rows.
+
+	A connector primitive: the statement is the caller's, and binding is this
+	driver's -- pyodbc takes positional ``?`` markers, so each ``:name`` becomes
+	one, bound in the order it appears. Values are always bound, never
+	interpolated. It does NOT commit.
+
+	Raises:
+		DatabaseError: If a named parameter has no value, or the query fails.
+	"""
+	ordered: list[Any] = []
+
+	def positional(match: re.Match) -> str:
+		name = match.group(1)
+		if name not in params:
+			raise DatabaseError(f"fetch_rows: no value for parameter ':{name}'.")
+		ordered.append(params[name])
+		return "?"
+
+	statement = _NAMED_PARAMETER.sub(positional, sql_text)
+	try:
+		cursor = conn.cursor()
+		try:
+			cursor.execute(statement, ordered)
+			names = [column[0] for column in cursor.description or []]
+			return [dict(zip(names, row)) for row in cursor.fetchall()]
+		finally:
+			cursor.close()
+	except pyodbc.Error as exc:
+		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+
+
 def load_sql(name: str) -> str:
     """
     Return the preloaded SQL string for a named query.
@@ -686,92 +652,6 @@ def load_sql(name: str) -> str:
             f"Available: {sorted(_SQL.keys())}"
         )
     return _SQL[name]
-
-
-def create_staging_table_if_not_exists(
-    conn: pyodbc.Connection,
-    schema: str,
-    table: str,
-    column_defs: list[tuple[str, str]],
-) -> bool:
-    """
-    Create a staging table if it does not already exist in SQL Server.
-
-    Uses OBJECT_ID check — safe to call on every startup. All columns
-    are created nullable. Never modifies an existing table — if the
-    table exists it is left untouched regardless of column differences.
-
-    Identifiers are validated before interpolation into DDL to prevent
-    SQL injection. Only alphanumeric characters, underscores, dots, and
-    square brackets are permitted in schema, table, and column names.
-
-    Parameters
-    ----------
-    conn : pyodbc.Connection
-        Open SQL Server connection.
-    schema : str
-        Target schema name (e.g. 'Staging_SCH').
-        May be 'database.schema' for cross-database targets.
-    table : str
-        Target table name.
-    column_defs : list[tuple[str, str]]
-        Ordered list of (column_name, sql_type) tuples.
-        e.g. [('trade_date', 'DATE'), ('account', 'NVARCHAR(35)')]
-        All columns are created as NULL.
-
-    Returns
-    -------
-    bool
-        True if the table was created, False if it already existed.
-
-    Raises
-    ------
-    DatabaseError
-        If an identifier is invalid or the DDL statement fails.
-    """
-    # Validate all identifiers before interpolation.
-    _validate_identifier(schema, "schema")
-    _validate_identifier(table, "table")
-    for col_name, _ in column_defs:
-        _validate_identifier(col_name, "column")
-
-    qualified = f"{schema}.{table}"
-
-    # Build column list — all nullable. Neutral types are mapped to SQL Server equivalents.
-    col_sql = ",\n        ".join(
-        f"[{col_name}] {_map_type(sql_type)} NULL"
-        for col_name, sql_type in column_defs
-    )
-
-    ddl = (
-        f"IF OBJECT_ID(N'{qualified}', N'U') IS NULL\n"
-        f"BEGIN\n"
-        f"    CREATE TABLE {qualified} (\n"
-        f"        {col_sql}\n"
-        f"    )\n"
-        f"END"
-    )
-
-    cursor = conn.cursor()
-    try:
-        cursor.execute(ddl)
-        conn.commit()
-
-        # Check if the table now exists to determine return value.
-        cursor.execute("SELECT OBJECT_ID(?, N'U')", [qualified])
-        row    = cursor.fetchone()
-        exists = row is not None and row[0] is not None
-
-        _logger.info("Staging table ready: %s", qualified)
-        return exists
-
-    except pyodbc.Error as exc:
-        conn.rollback()
-        raise DatabaseError(
-            f"Failed to create staging table '{qualified}': {exc}"
-        ) from exc
-    finally:
-        cursor.close()
 
 
 def is_truncation_error(exc: Exception) -> bool:

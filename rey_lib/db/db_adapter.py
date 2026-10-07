@@ -216,9 +216,7 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         "fetch_dicts",
         "call_proc",
         "call_proc_with_output",
-        "table_exists",
         "get_table_columns",
-        "create_staging_table_if_not_exists",
         "bulk_insert",
         # Optional by design, and the only two here that are. A provider
         # without `insert_from_path` loses nothing: the record-based path
@@ -233,6 +231,9 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # without them fails the contract test rather than a load.
         "quote_identifier",
         "execute_statement",
+        # A read with named parameters: what DatabaseTable asks a catalog with
+        # (backlog 690). Binding and placeholder style are the provider's.
+        "fetch_rows",
     }
 )
 
@@ -1329,38 +1330,6 @@ class DBAdapter:
     # Staging / bulk insert
     # ------------------------------------------------------------------
 
-    def table_exists(self, conn: Any, schema: str, table: str) -> bool:
-        """Return whether ``schema.table`` exists on the connection's backend.
-
-        A question about EXISTENCE, asked directly. It is not
-        ``bool(get_table_columns(...))``: that answers a question about
-        columns, and an empty answer would conflate "there is no such table"
-        with "I was given no columns". A caller deciding whether to CREATE a
-        table needs the two kept apart.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        schema : str
-            Target schema — may be 'database.schema' where the backend
-            qualifies that way.
-        table : str
-            Target table name.
-
-        Returns
-        -------
-        bool
-            ``True`` if the table exists.
-
-        Raises
-        ------
-        UnsupportedDatabaseCapabilityError
-            If the connection's provider cannot answer it.
-        """
-        exists = self._require_provider_capability(conn, "table_exists")
-        return bool(exists(conn, schema, table))
-
     def delete_all_rows(self, conn: Any, schema: str, table: str) -> int:
         """Remove every row from ``schema.table``, leaving the table itself.
 
@@ -1447,6 +1416,44 @@ class DBAdapter:
         """
         self._run_table_statement(conn, "DROP TABLE", schema, table)
 
+    # -- connector primitives (backlog 690) ------------------------------------
+    # What database objects need to reach a database: which provider a
+    # connection is, how it spells an identifier, and running one statement or
+    # one read. Table and type semantics are the objects' own, not these.
+
+    def provider(self, conn: Any) -> str:
+        """Which provider an open connection belongs to."""
+        return self._provider_for_conn(conn)
+
+    def quote_identifier(self, conn: Any, name: str) -> str:
+        """One identifier, quoted the way this connection's provider writes it.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot.
+        """
+        return self._require_provider_capability(conn, "quote_identifier")(name)
+
+    def execute_statement(self, conn: Any, sql_text: str) -> int:
+        """Run one statement on the connection; the provider's affected count. No commit.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot.
+        """
+        return self._require_provider_capability(conn, "execute_statement")(conn, sql_text)
+
+    def fetch_rows(
+        self, conn: Any, sql_text: str, params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Run one read with named ``:name`` parameters and return its rows.
+
+        Binding, and the placeholder style a driver needs, are the provider's:
+        a caller writes ``:name`` whatever the provider. No commit.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot.
+        """
+        return self._require_provider_capability(conn, "fetch_rows")(conn, sql_text, params)
+
     def _run_table_statement(
         self, conn: Any, verb: str, schema: str, table: str,
     ) -> int:
@@ -1481,46 +1488,6 @@ class DBAdapter:
         """
         describe = self._require_provider_capability(conn, "get_table_columns")
         return describe(conn, schema, table)
-
-    def create_staging_table_if_not_exists(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-        column_defs: list[tuple[str, str]],
-    ) -> bool:
-        """
-        Create a staging table on the connection's backend if it does not
-        already exist.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        schema : str
-            Target schema (or database.schema, for SQL Server).
-        table : str
-            Target table name.
-        column_defs : list[tuple[str, str]]
-            ``(column_name, sql_type)`` pairs. Use neutral types (VARCHAR(n),
-            INTEGER, DECIMAL(p,s), DATE, TEXT, TIMESTAMP) — each backend maps
-            them to its native equivalents.
-
-        Returns
-        -------
-        bool
-            ``True`` if the table was created on this call; ``False`` if it
-            already existed.
-
-        Raises
-        ------
-        UnsupportedDatabaseCapabilityError
-            If the connection's provider cannot create a staging table.
-        """
-        create = self._require_provider_capability(
-            conn, "create_staging_table_if_not_exists"
-        )
-        return create(conn, schema, table, column_defs)
 
     def bulk_insert(
         self,

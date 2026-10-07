@@ -53,7 +53,7 @@ __all__ = [
     "run_sql",
     "load_sql",
     "bulk_insert",
-    "create_staging_table_if_not_exists",
+    "fetch_rows",
     "MEMORY_DATABASE",
     "CSV_SOURCE_RELATION",
     "TEXT_LINE_SOURCE_RELATION",
@@ -77,20 +77,6 @@ _logger = get_logger(__name__)
 # Anything not in this map is used as-is.
 # ---------------------------------------------------------------------------
 
-_NEUTRAL_TYPE_MAP: dict[str, str] = {
-    "TEXT":         "VARCHAR",
-    "NVARCHAR":     "VARCHAR",
-    "TIMESTAMP":    "TIMESTAMP",
-    "INTEGER":      "INTEGER",
-    "INT":          "INTEGER",
-    "DATE":         "DATE",
-}
-
-# Pattern that matches NVARCHAR(n) / VARCHAR(n) with an explicit length.
-_NVARCHAR_RE = re.compile(r"^N?VARCHAR\s*\(\s*\d+\s*\)$", re.IGNORECASE)
-_NVARCHAR_MAX_RE = re.compile(r"^N?VARCHAR\s*\(\s*MAX\s*\)$", re.IGNORECASE)
-
-
 def _config_value(db_cfg: Any, name: str) -> Any:
     """Read one field from a connection config, mapping or namespace alike."""
     if db_cfg is None:
@@ -98,16 +84,6 @@ def _config_value(db_cfg: Any, name: str) -> Any:
     if isinstance(db_cfg, dict):
         return db_cfg.get(name)
     return getattr(db_cfg, name, None)
-
-
-def _map_type(sql_type: str) -> str:
-    """Return the DuckDB equivalent of a neutral or SQL Server type."""
-    upper = sql_type.strip().upper()
-    if upper in _NEUTRAL_TYPE_MAP:
-        return _NEUTRAL_TYPE_MAP[upper]
-    if _NVARCHAR_MAX_RE.match(upper) or _NVARCHAR_RE.match(upper):
-        return "VARCHAR"
-    return sql_type
 
 
 # ---------------------------------------------------------------------------
@@ -403,70 +379,6 @@ def bulk_insert(
     return len(rows)
 
 
-def create_staging_table_if_not_exists(
-    conn: duckdb.DuckDBPyConnection,
-    schema: str,
-    table: str,
-    column_defs: list[tuple[str, str]],
-) -> bool:
-    """
-    Create a table in DuckDB if it does not already exist.
-
-    All columns are created nullable. Neutral type names (TEXT, TIMESTAMP,
-    etc.) are mapped to DuckDB equivalents; SQL Server types are also
-    normalised so mixed callers work without changes.
-
-    Parameters
-    ----------
-    conn : duckdb.DuckDBPyConnection
-        Open DuckDB connection.
-    schema : str
-        Target schema name (e.g. 'main').
-    table : str
-        Target table name.
-    column_defs : list[tuple[str, str]]
-        Ordered list of (column_name, sql_type) tuples.
-
-    Returns
-    -------
-    bool
-        True if the table was created on this call; False if it already existed.
-    """
-    existed = table_exists(conn, schema, table)
-    if existed:
-        return False
-
-    col_sql = ",\n    ".join(
-        f'"{col}" {_map_type(sql_type)}'
-        for col, sql_type in column_defs
-    )
-    ddl = f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (\n    {col_sql}\n)'
-    conn.execute(ddl)
-    _logger.info("Staging table ready: %s.%s", schema, table)
-    return True
-
-
-def table_exists(
-    conn: duckdb.DuckDBPyConnection,
-    schema: str,
-    table: str,
-) -> bool:
-    """Return True if schema.table exists in the DuckDB catalog.
-
-    The adapter's existence contract, answered for DuckDB. This was private
-    and used only by ``create_staging_table_if_not_exists`` below; the loader
-    now asks the same question before deciding whether it may create, and one
-    provider keeping its own answer to itself would have made DuckDB look
-    unable to answer a question it has always answered.
-    """
-    rows = conn.execute(
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_schema = ? AND table_name = ?",
-        [schema, table],
-    ).fetchall()
-    return len(rows) > 0
-
-
 def get_table_columns(
     conn: duckdb.DuckDBPyConnection,
     schema: str,
@@ -484,9 +396,9 @@ def get_table_columns(
     insert column list is built from -- alphabetical would silently reorder
     every insert built from it.
 
-    Read from ``information_schema``, as ``table_exists`` above does, so both
-    answers come from the same catalog rather than one of them from a PRAGMA
-    that could disagree.
+    Read from ``information_schema``, as ``DatabaseTable.exists`` asks DuckDB,
+    so both answers come from the same catalog rather than one of them from a
+    PRAGMA that could disagree.
 
     Args:
         conn: Open connection handle.
@@ -840,6 +752,31 @@ def execute_statement(conn: duckdb.DuckDBPyConnection, sql_text: str) -> int:
     except duckdb.Error as exc:
         raise DatabaseError(f"execute_statement failed: {exc}") from exc
     return int(row[0]) if row else 0
+
+
+#: A named ``:name`` parameter -- never a ``::`` cast or part of a word.
+_NAMED_PARAMETER = re.compile(r"(?<![:\w]):([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def fetch_rows(
+    conn: duckdb.DuckDBPyConnection, sql_text: str, params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Run one read query with named ``:name`` parameters and return its rows.
+
+    A connector primitive: the statement is the caller's, and binding is this
+    driver's -- DuckDB names a parameter ``$name``, so each ``:name`` is written
+    that way and the values are bound by name. It does NOT commit.
+
+    Raises:
+        DatabaseError: If the query fails.
+    """
+    statement = _NAMED_PARAMETER.sub(lambda match: "$" + match.group(1), sql_text)
+    try:
+        result = conn.execute(statement, dict(params))
+        names = [column[0] for column in result.description or []]
+        return [dict(zip(names, row)) for row in result.fetchall()]
+    except duckdb.Error as exc:
+        raise DatabaseError(f"fetch_rows failed: {exc}") from exc
 
 
 def file_source_expression(file_path: Path | str) -> str:

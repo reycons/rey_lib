@@ -68,9 +68,11 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
         SimpleNamespace(
             # These tests are about a destination that IS there; whether an
             # absent one is created is test_file_loader_destination.py.
-            table_exists=lambda *_a, **_k: True,
+            # DatabaseTable asks the catalog through the connector (backlog 690).
+            provider=lambda _conn: "postgres",
+            quote_identifier=lambda _conn, name: f'"{name}"',
+            fetch_rows=lambda *_a, **_k: [{"present": 1}],
             get_table_columns=lambda *_a, **_k: list(columns),
-            create_staging_table_if_not_exists=lambda *_a, **_k: True,
             bulk_insert=_bulk_insert,
             is_truncation_error=lambda _exc: False,
         ),

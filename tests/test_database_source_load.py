@@ -30,6 +30,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.query_source import QuerySource
 from rey_lib.load import load_operation
+from tests.support.connector_double import ConnectorPrimitives
 
 #: Where these loads write. A table that already exists: creating one from a
 #: non-row source is its own open question and is not this test's business.
@@ -38,7 +39,7 @@ _TARGET = DatabaseObjectIdentity(
 )
 
 
-class _Destination:
+class _Destination(ConnectorPrimitives):
     """The WRITE adapter, recording what the load hands it.
 
     **It has no ``query_rows`` deliberately.** There are two adapter roles --
@@ -58,7 +59,7 @@ class _Destination:
         """No native path. A statement is not a file a provider can read."""
         return False
 
-    def table_exists(self, *_args, **_kwargs) -> bool:
+    def has_table(self, *_args, **_kwargs) -> bool:
         return True
 
     def get_table_columns(self, *_args, **_kwargs) -> list[str]:
@@ -72,7 +73,7 @@ class _Destination:
     def is_truncation_error(self, _exc) -> bool:
         return False
 
-    def create_staging_table_if_not_exists(self, *_args, **_kwargs) -> bool:
+    def record_create(self, *_args, **_kwargs) -> bool:
         raise AssertionError("the destination exists; nothing may create it")
 
 

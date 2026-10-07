@@ -9,7 +9,7 @@ from rey_lib.profiling.file_profiler import (
     DATATYPE_PRIORITY,
     detect_datatype,
     infer_col_type,
-    infer_sql_type,
+    infer_logical_type,
     is_date,
     is_datetime,
     is_profile_excluded_column,
@@ -30,7 +30,7 @@ from rey_lib.profiling.structural_analysis import (
 __all__ = [
     "profile_rows",
     "infer_col_type",
-    "infer_sql_type",
+    "infer_logical_type",
     "enrich_csv_profile",
     "normalized_header",
     "same_header_errors",

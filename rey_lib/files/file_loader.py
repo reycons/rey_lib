@@ -51,6 +51,8 @@ from rey_lib.logs.log_utils import (
     log_validation_result,
 )
 from rey_lib.data.errors import DataStructureError
+from rey_lib.data.logical_type import LogicalType
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import (
     ConfigError,
@@ -103,17 +105,18 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# Fixed schema for the rejection table — created on first use via
-# create_staging_table_if_not_exists. Table name comes from ctx.rejection.table.
-# Types use the neutral vocabulary understood by all backends (see db_adapter).
-_REJECTION_COLUMN_DEFS: list[tuple[str, str]] = [
-    ("FileName",     "VARCHAR"),
-    ("RowNum",       "INTEGER"),
-    ("ColumnName",   "VARCHAR"),
-    ("RawValue",     "TEXT"),
-    ("ErrorMessage", "TEXT"),
-    ("BatchID",      "INTEGER"),
-    ("RejectedDT",   "TIMESTAMP"),
+# Fixed schema for the rejection table -- created on first use by
+# DatabaseTable.create. Table name comes from ctx.rejection.table. Logical types
+# only (backlog 690): no Rey rule bounds a file or column name, so every text
+# column is unbounded, and each destination spells the types its own way.
+_REJECTION_COLUMNS: list[tuple[str, LogicalType]] = [
+    ("FileName",     LogicalType("text")),
+    ("RowNum",       LogicalType("integer")),
+    ("ColumnName",   LogicalType("text")),
+    ("RawValue",     LogicalType("text")),
+    ("ErrorMessage", LogicalType("text")),
+    ("BatchID",      LogicalType("integer")),
+    ("RejectedDT",   LogicalType("datetime")),
 ]
 
 # Keep callback and file-pipeline failures non-fatal without using broad catches.
@@ -614,28 +617,6 @@ def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Private — recovery from bulk-insert column-width failures
-#
-# The actual ALTER COLUMN statement is not in this module. The library
-# only:
-#   1. asks the DBAdapter whether the bulk-insert exception is a
-#      truncation-class error (backend-specific check, lives in the
-#      adapter),
-#   2. computes a new SQL DataType string for each column whose observed
-#      value length exceeds its declared length,
-#   3. populates ctx.alter_table / alter_column / alter_data_type and
-#      runs the configured ``alter_column_data_type`` sql_config — the
-#      app decides which proc / SQL that is, via ctx.sql_configs.
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
 # Private — transform orchestration
 # ---------------------------------------------------------------------------
 
@@ -705,12 +686,17 @@ def _write_rejections(
 		for row_num, col, raw_value, err in errors
 	]
 
-	columns = [col for col, _ in _REJECTION_COLUMN_DEFS]
+	columns = [col for col, _ in _REJECTION_COLUMNS]
+	# A schema of "database.schema" names the catalog too, as the destination
+	# string always has.
+	catalog, _, schema_name = schema.rpartition(".")
+	identity = DatabaseObjectIdentity(
+		connection=str(getattr(conn_cfg, "name", "") or ""),
+		catalog=catalog, schema=schema_name, name=table,
+	)
 	try:
 		with _db_adapter.get_connection(conn_cfg, ctx=ctx) as conn:
-			_db_adapter.create_staging_table_if_not_exists(
-				conn, schema, table, _REJECTION_COLUMN_DEFS
-			)
+			DatabaseTable.create(conn, identity, _REJECTION_COLUMNS, _db_adapter)
 			_db_adapter.bulk_insert(conn, schema, table, rows, columns)
 			conn.commit()
 		_logger.info(

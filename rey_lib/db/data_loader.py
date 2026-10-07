@@ -4,16 +4,16 @@ The sink of source -> transform -> sink. A ``DataFile`` says what a file
 contains, a ``DataTransform`` says what the records made from it contain, and
 this puts those records in a table.
 
-It owns DESTINATION MECHANICS and nothing else: does the table exist, may it
-be created, insert the rows, and decide whether a failure is worth retrying.
-Every database operation goes through ``DBAdapter``; no SQL is written here
-and no provider is named.
+It owns DESTINATION POLICY and nothing else: may the table be created, insert
+the rows, and decide whether a failure is worth retrying. What a table IS --
+whether it exists, creating it from a logical schema, widening a column -- is
+``DatabaseTable``'s (backlog 690); every other database operation goes through
+``DBAdapter``. No SQL is written here and no provider is named.
 
 What it deliberately does not have
 ----------------------------------
 **No ``ctx``.** The application context is consumed where these objects are
-constructed and does not travel down with them. The one indirect exception is
-``widen_columns`` -- see below -- and it is documented rather than hidden.
+constructed and does not travel down with them.
 
 **No connection.** The shared connection outlives any single load and is held
 by every other consumer of the same name, so holding one would claim an
@@ -34,12 +34,14 @@ an argument rather than patching a module attribute.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
+from rey_lib.data.logical_type import LogicalType
+from rey_lib.db.database_objects import DatabaseTable
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
-__all__ = ["DataLoader", "WidenColumns", "adapter_destination"]
+__all__ = ["DataLoader", "adapter_destination"]
 
 _logger = get_logger(__name__)
 
@@ -49,22 +51,9 @@ _logger = get_logger(__name__)
 #: or a caller's answer of None would be mistaken for not having asked.
 _UNASKED: Any = object()
 
-#: How a caller widens columns that were too narrow, and reports whether it
-#: changed anything.
-#:
-#: ``(conn, target, records, column_defs) -> widened?``
-#:
-#: Injected because widening is CONFIGURED behaviour -- it must run a declared
-#: stored procedure or SQL file rather than inline DDL, and its parameters are
-#: passed through the application context. This object decides WHEN a retry is
-#: warranted; it never learns HOW widening is configured.
-#:
-#: The connection and the target are arguments for the same reason this object
-#: holds neither: one is externally owned and the other is the load's, and both
-#: vary per call.
-WidenColumns = Callable[
-    [Any, Any, list[dict[str, Any]], list[tuple[str, str]]], bool
-]
+#: How much room a widened text column gets beyond the longest value that
+#: overflowed it.
+_COLUMN_EXPAND_BUFFER = 10
 
 
 def adapter_destination(target: Any) -> tuple[str, str]:
@@ -98,7 +87,6 @@ class DataLoader:
         create_destination: bool = False,
         replace_destination: bool = False,
         recreate_destination: bool = False,
-        widen_columns: WidenColumns | None = None,
     ) -> None:
         """Hold the policies that govern loading, and nothing about where.
 
@@ -129,14 +117,11 @@ class DataLoader:
                 schema level: what the table owns goes with it, and nothing
                 rebuilds it. Distinct from ``replace_destination``, which keeps
                 the table it empties.
-            widen_columns: How to widen columns after a truncation. Absent
-                means a truncation is simply reported.
         """
         self.adapter = adapter
         self.create_destination = create_destination
         self.replace_destination = replace_destination
         self.recreate_destination = recreate_destination
-        self.widen_columns = widen_columns
 
     def destination_columns(self, conn: Any, target: Any) -> list[str] | None:
         """Return the destination's columns, or None when it does not exist.
@@ -155,9 +140,9 @@ class DataLoader:
             conn: Open connection, owned by the caller and shared.
             target: The database object identity being loaded into.
         """
-        schema, table = adapter_destination(target)
-        if not self.adapter.table_exists(conn, schema, table):
+        if not DatabaseTable.exists(conn, target, self.adapter):
             return None
+        schema, table = adapter_destination(target)
         return self.adapter.get_table_columns(conn, schema, table)
 
     def load(
@@ -165,7 +150,7 @@ class DataLoader:
         conn: Any,
         target: Any,
         records: list[dict[str, Any]],
-        column_defs: list[tuple[str, str]],
+        columns: list[tuple[str, LogicalType]],
         destination_columns: list[str] | None = _UNASKED,
     ) -> int:
         """Put these records in the destination, creating it if allowed.
@@ -175,10 +160,10 @@ class DataLoader:
             target: The database object identity being loaded into. Passed,
                 not held -- see ``__init__``.
             records: The logical records to insert.
-            column_defs: ``(column, sql_type)`` pairs describing them. The
-                insert column list is DERIVED from this rather than passed
-                separately, so a CREATE and its INSERT cannot be handed
-                different lists.
+            columns: ``(column, LogicalType)`` pairs describing them -- Rey's
+                logical schema (backlog 690). The insert column list is DERIVED
+                from this rather than passed separately, so a CREATE and its
+                INSERT cannot be handed different lists.
 
         Returns:
             How many records were inserted.
@@ -189,9 +174,9 @@ class DataLoader:
                 fail the same way, so it stops the run rather than failing
                 one file.
             DatabaseError: When the insert fails for any reason not repaired
-                by widening.
+                by widening an overflowing text column.
         """
-        columns = [name for name, _sql_type in column_defs]
+        names = [name for name, _logical in columns]
         schema, table = adapter_destination(target)
 
         # A caller that already asked tells us what it found, so the check
@@ -224,9 +209,7 @@ class DataLoader:
             # the policy governing it: IF NOT EXISTS is no defence, because a
             # table dropped between the check and the call would be recreated
             # against a load that said not to.
-            self.adapter.create_staging_table_if_not_exists(
-                conn, schema, table, column_defs
-            )
+            DatabaseTable.create(conn, target, columns, self.adapter)
         elif self.replace_destination:
             # THE CONTENTS ARE REPLACED, so what was there goes first.
             #
@@ -244,22 +227,32 @@ class DataLoader:
             self.adapter.delete_all_rows(conn, schema, table)
 
         try:
-            return self._insert(conn, target, records, columns)
+            return self._insert(conn, target, records, names)
         except DatabaseError as insert_exc:
             conn.rollback()
-
             if not self.adapter.is_truncation_error(insert_exc):
                 raise
-            if self.widen_columns is None:
+            widened = _widened(columns, records)
+            if not widened:
                 raise
-            if not self.widen_columns(conn, target, records, column_defs):
-                raise
-
+            # A table this load created may have gone with the rollback, where
+            # the provider's DDL is transactional: then it is created again,
+            # wider. Otherwise the overflowing columns are widened in place.
+            if DatabaseTable.exists(conn, target, self.adapter):
+                table_object = DatabaseTable(identity=target)
+                for name, logical in widened.items():
+                    table_object.widen_column(conn, name, logical, self.adapter)
+            else:
+                DatabaseTable.create(
+                    conn, target,
+                    [(name, widened.get(name, logical)) for name, logical in columns],
+                    self.adapter,
+                )
             _logger.info(
-                "Retrying insert into %s.%s after column alterations",
-                schema, table,
+                "Retrying insert into %s.%s after widening %s",
+                schema, table, ", ".join(widened),
             )
-            return self._insert(conn, target, records, columns)
+            return self._insert(conn, target, records, names)
 
     def load_from_path(
         self,
@@ -330,3 +323,24 @@ class DataLoader:
         )
         conn.commit()
         return inserted
+
+
+def _widened(
+    columns: list[tuple[str, LogicalType]], records: list[dict[str, Any]],
+) -> dict[str, LogicalType]:
+    """Each bounded text column a value overflowed, as the wider type it needs.
+
+    Only ``text`` with a ``length`` can overflow; every other kind is sized by
+    what it means, so nothing else is widened. The new length is the longest
+    value seen plus a margin.
+    """
+    widened: dict[str, LogicalType] = {}
+    for name, logical in columns:
+        if logical.kind != "text" or logical.length is None:
+            continue
+        longest = max(
+            (len(str(record.get(name, "") or "")) for record in records), default=0,
+        )
+        if longest > logical.length:
+            widened[name] = LogicalType("text", length=longest + _COLUMN_EXPAND_BUFFER)
+    return widened

@@ -30,6 +30,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
+from tests.support.connector_double import ConnectorPrimitives
 
 #: Where these loads write. The per-file step takes a target object now, and
 #: resolves its own connection from it -- so tests substitute the resolution
@@ -42,7 +43,7 @@ _TARGET = DatabaseObjectIdentity(
 _COLUMNS = ["a", "b"]
 
 
-class _Adapter:
+class _Adapter(ConnectorPrimitives):
     """An adapter that records which contract calls the loader made."""
 
     def __init__(self, *, exists: bool) -> None:
@@ -61,7 +62,7 @@ class _Adapter:
         """
         return False
 
-    def table_exists(self, _conn, _schema, _table) -> bool:
+    def has_table(self, _conn, _schema, _table) -> bool:
         self.existence_checks += 1
         return self._exists
 
@@ -69,7 +70,7 @@ class _Adapter:
         self.described += 1
         return list(_COLUMNS) if self._exists else []
 
-    def create_staging_table_if_not_exists(self, _conn, schema, table, defs) -> bool:
+    def record_create(self, _conn, schema, table, defs) -> bool:
         self.created.append((schema, table, defs))
         self._exists = True
         return True

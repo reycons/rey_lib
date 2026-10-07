@@ -182,7 +182,7 @@ class TestResolution:
 
         assert builds == [
             ("_destination_identity", ("landing.orders", "warehouse"), {}),
-            ("_build_data_loader", (ctx, *policy), {}),
+            ("_build_data_loader", tuple(policy), {}),
         ]
         assert isinstance(identity, DatabaseObjectIdentity)
         assert (identity.connection, identity.schema, identity.name) == (
@@ -202,7 +202,7 @@ class TestResolution:
         _, loader = Target({**_TABLE, **flags}).resolve(ctx)
 
         # APPEND IS THE DEFAULT SPELLED: no fourth argument, the builder unchanged.
-        assert builds[-1] == ("_build_data_loader", (ctx, False, False, False), {})
+        assert builds[-1] == ("_build_data_loader", (False, False, False), {})
         assert Target({**_TABLE, **flags}).write_policy() == "append"
         assert not (
             loader.create_destination or loader.replace_destination

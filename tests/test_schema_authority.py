@@ -27,6 +27,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.data.errors import DataStructureError
 from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.load.load_operation import _configured_columns
+from rey_lib.data.logical_type import LogicalType
 
 _RECORDS = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
 
@@ -95,7 +96,7 @@ class TestConfiguredColumnsAreAuthoritative:
 
         defs = dict(transform.logical_schema(_RECORDS))
 
-        assert defs["a"] == "DATE"
+        assert defs["a"] == LogicalType("date")
 
     def test_with_no_configured_columns_the_records_decide(self) -> None:
         """Unchanged, and what the direct single-file path relies on."""

@@ -38,9 +38,10 @@ from rey_lib.files.data_file.base import RecordShape
 from rey_lib.files.data_file.keyed import JsonFile, JsonlFile
 from rey_lib.db.data_loader import DataLoader
 from rey_lib.data.data_transform import DataTransform
+from tests.support.connector_double import ConnectorPrimitives
 
 
-class _Adapter:
+class _Adapter(ConnectorPrimitives):
     """Records what the load decided, instead of reaching a database."""
 
     def __init__(self, *, exists: bool = True) -> None:
@@ -57,13 +58,13 @@ class _Adapter:
         """
         return False
 
-    def table_exists(self, _conn, _schema, _table) -> bool:
+    def has_table(self, _conn, _schema, _table) -> bool:
         return self._exists
 
     def get_table_columns(self, _conn, _schema, _table) -> list[str]:
         return ["asset_id", "name"] if self._exists else []
 
-    def create_staging_table_if_not_exists(self, _conn, schema, table, defs):
+    def record_create(self, _conn, schema, table, defs):
         self.created.append((schema, table, defs))
         self._exists = True
         return True

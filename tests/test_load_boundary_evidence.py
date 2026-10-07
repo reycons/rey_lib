@@ -31,13 +31,14 @@ import pytest
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
+from tests.support.connector_double import ConnectorPrimitives
 
 _TARGET = DatabaseObjectIdentity(
     connection="c", catalog="", schema="landing", name="records",
 )
 
 
-class _Adapter:
+class _Adapter(ConnectorPrimitives):
     """A destination that exists, takes rows, and offers no native path.
 
     ``supports_provider_capability`` answers rather than being absent: the
@@ -48,7 +49,7 @@ class _Adapter:
     def supports_provider_capability(self, _conn, _capability) -> bool:
         return False
 
-    def table_exists(self, *_args, **_kwargs) -> bool:
+    def has_table(self, *_args, **_kwargs) -> bool:
         return True
 
     def get_table_columns(self, *_args, **_kwargs) -> list[str]:

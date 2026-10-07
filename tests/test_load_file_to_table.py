@@ -22,9 +22,10 @@ import pytest
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import load_operation
 from rey_lib.load import configured_load
+from tests.support.connector_double import ConnectorPrimitives
 
 
-class _Adapter:
+class _Adapter(ConnectorPrimitives):
     """Records what the load decided, instead of reaching a database."""
 
     def __init__(self, *, exists: bool = False) -> None:
@@ -41,13 +42,13 @@ class _Adapter:
         """
         return False
 
-    def table_exists(self, _conn, _schema, _table) -> bool:
+    def has_table(self, _conn, _schema, _table) -> bool:
         return self._exists
 
     def get_table_columns(self, _conn, _schema, _table) -> list[str]:
         return ["a", "b"] if self._exists else []
 
-    def create_staging_table_if_not_exists(self, _conn, schema, table, defs):
+    def record_create(self, _conn, schema, table, defs):
         self.created.append((schema, table, defs))
         self._exists = True
         return True

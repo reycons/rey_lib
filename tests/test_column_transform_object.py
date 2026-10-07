@@ -28,6 +28,7 @@ from rey_lib.data import (
     authorable_starters,
 )
 from rey_lib.data.errors import TransformError
+from rey_lib.data.logical_type import LogicalType
 
 REY_LIB = Path(__file__).resolve().parents[1] / "rey_lib"
 
@@ -397,13 +398,13 @@ class TestADeclaredOutputDatatype:
         produced = held.transform([{"A": "123"}])
 
         # Derived, this is an INTEGER -- the values say so. Declared, it is text.
-        assert held.logical_schema(produced) == [("a", "VARCHAR(20)")]
+        assert held.logical_schema(produced) == [("a", LogicalType("text", length=20))]
 
     def test_absent_leaves_the_derivation_exactly_as_it_was(self) -> None:
         held = ColumnTransform(_declaration({"source": "A", "name": "a"}))
         produced = held.transform([{"A": "123"}])
 
-        assert held.logical_schema(produced) == [("a", "INTEGER")]
+        assert held.logical_schema(produced) == [("a", LogicalType("integer"))]
 
     def test_every_published_datatype_renders(self) -> None:
         """A vocabulary member with no rendering is a control that produces a

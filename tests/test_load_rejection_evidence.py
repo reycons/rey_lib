@@ -22,6 +22,7 @@ import pytest
 from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
+from tests.support.connector_double import ConnectorPrimitives
 
 #: Where these loads write. The per-file step takes a target object now.
 _TARGET = DatabaseObjectIdentity(
@@ -29,7 +30,7 @@ _TARGET = DatabaseObjectIdentity(
 )
 
 
-class _Adapter:
+class _Adapter(ConnectorPrimitives):
     """A destination that exists and has two columns."""
 
     def supports_provider_capability(self, _conn, _capability) -> bool:
@@ -41,13 +42,13 @@ class _Adapter:
         """
         return False
 
-    def table_exists(self, *_args, **_kwargs) -> bool:
+    def has_table(self, *_args, **_kwargs) -> bool:
         return True
 
     def get_table_columns(self, *_args, **_kwargs) -> list[str]:
         return ["a", "b"]
 
-    def create_staging_table_if_not_exists(self, *_args, **_kwargs) -> bool:
+    def record_create(self, *_args, **_kwargs) -> bool:
         raise AssertionError("a rejected file must not create a table")
 
     def bulk_insert(self, *_args, **_kwargs) -> int:

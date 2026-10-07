@@ -37,7 +37,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from rey_lib.data.errors import DataStructureError
-from rey_lib.profiling.file_profiler import infer_sql_type
+from rey_lib.data.logical_type import LogicalType
+from rey_lib.profiling.file_profiler import infer_logical_type
 
 __all__ = [
     "IDENTITY_EXECUTION",
@@ -46,42 +47,34 @@ __all__ = [
     "IdentityTransform",
 ]
 
-#: Declared transform type -> the neutral SQL type it produces.
+#: Declared transform type -> the Rey logical type it produces (backlog 690).
 #:
-#: The neutral vocabulary every backend understands through DBAdapter --
-#: VARCHAR(n), INTEGER, DECIMAL(p,s), DATE, TIMESTAMP. Backend-specific mapping happens
-#: inside each provider, not here.
-_TRANSFORM_TYPE_MAP: dict[str, str] = {
-    "date":       "DATE",
-    "datetime":   "TIMESTAMP",
-    "time":       "TIME",
-    "regex_date": "DATE",
-    "numeric":    "DECIMAL(18, 6)",
+#: Logical only: how a destination spells it is ``DatabaseType``'s, asked by
+#: ``DatabaseTable`` when it creates the table. Nothing here names a physical type.
+_TRANSFORM_LOGICAL_TYPE: dict[str, LogicalType] = {
+    "date":       LogicalType("date"),
+    "datetime":   LogicalType("datetime"),
+    "time":       LogicalType("time"),
+    "regex_date": LogicalType("date"),
+    "numeric":    LogicalType("decimal", precision=18, scale=6),
 }
 
-#: A STATED logical output type, rendered as the SQL this path already emits.
-#:
-#: **Every string here is one this module or `infer_sql_type` already produced.**
-#: Nothing new is invented: INTEGER and DATE are `infer_sql_type`'s, DECIMAL(18,
-#: 6) and DATETIME2 are `_TRANSFORM_TYPE_MAP`'s, and the VARCHAR width is the
-#: fallback's own arithmetic. So declaring a type changes WHICH of these answers
-#: a column gets, never what the answers are.
-#:
-#: Which also means `datetime` inherits DATETIME2 -- one server's spelling
-#: emitted for every provider. That is a defect this does not introduce and does
-#: not fix; correcting it needs somewhere for a provider to answer, and there is
-#: nowhere. Both are recorded on the backlog.
-#:
-#: Keyed by the logical vocabulary in `column_transform.OUTPUT_DATATYPES`, and
-#: `boolean` is absent from both for the same reason: it has no string here to
-#: render as.
-_LOGICAL_TYPE_SQL: dict[str, Any] = {
-    "text":     lambda observed: f"VARCHAR({max(observed + 10, 20)})",
-    "integer":  lambda _observed: "INTEGER",
-    "decimal":  lambda _observed: "DECIMAL(18, 6)",
-    "date":     lambda _observed: "DATE",
-    "datetime": lambda _observed: "DATETIME2",
+#: A STATED output datatype (``column_transform.OUTPUT_DATATYPES``), as the
+#: logical type it means. ``text`` is bounded by what was observed -- the same
+#: arithmetic as the undeclared fallback -- so declaring one changes which kind
+#: a column is, never how wide.
+_DECLARED_LOGICAL_TYPE: dict[str, Any] = {
+    "text":     lambda observed: LogicalType("text", length=_observed_width(observed)),
+    "integer":  lambda _observed: LogicalType("integer"),
+    "decimal":  lambda _observed: LogicalType("decimal", precision=18, scale=6),
+    "date":     lambda _observed: LogicalType("date"),
+    "datetime": lambda _observed: LogicalType("datetime"),
 }
+
+
+def _observed_width(observed: int) -> int:
+    """The width a text column gets from the widest value seen: room to spare, never under 20."""
+    return max(observed + 10, 20)
 
 
 @dataclass(frozen=True)
@@ -130,8 +123,8 @@ class DataTransform(ABC):
     def logical_schema(
         self,
         records: list[dict[str, Any]],
-    ) -> list[tuple[str, str]]:
-        """Return ``(column, sql_type)`` for the records produced.
+    ) -> list[tuple[str, LogicalType]]:
+        """Return ``(column, logical type)`` for the records produced.
 
         Ordered, because the order is what an insert is built from.
         """
@@ -203,12 +196,13 @@ class DeclaredTransform(DataTransform):
     def logical_schema(
         self,
         records: list[dict[str, Any]],
-    ) -> list[tuple[str, str]]:
-        """Return ``(column, sql_type)`` pairs for these records.
+    ) -> list[tuple[str, LogicalType]]:
+        """Return ``(column, logical type)`` pairs for these records.
 
         A DECLARED type wins where configuration states one; otherwise the
         type is inferred from the values, and failing that the column is a
-        VARCHAR wide enough for what was observed.
+        text column wide enough for what was observed. Logical types only:
+        the destination's spelling is ``DatabaseType``'s (backlog 690).
 
         **CONFIGURED COLUMNS ARE AUTHORITATIVE when declared.** They describe
         the records this transform produces -- including fields with no
@@ -223,7 +217,7 @@ class DeclaredTransform(DataTransform):
             records: The records to be loaded.
 
         Returns:
-            Ordered ``(column_name, sql_type)`` pairs, empty for no records.
+            Ordered ``(column_name, LogicalType)`` pairs, empty for no records.
 
         Raises:
             DataStructureError: When configuration declares columns and
@@ -253,28 +247,26 @@ class DeclaredTransform(DataTransform):
             # stronger claim than anything derived from how the value is made or
             # from what this sample happened to hold. Absent, everything below
             # is exactly what it always was.
-            if stated in _LOGICAL_TYPE_SQL:
-                sql_type = _LOGICAL_TYPE_SQL[stated](max_lengths.get(column, 0))
-            elif declared_type in _TRANSFORM_TYPE_MAP:
-                sql_type = _TRANSFORM_TYPE_MAP[declared_type]
+            if stated in _DECLARED_LOGICAL_TYPE:
+                logical = _DECLARED_LOGICAL_TYPE[stated](max_lengths.get(column, 0))
+            elif declared_type in _TRANSFORM_LOGICAL_TYPE:
+                logical = _TRANSFORM_LOGICAL_TYPE[declared_type]
             elif declared_type == "regex_extract" and cast_to in ("float", "double"):
-                sql_type = "DECIMAL(18, 6)"
+                logical = LogicalType("decimal", precision=18, scale=6)
             elif declared_type == "regex_extract" and cast_to in ("int", "integer"):
-                sql_type = "INTEGER"
+                logical = LogicalType("integer")
             else:
                 values = [
                     str(record.get(column, "") or "").strip()
                     for record in records
                     if str(record.get(column, "") or "").strip()
                 ]
-                inferred = infer_sql_type(values) if values else None
-                if inferred:
-                    sql_type = inferred
-                else:
-                    observed = max_lengths.get(column, 0)
-                    sql_type = f"VARCHAR({max(observed + 10, 20)})"
+                inferred = infer_logical_type(values) if values else None
+                logical = inferred or LogicalType(
+                    "text", length=_observed_width(max_lengths.get(column, 0)),
+                )
 
-            column_defs.append((column, sql_type))
+            column_defs.append((column, logical))
 
         return column_defs
 

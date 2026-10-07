@@ -266,6 +266,6 @@ class Target:
                 str(held["table"]), str(held["connection"]),
             ),
             load_operation._build_data_loader(
-                ctx, policy == "create", policy == "replace", policy == "recreate",
+                policy == "create", policy == "replace", policy == "recreate",
             ),
         )

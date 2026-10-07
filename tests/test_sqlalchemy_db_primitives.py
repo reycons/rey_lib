@@ -432,23 +432,6 @@ def test_mysql_connection_retries_with_existing_backoff(
     assert delays == [1.0, 2.0]
 
 
-def test_mysql_staging_commit_and_failure_rollback() -> None:
-    conn, core, _engine = _connection(provider="mysql")
-
-    assert mysql_utils.create_staging_table_if_not_exists(
-        conn, "stage", "records", [("RecordId", "INTEGER")]
-    ) is True
-    assert core.commits == 1
-    assert core.rollbacks == 0
-
-    core.failure = RuntimeError("cannot create")
-    with pytest.raises(DatabaseError, match="cannot create"):
-        mysql_utils.create_staging_table_if_not_exists(
-            conn, "stage", "other_records", [("RecordId", "INTEGER")]
-        )
-    assert core.rollbacks == 1
-
-
 def test_mysql_query_error_is_normalized() -> None:
     conn, core, _engine = _connection(provider="mysql")
     core.failure = RuntimeError("bad query")

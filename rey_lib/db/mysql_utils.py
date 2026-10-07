@@ -32,20 +32,13 @@ __all__ = [
 	"call_proc",
 	"call_proc_with_output",
 	"load_sql",
-	"create_staging_table_if_not_exists",
+	"fetch_rows",
 	"get_table_columns",
 	"quote_identifier",
 	"is_truncation_error",
 ]
 
 _logger = get_logger(__name__)
-
-_NEUTRAL_TYPE_MAP: dict[str, str] = {
-	"TEXT":      "TEXT",
-	"VARCHAR":   "VARCHAR(500)",
-	"TIMESTAMP": "DATETIME",
-	"INTEGER":   "INT",
-}
 
 _sql_dir: Path | None = None
 _SQL: dict[str, str] = {}
@@ -197,18 +190,6 @@ def call_proc_with_output(
 	)
 
 
-def table_exists(conn: Any, schema: str, table: str) -> bool:
-	"""Whether one table exists, asked of the shared inspector directly.
-
-	Not ``bool(get_table_columns(...))``: that inspects the whole schema and
-	answers about columns, and a caller deciding whether to CREATE needs "no
-	such table" kept apart from "no columns".
-	"""
-	from rey_lib.db._sqlalchemy import metadata_table_exists
-
-	return metadata_table_exists(conn, schema, table)
-
-
 def get_table_columns(conn: Any, schema: str, table: str) -> list[str]:
 	from rey_lib.db._sqlalchemy import inspect_schema
 
@@ -252,6 +233,25 @@ def execute_statement(conn: Any, sql_text: str) -> int:
 		raise DatabaseError(f"execute_statement failed: {exc}") from exc
 
 
+def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+	"""Run one read query with named ``:name`` parameters and return its rows.
+
+	A connector primitive: the statement is the caller's, and binding is this
+	driver's -- SQLAlchemy binds ``:name`` itself. It does NOT commit.
+
+	Raises:
+		DatabaseError: If the query fails.
+	"""
+	from rey_lib.db._sqlalchemy import core_connection
+	from sqlalchemy import text
+
+	try:
+		result = core_connection(conn).execute(text(sql_text), dict(params))
+		return [dict(row) for row in result.mappings()]
+	except Exception as exc:
+		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+
+
 def load_sql(name: str) -> str:
 	_require_init()
 
@@ -262,43 +262,6 @@ def load_sql(name: str) -> str:
 		)
 
 	return _SQL[name]
-
-
-def create_staging_table_if_not_exists(
-	conn: Any,
-	schema: str,
-	table: str,
-	column_defs: list[tuple[str, str]],
-) -> bool:
-	_validate_identifier(schema, "schema")
-	_validate_identifier(table, "table")
-
-	for col_name, _ in column_defs:
-		_validate_identifier(col_name, "column")
-
-	col_sql = ",\n\t".join(
-		f"{quote_identifier(col_name)} {_map_type(sql_type)} NULL"
-		for col_name, sql_type in column_defs
-	)
-
-	ddl = (
-		f"CREATE TABLE IF NOT EXISTS {quote_identifier(schema)}.{quote_identifier(table)} (\n"
-		f"\t{col_sql}\n"
-		f")"
-	)
-
-	from rey_lib.db._sqlalchemy import core_connection
-
-	try:
-		core_connection(conn).exec_driver_sql(ddl)
-		conn.commit()
-		_logger.info("Staging table ready: %s.%s", schema, table)
-		return True
-	except Exception as exc:
-		conn.rollback()
-		raise DatabaseError(
-			f"Failed to create staging table '{schema}.{table}': {exc}"
-		) from exc
 
 
 def is_truncation_error(exc: Exception) -> bool:
@@ -363,15 +326,6 @@ def _connect_with_retry(db_cfg: Any, timeout: int, *, ctx: Any = None) -> Any:
 	raise DatabaseError(
 		f"MySQL connection failed after {_MAX_CONNECT_ATTEMPTS} attempts."
 	) from last_exc
-
-
-def _map_type(sql_type: str) -> str:
-	upper = sql_type.strip().upper()
-
-	if upper in _NEUTRAL_TYPE_MAP:
-		return _NEUTRAL_TYPE_MAP[upper]
-
-	return sql_type
 
 
 def _normalize_db_nulls(value: Any) -> Any:

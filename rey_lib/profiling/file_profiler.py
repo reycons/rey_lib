@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rey_lib.logs import get_logger
 
+if TYPE_CHECKING:
+    from rey_lib.data.logical_type import LogicalType
+
 __all__ = [
     "infer_col_type",
-    "infer_sql_type",
+    "infer_logical_type",
     "is_profile_excluded_column",
     "profile_rows",
 ]
@@ -58,11 +61,12 @@ def is_profile_excluded_column(value: Any, line_number: int | None = None) -> bo
     return line_number is not None and text == str(line_number)
 
 
-def infer_sql_type(values: list[str]) -> str | None:
-    """Return the most precise SQL type for a column's values.
+def infer_logical_type(values: list[str]) -> LogicalType | None:
+    """Return the most precise Rey logical type for a column's values (backlog 690).
 
     Uses ``infer_col_type`` for classification then derives precision from
-    the observed data so callers avoid the generic ``DECIMAL(20, 8)`` fallback.
+    the observed data so callers avoid a generic decimal. A logical type, not
+    a physical one: how a destination spells it is ``DatabaseType``'s.
 
     Parameters
     ----------
@@ -71,28 +75,27 @@ def infer_sql_type(values: list[str]) -> str | None:
 
     Returns
     -------
-    str | None
-        ``'INTEGER'``, ``'DECIMAL(p, s)'``, ``'DATE'``, or ``None`` when
-        VARCHAR is the appropriate fallback.
+    LogicalType | None
+        ``integer``, ``decimal(p, s)`` or ``date``, or ``None`` when text is
+        the appropriate fallback.
     """
+    # Imported here: rey_lib.data imports this module, so a module-level import
+    # would be circular.
+    from rey_lib.data.logical_type import LogicalType  # noqa: PLC0415
+
     non_blank = [v.strip() for v in values if v and v.strip()]
     if not non_blank:
         return None
-
     col_type = infer_col_type(non_blank)
-
     if col_type == "integer":
-        return "INTEGER"
-
+        return LogicalType("integer")
     if col_type == "decimal":
         scale     = max((_decimal_places(v) for v in non_blank), default=0)
         int_digs  = max((_integer_digits(v) for v in non_blank), default=1)
         precision = max(int_digs + scale, 1)
-        return f"DECIMAL({precision}, {scale})"
-
+        return LogicalType("decimal", precision=precision, scale=scale)
     if col_type == "date":
-        return "DATE"
-
+        return LogicalType("date")
     return None
 
 

@@ -30,8 +30,8 @@ class _Backend:
 
     Records what was called: the dispatch tests are about whether the provider
     function was REACHED, not what it returned. Some adapter methods normalise
-    their provider's answer -- ``table_exists`` coerces to bool by contract --
-    so a return value is not a reliable witness that the call happened.
+    their provider's answer, so a return value is not a reliable witness that
+    the call happened.
     """
 
     def __init__(self, *implemented: str) -> None:
@@ -70,11 +70,7 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     "fetch_dicts": ("fetch_dicts", ("some_sql", None)),
     "call_proc": ("call_proc", ("some_proc", None)),
     "call_proc_with_output": ("call_proc_with_output", ("some_proc", [], [])),
-    "table_exists": ("table_exists", ("schema", "table")),
     "get_table_columns": ("get_table_columns", ("schema", "table")),
-    "create_staging_table_if_not_exists": (
-        "create_staging_table_if_not_exists", ("schema", "table", [("a", "INTEGER")]),
-    ),
     "bulk_insert": ("bulk_insert", ("schema", "table", [], ["a"])),
     # Optional for a provider, but dispatched exactly like the rest -- a
     # caller that did not ask for support first must still get a named
@@ -85,6 +81,8 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     # must be told which primitive is missing, by name.
     "quote_identifier": ("delete_all_rows", ("schema", "table")),
     "execute_statement": ("delete_all_rows", ("schema", "table")),
+    # The read DatabaseTable asks a catalog with (backlog 690).
+    "fetch_rows": ("fetch_rows", ("SELECT 1", {})),
 }
 
 
@@ -221,37 +219,40 @@ class TestSupportIsResolvedNotListed:
             assert not hasattr(postgres_utils, capability)
 
     def test_the_postgres_load_path_is_complete(self) -> None:
-        """The four the loader calls, in the order it calls them."""
-        from rey_lib.db import postgres_utils
+        """What a load reaches the provider for, now that the table owns its DDL.
 
-        for capability in (
-            "table_exists",
-            "get_table_columns",
-            "create_staging_table_if_not_exists",
-            "bulk_insert",
-        ):
-            assert hasattr(postgres_utils, capability)
-
-    def test_table_exists_is_answered_by_every_provider_that_can_load(self) -> None:
-        """Existence is a question the load path asks before anything else.
-
-        SQL Server answers it from its own information_schema rather than the
-        shared inspector, because its connection is raw pyodbc and the shared
-        inspector cannot see it -- and SQL Server is the provider the only
-        real loader config uses. A provider that cannot answer refuses by
-        name; it does not get a default.
+        The loader reads columns and inserts through the adapter; DatabaseTable
+        reaches the provider only through the primitives (backlog 690).
         """
         from rey_lib.db import postgres_utils
 
-        assert hasattr(postgres_utils, "table_exists")
-        assert "table_exists" in _PROVIDER_CONTRACT_CAPABILITIES
+        for capability in (
+            "get_table_columns",
+            "bulk_insert",
+            "quote_identifier",
+            "execute_statement",
+            "fetch_rows",
+        ):
+            assert hasattr(postgres_utils, capability)
+
+    def test_table_semantics_are_not_a_provider_capability(self) -> None:
+        """Existence and creation are DatabaseTable's, not the connector's (backlog 690).
+
+        A provider answers primitives -- it runs a read with named parameters
+        -- and the table decides what "exists" means and how it is created.
+        """
+        from rey_lib.db import postgres_utils
+
+        for moved in ("table_exists", "create_staging_table_if_not_exists"):
+            assert moved not in _PROVIDER_CONTRACT_CAPABILITIES
+            assert not hasattr(postgres_utils, moved)
 
 
 class TestEveryProviderHasThePrimitives:
     """Required, not optional: a gap fails here rather than in a load."""
 
     @pytest.mark.parametrize("provider", ["postgres", "mysql", "duckdb", "sqlserver"])
-    @pytest.mark.parametrize("primitive", ["quote_identifier", "execute_statement"])
+    @pytest.mark.parametrize("primitive", ["quote_identifier", "execute_statement", "fetch_rows"])
     def test_the_provider_module_defines_it(self, provider: str, primitive: str) -> None:
         """Read from the module source, so an absent driver cannot hide a gap."""
         import ast
