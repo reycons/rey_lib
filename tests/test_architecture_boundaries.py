@@ -326,3 +326,86 @@ def test_shared_data_contracts_name_no_implementation_family(violations) -> None
     ]
 
     assert offenders == []
+
+
+_DATABASE_RULE = "higher_layers_reach_the_database_through_canonical_objects"
+
+#: Every path the database rule allows, and why. Temporary entries name the
+#: backlog row that removes them; the list must equal the rule's
+#: allowed_path_globs exactly, so an exception cannot be added without a row
+#: and cannot outlive its removal unnoticed (backlog 754, gate 2).
+_DATABASE_ALLOWANCES = {
+    "rey_lib/db/*": "permanent: the primitive layer and the canonical database objects",
+    "rey_lib/repository_map/indexed_database_object.py":
+        "permanent: IndexedDatabaseObject is the canonical code_index.database_object",
+    "rey_lib/repository_map/bridge_index.py": "backlog 270/541: promotion CALLs via execute_sql",
+    "rey_lib/repository_map/code_index_database.py":
+        "backlog 270/541: promotion CALLs via execute_sql",
+    "rey_lib/repository_map/database_index.py": "backlog 270/541: promotion CALLs via execute_sql",
+    "rey_lib/load/load_operation.py": "backlog 757: QuerySource ownership undecided",
+    "rey_lib/load/source.py": "backlog 757: QuerySource ownership undecided",
+}
+
+
+def _database_rule():
+    """The database rule as this repository declares it."""
+    rules = load_scan_rules(RULES_PATH)
+    return rules, next(
+        rule for rule in rules.rules_for("architecture_rules") if rule.rule_id == _DATABASE_RULE
+    )
+
+
+def test_higher_layers_reach_the_database_through_canonical_objects(violations) -> None:
+    """No import, construction or primitive call of DBAdapter, and no provider
+    module, above the canonical objects (rules 82 and 83; backlog 754).
+
+    The canonical objects use DBAdapter; everything else uses them. The
+    allowances are the primitive layer, one canonical owner outside it, and
+    debt pinned to the rows that remove it.
+    """
+    offenders = [
+        f"{v.source_path}:{v.source_line} -> {v.callee}"
+        for v in violations
+        if v.rule_id == _DATABASE_RULE
+    ]
+
+    assert offenders == []
+
+
+def test_the_database_rule_allows_only_what_is_pinned() -> None:
+    """Shrink-only: adding an exception means naming its row here."""
+    _rules, rule = _database_rule()
+
+    assert sorted(rule.allowed_path_globs) == sorted(_DATABASE_ALLOWANCES)
+    for path, reason in _DATABASE_ALLOWANCES.items():
+        assert reason.startswith(("permanent: ", "backlog ")), path
+
+
+def test_the_database_rule_catches_a_bypass_and_spares_the_owners(tmp_path: Path) -> None:
+    """Not vacuous: a bypass in a higher layer is caught; the canonical
+    objects and an unrelated receiver are not."""
+    rules, _rule = _database_rule()
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from rey_lib.db.db_adapter import DBAdapter\n"
+        "from rey_lib.db import duckdb_utils\n"
+        "from rey_lib.db.database_objects import DatabaseTable\n"
+        "\n"
+        "def write(self, conn, identity, rows):\n"
+        "    self._adapter.bulk_insert(conn, 's', 't', rows, ['a'])\n"
+        "    DBAdapter().execute_sql(conn, 'SELECT 1', {}, 'no_return')\n"
+        "    duckdb_utils.get_connection()\n"
+        "    DatabaseTable.bulk_insert(conn, identity, rows, ['a'])\n"
+        "    self._registry.provider('x')\n",
+        encoding="utf-8",
+    )
+    references = extract_executable_references(probe, "Python", "rey_lib/load/probe.py")
+
+    caught = {
+        v.callee for v in check_architecture_boundaries(rules, references=references)
+        if v.rule_id == _DATABASE_RULE
+    }
+
+    assert {"self._adapter.bulk_insert", "DBAdapter", "duckdb_utils.get_connection"} <= caught
+    assert "rey_lib.db.db_adapter.DBAdapter" in caught
+    assert not {"DatabaseTable.bulk_insert", "self._registry.provider"} & caught

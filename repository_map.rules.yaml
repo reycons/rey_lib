@@ -202,6 +202,93 @@ architecture_rules:
     edge_kinds:
       - call
 
+  # Higher layers reach the database through the canonical objects, never
+  # around them (development rules 82 and 83; backlog 754, gate 2). DBAdapter
+  # owns provider dispatch and primitives and no database semantics: the
+  # canonical objects use it, and nothing above them does -- no import, no
+  # construction, no primitive call, and no provider module reached directly.
+  #
+  # IMPLEMENTATION LIMITATION, NOT THE RULE: a primitive call is recognised by
+  # a receiver named "*adapter" (self._adapter, adapter, _db_adapter, ...),
+  # because a reference target is a spelling, not a resolved method. The rule
+  # forbids the bypass whatever the variable is called; tighten this when the
+  # index can resolve a call to DBAdapter independent of the receiver's name.
+  #
+  # SHRINK-ONLY. Every allowed path is pinned in
+  # tests/test_architecture_boundaries.py to the backlog row that removes it,
+  # or to the reason it is permanent, and the two lists must be equal.
+  - rule_id: higher_layers_reach_the_database_through_canonical_objects
+    forbidden_target_globs:
+      - "*DBAdapter"
+      - "*postgres_utils"
+      - "*postgres_utils.*"
+      - "*duckdb_utils"
+      - "*duckdb_utils.*"
+      - "*mysql_utils"
+      - "*mysql_utils.*"
+      - "*sqlserver_utils"
+      - "*sqlserver_utils.*"
+      - "*adapter.bulk_insert"
+      - "*adapter.call_proc"
+      - "*adapter.call_proc_with_output"
+      - "*adapter.call_routine"
+      - "*adapter.constraint_catalog"
+      - "*adapter.constraint_native_definition"
+      - "*adapter.execute_page"
+      - "*adapter.execute_sql"
+      - "*adapter.execute_statement"
+      - "*adapter.execute_statements"
+      - "*adapter.fetch_dicts"
+      - "*adapter.fetch_rows"
+      - "*adapter.get_check_constraints"
+      - "*adapter.get_columns"
+      - "*adapter.get_connection"
+      - "*adapter.get_schema_metadata"
+      - "*adapter.get_table_columns"
+      - "*adapter.index_column_catalog"
+      - "*adapter.index_native_definition"
+      - "*adapter.insert_from_path"
+      - "*adapter.inspect_database_references"
+      - "*adapter.is_truncation_error"
+      - "*adapter.list_catalogs"
+      - "*adapter.list_database_objects"
+      - "*adapter.list_functions"
+      - "*adapter.list_procedures"
+      - "*adapter.list_schemas"
+      - "*adapter.list_tables"
+      - "*adapter.provider"
+      - "*adapter.query_rows"
+      - "*adapter.quote_identifier"
+      - "*adapter.routine_native_definition"
+      - "*adapter.run_sql"
+      - "*adapter.sequence_catalog"
+      - "*adapter.sequence_native_definition"
+      - "*adapter.supports"
+      - "*adapter.supports_provider_capability"
+      - "*adapter.table_column_catalog"
+      - "*adapter.table_exists"
+      - "*adapter.table_native_definition"
+      - "*adapter.trigger_native_definition"
+      - "*adapter.user_type_catalog"
+      - "*adapter.view_native_definition"
+    allowed_path_globs:
+      # Permanent: the primitive layer and the canonical database objects.
+      - "rey_lib/db/*"
+      # Permanent: IndexedDatabaseObject is the canonical code_index.database_object.
+      - "rey_lib/repository_map/indexed_database_object.py"
+      # Temporary, backlog 270/541: the promotion CALLs go through execute_sql.
+      - "rey_lib/repository_map/bridge_index.py"
+      - "rey_lib/repository_map/code_index_database.py"
+      - "rey_lib/repository_map/database_index.py"
+      # Temporary, backlog 757: QuerySource's ownership is undecided.
+      - "rey_lib/load/load_operation.py"
+      - "rey_lib/load/source.py"
+    scope_path_globs:
+      - "rey_lib/*"
+    edge_kinds:
+      - call
+      - import
+
   # A load is one operation between two data objects, and neither endpoint
   # family owns it. It lived under files/ for as long as the only thing ever
   # loaded was a file, which made that family privileged: a database source
