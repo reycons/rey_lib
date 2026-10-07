@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import AppError
 
@@ -311,13 +312,10 @@ def _vocabulary(adapter: Any, connection: Any) -> dict[str, frozenset[str]]:
     author. A copy in Python would be a second declaration free to drift from
     the one the data is actually built against.
     """
-    rows = adapter.execute_sql(
-        connection,
+    rows = DatabaseQuery(
         "SELECT population_kind, dimension "
         "FROM code.f_index_population_dimensions()",
-        {},
-        "dataset_result",
-    )
+    ).rows(connection, adapter)
     declared: dict[str, set[str]] = {}
     for row in rows:
         declared.setdefault(row["population_kind"], set()).add(row["dimension"])
@@ -373,7 +371,7 @@ def _measure(
     applied as given.
     """
     sql, params = _facet_sql(facet, filters)
-    rows = adapter.execute_sql(connection, sql, params, "dataset_result")
+    rows = DatabaseQuery(sql, params).rows(connection, adapter)
 
     if not rows:
         return FacetResult(
