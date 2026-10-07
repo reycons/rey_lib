@@ -144,13 +144,14 @@ class TestTheCommand:
     def _run(self, *args: str) -> int:
         return tester.main(["--config-path", "/cfg.yaml", "--connection", "example", *args])
 
-    def test_it_prints_status_headers_and_pretty_json(
-        self, wired: Any, capsys: pytest.CaptureFixture[str],
+    def test_it_reports_status_headers_and_pretty_json(
+        self, wired: Any, caplog: pytest.LogCaptureFixture,
     ) -> None:
+        caplog.set_level(logging.INFO)
         code = self._run("--method", "POST", "--query", "a=1", "--header", "X-Trace=t",
                          "--json", '{"k": "v"}', "mapping")
 
-        out = capsys.readouterr().out
+        out = "\n".join(r.getMessage() for r in caplog.records if r.name == tester.__name__)
         assert code == 0
         assert out.startswith("Status:  200 OK\nElapsed: ")
         assert "  content-type: application/json" in out
@@ -214,8 +215,8 @@ class TestTheCommand:
 
         self._run("--header", "X-Trace=h-secret", "x")
 
-        out = capsys.readouterr().out
+        out = capsys.readouterr()
         assert wired.seen[0].headers["X-API-KEY"] == _SECRET
-        for text in (out, *(r.getMessage() for r in caplog.records)):
+        for text in (out.out, out.err, *(r.getMessage() for r in caplog.records)):
             assert _SECRET not in text
             assert "h-secret" not in text

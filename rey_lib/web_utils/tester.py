@@ -18,8 +18,8 @@ Usage
                     [--header k=v ...] [--json TEXT | --body TEXT | --body-file PATH]
                     [--follow-redirects] [--timeout SECONDS] PATH_OR_URL
 
-Prints status, elapsed time, response headers and body. Request headers are
-never printed: the credential is added by the connection. The final URL after a
+Reports status, elapsed time, response headers and body through the logger.
+Request headers are never reported: the credential is added by the connection. The final URL after a
 redirect is not shown -- corehttp's public response reports the request's URL;
 an unfollowed 3xx shows its Location header instead.
 
@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,6 +151,20 @@ def _pairs(values: list[str], option: str) -> dict[str, str]:
     return pairs
 
 
+def _json_argument(text: Optional[str]) -> Any:
+    """The ``--json`` argument parsed, or None when it was not given.
+
+    Raises:
+        ConfigError: When the text is not one JSON document.
+    """
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise ConfigError("--json is not valid JSON.") from exc
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     """Build and parse the tester's arguments."""
     parser = argparse.ArgumentParser(
@@ -202,15 +215,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         query = _pairs(args.query, "--query")
         headers = _pairs(args.header, "--header")
-        json_body = json.loads(args.json_text) if args.json_text is not None else None
+        json_body = _json_argument(args.json_text)
         content: Optional[str] = args.body
         if args.body_file:
             from rey_lib.files.file_utils import read_text_file  # noqa: PLC0415
 
             content = read_text_file(args.body_file)
         connection = _connection(args.config_path, args.app, args.connection)
-    except (ConfigError, ValueError) as exc:
-        _logger.error("http tester: %s", exc)
+    except ConfigError as exc:
+        _logger.error("http tester: the request could not be prepared", exc_info=exc)
         return 2
     try:
         result = exchange(
@@ -219,8 +232,9 @@ def main(argv: list[str] | None = None) -> int:
             follow_redirects=args.follow_redirects, timeout_seconds=args.timeout,
         )
     except (ConfigError, HttpTransportError) as exc:
-        _logger.error("http tester: %s", exc)
+        _logger.error("http tester: the request was not answered", exc_info=exc)
         return 1
     # The connection is shared: runtime shutdown closes it, never a consumer.
-    sys.stdout.write(render(result))
+    # A manual tool's report is a log event, not product output (backlog 701).
+    _logger.info("%s", render(result))
     return 0
