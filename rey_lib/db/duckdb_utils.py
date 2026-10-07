@@ -1145,7 +1145,14 @@ def list_database_objects(
     conn: duckdb.DuckDBPyConnection,
     database: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return exportable DuckDB objects with discoverable dependencies."""
+    """Return exportable DuckDB objects with discoverable dependencies.
+
+    One catalog only -- ``database`` where given, else the connection's current
+    one (backlog 700). A DuckDB connection always sees several catalogs
+    (``memory`` or the file, ``system``, ``temp``, and anything attached), and
+    unfiltered every one of them answered: ``main`` was listed once per catalog
+    and the export refused the duplicates.
+    """
     db_name = database or get_current_database(conn)
 
     rows = conn.execute(
@@ -1153,7 +1160,8 @@ def list_database_objects(
         WITH objects AS (
             SELECT 'schema' AS object_type, schema_name AS schema_name, schema_name AS object_name
             FROM information_schema.schemata
-            WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
+            WHERE catalog_name = $catalog
+              AND schema_name NOT IN ('information_schema', 'pg_catalog')
 
             UNION ALL
 
@@ -1161,7 +1169,8 @@ def list_database_objects(
                    table_schema,
                    table_name
             FROM information_schema.tables
-            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+            WHERE table_catalog = $catalog
+              AND table_schema NOT IN ('information_schema', 'pg_catalog')
 
             UNION ALL
 
@@ -1169,12 +1178,14 @@ def list_database_objects(
             -- (backlog 697, folded into 695).
             SELECT 'sequence', schema_name, sequence_name
             FROM duckdb_sequences()
-            WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
+            WHERE database_name = $catalog
+              AND schema_name NOT IN ('information_schema', 'pg_catalog')
         )
         SELECT object_type, schema_name, object_name
         FROM objects
         ORDER BY object_type, schema_name, object_name
-        """
+        """,
+        {"catalog": db_name},
     ).fetchall()
 
     deps = _duckdb_dependencies(conn)
