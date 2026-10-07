@@ -15,6 +15,10 @@ what a load asks of the object it is reading.
 so nothing here resolves a connection config, opens a handle, or closes
 one. A load that writes to a different connection opens that one separately;
 neither end reaches for the other's.
+
+**Running the statement is DatabaseQuery's** (backlog 757): every read here is
+``DatabaseQuery.read``. What this object owns is what a load asks of a source
+-- its structure, whether it fits, and its rows.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.data.errors import DataStructureError
+from rey_lib.db.database_query import DatabaseQuery
 
 __all__ = ["QuerySource"]
 
@@ -39,23 +44,16 @@ class QuerySource:
         self,
         conn: Any,
         statement: str,
-        *,
-        adapter: Any,
     ) -> None:
-        """Hold the open connection, the statement, and the adapter to run it.
+        """Hold the open connection and the statement.
 
         Args:
             conn: An open connection, owned by the caller.
             statement: The query. Held as written -- nothing here parses it,
                 rewrites it, or decides what it means.
-            adapter: The ``DBAdapter`` every database operation goes through.
-                Injected rather than reached for, so this object has no
-                ambient state and a test substitutes one by passing it -- the
-                same reason ``DataLoader`` takes one.
         """
         self.conn = conn
         self.statement = str(statement)
-        self.adapter = adapter
 
     def source_structure(self) -> list[str]:
         """The columns this query returns, in the order it returns them.
@@ -76,10 +74,7 @@ class QuerySource:
                 into a structural failure -- a query that will not run is not
                 a query whose shape is wrong.
         """
-        columns, _rows = self.adapter.query_rows(
-            self.conn, self.statement, limit=_STRUCTURE_ROWS,
-        )
-        return list(columns)
+        return DatabaseQuery(self.statement).read(self.conn, limit=_STRUCTURE_ROWS).columns
 
     def read(self) -> list[dict[str, Any]]:
         """Every row this query returns, knowing nothing of any destination.
@@ -87,10 +82,7 @@ class QuerySource:
         ``limit=None``: a load must have all of its source, and naming a large
         bound instead would silently truncate the day the result outgrew it.
         """
-        _columns, rows = self.adapter.query_rows(
-            self.conn, self.statement, limit=None,
-        )
-        return list(rows)
+        return DatabaseQuery(self.statement).read(self.conn, limit=None).rows
 
     def sample(self, limit: int) -> list[dict[str, Any]]:
         """Some of the rows, for LOOKING AT rather than loading.
@@ -114,10 +106,7 @@ class QuerySource:
         """
         if limit <= 0:
             return []
-        _columns, rows = self.adapter.query_rows(
-            self.conn, self.statement, limit=limit,
-        )
-        return list(rows)
+        return DatabaseQuery(self.statement).read(self.conn, limit=limit).rows
 
     def validate(self, expected_columns: list[str] | None = None) -> None:
         """Refuse a query whose structure is not what it must be.

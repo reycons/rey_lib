@@ -1,17 +1,19 @@
-"""Running a caller's SQL, and the shape of what comes back (backlogs 730, 731).
+"""Running a caller's SQL, and the shape of what comes back (backlogs 730, 731, 757).
 
 ``DatabaseQuery`` owns the execution mechanics beneath a caller that owns its
 SQL, and nothing else. It holds no SQL of its own and knows nothing of what an
 answer means; the caller wrote the text and decides that. DBAdapter is the
 primitive beneath it.
 
-Three ways to run, one per need. ``rows`` binds the caller's parameters
+Four ways to run, one per need. ``rows`` binds the caller's parameters
 unchanged, runs in dataset mode and hands back plain dictionaries. ``run``
 executes the text exactly as supplied -- possibly a batch, a definition or a
-call -- for every result it produces; ``page`` reads it a page at a time. The
-text is never read, classified, bounded or rewritten, and a failure or a
-declination reaches the caller as raised. Parameters are valid only where they
-can be bound: ``run`` and ``page`` refuse them rather than drop them.
+call -- for every result it produces; ``page`` reads it a page at a time.
+``read`` runs one read and keeps its columns whether or not any row came back,
+bounded or not, on every provider that reads. The text is never read,
+classified, bounded or rewritten, and a failure or a declination reaches the
+caller as raised. Parameters are valid only where they can be bound: ``run``,
+``page`` and ``read`` refuse them rather than drop them.
 
 ``StatementResult`` and ``PageResult`` are the one shape of those answers. The
 providers build them; every caller reads them from here. ``json_value`` is the
@@ -112,11 +114,11 @@ class StatementResult:
 
 @dataclass(frozen=True)
 class DatabaseQuery:
-    """A caller's SQL, run in one of the three ways a caller needs.
+    """A caller's SQL, run in one of the four ways a caller needs.
 
     ``rows`` binds ``params`` by name, never interpolated, and passes them
-    through as the caller gave them. ``run`` and ``page`` execute the text
-    exactly as supplied, which binds nothing: they refuse a query carrying
+    through as the caller gave them. ``run``, ``page`` and ``read`` execute the
+    text exactly as supplied, which binds nothing: they refuse a query carrying
     parameters rather than run it without them.
     """
 
@@ -170,6 +172,31 @@ class DatabaseQuery:
             conn, self.statement, offset=offset, limit=limit,
             order_by=order_by, filters=filters,
         )
+
+    def read(
+        self, conn: Any, *, limit: int | None = None, adapter: Any = None,
+    ) -> StatementResult:
+        """Run one read and return its columns and its rows, in the order returned.
+
+        What ``rows`` cannot answer (backlog 757): the COLUMNS are kept even
+        when no row comes back, because a result states them whether or not it
+        has any; and the read can be BOUNDED, so learning a result's shape
+        costs one row and a sample costs its size.
+
+        ``limit=None`` is every row -- a different act from a large number,
+        which would silently truncate the day the result outgrew it.
+        ``limit=n`` stops after ``n``. Every provider that reads answers it.
+
+        Returns:
+            The one result, as the canonical ``StatementResult``. ``row_count``
+            is None: a read affects nothing, so there is no count to report.
+
+        Raises:
+            DatabaseError: If the query carries parameters, or execution fails.
+        """
+        self._unbound("read")
+        columns, rows = _adapter(adapter).query_rows(conn, self.statement, limit=limit)
+        return StatementResult(columns=list(columns), rows=list(rows))
 
     def _unbound(self, mode: str) -> None:
         """Refuse parameters a mode cannot bind, rather than run without them."""

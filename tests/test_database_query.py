@@ -1,4 +1,4 @@
-"""DatabaseQuery: execution mechanics only, in three modes (backlogs 730, 731).
+"""DatabaseQuery: execution mechanics only, in four modes (backlogs 730, 731, 757).
 
 Asserted against a recording adapter: the statement and parameters pass through
 once and unchanged, in dataset mode; rows come back as plain dictionaries; an
@@ -73,11 +73,11 @@ def test_it_is_frozen_and_each_query_has_its_own_parameters() -> None:
         first.statement = "SELECT 2"  # type: ignore[misc]
 
 
-def test_it_offers_rows_run_and_page_only_and_holds_no_sql() -> None:
+def test_it_offers_rows_run_page_and_read_only_and_holds_no_sql() -> None:
     public = {name for name in vars(DatabaseQuery) if not name.startswith("_")}
     code = Path(module.__file__).read_text(encoding="utf-8").split('"""', 2)[2]
 
-    assert public - {"statement", "params"} == {"rows", "run", "page"}
+    assert public - {"statement", "params"} == {"rows", "run", "page", "read"}
     for sql in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         assert sql not in code, sql
 
@@ -192,3 +192,66 @@ def test_json_value_has_one_implementation() -> None:
     ]
 
     assert [path.name for path in defined] == ["database_query.py"]
+
+
+class _Reader:
+    """Answers query_rows as a provider does, recording what was asked."""
+
+    def __init__(self, columns: list[str], rows: list[dict[str, Any]]) -> None:
+        self.columns, self.rows = columns, rows
+        self.asked: list[tuple[Any, str, int | None]] = []
+
+    def query_rows(self, conn: Any, text: str, *, limit: int | None = 1_000) -> tuple:
+        self.asked.append((conn, text, limit))
+        kept = self.rows if limit is None else self.rows[:limit]
+        return self.columns, kept
+
+
+class TestRead:
+    """One read, its columns kept and its rows bounded or not (backlog 757)."""
+
+    def test_the_columns_survive_an_empty_result(self) -> None:
+        answer = DatabaseQuery("SELECT a, b FROM t WHERE false").read(
+            object(), adapter=_Reader(["a", "b"], []),
+        )
+
+        assert answer == StatementResult(columns=["a", "b"], rows=[], row_count=None)
+
+    @pytest.mark.parametrize("limit, expected", [(None, 3), (2, 2), (1, 1)])
+    def test_none_is_every_row_and_n_stops_after_n(
+        self, limit: int | None, expected: int,
+    ) -> None:
+        reader, conn = _Reader(["k"], [{"k": 3}, {"k": 1}, {"k": 2}]), object()
+
+        answer = DatabaseQuery("SELECT k FROM t").read(conn, limit=limit, adapter=reader)
+
+        assert answer.rows == [{"k": 3}, {"k": 1}, {"k": 2}][:expected]  # order kept
+        assert reader.asked == [(conn, "SELECT k FROM t", limit)]
+
+    def test_it_is_the_canonical_result_record(self) -> None:
+        answer = DatabaseQuery("SELECT 1").read(object(), adapter=_Reader(["x"], [{"x": 1}]))
+
+        assert type(answer) is StatementResult
+
+    def test_parameters_it_cannot_bind_are_refused_before_anything_runs(self) -> None:
+        reader = _Reader(["a"], [])
+
+        with pytest.raises(DatabaseError, match=r"DatabaseQuery.read .*\['a'\]"):
+            DatabaseQuery("SELECT :a", {"a": 1}).read(object(), adapter=reader)
+        assert reader.asked == []
+
+    def test_a_real_engine_answers_through_the_provider_fallback(self) -> None:
+        """DuckDB reads through the DB-API path query_rows keeps for it."""
+        import duckdb
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("CREATE TABLE t (a INTEGER, b VARCHAR)")
+        conn.execute("INSERT INTO t VALUES (2, 'y'), (1, 'x')")
+
+        empty = DatabaseQuery("SELECT a, b FROM t WHERE a > 9").read(conn)
+        one = DatabaseQuery("SELECT a, b FROM t ORDER BY a").read(conn, limit=1)
+        every = DatabaseQuery("SELECT a, b FROM t ORDER BY a").read(conn)
+
+        assert (empty.columns, empty.rows) == (["a", "b"], [])
+        assert one.rows == [{"a": 1, "b": "x"}]
+        assert every.rows == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]

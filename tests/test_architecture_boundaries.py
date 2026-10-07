@@ -342,8 +342,6 @@ _DATABASE_ALLOWANCES = {
     "rey_lib/repository_map/code_index_database.py":
         "backlog 270/541: promotion CALLs via execute_sql",
     "rey_lib/repository_map/database_index.py": "backlog 270/541: promotion CALLs via execute_sql",
-    "rey_lib/load/load_operation.py": "backlog 757: QuerySource ownership undecided",
-    "rey_lib/load/source.py": "backlog 757: QuerySource ownership undecided",
 }
 
 

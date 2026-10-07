@@ -21,9 +21,9 @@ from rey_lib.db.query_source import QuerySource
 class _Adapter:
     """Records what the source asked for, and answers it.
 
-    Substituted rather than mocked: the source is constructed WITH its
-    adapter, so what it asks the database is observable without patching
-    anything.
+    Stands where DatabaseQuery resolves its primitive: the source holds no
+    adapter (backlog 757), so what it asks the database is observed beneath
+    DatabaseQuery.read.
     """
 
     def __init__(
@@ -45,8 +45,28 @@ class _Adapter:
         return self.columns, list(self.rows[:limit])
 
 
+#: The primitive DatabaseQuery resolves while a test runs.
+_PRIMITIVE: dict[str, Any] = {}
+
+
+@pytest.fixture(autouse=True)
+def _primitive_beneath_the_query(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Resolve DatabaseQuery's primitive to the test's double, where it set one."""
+    from rey_lib.db import database_query
+
+    real = database_query._adapter
+    monkeypatch.setattr(
+        database_query, "_adapter",
+        lambda given: _PRIMITIVE["adapter"] if "adapter" in _PRIMITIVE else real(given),
+    )
+    yield
+    _PRIMITIVE.clear()
+
+
 def _source(adapter: _Adapter, statement: str = "SELECT a, b FROM t") -> QuerySource:
-    return QuerySource(object(), statement, adapter=adapter)
+    """A QuerySource whose reads reach ``adapter`` beneath DatabaseQuery."""
+    _PRIMITIVE["adapter"] = adapter
+    return QuerySource(object(), statement)
 
 
 class TestWhatItReads:
@@ -234,18 +254,12 @@ class TestAgainstARealEngine:
 
     @staticmethod
     def _source(conn, rows: int) -> QuerySource:
-        from rey_lib.db.db_adapter import DBAdapter
-
         conn.execute("CREATE OR REPLACE TABLE records (id INTEGER, name VARCHAR)")
         conn.execute(
             "INSERT INTO records "
             f"SELECT i, 'name-' || i FROM range({rows}) AS t(i)"
         )
-        return QuerySource(
-            conn,
-            "SELECT id, name FROM records ORDER BY id",
-            adapter=DBAdapter(),
-        )
+        return QuerySource(conn, "SELECT id, name FROM records ORDER BY id")
 
     def test_the_structure_is_read_from_the_engine(self, engine) -> None:
         assert self._source(engine, 3).source_structure() == ["id", "name"]

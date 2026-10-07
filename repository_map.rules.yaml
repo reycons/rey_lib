@@ -280,9 +280,6 @@ architecture_rules:
       - "rey_lib/repository_map/bridge_index.py"
       - "rey_lib/repository_map/code_index_database.py"
       - "rey_lib/repository_map/database_index.py"
-      # Temporary, backlog 757: QuerySource's ownership is undecided.
-      - "rey_lib/load/load_operation.py"
-      - "rey_lib/load/source.py"
     scope_path_globs:
       - "rey_lib/*"
     edge_kinds:

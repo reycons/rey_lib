@@ -63,7 +63,7 @@ def _describe(value: Any) -> Any:
     if isinstance(value, DataFile):
         return (type(value).__name__, str(value.path), value.encoding)
     if isinstance(value, QuerySource):
-        return ("QuerySource", value.conn, value.statement, value.adapter)
+        return ("QuerySource", value.conn, value.statement)
     if isinstance(value, DatabaseObjectIdentity):
         return value
     if hasattr(value, "create_destination"):

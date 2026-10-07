@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from rey_lib.db.connection import shared_connection
-from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.data_file import data_file_for
@@ -289,20 +288,18 @@ class Source:
         ctx: Any,
         *,
         reader: Optional[SourceContextReader] = None,
-        adapter: Optional[Any] = None,
     ) -> DataFile | QuerySource:
         """The resolved object the selected configuration reads through.
 
         Built by the existing resolvers and handed back, never kept: the
-        connection, the adapter and the reader are this call's, and so is what
-        they produce.
+        connection and the reader are this call's, and so is what they
+        produce. A query runs through DatabaseQuery (backlog 757), so no
+        adapter is chosen here.
 
         Args:
             ctx: The runtime context, for the configured connections.
             reader: Whatever answers the source-context contract. Needed only
                 for a manifest source.
-            adapter: The database adapter a query reads through. A plain
-                ``DBAdapter`` where none is given.
 
         Returns:
             A ``DataFile`` for a file or a governed file; a ``QuerySource`` for a
@@ -325,10 +322,10 @@ class Source:
                 str(held["file"]), file_type=str(held.get("file-type") or ""),
             )
         if kind == "database":
-            return self._query(ctx, held["source-connection"], str(held["statement"]), adapter)
+            return self._query(ctx, held["source-connection"], str(held["statement"]))
         if kind == "sql_file":
             return self._query(
-                ctx, held["source-connection"], _statement_in(held["sql-file"]), adapter,
+                ctx, held["source-connection"], _statement_in(held["sql-file"]),
             )
         # manifest
         if reader is None:
@@ -352,13 +349,9 @@ class Source:
         return sum(name in kind.fields for kind in SOURCE_KINDS)
 
     @staticmethod
-    def _query(ctx: Any, connection: Any, statement: str, adapter: Any) -> QuerySource:
+    def _query(ctx: Any, connection: Any, statement: str) -> QuerySource:
         """A QuerySource on one configured connection, as the load builds one."""
-        return QuerySource(
-            shared_connection(ctx, str(connection)).handle(),
-            statement,
-            adapter=adapter if adapter is not None else DBAdapter(),
-        )
+        return QuerySource(shared_connection(ctx, str(connection)).handle(), statement)
 
 
 def _statement_in(path_text: Any) -> str:

@@ -31,7 +31,6 @@ from typing import Any
 
 import pytest
 
-from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.query_source import QuerySource
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
@@ -74,7 +73,7 @@ def engine():
 
 
 def _query(engine, statement: str = "SELECT a, b FROM orders ORDER BY a"):
-    return QuerySource(engine, statement, adapter=DBAdapter())
+    return QuerySource(engine, statement)
 
 
 def _load(run_log, source: Any, target: Any, **kwargs) -> int:

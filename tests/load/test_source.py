@@ -153,16 +153,14 @@ class TestResolution:
     def test_a_query_resolves_to_a_query_source_on_its_connection(
         self, connections: list[str],
     ) -> None:
-        adapter = object()
         resolved = Source(
             {"source-connection": "warehouse", "statement": "select 1"},
             selected="database",
-        ).resolve(SimpleNamespace(), adapter=adapter)
+        ).resolve(SimpleNamespace())
 
         assert isinstance(resolved, QuerySource)
-        assert (resolved.conn, resolved.statement, resolved.adapter) == (
-            "handle:warehouse", "select 1", adapter,
-        )
+        assert (resolved.conn, resolved.statement) == ("handle:warehouse", "select 1")
+        assert not hasattr(resolved, "adapter")  # it reads through DatabaseQuery (757)
         assert connections == ["warehouse"]
 
     def test_a_sql_file_is_read_into_one_query_source(
@@ -214,6 +212,6 @@ class TestResolution:
         source = Source({"source-connection": "w", "statement": "select 1"})
         before = dict(vars(source))
 
-        source.resolve(SimpleNamespace(), adapter=object())
+        source.resolve(SimpleNamespace())
 
         assert vars(source) == before

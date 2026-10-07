@@ -80,11 +80,9 @@ def run_selected_load(
             f"source into a {target.selected_kind()} target."
         )
 
-    # EACH OBJECT RESOLVES ITSELF. The read adapter is the one the load paths
-    # read through, so a query reads exactly as it always has.
-    resolved_source = source.resolve(
-        ctx, reader=reader, adapter=load_operation._read_adapter,
-    )
+    # EACH OBJECT RESOLVES ITSELF. A query reads through DatabaseQuery, exactly
+    # as the load paths read it (backlog 757).
+    resolved_source = source.resolve(ctx, reader=reader)
     if isinstance(resolved_source, DataFile) and source.selected_kind() == "file":
         # A named file that is not there is a mistyped path, refused before any
         # destination is touched.
@@ -167,7 +165,7 @@ def source_columns(
     """
     if source.validate():
         return []
-    resolved = source.resolve(ctx, reader=reader, adapter=load_operation._read_adapter)
+    resolved = source.resolve(ctx, reader=reader)
     return list(resolved.source_structure())
 
 
@@ -210,7 +208,7 @@ def preview_selected(
         raise ConfigError(
             f"Transform ({transform.selected_kind()}) is missing: {', '.join(missing)}."
         )
-    resolved = source.resolve(ctx, reader=reader, adapter=load_operation._read_adapter)
+    resolved = source.resolve(ctx, reader=reader)
     built = transform.resolve(ctx)
     # ONE MORE THAN ASKED FOR, which is how "there is more" is established.
     sampled = resolved.sample(limit + 1)

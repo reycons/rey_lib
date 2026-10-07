@@ -27,7 +27,6 @@ import pytest
 
 from rey_lib.data.errors import DataStructureError
 from rey_lib.db.database_objects import DatabaseObjectIdentity
-from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.query_source import QuerySource
 from rey_lib.load import load_operation
 from tests.support.connector_double import ConnectorPrimitives
@@ -43,12 +42,12 @@ _TARGET = DatabaseObjectIdentity(
 class _Destination(ConnectorPrimitives):
     """The WRITE adapter, recording what the load hands it.
 
-    **It has no ``query_rows`` deliberately.** There are two adapter roles --
-    a read adapter the source owns, over the source connection, and a write
-    adapter the destination mechanic uses, over the target's -- and giving
-    this one a read method would assert a sharing that the contract does not
-    have. The source reads through its own, over a real DuckDB, because the
-    point is that a real result set crosses the boundary.
+    **It has no ``query_rows`` deliberately.** The source reads through
+    DatabaseQuery over the source connection (backlog 757) and the destination
+    is written through DatabaseTable over the target's -- and giving this one a
+    read method would assert a sharing that the contract does not have. The
+    source reads a real DuckDB, because the point is that a real result set
+    crosses the boundary.
     """
 
     def __init__(self, columns: list[str]) -> None:
@@ -127,7 +126,7 @@ def _load(monkeypatch, run_log, source: Any, destination: _Destination) -> int:
 
 
 def _source(engine, statement: str = "SELECT a, b FROM orders ORDER BY a"):
-    return QuerySource(engine, statement, adapter=DBAdapter())
+    return QuerySource(engine, statement)
 
 
 class TestADatabaseSourceCrossesTheBoundary:

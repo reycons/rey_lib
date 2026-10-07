@@ -65,7 +65,6 @@ from rey_lib.db.database_objects import (
     DatabaseTable,
     schema_and_table,
 )
-from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
 from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
@@ -106,10 +105,9 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# The READ adapter a QuerySource is handed, over the source connection. The
-# write side has none: a destination is written through DataLoader, which
-# reaches the database only through DatabaseTable (backlog 751).
-_read_adapter = DBAdapter()
+# NO ADAPTER HERE. A destination is written through DataLoader, which reaches
+# the database only through DatabaseTable (backlog 751); a query source reads
+# through DatabaseQuery (backlog 757).
 
 # Matches {ctx.attr} and {data_source.attr} tokens in LLM prompt templates.
 _PROMPT_TOKEN_RE = re.compile(r"\{(ctx|data_source)\.([^}]+)\}")
@@ -666,10 +664,6 @@ def load_query_to_table(
     source = QuerySource(
         shared_connection(ctx, source_connection).handle(),
         statement,
-        # ITS OWN READ ADAPTER. Not the loader's: a source reads on the source
-        # connection, and which provider answers there has nothing to do with
-        # where the rows are going.
-        adapter=_read_adapter,
     )
 
     return _load_one_file(
@@ -739,11 +733,6 @@ def load_query_to_file(
     source = QuerySource(
         shared_connection(ctx, source_connection).handle(),
         statement,
-        # ITS OWN READ ADAPTER, exactly as the table sibling's is. Which
-        # provider answers on the source connection has nothing to do with
-        # where the rows are going -- and here there is no provider at the
-        # other end at all.
-        adapter=_read_adapter,
     )
 
     return _load_one_file(
