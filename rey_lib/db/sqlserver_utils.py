@@ -67,7 +67,6 @@ __all__ = [
     "get_connection",
     "get_current_database",
     "list_database_objects",
-    "get_object_ddl",
     "execute",
     "fetch",
     "bulk_insert",
@@ -692,6 +691,197 @@ def get_routine_definition(
 	return str(definition)
 
 
+def user_type_catalog(conn: pyodbc.Connection, schema: str, name: str) -> dict[str, Any]:
+	"""One user-defined type as SQL Server's catalog states it.
+
+	A metadata primitive: what the server says, not DDL. An alias type's base
+	is spelled the way SQL Server declares it, parameters included. A table or
+	CLR type is reported by that kind. Empty when there is no such type.
+
+	Returns:
+		``{"kind", "base_type", "default", "not_null", "labels"}``.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT base.name AS base_name, t.max_length AS max_length, t.precision AS precision, "
+		"t.scale AS scale, t.is_table_type AS is_table_type, t.is_assembly_type AS is_assembly_type "
+		"FROM sys.types t "
+		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
+		"LEFT JOIN sys.types base ON base.user_type_id = t.system_type_id "
+		"WHERE s.name = :schema AND t.name = :name AND t.is_user_defined = 1",
+		{"schema": schema, "name": name},
+	)
+	if not rows:
+		return {}
+	row = rows[0]
+	if row["is_table_type"]:
+		kind, base_type = "table", ""
+	elif row["is_assembly_type"]:
+		kind, base_type = "clr", ""
+	else:
+		kind = "alias"
+		base_type = _sqlserver_column_type(
+			row["base_name"], row["max_length"], row["precision"], row["scale"],
+		)
+	return {"kind": kind, "base_type": base_type, "default": None, "not_null": False, "labels": []}
+
+
+def sequence_catalog(conn: pyodbc.Connection, schema: str, name: str) -> dict[str, Any]:
+	"""One sequence as SQL Server's catalog states it.
+
+	A metadata primitive: what the server says, not DDL. Empty when there is
+	no such sequence.
+
+	Returns:
+		``{"start", "increment", "minimum", "maximum", "cycle"}``.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT seq.start_value AS start_value, seq.increment AS increment, "
+		"seq.minimum_value AS minimum_value, seq.maximum_value AS maximum_value, "
+		"seq.is_cycling AS is_cycling "
+		"FROM sys.sequences seq JOIN sys.schemas s ON s.schema_id = seq.schema_id "
+		"WHERE s.name = :schema AND seq.name = :name",
+		{"schema": schema, "name": name},
+	)
+	if not rows:
+		return {}
+	row = rows[0]
+	return {
+		"start": row["start_value"], "increment": row["increment"],
+		"minimum": row["minimum_value"], "maximum": row["maximum_value"],
+		"cycle": bool(row["is_cycling"]),
+	}
+
+
+def trigger_native_definition(
+	conn: pyodbc.Connection, schema: str, table: str, name: str,
+) -> str:
+	"""One trigger's CREATE TRIGGER statement as SQL Server itself stores it.
+
+	A metadata primitive: ``OBJECT_DEFINITION``, retrieved by the trigger's
+	table and name -- never by a handle a caller carries, and never composed
+	here. Empty when the table has no such trigger.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT OBJECT_DEFINITION(tr.object_id) AS definition FROM sys.triggers tr "
+		"JOIN sys.objects p ON p.object_id = tr.parent_id "
+		"JOIN sys.schemas s ON s.schema_id = p.schema_id "
+		"WHERE s.name = :schema AND p.name = :table AND tr.name = :name",
+		{"schema": schema, "table": table, "name": name},
+	)
+	return str((rows[0] if rows else {}).get("definition") or "")
+
+
+# SQL Server's constraint object types, in Rey's words.
+_CONSTRAINT_KIND: dict[str, str] = {
+	"PK": "primary_key", "F": "foreign_key", "UQ": "unique", "C": "check", "D": "default",
+}
+
+
+def constraint_catalog(
+	conn: pyodbc.Connection, schema: str, table: str, name: str,
+) -> dict[str, Any]:
+	"""One constraint on one table as SQL Server's catalog states it.
+
+	A metadata primitive: what the server says, not DDL. Columns and the
+	columns they reference in key order. Empty when the table has no such
+	constraint.
+
+	Returns:
+		``{"kind", "columns", "referenced_schema", "referenced_table",
+		"referenced_columns", "check"}``.
+	"""
+	found = fetch_rows(
+		conn,
+		"SELECT o.object_id AS object_id, o.type AS type FROM sys.objects o "
+		"JOIN sys.tables t ON t.object_id = o.parent_object_id "
+		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
+		"WHERE s.name = :schema AND t.name = :table AND o.name = :name",
+		{"schema": schema, "table": table, "name": name},
+	)
+	if not found:
+		return {}
+	object_id = found[0]["object_id"]
+	kind = _CONSTRAINT_KIND.get(str(found[0]["type"]).strip(), str(found[0]["type"]).strip())
+	catalog: dict[str, Any] = {
+		"kind": kind, "columns": [], "referenced_schema": "", "referenced_table": "",
+		"referenced_columns": [], "check": None,
+	}
+	if kind in ("primary_key", "unique"):
+		catalog["columns"] = [str(row["column_name"]) for row in fetch_rows(
+			conn,
+			"SELECT c.name AS column_name FROM sys.key_constraints k "
+			"JOIN sys.index_columns ic ON ic.object_id = k.parent_object_id "
+			"AND ic.index_id = k.unique_index_id "
+			"JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+			"WHERE k.object_id = :object_id ORDER BY ic.key_ordinal",
+			{"object_id": object_id},
+		)]
+	elif kind == "foreign_key":
+		keys = fetch_rows(
+			conn,
+			"SELECT pc.name AS column_name, rs.name AS referenced_schema, "
+			"rt.name AS referenced_table, rc.name AS referenced_column "
+			"FROM sys.foreign_key_columns fkc "
+			"JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id "
+			"AND pc.column_id = fkc.parent_column_id "
+			"JOIN sys.tables rt ON rt.object_id = fkc.referenced_object_id "
+			"JOIN sys.schemas rs ON rs.schema_id = rt.schema_id "
+			"JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id "
+			"AND rc.column_id = fkc.referenced_column_id "
+			"WHERE fkc.constraint_object_id = :object_id ORDER BY fkc.constraint_column_id",
+			{"object_id": object_id},
+		)
+		if keys:
+			catalog["columns"] = [str(row["column_name"]) for row in keys]
+			catalog["referenced_schema"] = str(keys[0]["referenced_schema"])
+			catalog["referenced_table"] = str(keys[0]["referenced_table"])
+			catalog["referenced_columns"] = [str(row["referenced_column"]) for row in keys]
+	elif kind == "check":
+		clauses = fetch_rows(
+			conn,
+			"SELECT definition AS check_clause FROM sys.check_constraints "
+			"WHERE object_id = :object_id",
+			{"object_id": object_id},
+		)
+		catalog["check"] = clauses[0]["check_clause"] if clauses else None
+	return catalog
+
+
+def index_column_catalog(
+	conn: pyodbc.Connection, schema: str, table: str, index: str,
+) -> dict[str, Any]:
+	"""One index on one table as SQL Server's catalog states it.
+
+	A metadata primitive: what the server says, not DDL. Columns in key order.
+	Empty when the table has no such index.
+
+	Returns:
+		``{"unique", "primary", "columns"}``.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT i.is_unique AS is_unique, i.is_primary_key AS is_primary, c.name AS column_name "
+		"FROM sys.indexes i "
+		"JOIN sys.tables t ON t.object_id = i.object_id "
+		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
+		"JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+		"JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+		"WHERE s.name = :schema AND t.name = :table AND i.name = :index "
+		"ORDER BY ic.key_ordinal",
+		{"schema": schema, "table": table, "index": index},
+	)
+	if not rows:
+		return {}
+	return {
+		"unique": bool(rows[0]["is_unique"]),
+		"primary": bool(rows[0]["is_primary"]),
+		"columns": [str(row["column_name"]) for row in rows],
+	}
+
+
 def load_sql(name: str) -> str:
     """
     Return the preloaded SQL string for a named query.
@@ -1077,36 +1267,56 @@ def list_database_objects(
                         WHEN 'UQ' THEN 'constraint'
                         WHEN 'F' THEN 'constraint'
                         WHEN 'C' THEN 'constraint'
-                        WHEN 'D' THEN 'constraint'
                         ELSE NULL
                     END AS object_type,
                     s.name AS schema_name,
                     o.name AS object_name,
-                    o.object_id
+                    o.object_id,
+                    -- A constraint or trigger names its table; a constraint its
+                    -- Rey kind (backlog 695).
+                    CASE WHEN o.type IN ('PK', 'UQ', 'F', 'C', 'TR')
+                        THEN OBJECT_NAME(o.parent_object_id) END AS table_name,
+                    CASE o.type
+                        WHEN 'PK' THEN 'primary_key'
+                        WHEN 'UQ' THEN 'unique'
+                        WHEN 'F' THEN 'foreign_key'
+                        WHEN 'C' THEN 'check'
+                    END AS constraint_kind
                 FROM sys.objects o
                 JOIN sys.schemas s ON s.schema_id = o.schema_id
                 WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
-                    AND o.type IN ('U', 'V', 'P', 'FN', 'TF', 'IF', 'TR', 'SO', 'PK', 'UQ', 'F', 'C', 'D')
+                    -- 'D', a column default, is part of its table's DDL and not
+                    -- exported as an object of its own (backlog 695).
+                    AND o.type IN ('U', 'V', 'P', 'FN', 'TF', 'IF', 'TR', 'SO', 'PK', 'UQ', 'F', 'C')
 
                 UNION ALL
 
-                SELECT 'index', s.name, i.name, i.object_id
+                SELECT 'index', s.name, i.name, i.object_id, t.name, NULL
                 FROM sys.indexes i
                 JOIN sys.tables t ON t.object_id = i.object_id
                 JOIN sys.schemas s ON s.schema_id = t.schema_id
                 WHERE i.name IS NOT NULL
                     AND i.type > 0
+                    -- A primary key's or unique constraint's backing index is
+                    -- that constraint, listed as such; not an index of its own
+                    -- (backlog 695).
+                    AND i.is_primary_key = 0
+                    AND i.is_unique_constraint = 0
                     AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
 
                 UNION ALL
 
-                SELECT 'type', s.name, t.name, NULL
+                SELECT 'type', s.name, t.name, NULL, NULL, NULL
                 FROM sys.types t
                 JOIN sys.schemas s ON s.schema_id = t.schema_id
                 WHERE t.is_user_defined = 1
+                    -- Alias types only: a table or CLR type is not a kind
+                    -- DatabaseUserDefinedType represents (backlog 695).
+                    AND t.is_table_type = 0
+                    AND t.is_assembly_type = 0
                     AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
             )
-            SELECT object_type, schema_name, object_name, object_id
+            SELECT object_type, schema_name, object_name, object_id, table_name, constraint_kind
             FROM objs
             WHERE object_type IS NOT NULL
             ORDER BY object_type, schema_name, object_name
@@ -1132,96 +1342,12 @@ def list_database_objects(
                 "schema": schema_name,
                 "name": object_name,
                 "object_id": object_id,
+                **({"table": str(row[4])} if row[4] is not None else {}),
+                **({"kind": str(row[5])} if row[5] is not None else {}),
                 "dependencies": deps.get(key, []),
             }
         )
     return objects
-
-
-def get_object_ddl(conn: pyodbc.Connection, obj: dict[str, Any]) -> str:
-    """Return native SQL Server DDL for one export object."""
-    object_type = str(obj.get("object_type", "")).lower().rstrip("s")
-    schema = str(obj.get("schema", "dbo"))
-    name = str(obj.get("name", ""))
-    object_id = obj.get("object_id")
-
-    if object_type == "schema":
-        return (
-            f"IF SCHEMA_ID(N'{schema}') IS NULL EXEC('CREATE SCHEMA [{schema}]');"
-        )
-
-    cursor = conn.cursor()
-    try:
-        if object_type in ("function", "trigger", "constraint") and object_id is not None:
-            cursor.execute("SELECT OBJECT_DEFINITION(?)", [object_id])
-            row = cursor.fetchone()
-            ddl = row[0] if row else None
-            if ddl:
-                return str(ddl).rstrip() + "\nGO"
-
-        if object_type == "sequence":
-            cursor.execute(
-                """
-                SELECT start_value, increment, minimum_value, maximum_value, is_cycling
-                FROM sys.sequences seq
-                JOIN sys.schemas s ON s.schema_id = seq.schema_id
-                WHERE s.name = ? AND seq.name = ?
-                """,
-                [schema, name],
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"sqlserver_utils: sequence not found: {schema}.{name}")
-            cycle_sql = "CYCLE" if bool(row[4]) else "NO CYCLE"
-            return (
-                f"CREATE SEQUENCE [{schema}].[{name}] "
-                f"START WITH {row[0]} INCREMENT BY {row[1]} "
-                f"MINVALUE {row[2]} MAXVALUE {row[3]} {cycle_sql};\nGO"
-            )
-
-        if object_type == "index":
-            cursor.execute(
-                """
-                SELECT t.name, i.is_unique,
-                    STRING_AGG(QUOTENAME(c.name), ', ') WITHIN GROUP (ORDER BY ic.key_ordinal)
-                FROM sys.indexes i
-                JOIN sys.tables t ON t.object_id = i.object_id
-                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-                JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-                WHERE s.name = ? AND i.name = ?
-                GROUP BY t.name, i.is_unique
-                """,
-                [schema, name],
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"sqlserver_utils: index not found: {schema}.{name}")
-            unique_sql = "UNIQUE " if bool(row[1]) else ""
-            return (
-                f"CREATE {unique_sql}INDEX [{name}] ON [{schema}].[{row[0]}] ({row[2]});\nGO"
-            )
-
-        if object_type == "type":
-            cursor.execute(
-                """
-                SELECT base.name, t.max_length, t.precision, t.scale
-                FROM sys.types t
-                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                JOIN sys.types base ON base.user_type_id = t.system_type_id
-                WHERE s.name = ? AND t.name = ?
-                """,
-                [schema, name],
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"sqlserver_utils: type not found: {schema}.{name}")
-            type_sql = _sqlserver_column_type(row[0], row[1], row[2], row[3])
-            return f"CREATE TYPE [{schema}].[{name}] FROM {type_sql};\nGO"
-
-        return f"-- Unsupported SQL Server object type '{object_type}' for [{schema}].[{name}]"
-    finally:
-        cursor.close()
 
 
 def _sqlserver_column_type(type_name: str, max_len: int, precision: int, scale: int) -> str:

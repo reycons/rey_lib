@@ -47,7 +47,6 @@ __all__ = [
     "get_connection",
     "get_current_database",
     "list_database_objects",
-    "get_object_ddl",
     "execute",
     "fetch",
     "run_sql",
@@ -795,6 +794,23 @@ def table_native_definition(
     return str(rows[0]["sql"]) if rows else ""
 
 
+def sequence_native_definition(
+    conn: duckdb.DuckDBPyConnection, schema: str, name: str,
+) -> str:
+    """The CREATE SEQUENCE statement DuckDB's catalog holds for one sequence.
+
+    A metadata primitive: the server's own definition, retrieved from
+    ``duckdb_sequences()`` -- never composed here. Empty when there is none.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT sql FROM duckdb_sequences() "
+        "WHERE schema_name = :schema AND sequence_name = :name",
+        {"schema": schema, "name": name},
+    )
+    return str(rows[0]["sql"]) if rows else ""
+
+
 def file_source_expression(file_path: Path | str) -> str:
     """Return the DuckDB source expression that reads ``file_path``.
 
@@ -1007,9 +1023,11 @@ def list_database_objects(
 
             UNION ALL
 
-            SELECT 'sequence', sequence_schema, sequence_name
-            FROM information_schema.sequences
-            WHERE sequence_schema NOT IN ('information_schema', 'pg_catalog')
+            -- duckdb_sequences(): DuckDB has no information_schema.sequences
+            -- (backlog 697, folded into 695).
+            SELECT 'sequence', schema_name, sequence_name
+            FROM duckdb_sequences()
+            WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
         )
         SELECT object_type, schema_name, object_name
         FROM objects
@@ -1032,35 +1050,6 @@ def list_database_objects(
             }
         )
     return result
-
-
-def get_object_ddl(conn: duckdb.DuckDBPyConnection, obj: dict[str, Any]) -> str:
-    """Return native DuckDB DDL for one object."""
-    object_type = str(obj.get("object_type", "")).lower().rstrip("s")
-    schema = str(obj.get("schema", "main"))
-    name = str(obj.get("name", ""))
-
-    if object_type == "schema":
-        return f'CREATE SCHEMA IF NOT EXISTS "{schema}";'
-
-    if object_type == "sequence":
-        row = conn.execute(
-            """
-            SELECT start_value, increment, min_value, max_value, cycle
-            FROM information_schema.sequences
-            WHERE sequence_schema = ? AND sequence_name = ?
-            """,
-            [schema, name],
-        ).fetchone()
-        if not row:
-            raise DatabaseError(f"duckdb_utils: sequence not found: {schema}.{name}")
-        cycle_sql = "CYCLE" if bool(row[4]) else "NO CYCLE"
-        return (
-            f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."{name}" '
-            f'START {row[0]} INCREMENT {row[1]} MINVALUE {row[2]} MAXVALUE {row[3]} {cycle_sql};'
-        )
-
-    return f"-- Unsupported DuckDB object type '{object_type}' for {schema}.{name}."
 
 
 def _duckdb_dependencies(conn: duckdb.DuckDBPyConnection) -> dict[str, list[dict[str, str]]]:

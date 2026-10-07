@@ -47,7 +47,6 @@ __all__ = [
     "get_connection",
     "get_current_database",
     "list_database_objects",
-    "get_object_ddl",
     "render_and_execute",
     "query_rows",
     "is_truncation_error",
@@ -869,7 +868,14 @@ def _list_table_indexes(
             FROM pg_indexes i
             JOIN pg_class c ON c.relname = i.indexname
             JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = i.schemaname
-            WHERE i.schemaname = %s AND i.tablename = %s
+            JOIN pg_index x ON x.indexrelid = c.oid
+            -- A primary key's or unique constraint's backing index is that
+            -- constraint, listed as such; it is not exported as an index of its
+            -- own (backlog 695).
+            WHERE i.schemaname = %s AND i.tablename = %s AND NOT x.indisprimary
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_constraint k WHERE k.conindid = c.oid AND k.contype = 'u'
+                )
             ORDER BY i.indexname
             """,
             [schema, table],
@@ -884,6 +890,7 @@ def _list_table_indexes(
             "object_type": "indexes",
             "schema": str(schema_name),
             "name": str(index_name),
+            "table": str(table),
             "object_oid": int(index_oid) if index_oid is not None else None,
             "dependencies": [dict(dependency)],
         }
@@ -900,7 +907,7 @@ def _list_table_constraints(
     try:
         cursor.execute(
             """
-            SELECT n.nspname, con.conname
+            SELECT n.nspname, con.conname, con.contype
             FROM pg_constraint con
             JOIN pg_class c ON c.oid = con.conrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -919,10 +926,12 @@ def _list_table_constraints(
             "object_type": "constraints",
             "schema": str(schema_name),
             "name": str(constraint_name),
+            "table": str(table),
+            "kind": _CONSTRAINT_KIND.get(str(contype), str(contype)),
             "object_oid": None,
             "dependencies": [dict(dependency)],
         }
-        for schema_name, constraint_name in rows
+        for schema_name, constraint_name, contype in rows
     ]
 
 
@@ -951,7 +960,8 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
                     AND t.typtype IN ('e', 'd')
                 UNION ALL
-                SELECT 'sequences'::text, s.sequence_schema, s.sequence_schema || '.' || s.sequence_name, NULL::oid
+                -- Schema and plain name: a sequence's identity (backlog 695).
+                SELECT 'sequences'::text, s.sequence_schema, s.sequence_name, NULL::oid
                 FROM information_schema.sequences s
                 WHERE s.sequence_schema NOT IN ('pg_catalog', 'information_schema')
                 UNION ALL
@@ -976,13 +986,20 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                 JOIN pg_trigger tr ON tr.tgname = t.trigger_name
                 JOIN pg_class c ON c.oid = tr.tgrelid
                 JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.event_object_schema
+                -- A trigger name is unique only within its table (backlog 695).
+                    AND c.relname = t.event_object_table
                 WHERE t.trigger_schema NOT IN ('pg_catalog', 'information_schema')
                     AND NOT tr.tgisinternal
             )
             SELECT object_type, schema_name, object_name, object_oid,
                    CASE WHEN object_type IN ('functions', 'procedures')
                         THEN pg_get_function_identity_arguments(object_oid)
-                   END AS signature
+                   END AS signature,
+                   CASE WHEN object_type = 'triggers'
+                        THEN (SELECT c.relname FROM pg_trigger tr
+                              JOIN pg_class c ON c.oid = tr.tgrelid
+                              WHERE tr.oid = object_oid)
+                   END AS table_name
             FROM base
             ORDER BY object_type, schema_name, object_name
             """
@@ -992,7 +1009,7 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
         cursor.close()
 
     objects: list[dict[str, Any]] = []
-    for object_type, schema_name, object_name, object_oid, signature in rows:
+    for object_type, schema_name, object_name, object_oid, signature, table_name in rows:
         oid = int(object_oid) if object_oid is not None else None
         dependencies = _postgres_dependencies(
             conn,
@@ -1012,6 +1029,8 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                 # Rey identity (DatabaseRoutineIdentity), so an overload is
                 # addressed without the provider's oid (backlog 695).
                 "signature": str(signature) if signature is not None else "",
+                # A trigger's table: with schema and name, its identity (695).
+                **({"table": str(table_name)} if table_name is not None else {}),
                 "dependencies": dependencies,
             }
         )
@@ -1238,90 +1257,6 @@ def get_routine_definition(
             f"{schema}.{name}({signature})"
         )
     return str(rows[0][0]).rstrip() + ";"
-
-
-def get_object_ddl(conn: Any, obj: dict[str, Any]) -> str:
-    """Return provider-native PostgreSQL DDL for one object."""
-    object_type = str(obj["object_type"])
-    schema = str(obj["schema"])
-    name = str(obj["name"])
-    oid = obj.get("object_oid")
-    cursor = conn.cursor()
-    try:
-        if object_type == "schemas":
-            return f'CREATE SCHEMA IF NOT EXISTS "{schema}";'
-
-        if object_type == "types":
-            return _postgres_type_ddl(conn, schema, name)
-
-        if object_type == "sequences":
-            seq_name = name.split(".", 1)[-1]
-            cursor.execute(
-                """
-                SELECT start_value, increment_by, minimum_value, maximum_value, cycle_option
-                FROM information_schema.sequences
-                WHERE sequence_schema = %s AND sequence_name = %s
-                """,
-                [schema, seq_name],
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"postgres_utils: sequence not found: {schema}.{seq_name}")
-            return (
-                f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."{seq_name}" '\
-                f'START WITH {row[0]} INCREMENT BY {row[1]} MINVALUE {row[2]} MAXVALUE {row[3]} '\
-                f"{'CYCLE' if str(row[4]).upper() == 'YES' else 'NO CYCLE'};"
-            )
-
-        if object_type == "functions":
-            if oid is None:
-                raise DatabaseError(f"postgres_utils: routine oid missing for {schema}.{name}")
-            cursor.execute("SELECT pg_get_functiondef(%s::oid)", [oid])
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"postgres_utils: routine not found for oid {oid}")
-            return str(row[0]).rstrip() + ";"
-
-        if object_type == "triggers":
-            if oid is None:
-                raise DatabaseError(f"postgres_utils: trigger oid missing for {schema}.{name}")
-            cursor.execute("SELECT pg_get_triggerdef(%s::oid, true)", [oid])
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"postgres_utils: trigger not found for oid {oid}")
-            return str(row[0]).rstrip() + ";"
-
-        if object_type == "indexes":
-            if oid is None:
-                raise DatabaseError(f"postgres_utils: index oid missing for {schema}.{name}")
-            cursor.execute("SELECT pg_get_indexdef(%s::oid)", [oid])
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"postgres_utils: index not found for oid {oid}")
-            return str(row[0]).rstrip() + ";"
-
-        if object_type == "constraints":
-            cursor.execute(
-                """
-                SELECT ns.nspname, cls.relname, con.conname, pg_get_constraintdef(con.oid, true)
-                FROM pg_constraint con
-                JOIN pg_class cls ON cls.oid = con.conrelid
-                JOIN pg_namespace ns ON ns.oid = cls.relnamespace
-                WHERE con.conname = %s AND con.connamespace = (
-                    SELECT oid FROM pg_namespace WHERE nspname = %s LIMIT 1
-                )
-                LIMIT 1
-                """,
-                [name, schema],
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise DatabaseError(f"postgres_utils: constraint not found: {schema}.{name}")
-            return f'ALTER TABLE "{row[0]}"."{row[1]}" ADD CONSTRAINT "{row[2]}" {row[3]};'
-
-        raise DatabaseError(f"postgres_utils: unsupported export object type '{object_type}'.")
-    finally:
-        cursor.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2151,54 +2086,6 @@ def get_column_ddl(conn: Any, schema: str, table: str, column: str) -> str:
     return f'"{row[0]}" {row[1]}{default} {nullable}'
 
 
-def _postgres_type_ddl(conn: Any, schema: str, type_name: str) -> str:
-    """Build CREATE TYPE DDL for enums/domains."""
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT t.typtype, format_type(t.typbasetype, t.typtypmod), t.typnotnull,
-                   pg_get_expr(t.typdefaultbin, 0)
-            FROM pg_type t
-            JOIN pg_namespace n ON n.oid = t.typnamespace
-            WHERE n.nspname = %s AND t.typname = %s
-            """,
-            [schema, type_name],
-        )
-        row = cursor.fetchone()
-        if not row:
-            raise DatabaseError(f"postgres_utils: type not found: {schema}.{type_name}")
-
-        typtype = str(row[0])
-        if typtype == "e":
-            cursor.execute(
-                """
-                SELECT enumlabel
-                FROM pg_enum e
-                JOIN pg_type t ON t.oid = e.enumtypid
-                JOIN pg_namespace n ON n.oid = t.typnamespace
-                WHERE n.nspname = %s AND t.typname = %s
-                ORDER BY enumsortorder
-                """,
-                [schema, type_name],
-            )
-            labels = ["'" + str(r[0]).replace("'", "''") + "'" for r in cursor.fetchall()]
-            return f'CREATE TYPE "{schema}"."{type_name}" AS ENUM ({", ".join(labels)});'
-
-        if typtype == "d":
-            base_type = str(row[1])
-            not_null = " NOT NULL" if bool(row[2]) else ""
-            default_expr = f" DEFAULT {row[3]}" if row[3] is not None else ""
-            return (
-                f'CREATE DOMAIN "{schema}"."{type_name}" AS {base_type}'
-                f"{default_expr}{not_null};"
-            )
-
-        return f"-- Unsupported PostgreSQL type kind '{typtype}' for {schema}.{type_name}."
-    finally:
-        cursor.close()
-
-
 # ---------------------------------------------------------------------------
 # Paging
 #
@@ -2326,6 +2213,223 @@ def table_column_catalog(conn: Any, schema: str, table: str) -> list[dict[str, A
          "default": row["default_value"], "nullable": bool(row["nullable"])}
         for row in rows
     ]
+
+
+# PostgreSQL's constraint kinds, in Rey's words. Any other is carried as its
+# own letter: it has no Rey owner beyond DatabaseConstraint's native form.
+_CONSTRAINT_KIND: dict[str, str] = {
+    "p": "primary_key", "f": "foreign_key", "u": "unique", "c": "check", "x": "exclusion",
+}
+
+
+def constraint_catalog(conn: Any, schema: str, table: str, name: str) -> dict[str, Any]:
+    """One constraint on one table as PostgreSQL's catalog states it.
+
+    A metadata primitive: what the server says, not DDL. Columns and the
+    columns they reference in key order. Empty when the table has no such
+    constraint.
+
+    Returns:
+        ``{"kind", "columns", "referenced_schema", "referenced_table",
+        "referenced_columns", "check"}``.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT con.contype AS contype, a.attname AS column_name, "
+        "rn.nspname AS referenced_schema, rt.relname AS referenced_table, "
+        "ra.attname AS referenced_column, pg_get_expr(con.conbin, con.conrelid) AS check_clause "
+        "FROM pg_constraint con "
+        "JOIN pg_class tbl ON tbl.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = tbl.relnamespace "
+        "LEFT JOIN LATERAL unnest(con.conkey, con.confkey) "
+        "WITH ORDINALITY AS k(attnum, fattnum, ord) ON true "
+        "LEFT JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum "
+        "LEFT JOIN pg_class rt ON rt.oid = con.confrelid "
+        "LEFT JOIN pg_namespace rn ON rn.oid = rt.relnamespace "
+        "LEFT JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.fattnum "
+        "WHERE n.nspname = :schema AND tbl.relname = :table AND con.conname = :name "
+        "ORDER BY k.ord",
+        {"schema": schema, "table": table, "name": name},
+    )
+    if not rows:
+        return {}
+    first = rows[0]
+    return {
+        "kind": _CONSTRAINT_KIND.get(str(first["contype"]), str(first["contype"])),
+        "columns": [str(row["column_name"]) for row in rows if row["column_name"] is not None],
+        "referenced_schema": str(first["referenced_schema"] or ""),
+        "referenced_table": str(first["referenced_table"] or ""),
+        "referenced_columns": [
+            str(row["referenced_column"]) for row in rows if row["referenced_column"] is not None
+        ],
+        "check": first["check_clause"],
+    }
+
+
+# PostgreSQL's user-defined type kinds this lists, in Rey's words.
+_USER_TYPE_KIND: dict[str, str] = {"e": "enum", "d": "domain"}
+
+
+def user_type_catalog(conn: Any, schema: str, name: str) -> dict[str, Any]:
+    """One enum or domain as PostgreSQL's catalog states it.
+
+    A metadata primitive: what the server says, not DDL. A domain's base type
+    is ``format_type`` of it, modifiers included; an enum's labels are in
+    their sort order. Empty when there is no such type.
+
+    Returns:
+        ``{"kind", "base_type", "default", "not_null", "labels"}``.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT t.typtype AS typtype, format_type(t.typbasetype, t.typtypmod) AS base_type, "
+        "t.typnotnull AS not_null, pg_get_expr(t.typdefaultbin, 0) AS default_value "
+        "FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace "
+        "WHERE n.nspname = :schema AND t.typname = :name",
+        {"schema": schema, "name": name},
+    )
+    if not rows:
+        return {}
+    row = rows[0]
+    typtype = str(row["typtype"])
+    labels: list[str] = []
+    if typtype == "e":
+        labels = [str(label["enumlabel"]) for label in fetch_rows(
+            conn,
+            "SELECT e.enumlabel AS enumlabel FROM pg_enum e "
+            "JOIN pg_type t ON t.oid = e.enumtypid "
+            "JOIN pg_namespace n ON n.oid = t.typnamespace "
+            "WHERE n.nspname = :schema AND t.typname = :name ORDER BY e.enumsortorder",
+            {"schema": schema, "name": name},
+        )]
+    return {
+        "kind": _USER_TYPE_KIND.get(typtype, typtype),
+        "base_type": str(row["base_type"]),
+        "default": row["default_value"],
+        "not_null": bool(row["not_null"]),
+        "labels": labels,
+    }
+
+
+def sequence_catalog(conn: Any, schema: str, name: str) -> dict[str, Any]:
+    """One sequence as PostgreSQL's catalog states it.
+
+    A metadata primitive: what the server says, not DDL. Empty when there is
+    no such sequence.
+
+    Returns:
+        ``{"start", "increment", "minimum", "maximum", "cycle"}``.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT start_value AS start_value, increment AS increment, "
+        "minimum_value AS minimum_value, maximum_value AS maximum_value, "
+        "cycle_option AS cycle_option "
+        "FROM information_schema.sequences "
+        "WHERE sequence_schema = :schema AND sequence_name = :name",
+        {"schema": schema, "name": name},
+    )
+    if not rows:
+        return {}
+    row = rows[0]
+    return {
+        "start": row["start_value"], "increment": row["increment"],
+        "minimum": row["minimum_value"], "maximum": row["maximum_value"],
+        "cycle": str(row["cycle_option"]).upper() == "YES",
+    }
+
+
+def trigger_native_definition(conn: Any, schema: str, table: str, name: str) -> str:
+    """One trigger's CREATE TRIGGER statement as PostgreSQL itself reports it.
+
+    A metadata primitive: ``pg_get_triggerdef``, retrieved by schema, table
+    and trigger name -- never by a handle a caller carries, and never
+    composed here. Empty when the table has no such trigger.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT pg_get_triggerdef(tr.oid, true) AS definition "
+        "FROM pg_trigger tr "
+        "JOIN pg_class c ON c.oid = tr.tgrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = :schema AND c.relname = :table AND tr.tgname = :name "
+        "AND NOT tr.tgisinternal",
+        {"schema": schema, "table": table, "name": name},
+    )
+    return str((rows[0] if rows else {}).get("definition") or "")
+
+
+def constraint_native_definition(conn: Any, schema: str, table: str, name: str) -> str:
+    """One constraint's definition as PostgreSQL itself reports it.
+
+    A metadata primitive: ``pg_get_constraintdef`` -- the clause after ADD
+    CONSTRAINT <name>, actions and deferrability included -- retrieved by
+    schema, table and constraint name, never composed here. Empty when there
+    is none.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT pg_get_constraintdef(con.oid, true) AS definition "
+        "FROM pg_constraint con "
+        "JOIN pg_class tbl ON tbl.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = tbl.relnamespace "
+        "WHERE n.nspname = :schema AND tbl.relname = :table AND con.conname = :name",
+        {"schema": schema, "table": table, "name": name},
+    )
+    return str((rows[0] if rows else {}).get("definition") or "")
+
+
+def index_column_catalog(conn: Any, schema: str, table: str, index: str) -> dict[str, Any]:
+    """One index on one table as PostgreSQL's catalog states it.
+
+    A metadata primitive: what the server says, not DDL. Key columns in key
+    order; an expression key has no column name and is left out. Empty when
+    the table has no such index.
+
+    Returns:
+        ``{"unique", "primary", "columns"}``.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT x.indisunique AS is_unique, x.indisprimary AS is_primary, a.attname AS column_name "
+        "FROM pg_index x "
+        "JOIN pg_class idx ON idx.oid = x.indexrelid "
+        "JOIN pg_class tbl ON tbl.oid = x.indrelid "
+        "JOIN pg_namespace n ON n.oid = tbl.relnamespace "
+        "LEFT JOIN LATERAL unnest(x.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) "
+        "ON k.ord <= x.indnkeyatts "
+        "LEFT JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum "
+        "WHERE n.nspname = :schema AND tbl.relname = :table AND idx.relname = :index "
+        "ORDER BY k.ord",
+        {"schema": schema, "table": table, "index": index},
+    )
+    if not rows:
+        return {}
+    return {
+        "unique": bool(rows[0]["is_unique"]),
+        "primary": bool(rows[0]["is_primary"]),
+        "columns": [str(row["column_name"]) for row in rows if row["column_name"] is not None],
+    }
+
+
+def index_native_definition(conn: Any, schema: str, table: str, index: str) -> str:
+    """The CREATE INDEX statement PostgreSQL itself reports for one index.
+
+    A metadata primitive: ``pg_get_indexdef``, retrieved by schema, table and
+    index name -- never by a handle a caller carries, and never composed here.
+    Empty when there is none.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT pg_get_indexdef(x.indexrelid) AS definition "
+        "FROM pg_index x "
+        "JOIN pg_class idx ON idx.oid = x.indexrelid "
+        "JOIN pg_class tbl ON tbl.oid = x.indrelid "
+        "JOIN pg_namespace n ON n.oid = tbl.relnamespace "
+        "WHERE n.nspname = :schema AND tbl.relname = :table AND idx.relname = :index",
+        {"schema": schema, "table": table, "index": index},
+    )
+    return str((rows[0] if rows else {}).get("definition") or "")
 
 
 def _validated_page(offset: int, limit: int) -> tuple[int, int]:

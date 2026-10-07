@@ -26,7 +26,6 @@ __all__ = [
 	"get_connection",
 	"get_current_database",
 	"list_database_objects",
-	"get_object_ddl",
 	"fetch_dicts",
 	"bulk_insert",
 	"call_proc",
@@ -264,6 +263,113 @@ def table_native_definition(conn: Any, schema: str, table: str) -> str:
 	return str((rows[0] if rows else {}).get("Create Table") or "")
 
 
+def trigger_native_definition(conn: Any, schema: str, table: str, name: str) -> str:
+	"""One trigger's CREATE TRIGGER statement as MySQL itself reports it.
+
+	A metadata primitive: ``SHOW CREATE TRIGGER``, retrieved -- never composed
+	here -- once the catalog confirms the trigger fires on ``table``. Empty
+	when the table has no such trigger.
+	"""
+	found = fetch_rows(
+		conn,
+		"SELECT 1 AS present FROM information_schema.triggers "
+		"WHERE trigger_schema = :schema AND event_object_table = :table AND trigger_name = :name",
+		{"schema": schema, "table": table, "name": name},
+	)
+	if not found:
+		return ""
+	rows = fetch_rows(
+		conn, f"SHOW CREATE TRIGGER {quote_identifier(schema)}.{quote_identifier(name)}", {},
+	)
+	row = rows[0] if rows else {}
+	return str(row.get("SQL Original Statement") or row.get("Create Trigger") or "")
+
+
+# MySQL's constraint types, in Rey's words.
+_CONSTRAINT_KIND: dict[str, str] = {
+	"PRIMARY KEY": "primary_key", "FOREIGN KEY": "foreign_key", "UNIQUE": "unique", "CHECK": "check",
+}
+
+
+def constraint_catalog(conn: Any, schema: str, table: str, name: str) -> dict[str, Any]:
+	"""One constraint on one table as MySQL's catalog states it.
+
+	A metadata primitive: what the server says, not DDL. Columns and the
+	columns they reference in key order. Empty when the table has no such
+	constraint.
+
+	Returns:
+		``{"kind", "columns", "referenced_schema", "referenced_table",
+		"referenced_columns", "check"}``.
+	"""
+	params = {"schema": schema, "table": table, "name": name}
+	found = fetch_rows(
+		conn,
+		"SELECT constraint_type AS constraint_type FROM information_schema.table_constraints "
+		"WHERE constraint_schema = :schema AND table_name = :table AND constraint_name = :name",
+		params,
+	)
+	if not found:
+		return {}
+	kind = str(found[0]["constraint_type"]).upper()
+	keys = fetch_rows(
+		conn,
+		"SELECT column_name AS column_name, referenced_table_schema AS referenced_schema, "
+		"referenced_table_name AS referenced_table, referenced_column_name AS referenced_column "
+		"FROM information_schema.key_column_usage "
+		"WHERE constraint_schema = :schema AND table_name = :table AND constraint_name = :name "
+		"ORDER BY ordinal_position",
+		params,
+	)
+	check = None
+	if kind == "CHECK":
+		clauses = fetch_rows(
+			conn,
+			"SELECT check_clause AS check_clause FROM information_schema.check_constraints "
+			"WHERE constraint_schema = :schema AND constraint_name = :name",
+			{"schema": schema, "name": name},
+		)
+		check = clauses[0]["check_clause"] if clauses else None
+	first = keys[0] if keys else {}
+	return {
+		"kind": _CONSTRAINT_KIND.get(kind, kind.lower()),
+		"columns": [str(row["column_name"]) for row in keys if row["column_name"] is not None],
+		"referenced_schema": str(first.get("referenced_schema") or ""),
+		"referenced_table": str(first.get("referenced_table") or ""),
+		"referenced_columns": [
+			str(row["referenced_column"]) for row in keys if row["referenced_column"] is not None
+		],
+		"check": check,
+	}
+
+
+def index_column_catalog(conn: Any, schema: str, table: str, index: str) -> dict[str, Any]:
+	"""One index on one table as MySQL's catalog states it.
+
+	A metadata primitive: what the server says, not DDL. Columns in key order.
+	MySQL names a primary key's index PRIMARY. Empty when the table has no
+	such index.
+
+	Returns:
+		``{"unique", "primary", "columns"}``.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT non_unique AS non_unique, column_name AS column_name "
+		"FROM information_schema.statistics "
+		"WHERE table_schema = :schema AND table_name = :table AND index_name = :index "
+		"ORDER BY seq_in_index",
+		{"schema": schema, "table": table, "index": index},
+	)
+	if not rows:
+		return {}
+	return {
+		"unique": int(rows[0]["non_unique"]) == 0,
+		"primary": index == "PRIMARY",
+		"columns": [str(row["column_name"]) for row in rows if row["column_name"] is not None],
+	}
+
+
 def load_sql(name: str) -> str:
 	_require_init()
 
@@ -433,13 +539,14 @@ def list_database_objects(
 						"object_type": "index",
 						"schema": db_name,
 						"name": name,
+						"table": table_name,
 						"dependencies": [dict(dependency)],
 					}
 				)
-		constraints = [table_metadata["primary_key"]]
-		constraints.extend(table_metadata["foreign_keys"])
-		constraints.extend(table_metadata["unique_constraints"])
-		for constraint in constraints:
+		constraints = [("primary_key", table_metadata["primary_key"])]
+		constraints.extend(("foreign_key", entry) for entry in table_metadata["foreign_keys"])
+		constraints.extend(("unique", entry) for entry in table_metadata["unique_constraints"])
+		for kind, constraint in constraints:
 			name = str(constraint.get("name") or "")
 			if name:
 				objects.append(
@@ -448,6 +555,8 @@ def list_database_objects(
 						"object_type": "constraint",
 						"schema": db_name,
 						"name": name,
+						"table": table_name,
+						"kind": kind,
 						"dependencies": [dict(dependency)],
 					}
 				)
@@ -468,10 +577,10 @@ def list_database_objects(
 		cursor.execute(
 			"""
 			SELECT CASE routine_type WHEN 'PROCEDURE' THEN 'procedure' ELSE 'function' END AS object_type,
-				routine_schema AS schema_name, routine_name AS object_name
+				routine_schema AS schema_name, routine_name AS object_name, NULL AS table_name
 			FROM information_schema.routines WHERE routine_schema = %s
 			UNION ALL
-			SELECT 'trigger', trigger_schema, trigger_name
+			SELECT 'trigger', trigger_schema, trigger_name, event_object_table
 			FROM information_schema.triggers WHERE trigger_schema = %s
 			""",
 			[db_name, db_name],
@@ -483,6 +592,8 @@ def list_database_objects(
 					"object_type": str(row["object_type"]),
 					"schema": str(row["schema_name"]),
 					"name": str(row["object_name"]),
+					# A trigger's table: with schema and name, its identity (695).
+					**({"table": str(row["table_name"])} if row["table_name"] is not None else {}),
 					"dependencies": [],
 				}
 			)
@@ -581,102 +692,6 @@ def get_routine_definition(
 			f"mysql_utils: {kind} not found: {target_schema}.{name}"
 		)
 	return str(definition).rstrip() + ";"
-
-
-def get_object_ddl(
-	conn: mysql.connector.MySQLConnection,
-	obj: dict[str, Any],
-) -> str:
-	"""Return native MySQL DDL for one object."""
-	object_type = str(obj.get("object_type", "")).lower().rstrip("s")
-	schema = str(obj.get("schema", ""))
-	name = str(obj.get("name", ""))
-	cursor = conn.cursor(dictionary=True)
-	try:
-		if object_type == "schema":
-			return f"CREATE SCHEMA IF NOT EXISTS `{schema}`;"
-
-		if object_type == "function":
-			cursor.execute(f"SHOW CREATE {object_type.upper()} `{schema}`.`{name}`")
-			row = cursor.fetchone() or {}
-			ddl = row.get("Create Function") or ""
-			return str(ddl).rstrip() + ";"
-
-		if object_type == "trigger":
-			cursor.execute(f"SHOW CREATE TRIGGER `{schema}`.`{name}`")
-			row = cursor.fetchone() or {}
-			ddl = row.get("SQL Original Statement") or row.get("Create Trigger") or ""
-			return str(ddl).rstrip() + ";"
-
-		if object_type == "index":
-			cursor.execute(
-				"""
-				SELECT table_name, non_unique,
-					GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ', ') AS columns,
-					index_type
-				FROM information_schema.statistics
-				WHERE table_schema = %s AND index_name = %s
-				GROUP BY table_name, non_unique, index_type
-				LIMIT 1
-				""",
-				[schema, name],
-			)
-			row = cursor.fetchone()
-			if not row:
-				raise DatabaseError(f"mysql_utils: index not found: {schema}.{name}")
-			table_name = row["table_name"]
-			non_unique = int(row["non_unique"])
-			cols = str(row["columns"])
-			prefix = "UNIQUE " if non_unique == 0 and name != "PRIMARY" else ""
-			if name == "PRIMARY":
-				return f"ALTER TABLE `{schema}`.`{table_name}` ADD PRIMARY KEY ({cols});"
-			return f"CREATE {prefix}INDEX `{name}` ON `{schema}`.`{table_name}` ({cols});"
-
-		if object_type == "constraint":
-			cursor.execute(
-				"""
-				SELECT tc.table_name, tc.constraint_type,
-					GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position SEPARATOR ', ') AS columns,
-					rc.referenced_table_name,
-					GROUP_CONCAT(kcu.referenced_column_name ORDER BY kcu.ordinal_position SEPARATOR ', ') AS ref_columns
-				FROM information_schema.table_constraints tc
-				LEFT JOIN information_schema.key_column_usage kcu
-					ON tc.constraint_schema = kcu.constraint_schema
-					AND tc.constraint_name = kcu.constraint_name
-					AND tc.table_name = kcu.table_name
-				LEFT JOIN information_schema.referential_constraints rc
-					ON tc.constraint_schema = rc.constraint_schema
-					AND tc.constraint_name = rc.constraint_name
-				WHERE tc.constraint_schema = %s
-					AND tc.constraint_name = %s
-				GROUP BY tc.table_name, tc.constraint_type, rc.referenced_table_name
-				LIMIT 1
-				""",
-				[schema, name],
-			)
-			row = cursor.fetchone()
-			if not row:
-				raise DatabaseError(f"mysql_utils: constraint not found: {schema}.{name}")
-			table_name = row["table_name"]
-			constraint_type = str(row["constraint_type"]).upper()
-			cols = row.get("columns") or ""
-			if constraint_type == "PRIMARY KEY":
-				return f"ALTER TABLE `{schema}`.`{table_name}` ADD PRIMARY KEY ({cols});"
-			if constraint_type == "UNIQUE":
-				return f"ALTER TABLE `{schema}`.`{table_name}` ADD CONSTRAINT `{name}` UNIQUE ({cols});"
-			if constraint_type == "FOREIGN KEY":
-				ref_table = row.get("referenced_table_name")
-				ref_cols = row.get("ref_columns") or ""
-				return (
-					f"ALTER TABLE `{schema}`.`{table_name}` "
-					f"ADD CONSTRAINT `{name}` FOREIGN KEY ({cols}) "
-					f"REFERENCES `{schema}`.`{ref_table}` ({ref_cols});"
-				)
-			return f"-- Unsupported MySQL constraint type {constraint_type} for `{schema}`.`{name}`."
-
-		return f"-- Unsupported MySQL object type '{object_type}' for `{schema}`.`{name}`."
-	finally:
-		cursor.close()
 
 
 def _mysql_dependencies(

@@ -41,7 +41,10 @@ __all__ = [
     "DatabaseProcedure",
     "DatabaseRoutineIdentity",
     "DatabaseSchema",
+    "DatabaseSequence",
     "DatabaseTable",
+    "DatabaseTrigger",
+    "DatabaseUserDefinedType",
     "DatabaseView",
 ]
 
@@ -129,6 +132,24 @@ class DatabasePrimaryKey:
     columns: tuple[str, ...] = ()
     ddl: str = ""
 
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+    ) -> str:
+        """This primary key's own standalone DDL (backlog 695).
+
+        Addressed by the table it belongs to and its own name -- never by a
+        provider handle. Standalone: ALTER TABLE ... ADD CONSTRAINT. Where the
+        table's own CREATE TABLE already creates it, that is the table's.
+
+        Raises:
+            DatabaseError: If there is no such constraint, or it is not a primary key.
+            UnsupportedDatabaseCapabilityError: If the provider answers neither.
+        """
+        return _constraint_ddl(
+            cls.__name__, lambda kind: kind == "primary_key", conn, table, name, adapter,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "columns": list(self.columns), "ddl": self.ddl}
 
@@ -148,6 +169,24 @@ class DatabaseForeignKey:
     referenced_table: str = ""
     referenced_columns: tuple[str, ...] = ()
     ddl: str = ""
+
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+    ) -> str:
+        """This foreign key's own standalone DDL (backlog 695).
+
+        Addressed by the table it belongs to and its own name -- never by a
+        provider handle. Standalone: ALTER TABLE ... ADD CONSTRAINT. Where the
+        table's own CREATE TABLE already creates it, that is the table's.
+
+        Raises:
+            DatabaseError: If there is no such constraint, or it is not a foreign key.
+            UnsupportedDatabaseCapabilityError: If the provider answers neither.
+        """
+        return _constraint_ddl(
+            cls.__name__, lambda kind: kind == "foreign_key", conn, table, name, adapter,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +208,49 @@ class DatabaseIndex:
     unique: bool = False
     ddl: str = ""
 
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+    ) -> str:
+        """This index's own DDL (backlog 695).
+
+        An index is addressed by the table it belongs to and its own name --
+        never by a provider handle. Where the database supplies its own
+        definition (PostgreSQL) that definition IS the DDL; elsewhere the index
+        composes CREATE [UNIQUE] INDEX from the key columns its catalog states.
+        Ordinary and unique indexes only: a primary key's backing index is the
+        primary key, whose DDL is DatabasePrimaryKey's, and is refused here.
+
+        Raises:
+            DatabaseError: If there is no such index, or it backs the primary key.
+            UnsupportedDatabaseCapabilityError: If the provider answers neither.
+        """
+        adapter = adapter or _adapter()
+        where = f"{table.schema}.{table.name}.{name}"
+        catalog = adapter.index_column_catalog(conn, table.schema, table.name, name)
+        if not catalog:
+            raise DatabaseError(f"index not found: {where}")
+        if catalog["primary"]:
+            raise DatabaseError(
+                f"index {where} backs the primary key; its DDL is DatabasePrimaryKey's"
+            )
+        provider = adapter.provider(conn)
+        if provider in _NATIVE_INDEX_DEFINITION:
+            definition = adapter.index_native_definition(
+                conn, table.schema, table.name, name,
+            ).rstrip()
+            if not definition:
+                raise DatabaseError(f"index not found: {where}")
+            return definition if definition.endswith(";") else definition + ";"
+        quote = adapter.quote_identifier
+        columns = ", ".join(quote(conn, column) for column in catalog["columns"])
+        unique = "UNIQUE " if catalog["unique"] else ""
+        return (
+            f"CREATE {unique}INDEX {quote(conn, name)} "
+            f"ON {quote(conn, table.schema)}.{quote(conn, table.name)} ({columns});"
+            + _BATCH_END.get(provider, "")
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -187,6 +269,25 @@ class DatabaseConstraint:
     kind: str = ""
     ddl: str = ""
 
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+    ) -> str:
+        """This unique or check constraint's own standalone DDL (backlog 695).
+
+        Addressed by the table it belongs to and its own name -- never by a
+        provider handle. Standalone: ALTER TABLE ... ADD CONSTRAINT. Where the
+        table's own CREATE TABLE already creates it, that is the table's.
+
+        Raises:
+            DatabaseError: If there is no such constraint, or it is a primary or foreign key.
+            UnsupportedDatabaseCapabilityError: If the provider answers neither.
+        """
+        return _constraint_ddl(
+            cls.__name__, lambda kind: kind not in ("primary_key", "foreign_key"),
+            conn, table, name, adapter,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -194,6 +295,156 @@ class DatabaseConstraint:
             "kind": self.kind,
             "ddl": self.ddl,
         }
+
+
+@dataclass(frozen=True)
+class DatabaseSequence:
+    """One sequence, named within its schema (backlog 695).
+
+    Its identity is schema and name -- never a name with the schema folded
+    into it, and never a provider handle.
+    """
+
+    identity: DatabaseObjectIdentity
+    ddl: str = ""
+
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> str:
+        """This sequence's own DDL.
+
+        Where the database supplies its own definition (DuckDB) that
+        definition IS the DDL; elsewhere the sequence composes CREATE SEQUENCE
+        from the start, increment, bounds and cycling its catalog states.
+
+        Raises:
+            DatabaseError: When there is no such sequence.
+            UnsupportedDatabaseCapabilityError: If the provider has no sequences.
+        """
+        adapter = adapter or _adapter()
+        where = f"{identity.schema}.{identity.name}"
+        provider = adapter.provider(conn)
+        if provider in _NATIVE_SEQUENCE_DEFINITION:
+            definition = adapter.sequence_native_definition(
+                conn, identity.schema, identity.name,
+            ).rstrip()
+            if not definition:
+                raise DatabaseError(f"sequence not found: {where}")
+            return definition if definition.endswith(";") else definition + ";"
+        catalog = adapter.sequence_catalog(conn, identity.schema, identity.name)
+        if not catalog:
+            raise DatabaseError(f"sequence not found: {where}")
+        qualified = ".".join(
+            adapter.quote_identifier(conn, part) for part in (identity.schema, identity.name)
+        )
+        create = (
+            "CREATE SEQUENCE IF NOT EXISTS"
+            if provider in _SEQUENCE_IF_NOT_EXISTS else "CREATE SEQUENCE"
+        )
+        return (
+            f"{create} {qualified} START WITH {catalog['start']} "
+            f"INCREMENT BY {catalog['increment']} "
+            f"MINVALUE {catalog['minimum']} MAXVALUE {catalog['maximum']} "
+            f"{'CYCLE' if catalog['cycle'] else 'NO CYCLE'};"
+            + _BATCH_END.get(provider, "")
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"identity": self.identity.to_dict(), "ddl": self.ddl}
+
+
+@dataclass(frozen=True)
+class DatabaseUserDefinedType:
+    """One user-defined type: a schema-scoped database object (backlog 695).
+
+    ``kind`` is its variant -- ``enum`` or ``domain`` (PostgreSQL), ``alias``
+    (SQL Server). Not :class:`~rey_lib.db.database_type.DatabaseType`, which
+    is how a Rey logical type is spelled at a destination and has no identity.
+    """
+
+    identity: DatabaseObjectIdentity
+    kind: str = ""
+    ddl: str = ""
+
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> str:
+        """This type's own DDL, composed from what its catalog states.
+
+        Raises:
+            DatabaseError: When there is no such type, or its kind is one this
+                object does not represent.
+            UnsupportedDatabaseCapabilityError: If the provider has no such types.
+        """
+        adapter = adapter or _adapter()
+        where = f"{identity.schema}.{identity.name}"
+        catalog = adapter.user_type_catalog(conn, identity.schema, identity.name)
+        if not catalog:
+            raise DatabaseError(f"type not found: {where}")
+        provider = adapter.provider(conn)
+        qualified = ".".join(
+            adapter.quote_identifier(conn, part) for part in (identity.schema, identity.name)
+        )
+        kind = str(catalog["kind"])
+        if kind == "enum":
+            labels = ", ".join(
+                "'" + str(label).replace("'", "''") + "'" for label in catalog["labels"]
+            )
+            statement = f"CREATE TYPE {qualified} AS ENUM ({labels});"
+        elif kind == "domain":
+            default = f" DEFAULT {catalog['default']}" if catalog["default"] is not None else ""
+            not_null = " NOT NULL" if catalog["not_null"] else ""
+            statement = f"CREATE DOMAIN {qualified} AS {catalog['base_type']}{default}{not_null};"
+        elif kind == "alias":
+            statement = f"CREATE TYPE {qualified} FROM {catalog['base_type']};"
+        else:
+            raise DatabaseError(
+                f"type {where} is a {kind}, which DatabaseUserDefinedType does not represent"
+            )
+        return statement + _BATCH_END.get(provider, "")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"identity": self.identity.to_dict(), "kind": self.kind, "ddl": self.ddl}
+
+
+@dataclass(frozen=True)
+class DatabaseTrigger:
+    """One trigger, named within the table it fires on (backlog 695).
+
+    A trigger name is not unique on its own; its identity is its table's
+    identity and its name, never a provider handle such as PostgreSQL's oid or
+    SQL Server's object_id.
+    """
+
+    name: str
+    ddl: str = ""
+
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, table: DatabaseObjectIdentity, name: str, adapter: Any = None,
+    ) -> str:
+        """This trigger's own DDL.
+
+        The server's stored definition is a retrieved fact
+        (``DBAdapter.trigger_native_definition``); the trigger ends the
+        statement as its provider's script needs.
+
+        Raises:
+            DatabaseError: When the table has no such trigger.
+            UnsupportedDatabaseCapabilityError: If the provider has no triggers.
+        """
+        adapter = adapter or _adapter()
+        definition = adapter.trigger_native_definition(
+            conn, table.schema, table.name, name,
+        ).rstrip()
+        if not definition:
+            raise DatabaseError(f"trigger not found: {table.schema}.{table.name}.{name}")
+        return _routine_terminated(adapter.provider(conn), definition)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "ddl": self.ddl}
 
 
 @dataclass(frozen=True)
@@ -312,6 +563,32 @@ class DatabaseTable:
             )
         table = _qualified(adapter, conn, self.identity)
         _run(adapter, conn, self.identity, f"ALTER TABLE {table} {change}")
+
+    @classmethod
+    def create_includes_constraints(cls, conn: Any, adapter: Any = None) -> bool:
+        """Whether this table's CREATE TABLE also creates its keys and constraints.
+
+        Primary key, foreign keys, unique, check and exclusion constraints. A
+        fact about the table's own creation statement (backlog 695), stated per
+        provider. Where it is true, their standalone DDL would create them twice.
+
+        Raises:
+            DatabaseError: For a provider it is not stated for.
+        """
+        return _creation_fact(_CREATE_INCLUDES_CONSTRAINTS, "constraints", conn, adapter)
+
+    @classmethod
+    def create_includes_indexes(cls, conn: Any, adapter: Any = None) -> bool:
+        """Whether this table's CREATE TABLE also creates its indexes.
+
+        A fact about the table's own creation statement (backlog 695), stated
+        per provider. Where it is true, their standalone DDL would create them
+        twice.
+
+        Raises:
+            DatabaseError: For a provider it is not stated for.
+        """
+        return _creation_fact(_CREATE_INCLUDES_INDEXES, "indexes", conn, adapter)
 
     @classmethod
     def read_ddl(
@@ -482,10 +759,7 @@ class DatabaseProcedure:
         definition = adapter.routine_native_definition(
             conn, identity.schema, identity.name, identity.signature, "procedure",
         ).rstrip()
-        provider = adapter.provider(conn)
-        if provider in _BATCH_END:
-            return definition + _BATCH_END[provider]
-        return definition if definition.endswith(";") else definition + ";"
+        return _routine_terminated(adapter.provider(conn), definition)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -506,6 +780,28 @@ class DatabaseFunction:
     identity: DatabaseRoutineIdentity
     ddl: str = ""
     invocation: str = ""
+
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, identity: DatabaseRoutineIdentity, adapter: Any = None,
+    ) -> str:
+        """This function's own DDL (backlog 695).
+
+        Reading a function's DDL is the function's operation; the server's
+        stored definition is a retrieved fact
+        (``DBAdapter.routine_native_definition``), addressed by Rey's routine
+        identity -- schema, name and signature, never a provider handle. The
+        function ends the statement as its provider's script needs.
+
+        Raises:
+            DatabaseError: When there is no such function.
+            UnsupportedDatabaseCapabilityError: If the provider has no functions.
+        """
+        adapter = adapter or _adapter()
+        definition = adapter.routine_native_definition(
+            conn, identity.schema, identity.name, identity.signature, "function",
+        ).rstrip()
+        return _routine_terminated(adapter.provider(conn), definition)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -530,6 +826,29 @@ class DatabaseSchema:
     views: tuple[DatabaseView, ...] = ()
     procedures: tuple[DatabaseProcedure, ...] = ()
     functions: tuple[DatabaseFunction, ...] = ()
+
+    @classmethod
+    def read_ddl(cls, conn: Any, schema: str, adapter: Any = None) -> str:
+        """This schema's own CREATE SCHEMA (backlog 695).
+
+        Composed from the schema's name alone -- creating a schema needs no
+        other fact. The name is quoted by the provider's own rule; SQL Server's
+        guarded form also carries it as a string literal and inside EXEC's
+        string, each escaped, so any schema name is written correctly.
+
+        Raises:
+            DatabaseError: For a provider with no CREATE SCHEMA stated here.
+        """
+        adapter = adapter or _adapter()
+        provider = adapter.provider(conn)
+        if provider != "sqlserver" and provider not in _CREATE_SCHEMA_IF_NOT_EXISTS:
+            raise DatabaseError(f"no CREATE SCHEMA is stated for {provider}")
+        quoted = adapter.quote_identifier(conn, schema)
+        if provider == "sqlserver":
+            literal = schema.replace("'", "''")
+            create = f"CREATE SCHEMA {quoted}".replace("'", "''")
+            return f"IF SCHEMA_ID(N'{literal}') IS NULL EXEC('{create}');"
+        return f"CREATE SCHEMA IF NOT EXISTS {quoted};"
 
     @classmethod
     def read(
@@ -679,24 +998,25 @@ def _table(
     """One table, from the schema read plus its own DDL."""
     name = str(read.get("name") or "")
     columns = _columns(read.get("columns"))
+    identity = DatabaseObjectIdentity(
+        connection=connection, catalog=catalog, schema=schema, name=name,
+    )
     return DatabaseTable(
-        identity=DatabaseObjectIdentity(
-            connection=connection, catalog=catalog, schema=schema, name=name,
-        ),
+        identity=identity,
         columns=_described(adapter, handle, schema, name, columns),
-        primary_key=_primary_key(adapter, handle, schema, read.get("primary_key")),
+        primary_key=_primary_key(adapter, handle, identity, read.get("primary_key")),
         foreign_keys=tuple(
-            _foreign_key(adapter, handle, schema, entry)
+            _foreign_key(adapter, handle, identity, entry)
             for entry in read.get("foreign_keys") or []
         ),
         indexes=tuple(
-            _index(adapter, handle, schema, entry) for entry in read.get("indexes") or []
+            _index(adapter, handle, identity, entry) for entry in read.get("indexes") or []
         ),
         constraints=tuple(
-            _constraint(adapter, handle, schema, entry)
+            _constraint(adapter, handle, identity, entry)
             for entry in read.get("unique_constraints") or []
         ) + tuple(
-            _check(adapter, handle, schema, entry)
+            _check(adapter, handle, identity, entry)
             for entry in read.get("check_constraints") or []
         ),
         ddl=_table_ddl(adapter, handle, connection, catalog, schema, name),
@@ -734,21 +1054,6 @@ def _view(
     )
 
 
-def _ddl(adapter: Any, handle: Any, object_type: str, schema: str, name: str) -> str:
-    """One relation's DDL, or nothing when the provider cannot write it.
-
-    A relation whose DDL cannot be produced is still a relation. Losing the
-    whole schema because one object could not be written would be the wrong
-    trade.
-    """
-    try:
-        return str(adapter.get_object_ddl(
-            handle, {"object_type": object_type, "schema": schema, "name": name},
-        ))
-    except Exception:
-        return ""
-
-
 def _routines(
     adapter: Any,
     handle: Any,
@@ -782,12 +1087,8 @@ def _routines(
         )
         built.append(build(
             identity=identity,
-            # A procedure reads its own DDL (backlog 695); functions keep the
-            # adapter's definition read until their own slice.
-            ddl=(
-                _procedure_ddl(adapter, handle, identity) if kind == "procedures"
-                else _routine_ddl(adapter, handle, kind, schema, name, signature)
-            ),
+            # A procedure or function reads its own DDL (backlog 695).
+            ddl=_routine_object_ddl(build, adapter, handle, identity),
             # Carried as the provider wrote it. Absent is an ordinary answer,
             # and nothing here composes one in its place: a call assembled by
             # something that does not know the provider's rules can reach the
@@ -795,36 +1096,6 @@ def _routines(
             invocation=str(entry.get("invocation") or ""),
         ))
     return built
-
-
-def _routine_ddl(
-    adapter: Any,
-    handle: Any,
-    kind: str,
-    schema: str,
-    name: str,
-    signature: str,
-) -> str:
-    """One routine's source.
-
-    The signature travels with the request because the reader refuses without
-    it: a name alone does not say which overload is wanted.
-    """
-    identity = {
-        "schema": schema,
-        "name": name,
-        "object_type": "procedure" if kind == "procedures" else "function",
-        "signature": signature,
-    }
-    read = (
-        adapter.get_procedure_definition
-        if kind == "procedures"
-        else adapter.get_function_definition
-    )
-    try:
-        return str(read(handle, identity))
-    except Exception:
-        return ""
 
 
 def _described(
@@ -853,19 +1124,6 @@ def _described(
     return tuple(described)
 
 
-def _child_ddl(
-    adapter: Any,
-    handle: Any,
-    object_type: str,
-    schema: str,
-    name: str,
-) -> str:
-    """One index or constraint's own statement, where it has a name to ask by."""
-    if not name:
-        return ""
-    return _ddl(adapter, handle, object_type, schema, name)
-
-
 def _columns(read: Any) -> tuple[DatabaseColumn, ...]:
     """The columns, in the order the provider reported them.
 
@@ -887,7 +1145,7 @@ def _columns(read: Any) -> tuple[DatabaseColumn, ...]:
 
 
 def _primary_key(
-    adapter: Any, handle: Any, schema: str, read: Any,
+    adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: Any,
 ) -> DatabasePrimaryKey | None:
     """The primary key, or nothing when the relation has none.
 
@@ -902,12 +1160,12 @@ def _primary_key(
     name = str(read.get("name") or "")
     return DatabasePrimaryKey(
         name=name, columns=columns,
-        ddl=_child_ddl(adapter, handle, "constraints", schema, name),
+        ddl=_child_object_ddl(DatabasePrimaryKey, adapter, handle, table, name),
     )
 
 
 def _foreign_key(
-    adapter: Any, handle: Any, schema: str, read: dict[str, Any],
+    adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
 ) -> DatabaseForeignKey:
     """One foreign key, and what it points at."""
     name = str(read.get("name") or "")
@@ -917,24 +1175,40 @@ def _foreign_key(
         referenced_schema=str(read.get("referred_schema") or ""),
         referenced_table=str(read.get("referred_table") or ""),
         referenced_columns=_names(read.get("referred_columns")),
-        ddl=_child_ddl(adapter, handle, "constraints", schema, name),
+        ddl=_child_object_ddl(DatabaseForeignKey, adapter, handle, table, name),
     )
 
 
 def _index(
-    adapter: Any, handle: Any, schema: str, read: dict[str, Any],
+    adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
 ) -> DatabaseIndex:
+    """One index of ``table``, with the DDL it writes itself (backlog 695)."""
     name = str(read.get("name") or "")
     return DatabaseIndex(
         name=name,
         columns=_names(read.get("column_names")),
         unique=bool(read.get("unique", False)),
-        ddl=_child_ddl(adapter, handle, "indexes", schema, name),
+        ddl=_child_object_ddl(DatabaseIndex, adapter, handle, table, name),
     )
 
 
+def _child_object_ddl(
+    owner: Any, adapter: Any, handle: Any, table: DatabaseObjectIdentity, name: str,
+) -> str:
+    """One index's, key's or constraint's standalone DDL, as it writes it.
+
+    Nothing where it has no name to be asked by, or cannot be produced.
+    """
+    if not name:
+        return ""
+    try:
+        return owner.read_ddl(handle, table, name, adapter)
+    except Exception:
+        return ""
+
+
 def _constraint(
-    adapter: Any, handle: Any, schema: str, read: dict[str, Any],
+    adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
 ) -> DatabaseConstraint:
     """One unique constraint, in the provider's own word for its kind."""
     name = str(read.get("name") or "")
@@ -942,19 +1216,19 @@ def _constraint(
         name=name,
         columns=_names(read.get("column_names")),
         kind="unique",
-        ddl=_child_ddl(adapter, handle, "constraints", schema, name),
+        ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name),
     )
 
 
 def _check(
-    adapter: Any, handle: Any, schema: str, read: dict[str, Any],
+    adapter: Any, handle: Any, table: DatabaseObjectIdentity, read: dict[str, Any],
 ) -> DatabaseConstraint:
     """One check constraint. It constrains an expression, not a column list."""
     name = str(read.get("name") or "")
     return DatabaseConstraint(
         name=name,
         kind="check",
-        ddl=_child_ddl(adapter, handle, "constraints", schema, name),
+        ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name),
     )
 
 
@@ -999,6 +1273,46 @@ def _view_ddl(
 #: Providers whose server supplies a table's complete definition itself.
 _NATIVE_TABLE_DEFINITION: frozenset[str] = frozenset({"mysql", "duckdb"})
 
+# What a provider's CREATE TABLE, as DatabaseTable.read_ddl writes it, creates
+# besides the table. Stated, not derived from _NATIVE_TABLE_DEFINITION:
+#   mysql     -- SHOW CREATE TABLE carries every key, constraint and index.
+#   duckdb    -- the stored CREATE TABLE carries its keys and constraints, which
+#                DuckDB cannot add any other way; its indexes are separate
+#                CREATE INDEX statements.
+#   postgres, sqlserver -- composed from the columns alone.
+_CREATE_INCLUDES_CONSTRAINTS: dict[str, bool] = {
+    "mysql": True,
+    "duckdb": True,
+    "postgres": False,
+    "sqlserver": False,
+}
+_CREATE_INCLUDES_INDEXES: dict[str, bool] = {
+    "mysql": True,
+    "duckdb": False,
+    "postgres": False,
+    "sqlserver": False,
+}
+
+# The providers whose CREATE SCHEMA takes IF NOT EXISTS. SQL Server has no such
+# clause; DatabaseSchema writes its guarded form instead.
+_CREATE_SCHEMA_IF_NOT_EXISTS: frozenset[str] = frozenset({"postgres", "mysql", "duckdb"})
+
+# The providers whose server supplies a sequence's own definition (DuckDB's
+# duckdb_sequences().sql); elsewhere the sequence composes it from its catalog.
+_NATIVE_SEQUENCE_DEFINITION: frozenset[str] = frozenset({"duckdb"})
+
+# The providers whose CREATE SEQUENCE accepts IF NOT EXISTS, as their sequence
+# DDL has always been written.
+_SEQUENCE_IF_NOT_EXISTS: frozenset[str] = frozenset({"postgres"})
+
+# The providers whose server supplies a constraint's own definition; elsewhere
+# the owning object composes it from its catalog.
+_NATIVE_CONSTRAINT_DEFINITION: frozenset[str] = frozenset({"postgres"})
+
+# The providers whose server supplies an index's own definition; elsewhere the
+# index composes it from its catalog.
+_NATIVE_INDEX_DEFINITION: frozenset[str] = frozenset({"postgres"})
+
 #: How a provider's script ends one statement's batch, after its semicolon.
 _BATCH_END: dict[str, str] = {"sqlserver": "\nGO"}
 
@@ -1022,9 +1336,83 @@ def _table_ddl(
         return ""
 
 
-def _procedure_ddl(adapter: Any, handle: Any, identity: DatabaseRoutineIdentity) -> str:
-    """One procedure's DDL, as the procedure writes it, or nothing when it cannot be produced."""
+def _routine_terminated(provider: str, definition: str) -> str:
+    """A routine's or trigger's stored source, ended as its provider's script needs it."""
+    if provider in _BATCH_END:
+        return definition + _BATCH_END[provider]
+    return definition if definition.endswith(";") else definition + ";"
+
+
+def _routine_object_ddl(
+    owner: Any, adapter: Any, handle: Any, identity: DatabaseRoutineIdentity,
+) -> str:
+    """One procedure's or function's DDL, as it writes it, or nothing when it cannot be produced."""
     try:
-        return DatabaseProcedure.read_ddl(handle, identity, adapter)
+        return owner.read_ddl(handle, identity, adapter)
     except Exception:
         return ""
+
+
+def _constraint_ddl(
+    owner: str,
+    owns: Any,
+    conn: Any,
+    table: DatabaseObjectIdentity,
+    name: str,
+    adapter: Any,
+) -> str:
+    """One key's or constraint's standalone DDL, written by ``owner``.
+
+    ALTER TABLE <table> ADD CONSTRAINT <name>, then the server's own clause
+    where it supplies one, or the clause composed from the catalog. A
+    constraint of a kind ``owner`` does not own is refused, naming both.
+    """
+    adapter = adapter or _adapter()
+    where = f"{table.schema}.{table.name}.{name}"
+    catalog = adapter.constraint_catalog(conn, table.schema, table.name, name)
+    if not catalog:
+        raise DatabaseError(f"constraint not found: {where}")
+    kind = str(catalog["kind"])
+    if not owns(kind):
+        raise DatabaseError(f"constraint {where} is a {kind}; its DDL is not {owner}'s")
+    provider = adapter.provider(conn)
+
+    def quote(part: str) -> str:
+        return adapter.quote_identifier(conn, part)
+
+    def listed(names: Iterable[str]) -> str:
+        return ", ".join(quote(column) for column in names)
+
+    head = f"ALTER TABLE {quote(table.schema)}.{quote(table.name)} ADD CONSTRAINT {quote(name)}"
+    if provider in _NATIVE_CONSTRAINT_DEFINITION:
+        definition = adapter.constraint_native_definition(
+            conn, table.schema, table.name, name,
+        ).strip()
+        if not definition:
+            raise DatabaseError(f"constraint not found: {where}")
+        return f"{head} {definition};"
+    if kind == "primary_key":
+        clause = f"PRIMARY KEY ({listed(catalog['columns'])})"
+    elif kind == "unique":
+        clause = f"UNIQUE ({listed(catalog['columns'])})"
+    elif kind == "foreign_key":
+        clause = (
+            f"FOREIGN KEY ({listed(catalog['columns'])}) REFERENCES "
+            f"{quote(catalog['referenced_schema'])}.{quote(catalog['referenced_table'])} "
+            f"({listed(catalog['referenced_columns'])})"
+        )
+    elif kind == "check" and catalog.get("check"):
+        clause = f"CHECK ({catalog['check']})"
+    else:
+        raise DatabaseError(f"constraint {where}: no standalone {provider} form for a {kind}")
+    return f"{head} {clause};" + _BATCH_END.get(provider, "")
+
+
+def _creation_fact(stated: dict[str, bool], what: str, conn: Any, adapter: Any) -> bool:
+    """One stated fact about a provider's CREATE TABLE, refused where it is not stated."""
+    provider = (adapter or _adapter()).provider(conn)
+    if provider not in stated:
+        raise DatabaseError(
+            f"whether a {provider} table's creation includes its {what} is not stated"
+        )
+    return stated[provider]

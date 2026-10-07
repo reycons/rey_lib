@@ -498,11 +498,13 @@ def test_mysql_inventory_uses_inspector_and_keeps_routine_trigger_fallback(
                         "object_type": "procedure",
                         "schema_name": "warehouse",
                         "object_name": "refresh_records",
+                        "table_name": None,
                     },
                     {
                         "object_type": "trigger",
                         "schema_name": "warehouse",
                         "object_name": "records_audit",
+                        "table_name": "records",
                     },
                 ]
             return []

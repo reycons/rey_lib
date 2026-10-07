@@ -90,6 +90,23 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     "get_routine_definition": (
         "routine_native_definition", ("schema", "name", "", "procedure"),
     ),
+    # What a catalog says about one index, for DatabaseIndex.read_ddl (backlog 695).
+    "index_column_catalog": ("index_column_catalog", ("schema", "table", "index")),
+    "index_native_definition": ("index_native_definition", ("schema", "table", "index")),
+    # What a catalog says about one constraint, for the key and constraint
+    # objects' read_ddl (backlog 695).
+    "constraint_catalog": ("constraint_catalog", ("schema", "table", "name")),
+    "constraint_native_definition": (
+        "constraint_native_definition", ("schema", "table", "name"),
+    ),
+    # A trigger's stored definition, for DatabaseTrigger.read_ddl (backlog 695).
+    "trigger_native_definition": ("trigger_native_definition", ("schema", "table", "name")),
+    # What a catalog says about one sequence, for DatabaseSequence.read_ddl (695).
+    "sequence_catalog": ("sequence_catalog", ("schema", "name")),
+    "sequence_native_definition": ("sequence_native_definition", ("schema", "name")),
+    # What a catalog says about one user-defined type, for
+    # DatabaseUserDefinedType.read_ddl (backlog 695).
+    "user_type_catalog": ("user_type_catalog", ("schema", "name")),
 }
 
 

@@ -36,14 +36,6 @@ SCHEMA_READ: dict[str, Any] = {
 }
 
 
-#: The object types ``postgres_utils.get_object_ddl`` dispatches on. Plural, and
-#: anything else raises there -- which is how an entire release of empty DDL
-#: went unnoticed behind an adapter that answered whatever it was asked.
-PROVIDER_VOCABULARY = frozenset({
-    "schemas", "types", "tables", "views", "sequences",
-    "functions", "procedures", "triggers", "indexes", "constraints",
-})
-
 ROUTINES = {
     "procedures": [{"name": "load_runs", "signature": "integer"}],
     "functions": [
@@ -96,12 +88,25 @@ class _Adapter:
         self.asked.append(("table", table))
         return [{"name": "run_id", "type": "bigint", "default": None, "nullable": False}]
 
-    def get_object_ddl(self, conn: Any, obj: dict[str, Any]) -> str:
-        object_type = str(obj["object_type"])
-        if object_type not in PROVIDER_VOCABULARY:
-            raise RuntimeError(f"unsupported export object type '{object_type}'")
-        self.asked.append((object_type, str(obj["name"])))
-        return f"CREATE {object_type[:-1].upper()} {obj['schema']}.{obj['name']} ();"
+    def index_column_catalog(self, _conn: Any, _schema: str, table: str, index: str) -> dict:
+        """An index as the catalog states it; the index reads its own DDL (695)."""
+        self.asked.append(("index", index))
+        return {"unique": False, "primary": False, "columns": ["status"]}
+
+    def index_native_definition(self, _conn: Any, schema: str, table: str, index: str) -> str:
+        return f"CREATE INDEX {index} ON {schema}.{table} USING btree (status)"
+
+    _KINDS = {"pkey": "primary_key", "fkey": "foreign_key", "key": "unique", "ck": "check"}
+
+    def constraint_catalog(self, _conn: Any, _schema: str, table: str, name: str) -> dict:
+        """A key or constraint as the catalog states it; it reads its own DDL (695)."""
+        self.asked.append(("constraint", name))
+        return {"kind": self._KINDS[name.rsplit("_", 1)[-1]], "columns": []}
+
+    def constraint_native_definition(
+        self, _conn: Any, _schema: str, _table: str, name: str,
+    ) -> str:
+        return {"run_log_status_ck": "CHECK (status <> '')"}.get(name, "PRIMARY KEY (run_id)")
 
     def get_columns(self, conn: Any, schema: str, name: str) -> list[dict[str, Any]]:
         return [{"name": "run_id", "type": "BIGINT", "nullable": False, "default": None}]
@@ -194,8 +199,10 @@ def test_a_check_constraint_is_built_beside_the_unique_ones(
     assert [(one.name, one.kind) for one in table.constraints] == [
         ("run_log_status_key", "unique"), ("run_log_status_ck", "check"),
     ]
-    assert table.constraints[1].ddl == "CREATE CONSTRAINT control.run_log_status_ck ();"
-    assert ("constraints", "run_log_status_ck") in adapter.asked
+    assert table.constraints[1].ddl == (
+        'ALTER TABLE "control"."run_log" ADD CONSTRAINT "run_log_status_ck" CHECK (status <> \'\');'
+    )
+    assert ("constraint", "run_log_status_ck") in adapter.asked
 
 
 def test_a_table_without_a_key_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,29 +247,20 @@ def test_a_relation_with_no_columns_opens_on_everything(
     )
 
 
-def test_ddl_is_asked_in_the_vocabulary_the_provider_accepts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The exact tokens, not near-misses.
+def test_every_object_reads_its_own_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is no generic DDL owner (backlog 695): each object is asked as itself.
 
-    The provider dispatches on plural object types and raises on anything
-    else. A singular word here read as an empty definition for every object in
-    the estate, and nothing noticed.
+    The adapter double has no generic object-DDL method at all, so an object
+    that still went through one could not produce its DDL here.
     """
     adapter = _Adapter()
     _loaded(adapter, monkeypatch)
 
-    asked = dict.fromkeys(kind for kind, _ in adapter.asked if kind not in ("view", "table"))
-    assert set(asked) <= PROVIDER_VOCABULARY
-    # A table writes its own DDL now: it is never asked of the provider.
-    assert ("tables", "run_log") not in adapter.asked
     assert ("table", "run_log") in adapter.asked
-    # A view writes its own DDL now: it is never asked of the provider.
-    assert ("views", "run_vw") not in adapter.asked
     assert ("view", "run_vw") in adapter.asked
-    assert ("constraints", "run_log_pkey") in adapter.asked
-    assert ("constraints", "run_log_batch_fkey") in adapter.asked
-    assert ("indexes", "run_log_status_idx") in adapter.asked
+    assert ("constraint", "run_log_pkey") in adapter.asked
+    assert ("constraint", "run_log_batch_fkey") in adapter.asked
+    assert ("index", "run_log_status_idx") in adapter.asked
 
 
 def test_a_supplied_definition_arrives_non_empty(

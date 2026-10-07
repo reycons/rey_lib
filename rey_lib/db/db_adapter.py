@@ -35,10 +35,19 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from rey_lib.db.database_objects import (
+    DatabaseConstraint,
+    DatabaseForeignKey,
+    DatabaseFunction,
+    DatabaseIndex,
     DatabaseObjectIdentity,
+    DatabasePrimaryKey,
+    DatabaseSchema,
+    DatabaseSequence,
     DatabaseProcedure,
     DatabaseRoutineIdentity,
     DatabaseTable,
+    DatabaseTrigger,
+    DatabaseUserDefinedType,
     DatabaseView,
 )
 from rey_lib.db.routine_call import RoutineCall
@@ -251,8 +260,38 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # the fact DatabaseProcedure (and later DatabaseFunction) reads its DDL
         # from. ``kind`` says which routine; the semantics stay the object's.
         "get_routine_definition",
+        # What a catalog says about one index on one table (backlog 695): its
+        # key columns and kind, for a provider whose index DDL the index
+        # composes; or the definition the server itself supplies.
+        "index_column_catalog",
+        "index_native_definition",
+        # What a catalog says about one constraint on one table (backlog 695):
+        # its kind, columns, references and check, for a provider whose
+        # constraint DDL the owning object composes; or the definition the
+        # server itself supplies.
+        "constraint_catalog",
+        "constraint_native_definition",
+        # A trigger's own definition, as the server stores it, found by its
+        # table and name (backlog 695): what DatabaseTrigger reads its DDL from.
+        "trigger_native_definition",
+        # What a catalog says about one sequence (backlog 695): its start,
+        # increment, bounds and cycling, for a provider whose sequence DDL the
+        # sequence composes; or the definition the server itself supplies.
+        "sequence_catalog",
+        "sequence_native_definition",
+        # What a catalog says about one user-defined type (backlog 695): its
+        # kind, base type, default, nullability and enum labels, from which
+        # DatabaseUserDefinedType composes its DDL.
+        "user_type_catalog",
     }
 )
+
+# Which object writes a listed constraint's DDL, by the kind the listing gives.
+# Anything not a primary or foreign key is DatabaseConstraint's.
+_CONSTRAINT_OWNER: dict[str, Any] = {
+    "primary_key": DatabasePrimaryKey,
+    "foreign_key": DatabaseForeignKey,
+}
 
 _DEFAULT_BUILD_ORDER: list[str] = [
     "schemas",
@@ -1059,26 +1098,6 @@ class DBAdapter:
             "views": sorted(inspected.get("views") or [], key=lambda item: item["name"]),
         }
 
-    def get_object_ddl(self, conn: Any, obj: dict[str, Any]) -> str:
-        """Return one database object's provider-native DDL.
-
-        The same definition the DDL export writes to a file, for one object and
-        returned rather than written. Which SQL that is belongs to the provider;
-        nothing here composes any of it.
-
-        Args:
-            conn: Open connection.
-            obj: ``object_type``, ``schema`` and ``name``.
-
-        Raises:
-            ConfigError: When the provider writes no object DDL.
-        """
-        provider = self._provider_for_conn(conn)
-        backend = _backend(provider)
-        if not hasattr(backend, "get_object_ddl"):
-            raise ConfigError(f"Provider '{provider}' is missing get_object_ddl().")
-        return str(backend.get_object_ddl(conn, obj))
-
     def get_column_ddl(self, conn: Any, schema: str, table: str, column: str) -> str:
         """Return one column's definition, as its provider writes it.
 
@@ -1484,6 +1503,112 @@ class DBAdapter:
         read = self._require_provider_capability(conn, "table_native_definition")
         return read(conn, schema, table)
 
+    def index_column_catalog(
+        self, conn: Any, schema: str, table: str, index: str,
+    ) -> dict[str, Any]:
+        """One index on one table as the provider's catalog states it.
+
+        Whether it is unique, whether it backs the primary key, and its key
+        columns in order. A metadata primitive, not DDL. Empty when the table
+        has no such index.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "index_column_catalog")
+        return read(conn, schema, table, index)
+
+    def index_native_definition(self, conn: Any, schema: str, table: str, index: str) -> str:
+        """The index definition the destination database itself supplies.
+
+        Retrieved, never generated: the server's own statement, addressed by
+        schema, table and index name. Empty when there is none.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "index_native_definition")
+        return read(conn, schema, table, index)
+
+    def constraint_catalog(
+        self, conn: Any, schema: str, table: str, name: str,
+    ) -> dict[str, Any]:
+        """One constraint on one table as the provider's catalog states it.
+
+        Its kind in Rey's words, its columns, what they reference, and a
+        check's expression. A metadata primitive, not DDL. Empty when the
+        table has no such constraint.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "constraint_catalog")
+        return read(conn, schema, table, name)
+
+    def constraint_native_definition(
+        self, conn: Any, schema: str, table: str, name: str,
+    ) -> str:
+        """A constraint's definition as the destination database itself supplies it.
+
+        Retrieved, never generated: the server's own clause, addressed by
+        schema, table and constraint name. Empty when there is none.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "constraint_native_definition")
+        return read(conn, schema, table, name)
+
+    def user_type_catalog(self, conn: Any, schema: str, name: str) -> dict[str, Any]:
+        """One user-defined type as the provider's catalog states it.
+
+        Its kind, base type, default, whether it is NOT NULL, and an enum's
+        labels in order. A metadata primitive, not DDL. Empty when there is no
+        such type.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "user_type_catalog")
+        return read(conn, schema, name)
+
+    def sequence_catalog(self, conn: Any, schema: str, name: str) -> dict[str, Any]:
+        """One sequence as the provider's catalog states it.
+
+        Start, increment, minimum, maximum and whether it cycles. A metadata
+        primitive, not DDL. Empty when there is no such sequence.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "sequence_catalog")
+        return read(conn, schema, name)
+
+    def sequence_native_definition(self, conn: Any, schema: str, name: str) -> str:
+        """The sequence definition the destination database itself supplies.
+
+        Retrieved, never generated: the server's own statement, addressed by
+        schema and name. Empty when there is none.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "sequence_native_definition")
+        return str(read(conn, schema, name))
+
+    def trigger_native_definition(self, conn: Any, schema: str, table: str, name: str) -> str:
+        """One trigger's definition as the destination database itself supplies it.
+
+        A retrieval primitive, not a trigger owner: the server's stored
+        statement, addressed by the trigger's table and its name. Empty when
+        the table has no such trigger.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider has no triggers.
+        """
+        read = self._require_provider_capability(conn, "trigger_native_definition")
+        return str(read(conn, schema, table, name))
+
     def routine_native_definition(
         self, conn: Any, schema: str, name: str, signature: str, kind: str,
     ) -> str:
@@ -1685,8 +1810,6 @@ class DBAdapter:
 
         if not hasattr(backend, "list_database_objects"):
             raise ConfigError(f"Provider '{provider}' is missing list_database_objects().")
-        if not hasattr(backend, "get_object_ddl"):
-            raise ConfigError(f"Provider '{provider}' is missing get_object_ddl().")
 
         objects_raw = backend.list_database_objects(conn, database=database)
         normalized = self._normalize_export_objects(
@@ -1695,6 +1818,15 @@ class DBAdapter:
             database=database,
             objects_raw=objects_raw,
         )
+        # What a table's creation statement already creates is not emitted again
+        # as an object of its own: the table states it, this export decides
+        # (backlog 695).
+        suppressed = set()
+        if DatabaseTable.create_includes_constraints(conn, self):
+            suppressed.add("constraints")
+        if DatabaseTable.create_includes_indexes(conn, self):
+            suppressed.add("indexes")
+        normalized = [obj for obj in normalized if obj["object_type"] not in suppressed]
         validation = self._validate_export_objects(normalized)
         if validation["errors"]:
             raise DatabaseError(
@@ -1722,21 +1854,49 @@ class DBAdapter:
         for obj in ordered:
             if validate_only:
                 continue
-            # A VIEW, A TABLE AND A PROCEDURE WRITE THEIR OWN DDL (backlog 695);
-            # which objects, in which order, stays this export's.
+            # EVERY OBJECT WRITES ITS OWN DDL (backlog 695): there is no generic
+            # DDL owner. Which objects, in which order, and which owner to ask
+            # stay this export's; a type with no owner is refused.
             kind = str(obj.get("object_type", "")).lower().rstrip("s")
-            if kind == "procedure":
-                ddl = DatabaseProcedure.read_ddl(conn, DatabaseRoutineIdentity(
+            if obj["object_type"] == "schemas":
+                ddl = DatabaseSchema.read_ddl(conn, str(obj["schema"]), self)
+            elif kind in ("procedure", "function"):
+                routine = DatabaseProcedure if kind == "procedure" else DatabaseFunction
+                ddl = routine.read_ddl(conn, DatabaseRoutineIdentity(
                     connection="", catalog="", schema=str(obj["schema"]),
                     name=str(obj["name"]), signature=str(obj.get("signature") or ""),
                 ), self)
+            elif str(obj.get("object_type", "")).lower() in ("index", "indexes"):
+                ddl = DatabaseIndex.read_ddl(conn, DatabaseObjectIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]), name=str(obj["table"]),
+                ), str(obj["name"]), self)
+            elif obj["object_type"] == "types":
+                ddl = DatabaseUserDefinedType.read_ddl(conn, DatabaseObjectIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]), name=str(obj["name"]),
+                ), self)
+            elif obj["object_type"] == "sequences":
+                ddl = DatabaseSequence.read_ddl(conn, DatabaseObjectIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]), name=str(obj["name"]),
+                ), self)
+            elif obj["object_type"] == "triggers":
+                ddl = DatabaseTrigger.read_ddl(conn, DatabaseObjectIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]), name=str(obj["table"]),
+                ), str(obj["name"]), self)
+            elif obj["object_type"] == "constraints":
+                owner = _CONSTRAINT_OWNER.get(str(obj.get("kind") or ""), DatabaseConstraint)
+                ddl = owner.read_ddl(conn, DatabaseObjectIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]), name=str(obj["table"]),
+                ), str(obj["name"]), self)
             elif kind in ("view", "table"):
                 owner = DatabaseView if kind == "view" else DatabaseTable
                 ddl = owner.read_ddl(conn, DatabaseObjectIdentity(
                     connection="", catalog="", schema=str(obj["schema"]), name=str(obj["name"]),
                 ), self)
             else:
-                ddl = backend.get_object_ddl(conn, obj)
+                raise DatabaseError(
+                    f"No database object owns the DDL of a '{obj['object_type']}' "
+                    f"({obj['key']})."
+                )
             if not isinstance(ddl, str) or not ddl.strip():
                 raise DatabaseError(
                     f"Provider '{provider}' returned empty DDL for {obj['key']}."
@@ -2082,13 +2242,18 @@ class DBAdapter:
 
 
 def _normalise_object_type(value: str) -> str:
+    """A known object type in its canonical word; an unknown one stays as it is.
+
+    Never a table by default: a type no object owns must reach the export's
+    refusal, not become a DatabaseTable (backlog 695).
+    """
     raw = (value or "").strip().lower()
     if raw in _TYPE_ALIASES:
         return _TYPE_ALIASES[raw]
     singular = raw.rstrip("s")
     if singular in _TYPE_ALIASES:
         return _TYPE_ALIASES[singular]
-    return "tables"
+    return raw
 
 
 def _safe_name(name: str) -> str:

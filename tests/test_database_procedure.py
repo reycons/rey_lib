@@ -102,7 +102,7 @@ class _Cursor:
         # The object query answers one procedure; the table, index and
         # constraint listings it also runs answer nothing.
         if "WITH base AS" in self.statements[-1]:
-            return [("procedures", "control", "load_runs", 4242, "integer")]
+            return [("procedures", "control", "load_runs", 4242, "integer", None)]
         return []
 
     def fetchone(self) -> tuple:
@@ -139,7 +139,6 @@ def test_the_ddl_export_asks_the_procedure_by_identity(
              "name": "load_runs", "signature": "integer", "object_oid": 4242,
              "dependencies": []},
         ],
-        get_object_ddl=lambda *_a: pytest.fail("a procedure is not asked of the provider"),
         get_routine_definition=lambda _c, _catalog, schema, name, signature, kind: asked.append(
             (schema, name, signature, kind)) or "CREATE PROCEDURE control.load_runs(integer) ...;",
     )
