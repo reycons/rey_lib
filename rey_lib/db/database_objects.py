@@ -313,6 +313,47 @@ class DatabaseTable:
         table = _qualified(adapter, conn, self.identity)
         _run(adapter, conn, self.identity, f"ALTER TABLE {table} {change}")
 
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> str:
+        """This table's own DDL (backlog 695).
+
+        Reading a table's DDL is the table's operation; how a provider's
+        catalog is asked is the connector's. Where the database supplies its
+        own complete definition (MySQL, DuckDB) that definition IS the DDL,
+        ENGINE and character set included, and nothing is reconstructed. Where
+        it does not (PostgreSQL, SQL Server) the table composes CREATE TABLE
+        from the columns its catalog states. The DDL export asks this for a
+        table; reading a schema does too.
+
+        Raises:
+            DatabaseError: If the table is not there, or the read fails.
+            UnsupportedDatabaseCapabilityError: If the provider answers neither.
+        """
+        adapter = adapter or _adapter()
+        provider = adapter.provider(conn)
+        if provider in _NATIVE_TABLE_DEFINITION:
+            definition = adapter.table_native_definition(
+                conn, identity.schema, identity.name,
+            ).rstrip()
+            _found(definition, identity)
+            return definition if definition.endswith(";") else definition + ";"
+        columns = adapter.table_column_catalog(conn, identity.schema, identity.name)
+        _found(columns, identity)
+        # schema.table, as table DDL has always been written: the catalog a
+        # read carries is the connection's own database, not the statement's.
+        qualified = ".".join(
+            adapter.quote_identifier(conn, part) for part in (identity.schema, identity.name)
+        )
+        listed = ",\n".join(
+            f"    {adapter.quote_identifier(conn, column['name'])} {column['type']}"
+            + (f" DEFAULT {column['default']}" if column["default"] is not None else "")
+            + (" NULL" if column["nullable"] else " NOT NULL")
+            for column in columns
+        )
+        return f"CREATE TABLE {qualified} (\n{listed}\n);" + _BATCH_END.get(provider, "")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "identity": self.identity.to_dict(),
@@ -632,7 +673,7 @@ def _table(
             _check(adapter, handle, schema, entry)
             for entry in read.get("check_constraints") or []
         ),
-        ddl=_ddl(adapter, handle, "tables", schema, name),
+        ddl=_table_ddl(adapter, handle, connection, catalog, schema, name),
         initial_select=_initial_select(schema, name, columns),
     )
 
@@ -920,5 +961,31 @@ def _view_ddl(
     )
     try:
         return DatabaseView.read_ddl(handle, identity, adapter)
+    except Exception:
+        return ""
+
+
+#: Providers whose server supplies a table's complete definition itself.
+_NATIVE_TABLE_DEFINITION: frozenset[str] = frozenset({"mysql", "duckdb"})
+
+#: How a provider's script ends one statement's batch, after its semicolon.
+_BATCH_END: dict[str, str] = {"sqlserver": "\nGO"}
+
+
+def _found(read: Any, identity: DatabaseObjectIdentity) -> None:
+    """Refuse a catalog read that found no such table, naming it."""
+    if not read:
+        raise DatabaseError(f"table not found: {identity.schema}.{identity.name}")
+
+
+def _table_ddl(
+    adapter: Any, handle: Any, connection: str, catalog: str, schema: str, name: str,
+) -> str:
+    """One table's DDL, as the table writes it, or nothing when it cannot be produced."""
+    identity = DatabaseObjectIdentity(
+        connection=connection, catalog=catalog, schema=schema, name=name,
+    )
+    try:
+        return DatabaseTable.read_ddl(handle, identity, adapter)
     except Exception:
         return ""

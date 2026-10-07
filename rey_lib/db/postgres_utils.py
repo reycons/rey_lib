@@ -1247,9 +1247,6 @@ def get_object_ddl(conn: Any, obj: dict[str, Any]) -> str:
         if object_type == "types":
             return _postgres_type_ddl(conn, schema, name)
 
-        if object_type == "tables":
-            return _postgres_table_ddl(conn, schema, name)
-
         if object_type == "sequences":
             seq_name = name.split(".", 1)[-1]
             cursor.execute(
@@ -2110,8 +2107,8 @@ def get_column_ddl(conn: Any, schema: str, table: str, column: str) -> str:
 
     A fragment and not a statement: a column has no standalone CREATE, and
     pretending otherwise would hand a caller SQL that does not run. What comes
-    back is the same line ``_postgres_table_ddl`` writes for this column, read
-    from the same catalog -- name, ``format_type`` of the resolved type, any
+    back is the same line ``DatabaseTable.read_ddl`` writes for this column, from
+    ``table_column_catalog``'s read of the same catalog -- name, ``format_type`` of the resolved type, any
     default, and whether it is nullable.
 
     Returns an empty string when the column does not exist, which is what a
@@ -2145,83 +2142,6 @@ def get_column_ddl(conn: Any, schema: str, table: str, column: str) -> str:
     default = f" DEFAULT {row[3]}" if row[3] is not None else ""
     nullable = "NOT NULL" if bool(row[2]) else "NULL"
     return f'"{row[0]}" {row[1]}{default} {nullable}'
-
-
-def _postgres_table_ddl(conn: Any, schema: str, table: str) -> str:
-    """Build CREATE TABLE DDL from the catalog for base tables.
-
-    Read column metadata from ``pg_attribute`` rather than
-    ``information_schema.columns`` so DDL is generated regardless of the
-    connecting role's privileges; the standard view is privilege-filtered.
-    ``format_type`` yields the exact column type, including length and
-    precision modifiers.
-    """
-    from rey_lib.db._sqlalchemy import inspect_schema, is_sqlalchemy_connection
-
-    if is_sqlalchemy_connection(conn):
-        metadata = inspect_schema(conn, schema)
-        table_metadata = next(
-            (item for item in metadata["tables"] if item["name"] == table), None
-        )
-        if table_metadata is None:
-            raise DatabaseError(f"postgres_utils: table not found: {schema}.{table}")
-        columns = []
-        for column in table_metadata["columns"]:
-            nullable = "NULL" if column["nullable"] else "NOT NULL"
-            default = (
-                f" DEFAULT {column['default']}"
-                if column["default"] is not None
-                else ""
-            )
-            col_name = str(column["name"]).replace('"', '""')
-            columns.append(
-                f'    "{col_name}" {column["type"]}{default} {nullable}'
-            )
-        return (
-            f'CREATE TABLE "{schema}"."{table}" (\n'
-            + ",\n".join(columns)
-            + "\n);"
-        )
-
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            SELECT
-                a.attname,
-                format_type(a.atttypid, a.atttypmod),
-                a.attnotnull,
-                pg_get_expr(ad.adbin, ad.adrelid)
-            FROM pg_attribute a
-            JOIN pg_class c ON c.oid = a.attrelid
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-            WHERE n.nspname = %s AND c.relname = %s
-                AND a.attnum > 0
-                AND NOT a.attisdropped
-            ORDER BY a.attnum
-            """,
-            [schema, table],
-        )
-        rows = cursor.fetchall()
-        if not rows:
-            raise DatabaseError(f"postgres_utils: table not found: {schema}.{table}")
-
-        columns: list[str] = []
-        for row in rows:
-            col_name = str(row[0])
-            data_type = str(row[1])
-            nullable = "NOT NULL" if bool(row[2]) else "NULL"
-            default = f" DEFAULT {row[3]}" if row[3] is not None else ""
-            columns.append(f'    "{col_name}" {data_type}{default} {nullable}')
-
-        return (
-            f'CREATE TABLE "{schema}"."{table}" (\n'
-            + ",\n".join(columns)
-            + "\n);"
-        )
-    finally:
-        cursor.close()
 
 
 def _postgres_type_ddl(conn: Any, schema: str, type_name: str) -> str:
@@ -2368,6 +2288,37 @@ def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[st
         return [dict(row) for row in result.mappings()]
     except Exception as exc:
         raise DatabaseError(f"fetch_rows failed: {exc}") from exc
+
+
+def table_column_catalog(conn: Any, schema: str, table: str) -> list[dict[str, Any]]:
+    """One table's columns as PostgreSQL's catalog states them, in ordinal order.
+
+    A metadata primitive: what the server says, not DDL. Read from
+    ``pg_attribute`` rather than ``information_schema.columns``, which is
+    filtered by the connecting role's privileges; ``format_type`` gives each
+    column's exact type with its modifiers. Empty when there is no such table.
+
+    Returns:
+        ``{"name", "type", "default", "nullable"}`` per column.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, "
+        "pg_get_expr(ad.adbin, ad.adrelid) AS default_value, NOT a.attnotnull AS nullable "
+        "FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum "
+        "WHERE n.nspname = :schema AND c.relname = :table "
+        "AND a.attnum > 0 AND NOT a.attisdropped "
+        "ORDER BY a.attnum",
+        {"schema": schema, "table": table},
+    )
+    return [
+        {"name": str(row["name"]), "type": str(row["type"]),
+         "default": row["default_value"], "nullable": bool(row["nullable"])}
+        for row in rows
+    ]
 
 
 def _validated_page(offset: int, limit: int) -> tuple[int, int]:

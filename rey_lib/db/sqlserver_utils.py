@@ -624,6 +624,45 @@ def fetch_rows(
 		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
 
 
+def table_column_catalog(
+	conn: pyodbc.Connection, schema: str, table: str,
+) -> list[dict[str, Any]]:
+	"""One table's columns as SQL Server's catalog states them, in column order.
+
+	A metadata primitive: what the server says, not DDL. Each type is the
+	declaration SQL Server uses for it, parameters included. Empty when there
+	is no such table.
+
+	Returns:
+		``{"name", "type", "default", "nullable"}`` per column.
+	"""
+	rows = fetch_rows(
+		conn,
+		"SELECT c.name AS name, ty.name AS type_name, c.max_length AS max_length, "
+		"c.precision AS precision, c.scale AS scale, c.is_nullable AS is_nullable, "
+		"dc.definition AS default_value "
+		"FROM sys.columns c "
+		"JOIN sys.types ty ON ty.user_type_id = c.user_type_id "
+		"LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id "
+		"JOIN sys.tables t ON t.object_id = c.object_id "
+		"JOIN sys.schemas s ON s.schema_id = t.schema_id "
+		"WHERE s.name = :schema AND t.name = :table "
+		"ORDER BY c.column_id",
+		{"schema": schema, "table": table},
+	)
+	return [
+		{
+			"name": str(row["name"]),
+			"type": _sqlserver_column_type(
+				row["type_name"], row["max_length"], row["precision"], row["scale"],
+			),
+			"default": row["default_value"] or None,
+			"nullable": bool(row["is_nullable"]),
+		}
+		for row in rows
+	]
+
+
 def load_sql(name: str) -> str:
     """
     Return the preloaded SQL string for a named query.
@@ -1091,40 +1130,6 @@ def get_object_ddl(conn: pyodbc.Connection, obj: dict[str, Any]) -> str:
             if ddl:
                 return str(ddl).rstrip() + "\nGO"
 
-        if object_type == "table":
-            cursor.execute(
-                """
-                SELECT
-                    c.name,
-                    ty.name,
-                    c.max_length,
-                    c.precision,
-                    c.scale,
-                    c.is_nullable,
-                    dc.definition
-                FROM sys.columns c
-                JOIN sys.types ty ON ty.user_type_id = c.user_type_id
-                LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
-                JOIN sys.tables t ON t.object_id = c.object_id
-                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = ? AND t.name = ?
-                ORDER BY c.column_id
-                """,
-                [schema, name],
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                raise DatabaseError(f"sqlserver_utils: table not found: {schema}.{name}")
-            cols: list[str] = []
-            for row in rows:
-                col_name, type_name, max_len, precision, scale, is_nullable, default_def = row
-                type_sql = _sqlserver_column_type(type_name, max_len, precision, scale)
-                null_sql = "NULL" if bool(is_nullable) else "NOT NULL"
-                default_sql = f" DEFAULT {default_def}" if default_def else ""
-                cols.append(f"    [{col_name}] {type_sql}{default_sql} {null_sql}")
-            body = ",\n".join(cols)
-            return f"CREATE TABLE [{schema}].[{name}] (\n{body}\n);\nGO"
-
         if object_type == "sequence":
             cursor.execute(
                 """
@@ -1190,6 +1195,22 @@ def get_object_ddl(conn: pyodbc.Connection, obj: dict[str, Any]) -> str:
         cursor.close()
 
 
+def _sqlserver_column_type(type_name: str, max_len: int, precision: int, scale: int) -> str:
+    """Return SQL Server type declaration with parameters when applicable."""
+    t = str(type_name).lower()
+    if t in {"nvarchar", "varchar", "nchar", "char", "varbinary", "binary"}:
+        if max_len == -1:
+            return f"{type_name}(MAX)"
+        if t.startswith("n") and max_len and max_len > 0:
+            return f"{type_name}({int(max_len // 2)})"
+        return f"{type_name}({int(max_len)})"
+    if t in {"decimal", "numeric"}:
+        return f"{type_name}({int(precision)},{int(scale)})"
+    if t in {"datetime2", "time", "datetimeoffset"}:
+        return f"{type_name}({int(scale)})"
+    return str(type_name)
+
+
 def _sqlserver_dependencies(conn: pyodbc.Connection) -> dict[str, list[dict[str, str]]]:
     """Return dependency map keyed by exporter object key."""
     cursor = conn.cursor()
@@ -1251,18 +1272,3 @@ def _sqlserver_dependencies(conn: pyodbc.Connection) -> dict[str, list[dict[str,
         result[key] = [uniq[k] for k in sorted(uniq)]
     return result
 
-
-def _sqlserver_column_type(type_name: str, max_len: int, precision: int, scale: int) -> str:
-    """Return SQL Server type declaration with parameters when applicable."""
-    t = str(type_name).lower()
-    if t in {"nvarchar", "varchar", "nchar", "char", "varbinary", "binary"}:
-        if max_len == -1:
-            return f"{type_name}(MAX)"
-        if t.startswith("n") and max_len and max_len > 0:
-            return f"{type_name}({int(max_len // 2)})"
-        return f"{type_name}({int(max_len)})"
-    if t in {"decimal", "numeric"}:
-        return f"{type_name}({int(precision)},{int(scale)})"
-    if t in {"datetime2", "time", "datetimeoffset"}:
-        return f"{type_name}({int(scale)})"
-    return str(type_name)

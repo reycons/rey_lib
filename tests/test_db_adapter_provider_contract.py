@@ -83,6 +83,9 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     "execute_statement": ("delete_all_rows", ("schema", "table")),
     # The read DatabaseTable asks a catalog with (backlog 690).
     "fetch_rows": ("fetch_rows", ("SELECT 1", {})),
+    # What a catalog says about one table, for DatabaseTable.read_ddl (backlog 695).
+    "table_column_catalog": ("table_column_catalog", ("schema", "table")),
+    "table_native_definition": ("table_native_definition", ("schema", "table")),
 }
 
 

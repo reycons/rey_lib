@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseView
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable, DatabaseView
 from rey_lib.db.routine_call import RoutineCall
 from rey_lib.logs import get_logger
 from rey_lib.errors.error_utils import (
@@ -235,6 +235,12 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # A read with named parameters: what DatabaseTable asks a catalog with
         # (backlog 690). Binding and placeholder style are the provider's.
         "fetch_rows",
+        # What a provider's catalog says about one table (backlog 695): its
+        # columns, for a provider whose table DDL the table composes; or the
+        # complete definition the server itself supplies. Each is implemented
+        # by the providers it applies to and refused by name elsewhere.
+        "table_column_catalog",
+        "table_native_definition",
     }
 )
 
@@ -1442,6 +1448,32 @@ class DBAdapter:
         """
         return self._require_provider_capability(conn, "fetch_rows")(conn, sql_text, params)
 
+    def table_column_catalog(
+        self, conn: Any, schema: str, table: str,
+    ) -> list[dict[str, Any]]:
+        """One table's columns as the provider's catalog states them.
+
+        Name, type, default and nullability per column. A metadata primitive,
+        not DDL. Empty when there is no such table.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "table_column_catalog")
+        return read(conn, schema, table)
+
+    def table_native_definition(self, conn: Any, schema: str, table: str) -> str:
+        """The complete table definition the destination database itself supplies.
+
+        Retrieved, never generated: the server's own statement, as it reports
+        it. Empty when there is none.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider does not answer this.
+        """
+        read = self._require_provider_capability(conn, "table_native_definition")
+        return read(conn, schema, table)
+
     def _run_table_statement(
         self, conn: Any, verb: str, schema: str, table: str,
     ) -> int:
@@ -1663,10 +1695,12 @@ class DBAdapter:
         for obj in ordered:
             if validate_only:
                 continue
-            # A VIEW WRITES ITS OWN DDL (backlog 695); which objects, in which
-            # order, stays this export's.
-            if str(obj.get("object_type", "")).lower().rstrip("s") == "view":
-                ddl = DatabaseView.read_ddl(conn, DatabaseObjectIdentity(
+            # A VIEW AND A TABLE WRITE THEIR OWN DDL (backlog 695); which objects,
+            # in which order, stays this export's.
+            kind = str(obj.get("object_type", "")).lower().rstrip("s")
+            if kind in ("view", "table"):
+                owner = DatabaseView if kind == "view" else DatabaseTable
+                ddl = owner.read_ddl(conn, DatabaseObjectIdentity(
                     connection="", catalog="", schema=str(obj["schema"]), name=str(obj["name"]),
                 ), self)
             else:

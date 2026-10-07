@@ -252,6 +252,18 @@ def fetch_rows(conn: Any, sql_text: str, params: dict[str, Any]) -> list[dict[st
 		raise DatabaseError(f"fetch_rows failed: {exc}") from exc
 
 
+def table_native_definition(conn: Any, schema: str, table: str) -> str:
+	"""The CREATE TABLE statement MySQL itself reports for one table, as it reports it.
+
+	A metadata primitive: the server's own definition, ENGINE and character set
+	included -- retrieved, never composed here. Empty when there is none.
+	"""
+	rows = fetch_rows(
+		conn, f"SHOW CREATE TABLE {quote_identifier(schema)}.{quote_identifier(table)}", {},
+	)
+	return str((rows[0] if rows else {}).get("Create Table") or "")
+
+
 def load_sql(name: str) -> str:
 	_require_init()
 
@@ -583,12 +595,6 @@ def get_object_ddl(
 	try:
 		if object_type == "schema":
 			return f"CREATE SCHEMA IF NOT EXISTS `{schema}`;"
-
-		if object_type == "table":
-			cursor.execute(f"SHOW CREATE TABLE `{schema}`.`{name}`")
-			row = cursor.fetchone() or {}
-			ddl = row.get("Create Table") or ""
-			return str(ddl).rstrip() + ";"
 
 		if object_type in ("procedure", "function"):
 			cursor.execute(f"SHOW CREATE {object_type.upper()} `{schema}`.`{name}`")

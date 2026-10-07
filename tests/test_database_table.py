@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import duckdb
 import pytest
 
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db import duckdb_utils, mysql_utils, postgres_utils, sqlserver_utils
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.database_type import DatabaseType
+from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
 _QUOTE = {
@@ -221,3 +223,131 @@ class TestWidenColumn:
         )
 
         assert connector.statements == [statement]
+
+
+class _CatalogConnector(_Connector):
+    """The connector, also answering what a catalog says about the table."""
+
+    def __init__(self, provider: str, *, columns: list[dict] | None = None, native: str = ""):
+        super().__init__(provider)
+        self.columns = columns or []
+        self.native = native
+
+    def table_column_catalog(self, _conn: Any, _schema: str, _table: str) -> list[dict]:
+        return self.columns
+
+    def table_native_definition(self, _conn: Any, _schema: str, _table: str) -> str:
+        return self.native
+
+
+_CATALOG_COLUMNS = [
+    {"name": "trade_id", "type": "integer", "default": None, "nullable": False},
+    {"name": "symbol", "type": "character varying(12)", "default": "'X'::text", "nullable": True},
+]
+
+
+class TestReadDdl:
+    """Backlog 695: a table reads its own DDL; how the catalog is asked is the connector's."""
+
+    def test_postgres_composes_from_the_catalog_s_own_spelling(self) -> None:
+        connector = _CatalogConnector("postgres", columns=_CATALOG_COLUMNS)
+
+        assert DatabaseTable.read_ddl(_Conn(), _identity("rey"), connector) == (
+            'CREATE TABLE "staging"."trade" (\n'
+            '    "trade_id" integer NOT NULL,\n'
+            '    "symbol" character varying(12) DEFAULT \'X\'::text NULL\n'
+            ");"
+        )
+
+    def test_sql_server_composes_and_ends_the_batch(self) -> None:
+        columns = [{"name": "trade_id", "type": "int", "default": None, "nullable": False}]
+        connector = _CatalogConnector("sqlserver", columns=columns)
+
+        assert DatabaseTable.read_ddl(_Conn(), _identity(), connector) == (
+            "CREATE TABLE [staging].[trade] (\n    [trade_id] int NOT NULL\n);\nGO"
+        )
+
+    @pytest.mark.parametrize(("provider", "native", "expected"), [
+        ("mysql", "CREATE TABLE `trade` (\n  `trade_id` int\n) ENGINE=InnoDB",
+         "CREATE TABLE `trade` (\n  `trade_id` int\n) ENGINE=InnoDB;"),
+        ("duckdb", "CREATE TABLE trade(trade_id INTEGER);",
+         "CREATE TABLE trade(trade_id INTEGER);"),
+    ])
+    def test_a_server_s_own_definition_is_the_ddl_untouched(
+        self, provider: str, native: str, expected: str,
+    ) -> None:
+        connector = _CatalogConnector(provider, native=native)
+
+        assert DatabaseTable.read_ddl(_Conn(), _identity(), connector) == expected
+
+    @pytest.mark.parametrize("provider", ["postgres", "mysql"])
+    def test_a_missing_table_is_refused_by_name(self, provider: str) -> None:
+        with pytest.raises(DatabaseError, match="table not found: staging.trade"):
+            DatabaseTable.read_ddl(_Conn(), _identity(), _CatalogConnector(provider))
+
+
+class TestTheCatalogPrimitives:
+    """What the providers retrieve: facts and native definitions, never DDL."""
+
+    def test_postgres_states_columns_from_pg_attribute(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked: list[str] = []
+
+        def _rows(_conn: Any, sql_text: str, params: dict) -> list[dict]:
+            asked.append(sql_text)
+            return [{"name": "a", "type": "integer", "default_value": None, "nullable": False}]
+
+        monkeypatch.setattr(postgres_utils, "fetch_rows", _rows)
+
+        assert postgres_utils.table_column_catalog(object(), "s", "t") == [
+            {"name": "a", "type": "integer", "default": None, "nullable": False},
+        ]
+        assert "pg_attribute" in asked[0] and "format_type" in asked[0]
+
+    def test_sql_server_states_each_type_as_it_declares_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda *_a: [
+            {"name": "symbol", "type_name": "nvarchar", "max_length": 24, "precision": 0,
+             "scale": 0, "is_nullable": True, "default_value": None},
+        ])
+
+        assert sqlserver_utils.table_column_catalog(object(), "s", "t") == [
+            {"name": "symbol", "type": "nvarchar(12)", "default": None, "nullable": True},
+        ]
+
+    def test_mysql_retrieves_show_create_table(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        asked: list[str] = []
+        native = "CREATE TABLE `t` (`a` int) ENGINE=InnoDB"
+        monkeypatch.setattr(mysql_utils, "fetch_rows", lambda _c, sql_text, _p: asked.append(
+            sql_text) or [{"Table": "t", "Create Table": native}])
+
+        assert mysql_utils.table_native_definition(object(), "s", "t") == (
+            "CREATE TABLE `t` (`a` int) ENGINE=InnoDB"
+        )
+        assert asked == ["SHOW CREATE TABLE `s`.`t`"]
+
+    def test_duckdb_retrieves_its_catalog_statement(self) -> None:
+        conn = duckdb.connect(":memory:")
+        conn.execute("CREATE TABLE trade (symbol VARCHAR NOT NULL)")
+
+        assert duckdb_utils.table_native_definition(conn, "main", "trade") == (
+            "CREATE TABLE trade(symbol VARCHAR NOT NULL);"
+        )
+
+    def test_the_ddl_export_writes_a_table_s_own_ddl(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End to end on DuckDB: the listing is scripted (backlog 697), the DDL is the table's."""
+        conn = duckdb.connect(":memory:")
+        conn.execute("CREATE TABLE trade (symbol VARCHAR)")
+        monkeypatch.setattr(duckdb_utils, "list_database_objects", lambda _c, database=None: [
+            {"database": "memory", "object_type": "table", "schema": "main", "name": "trade",
+             "dependencies": []},
+        ])
+
+        DBAdapter().export_database_ddl(conn, output_root=str(tmp_path))
+
+        (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "trade" in p.name]
+        assert written.read_text(encoding="utf-8") == "CREATE TABLE trade(symbol VARCHAR);\n"

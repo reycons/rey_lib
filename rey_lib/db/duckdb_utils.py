@@ -779,6 +779,22 @@ def fetch_rows(
         raise DatabaseError(f"fetch_rows failed: {exc}") from exc
 
 
+def table_native_definition(
+    conn: duckdb.DuckDBPyConnection, schema: str, table: str,
+) -> str:
+    """The CREATE TABLE statement DuckDB's catalog holds for one table, as it holds it.
+
+    A metadata primitive: the server's own definition, retrieved from
+    ``duckdb_tables()`` -- never composed here. Empty when there is none.
+    """
+    rows = fetch_rows(
+        conn,
+        "SELECT sql FROM duckdb_tables() WHERE schema_name = :schema AND table_name = :table",
+        {"schema": schema, "table": table},
+    )
+    return str(rows[0]["sql"]) if rows else ""
+
+
 def file_source_expression(file_path: Path | str) -> str:
     """Return the DuckDB source expression that reads ``file_path``.
 
@@ -1026,11 +1042,6 @@ def get_object_ddl(conn: duckdb.DuckDBPyConnection, obj: dict[str, Any]) -> str:
 
     if object_type == "schema":
         return f'CREATE SCHEMA IF NOT EXISTS "{schema}";'
-
-    if object_type == "table":
-        row = conn.execute(f'SHOW CREATE TABLE "{schema}"."{name}"').fetchone()
-        ddl = row[1] if row and len(row) > 1 else (row[0] if row else "")
-        return str(ddl).rstrip() + ";"
 
     if object_type == "sequence":
         row = conn.execute(

@@ -91,6 +91,11 @@ class _Adapter:
         self.asked.append(("view", str(params.get("view"))))
         return [{"definition": " SELECT run_id FROM control.run_log"}]
 
+    def table_column_catalog(self, _conn: Any, schema: str, table: str) -> list[dict]:
+        """A table's columns as the catalog states them; the table composes its DDL."""
+        self.asked.append(("table", table))
+        return [{"name": "run_id", "type": "bigint", "default": None, "nullable": False}]
+
     def get_object_ddl(self, conn: Any, obj: dict[str, Any]) -> str:
         object_type = str(obj["object_type"])
         if object_type not in PROVIDER_VOCABULARY:
@@ -160,7 +165,8 @@ def test_a_table_carries_what_it_is_made_of(monkeypatch: pytest.MonkeyPatch) -> 
     assert table.foreign_keys[0].referenced_columns == ("batch_id",)
     assert table.indexes[0].columns == ("status",)
     assert table.constraints[0].kind == "unique"
-    assert table.ddl == "CREATE TABLE control.run_log ();"
+    # The table's own DDL, composed from its catalog's columns (backlog 695).
+    assert table.ddl == 'CREATE TABLE "control"."run_log" (\n    "run_id" bigint NOT NULL\n);'
 
 
 def test_a_check_constraint_is_built_beside_the_unique_ones(
@@ -238,9 +244,11 @@ def test_ddl_is_asked_in_the_vocabulary_the_provider_accepts(
     adapter = _Adapter()
     _loaded(adapter, monkeypatch)
 
-    asked = dict.fromkeys(kind for kind, _ in adapter.asked if kind != "view")
+    asked = dict.fromkeys(kind for kind, _ in adapter.asked if kind not in ("view", "table"))
     assert set(asked) <= PROVIDER_VOCABULARY
-    assert ("tables", "run_log") in adapter.asked
+    # A table writes its own DDL now: it is never asked of the provider.
+    assert ("tables", "run_log") not in adapter.asked
+    assert ("table", "run_log") in adapter.asked
     # A view writes its own DDL now: it is never asked of the provider.
     assert ("views", "run_vw") not in adapter.asked
     assert ("view", "run_vw") in adapter.asked
@@ -260,7 +268,8 @@ def test_a_supplied_definition_arrives_non_empty(
     schema = _loaded(_Adapter(), monkeypatch)
     table = schema.tables[0]
 
-    assert table.ddl == "CREATE TABLE control.run_log ();"
+    # The table's own DDL, composed from its catalog's columns (backlog 695).
+    assert table.ddl == 'CREATE TABLE "control"."run_log" (\n    "run_id" bigint NOT NULL\n);'
     assert table.columns[0].ddl == '"run_id" BIGINT NOT NULL'
     assert table.primary_key is not None and table.primary_key.ddl
     assert table.foreign_keys[0].ddl
