@@ -36,6 +36,7 @@ from rey_lib.errors.error_utils import DatabaseError
 from rey_lib.load import load_operation
 from rey_lib.files.data_file import data_file_for
 from rey_lib.data.data_transform import IdentityTransform
+from tests.support.table_primitive import stand_beneath_the_table
 
 _TARGET = DatabaseObjectIdentity(
     connection="c", catalog="", schema="main", name="asset",
@@ -82,7 +83,7 @@ def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
             load_operation, "log_validation_result",
             lambda _run_log, **kwargs: captured.update(kwargs),
         )
-    monkeypatch.setattr(load_operation, "_write_adapter", adapter or _Adapter())
+    stand_beneath_the_table(monkeypatch, adapter or _Adapter())
     monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
     monkeypatch.setattr(
         load_operation, "shared_connection",
@@ -310,13 +311,17 @@ class TestEveryGateRefusesOnItsOwn:
     path must run.
     """
 
+    @pytest.fixture(autouse=True)
+    def _a_capable_provider(self, monkeypatch) -> None:
+        """The capability is DatabaseTable's question (backlog 751); yes unless broken."""
+        stand_beneath_the_table(monkeypatch, SimpleNamespace(
+            supports_provider_capability=lambda *_a, **_k: True))
+
     @staticmethod
     def _possible(**over) -> bool:
         defaults = dict(
             source=SimpleNamespace(declares_structure=True),
             transform=IdentityTransform(),
-            loader=SimpleNamespace(adapter=SimpleNamespace(
-                supports_provider_capability=lambda *_a, **_k: True)),
             conn=object(),
             exists=True,
         )
@@ -346,11 +351,11 @@ class TestEveryGateRefusesOnItsOwn:
         """Creating one needs a schema, and a schema needs records."""
         assert self._possible(exists=False) is False
 
-    def test_a_provider_without_the_capability_refuses(self) -> None:
-        assert self._possible(
-            loader=SimpleNamespace(adapter=SimpleNamespace(
-                supports_provider_capability=lambda *_a, **_k: False))
-        ) is False
+    def test_a_provider_without_the_capability_refuses(self, monkeypatch) -> None:
+        stand_beneath_the_table(monkeypatch, SimpleNamespace(
+            supports_provider_capability=lambda *_a, **_k: False))
+
+        assert self._possible() is False
 
     def test_a_keyed_source_takes_the_materialised_path_end_to_end(
         self, tmp_path: Path, monkeypatch, run_log
@@ -359,7 +364,7 @@ class TestEveryGateRefusesOnItsOwn:
         source = tmp_path / "source.jsonl"
         source.write_text('{"asset_id": "1", "name": "Alpha"}\n', encoding="utf-8")
 
-        monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
+        stand_beneath_the_table(monkeypatch, _Adapter())
         monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
         conn = _duck(tmp_path)
         monkeypatch.setattr(

@@ -32,6 +32,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 _TARGET = DatabaseObjectIdentity(
     connection="c", catalog="", schema="landing", name="records",
@@ -67,7 +68,7 @@ def recorded(tmp_path: Path, monkeypatch, run_log) -> dict:
     """Load one ordinary CSV through the boundary; return its ROW_COUNT row."""
     records: list[dict] = []
 
-    monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
+    stand_beneath_the_table(monkeypatch, _Adapter())
     monkeypatch.setattr(load_operation, "execute_movements",
                         lambda *_a, **_k: None)
     monkeypatch.setattr(

@@ -1,8 +1,10 @@
 """Where logical records go, and the policies that govern getting them there.
 
 No database is opened. What is asserted is what the object DECIDED -- which
-adapter calls it made, in what order, and when it refused -- because every
-rule here is a policy rather than a mechanism.
+table operations reached the primitive beneath DatabaseTable, in what order,
+and when it refused -- because every rule here is a policy rather than a
+mechanism. DataLoader holds no adapter (backlog 751), so the double stands
+where DatabaseTable resolves its primitive.
 
 The three that matter most are the ones that only surface in production:
 
@@ -20,6 +22,7 @@ import inspect
 import pytest
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
+from rey_lib.db import database_objects
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.db.data_loader import DataLoader
 from rey_lib.data.logical_type import LogicalType
@@ -139,26 +142,48 @@ _TARGET = DatabaseObjectIdentity(
 )
 
 
+#: The primitive DatabaseTable resolves while a test runs.
+_PRIMITIVE: dict[str, Any] = {}
+
+
+@pytest.fixture(autouse=True)
+def _primitive_beneath_the_table(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Stand the test's double where DatabaseTable resolves its primitive."""
+    monkeypatch.setattr(database_objects, "_adapter", lambda: _PRIMITIVE["adapter"])
+    yield
+    _PRIMITIVE.clear()
+
+
 def _loader(adapter, **kwargs) -> DataLoader:
-    return DataLoader(adapter=adapter, **kwargs)
+    """A DataLoader whose table operations reach ``adapter`` beneath DatabaseTable."""
+    _PRIMITIVE["adapter"] = adapter
+    return DataLoader(**kwargs)
 
 
 class TestTheDependenciesAreExplicit:
-    """Nothing is reached for; everything is handed over."""
+    """Nothing is reached for; every database operation is DatabaseTable's."""
 
-    def test_a_stub_adapter_needs_no_patching_at_all(self) -> None:
-        """The sharpest proof the dependency is injected.
+    def test_it_holds_no_adapter(self) -> None:
+        """Higher layers use the canonical objects, not the primitive (backlog 751).
 
-        A test that had to monkeypatch a module attribute to substitute the
-        adapter would be evidence the object reaches for one instead of being
-        given one -- which is what extracting it from the procedural loader
-        was for.
+        No parameter, no attribute, and no primitive call of its own: every
+        database operation it makes is a DatabaseTable behaviour.
         """
+        from pathlib import Path
+
+        import rey_lib.db.data_loader as module
+
+        assert "adapter" not in inspect.signature(DataLoader.__init__).parameters
+        assert not hasattr(DataLoader(), "adapter")
+        assert "adapter" not in Path(module.__file__).read_text(encoding="utf-8")
+
+    def test_its_writes_reach_the_primitive_through_the_table(self) -> None:
         adapter = _Adapter(exists=True)
 
         loaded = _loader(adapter).load(_Conn(), _TARGET, _RECORDS, _DEFS)
 
         assert loaded == 2
+        assert adapter.inserted == [("s", "t", _RECORDS, ["a", "b"])]
 
     def test_the_module_knows_nothing_it_should_not(self) -> None:
         """No ctx, no loader, no config, no adapter of its own.

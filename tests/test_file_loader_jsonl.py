@@ -27,6 +27,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.files.file_utils import KEYED_FILE_TYPES, get_reader
 from rey_lib.errors.error_utils import ConfigError
+from tests.support.table_primitive import stand_beneath_the_table
 
 #: Where these loads write. The per-file step takes a target object now.
 _TARGET = DatabaseObjectIdentity(
@@ -63,8 +64,8 @@ def _load(tmp_path: Path, monkeypatch, run_log, *records: dict,
         seen["columns"] = cols
         return len(rows)
 
-    monkeypatch.setattr(
-        load_operation, "_write_adapter",
+    stand_beneath_the_table(
+        monkeypatch,
         SimpleNamespace(
             # These tests are about a destination that IS there; whether an
             # absent one is created is test_file_loader_destination.py.

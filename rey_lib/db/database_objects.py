@@ -53,6 +53,7 @@ __all__ = [
     "DatabaseTrigger",
     "DatabaseUserDefinedType",
     "DatabaseView",
+    "schema_and_table",
 ]
 
 
@@ -971,6 +972,80 @@ class DatabaseTable:
         return _run(adapter, conn, identity, f"DELETE FROM {table}")
 
     @classmethod
+    def bulk_insert(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        rows: list[dict[str, Any]],
+        columns: list[str],
+        adapter: Any = None,
+    ) -> int:
+        """Insert these rows into this table, in this column order (backlog 751).
+
+        The provider's own bulk path does the writing; which one, and how it
+        binds, is the connector's. It does not commit: whether the insert sits
+        in a transaction is the connection's, and is the caller's to manage.
+
+        Returns:
+            Rows inserted, as the provider counted them.
+
+        Raises:
+            DatabaseError: If the insert fails -- including the overflow
+                ``is_truncation_error`` recognises.
+        """
+        adapter = adapter or _adapter()
+        schema, table = schema_and_table(identity)
+        return adapter.bulk_insert(conn, schema, table, rows, columns)
+
+    @classmethod
+    def insert_from_path(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        source_path: Any,
+        columns: list[str],
+        adapter: Any = None,
+    ) -> int:
+        """Insert a file's rows into this table, read by the engine (backlog 751).
+
+        The non-row sibling of ``bulk_insert``: the rows never pass through
+        this process. The provider's statement is atomic; like every table
+        operation here, it does not commit.
+
+        Returns:
+            Rows inserted, as the engine counted them.
+
+        Raises:
+            DatabaseError: If the insert fails.
+            UnsupportedDatabaseCapabilityError: If the provider cannot read
+                a path.
+        """
+        adapter = adapter or _adapter()
+        schema, table = schema_and_table(identity)
+        return adapter.insert_from_path(conn, schema, table, source_path, columns)
+
+    @classmethod
+    def can_insert_from_path(cls, conn: Any, adapter: Any = None) -> bool:
+        """Whether this connection's provider can fill a table from a path (backlog 751).
+
+        The question asked before ``insert_from_path`` is chosen: the
+        provider's own capability answer, unchanged. A provider without the
+        path read answers no, and the row-by-row load runs instead.
+        """
+        return bool(
+            (adapter or _adapter()).supports_provider_capability(conn, "insert_from_path")
+        )
+
+    @classmethod
+    def is_truncation_error(cls, exc: Exception, adapter: Any = None) -> bool:
+        """Whether a failed write here was the provider's column overflow (backlog 751).
+
+        The question ``widen_column`` answers: only an overflow is repaired by
+        widening, so only an overflow is reported as one. Never raises.
+        """
+        return (adapter or _adapter()).is_truncation_error(exc)
+
+    @classmethod
     def replace_rows(
         cls,
         conn: Any,
@@ -1741,6 +1816,18 @@ def _adapter() -> Any:
     from rey_lib.db.db_adapter import DBAdapter  # noqa: PLC0415 -- the adapter imports widely
 
     return DBAdapter()
+
+
+def schema_and_table(identity: DatabaseObjectIdentity) -> tuple[str, str]:
+    """A table's identity as one ``(schema, table)`` pair (backlog 751).
+
+    The identity keeps catalog and schema apart; a write to a table names them
+    as one schema argument -- ``database.schema`` where a catalog is given --
+    beside the table's own name. Unchanged from what writes have always sent.
+    """
+    catalog = str(getattr(identity, "catalog", "") or "")
+    schema = str(getattr(identity, "schema", "") or "")
+    return (f"{catalog}.{schema}" if catalog else schema, str(identity.name))
 
 
 def _named(identity: DatabaseObjectIdentity) -> str:

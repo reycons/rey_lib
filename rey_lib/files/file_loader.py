@@ -29,8 +29,9 @@ All configuration is driven by the YAML data source config — no table names,
 schema names, column names, or folder paths are hardcoded here. This module
 has no knowledge of any specific application, data model, or business rule.
 
-All DB calls go through DBAdapter. All file moves go through file_utils. No
-raw pyodbc or os calls anywhere in this module.
+All DB work goes through the canonical objects -- the configured Connection
+and DataLoader. All file moves go through file_utils. No raw pyodbc or os calls
+anywhere in this module.
 """
 
 from __future__ import annotations
@@ -53,8 +54,9 @@ from rey_lib.logs.log_utils import (
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.file_routing import FileRoutingError
 from rey_lib.data.logical_type import LogicalType
-from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
-from rey_lib.db.db_adapter import DBAdapter
+from rey_lib.db.connection import shared_connection
+from rey_lib.db.data_loader import DataLoader
+from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.errors.error_utils import (
     AppError,
     ConfigError,
@@ -79,11 +81,6 @@ from rey_lib.files.transformer import (
     parse_date_from_filename,
 )
 
-# Module-level DBAdapter instance. All DB calls in this module go through
-# the adapter, which dispatches to the right backend implementation based
-# on each connection config's `provider` field. The file pipeline never
-# imports a backend driver directly — that knowledge lives in the adapter.
-_db_adapter = DBAdapter()
 
 __all__ = [
     # The file pipeline itself.
@@ -107,10 +104,10 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# Fixed schema for the rejection table -- created on first use by
-# DatabaseTable.create. Table name comes from ctx.rejection.table. Logical types
-# only (backlog 690): no Rey rule bounds a file or column name, so every text
-# column is unbounded, and each destination spells the types its own way.
+# Fixed schema for the rejection table -- created on first use by DataLoader
+# (create_destination). Table name comes from ctx.rejection.table. Logical
+# types only (backlog 690): no Rey rule bounds a file or column name, so every
+# text column is unbounded, and each destination spells the types its own way.
 _REJECTION_COLUMNS: list[tuple[str, LogicalType]] = [
     ("FileName",     LogicalType("text")),
     ("RowNum",       LogicalType("integer")),
@@ -634,8 +631,8 @@ def _write_rejections(
 ) -> None:
 	"""Write transform row errors to the configured rejection table.
 
-	Reads ctx.rejection.connection and ctx.rejection.table. If either is
-	absent the call is a no-op — rejection logging is optional. Failures
+	Reads ctx.rejection.connection -- a connection configured in
+	ctx.connections -- and ctx.rejection.table. If either is absent the call is a no-op — rejection logging is optional. Failures
 	are logged as warnings and never re-raised so they cannot mask the
 	original transform failure.
 
@@ -663,19 +660,6 @@ def _write_rejections(
 		)
 		return
 
-	from rey_lib.config.ctx import find_by_name  # local import — avoids circular dep
-
-	sql_cfgs = getattr(ctx, "sql_configs", None)
-	conn_cfg = find_by_name(sql_cfgs, conn_name) if sql_cfgs else None
-	if conn_cfg is None:
-		_logger.warning(
-			"Rejection connection '%s' not found in sql_configs — "
-			"skipping rejection write for %s",
-			conn_name,
-			file_path.name,
-		)
-		return
-
 	schema, table = _parse_destination(table_name)
 	batch_id      = getattr(ctx, "batch_id", None)
 	rejected_dt   = datetime.now()
@@ -693,22 +677,28 @@ def _write_rejections(
 		for row_num, col, raw_value, err in errors
 	]
 
-	columns = [col for col, _ in _REJECTION_COLUMNS]
 	# A schema of "database.schema" names the catalog too, as the destination
 	# string always has.
 	catalog, _, schema_name = schema.rpartition(".")
 	identity = DatabaseObjectIdentity(
-		connection=str(getattr(conn_cfg, "name", "") or ""),
+		connection=str(conn_name),
 		catalog=catalog, schema=schema_name, name=table,
 	)
 	try:
-		with _db_adapter.get_connection(conn_cfg, ctx=ctx) as conn:
-			DatabaseTable.create(conn, identity, _REJECTION_COLUMNS, _db_adapter)
-			_db_adapter.bulk_insert(conn, schema, table, rows, columns)
-			conn.commit()
+		# The configured connection everything else holds, and an append load
+		# that creates the table where it is absent -- DataLoader commits it
+		# (backlog 751). An unknown connection is shared_connection's
+		# ConfigError, and like every other failure here it is a warning,
+		# never the transform's error.
+		written = DataLoader(create_destination=True).load(
+			shared_connection(ctx, conn_name).handle(),
+			identity,
+			rows,
+			_REJECTION_COLUMNS,
+		)
 		_logger.info(
 			"Wrote %d rejection row(s) for '%s' → %s.%s",
-			len(rows),
+			written,
 			file_path.name,
 			schema,
 			table,

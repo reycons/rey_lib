@@ -207,12 +207,9 @@ def test_connections_are_opened_only_by_connection(violations) -> None:
     rey_console and console_next. The four outside this repository are guarded
     by their own tests, since this policy only reaches rey_lib.
 
-    One exemption, and it is a deferred migration rather than an owner.
-    file_loader's rejection writer resolves its connection from sql_configs
-    rather than from any connection registry, so repointing it would change
-    which record it uses -- a behaviour change, not a migration. It is the
-    single remaining direct caller, it is expected to be removed rather than
-    joined, and it is not evidence of the target architecture.
+    The rejection writer was the last deferred caller; it resolves the
+    configured Connection like everything else now (backlog 751), so nothing
+    outside the implementation layer is exempt.
     """
     offenders = [
         f"{v.source_path}:{v.source_line} -> {v.callee}"

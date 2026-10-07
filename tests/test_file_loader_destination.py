@@ -31,6 +31,7 @@ from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 #: Where these loads write. The per-file step takes a target object now, and
 #: resolves its own connection from it -- so tests substitute the resolution
@@ -101,7 +102,7 @@ def _jsonl(tmp_path: Path, records=({"a": 1, "b": "x"},)) -> Path:
 def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
           keyed=False, moved=None, records=({"a": 1, "b": "x"},)):
     """Run _load_one_file with a recording adapter and a declared setting."""
-    monkeypatch.setattr(load_operation, "_write_adapter", adapter)
+    stand_beneath_the_table(monkeypatch, adapter)
     # Every outcome passes through _route_file; what it records is which
     # movement list the file went down (its fourth argument).
     monkeypatch.setattr(
@@ -198,7 +199,7 @@ class TestTheDestinationIsThere:
         moved: list = []
         path = tmp_path / "source.csv"
         path.write_text("a,WRONG\n1,x\n", encoding="utf-8")
-        monkeypatch.setattr(load_operation, "_write_adapter", adapter)
+        stand_beneath_the_table(monkeypatch, adapter)
         monkeypatch.setattr(load_operation, "_route_file",
                             lambda *a, **k: moved.append(a[3]))
 

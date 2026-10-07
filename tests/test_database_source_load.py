@@ -31,6 +31,7 @@ from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.query_source import QuerySource
 from rey_lib.load import load_operation
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 #: Where these loads write. A table that already exists: creating one from a
 #: non-row source is its own open question and is not this test's business.
@@ -91,7 +92,7 @@ def engine():
 
 def _load(monkeypatch, run_log, source: Any, destination: _Destination) -> int:
     """Run one load through the shared boundary and return the rows loaded."""
-    monkeypatch.setattr(load_operation, "_write_adapter", destination)
+    stand_beneath_the_table(monkeypatch, destination)
     monkeypatch.setattr(
         load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
@@ -251,7 +252,7 @@ class TestTheConstructionSite:
         # ONLY the write adapter. The read adapter is left real, because
         # that is the one the source is given -- substituting both would hide
         # which role each is playing.
-        monkeypatch.setattr(load_operation, "_write_adapter", destination)
+        stand_beneath_the_table(monkeypatch, destination)
         monkeypatch.setattr(load_operation, "shared_connection", _shared)
         monkeypatch.setattr(
             load_operation, "execute_movements",

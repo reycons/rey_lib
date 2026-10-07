@@ -23,6 +23,7 @@ from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 #: Where these loads write. The per-file step takes a target object now.
 _TARGET = DatabaseObjectIdentity(
@@ -63,7 +64,7 @@ def _recorded(tmp_path: Path, monkeypatch, run_log, source: Path,
     """Run one load to rejection and return what was recorded about it."""
     captured: dict = {}
 
-    monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
+    stand_beneath_the_table(monkeypatch, _Adapter())
     monkeypatch.setattr(load_operation, "execute_movements",
                         lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -161,7 +162,7 @@ class TestTheEvidenceSurvivedTheMove:
         source = tmp_path / "wrong.jsonl"
         source.write_text('{"a": 1, "c": 2}\n', encoding="utf-8")
 
-        monkeypatch.setattr(load_operation, "_write_adapter", _Adapter())
+        stand_beneath_the_table(monkeypatch, _Adapter())
         monkeypatch.setattr(load_operation, "execute_movements",
                             lambda *args, **_k: moved.append(args))
 

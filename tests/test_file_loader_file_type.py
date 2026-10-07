@@ -23,6 +23,7 @@ from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
 from rey_lib.errors.error_utils import ConfigError
+from tests.support.table_primitive import stand_beneath_the_table
 
 #: Where these loads write. The per-file step takes a target object now.
 _TARGET = DatabaseObjectIdentity(
@@ -53,8 +54,8 @@ def _csv(tmp_path: Path) -> Path:
 
 def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
     """Run _load_one_file far enough to record what the reader was given."""
-    monkeypatch.setattr(
-        load_operation, "_write_adapter",
+    stand_beneath_the_table(
+        monkeypatch,
         SimpleNamespace(provider=lambda _conn: "postgres",
                             quote_identifier=lambda _conn, name: f'"{name}"',
                             table_exists=lambda *_a, **_k: True,
@@ -165,8 +166,8 @@ class TestTheConfiguredTypeReachesTheReader:
         file reads as CSV and nothing is raised at all. get_reader is not
         stubbed here -- that would test the test.
         """
-        monkeypatch.setattr(
-            load_operation, "_write_adapter",
+        stand_beneath_the_table(
+            monkeypatch,
             SimpleNamespace(provider=lambda _conn: "postgres",
                             quote_identifier=lambda _conn, name: f'"{name}"',
                             table_exists=lambda *_a, **_k: True,

@@ -6,9 +6,10 @@ this puts those records in a table.
 
 It owns DESTINATION POLICY and nothing else: may the table be created, insert
 the rows, and decide whether a failure is worth retrying. What a table IS --
-whether it exists, creating it from a logical schema, widening a column -- is
-``DatabaseTable``'s (backlog 690); every other database operation goes through
-``DBAdapter``. No SQL is written here and no provider is named.
+whether it exists, creating it from a logical schema, widening a column,
+inserting rows into it -- is ``DatabaseTable``'s (backlogs 690, 751), and every
+database operation here goes through it. No SQL is written here and no
+provider is named.
 
 What it deliberately does not have
 ----------------------------------
@@ -28,8 +29,8 @@ would be one endpoint represented twice.
 ``"database.schema.table"`` is configuration interpretation and happens at the
 construction boundary.
 
-**No module globals.** The adapter is injected, so substituting one is passing
-an argument rather than patching a module attribute.
+**No primitive layer.** Every database operation is a DatabaseTable behaviour
+(backlog 751); this object orchestrates them and holds no DBAdapter.
 """
 
 from __future__ import annotations
@@ -40,11 +41,11 @@ from typing import Any
 from rey_lib.data.logical_type import LogicalType
 # _beside: the one naming rule for a table's short-lived companions, shared
 # with DatabaseTable.replace_table so the two cannot drift.
-from rey_lib.db.database_objects import DatabaseTable, _beside
+from rey_lib.db.database_objects import DatabaseTable, _beside, schema_and_table
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
-__all__ = ["DataLoader", "adapter_destination"]
+__all__ = ["DataLoader"]
 
 _logger = get_logger(__name__)
 
@@ -59,34 +60,12 @@ _UNASKED: Any = object()
 _COLUMN_EXPAND_BUFFER = 10
 
 
-def adapter_destination(target: Any) -> tuple[str, str]:
-    """Render one database object identity as the adapter's ``(schema, table)``.
-
-    THE ONE TRANSLATION POINT, and it belongs here because this is the object
-    that talks to the adapter. The identity keeps its parts apart --
-    ``catalog`` and ``schema`` are separate fields, and it carries no rendered
-    reference -- while the adapter takes a single schema argument that is
-    ``database.schema`` where a backend qualifies that way.
-
-    Args:
-        target: A database object identity: ``catalog``, ``schema``, ``name``.
-
-    Returns:
-        ``(schema, table)`` exactly as the adapter has always received it, so
-        what reaches the database is unchanged by the identity having parts.
-    """
-    catalog = str(getattr(target, "catalog", "") or "")
-    schema = str(getattr(target, "schema", "") or "")
-    return (f"{catalog}.{schema}" if catalog else schema, str(target.name))
-
-
 class DataLoader:
     """One destination, and the policy for putting records into it."""
 
     def __init__(
         self,
         *,
-        adapter: Any,
         create_destination: bool = False,
         replace_destination: bool = False,
         recreate_destination: bool = False,
@@ -104,9 +83,6 @@ class DataLoader:
         ``create_destination`` would be meaningless when read from.
 
         Args:
-            adapter: The ``DBAdapter`` every database operation goes through.
-                Injected rather than reached for, so this object has no
-                ambient state and a test substitutes one by passing it.
             create_destination: Whether an ABSENT destination may be created
                 from the records. False means the table must already exist,
                 which is what the loader did before the setting existed.
@@ -121,7 +97,6 @@ class DataLoader:
                 rebuilds it. Distinct from ``replace_destination``, which keeps
                 the table it empties.
         """
-        self.adapter = adapter
         self.create_destination = create_destination
         self.replace_destination = replace_destination
         self.recreate_destination = recreate_destination
@@ -143,10 +118,10 @@ class DataLoader:
             conn: Open connection, owned by the caller and shared.
             target: The database object identity being loaded into.
         """
-        if not DatabaseTable.exists(conn, target, self.adapter):
+        if not DatabaseTable.exists(conn, target):
             return None
         # What the destination's columns are is the table's (backlog 722).
-        return DatabaseTable.column_names(conn, target, self.adapter)
+        return DatabaseTable.column_names(conn, target)
 
     def load(
         self,
@@ -180,7 +155,7 @@ class DataLoader:
                 by widening an overflowing text column.
         """
         names = [name for name, _logical in columns]
-        schema, table = adapter_destination(target)
+        schema, table = schema_and_table(target)
 
         # A caller that already asked tells us what it found, so the check
         # happens ONCE per load rather than once per decision. A caller that
@@ -208,7 +183,7 @@ class DataLoader:
             # the policy governing it: IF NOT EXISTS is no defence, because a
             # table dropped between the check and the call would be recreated
             # against a load that said not to.
-            DatabaseTable.create(conn, target, columns, self.adapter)
+            DatabaseTable.create(conn, target, columns)
 
         return self._insert_widening(conn, target, records, columns, names)
 
@@ -228,17 +203,17 @@ class DataLoader:
         The staging table is removed afterwards, and on failure.
         """
         staging = replace(target, name=_beside(target.name, "stage"))
-        if DatabaseTable.exists(conn, staging, self.adapter):
+        if DatabaseTable.exists(conn, staging):
             # One a failed run left behind: it is this loader's, by its name.
-            DatabaseTable.drop(conn, staging, self.adapter)
+            DatabaseTable.drop(conn, staging)
         failed = True
         try:
-            DatabaseTable.create(conn, staging, columns, self.adapter)
+            DatabaseTable.create(conn, staging, columns)
             inserted = self._insert_widening(conn, staging, records, columns, names)
             if self.recreate_destination:
-                DatabaseTable.replace_table(conn, target, staging, self.adapter)
+                DatabaseTable.replace_table(conn, target, staging)
             else:
-                DatabaseTable.replace_rows(conn, target, staging, self.adapter)
+                DatabaseTable.replace_rows(conn, target, staging)
             failed = False
             return inserted
         finally:
@@ -252,8 +227,8 @@ class DataLoader:
         it is raised, because a staging table left behind is a fault.
         """
         try:
-            if DatabaseTable.exists(conn, staging, self.adapter):
-                DatabaseTable.drop(conn, staging, self.adapter)
+            if DatabaseTable.exists(conn, staging):
+                DatabaseTable.drop(conn, staging)
                 conn.commit()
         except DatabaseError as exc:
             if not failed:
@@ -269,12 +244,12 @@ class DataLoader:
         names: list[str],
     ) -> int:
         """Insert, widening an overflowing text column once and trying again."""
-        schema, table = adapter_destination(target)
+        schema, table = schema_and_table(target)
         try:
             return self._insert(conn, target, records, names)
         except DatabaseError as insert_exc:
             conn.rollback()
-            if not self.adapter.is_truncation_error(insert_exc):
+            if not DatabaseTable.is_truncation_error(insert_exc):
                 raise
             widened = _widened(columns, records)
             if not widened:
@@ -282,15 +257,14 @@ class DataLoader:
             # A table this load created may have gone with the rollback, where
             # the provider's DDL is transactional: then it is created again,
             # wider. Otherwise the overflowing columns are widened in place.
-            if DatabaseTable.exists(conn, target, self.adapter):
+            if DatabaseTable.exists(conn, target):
                 table_object = DatabaseTable(identity=target)
                 for name, logical in widened.items():
-                    table_object.widen_column(conn, name, logical, self.adapter)
+                    table_object.widen_column(conn, name, logical)
             else:
                 DatabaseTable.create(
                     conn, target,
                     [(name, widened.get(name, logical)) for name, logical in columns],
-                    self.adapter,
                 )
             _logger.info(
                 "Retrying insert into %s.%s after widening %s",
@@ -325,7 +299,7 @@ class DataLoader:
         touching another's committed work.
 
         No truncation retry either: widening measures the records, and there
-        are none. See ``DBAdapter.insert_from_path``.
+        are none. See ``DatabaseTable.insert_from_path``.
 
         Args:
             conn: Open connection, owned by the caller and shared.
@@ -341,10 +315,7 @@ class DataLoader:
         Raises:
             DatabaseError: If the insert fails.
         """
-        schema, table = adapter_destination(target)
-        inserted = self.adapter.insert_from_path(
-            conn, schema, table, source_path, columns
-        )
+        inserted = DatabaseTable.insert_from_path(conn, target, source_path, columns)
         conn.commit()
         return inserted
 
@@ -361,10 +332,7 @@ class DataLoader:
         a batch of files is an aggregate of separate loads, and one failing
         must not undo another that already succeeded.
         """
-        schema, table = adapter_destination(target)
-        inserted = self.adapter.bulk_insert(
-            conn, schema, table, records, columns
-        )
+        inserted = DatabaseTable.bulk_insert(conn, target, records, columns)
         conn.commit()
         return inserted
 

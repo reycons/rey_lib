@@ -19,11 +19,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 PRODUCTION = REPO / "rey_lib"
 
-# The rejection writer is deferred, not exempt: it resolves its connection from
-# sql_configs rather than any connection registry, so repointing it changes
-# which record it uses. Named once here so the exception stays visible.
-_DEFERRED = PRODUCTION / "files" / "file_loader.py"
-
 
 def _sources() -> list[Path]:
     """Every production module in this repository.
@@ -71,15 +66,10 @@ class TestNoRawConnectionAcquisition:
         offenders = [
             f"{p.relative_to(REPO)}:{line}"
             for p in _sources() if p.name not in ("connection.py", "db_adapter.py")
-            and p != _DEFERRED
             for line in _calls_named(p, "get_connection")
         ]
 
         assert offenders == []
-
-    def test_the_deferred_exception_is_exactly_one_site(self) -> None:
-        """Stated so it shrinks to zero rather than quietly growing."""
-        assert len(_calls_named(_DEFERRED, "get_connection")) == 1
 
 
 class TestConnectionIsTheRuntimePath:

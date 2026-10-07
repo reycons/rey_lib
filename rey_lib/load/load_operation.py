@@ -60,8 +60,11 @@ from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.data.errors import DataStructureError
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.data_loader import DataLoader as _DataLoader
-from rey_lib.db.data_loader import adapter_destination
-from rey_lib.db.database_objects import DatabaseObjectIdentity
+from rey_lib.db.database_objects import (
+    DatabaseObjectIdentity,
+    DatabaseTable,
+    schema_and_table,
+)
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.db.procedure_map import execute_procedure_call, execute_sql_text
 from rey_lib.db.query_source import QuerySource
@@ -103,19 +106,9 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# TWO ADAPTER ROLES, and they are not one shared instance.
-#
-#     QuerySource             -> a READ adapter, over the source connection
-#     DataLoader / target     -> a WRITE adapter, over the target connection
-#
-# The same concrete class serves both -- it dispatches on each connection
-# config's provider, so this module never imports a backend driver -- but the
-# roles are distinct by contract. A source reads through its own; a
-# destination is written through the loader's. Handing one object to both
-# would make a source's read depend on what the destination happens to be,
-# which is exactly backwards for endpoints that may sit on different
-# connections and different providers.
-_write_adapter = DBAdapter()
+# The READ adapter a QuerySource is handed, over the source connection. The
+# write side has none: a destination is written through DataLoader, which
+# reaches the database only through DatabaseTable (backlog 751).
 _read_adapter = DBAdapter()
 
 # Matches {ctx.attr} and {data_source.attr} tokens in LLM prompt templates.
@@ -369,8 +362,8 @@ def _destination_identity(
     ``_parse_destination``: that one joins a three-part name into the single
     schema argument the adapter takes, and it still does, for the callers that
     hand strings straight to the adapter. An identity carries no rendered
-    reference, so the join happens where the adapter is actually called --
-    ``data_loader.adapter_destination``.
+    reference, so the join happens where the table is written --
+    ``database_objects.schema_and_table``.
 
         'schema.table'             -> catalog '',         schema 'schema'
         'database.schema.table'    -> catalog 'database',  schema 'schema'
@@ -428,7 +421,6 @@ def _build_data_loader(
     ``DatabaseTable`` (backlog 690): nothing about it is configured here.
     """
     return _DataLoader(
-        adapter=_write_adapter,
         create_destination=create_declared,
         replace_destination=replace_declared,
         recreate_destination=recreate_declared,
@@ -1548,7 +1540,6 @@ def _reject_empty(
 def _non_row_execution_possible(
     source: Any,
     transform: Any,
-    loader: Any,
     conn: Any,
     exists: bool,
 ) -> bool:
@@ -1573,9 +1564,10 @@ def _non_row_execution_possible(
     3. **The destination already exists.** Creating one needs a schema, and a
        schema is derived from records this path will not have. An absent
        destination is not a refusal of the load, only of this path.
-    4. **The provider implements it.** Resolved from the provider module by
-       ``supports_provider_capability``, so nothing declares support twice
-       and a provider that lacks the function simply answers no.
+    4. **The provider implements it.** Asked of the table --
+       ``DatabaseTable.can_insert_from_path`` (backlog 751) -- which resolves
+       it from the provider module, so nothing declares support twice and a
+       provider that lacks the function simply answers no.
 
     Returns:
         True when all four hold. False is never a failure -- it means the
@@ -1587,9 +1579,7 @@ def _non_row_execution_possible(
         return False
     if not exists:
         return False
-    return bool(
-        loader.adapter.supports_provider_capability(conn, "insert_from_path")
-    )
+    return DatabaseTable.can_insert_from_path(conn)
 
 def _load_one_file(
     source: Any,
@@ -1684,7 +1674,7 @@ def _load_one_file(
         destination = {"destination_path": str(target.path)}
         named = str(target.path)
     else:
-        schema, table = adapter_destination(target)
+        schema, table = schema_and_table(target)
         destination = {"schema": schema, "table": table}
         named = f"{schema}.{table}"
     # Named before the try so the handlers can ask whether there is anything
@@ -1778,7 +1768,7 @@ def _load_one_file(
         # has no provider to ask, so the materialised path -- the guaranteed
         # one -- runs.
         if not writes_a_file and _non_row_execution_possible(
-            source, transform, loader, conn, exists,
+            source, transform, conn, exists,
         ):
             # THE SAME TWO CHECKS, from the structure the file declares
             # instead of from records. Neither is skipped and neither is

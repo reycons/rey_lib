@@ -37,6 +37,7 @@ from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
 from rey_lib.errors.error_utils import ConfigError
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 
 class _Table(ConnectorPrimitives):
@@ -435,7 +436,7 @@ class TestWhatTheEvidenceSays:
             load_operation, "log_row_count",
             lambda _run_log, **kwargs: recorded.append(kwargs),
         )
-        monkeypatch.setattr(load_operation, "_write_adapter", _Table(["a", "b"]))
+        stand_beneath_the_table(monkeypatch, _Table(["a", "b"]))
         monkeypatch.setattr(
             load_operation, "shared_connection",
             lambda _ctx, _name: SimpleNamespace(

@@ -518,3 +518,96 @@ class TestTheCatalogPrimitives:
 
         (written,) = [p for p in tmp_path.rglob("*") if p.is_file() and "trade" in p.name]
         assert written.read_text(encoding="utf-8") == "CREATE TABLE trade(symbol VARCHAR);\n"
+
+
+class _Writer:
+    """The write primitives, recording exactly what DatabaseTable passed."""
+
+    def __init__(self, truncation: bool = False) -> None:
+        self.asked: list[tuple] = []
+        self._truncation = truncation
+
+    def bulk_insert(self, conn: Any, schema: str, table: str, rows: list, columns: list) -> int:
+        self.asked.append(("bulk_insert", conn, schema, table, rows, columns))
+        return len(rows)
+
+    def insert_from_path(
+        self, conn: Any, schema: str, table: str, source_path: Any, columns: list,
+    ) -> int:
+        self.asked.append(("insert_from_path", conn, schema, table, source_path, columns))
+        return 7
+
+    def is_truncation_error(self, exc: Exception) -> bool:
+        self.asked.append(("is_truncation_error", exc))
+        return self._truncation
+
+
+class TestInsertingRowsIsTheTablesBehaviour:
+    """bulk_insert, insert_from_path and is_truncation_error (backlog 751).
+
+    Each passes the primitive exactly what writes have always sent -- a
+    catalog folded into the schema argument -- and none commits.
+    """
+
+    _IN_CATALOG = DatabaseObjectIdentity(connection="c", catalog="db", schema="s", name="t")
+
+    def test_bulk_insert_passes_the_rows_through_and_does_not_commit(self) -> None:
+        conn, writer = _Conn(), _Writer()
+        rows = [{"a": 1}, {"a": 2}]
+
+        inserted = DatabaseTable.bulk_insert(conn, self._IN_CATALOG, rows, ["a"], writer)
+
+        assert inserted == 2
+        assert writer.asked == [("bulk_insert", conn, "db.s", "t", rows, ["a"])]
+        assert conn.commits == 0
+
+    def test_insert_from_path_passes_the_path_through_and_does_not_commit(self) -> None:
+        conn, writer = _Conn(), _Writer()
+
+        inserted = DatabaseTable.insert_from_path(
+            conn, _identity(""), "/in/file.csv", ["a", "b"], writer,
+        )
+
+        assert inserted == 7
+        assert writer.asked == [
+            ("insert_from_path", conn, "staging", "trade", "/in/file.csv", ["a", "b"]),
+        ]
+        assert conn.commits == 0
+
+    @pytest.mark.parametrize("answer", [True, False])
+    def test_can_insert_from_path_is_the_providers_capability_answer(
+        self, answer: bool,
+    ) -> None:
+        asked: list[tuple] = []
+
+        class _Capability:
+            def supports_provider_capability(self, conn: Any, name: str) -> bool:
+                asked.append((conn, name))
+                return answer
+
+        conn = _Conn()
+
+        assert DatabaseTable.can_insert_from_path(conn, _Capability()) is answer
+        assert asked == [(conn, "insert_from_path")]
+
+    def test_a_real_provider_answers_the_capability(self) -> None:
+        assert DatabaseTable.can_insert_from_path(duckdb.connect(":memory:")) is True
+
+    @pytest.mark.parametrize("answer", [True, False])
+    def test_is_truncation_error_is_the_providers_answer(self, answer: bool) -> None:
+        exc = DatabaseError("String or binary data would be truncated")
+
+        assert DatabaseTable.is_truncation_error(exc, _Writer(truncation=answer)) is answer
+
+    def test_rows_land_in_a_real_table(self) -> None:
+        conn = duckdb.connect(":memory:")
+        conn.execute("CREATE SCHEMA s")
+        conn.execute("CREATE TABLE s.t (a INTEGER, b VARCHAR)")
+        identity = DatabaseObjectIdentity(connection="d", catalog="", schema="s", name="t")
+
+        inserted = DatabaseTable.bulk_insert(
+            conn, identity, [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}], ["a", "b"], DBAdapter(),
+        )
+
+        assert inserted == 2
+        assert conn.execute("SELECT a, b FROM s.t ORDER BY a").fetchall() == [(1, "x"), (2, "y")]

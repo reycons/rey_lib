@@ -23,6 +23,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import load_operation
 from rey_lib.load import configured_load
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 
 class _Adapter(ConnectorPrimitives):
@@ -70,7 +71,7 @@ def _jsonl(tmp_path: Path, *records: dict, name: str = "asset.jsonl") -> Path:
 
 def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
           destination="testing.asset", moved=None, **kwargs) -> int:
-    monkeypatch.setattr(load_operation, "_write_adapter", adapter)
+    stand_beneath_the_table(monkeypatch, adapter)
     # Resolved from the target now, so it is substituted where it is resolved.
     monkeypatch.setattr(
         load_operation, "shared_connection",

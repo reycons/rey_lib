@@ -197,12 +197,6 @@ architecture_rules:
       # The adapter dispatching to its own provider backend is the mechanism
       # Connection is built on, not a second way in.
       - "rey_lib/db/db_adapter.py"
-      # Deferred, not an owner. file_loader's rejection writer resolves its
-      # connection from sql_configs rather than from any connection registry,
-      # so repointing it would change which record it uses -- a behaviour
-      # change, not a migration. It is the single remaining direct caller and
-      # this entry is expected to be removed, not to accumulate company.
-      - "rey_lib/files/file_loader.py"
     scope_path_globs:
       - "rey_lib/*"
     edge_kinds:

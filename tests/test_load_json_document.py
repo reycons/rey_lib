@@ -39,6 +39,7 @@ from rey_lib.files.data_file.keyed import JsonFile, JsonlFile
 from rey_lib.db.data_loader import DataLoader
 from rey_lib.data.data_transform import DataTransform
 from tests.support.connector_double import ConnectorPrimitives
+from tests.support.table_primitive import stand_beneath_the_table
 
 
 class _Adapter(ConnectorPrimitives):
@@ -99,7 +100,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
     exercises the path a reader takes rather than a per-file step underneath
     it.
     """
-    monkeypatch.setattr(load_operation, "_write_adapter", adapter)
+    stand_beneath_the_table(monkeypatch, adapter)
     # Resolved from the target now, so it is substituted where it is resolved.
     monkeypatch.setattr(
         load_operation, "shared_connection",

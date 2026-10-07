@@ -22,6 +22,7 @@ from rey_lib.db.data_loader import DataLoader
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError, UnsupportedDatabaseCapabilityError
+from tests.support.table_primitive import stand_beneath_the_table
 
 _TARGET = DatabaseObjectIdentity(connection="d", catalog="", schema="s", name="t")
 _STAGING = DatabaseObjectIdentity(connection="d", catalog="", schema="s", name="t__rey_stage")
@@ -67,7 +68,7 @@ class TestOnARealEngine:
     """DuckDB in memory, through the real adapter: the outcome itself."""
 
     def test_replace_replaces_the_rows_and_keeps_the_table(self, duck) -> None:
-        loaded = DataLoader(adapter=DBAdapter(), replace_destination=True).load(
+        loaded = DataLoader(replace_destination=True).load(
             duck, _TARGET, [{"a": 3, "b": "new"}], _COLUMNS,
         )
 
@@ -76,7 +77,7 @@ class TestOnARealEngine:
         assert _tables(duck) == ["t"]
 
     def test_recreate_rebuilds_the_table_from_the_load(self, duck) -> None:
-        DataLoader(adapter=DBAdapter(), recreate_destination=True).load(
+        DataLoader(recreate_destination=True).load(
             duck, _TARGET, [{"a": 3, "b": "new"}], _COLUMNS,
         )
 
@@ -89,13 +90,16 @@ class TestOnARealEngine:
         assert _tables(duck) == ["t"]
 
     @pytest.mark.parametrize("mode", ["replace_destination", "recreate_destination"])
-    def test_a_failed_fill_leaves_the_target_unchanged(self, duck, mode: str) -> None:
+    def test_a_failed_fill_leaves_the_target_unchanged(
+        self, duck, mode: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # The fill's DatabaseError is replaced by DuckDB refusing the retry
         # path's conn.rollback() with no transaction open -- a defect older
         # than 516 (the same line ran before it), tracked as backlog 746.
         # What this asserts is 516's: the target is untouched.
+        stand_beneath_the_table(monkeypatch, _FailingFill())
         with pytest.raises((DatabaseError, duckdb.TransactionException)):
-            DataLoader(adapter=_FailingFill(), **{mode: True}).load(
+            DataLoader(**{mode: True}).load(
                 duck, _TARGET, [{"a": 3, "b": "new"}], _COLUMNS,
             )
 
@@ -108,7 +112,7 @@ class TestOnARealEngine:
         text = [("a", LogicalType("text", length=20)), ("b", LogicalType("text", length=20))]
 
         with pytest.raises(DatabaseError, match="Conversion"):
-            DataLoader(adapter=DBAdapter(), replace_destination=True).load(
+            DataLoader(replace_destination=True).load(
                 duck, _TARGET, [{"a": "not a number", "b": "new"}], text,
             )
 
@@ -120,7 +124,7 @@ class TestOnARealEngine:
     def test_a_staging_table_a_failed_run_left_is_replaced(self, duck) -> None:
         duck.execute("CREATE TABLE s.t__rey_stage (stale INTEGER)")
 
-        DataLoader(adapter=DBAdapter(), replace_destination=True).load(
+        DataLoader(replace_destination=True).load(
             duck, _TARGET, [{"a": 3, "b": "new"}], _COLUMNS,
         )
 
