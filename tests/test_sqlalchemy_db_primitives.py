@@ -328,24 +328,18 @@ def test_postgres_refuses_a_config_that_asserts_it_is_transactional() -> None:
         postgres_utils.get_connection(SimpleNamespace(**base, autocommit="no"))
 
 
-def test_mysql_query_rows_and_named_fetch_preserve_dict_shapes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_mysql_query_rows_preserves_dict_shapes() -> None:
     result = _Result(
         columns=("Record Id", "Status"),
         rows=[(8, "ready")],
         mappings=[{"Record Id": 8, "Status": "ready"}],
     )
-    conn, core, _engine = _connection(result, provider="mysql")
-    monkeypatch.setattr(mysql_utils, "load_sql", lambda _name: "SELECT %s AS value")
+    conn, _core, _engine = _connection(result, provider="mysql")
 
     columns, rows = DBAdapter().query_rows(conn, "SELECT * FROM records", limit=10)
-    named_rows = mysql_utils.fetch_dicts(conn, "find_record", [8])
 
     assert columns == ["Record Id", "Status"]
     assert rows == [{"Record Id": 8, "Status": "ready"}]
-    assert named_rows == [{"Record Id": 8, "Status": "ready"}]
-    assert core.executed[1] == ("SELECT %s AS value", (8,))
 
 
 def test_mysql_bulk_insert_preserves_normalization_and_caller_transaction() -> None:

@@ -26,7 +26,6 @@ __all__ = [
 	"get_connection",
 	"get_current_database",
 	"list_database_objects",
-	"fetch_dicts",
 	"bulk_insert",
 	"call_proc",
 	"call_proc_with_output",
@@ -72,21 +71,6 @@ def init_db(sql_dir: Path) -> None:
 def get_connection(db_cfg: Any, *, ctx: Any = None) -> Any:
 	timeout = int(getattr(db_cfg, "timeout", 30))
 	return _connect_with_retry(db_cfg, timeout, ctx=ctx)
-
-
-def fetch_dicts(
-	conn: Any,
-	sql_name: str,
-	params: Optional[list[Any]] = None,
-) -> list[dict[str, Any]]:
-	from rey_lib.db._sqlalchemy import core_connection
-
-	sql = load_sql(sql_name)
-	try:
-		result = core_connection(conn).exec_driver_sql(sql, tuple(params or []))
-		return [dict(row) for row in result.mappings().all()]
-	except Exception as exc:
-		raise DatabaseError(f"Query '{sql_name}' failed: {exc}") from exc
 
 
 def query_rows(

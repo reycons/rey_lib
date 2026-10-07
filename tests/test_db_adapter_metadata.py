@@ -83,66 +83,6 @@ def test_sqlalchemy_providers_return_the_same_normalized_contract(
         assert all(adapter.supports(conn, capability) for capability in _ALL_CAPABILITIES)
         assert adapter.list_catalogs(conn) == [{"name": "subject"}]
         assert {item["name"] for item in adapter.list_schemas(conn)} >= {"main"}
-        assert {item["name"] for item in adapter.list_tables(conn, "main")} == {
-            "child",
-            "no_primary_key",
-            "parent",
-        }
-
-        columns = adapter.get_columns(conn, "main", "child")
-        assert columns == [
-            {
-                "catalog": "subject",
-                "schema": "main",
-                "table": "child",
-                "name": "id",
-                "ordinal_position": 1,
-                "type": "INTEGER",
-                "nullable": True,
-                "default": None,
-            },
-            {
-                "catalog": "subject",
-                "schema": "main",
-                "table": "child",
-                "name": "parent_id",
-                "ordinal_position": 2,
-                "type": "INTEGER",
-                "nullable": False,
-                "default": "7",
-            },
-        ]
-        # Backlog 571: a check constraint, by name, with the expression it checks.
-        assert adapter.get_check_constraints(conn, "main", "parent") == [
-            {
-                "catalog": "subject",
-                "schema": "main",
-                "table": "parent",
-                "name": "ck_parent_id_positive",
-                "expression": "id > 0",
-            }
-        ]
-        assert adapter.get_check_constraints(conn, "main", "child") == []
-
-        # Keys, indexes and unique constraints are the database objects'
-        # (DatabaseSchema.read); their DBAdapter readers are retired (720).
-        for value in (
-            columns,
-            adapter.get_check_constraints(conn, "main", "parent"),
-        ):
-            _assert_rey_primitives(value)
-    finally:
-        conn.close()
-
-
-def test_supported_empty_is_not_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = create_engine("sqlite://")
-    conn = ReyConnection("postgres", engine, engine.connect())
-    monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "empty")
-    try:
-        adapter = DBAdapter()
-        assert adapter.supports(conn, "tables") is True
-        assert adapter.list_tables(conn, "main") == []
     finally:
         conn.close()
 
@@ -427,16 +367,8 @@ def test_duckdb_reports_only_existing_metadata_capabilities(
         ):
             assert adapter.supports(conn, capability) is False
 
-        catalog = adapter.list_catalogs(conn)[0]["name"]
+        assert adapter.list_catalogs(conn)[0]["name"]
         assert {item["name"] for item in adapter.list_schemas(conn)} >= {"subject"}
-        assert adapter.list_tables(conn, "subject") == [
-            {"catalog": catalog, "schema": "subject", "name": "records"}
-        ]
-        with pytest.raises(
-            UnsupportedDatabaseCapabilityError,
-            match="provider 'duckdb'.*capability 'columns'",
-        ):
-            adapter.get_columns(conn, "subject", "records")
     finally:
         conn.close()
 
@@ -472,10 +404,6 @@ def test_listings_are_ordered_whatever_the_provider_answers(
     monkeypatch.setattr(_sqlalchemy, "metadata_list_schemas", lambda _conn, catalog: [
         {"catalog": catalog, "name": "zeta"}, {"catalog": catalog, "name": "alpha"},
     ])
-    monkeypatch.setattr(_sqlalchemy, "metadata_list_tables", lambda _conn, catalog, schema: [
-        {"catalog": catalog, "schema": "s", "name": "orders"},
-        {"catalog": catalog, "schema": "s", "name": "accounts"},
-    ])
     # The structure read (backlog 725): names, keys and constraints only.
     monkeypatch.setattr(_sqlalchemy, "inspect_schema_structure", lambda _conn, schema: {
         "tables": [{"name": "orders"}, {"name": "accounts"}],
@@ -484,7 +412,6 @@ def test_listings_are_ordered_whatever_the_provider_answers(
     adapter = DBAdapter()
     try:
         assert [one["name"] for one in adapter.list_schemas(conn)] == ["alpha", "zeta"]
-        assert [one["name"] for one in adapter.list_tables(conn, "s")] == ["accounts", "orders"]
         metadata = adapter.get_schema_metadata(conn, "s")
         assert set(metadata) == {"tables", "views"}
         assert [one["name"] for one in metadata["tables"]] == ["accounts", "orders"]

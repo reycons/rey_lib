@@ -294,15 +294,6 @@ def _inspector(conn: Any) -> tuple[Any, Any]:
     return inspect(sa_conn), sa_conn
 
 
-def _schema_name(inspector: Any, schema: str | None) -> str:
-    value = schema if schema is not None else inspector.default_schema_name
-    return str(value or "")
-
-
-def _optional_name(value: Any) -> str | None:
-    return None if value is None or value == "" else str(value)
-
-
 def _primitive(value: Any) -> str | int | float | bool | None:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -314,19 +305,6 @@ def metadata_list_schemas(conn: Any, catalog: str) -> list[dict[str, Any]]:
     return [
         {"catalog": str(catalog), "name": str(name)}
         for name in inspector.get_schema_names()
-    ]
-
-
-def metadata_list_tables(
-    conn: Any,
-    catalog: str,
-    schema: str | None,
-) -> list[dict[str, Any]]:
-    inspector, _sa_conn = _inspector(conn)
-    schema_name = _schema_name(inspector, schema)
-    return [
-        {"catalog": str(catalog), "schema": schema_name, "name": str(name)}
-        for name in inspector.get_table_names(schema=schema or None)
     ]
 
 
@@ -361,21 +339,3 @@ def metadata_get_columns(
         )
     return result
 
-
-def metadata_get_check_constraints(
-    conn: Any,
-    catalog: str,
-    schema: str,
-    table: str,
-) -> list[dict[str, Any]]:
-    inspector, _sa_conn = _inspector(conn)
-    return [
-        {
-            "catalog": str(catalog),
-            "schema": str(schema),
-            "table": str(table),
-            "name": _optional_name(value.get("name")),
-            "expression": str(value.get("sqltext") or ""),
-        }
-        for value in inspector.get_check_constraints(table, schema=schema)
-    ]

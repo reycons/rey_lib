@@ -69,7 +69,6 @@ def _with_backend(monkeypatch: pytest.MonkeyPatch, backend: Any) -> None:
 # unexercised. Most are reached by the adapter method of the same name; the two
 # primitives are reached through the adapter operations built from them.
 _CALLS: dict[str, tuple[str, tuple]] = {
-    "fetch_dicts": ("fetch_dicts", ("some_sql", None)),
     "call_proc": ("call_proc", ("some_proc", None)),
     "call_proc_with_output": ("call_proc_with_output", ("some_proc", [], [])),
     "get_table_columns": ("get_table_columns", ("schema", "table")),
@@ -83,8 +82,6 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     # destination, and the load must be told which primitive is missing, by name.
     "quote_identifier": ("quote_identifier", ("name",)),
     "execute_statement": ("execute_statement", ("DELETE FROM t",)),
-    # The read DatabaseTable asks a catalog with (backlog 690).
-    "fetch_rows": ("fetch_rows", ("SELECT 1", {})),
     # What a catalog says about one table, for DatabaseTable.read_ddl (backlog 695).
     "table_column_catalog": ("table_column_catalog", ("schema", "table")),
     "table_native_definition": ("table_native_definition", ("schema", "table")),
@@ -243,14 +240,14 @@ class TestSupportIsResolvedNotListed:
     def test_the_real_postgres_module_still_has_the_known_gaps(self) -> None:
         """The out-of-scope half: their failure MODE is fixed, not their absence.
 
-        fetch_dicts, call_proc and call_proc_with_output are genuinely absent
+        call_proc and call_proc_with_output are genuinely absent
         from postgres_utils and this row does not add them. They now refuse by
         name. Asserting it here keeps "declared unsupported" honest -- if one
         is implemented later, this fails and says so.
         """
         from rey_lib.db import postgres_utils
 
-        for capability in ("fetch_dicts", "call_proc", "call_proc_with_output"):
+        for capability in ("call_proc", "call_proc_with_output"):
             assert not hasattr(postgres_utils, capability)
 
     def test_the_postgres_load_path_is_complete(self) -> None:

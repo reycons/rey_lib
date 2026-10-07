@@ -128,7 +128,6 @@ _PROVIDER_METADATA_CAPABILITIES: dict[str, frozenset[str]] = {
 # missing implementation is already absorbed by that loop.
 _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
     {
-        "fetch_dicts",
         "call_proc",
         "call_proc_with_output",
         "get_table_columns",
@@ -146,9 +145,6 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # without them fails the contract test rather than a load.
         "quote_identifier",
         "execute_statement",
-        # A read with named parameters: what DatabaseTable asks a catalog with
-        # (backlog 690). Binding and placeholder style are the provider's.
-        "fetch_rows",
         # What a provider's catalog says about one table (backlog 695): its
         # columns, for a provider whose table DDL the table composes; or the
         # complete definition the server itself supplies. Each is implemented
@@ -387,39 +383,6 @@ class DBAdapter:
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
-
-    def fetch_dicts(
-        self,
-        conn:     Any,
-        sql_name: str,
-        params:   Optional[list[Any]] = None,
-    ) -> list[dict[str, Any]]:
-        """Execute a named SQL query and return all rows as a list of dicts.
-
-        Delegates to the backend's ``fetch_dicts`` implementation so the
-        return type is always ``list[dict[str, Any]]`` regardless of backend.
-
-        Parameters
-        ----------
-        conn : Any
-            Open backend connection.
-        sql_name : str
-            SQL filename stem without .sql extension.
-        params : Optional[list[Any]]
-            Positional query parameters.
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            All result rows as column → value dicts.
-
-        Raises
-        ------
-        UnsupportedDatabaseCapabilityError
-            If the connection's provider does not implement ``fetch_dicts``.
-        """
-        fetch = self._require_provider_capability(conn, "fetch_dicts")
-        return fetch(conn, sql_name, params)
 
     def run_sql(
         self,
@@ -772,27 +735,6 @@ class DBAdapter:
             for name in sorted(name for name in names if name)
         ]
 
-    def list_tables(
-        self,
-        conn: Any,
-        schema: str | None = None,
-    ) -> list[dict[str, str]]:
-        """Return normalized tables, optionally restricted to one schema."""
-        return self._list_relations(conn, "tables", schema)
-
-    def get_columns(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-    ) -> list[dict[str, Any]]:
-        """Return normalized columns in ordinal order."""
-        provider = self._require_metadata_capability(conn, "columns")
-        catalog = self._metadata_catalog(conn, provider)
-        from rey_lib.db._sqlalchemy import metadata_get_columns
-
-        return metadata_get_columns(conn, catalog, schema, table)
-
     def inspect_database_references(
         self,
         conn: Any,
@@ -828,19 +770,6 @@ class DBAdapter:
                 f"references."
             )
         return inspect(conn, schema)
-
-    def get_check_constraints(
-        self,
-        conn: Any,
-        schema: str,
-        table: str,
-    ) -> list[dict[str, Any]]:
-        """Return normalized check constraints for a table, each with its expression."""
-        provider = self._require_metadata_capability(conn, "check_constraints")
-        catalog = self._metadata_catalog(conn, provider)
-        from rey_lib.db._sqlalchemy import metadata_get_check_constraints
-
-        return metadata_get_check_constraints(conn, catalog, schema, table)
 
     def list_procedures(
         self,
@@ -944,38 +873,6 @@ class DBAdapter:
 
     def _metadata_catalog(self, conn: Any, provider: str) -> str:
         return str(_backend(provider).get_current_database(conn))
-
-    def _list_relations(
-        self,
-        conn: Any,
-        capability: str,
-        schema: str | None,
-    ) -> list[dict[str, str]]:
-        provider = self._require_metadata_capability(conn, capability)
-        catalog = self._metadata_catalog(conn, provider)
-        if provider in {"postgres", "mysql"}:
-            from rey_lib.db._sqlalchemy import metadata_list_tables
-
-            listed = metadata_list_tables(conn, catalog, schema)
-            # ORDERED HERE, as the other branch is (backlog 278).
-            return sorted(listed, key=lambda item: (item["schema"], item["name"]))
-
-        relation_type = capability.rstrip("s")
-        objects = _backend(provider).list_database_objects(conn, catalog)
-        result = []
-        for obj in objects:
-            object_type = str(obj.get("object_type", "")).lower().rstrip("s")
-            object_schema = str(obj.get("schema") or "")
-            if object_type != relation_type or (schema and object_schema != schema):
-                continue
-            result.append(
-                {
-                    "catalog": catalog,
-                    "schema": object_schema,
-                    "name": str(obj.get("name") or ""),
-                }
-            )
-        return sorted(result, key=lambda item: (item["schema"], item["name"]))
 
     def _list_routines(
         self,
@@ -1138,19 +1035,6 @@ class DBAdapter:
             UnsupportedDatabaseCapabilityError: If the provider cannot.
         """
         return self._require_provider_capability(conn, "execute_statement")(conn, sql_text)
-
-    def fetch_rows(
-        self, conn: Any, sql_text: str, params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """Run one read with named ``:name`` parameters and return its rows.
-
-        Binding, and the placeholder style a driver needs, are the provider's:
-        a caller writes ``:name`` whatever the provider. No commit.
-
-        Raises:
-            UnsupportedDatabaseCapabilityError: If the provider cannot.
-        """
-        return self._require_provider_capability(conn, "fetch_rows")(conn, sql_text, params)
 
     def table_column_catalog(
         self, conn: Any, schema: str, table: str, *, database_name: str = "",
