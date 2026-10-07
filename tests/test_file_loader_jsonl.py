@@ -232,11 +232,11 @@ class TestTheReaderDelegates:
     """One branch in the existing dispatch, not a second parser."""
 
     def test_get_reader_dispatches_every_keyed_type(self, tmp_path: Path) -> None:
-        """The aliases are one set, shared with the loader.
+        """The aliases are one set: what get_reader reads one line at a time.
 
-        KEYED_FILE_TYPES decides both what get_reader dispatches and when the
-        loader can check the shape, so the two cannot disagree about which
-        formats carry their names per record.
+        KEYED_FILE_TYPES is what get_reader dispatches to its LINE reader on.
+        When a file's shape can be checked is KeyedFile's now, not this set's
+        (backlog 302).
         """
         path = tmp_path / "x.jsonl"
         path.write_text('{"a": 1}\n', encoding="utf-8")
@@ -244,6 +244,15 @@ class TestTheReaderDelegates:
         for file_type in KEYED_FILE_TYPES:
             assert list(get_reader(path, file_type=file_type)) == [{"a": 1}]
             assert list(get_reader(path, file_type=file_type.lower())) == [{"a": 1}]
+
+    def test_json_is_keyed_but_never_read_a_line_at_a_time(self) -> None:
+        """Backlog 302: the near miss, held by a test rather than a comment.
+
+        JSON carries its names per record, which is what the set's name reads
+        as. But a document is one value: through the line reader it yields
+        nothing, which is the failure the JSON work removed. JsonFile reads it.
+        """
+        assert "JSON" not in KEYED_FILE_TYPES
 
     def test_an_unknown_type_is_still_refused_by_name(self, tmp_path: Path) -> None:
         """Adding a branch must not turn the dispatch into a fallback."""
