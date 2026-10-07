@@ -979,7 +979,10 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                 WHERE t.trigger_schema NOT IN ('pg_catalog', 'information_schema')
                     AND NOT tr.tgisinternal
             )
-            SELECT object_type, schema_name, object_name, object_oid
+            SELECT object_type, schema_name, object_name, object_oid,
+                   CASE WHEN object_type IN ('functions', 'procedures')
+                        THEN pg_get_function_identity_arguments(object_oid)
+                   END AS signature
             FROM base
             ORDER BY object_type, schema_name, object_name
             """
@@ -989,7 +992,7 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
         cursor.close()
 
     objects: list[dict[str, Any]] = []
-    for object_type, schema_name, object_name, object_oid in rows:
+    for object_type, schema_name, object_name, object_oid, signature in rows:
         oid = int(object_oid) if object_oid is not None else None
         dependencies = _postgres_dependencies(
             conn,
@@ -1005,6 +1008,10 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                 "schema": str(schema_name),
                 "name": str(object_name),
                 "object_oid": oid,
+                # A routine's identity arguments: with schema and name, its
+                # Rey identity (DatabaseRoutineIdentity), so an overload is
+                # addressed without the provider's oid (backlog 695).
+                "signature": str(signature) if signature is not None else "",
                 "dependencies": dependencies,
             }
         )
@@ -1266,7 +1273,7 @@ def get_object_ddl(conn: Any, obj: dict[str, Any]) -> str:
                 f"{'CYCLE' if str(row[4]).upper() == 'YES' else 'NO CYCLE'};"
             )
 
-        if object_type in ("functions", "procedures"):
+        if object_type == "functions":
             if oid is None:
                 raise DatabaseError(f"postgres_utils: routine oid missing for {schema}.{name}")
             cursor.execute("SELECT pg_get_functiondef(%s::oid)", [oid])

@@ -461,6 +461,32 @@ class DatabaseProcedure:
     ddl: str = ""
     invocation: str = ""
 
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, identity: DatabaseRoutineIdentity, adapter: Any = None,
+    ) -> str:
+        """This procedure's own DDL (backlog 695).
+
+        Reading a procedure's DDL is the procedure's operation; the server's
+        stored definition is a retrieved fact
+        (``DBAdapter.routine_native_definition``), addressed by Rey's routine
+        identity -- schema, name and signature, never a provider handle. The
+        procedure ends the statement as its provider's script needs: a
+        semicolon, and on SQL Server the batch separator.
+
+        Raises:
+            DatabaseError: When there is no such procedure.
+            UnsupportedDatabaseCapabilityError: If the provider has no procedures.
+        """
+        adapter = adapter or _adapter()
+        definition = adapter.routine_native_definition(
+            conn, identity.schema, identity.name, identity.signature, "procedure",
+        ).rstrip()
+        provider = adapter.provider(conn)
+        if provider in _BATCH_END:
+            return definition + _BATCH_END[provider]
+        return definition if definition.endswith(";") else definition + ";"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "identity": self.identity.to_dict(),
@@ -756,7 +782,12 @@ def _routines(
         )
         built.append(build(
             identity=identity,
-            ddl=_routine_ddl(adapter, handle, kind, schema, name, signature),
+            # A procedure reads its own DDL (backlog 695); functions keep the
+            # adapter's definition read until their own slice.
+            ddl=(
+                _procedure_ddl(adapter, handle, identity) if kind == "procedures"
+                else _routine_ddl(adapter, handle, kind, schema, name, signature)
+            ),
             # Carried as the provider wrote it. Absent is an ordinary answer,
             # and nothing here composes one in its place: a call assembled by
             # something that does not know the provider's rules can reach the
@@ -987,5 +1018,13 @@ def _table_ddl(
     )
     try:
         return DatabaseTable.read_ddl(handle, identity, adapter)
+    except Exception:
+        return ""
+
+
+def _procedure_ddl(adapter: Any, handle: Any, identity: DatabaseRoutineIdentity) -> str:
+    """One procedure's DDL, as the procedure writes it, or nothing when it cannot be produced."""
+    try:
+        return DatabaseProcedure.read_ddl(handle, identity, adapter)
     except Exception:
         return ""

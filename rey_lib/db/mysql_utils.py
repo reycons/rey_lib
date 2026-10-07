@@ -596,10 +596,10 @@ def get_object_ddl(
 		if object_type == "schema":
 			return f"CREATE SCHEMA IF NOT EXISTS `{schema}`;"
 
-		if object_type in ("procedure", "function"):
+		if object_type == "function":
 			cursor.execute(f"SHOW CREATE {object_type.upper()} `{schema}`.`{name}`")
 			row = cursor.fetchone() or {}
-			ddl = row.get("Create Procedure") or row.get("Create Function") or ""
+			ddl = row.get("Create Function") or ""
 			return str(ddl).rstrip() + ";"
 
 		if object_type == "trigger":

@@ -34,7 +34,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable, DatabaseView
+from rey_lib.db.database_objects import (
+    DatabaseObjectIdentity,
+    DatabaseProcedure,
+    DatabaseRoutineIdentity,
+    DatabaseTable,
+    DatabaseView,
+)
 from rey_lib.db.routine_call import RoutineCall
 from rey_lib.logs import get_logger
 from rey_lib.errors.error_utils import (
@@ -241,6 +247,10 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # by the providers it applies to and refused by name elsewhere.
         "table_column_catalog",
         "table_native_definition",
+        # A routine's own definition, as the server stores it (backlog 695):
+        # the fact DatabaseProcedure (and later DatabaseFunction) reads its DDL
+        # from. ``kind`` says which routine; the semantics stay the object's.
+        "get_routine_definition",
     }
 )
 
@@ -1474,6 +1484,23 @@ class DBAdapter:
         read = self._require_provider_capability(conn, "table_native_definition")
         return read(conn, schema, table)
 
+    def routine_native_definition(
+        self, conn: Any, schema: str, name: str, signature: str, kind: str,
+    ) -> str:
+        """One routine's definition as the destination database itself supplies it.
+
+        A retrieval primitive, not a routine owner: the server's own source,
+        addressed by Rey's routine identity (schema, name, signature) and the
+        ``kind`` of routine asked for. Terminators and presentation are the
+        database object's.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider has no routines.
+            DatabaseError: When there is no such routine.
+        """
+        read = self._require_provider_capability(conn, "get_routine_definition")
+        return str(read(conn, "", schema, name, signature, kind))
+
     def _run_table_statement(
         self, conn: Any, verb: str, schema: str, table: str,
     ) -> int:
@@ -1695,10 +1722,15 @@ class DBAdapter:
         for obj in ordered:
             if validate_only:
                 continue
-            # A VIEW AND A TABLE WRITE THEIR OWN DDL (backlog 695); which objects,
-            # in which order, stays this export's.
+            # A VIEW, A TABLE AND A PROCEDURE WRITE THEIR OWN DDL (backlog 695);
+            # which objects, in which order, stays this export's.
             kind = str(obj.get("object_type", "")).lower().rstrip("s")
-            if kind in ("view", "table"):
+            if kind == "procedure":
+                ddl = DatabaseProcedure.read_ddl(conn, DatabaseRoutineIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]),
+                    name=str(obj["name"]), signature=str(obj.get("signature") or ""),
+                ), self)
+            elif kind in ("view", "table"):
                 owner = DatabaseView if kind == "view" else DatabaseTable
                 ddl = owner.read_ddl(conn, DatabaseObjectIdentity(
                     connection="", catalog="", schema=str(obj["schema"]), name=str(obj["name"]),

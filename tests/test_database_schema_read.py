@@ -119,6 +119,14 @@ class _Adapter:
             raise RuntimeError("this provider answers about no routines")
         return list(self._routines.get("functions") or [])
 
+    def routine_native_definition(
+        self, conn: Any, schema: str, name: str, signature: str, kind: str,
+    ) -> str:
+        """The server's stored routine source; DatabaseProcedure reads through this (695)."""
+        return self._routine_source(kind, {
+            "object_type": kind, "schema": schema, "name": name, "signature": signature,
+        })
+
     def get_procedure_definition(self, conn: Any, identity: dict[str, Any]) -> str:
         return self._routine_source("procedure", identity)
 

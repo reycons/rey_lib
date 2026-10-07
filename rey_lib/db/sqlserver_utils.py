@@ -663,6 +663,35 @@ def table_column_catalog(
 	]
 
 
+def get_routine_definition(
+	conn: pyodbc.Connection,
+	catalog: str,
+	schema: str,
+	name: str,
+	signature: str,
+	kind: str,
+) -> str:
+	"""One routine's definition as SQL Server itself stores it.
+
+	A metadata primitive: the server's own source, retrieved by name through
+	``OBJECT_DEFINITION`` -- never composed here. SQL Server does not overload
+	a routine name, so the signature takes no part in finding one.
+
+	Raises:
+		DatabaseError: When there is no such routine.
+	"""
+	qualified = f"{quote_identifier(schema)}.{quote_identifier(name)}"
+	rows = fetch_rows(
+		conn,
+		"SELECT OBJECT_DEFINITION(OBJECT_ID(:qualified)) AS definition",
+		{"qualified": qualified},
+	)
+	definition = rows[0]["definition"] if rows else None
+	if not definition:
+		raise DatabaseError(f"sqlserver_utils: {kind} not found: {schema}.{name}")
+	return str(definition)
+
+
 def load_sql(name: str) -> str:
     """
     Return the preloaded SQL string for a named query.
@@ -1123,7 +1152,7 @@ def get_object_ddl(conn: pyodbc.Connection, obj: dict[str, Any]) -> str:
 
     cursor = conn.cursor()
     try:
-        if object_type in ("procedure", "function", "trigger", "constraint") and object_id is not None:
+        if object_type in ("function", "trigger", "constraint") and object_id is not None:
             cursor.execute("SELECT OBJECT_DEFINITION(?)", [object_id])
             row = cursor.fetchone()
             ddl = row[0] if row else None

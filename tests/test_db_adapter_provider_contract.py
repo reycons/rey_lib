@@ -86,6 +86,10 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     # What a catalog says about one table, for DatabaseTable.read_ddl (backlog 695).
     "table_column_catalog": ("table_column_catalog", ("schema", "table")),
     "table_native_definition": ("table_native_definition", ("schema", "table")),
+    # A routine's stored source, for DatabaseProcedure.read_ddl (backlog 695).
+    "get_routine_definition": (
+        "routine_native_definition", ("schema", "name", "", "procedure"),
+    ),
 }
 
 
