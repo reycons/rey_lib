@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.code_index import IndexedRepository
@@ -281,11 +282,10 @@ class CodeIndexDatabaseWriter:
         Realizations and canonical objects first: they name the concepts.
         """
         for table in ("canonical_object_stage", "realization_stage", "concept_stage"):
-            self._adapter.execute_sql(
+            DatabaseTable.delete_all_rows(
                 self._connection,
-                f"DELETE FROM {SCHEMA}.{table}",
-                {},
-                "no_return",
+                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+                self._adapter,
             )
 
     def clear(self) -> None:
@@ -310,11 +310,10 @@ class CodeIndexDatabaseWriter:
                       "assignment_stage", "parameter_stage",
                       "edge_stage", "symbol_stage", "file_stage",
                       "repository_stage"):
-            self._adapter.execute_sql(
+            DatabaseTable.delete_all_rows(
                 self._connection,
-                f"DELETE FROM {SCHEMA}.{table}",
-                {},
-                "no_return",
+                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+                self._adapter,
             )
 
     def _stage(

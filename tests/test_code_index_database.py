@@ -32,6 +32,14 @@ class _Adapter:
     ) -> None:
         self.statements.append(sql_text)
 
+    def quote_identifier(self, _conn: Any, name: str) -> str:
+        return f'"{name}"'
+
+    def execute_statement(self, _conn: Any, sql_text: str) -> int:
+        """Where DatabaseTable.delete_all_rows sends its statement."""
+        self.statements.append(sql_text)
+        return 0
+
     def bulk_insert(
         self,
         _conn: Any,
@@ -117,8 +125,8 @@ class TestTheWriteBoundary:
         for statement in adapter.statements:
             if statement.startswith("CALL"):
                 continue
-            assert statement.startswith("DELETE FROM code.")
-            assert statement.endswith("_stage")
+            assert statement.startswith('DELETE FROM "code".')
+            assert statement.endswith('_stage"')
 
     def test_the_replacement_is_one_call(self) -> None:
         """Atomicity is the schema's, so exactly one promotion is issued."""
@@ -153,17 +161,17 @@ class TestTheWriteBoundary:
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
-            "DELETE FROM code.call_argument_stage",
-            "DELETE FROM code.raise_site_stage",
-            "DELETE FROM code.return_site_stage",
-            "DELETE FROM code.class_attribute_stage",
-            "DELETE FROM code.access_stage",
-            "DELETE FROM code.assignment_stage",
-            "DELETE FROM code.parameter_stage",
-            "DELETE FROM code.edge_stage",
-            "DELETE FROM code.symbol_stage",
-            "DELETE FROM code.file_stage",
-            "DELETE FROM code.repository_stage",
+            'DELETE FROM "code"."call_argument_stage"',
+            'DELETE FROM "code"."raise_site_stage"',
+            'DELETE FROM "code"."return_site_stage"',
+            'DELETE FROM "code"."class_attribute_stage"',
+            'DELETE FROM "code"."access_stage"',
+            'DELETE FROM "code"."assignment_stage"',
+            'DELETE FROM "code"."parameter_stage"',
+            'DELETE FROM "code"."edge_stage"',
+            'DELETE FROM "code"."symbol_stage"',
+            'DELETE FROM "code"."file_stage"',
+            'DELETE FROM "code"."repository_stage"',
         ]
 
     def test_a_symbol_carries_the_keys_that_resolve_it(self) -> None:
@@ -318,9 +326,9 @@ class TestTheAuthoredSideIsItsOwnLifecycle:
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
-            "DELETE FROM code.canonical_object_stage",
-            "DELETE FROM code.realization_stage",
-            "DELETE FROM code.concept_stage",
+            'DELETE FROM "code"."canonical_object_stage"',
+            'DELETE FROM "code"."realization_stage"',
+            'DELETE FROM "code"."concept_stage"',
         ]
 
     def test_a_concept_carries_its_parent_by_key_not_by_id(self) -> None:

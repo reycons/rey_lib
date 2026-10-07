@@ -28,6 +28,7 @@ import ast
 from pathlib import Path
 from typing import Any
 
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.logs.logging_setup import get_logger
 
@@ -465,8 +466,10 @@ class BridgeIndexWriter:
     def _clear_staging(self) -> None:
         """Empty staging, so a run that staged and failed cannot be published."""
         for table in _STAGING:
-            self._adapter.execute_sql(
-                self._connection, f"DELETE FROM {SCHEMA}.{table}", {}, "no_return",
+            DatabaseTable.delete_all_rows(
+                self._connection,
+                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+                self._adapter,
             )
 
     def _stage(
