@@ -174,5 +174,5 @@ def test_the_compiler_resolves_families_only_through_the_registry(doc: Path) -> 
 
 def test_a_missing_document_raises_rather_than_guessing(tmp_path: Path) -> None:
     """The path is configuration and is never substituted."""
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ConfigError):
         compile_architecture_policy(tmp_path / "absent.yaml", "shared_lib")

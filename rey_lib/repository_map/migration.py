@@ -207,12 +207,11 @@ def load_migration_manifest(path: Path) -> MigrationManifest:
         The typed manifest.
 
     Raises:
-        FileNotFoundError: If the manifest is absent. The path is configuration
-            and is never guessed.
-        ValueError: If the manifest is not valid YAML or omits a required field.
+        ConfigError: If the manifest is absent (the path is configuration and
+            is never guessed), is not valid YAML, or omits a required field.
     """
     if not path.is_file():
-        raise FileNotFoundError(f"Migration manifest not found: {path}")
+        raise ConfigError(f"Migration manifest not found: {path}")
     try:
         parsed = parse_yaml(read_text_file(path))
     except Exception as exc:  # Surface the offending file, not a bare parse error.

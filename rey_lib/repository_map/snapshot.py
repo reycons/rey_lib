@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs.logging_setup import get_logger
 from rey_lib.repository_map.architecture_projection import (
     ARCHITECTURE_SOURCE_NAME,
@@ -91,7 +92,7 @@ def scan(apps_root: Path, context_root: Path) -> CodeIndexSnapshot:
     Raises:
         ArchitectureProjectionError: If the architecture context is absent or
             declares no membership, or if a statement cannot be resolved.
-        FileNotFoundError: If a declared repository is not checked out.
+        ConfigError: If a declared repository is not checked out.
         ValueError: If a derived artifact does not describe the inputs it was
             just built from, which means one moved during the scan.
     """
@@ -103,7 +104,7 @@ def scan(apps_root: Path, context_root: Path) -> CodeIndexSnapshot:
     for repository in members:
         repo_root = apps_root / repository
         if not repo_root.is_dir():
-            raise FileNotFoundError(
+            raise ConfigError(
                 f"Declared system member '{repository}' is not checked out at {repo_root}."
             )
         rules_path = repo_root / RULES_NAME

@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from rey_lib.errors.error_utils import ConfigError
+
 from rey_lib.repository_map.inventory import load_scan_rules
 from rey_lib.repository_map.records import ScanRules
 from rey_lib.repository_map.writer import (
@@ -171,7 +173,7 @@ def test_a_declared_rules_path_that_is_absent_is_refused(tmp_path: Path) -> None
     root = tmp_path / "bare"
     root.mkdir()
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ConfigError):
         _scan(root, root / RULES_NAME)
 
 

@@ -409,7 +409,7 @@ def test_a_manifest_missing_a_required_field_is_refused(tmp_path: Path) -> None:
 
 def test_a_missing_manifest_raises_rather_than_guessing(tmp_path: Path) -> None:
     """The path is configuration and is never substituted."""
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ConfigError):
         load_migration_manifest(tmp_path / "absent.yaml")
 
 

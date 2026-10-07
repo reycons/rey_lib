@@ -41,12 +41,12 @@ def load_scan_rules(rules_path: Path) -> ScanRules:
         The typed scan rules.
 
     Raises:
-        FileNotFoundError: If the rules file does not exist. The path is
-            configuration and is never guessed or substituted.
-        ConfigError: If the rules file is not valid rules content.
+        ConfigError: If the rules file does not exist (the path is
+            configuration and is never guessed or substituted), or is not valid
+            rules content.
     """
     if not rules_path.is_file():
-        raise FileNotFoundError(f"Scan rules file not found: {rules_path}")
+        raise ConfigError(f"Scan rules file not found: {rules_path}")
 
     text = read_text_file(rules_path)
     try:

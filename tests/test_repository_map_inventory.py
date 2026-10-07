@@ -273,7 +273,7 @@ def test_missing_repository_root_is_rejected(tmp_path: Path, rules: ScanRules) -
 
 def test_missing_rules_file_is_rejected(tmp_path: Path) -> None:
     """A missing rules path is an error; it is never guessed or defaulted."""
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ConfigError):
         load_scan_rules(tmp_path / "absent.yaml")
 
 

@@ -154,14 +154,13 @@ def compile_architecture_policy(
         The compiled rules and the provenance of each.
 
     Raises:
-        FileNotFoundError: If the architecture document is absent. The path is
-            configuration and is never guessed or substituted.
-        ValueError: If the document is not valid YAML, if an annotation names a
-            family the registry does not hold, or if an annotation is malformed
-            for the family that owns it.
+        ConfigError: If the architecture document is absent (the path is
+            configuration and is never guessed or substituted), if it is not
+            valid YAML, if an annotation names a family the registry does not
+            hold, or if an annotation is malformed for the family that owns it.
     """
     if not architecture_path.is_file():
-        raise FileNotFoundError(f"Architecture context not found: {architecture_path}")
+        raise ConfigError(f"Architecture context not found: {architecture_path}")
 
     try:
         parsed = parse_yaml(read_text_file(architecture_path))
