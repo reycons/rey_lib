@@ -169,10 +169,13 @@ class TestTheCommand:
         assert self._run("--method", "POST", "--body-file", str(body), "x") == 0
         assert wired.seen[0].content == b"from file"
 
-    def test_a_refusal_exits_one(self, wired: Any) -> None:
-        assert self._run("--follow-redirects", "hop") == 1
+    def test_a_refusal_is_raised_as_its_app_error(self, wired: Any) -> None:
+        with pytest.raises(ConfigError):
+            self._run("--follow-redirects", "hop")
 
-    def test_an_unanswered_request_exits_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_unanswered_request_is_raised_as_its_app_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         def refuse(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("refused", request=request)
 
@@ -180,22 +183,29 @@ class TestTheCommand:
         connection = HttpConnection(_record(), ctx=_ctx(), transport=transport)
         monkeypatch.setattr(tester, "_connection", lambda path, app, name: connection)
 
-        assert self._run("x") == 1
+        with pytest.raises(HttpTransportError):
+            self._run("x")
 
     @pytest.mark.parametrize("args", [
         ("--query", "novalue", "x"),
         ("--json", "{not json", "x"),
     ])
-    def test_bad_arguments_exit_two(self, wired: Any, args: tuple[str, ...]) -> None:
-        assert self._run(*args) == 2
+    def test_bad_arguments_are_raised_as_config_errors(
+        self, wired: Any, args: tuple[str, ...],
+    ) -> None:
+        with pytest.raises(ConfigError):
+            self._run(*args)
 
-    def test_a_database_connection_exits_two(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_database_connection_is_raised_as_a_config_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         def lookup(path: str, app: str, name: str) -> Any:
             raise ConfigError(f"connection '{name}' is a postgres connection, not http.")
 
         monkeypatch.setattr(tester, "_connection", lookup)
 
-        assert self._run("x") == 2
+        with pytest.raises(ConfigError):
+            self._run("x")
 
     def test_a_non_http_connection_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import rey_lib.config.config_context as config_context

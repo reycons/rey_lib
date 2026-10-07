@@ -23,8 +23,8 @@ Request headers are never reported: the credential is added by the connection. T
 redirect is not shown -- corehttp's public response reports the request's URL;
 an unfollowed 3xx shows its Location header instead.
 
-Exit codes: 0 a response came back (any status); 1 the request was refused or
-not answered; 2 a usage or configuration error.
+A response of any status returns 0. A failure is raised as its AppError --
+ConfigError or HttpTransportError -- and is not caught here (rule 79).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from rey_lib.errors.error_utils import ConfigError, HttpTransportError
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import get_logger
 from rey_lib.web_utils.connection import HttpConnection
 from rey_lib.web_utils import HttpRequest
@@ -212,28 +212,20 @@ def _connection(config_path: str, app: str, name: str) -> HttpConnection:
 def main(argv: list[str] | None = None) -> int:
     """Run the HTTP tester. Returns the process exit code."""
     args = _parse_args(argv)
-    try:
-        query = _pairs(args.query, "--query")
-        headers = _pairs(args.header, "--header")
-        json_body = _json_argument(args.json_text)
-        content: Optional[str] = args.body
-        if args.body_file:
-            from rey_lib.files.file_utils import read_text_file  # noqa: PLC0415
+    query = _pairs(args.query, "--query")
+    headers = _pairs(args.header, "--header")
+    json_body = _json_argument(args.json_text)
+    content: Optional[str] = args.body
+    if args.body_file:
+        from rey_lib.files.file_utils import read_text_file  # noqa: PLC0415
 
-            content = read_text_file(args.body_file)
-        connection = _connection(args.config_path, args.app, args.connection)
-    except ConfigError as exc:
-        _logger.error("http tester: the request could not be prepared", exc_info=exc)
-        return 2
-    try:
-        result = exchange(
-            connection, args.method, args.target,
-            query=query, headers=headers, json_body=json_body, content=content,
-            follow_redirects=args.follow_redirects, timeout_seconds=args.timeout,
-        )
-    except (ConfigError, HttpTransportError) as exc:
-        _logger.error("http tester: the request was not answered", exc_info=exc)
-        return 1
+        content = read_text_file(args.body_file)
+    connection = _connection(args.config_path, args.app, args.connection)
+    result = exchange(
+        connection, args.method, args.target,
+        query=query, headers=headers, json_body=json_body, content=content,
+        follow_redirects=args.follow_redirects, timeout_seconds=args.timeout,
+    )
     # The connection is shared: runtime shutdown closes it, never a consumer.
     # A manual tool's report is a log event, not product output (backlog 701).
     _logger.info("%s", render(result))
