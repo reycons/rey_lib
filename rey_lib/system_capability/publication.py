@@ -33,6 +33,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.procedure_map import execute_mapped_routine
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import get_logger
@@ -306,11 +307,15 @@ class CapabilityPublisher:
         columns: tuple[str, ...],
         rows: list[dict[str, Any]],
     ) -> None:
-        """Stage rows through the adapter's bulk mechanism."""
+        """Stage rows through the table's bulk insert (backlog 753)."""
         if not rows:
             return
-        self._adapter.bulk_insert(
-            self._connection, _SCHEMA, table, rows, list(columns)
+        DatabaseTable.bulk_insert(
+            self._connection,
+            DatabaseObjectIdentity(connection="", catalog="", schema=_SCHEMA, name=table),
+            rows,
+            list(columns),
+            self._adapter,
         )
 
     def _call(

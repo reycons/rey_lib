@@ -478,8 +478,12 @@ class BridgeIndexWriter:
         """Insert staged rows. Empty is a legitimate result, not an error."""
         if not rows:
             return
-        self._adapter.bulk_insert(
-            self._connection, SCHEMA, table, rows, list(columns)
+        DatabaseTable.bulk_insert(
+            self._connection,
+            DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+            rows,
+            list(columns),
+            self._adapter,
         )
 
     def _call(self, procedure: str) -> None:

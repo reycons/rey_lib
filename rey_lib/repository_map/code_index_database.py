@@ -322,7 +322,7 @@ class CodeIndexDatabaseWriter:
         rows: list[dict[str, Any]],
         columns: tuple[str, ...],
     ) -> None:
-        """Insert staged rows through the adapter's bulk mechanism.
+        """Insert staged rows through the table's bulk insert (backlog 753).
 
         Args:
             table: The staging table, unqualified.
@@ -332,8 +332,12 @@ class CodeIndexDatabaseWriter:
         """
         if not rows:
             return
-        self._adapter.bulk_insert(
-            self._connection, SCHEMA, table, rows, list(columns)
+        DatabaseTable.bulk_insert(
+            self._connection,
+            DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+            rows,
+            list(columns),
+            self._adapter,
         )
 
     def _call(self, procedure: str, arguments: str = "") -> None:
