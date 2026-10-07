@@ -342,6 +342,34 @@ class TestTheTruncationRetry:
         # Only b overflowed: the longest value plus the margin.
         assert adapter.altered == ['ALTER TABLE "s"."t" ALTER COLUMN "b" TYPE VARCHAR(35)']
 
+    def test_a_failed_rollback_leaves_the_inserts_own_error_standing(self) -> None:
+        """The handle refusing to roll back (DuckDB with no transaction open)
+        must not replace what actually went wrong (backlog 746)."""
+        refused = RuntimeError("cannot rollback - no transaction is active")
+        conn = _Conn()
+        conn.rollback = lambda: (_ for _ in ()).throw(refused)
+        original = DatabaseError("the insert failed")
+
+        with pytest.raises(DatabaseError) as raised:
+            _loader(_Adapter(exists=True, insert_error=original)).load(
+                conn, _TARGET, _RECORDS, _DEFS,
+            )
+
+        assert raised.value is original
+
+    def test_after_a_failed_rollback_nothing_is_widened_or_retried(self) -> None:
+        """Even a truncation: a retry is only safe once the rollback succeeded."""
+        adapter = _Adapter(exists=True, truncation=True,
+                           insert_error=DatabaseError("too long"))
+        conn = _Conn()
+        conn.rollback = lambda: (_ for _ in ()).throw(RuntimeError("no transaction"))
+
+        with pytest.raises(DatabaseError, match="too long"):
+            _loader(adapter).load(conn, _TARGET, _OVERFLOWING, _DEFS)
+
+        assert adapter.calls.count("bulk_insert") == 1
+        assert getattr(adapter, "altered", []) == []
+
     def test_a_NON_truncation_error_widens_nothing(self) -> None:
         """Widening a column would not repair an unrelated failure."""
         adapter = _Adapter(exists=True, truncation=False,

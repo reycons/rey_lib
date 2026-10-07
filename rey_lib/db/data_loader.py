@@ -248,8 +248,20 @@ class DataLoader:
         try:
             return self._insert(conn, target, records, names)
         except DatabaseError as insert_exc:
-            conn.rollback()
-            if not DatabaseTable.is_truncation_error(insert_exc):
+            rolled_back = True
+            try:
+                conn.rollback()
+            except Exception as rollback_exc:  # noqa: BLE001 -- the raw handle's own type
+                # A failed rollback must not replace the insert's error (backlog
+                # 746): DuckDB with no transaction open refuses one outright.
+                _logger.debug(
+                    "Nothing rolled back after a failed insert into %s.%s: %s",
+                    schema, table, rollback_exc,
+                )
+                rolled_back = False
+            # The insert's own error, exactly as raised. Nothing is classified,
+            # widened or retried on a handle that could not be rolled back.
+            if not rolled_back or not DatabaseTable.is_truncation_error(insert_exc):
                 raise
             widened = _widened(columns, records)
             if not widened:

@@ -93,12 +93,10 @@ class TestOnARealEngine:
     def test_a_failed_fill_leaves_the_target_unchanged(
         self, duck, mode: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # The fill's DatabaseError is replaced by DuckDB refusing the retry
-        # path's conn.rollback() with no transaction open -- a defect older
-        # than 516 (the same line ran before it), tracked as backlog 746.
-        # What this asserts is 516's: the target is untouched.
+        # The fill's own error reaches the caller: DuckDB refusing the
+        # rollback with no transaction open no longer replaces it (backlog 746).
         stand_beneath_the_table(monkeypatch, _FailingFill())
-        with pytest.raises((DatabaseError, duckdb.TransactionException)):
+        with pytest.raises(DatabaseError, match="the fill failed"):
             DataLoader(**{mode: True}).load(
                 duck, _TARGET, [{"a": 3, "b": "new"}], _COLUMNS,
             )
