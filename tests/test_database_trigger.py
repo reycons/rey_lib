@@ -123,7 +123,10 @@ def test_the_postgres_listing_names_each_trigger_s_table(
         "triggers", "run_log_audit", "run_log",
     )
     (asked,) = [sql for sql in cursor.statements if "WITH base AS" in sql]
-    assert "c.relname = t.event_object_table" in asked
+    # From the catalog itself, one row per trigger: information_schema.triggers
+    # shows only what the reading role holds privileges on (backlog 760).
+    assert "FROM pg_trigger tr" in asked and "NOT tr.tgisinternal" in asked
+    assert "FROM information_schema.triggers" not in asked
 
 
 def test_the_ddl_export_asks_the_trigger_by_its_table(

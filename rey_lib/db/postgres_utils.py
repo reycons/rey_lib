@@ -961,9 +961,14 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                     AND t.typtype IN ('e', 'd')
                 UNION ALL
                 -- Schema and plain name: a sequence's identity (backlog 695).
-                SELECT 'sequences'::text, s.sequence_schema, s.sequence_name, NULL::oid
-                FROM information_schema.sequences s
-                WHERE s.sequence_schema NOT IN ('pg_catalog', 'information_schema')
+                -- From pg_class, not information_schema.sequences, which shows
+                -- only what the reading role owns or holds privileges on, so a
+                -- listing would depend on who reads it (backlog 760).
+                SELECT 'sequences'::text, n.nspname, c.relname, NULL::oid
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = 'S'
+                    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
                 UNION ALL
                 SELECT 'views'::text, v.table_schema, v.table_name, c.oid
                 FROM information_schema.views v
@@ -981,14 +986,15 @@ def _list_primary_objects(conn: Any, db_name: str) -> list[dict[str, Any]]:
                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
                     AND p.prokind IN ('f', 'p')
                 UNION ALL
-                SELECT DISTINCT 'triggers'::text, t.trigger_schema, t.trigger_name, tr.oid
-                FROM information_schema.triggers t
-                JOIN pg_trigger tr ON tr.tgname = t.trigger_name
+                -- From pg_trigger, not information_schema.triggers, for the
+                -- same reason as sequences (backlog 760). One row per trigger;
+                -- its table is read below, because a trigger name is unique
+                -- only within its table (backlog 695).
+                SELECT 'triggers'::text, n.nspname, tr.tgname, tr.oid
+                FROM pg_trigger tr
                 JOIN pg_class c ON c.oid = tr.tgrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.event_object_schema
-                -- A trigger name is unique only within its table (backlog 695).
-                    AND c.relname = t.event_object_table
-                WHERE t.trigger_schema NOT IN ('pg_catalog', 'information_schema')
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
                     AND NOT tr.tgisinternal
             )
             SELECT object_type, schema_name, object_name, object_oid,
@@ -1939,7 +1945,12 @@ def _postgres_dependencies(
         if object_type == "views":
             cursor.execute(
                 """
-                SELECT DISTINCT 'tables'::text, sn.nspname, sc.relname
+                -- Each target by what it is, as the routines branch states it;
+                -- and never the view itself, which its own rewrite rule
+                -- depends on (backlog 761).
+                SELECT DISTINCT
+                    CASE WHEN sc.relkind = 'r' THEN 'tables' ELSE 'views' END,
+                    sn.nspname, sc.relname
                 FROM pg_class vc
                 JOIN pg_namespace vn ON vn.oid = vc.relnamespace
                 JOIN pg_rewrite rw ON rw.ev_class = vc.oid
@@ -1948,6 +1959,7 @@ def _postgres_dependencies(
                 JOIN pg_namespace sn ON sn.oid = sc.relnamespace
                 WHERE vn.nspname = %s AND vc.relname = %s
                     AND sc.relkind IN ('r', 'v', 'm')
+                    AND sc.oid <> vc.oid
                     AND sn.nspname NOT IN ('pg_catalog', 'information_schema')
                 """,
                 [schema, name],

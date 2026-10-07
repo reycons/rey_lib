@@ -128,6 +128,10 @@ def test_the_postgres_listing_names_a_sequence_by_its_plain_name(
     assert (listed["schema"], listed["name"]) == ("control", "run_seq")
     (asked,) = [sql for sql in cursor.statements if "WITH base AS" in sql]
     assert "s.sequence_schema || '.'" not in asked
+    # From pg_class: information_schema.sequences shows only what the reading
+    # role holds privileges on, so the listing depended on who read it (760).
+    assert "c.relkind = 'S'" in asked
+    assert "FROM information_schema.sequences" not in asked
 
 
 def test_duckdb_answers_from_its_own_catalog_end_to_end() -> None:

@@ -185,3 +185,39 @@ def test_the_ddl_export_writes_a_view_s_own_ddl(
     assert written.read_text(encoding="utf-8") == (
         "CREATE VIEW trade_vw AS SELECT symbol FROM trade;\n"
     )
+
+
+class _DependencyCursor:
+    """Records the dependency query a postgres view is asked with."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, sql_text: str, *_a: Any) -> None:
+        self.statements.append(sql_text)
+
+    def fetchall(self) -> list[tuple]:
+        return [("views", "code", "concept_vw"), ("tables", "code", "concept")]
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_postgres_view_names_each_target_by_what_it_is_and_never_itself() -> None:
+    """Backlog 761: every target was labelled a table, and each view depended
+    on itself through its own rewrite rule."""
+    cursor = _DependencyCursor()
+
+    deps = postgres_utils._postgres_dependencies(
+        type("Conn", (), {"cursor": lambda self: cursor})(),
+        object_type="views", schema="code", name="concept_flat_vw", object_oid=None,
+    )
+
+    (asked,) = cursor.statements
+    assert "CASE WHEN sc.relkind = 'r' THEN 'tables' ELSE 'views' END" in asked
+    assert "sc.oid <> vc.oid" in asked
+    assert "'tables'::text" not in asked
+    assert sorted(deps, key=lambda d: d["name"]) == [
+        {"object_type": "tables", "schema": "code", "name": "concept"},
+        {"object_type": "views", "schema": "code", "name": "concept_vw"},
+    ]
