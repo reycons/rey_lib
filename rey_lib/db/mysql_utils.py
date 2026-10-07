@@ -584,10 +584,10 @@ def get_object_ddl(
 		if object_type == "schema":
 			return f"CREATE SCHEMA IF NOT EXISTS `{schema}`;"
 
-		if object_type in ("table", "view"):
+		if object_type == "table":
 			cursor.execute(f"SHOW CREATE TABLE `{schema}`.`{name}`")
 			row = cursor.fetchone() or {}
-			ddl = row.get("Create Table") or row.get("Create View") or ""
+			ddl = row.get("Create Table") or ""
 			return str(ddl).rstrip() + ";"
 
 		if object_type in ("procedure", "function"):

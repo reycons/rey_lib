@@ -88,9 +88,6 @@ def test_sqlalchemy_providers_return_the_same_normalized_contract(
             "no_primary_key",
             "parent",
         }
-        assert adapter.list_views(conn, "main") == [
-            {"catalog": "subject", "schema": "main", "name": "child_ids"}
-        ]
 
         columns = adapter.get_columns(conn, "main", "child")
         assert columns == [
@@ -186,7 +183,6 @@ def test_supported_empty_is_not_unsupported(monkeypatch: pytest.MonkeyPatch) -> 
         adapter = DBAdapter()
         assert adapter.supports(conn, "tables") is True
         assert adapter.list_tables(conn, "main") == []
-        assert adapter.list_views(conn, "main") == []
     finally:
         conn.close()
 
@@ -465,9 +461,6 @@ def test_duckdb_reports_only_existing_metadata_capabilities(
         assert adapter.list_tables(conn, "subject") == [
             {"catalog": catalog, "schema": "subject", "name": "records"}
         ]
-        assert adapter.list_views(conn, "subject") == [
-            {"catalog": catalog, "schema": "subject", "name": "current_records"}
-        ]
         with pytest.raises(
             UnsupportedDatabaseCapabilityError,
             match="provider 'duckdb'.*capability 'columns'",
@@ -494,7 +487,11 @@ def test_listings_are_ordered_whatever_the_provider_answers(
     backend: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Backlog 278: the adapter owns ordering, not the provider's Inspector."""
+    """Backlog 278: the adapter owns ordering, not the provider's Inspector.
+
+    Views are listed by a schema read now (backlog 695); the standalone view
+    listing left DBAdapter.
+    """
     from rey_lib.db import _sqlalchemy
 
     conn = _sqlalchemy_connection(provider)
@@ -506,10 +503,6 @@ def test_listings_are_ordered_whatever_the_provider_answers(
         {"catalog": catalog, "schema": "s", "name": "orders"},
         {"catalog": catalog, "schema": "s", "name": "accounts"},
     ])
-    monkeypatch.setattr(_sqlalchemy, "metadata_list_views", lambda _conn, catalog, schema: [
-        {"catalog": catalog, "schema": "s", "name": "v_z"},
-        {"catalog": catalog, "schema": "s", "name": "v_a"},
-    ])
     monkeypatch.setattr(_sqlalchemy, "inspect_schema", lambda _conn, schema: {
         "schemas": ["zeta", "alpha"],
         "tables": [{"name": "orders", "columns": [{"name": "z"}, {"name": "a"}]},
@@ -520,7 +513,6 @@ def test_listings_are_ordered_whatever_the_provider_answers(
     try:
         assert [one["name"] for one in adapter.list_schemas(conn)] == ["alpha", "zeta"]
         assert [one["name"] for one in adapter.list_tables(conn, "s")] == ["accounts", "orders"]
-        assert [one["name"] for one in adapter.list_views(conn, "s")] == ["v_a", "v_z"]
         metadata = adapter.get_schema_metadata(conn, "s")
         assert metadata["schemas"] == ["alpha", "zeta"]
         assert [one["name"] for one in metadata["tables"]] == ["accounts", "orders"]

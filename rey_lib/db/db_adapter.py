@@ -34,6 +34,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseView
 from rey_lib.db.routine_call import RoutineCall
 from rey_lib.logs import get_logger
 from rey_lib.errors.error_utils import (
@@ -855,14 +856,6 @@ class DBAdapter:
         """Return normalized tables, optionally restricted to one schema."""
         return self._list_relations(conn, "tables", schema)
 
-    def list_views(
-        self,
-        conn: Any,
-        schema: str | None = None,
-    ) -> list[dict[str, str]]:
-        """Return normalized views, optionally restricted to one schema."""
-        return self._list_relations(conn, "views", schema)
-
     def get_columns(
         self,
         conn: Any,
@@ -1136,14 +1129,9 @@ class DBAdapter:
         provider = self._require_metadata_capability(conn, capability)
         catalog = self._metadata_catalog(conn, provider)
         if provider in {"postgres", "mysql"}:
-            if capability == "tables":
-                from rey_lib.db._sqlalchemy import metadata_list_tables
+            from rey_lib.db._sqlalchemy import metadata_list_tables
 
-                listed = metadata_list_tables(conn, catalog, schema)
-            else:
-                from rey_lib.db._sqlalchemy import metadata_list_views
-
-                listed = metadata_list_views(conn, catalog, schema)
+            listed = metadata_list_tables(conn, catalog, schema)
             # ORDERED HERE, as the other branch is (backlog 278).
             return sorted(listed, key=lambda item: (item["schema"], item["name"]))
 
@@ -1675,7 +1663,14 @@ class DBAdapter:
         for obj in ordered:
             if validate_only:
                 continue
-            ddl = backend.get_object_ddl(conn, obj)
+            # A VIEW WRITES ITS OWN DDL (backlog 695); which objects, in which
+            # order, stays this export's.
+            if str(obj.get("object_type", "")).lower().rstrip("s") == "view":
+                ddl = DatabaseView.read_ddl(conn, DatabaseObjectIdentity(
+                    connection="", catalog="", schema=str(obj["schema"]), name=str(obj["name"]),
+                ), self)
+            else:
+                ddl = backend.get_object_ddl(conn, obj)
             if not isinstance(ddl, str) or not ddl.strip():
                 raise DatabaseError(
                     f"Provider '{provider}' returned empty DDL for {obj['key']}."

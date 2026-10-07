@@ -79,6 +79,18 @@ class _Adapter:
             raise RuntimeError("the provider refused")
         return self._read
 
+    # The connector primitives a view's own DDL is read through (backlog 695),
+    # answered as PostgreSQL.
+    def provider(self, _conn: Any) -> str:
+        return "postgres"
+
+    def quote_identifier(self, _conn: Any, name: str) -> str:
+        return f'"{name}"'
+
+    def fetch_rows(self, _conn: Any, _sql_text: str, params: dict[str, Any]) -> list[dict]:
+        self.asked.append(("view", str(params.get("view"))))
+        return [{"definition": " SELECT run_id FROM control.run_log"}]
+
     def get_object_ddl(self, conn: Any, obj: dict[str, Any]) -> str:
         object_type = str(obj["object_type"])
         if object_type not in PROVIDER_VOCABULARY:
@@ -185,7 +197,10 @@ def test_a_view_is_asked_for_its_own_columns(monkeypatch: pytest.MonkeyPatch) ->
     view = _loaded(_Adapter(), monkeypatch).views[0]
 
     assert [column.name for column in view.columns] == ["run_id"]
-    assert view.ddl == "CREATE VIEW control.run_vw ();"
+    # The view's own DDL (backlog 695), not the provider's object DDL.
+    assert view.ddl == (
+        'CREATE OR REPLACE VIEW "control"."run_vw" AS\n SELECT run_id FROM control.run_log;'
+    )
 
 
 def test_the_statement_lists_the_columns_that_were_read(
@@ -223,10 +238,12 @@ def test_ddl_is_asked_in_the_vocabulary_the_provider_accepts(
     adapter = _Adapter()
     _loaded(adapter, monkeypatch)
 
-    asked = dict.fromkeys(kind for kind, _ in adapter.asked)
+    asked = dict.fromkeys(kind for kind, _ in adapter.asked if kind != "view")
     assert set(asked) <= PROVIDER_VOCABULARY
     assert ("tables", "run_log") in adapter.asked
-    assert ("views", "run_vw") in adapter.asked
+    # A view writes its own DDL now: it is never asked of the provider.
+    assert ("views", "run_vw") not in adapter.asked
+    assert ("view", "run_vw") in adapter.asked
     assert ("constraints", "run_log_pkey") in adapter.asked
     assert ("constraints", "run_log_batch_fkey") in adapter.asked
     assert ("indexes", "run_log_status_idx") in adapter.asked

@@ -1084,7 +1084,7 @@ def get_object_ddl(conn: pyodbc.Connection, obj: dict[str, Any]) -> str:
 
     cursor = conn.cursor()
     try:
-        if object_type in ("view", "procedure", "function", "trigger", "constraint") and object_id is not None:
+        if object_type in ("procedure", "function", "trigger", "constraint") and object_id is not None:
             cursor.execute("SELECT OBJECT_DEFINITION(?)", [object_id])
             row = cursor.fetchone()
             ddl = row[0] if row else None

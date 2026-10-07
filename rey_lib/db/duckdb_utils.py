@@ -1032,11 +1032,6 @@ def get_object_ddl(conn: duckdb.DuckDBPyConnection, obj: dict[str, Any]) -> str:
         ddl = row[1] if row and len(row) > 1 else (row[0] if row else "")
         return str(ddl).rstrip() + ";"
 
-    if object_type == "view":
-        row = conn.execute(f'SHOW CREATE VIEW "{schema}"."{name}"').fetchone()
-        ddl = row[1] if row and len(row) > 1 else (row[0] if row else "")
-        return str(ddl).rstrip() + ";"
-
     if object_type == "sequence":
         row = conn.execute(
             """

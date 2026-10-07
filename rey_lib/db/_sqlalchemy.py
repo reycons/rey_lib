@@ -282,19 +282,6 @@ def metadata_list_tables(
     ]
 
 
-def metadata_list_views(
-    conn: Any,
-    catalog: str,
-    schema: str | None,
-) -> list[dict[str, Any]]:
-    inspector, _sa_conn = _inspector(conn)
-    schema_name = _schema_name(inspector, schema)
-    return [
-        {"catalog": str(catalog), "schema": schema_name, "name": str(name)}
-        for name in inspector.get_view_names(schema=schema or None)
-    ]
-
-
 def metadata_get_columns(
     conn: Any,
     catalog: str,

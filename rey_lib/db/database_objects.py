@@ -339,6 +339,60 @@ class DatabaseView:
     ddl: str = ""
     initial_select: str = ""
 
+    @classmethod
+    def read_ddl(
+        cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
+    ) -> str:
+        """This view's own DDL, as its provider writes it (backlog 695).
+
+        View DDL is the view's: each provider's way of producing it lives here,
+        reaching the database only through the connector's primitives. The DDL
+        export asks this for a view; reading a schema does too.
+
+        Raises:
+            DatabaseError: If the provider has no view DDL here, or the read fails.
+        """
+        adapter = adapter or _adapter()
+        provider = adapter.provider(conn)
+        # schema.view, as view DDL has always been written: the catalog a read
+        # carries is the connection's own database, not part of the statement.
+        qualified = ".".join(
+            adapter.quote_identifier(conn, part) for part in (identity.schema, identity.name)
+        )
+        names = {"schema": identity.schema, "view": identity.name}
+        if provider == "postgres":
+            rows = adapter.fetch_rows(
+                conn,
+                "SELECT pg_get_viewdef(c.oid, true) AS definition "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = :schema AND c.relname = :view",
+                names,
+            )
+            definition = rows[0]["definition"] if rows else ""
+            return f"CREATE OR REPLACE VIEW {qualified} AS\n{definition};"
+        if provider == "mysql":
+            rows = adapter.fetch_rows(conn, f"SHOW CREATE VIEW {qualified}", {})
+            return str((rows[0] if rows else {}).get("Create View") or "").rstrip() + ";"
+        if provider == "sqlserver":
+            rows = adapter.fetch_rows(
+                conn,
+                "SELECT OBJECT_DEFINITION(OBJECT_ID(:qualified)) AS definition",
+                {"qualified": qualified},
+            )
+            definition = rows[0]["definition"] if rows else None
+            return str(definition).rstrip() + "\nGO" if definition else ""
+        if provider == "duckdb":
+            # The catalog's own statement. SHOW CREATE VIEW, used before this
+            # moved here, is not DuckDB syntax and produced nothing.
+            rows = adapter.fetch_rows(
+                conn,
+                "SELECT sql FROM duckdb_views() "
+                "WHERE schema_name = :schema AND view_name = :view",
+                names,
+            )
+            return str(rows[0]["sql"]).rstrip() if rows else ""
+        raise DatabaseError(f"DatabaseView.read_ddl: provider '{provider}' has no view DDL.")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "identity": self.identity.to_dict(),
@@ -608,7 +662,7 @@ def _view(
             connection=connection, catalog=catalog, schema=schema, name=name,
         ),
         columns=columns,
-        ddl=_ddl(adapter, handle, "views", schema, name) or definition,
+        ddl=_view_ddl(adapter, handle, connection, catalog, schema, name) or definition,
         initial_select=_initial_select(schema, name, columns),
     )
 
@@ -851,3 +905,20 @@ def _initial_select(schema: str, name: str, columns: tuple[DatabaseColumn, ...])
         return f"SELECT * FROM {qualified};"
     listed = ",\n    ".join(projection)
     return f"SELECT\n    {listed}\nFROM {qualified};"
+
+
+def _view_ddl(
+    adapter: Any, handle: Any, connection: str, catalog: str, schema: str, name: str,
+) -> str:
+    """One view's DDL, as the view writes it, or nothing when it cannot be produced.
+
+    A view whose DDL cannot be produced is still a view, as for every other
+    object here.
+    """
+    identity = DatabaseObjectIdentity(
+        connection=connection, catalog=catalog, schema=schema, name=name,
+    )
+    try:
+        return DatabaseView.read_ddl(handle, identity, adapter)
+    except Exception:
+        return ""

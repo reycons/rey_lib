@@ -1250,17 +1250,6 @@ def get_object_ddl(conn: Any, obj: dict[str, Any]) -> str:
         if object_type == "tables":
             return _postgres_table_ddl(conn, schema, name)
 
-        if object_type == "views":
-            cursor.execute(
-                "SELECT pg_get_viewdef(c.oid, true) "
-                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                "WHERE n.nspname = %s AND c.relname = %s",
-                [schema, name],
-            )
-            row = cursor.fetchone()
-            view_sql = row[0] if row else ""
-            return f'CREATE OR REPLACE VIEW "{schema}"."{name}" AS\n{view_sql};'
-
         if object_type == "sequences":
             seq_name = name.split(".", 1)[-1]
             cursor.execute(
