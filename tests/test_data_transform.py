@@ -65,7 +65,7 @@ class TestTheLogicalSchema:
         "declared,expected",
         [
             ({"type": "date"}, "DATE"),
-            ({"type": "datetime"}, "DATETIME2"),
+            ({"type": "datetime"}, "TIMESTAMP"),
             ({"type": "numeric"}, "DECIMAL(18, 6)"),
             ({"type": "regex_extract", "cast_to": "float"}, "DECIMAL(18, 6)"),
             ({"type": "regex_extract", "cast_to": "integer"}, "INTEGER"),
@@ -262,3 +262,39 @@ class TestTheOptionalExecutionForm:
             assert "rey_lib.db" not in line, line
             for engine in ("duckdb", "postgres", "mysql", "sqlserver", "sqlalchemy"):
                 assert engine not in line.lower(), line
+
+
+class TestDatetimeIsTheNeutralTimestamp:
+    """Backlog 385: `datetime` emits the neutral TIMESTAMP, and each provider renders it."""
+
+    @staticmethod
+    def _declared_datetime() -> str:
+        ((_name, sql_type),) = IdentityTransform({"value": {"type": "datetime"}}).logical_schema(
+            [{"value": "2026-10-07 09:00:00"}],
+        )
+        return sql_type
+
+    @pytest.mark.parametrize(("provider", "rendered"), [
+        ("sqlserver_utils", "DATETIME2"),
+        ("mysql_utils", "DATETIME"),
+        ("duckdb_utils", "TIMESTAMP"),
+    ])
+    def test_each_translating_provider_renders_its_own_datetime(
+        self, provider: str, rendered: str,
+    ) -> None:
+        import importlib
+
+        module = importlib.import_module(f"rey_lib.db.{provider}")
+
+        assert module._map_type(self._declared_datetime()) == rendered
+
+    def test_postgres_takes_the_neutral_type_as_its_own(self) -> None:
+        # Postgres's vocabulary IS the neutral one: the type is used as written,
+        # and only validated. DATETIME2, which this used to emit, is not a
+        # PostgreSQL type at all.
+        from rey_lib.db import postgres_utils
+
+        sql_type = self._declared_datetime()
+        postgres_utils._validate_column_type(sql_type)
+
+        assert sql_type == "TIMESTAMP"

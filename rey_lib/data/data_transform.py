@@ -49,11 +49,11 @@ __all__ = [
 #: Declared transform type -> the neutral SQL type it produces.
 #:
 #: The neutral vocabulary every backend understands through DBAdapter --
-#: VARCHAR(n), INTEGER, DECIMAL(p,s), DATE. Backend-specific mapping happens
+#: VARCHAR(n), INTEGER, DECIMAL(p,s), DATE, TIMESTAMP. Backend-specific mapping happens
 #: inside each provider, not here.
 _TRANSFORM_TYPE_MAP: dict[str, str] = {
     "date":       "DATE",
-    "datetime":   "DATETIME2",
+    "datetime":   "TIMESTAMP",
     "time":       "TIME",
     "regex_date": "DATE",
     "numeric":    "DECIMAL(18, 6)",
