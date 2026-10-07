@@ -11,9 +11,8 @@ a path. It is not a file, does not pretend to be one, and answers nothing
 file-shaped: no format token, no record shape, no path. What it answers is
 what a load asks of the object it is reading.
 
-**The caller owns the connection.** It is handed one that is already open --
-the same contract ``DBDataSource`` states in ``rey_lib.analysis.datasource``
--- so nothing here resolves a connection config, opens a handle, or closes
+**The caller owns the connection.** It is handed one that is already open,
+so nothing here resolves a connection config, opens a handle, or closes
 one. A load that writes to a different connection opens that one separately;
 neither end reaches for the other's.
 """

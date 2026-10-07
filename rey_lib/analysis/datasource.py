@@ -5,17 +5,12 @@ A DataSource knows how to extract raw data from one origin system. It is
 contract-agnostic — column filtering, required filters, sampling, and redaction
 are all applied later by the preparation pipeline.
 
-Database access goes exclusively through ``DBAdapter`` from
-``rey_lib.db.db_adapter``.  No backend-specific imports belong here.
-
 Public API
 ----------
 SourceData
     Result of one extraction: rows (or raw text), metadata, content hash.
 DataSource
     Abstract base class.  Subclass to add custom source types.
-DBDataSource
-    Extracts rows via DBAdapter.fetch_dicts() — backend-agnostic.
 CSVDataSource
     Streams rows from a CSV file.
 ExcelDataSource
@@ -38,7 +33,6 @@ from rey_lib.files.csv import read_csv
 __all__ = [
     "SourceData",
     "DataSource",
-    "DBDataSource",
     "CSVDataSource",
     "ExcelDataSource",
     "TextDataSource",
@@ -107,64 +101,6 @@ class DataSource(ABC):
         SourceData
             Extracted rows (or raw text) with metadata and a content hash.
         """
-
-
-class DBDataSource(DataSource):
-    """Extract rows from an already-open database connection via DBAdapter.
-
-    The caller owns the connection lifecycle (open, commit, close).  This
-    class only calls ``DBAdapter.fetch_dicts()`` — it never opens or closes
-    a connection itself.  This matches the pattern used throughout rey_lib:
-    connections are opened once at the application level from YAML config and
-    passed into the call chain.
-
-    Parameters
-    ----------
-    conn : Any
-        An already-open backend connection (obtained from the db lib).
-    sql_name : str
-        Named SQL query (filename stem without .sql extension) loaded via the
-        backend's ``init_db`` / ``load_sql`` mechanism.
-    params : Optional[list[Any]]
-        Positional query parameters forwarded to the backend.
-    ref : str
-        Human-readable label for audit records (e.g. connection + query name).
-    """
-
-    def __init__(
-        self,
-        conn:     Any,
-        sql_name: str,
-        params:   Optional[list[Any]] = None,
-        ref:      str                 = "",
-    ) -> None:
-        """Initialise with an open connection and a named query."""
-        self._conn     = conn
-        self._sql_name = sql_name
-        self._params   = params
-        self._ref      = ref or f"db:{sql_name}"
-
-    def extract(self, max_extract: int = _DEFAULT_MAX_EXTRACT) -> SourceData:
-        """Execute the named query on the open connection and return rows."""
-        from rey_lib.db.db_adapter import DBAdapter  # noqa: PLC0415
-
-        rows: list[dict[str, Any]] = DBAdapter().fetch_dicts(
-            self._conn, self._sql_name, self._params
-        )
-
-        truncated = len(rows) > max_extract
-        rows      = rows[:max_extract]
-        col_names = list(rows[0].keys()) if rows else []
-
-        return SourceData(
-            rows        = rows,
-            raw_text    = "",
-            columns     = col_names,
-            row_count   = len(rows),
-            source_ref  = self._ref,
-            truncated   = truncated,
-            source_hash = _hash_rows(rows),
-        )
 
 
 class CSVDataSource(DataSource):
