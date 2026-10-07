@@ -29,6 +29,8 @@ _DEFS = [("a", LogicalType("integer")), ("b", LogicalType("text", length=20))]
 #: How DatabaseTable writes ``_DEFS`` for PostgreSQL, the double's provider.
 _CREATED = [("a", "INTEGER"), ("b", "VARCHAR(20)")]
 _RECORDS = [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+#: The staging table's name beside ``t`` (backlog 516).
+_STAGE = "__rey_stage"
 #: A value too long for ``b``: what a truncation is about.
 _OVERFLOWING = [{"a": 1, "b": "x" * 25}, {"a": 2, "b": "y"}]
 
@@ -60,6 +62,10 @@ class _Adapter(ConnectorPrimitives):
         self.emptied: list[tuple] = []
         self.dropped: list[tuple] = []
         self.inserted: list[tuple] = []
+        #: Staging tables beside the destination, kept apart from it (backlog 516).
+        self.staged: set[str] = set()
+        #: Each promotion, as (statement kind, target, staging).
+        self.promoted: list[tuple] = []
 
     def supports_provider_capability(self, _conn, _capability) -> bool:
         """No native execution path, so the materialised one runs.
@@ -70,12 +76,22 @@ class _Adapter(ConnectorPrimitives):
         """
         return False
 
-    def has_table(self, _conn, _schema, _table) -> bool:
+    def has_table(self, _conn, _schema, table) -> bool:
         self.calls.append("table_exists")
-        return self._exists
+        return table in self.staged if table.endswith(_STAGE) else self._exists
 
     def execute_statement(self, conn, sql_text: str) -> int:
-        """DROP and DELETE arrive as DatabaseTable writes them (backlog 722)."""
+        """DROP and DELETE arrive as DatabaseTable writes them (backlog 722);
+        a promotion as replace_rows / replace_table write it (backlog 516)."""
+        for kind, opening in (("replace_rows", "WITH removed AS (DELETE FROM "),
+                              ("replace_table", "DO $rey$ BEGIN DROP TABLE ")):
+            if sql_text.startswith(opening):
+                self.calls.append(kind)
+                self.promoted.append((kind, "t", "t" + _STAGE))
+                if kind == "replace_table":
+                    self.staged.discard("t" + _STAGE)
+                    self._exists = True
+                return 0
         for verb, call, kept in (("DROP TABLE ", "drop_table", self.dropped),
                                  ("DELETE FROM ", "delete_all_rows", self.emptied)):
             if sql_text.startswith(verb):
@@ -84,7 +100,10 @@ class _Adapter(ConnectorPrimitives):
                 self.calls.append(call)
                 kept.append((schema, table))
                 if call == "drop_table":
-                    self._exists = False
+                    if table.endswith(_STAGE):
+                        self.staged.discard(table)
+                    else:
+                        self._exists = False
                 return 0
         return super().execute_statement(conn, sql_text)
 
@@ -95,7 +114,10 @@ class _Adapter(ConnectorPrimitives):
     def record_create(self, _conn, schema, table, defs):
         self.calls.append("create")
         self.created.append((schema, table, defs))
-        self._exists = True
+        if table.endswith(_STAGE):
+            self.staged.add(table)
+        else:
+            self._exists = True
         return True
 
     def bulk_insert(self, _conn, schema, table, records, columns) -> int:
@@ -355,9 +377,10 @@ class TestTheReplacePolicy:
         assert adapter.calls == ["table_exists", "get_table_columns",
                                  "bulk_insert"]
 
-    def test_declared_it_empties_the_destination_before_writing(self) -> None:
-        """IN THAT ORDER. Emptying after the insert would remove what was just
-        written, and the order is the whole of what Replace means.
+    def test_declared_it_stages_then_the_table_replaces_its_rows(self) -> None:
+        """THE DESTINATION IS NOT TOUCHED UNTIL THE NEW ROWS ARE SAFE (backlog
+        516): they go to a staging table first, and the table then replaces
+        its rows from it in one atomic promotion. No separate emptying.
         """
         adapter = _Adapter(exists=True)
 
@@ -366,9 +389,22 @@ class TestTheReplacePolicy:
         )
 
         assert loaded == 2
-        assert adapter.emptied == [("s", "t")]
-        assert adapter.calls == ["table_exists", "get_table_columns",
-                                 "delete_all_rows", "bulk_insert"]
+        assert adapter.emptied == []
+        assert [(s, t) for s, t, _r, _c in adapter.inserted] == [("s", "t" + _STAGE)]
+        assert adapter.promoted == [("replace_rows", "t", "t" + _STAGE)]
+        assert adapter.dropped == [("s", "t" + _STAGE)]   # staging removed after
+        assert adapter.calls.index("bulk_insert") < adapter.calls.index("replace_rows")
+
+    def test_a_failed_fill_never_reaches_the_destination(self) -> None:
+        adapter = _Adapter(exists=True, insert_error=DatabaseError("nope"))
+
+        with pytest.raises(DatabaseError):
+            _loader(adapter, replace_destination=True).load(
+                _Conn(), _TARGET, _RECORDS, _DEFS
+            )
+
+        assert adapter.promoted == [] and adapter.emptied == []
+        assert adapter.dropped == [("s", "t" + _STAGE)]   # staging removed on failure
 
     def test_a_destination_it_just_created_is_not_emptied(self) -> None:
         """Nothing to remove, and emptying would be a second answer to a
@@ -390,7 +426,7 @@ class TestTheReplacePolicy:
         """
         source = inspect.getsource(DataLoader)
 
-        assert "DatabaseTable.delete_all_rows" in source
+        assert "DatabaseTable.replace_rows" in source
         assert "self.adapter.delete_all_rows" not in source
         for named in ("postgres", "mysql", "sqlserver", "duckdb",
                       "DELETE", "TRUNCATE"):
@@ -405,7 +441,9 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
     the table owned.
     """
 
-    def test_declared_it_drops_then_creates_before_writing(self) -> None:
+    def test_declared_it_builds_the_table_beside_and_swaps_it_in(self) -> None:
+        """The new table is built from these records as staging, filled, and
+        only then put in the old one's place, atomically (backlog 516)."""
         adapter = _Adapter(exists=True)
 
         loaded = _loader(adapter, recreate_destination=True).load(
@@ -413,10 +451,23 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
         )
 
         assert loaded == 2
-        assert adapter.dropped == [("s", "t")]
-        assert adapter.created == [("s", "t", _CREATED)]
-        assert adapter.calls == ["table_exists", "get_table_columns",
-                                 "drop_table", "table_exists", "create", "bulk_insert"]
+        assert adapter.created == [("s", "t" + _STAGE, _CREATED)]
+        assert [(s, t) for s, t, _r, _c in adapter.inserted] == [("s", "t" + _STAGE)]
+        assert adapter.promoted == [("replace_table", "t", "t" + _STAGE)]
+        assert adapter.dropped == []   # no separate drop: the swap is the promotion
+        assert adapter.staged == set()
+
+    def test_a_failed_fill_leaves_the_old_table_standing(self) -> None:
+        adapter = _Adapter(exists=True, insert_error=DatabaseError("nope"))
+
+        with pytest.raises(DatabaseError):
+            _loader(adapter, recreate_destination=True).load(
+                _Conn(), _TARGET, _RECORDS, _DEFS
+            )
+
+        assert adapter.promoted == []
+        assert adapter.dropped == [("s", "t" + _STAGE)]
+        assert adapter._exists is True
 
     def test_it_never_merely_empties(self) -> None:
         """THE FAILURE THAT WOULD LOOK LIKE SUCCESS. Emptying instead of
@@ -461,7 +512,7 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
     def test_it_is_the_table_that_is_asked(self) -> None:
         source = inspect.getsource(DataLoader)
 
-        assert "DatabaseTable.drop" in source
+        assert "DatabaseTable.replace_table" in source
         assert "self.adapter.drop_table" not in source
         # `DROP TABLE` is the statement; "a drop" is English, and the comments
         # here explain the operation in words. It is SQL that must not be
@@ -469,3 +520,33 @@ class TestRecreateDestroysTheDestinationAndBuildsItAgain:
         for named in ("postgres", "mysql", "sqlserver", "duckdb",
                       "DROP TABLE", "DROP  TABLE"):
             assert named not in source, named
+
+
+class TestTheRetryHappensAgainstStaging:
+    """Backlog 516's second bug: a retry that re-inserted after a rollback had
+    restored the old rows appended to them. The retry now never reaches the
+    destination -- it widens and refills the staging table, and the table is
+    promoted once.
+    """
+
+    @pytest.mark.parametrize(("mode", "promotion"), [
+        ("replace_destination", "replace_rows"),
+        ("recreate_destination", "replace_table"),
+    ])
+    def test_the_destination_is_promoted_once_after_the_retry(
+        self, mode: str, promotion: str,
+    ) -> None:
+        adapter = _Adapter(exists=True, truncation=True,
+                           insert_error=DatabaseError("too long"))
+
+        loaded = _loader(adapter, **{mode: True}).load(
+            _Conn(), _TARGET, _OVERFLOWING, _DEFS
+        )
+
+        assert loaded == 2
+        assert {(s, t) for s, t, _r, _c in adapter.inserted} == {("s", "t" + _STAGE)}
+        assert adapter.calls.count("bulk_insert") == 2
+        assert adapter.promoted == [(promotion, "t", "t" + _STAGE)]
+        assert adapter.emptied == []
+        # The staging table is what was widened, never the destination.
+        assert all('"t__rey_stage"' in one for one in getattr(adapter, "altered", []))

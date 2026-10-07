@@ -23,13 +23,17 @@ one, so the same value is what the Console's tree draws.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha1
 from types import MethodType
 from typing import Any, ClassVar, Iterable
 
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db.database_type import DatabaseType
-from rey_lib.errors.error_utils import DatabaseError
+from rey_lib.errors.error_utils import DatabaseError, UnsupportedDatabaseCapabilityError
+from rey_lib.logs import get_logger
+
+_logger = get_logger(__name__)
 
 __all__ = [
     "DatabaseColumn",
@@ -967,6 +971,144 @@ class DatabaseTable:
         return _run(adapter, conn, identity, f"DELETE FROM {table}")
 
     @classmethod
+    def replace_rows(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        staging: DatabaseObjectIdentity,
+        adapter: Any = None,
+    ) -> None:
+        """Replace every row of this table with a staging table's, atomically (backlog 516).
+
+        **ATOMIC, OR THE TABLE IS UNCHANGED.** The removal and the copy happen
+        as one unit on every provider, so a failure leaves exactly the rows
+        that were there. The table itself -- its constraints, grants, indexes
+        and triggers -- is kept, which is what replacing contents means.
+
+        The staging table is read, never changed; removing it is the caller's.
+        How the unit is made is each provider's smallest sufficient answer:
+
+        - PostgreSQL: one statement, a data-modifying CTE, which an autocommit
+          handle runs as a single transaction;
+        - DuckDB: one call holding its own transaction, rolled back on failure;
+        - SQL Server, MySQL: their connections are transactional, so the two
+          statements commit together or roll back together, here.
+
+        Raises:
+            DatabaseError: Naming the table, if the replacement fails.
+            UnsupportedDatabaseCapabilityError: For a provider with no atomic
+                answer -- refused rather than run without the guarantee.
+        """
+        adapter = adapter or _adapter()
+        provider = adapter.provider(conn)
+        if provider not in ("postgres", "duckdb") and provider not in _COMMITS_TABLE_DDL:
+            raise UnsupportedDatabaseCapabilityError(
+                f"DatabaseTable.replace_rows: provider '{provider}' has no atomic "
+                f"replacement for {_named(identity)}."
+            )
+        table = _qualified(adapter, conn, identity)
+        source = _qualified(adapter, conn, staging)
+        listed = ", ".join(
+            adapter.quote_identifier(conn, name)
+            for name in cls.column_names(conn, staging, adapter)
+        )
+        copy = f"INSERT INTO {table} ({listed}) SELECT {listed} FROM {source}"
+        if provider == "postgres":
+            _run(adapter, conn, identity, f"WITH removed AS (DELETE FROM {table}) {copy}")
+        elif provider == "duckdb":
+            _atomic_call(
+                adapter, conn, identity,
+                f"BEGIN TRANSACTION; DELETE FROM {table}; {copy}; COMMIT",
+            )
+        else:
+            _committed_together(
+                adapter, conn, identity, [f"DELETE FROM {table}", copy],
+            )
+
+    @classmethod
+    def replace_table(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        staging: DatabaseObjectIdentity,
+        adapter: Any = None,
+    ) -> None:
+        """Replace this table itself with a staging table, atomically (backlog 516).
+
+        **RECREATE'S MEANING, KEPT.** Recreating a destination drops the table
+        and builds it again from the load's logical schema, and what the old
+        table owned goes with it. The staging table was built by ``create``
+        from that same schema, so it IS the table recreate would have built;
+        this puts it in the old one's place under the old one's name.
+
+        **ATOMIC, OR THE TABLE IS UNCHANGED.** A failure leaves the old table
+        exactly as it was. Per provider:
+
+        - PostgreSQL: one ``DO`` block, dropping the old and renaming the
+          staging table, which an autocommit handle runs as one transaction;
+        - DuckDB: one ``CREATE OR REPLACE TABLE ... AS SELECT`` from staging;
+          the staging table remains, for the caller to remove;
+        - MySQL: one ``RENAME TABLE`` swapping both names, which MySQL makes
+          atomic even though its DROP and CREATE are not; the old table is
+          dropped afterwards, the target already replaced;
+        - SQL Server: drop and ``sp_rename`` in the connection's transaction,
+          committed together or rolled back together, here.
+
+        Raises:
+            DatabaseError: Naming the table, if the replacement fails -- or, on
+                MySQL, if the old table could not be removed afterwards (the
+                target is then already replaced, and the message says so).
+            UnsupportedDatabaseCapabilityError: For a provider with no atomic
+                answer -- refused rather than run without the guarantee.
+        """
+        adapter = adapter or _adapter()
+        provider = adapter.provider(conn)
+        table = _qualified(adapter, conn, identity)
+        source = _qualified(adapter, conn, staging)
+        name = adapter.quote_identifier(conn, identity.name)
+        if provider == "postgres":
+            _run(
+                adapter, conn, identity,
+                f"DO $rey$ BEGIN DROP TABLE {table}; "
+                f"ALTER TABLE {source} RENAME TO {name}; END $rey$",
+            )
+        elif provider == "duckdb":
+            _run(
+                adapter, conn, identity,
+                f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM {source}",
+            )
+        elif provider == "mysql":
+            old = replace(identity, name=_beside(identity.name, "old"))
+            retired = _qualified(adapter, conn, old)
+            _run(
+                adapter, conn, identity,
+                f"RENAME TABLE {table} TO {retired}, {source} TO {table}",
+            )
+            try:
+                _run(adapter, conn, identity, f"DROP TABLE {retired}")
+            except DatabaseError as exc:
+                raise DatabaseError(
+                    f"{_named(identity)} was replaced, but its previous table "
+                    f"{_named(old)} could not be removed: {exc}"
+                ) from exc
+        elif provider == "sqlserver":
+            # sp_rename works in the database it is called in, so a table in
+            # another catalog is renamed by that catalog's own procedure.
+            procedure = "sp_rename" if not staging.catalog else (
+                f"{adapter.quote_identifier(conn, staging.catalog)}.sys.sp_rename"
+            )
+            local = _qualified(adapter, conn, replace(staging, catalog=""))
+            _committed_together(adapter, conn, identity, [
+                f"DROP TABLE {table}",
+                f"EXEC {procedure} N{_sql_text(local)}, N{_sql_text(identity.name)}",
+            ])
+        else:
+            raise UnsupportedDatabaseCapabilityError(
+                f"DatabaseTable.replace_table: provider '{provider}' has no atomic "
+                f"replacement for {_named(identity)}."
+            )
+
+    @classmethod
     def column_names(
         cls, conn: Any, identity: DatabaseObjectIdentity, adapter: Any = None,
     ) -> list[str]:
@@ -1612,6 +1754,59 @@ def _qualified(adapter: Any, conn: Any, identity: DatabaseObjectIdentity) -> str
         adapter.quote_identifier(conn, part)
         for part in (identity.catalog, identity.schema, identity.name) if part
     )
+
+
+def _atomic_call(
+    adapter: Any, conn: Any, identity: DatabaseObjectIdentity, statements: str,
+) -> None:
+    """Run one call that opens and commits its own transaction, or undo it (backlog 516).
+
+    A failure inside leaves that transaction open and aborted; it is rolled
+    back here so the table is as it was and the connection usable. The
+    original failure is what is raised.
+    """
+    try:
+        _run(adapter, conn, identity, statements)
+    except DatabaseError:
+        try:
+            adapter.execute_statement(conn, "ROLLBACK")
+        except DatabaseError as rollback_exc:
+            _logger.debug("Nothing to roll back for %s: %s", _named(identity), rollback_exc)
+        raise
+
+
+def _committed_together(
+    adapter: Any, conn: Any, identity: DatabaseObjectIdentity, statements: list[str],
+) -> None:
+    """Run statements in the connection's transaction: all committed, or all undone.
+
+    For a provider whose connection is transactional (``_COMMITS_TABLE_DDL``),
+    where ``create`` already commits its own DDL the same way.
+    """
+    try:
+        for statement in statements:
+            _run(adapter, conn, identity, statement)
+    except DatabaseError:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def _beside(name: str, role: str) -> str:
+    """A table name for a short-lived companion of ``name``, within every provider's limit.
+
+    Deterministic, so a companion a failed run left behind is found again by
+    the next one. Long names keep a readable prefix and a hash of the whole.
+    """
+    suffix = f"__rey_{role}"
+    if len(name) + len(suffix) <= 63:
+        return name + suffix
+    return f"{name[:40]}{suffix}_{sha1(name.encode('utf-8')).hexdigest()[:8]}"
+
+
+def _sql_text(value: str) -> str:
+    """One value as a SQL text literal."""
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _run(adapter: Any, conn: Any, identity: DatabaseObjectIdentity, statement: str) -> int:

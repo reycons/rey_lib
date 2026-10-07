@@ -34,10 +34,13 @@ an argument rather than patching a module attribute.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from rey_lib.data.logical_type import LogicalType
-from rey_lib.db.database_objects import DatabaseTable
+# _beside: the one naming rule for a table's short-lived companions, shared
+# with DatabaseTable.replace_table so the two cannot drift.
+from rey_lib.db.database_objects import DatabaseTable, _beside
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import get_logger
 
@@ -192,17 +195,13 @@ class DataLoader:
                 f"this load does not declare that it may be created."
             )
 
-        if exists and self.recreate_destination:
-            # THE TABLE ITSELF GOES, and is built again from these records --
-            # which is the whole difference from `replace`, where the table
-            # stays and only its rows leave. What the table owned goes with it;
-            # nothing here puts any of it back.
-            #
-            # Issued in the same transaction boundary as the insert below, as
-            # the replace removal is. WHAT A ROLLBACK THEN DOES TO A DROP is
-            # the database's own semantics and is not promised here.
-            DatabaseTable.drop(conn, target, self.adapter)
-            exists = False
+        if exists and (self.replace_destination or self.recreate_destination):
+            # WHAT IS THERE IS NOT TOUCHED UNTIL THE NEW ROWS ARE SAFE (backlog
+            # 516). They are staged beside the destination first, where every
+            # failure -- the truncation retry included -- costs nothing; only
+            # then does the table promote them, atomically, so a failure at any
+            # point leaves the destination exactly as it was.
+            return self._load_through_staging(conn, target, records, columns, names)
 
         if not exists:
             # Only when absent. Calling this unconditionally would contradict
@@ -210,22 +209,67 @@ class DataLoader:
             # table dropped between the check and the call would be recreated
             # against a load that said not to.
             DatabaseTable.create(conn, target, columns, self.adapter)
-        elif self.replace_destination:
-            # THE CONTENTS ARE REPLACED, so what was there goes first.
-            #
-            # Only where the destination EXISTS: a table this load just created
-            # has nothing to remove, and emptying it would be a second answer
-            # to a question `create` already settled.
-            #
-            # BEFORE the insert and inside the same transaction as it, so a
-            # failed write leaves the destination as it was rather than empty
-            # -- the worst outcome available, because it destroys what was
-            # there and puts nothing in its place.
-            #
-            # The table is asked (backlog 722); which provider is on the other
-            # end, and how it spells this, is not this object's business.
-            DatabaseTable.delete_all_rows(conn, target, self.adapter)
 
+        return self._insert_widening(conn, target, records, columns, names)
+
+    def _load_through_staging(
+        self,
+        conn: Any,
+        target: Any,
+        records: list[dict[str, Any]],
+        columns: list[tuple[str, LogicalType]],
+        names: list[str],
+    ) -> int:
+        """Stage the rows beside the destination, then let the table promote them.
+
+        ``replace`` keeps the table and replaces its rows; ``recreate`` puts a
+        table built from these records in its place -- each the table's own
+        atomic behaviour (``DatabaseTable.replace_rows`` / ``replace_table``).
+        The staging table is removed afterwards, and on failure.
+        """
+        staging = replace(target, name=_beside(target.name, "stage"))
+        if DatabaseTable.exists(conn, staging, self.adapter):
+            # One a failed run left behind: it is this loader's, by its name.
+            DatabaseTable.drop(conn, staging, self.adapter)
+        failed = True
+        try:
+            DatabaseTable.create(conn, staging, columns, self.adapter)
+            inserted = self._insert_widening(conn, staging, records, columns, names)
+            if self.recreate_destination:
+                DatabaseTable.replace_table(conn, target, staging, self.adapter)
+            else:
+                DatabaseTable.replace_rows(conn, target, staging, self.adapter)
+            failed = False
+            return inserted
+        finally:
+            self._remove_staging(conn, staging, failed)
+
+    def _remove_staging(self, conn: Any, staging: Any, failed: bool) -> None:
+        """Remove the staging table, where it is still there.
+
+        After a failure the original error is the one reported, so a failed
+        removal is logged rather than allowed to replace it; after a success
+        it is raised, because a staging table left behind is a fault.
+        """
+        try:
+            if DatabaseTable.exists(conn, staging, self.adapter):
+                DatabaseTable.drop(conn, staging, self.adapter)
+                conn.commit()
+        except DatabaseError as exc:
+            if not failed:
+                raise
+            _logger.debug("Staging table %s not removed: %s", staging.name, exc)
+
+    def _insert_widening(
+        self,
+        conn: Any,
+        target: Any,
+        records: list[dict[str, Any]],
+        columns: list[tuple[str, LogicalType]],
+        names: list[str],
+    ) -> int:
+        """Insert, widening an overflowing text column once and trying again."""
+        schema, table = adapter_destination(target)
         try:
             return self._insert(conn, target, records, names)
         except DatabaseError as insert_exc:
