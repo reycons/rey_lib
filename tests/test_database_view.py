@@ -119,9 +119,6 @@ class _SchemaAdapter(_Connector):
     def get_columns(self, *_a: Any) -> list[dict]:
         return [{"name": "run_id", "type": "INTEGER", "nullable": False}]
 
-    def get_column_ddl(self, *_a: Any) -> str:
-        return ""
-
     def list_procedures(self, *_a: Any) -> list:
         return []
 

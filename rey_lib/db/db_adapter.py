@@ -1098,27 +1098,6 @@ class DBAdapter:
             "views": sorted(inspected.get("views") or [], key=lambda item: item["name"]),
         }
 
-    def get_column_ddl(self, conn: Any, schema: str, table: str, column: str) -> str:
-        """Return one column's definition, as its provider writes it.
-
-        A fragment rather than a statement: a column is created with its table,
-        so what comes back is the line that declares it. A provider that writes
-        no column definitions answers with nothing, which is what a caller
-        carrying a definition field for every object should receive rather than
-        a refusal.
-
-        Args:
-            conn: Open connection.
-            schema: The schema the table sits in.
-            table: The table the column belongs to.
-            column: The column itself.
-        """
-        backend = _backend(self._provider_for_conn(conn))
-        writer = getattr(backend, "get_column_ddl", None)
-        if writer is None:
-            return ""
-        return str(writer(conn, schema, table, column))
-
     def get_procedure_definition(self, conn: Any, identity: dict[str, Any]) -> str:
         """Return one procedure's provider-native definition SQL."""
         return self._routine_definition(conn, "procedures", identity)

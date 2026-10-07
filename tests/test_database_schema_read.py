@@ -111,9 +111,6 @@ class _Adapter:
     def get_columns(self, conn: Any, schema: str, name: str) -> list[dict[str, Any]]:
         return [{"name": "run_id", "type": "BIGINT", "nullable": False, "default": None}]
 
-    def get_column_ddl(self, conn: Any, schema: str, table: str, column: str) -> str:
-        return f'"{column}" BIGINT NOT NULL'
-
     def list_procedures(self, conn: Any, schema: str) -> list[dict[str, Any]]:
         if self._no_routines:
             raise RuntimeError("this provider answers about no routines")

@@ -104,7 +104,13 @@ class DatabaseRoutineIdentity:
 
 @dataclass(frozen=True)
 class DatabaseColumn:
-    """One column, in the position the provider reported it."""
+    """One column, in the position the provider reported it.
+
+    The one owner of a column definition (backlog 721): the fragment a table's
+    DDL lists for it, composed from this column's own physical facts. Not a
+    statement -- a column has no standalone CREATE, and table-level CREATE or
+    ALTER syntax is DatabaseTable's.
+    """
 
     name: str
     type: str
@@ -112,6 +118,23 @@ class DatabaseColumn:
     default: str | None
     ordinal: int
     ddl: str = ""
+
+    def definition(self, conn: Any, adapter: Any = None) -> str:
+        """This column's definition fragment: name, type, default, nullability.
+
+        ``type`` is the physical type the destination reported, or the one
+        DatabaseType resolved for it. The name is quoted by the provider's own
+        rule; a provider that takes no explicit NULL gets none.
+        """
+        adapter = adapter or _adapter()
+        parts = [adapter.quote_identifier(conn, self.name), self.type]
+        if self.default is not None:
+            parts.append(f"DEFAULT {self.default}")
+        if not self.nullable:
+            parts.append("NOT NULL")
+        elif adapter.provider(conn) not in _NO_EXPLICIT_NULL:
+            parts.append("NULL")
+        return " ".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -524,10 +547,14 @@ class DatabaseTable:
             return False
         provider = adapter.provider(conn)
         types = DatabaseType(provider)
-        nullable = "" if provider == "duckdb" else " NULL"
+        # DatabaseType resolves each physical type; each column writes its own
+        # definition (backlog 721).
         listed = ",\n\t".join(
-            f"{adapter.quote_identifier(conn, name)} {types.column_type(logical)}{nullable}"
-            for name, logical in columns
+            DatabaseColumn(
+                name=name, type=types.column_type(logical), nullable=True,
+                default=None, ordinal=position,
+            ).definition(conn, adapter)
+            for position, (name, logical) in enumerate(columns, start=1)
         )
         table = _qualified(adapter, conn, identity)
         _run(adapter, conn, identity, f"CREATE TABLE {table} (\n\t{listed}\n)")
@@ -623,11 +650,14 @@ class DatabaseTable:
         qualified = ".".join(
             adapter.quote_identifier(conn, part) for part in (identity.schema, identity.name)
         )
+        # The catalog's facts become columns, and each writes its own
+        # definition (backlog 721).
         listed = ",\n".join(
-            f"    {adapter.quote_identifier(conn, column['name'])} {column['type']}"
-            + (f" DEFAULT {column['default']}" if column["default"] is not None else "")
-            + (" NULL" if column["nullable"] else " NOT NULL")
-            for column in columns
+            "    " + DatabaseColumn(
+                name=column["name"], type=column["type"], nullable=column["nullable"],
+                default=column["default"], ordinal=position,
+            ).definition(conn, adapter)
+            for position, column in enumerate(columns, start=1)
         )
         return f"CREATE TABLE {qualified} (\n{listed}\n);" + _BATCH_END.get(provider, "")
 
@@ -916,6 +946,10 @@ class DatabaseSchema:
         }
 
 
+#: Providers whose column definition takes no explicit NULL: a nullable column
+#: is written without one. Column-definition semantics, so DatabaseColumn's.
+_NO_EXPLICIT_NULL: frozenset[str] = frozenset({"duckdb"})
+
 #: Providers whose table DDL is not part of the surrounding transaction, so a
 #: created table is committed as it always has been there.
 _COMMITS_TABLE_DDL: frozenset[str] = frozenset({"sqlserver", "mysql"})
@@ -1003,7 +1037,7 @@ def _table(
     )
     return DatabaseTable(
         identity=identity,
-        columns=_described(adapter, handle, schema, name, columns),
+        columns=_described(adapter, handle, columns),
         primary_key=_primary_key(adapter, handle, identity, read.get("primary_key")),
         foreign_keys=tuple(
             _foreign_key(adapter, handle, identity, entry)
@@ -1042,7 +1076,7 @@ def _view(
         described = adapter.get_columns(handle, schema, name)
     except Exception:
         described = []
-    columns = _described(adapter, handle, schema, name, _columns(described))
+    columns = _described(adapter, handle, _columns(described))
     definition = str(read.get("definition") or "")
     return DatabaseView(
         identity=DatabaseObjectIdentity(
@@ -1101,20 +1135,17 @@ def _routines(
 def _described(
     adapter: Any,
     handle: Any,
-    schema: str,
-    table: str,
     columns: tuple[DatabaseColumn, ...],
 ) -> tuple[DatabaseColumn, ...]:
-    """The columns, each carrying its own definition.
+    """The columns, each carrying its own definition (backlog 721).
 
-    A column is created with its table, so what a provider writes for one is a
-    fragment. Where a provider writes none it stays empty, which is the same
-    answer every other object gives when its provider cannot write it.
+    The column writes it from its own facts. Where it cannot be produced it
+    stays empty, the same answer every other object gives.
     """
     described: list[DatabaseColumn] = []
     for column in columns:
         try:
-            fragment = str(adapter.get_column_ddl(handle, schema, table, column.name))
+            fragment = column.definition(handle, adapter)
         except Exception:
             fragment = ""
         described.append(DatabaseColumn(
