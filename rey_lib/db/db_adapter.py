@@ -30,9 +30,9 @@ All other methods detect the provider from the open connection object via
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from rey_lib.db.database_query import PageResult, StatementResult
 from rey_lib.db.routine_call import RoutineCall
 from rey_lib.logs import get_logger
 from rey_lib.errors.error_utils import (
@@ -41,87 +41,7 @@ from rey_lib.errors.error_utils import (
     UnsupportedDatabaseCapabilityError,
 )
 
-__all__ = ["DBAdapter", "PageResult", "StatementResult"]
-
-
-@dataclass(frozen=True)
-class PageResult:
-    """One bounded page of a result, and the size of the whole result.
-
-    A success type only. There is no "could not page" state to read here:
-    a provider that cannot page says so by raising, because an empty page with
-    a zero total would publish "this query has no rows" as though it were the
-    answer.
-
-    Shaped on the page models this estate already uses -- ``FileHierarchyPage``
-    in ``rey_lib.logs.file_hierarchy`` carries the same offset/limit/total/
-    next_offset -- so a reader who knows one knows this.
-
-    Attributes:
-        columns: The column names, in the order they were returned.
-        rows: This page's rows, each a column-to-value mapping. At most
-            ``limit`` of them.
-        total_row_count: How many rows the whole query returns, **not** how many
-            are on this page -- or **None where the provider does not count**.
-
-            None means *unknown*, and never zero. A provider counts only where
-            counting is an operation it can afford: over a table it is cheap,
-            and over a file it is a full parse of that file, which is not a
-            price to pay on every page. A reader of this field must say
-            "unknown" rather than draw "no rows" over rows that plainly exist.
-        offset: Where this page starts in the whole result.
-        limit: The most rows this page may hold.
-        next_offset: Where the following page starts, or None when this page
-            reaches the end.
-
-            **This is the continuation signal, not a convenience.** Where
-            ``total_row_count`` is None, nothing else says whether another page
-            exists -- there is no total to do arithmetic against -- so this must
-            survive every crossing between here and whatever draws the page.
-    """
-
-    columns: list[str]
-    rows: list[dict[str, Any]]
-    total_row_count: int | None
-    offset: int
-    limit: int
-    next_offset: int | None = None
-    #: A neutral kind per column, where the provider stated one -- e.g.
-    #: ``"document"`` for a structured value. Absent means not stated. The
-    #: vocabulary is the providers'; this type assigns no meaning to any kind.
-    column_kinds: dict[str, str] = field(default_factory=dict)
-    #: The most rows the provider will return per page FOR THIS RESULT, or None
-    #: where it sets no ceiling. Why it set one is the provider's; ``limit``
-    #: already reports the limit actually applied.
-    max_page_size: int | None = None
-
-
-@dataclass(frozen=True)
-class StatementResult:
-    """One result a database handed back, normalized across providers.
-
-    A result, not a statement: what a driver exposes and what a person typed are
-    not the same count. A statement that returns nothing still produces one of
-    these -- it ran, and saying so is the answer.
-
-    Attributes:
-        columns: The column names, in the order they were returned. Empty for a
-            statement that returned no rows at all, which is ordinary for DDL
-            and for a call.
-        rows: The rows, each a column-to-value mapping, bounded by the caller's
-            limit.
-        row_count: How many rows the statement affected, or **None where the
-            backend gave no meaningful count**. DBAPI reports -1 for "unknown"
-            and means different things by it for queries and for DML, so that
-            is normalized here rather than escaping as a number that looks real.
-    """
-
-    columns: list[str]
-    rows: list[dict[str, Any]]
-    row_count: int | None = None
-    #: A neutral kind per column, where the provider stated one. See
-    #: ``PageResult.column_kinds``.
-    column_kinds: dict[str, str] = field(default_factory=dict)
+__all__ = ["DBAdapter"]
 
 
 # ---------------------------------------------------------------------------

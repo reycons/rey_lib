@@ -1445,7 +1445,7 @@ def execute_page(
             Raised before the statement is executed, never after.
         DatabaseError: If the bounds are invalid, or execution failed.
     """
-    from rey_lib.db.db_adapter import PageResult
+    from rey_lib.db.database_query import PageResult
 
     offset, limit = _validated_page_bounds(offset, limit)
     wrapped = _page_wrapped(sql_text)

@@ -392,7 +392,7 @@ def execute_statements(
     from ``nextset``, which is the whole of what this migration changed.
     """
     from rey_lib.db._sqlalchemy import raw_dbapi_connection
-    from rey_lib.db.db_adapter import StatementResult
+    from rey_lib.db.database_query import StatementResult
 
     cursor = None
     try:
@@ -2610,7 +2610,7 @@ def execute_page(
         DatabaseError: If the bounds are invalid, or execution failed.
     """
     from rey_lib.db._sqlalchemy import own_connection
-    from rey_lib.db.db_adapter import PageResult
+    from rey_lib.db.database_query import PageResult
 
     offset, limit = _validated_page(offset, limit)
     wrapped = _wrapped(sql_text)

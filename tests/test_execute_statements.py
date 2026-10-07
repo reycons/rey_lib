@@ -16,7 +16,8 @@ from typing import Any
 
 import pytest
 
-from rey_lib.db.db_adapter import DBAdapter, StatementResult
+from rey_lib.db.database_query import StatementResult
+from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.errors.error_utils import DatabaseError
 
 
