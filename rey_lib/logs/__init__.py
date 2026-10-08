@@ -1,3 +1,4 @@
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.logs.jsonl_handler import (
     SENSITIVE_FIELD,
     JsonlHandler,
@@ -111,6 +112,7 @@ from rey_lib.logs.log_utils import (
 )
 
 __all__ = [
+    "AppLogger",
     "SENSITIVE_FIELD",
     "classified",
     "sensitive",

@@ -26,6 +26,9 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
     # surface lives in rey_lib.logs.file_manifest, and the run-to-manifest
     # query that joins them lives in rey_lib.logs.run_file_records.
     non_log_utils_exports = {
+        # The application logging object owns its own module; it is not part
+        # of the log_utils facade, which get_logger leaves with (backlog 771).
+        "AppLogger",
         "JsonlHandler",
         "run_app_operation",
         "FileManifestError",
