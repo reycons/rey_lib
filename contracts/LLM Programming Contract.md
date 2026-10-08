@@ -206,7 +206,8 @@ All reusable infrastructure is provided by `rey_lib`. Projects must use it — n
 - `rey_lib.config.config_utils` — `build_ctx()`, `Namespace`, `save_config()`, `print_ctx()`
 - `rey_lib.config.ctx` — `find_by_name()`, `find_in_ctx()`, `find_in_ctx_versioned()`
 - `rey_lib.errors.error_utils` — `AppError`, `ConfigError`, `DatabaseError`, `handle_exception()`, `validate_env()`, `validate_path()`, `validate_required()`
-- `rey_lib.logs.log_utils` — `setup_logging()`, `get_logger()`, `log_enter()`, `log_exit()`
+- `rey_lib.logs` — `AppLogger` (defined in `rey_lib.logs.app_logger`): application logging (`debug`, `info`, `warning`, `isEnabledFor`) and the one process-wide call depth (`AppLogger.log_depth`, moved only by `enter()` / `exit()`)
+- `rey_lib.logs.logging_setup` — **transitional** legacy helpers, also re-exported by `rey_lib.logs.log_utils`: `get_logger()` (returns `AppLogger` from S5; removed in S7), `log_enter()` / `log_exit()` (pass-throughs to `AppLogger.enter()` / `exit()`; removed in S6), `setup_logging()` (delegate to AppLogger configuration; removed in S6). Backlog `logging.app_logger_canonical_object`.
 - `rey_lib.db.sqlserver_utils` — SQL Server connections, query execution, bulk insert, transaction handling
 - `rey_lib.db.duckdb_utils` — DuckDB connections, SQL file loading, query execution
 - `rey_lib.files.file_utils` — `input_files()`, `get_reader()`, `write_file()`, `move_file()`, `converted_output_path()`
@@ -219,7 +220,7 @@ All reusable infrastructure is provided by `rey_lib`. Projects must use it — n
 - Always check rey_lib before writing any helper — if it already exists there, use it
 - App-specific exceptions extend `rey_lib.errors.error_utils.AppError` and are defined in `{project_name}/error_utils.py`
 - `ctx` is built once at startup in `main.py` via `build_ctx(env=..., project_root=_PROJECT_ROOT)` and passed explicitly to every function that needs it
-- `setup_logging(ctx, operation=...)` is called once in `main.py` immediately after `build_ctx()`
+- Logging is started once by the launch boundary (`rey_lib.config.bootstrap.build_ctx_for_app`, through AppLogger's configuration); an application never starts or configures logging itself
 - All DB calls go through the appropriate `rey_lib.db.*` module — no raw driver calls anywhere in the project
 
 ### 5.5 SQL Query Files
@@ -257,7 +258,7 @@ App-specific business logic lives in the `{project_name}/` directory. This is wh
 - All function size, complexity, naming, docstring, and commenting rules from Section 5 apply equally to `{project_name}/` code
 - App-specific modules are not required to be reusable, but must still be clean, focused, and well-structured
 - No direct DB calls in `{project_name}/` — all database interaction goes through the appropriate `rey_lib.db.*` module
-- No direct logging setup in `{project_name}/` — use `rey_lib.logs.log_utils` helpers
+- No direct logging setup in `{project_name}/` — log through `AppLogger` (`rey_lib.logs`); configuration is AppLogger's, at the launch boundary
 - No raw `except` blocks in `{project_name}/` — all error handling goes through `rey_lib.errors.error_utils`
 - App modules must never read config files directly — all values come from `ctx`
 
@@ -430,7 +431,7 @@ Before outputting any Python, verify each of the following:
 **Architecture:**
 
 - [ ] `ctx` passed as first argument to functions that need it — not injected globally
-- [ ] `ctx.log_level` is set; `ctx.log_depth` incremented/decremented via `log_enter`/`log_exit`
+- [ ] `ctx.log_level` is set; call depth is `AppLogger.log_depth`, moved only by `AppLogger.enter()` / `exit()` (the transitional `log_enter` / `log_exit` pass through to them until S6)
 - [ ] `main.py` contains orchestration only
 - [ ] App-specific logic is in `{project_name}/`, reusable logic is in `rey_lib`
 - [ ] Dependency direction is correct: `main.py` → `{project_name}/` → `rey_lib` only
@@ -442,7 +443,7 @@ Before outputting any Python, verify each of the following:
 **Data and DB:**
 
 - [ ] No direct DB calls outside the appropriate `rey_lib.db.*` module
-- [ ] No direct `logging` setup outside `rey_lib.logs.log_utils`
+- [ ] No direct `logging` setup outside `rey_lib.logs.app_logger` (AppLogger's configuration)
 - [ ] No bare `except` blocks outside `rey_lib.errors.error_utils` or `{project_name}/error_utils.py`
 - [ ] All SQL is in `sql/{server}/` files — none inline in Python
 - [ ] No string-formatted SQL — parameterized queries only

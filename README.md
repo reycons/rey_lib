@@ -12,7 +12,9 @@ rey_lib/
         config_utils.py     # YAML config loader, Namespace builder, inject_secrets
         ctx.py              # Generic context lookup helpers (find_by_name, etc.)
     logs/
-        log_utils.py        # Centralised logging, call-depth indentation
+        app_logger.py       # AppLogger: application logging, logging configuration, call depth
+        logging_setup.py    # Transitional helpers: get_logger (to S7), log_enter/log_exit, setup_logging (to S6)
+        log_utils.py        # Compatibility re-exports of the logs package
     errors/
         error_utils.py      # AppError base, validators, handle_exception
     ftp/
@@ -62,7 +64,10 @@ from rey_lib.config.config_utils import build_ctx, inject_secrets, Namespace
 from rey_lib.config.ctx import find_in_ctx, find_by_name
 
 # Logging
-from rey_lib.logs.log_utils import setup_logging, get_logger, log_enter, log_exit
+from rey_lib.logs import AppLogger
+# Transitional, defined in rey_lib.logs.logging_setup: get_logger until S7; log_enter / log_exit
+# (pass-throughs to AppLogger.enter / exit) until S6. Logging is started by the launch boundary.
+from rey_lib.logs.logging_setup import get_logger, log_enter, log_exit
 
 # Errors
 from rey_lib.errors.error_utils import AppError, ConfigError, handle_exception
