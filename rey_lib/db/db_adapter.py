@@ -191,6 +191,13 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
         # inventory the database objects claim their own entries from
         # (DatabaseObjectListing, backlog 723).
         "list_database_objects",
+        # One-row and targeted table DML (backlog database.table_dml_surface):
+        # what DatabaseTable.insert / update / delete need from a provider --
+        # the statement, its binding, and how the provider returns the inserted
+        # row's key and the rows it touched. Semantics stay DatabaseTable's.
+        "insert",
+        "update",
+        "delete",
     }
 )
 
@@ -1290,6 +1297,41 @@ class DBAdapter:
         """
         insert_rows = self._require_provider_capability(conn, "bulk_insert")
         return insert_rows(conn, schema, table, rows, columns)
+
+    def insert(self, conn: Any, schema: str, table: str, row: dict[str, Any]) -> Any:
+        """Insert one row; the inserted row's primary-key value, as the provider returns it.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot.
+        """
+        return self._require_provider_capability(conn, "insert")(conn, schema, table, row)
+
+    def update(
+        self,
+        conn: Any,
+        schema: str,
+        table: str,
+        values: dict[str, Any],
+        criteria: dict[str, Any],
+    ) -> int:
+        """Set ``values`` on the rows matching ``criteria``; the rows affected.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot.
+        """
+        return self._require_provider_capability(conn, "update")(
+            conn, schema, table, values, criteria,
+        )
+
+    def delete(
+        self, conn: Any, schema: str, table: str, criteria: dict[str, Any],
+    ) -> int:
+        """Remove the rows matching ``criteria``; the rows affected.
+
+        Raises:
+            UnsupportedDatabaseCapabilityError: If the provider cannot.
+        """
+        return self._require_provider_capability(conn, "delete")(conn, schema, table, criteria)
 
     def insert_from_path(
         self,

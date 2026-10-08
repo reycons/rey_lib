@@ -998,6 +998,86 @@ class DatabaseTable:
         return adapter.bulk_insert(conn, schema, table, rows, columns)
 
     @classmethod
+    def insert(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        row: dict[str, Any],
+        adapter: Any = None,
+    ) -> Any:
+        """Insert one row into this table and return that row's primary-key value.
+
+        The table must have exactly one primary-key column. How the value comes
+        back -- generated or supplied -- is the provider's. It does not commit:
+        whether the insert sits in a transaction is the connection's.
+
+        Raises:
+            DatabaseError: If ``row`` is empty, the table has no single-column
+                primary key, or the insert fails.
+            UnsupportedDatabaseCapabilityError: If the provider cannot insert one row.
+        """
+        if not row:
+            raise DatabaseError(f"{_named(identity)}: insert needs at least one column value.")
+        adapter = adapter or _adapter()
+        schema, table = schema_and_table(identity)
+        return adapter.insert(conn, schema, table, row)
+
+    @classmethod
+    def update(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        values: dict[str, Any],
+        criteria: dict[str, Any],
+        adapter: Any = None,
+    ) -> int:
+        """Set ``values`` on the rows matching ``criteria``; the rows affected.
+
+        ``criteria`` are equalities on columns, all of which must hold. They
+        are required: a change to every row is not an update this method makes.
+
+        Raises:
+            DatabaseError: If ``values`` or ``criteria`` is empty, or the update fails.
+            UnsupportedDatabaseCapabilityError: If the provider cannot update.
+        """
+        if not values:
+            raise DatabaseError(f"{_named(identity)}: update needs at least one column value.")
+        if not criteria:
+            raise DatabaseError(
+                f"{_named(identity)}: update needs criteria; it never changes every row."
+            )
+        adapter = adapter or _adapter()
+        schema, table = schema_and_table(identity)
+        return adapter.update(conn, schema, table, values, criteria)
+
+    @classmethod
+    def delete(
+        cls,
+        conn: Any,
+        identity: DatabaseObjectIdentity,
+        criteria: dict[str, Any],
+        adapter: Any = None,
+    ) -> int:
+        """Remove the rows matching ``criteria``; the rows affected.
+
+        ``criteria`` are equalities on columns, all of which must hold. They
+        are required: removing every row is ``delete_all_rows``, asked for by
+        name.
+
+        Raises:
+            DatabaseError: If ``criteria`` is empty, or the delete fails.
+            UnsupportedDatabaseCapabilityError: If the provider cannot delete.
+        """
+        if not criteria:
+            raise DatabaseError(
+                f"{_named(identity)}: delete needs criteria; removing every row is "
+                "delete_all_rows."
+            )
+        adapter = adapter or _adapter()
+        schema, table = schema_and_table(identity)
+        return adapter.delete(conn, schema, table, criteria)
+
+    @classmethod
     def insert_from_path(
         cls,
         conn: Any,

@@ -27,6 +27,9 @@ __all__ = [
 	"get_current_database",
 	"list_database_objects",
 	"bulk_insert",
+	"insert",
+	"update",
+	"delete",
 	"call_proc",
 	"call_proc_with_output",
 	"load_sql",
@@ -138,6 +141,119 @@ def bulk_insert(
 		return len(rows)
 	except Exception as exc:
 		raise DatabaseError(f"bulk_insert failed for {schema}.{table}: {exc}") from exc
+
+
+def _bound_value(value: Any) -> Any:
+	"""A value as this provider binds it: a mapping or list travels as JSON text."""
+	if isinstance(value, (dict, list)):
+		import json
+
+		return json.dumps(value, default=str)
+	return value
+
+
+def _validated_target(schema: str, table: str, columns: list[str]) -> None:
+	"""Refuse a schema, table or column name this provider will not address."""
+	_validate_identifier(schema, "schema")
+	_validate_identifier(table, "table")
+	for name in columns:
+		_validate_identifier(name, "column")
+
+
+def insert(conn: Any, schema: str, table: str, row: dict[str, Any]) -> Any:
+	"""Insert one row into a table with one primary-key column; that row's key value.
+
+	The primary key is read from the catalog through the SQLAlchemy inspector.
+	MySQL returns no row from an insert, so the key value is the row's own when
+	it supplies one, and otherwise the generated value the driver reports
+	(``lastrowid``). Values are bound by SQLAlchemy. It does not commit.
+
+	Raises:
+		DatabaseError: If a name is not a plain identifier, the table has no
+			single-column primary key, or the insert fails.
+	"""
+	from rey_lib.db._sqlalchemy import core_connection, inspect_primary_key
+	from sqlalchemy import column, insert as sql_insert, table as sql_table
+	from sqlalchemy.exc import SQLAlchemyError
+
+	_validated_target(schema, table, list(row))
+	try:
+		key_columns = inspect_primary_key(conn, schema, table)
+	except SQLAlchemyError as exc:
+		raise DatabaseError(
+			f"insert: could not read the primary key of {schema}.{table}: {exc}"
+		) from exc
+	if len(key_columns) != 1:
+		raise DatabaseError(
+			f"insert: {schema}.{table} has {len(key_columns)} primary-key column(s); "
+			"insert needs exactly one."
+		)
+	key = key_columns[0]
+	target = sql_table(table, *(column(name) for name in row), schema=schema)
+	statement = sql_insert(target).values(
+		{name: _bound_value(value) for name, value in row.items()}
+	)
+	try:
+		result = core_connection(conn).execute(statement)
+	except SQLAlchemyError as exc:
+		raise DatabaseError(f"insert failed for {schema}.{table}: {exc}") from exc
+	if row.get(key) is not None:
+		return row[key]
+	return result.lastrowid
+
+
+def update(
+	conn: Any, schema: str, table: str, values: dict[str, Any], criteria: dict[str, Any],
+) -> int:
+	"""Set ``values`` on the rows matching every ``criteria`` equality; the rows affected.
+
+	Values and criteria are bound by SQLAlchemy; a criterion of None matches
+	NULL. It does not commit.
+
+	Raises:
+		DatabaseError: If a name is not a plain identifier or the update fails.
+	"""
+	from rey_lib.db._sqlalchemy import core_connection
+	from sqlalchemy import column, table as sql_table, update as sql_update
+	from sqlalchemy.exc import SQLAlchemyError
+
+	_validated_target(schema, table, [*values, *criteria])
+	target = sql_table(
+		table, *(column(name) for name in dict.fromkeys([*values, *criteria])), schema=schema,
+	)
+	statement = (
+		sql_update(target)
+		.where(*(target.c[name] == value for name, value in criteria.items()))
+		.values({name: _bound_value(value) for name, value in values.items()})
+	)
+	try:
+		return int(core_connection(conn).execute(statement).rowcount)
+	except SQLAlchemyError as exc:
+		raise DatabaseError(f"update failed for {schema}.{table}: {exc}") from exc
+
+
+def delete(conn: Any, schema: str, table: str, criteria: dict[str, Any]) -> int:
+	"""Remove the rows matching every ``criteria`` equality; the rows affected.
+
+	Criteria are bound by SQLAlchemy; a criterion of None matches NULL. It
+	does not commit.
+
+	Raises:
+		DatabaseError: If a name is not a plain identifier or the delete fails.
+	"""
+	from rey_lib.db._sqlalchemy import core_connection
+	from sqlalchemy import column, delete as sql_delete, table as sql_table
+	from sqlalchemy.exc import SQLAlchemyError
+
+	_validated_target(schema, table, list(criteria))
+	target = sql_table(table, *(column(name) for name in criteria), schema=schema)
+	statement = sql_delete(target).where(
+		*(target.c[name] == value for name, value in criteria.items())
+	)
+	try:
+		return int(core_connection(conn).execute(statement).rowcount)
+	except SQLAlchemyError as exc:
+		raise DatabaseError(f"delete failed for {schema}.{table}: {exc}") from exc
 
 
 def call_proc(

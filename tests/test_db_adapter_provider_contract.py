@@ -73,6 +73,10 @@ _CALLS: dict[str, tuple[str, tuple]] = {
     "call_proc_with_output": ("call_proc_with_output", ("some_proc", [], [])),
     "get_table_columns": ("get_table_columns", ("schema", "table")),
     "bulk_insert": ("bulk_insert", ("schema", "table", [], ["a"])),
+    # One-row and targeted table DML (backlog database.table_dml_surface).
+    "insert": ("insert", ("schema", "table", {"a": 1})),
+    "update": ("update", ("schema", "table", {"a": 1}, {"b": 2})),
+    "delete": ("delete", ("schema", "table", {"b": 2})),
     # Optional for a provider, but dispatched exactly like the rest -- a
     # caller that did not ask for support first must still get a named
     # refusal rather than an AttributeError from inside the call.
@@ -284,7 +288,11 @@ class TestEveryProviderHasThePrimitives:
     """Required, not optional: a gap fails here rather than in a load."""
 
     @pytest.mark.parametrize("provider", ["postgres", "mysql", "duckdb", "sqlserver"])
-    @pytest.mark.parametrize("primitive", ["quote_identifier", "execute_statement", "fetch_rows"])
+    @pytest.mark.parametrize("primitive", [
+        "quote_identifier", "execute_statement", "fetch_rows",
+        # Table DML (backlog database.table_dml_surface): every provider in this slice.
+        "insert", "update", "delete",
+    ])
     def test_the_provider_module_defines_it(self, provider: str, primitive: str) -> None:
         """Read from the module source, so an absent driver cannot hide a gap."""
         import ast

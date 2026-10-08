@@ -52,6 +52,9 @@ __all__ = [
     "run_sql",
     "load_sql",
     "bulk_insert",
+    "insert",
+    "update",
+    "delete",
     "fetch_rows",
     "MEMORY_DATABASE",
     "CSV_SOURCE_RELATION",
@@ -350,6 +353,127 @@ def bulk_insert(
     values = [tuple(row[c] for c in columns) for row in rows]
     conn.executemany(sql, values)
     return len(rows)
+
+
+def _bound_value(value: Any) -> Any:
+    """A value as this provider binds it: a mapping or list travels as JSON text."""
+    if isinstance(value, (dict, list)):
+        import json
+
+        return json.dumps(value, default=str)
+    return value
+
+
+def _single_primary_key(conn: duckdb.DuckDBPyConnection, schema: str, table: str) -> str:
+    """The table's one primary-key column, read from this provider's schema metadata.
+
+    Raises:
+        DatabaseError: When the table has no primary key, or more than one column in it.
+    """
+    tables = schema_metadata(conn, schema).get("tables") or []
+    entry = next((item for item in tables if item.get("name") == table), {})
+    columns = list((entry.get("primary_key") or {}).get("constrained_columns") or [])
+    if len(columns) != 1:
+        raise DatabaseError(
+            f"insert: {schema}.{table} has {len(columns)} primary-key column(s); "
+            "insert needs exactly one."
+        )
+    return str(columns[0])
+
+
+def _matching(criteria: dict[str, Any]) -> tuple[str, list[Any]]:
+    """The equality conditions for ``criteria``, joined with AND, and their bound values.
+
+    A criterion of None matches NULL.
+    """
+    conditions: list[str] = []
+    values: list[Any] = []
+    for name, value in criteria.items():
+        if value is None:
+            conditions.append(f"{quote_identifier(name)} IS NULL")
+        else:
+            conditions.append(f"{quote_identifier(name)} = ?")
+            values.append(_bound_value(value))
+    return " AND ".join(conditions), values
+
+
+def insert(
+    conn: duckdb.DuckDBPyConnection, schema: str, table: str, row: dict[str, Any],
+) -> Any:
+    """Insert one row into a table with one primary-key column; that row's key value.
+
+    The primary key is read from this provider's schema metadata, and the row's
+    value of it comes back from the insert itself (``RETURNING``). Every value
+    is a bound parameter; a mapping or list is bound as JSON text.
+
+    Raises:
+        DatabaseError: If the table has no single-column primary key or the insert fails.
+    """
+    key = _single_primary_key(conn, schema, table)
+    columns = list(row)
+    target = f"{quote_identifier(schema)}.{quote_identifier(table)}"
+    listed = ", ".join(quote_identifier(name) for name in columns)
+    placeholders = ", ".join("?" for _ in columns)
+    sql = (
+        f"INSERT INTO {target} ({listed}) VALUES ({placeholders}) "
+        f"RETURNING {quote_identifier(key)}"
+    )
+    try:
+        returned = conn.execute(sql, [_bound_value(row[name]) for name in columns]).fetchone()
+    except duckdb.Error as exc:
+        raise DatabaseError(f"insert failed for {schema}.{table}: {exc}") from exc
+    if not returned:
+        raise DatabaseError(f"insert: {schema}.{table} returned no {key}.")
+    return returned[0]
+
+
+def update(
+    conn: duckdb.DuckDBPyConnection,
+    schema: str,
+    table: str,
+    values: dict[str, Any],
+    criteria: dict[str, Any],
+) -> int:
+    """Set ``values`` on the rows matching every ``criteria`` equality; the rows affected.
+
+    Every value is a bound parameter. It does not commit.
+
+    Raises:
+        DatabaseError: If the update fails.
+    """
+    assignments = ", ".join(f"{quote_identifier(name)} = ?" for name in values)
+    condition, condition_values = _matching(criteria)
+    target = f"{quote_identifier(schema)}.{quote_identifier(table)}"
+    sql = f"UPDATE {target} SET {assignments} WHERE {condition}"
+    try:
+        result = conn.execute(
+            sql, [*(_bound_value(value) for value in values.values()), *condition_values],
+        )
+        counted = result.fetchone() if result.description else None
+    except duckdb.Error as exc:
+        raise DatabaseError(f"update failed for {schema}.{table}: {exc}") from exc
+    return int(counted[0]) if counted else 0
+
+
+def delete(
+    conn: duckdb.DuckDBPyConnection, schema: str, table: str, criteria: dict[str, Any],
+) -> int:
+    """Remove the rows matching every ``criteria`` equality; the rows affected.
+
+    Every value is a bound parameter. It does not commit.
+
+    Raises:
+        DatabaseError: If the delete fails.
+    """
+    condition, condition_values = _matching(criteria)
+    target = f"{quote_identifier(schema)}.{quote_identifier(table)}"
+    sql = f"DELETE FROM {target} WHERE {condition}"
+    try:
+        result = conn.execute(sql, condition_values)
+        counted = result.fetchone() if result.description else None
+    except duckdb.Error as exc:
+        raise DatabaseError(f"delete failed for {schema}.{table}: {exc}") from exc
+    return int(counted[0]) if counted else 0
 
 
 def get_table_columns(

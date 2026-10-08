@@ -285,6 +285,18 @@ def inspect_schema_structure(conn: Any, schema: str) -> dict[str, Any]:
     return {"tables": tables, "views": views}
 
 
+def inspect_primary_key(conn: Any, schema: str, table: str) -> list[str]:
+    """One table's primary-key columns, in key order, as the inspector reports them.
+
+    The same read ``inspect_schema_structure`` makes for every table, scoped to
+    one table, for the providers SQLAlchemy inspects. Empty when the table has
+    no primary key.
+    """
+    inspector, _ = _inspector(conn)
+    constraint = inspector.get_pk_constraint(table, schema=schema) or {}
+    return [str(name) for name in constraint.get("constrained_columns") or []]
+
+
 def _inspector(conn: Any) -> tuple[Any, Any]:
     try:
         from sqlalchemy import inspect  # noqa: PLC0415
