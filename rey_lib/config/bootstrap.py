@@ -36,7 +36,7 @@ from typing import Optional
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.logs import (
-    classified, finalize_run_phases, get_logger, setup_logging,
+    AppLogger, classified, finalize_run_phases, get_logger,
 )
 from rey_lib.db.connection import build_connections, connection_owner
 from rey_lib.run import Run, establish_run_identity
@@ -189,12 +189,12 @@ def build_ctx_for_app(
     establish_run_identity(ctx)
 
     _settle_log_level(ctx)
-    setup_logging(ctx, operation=operation)
+    AppLogger._configure(ctx, operation=operation)
     return ctx
 
 
 #: What a level may be. Read from the one map that applies it, so this cannot
-#: drift from what ``setup_logging`` actually honours.
+#: drift from what ``AppLogger._configure`` actually honours.
 def _settle_installation_id(ctx: Namespace) -> None:
     """Give this context's installation the id the registry holds for it.
 
@@ -248,7 +248,7 @@ def _settle_installation_id(ctx: Namespace) -> None:
 
 
 def _levels() -> tuple[str, ...]:
-    from rey_lib.logs.logging_setup import _LEVEL_MAP
+    from rey_lib.logs.app_logger import _LEVEL_MAP
 
     return tuple(sorted(_LEVEL_MAP))
 
@@ -307,14 +307,14 @@ def _settle_log_level(ctx: Namespace) -> None:
     ``ctx.log_level``: sharing one attribute with configuration would make the
     first term win whenever either had spoken.
 
-    What leaves here is a single settled ``ctx.log_level``. ``setup_logging``
+    What leaves here is a single settled ``ctx.log_level``. ``AppLogger._configure``
     reads that and nothing else -- it learns nothing about command lines,
     applications or installations, and the chain is not partly resolved anywhere
     upstream.
 
     Case is normalized at this boundary, so ``debug`` from YAML and ``DEBUG``
     from a command line are the same level. An unrecognised name is still
-    refused: ``setup_logging`` maps one it does not know to a default silently,
+    refused: ``AppLogger._configure`` maps one it does not know to a default silently,
     so a typo in an installation's YAML would otherwise produce a run that looks
     entirely normal and records the wrong amount.
 

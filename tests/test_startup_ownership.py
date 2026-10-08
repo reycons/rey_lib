@@ -25,7 +25,10 @@ APPS_ROOT = Path(__file__).resolve().parents[2]
 # rather than skipped by pattern, so the day it thaws this test says so.
 FROZEN = {"trade_analyzer"}
 
-_CALL = re.compile(r"^\s*[^#\n]*\bsetup_logging\s*\(", re.MULTILINE)
+# Logging is started by AppLogger._configure (backlog
+# logging.app_logger.s3_configuration). setup_logging is a delegate to it until
+# S6, so calling either one starts logging.
+_CALL = re.compile(r"^\s*[^#\n]*\b(?:setup_logging|AppLogger\._configure)\s*\(", re.MULTILINE)
 
 
 def _application_sources() -> list[Path]:
@@ -80,6 +83,7 @@ def test_the_frozen_exception_is_still_real() -> None:
 def test_the_bootstrap_is_the_only_place_logging_starts() -> None:
     """One initializer, in the module that owns startup."""
     bootstrap = (APPS_ROOT / "rey_lib/rey_lib/config/bootstrap.py").read_text(encoding="utf-8")
-    assert bootstrap.count("setup_logging(") == 1
+    assert bootstrap.count("AppLogger._configure(") == 1
+    assert bootstrap.count("setup_logging(") == 0
     # No parallel error boundary: an uncaught failure is the interpreter's.
     assert "install_process_error_boundary" not in bootstrap

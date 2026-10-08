@@ -176,12 +176,13 @@ def test_logging_is_started_on_both_branches() -> None:
     from rey_lib.config import bootstrap
 
     source = inspect.getsource(bootstrap.build_ctx_for_app)
-    # One unconditional call, reached however the context arrived.
-    assert source.count("setup_logging(") == 1, (
+    # One unconditional call, reached however the context arrived. Logging is
+    # started by AppLogger._configure (backlog logging.app_logger.s3_configuration).
+    assert source.count("AppLogger._configure(") == 1, (
         "logging must be started exactly once, on a path both branches reach"
     )
     resolve_line = source.index("_resolve_ctx(")
-    logging_line = source.index("setup_logging(")
+    logging_line = source.index("AppLogger._configure(")
     assert logging_line > resolve_line, "logging must start after the context exists"
 
 

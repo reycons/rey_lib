@@ -186,16 +186,18 @@ class TestLoggingConsumesTheSettledValueOnly:
         """
         import inspect
 
-        from rey_lib.logs import logging_setup
+        from rey_lib.logs import app_logger, logging_setup
 
-        source = inspect.getsource(logging_setup)
+        # Configuration moved from logging_setup into AppLogger (backlog
+        # logging.app_logger.s3_configuration); both are checked until S6.
+        source = inspect.getsource(logging_setup) + inspect.getsource(app_logger)
 
         assert "applications" not in source, (
-            "logging_setup reads ctx.applications. Precedence belongs to "
+            "logging configuration reads ctx.applications. Precedence belongs to "
             "_settle_log_level; logging consumes one settled value."
         )
         assert REQUESTED_LOG_LEVEL_ATTR not in source, (
-            f"logging_setup reads {REQUESTED_LOG_LEVEL_ATTR}. The operator's "
+            f"logging configuration reads {REQUESTED_LOG_LEVEL_ATTR}. The operator's "
             "choice is ordered at settlement, not re-read here."
         )
 

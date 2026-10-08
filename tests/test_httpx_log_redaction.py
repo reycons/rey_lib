@@ -12,7 +12,7 @@ import logging
 import httpx
 import pytest
 
-from rey_lib.logs.logging_setup import _ProviderWarningFilter, redacted_url
+from rey_lib.logs.app_logger import _ProviderWarningFilter, redacted_url
 
 
 def _httpx_record(url: object, status: int = 200, reason: str = "OK") -> logging.LogRecord:
