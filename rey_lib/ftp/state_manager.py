@@ -27,7 +27,7 @@ from typing import Any
 from rey_lib.errors.error_utils import FtpDownloadError, StateError
 from rey_lib.files.json import JsonReadError, read_json_file
 from rey_lib.files.file_utils import write_file
-from rey_lib.logs.log_utils import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
@@ -47,7 +47,7 @@ __all__ = [
     "abandon_to_failed_file",
 ]
 
-log = get_logger(__name__)
+log = AppLogger(__name__)
 
 
 def get_state_file_path(ctx: Any, conn: Any) -> Path:

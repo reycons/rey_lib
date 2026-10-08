@@ -17,9 +17,9 @@ from typing import Any
 
 from rey_lib.artifacts.config import artifact_config_from_ctx
 from rey_lib.artifacts.engines import get_engine
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Provenance for artifact_processing routes (best-effort source attribution).
 _SOURCE = "configs/shared/artifact_processing.yaml"

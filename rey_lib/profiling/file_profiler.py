@@ -18,7 +18,7 @@ import re
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 if TYPE_CHECKING:
     from rey_lib.data.logical_type import LogicalType
@@ -30,7 +30,7 @@ __all__ = [
     "profile_rows",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 _EXCLUDED_PROFILE_COLUMNS = frozenset({"source_line_number"})
 
 

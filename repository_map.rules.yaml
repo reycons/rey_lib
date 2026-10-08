@@ -73,7 +73,7 @@ architecture_rules:
   # The allowed path is the only permitted logging infrastructure boundary --
   # the code that wraps logging.getLogger and so cannot route through itself:
   # app_logger.py, the canonical stdlib boundary (backlog
-  # logging.app_logger_canonical_object; logging_setup.py left this list in S6).
+  # logging.app_logger_canonical_object).
   # This list names the infrastructure owner and is not a grandfather list for
   # sites that have not been corrected.
   - rule_id: logging_routes_through_the_logging_owner

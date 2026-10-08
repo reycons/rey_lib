@@ -24,7 +24,7 @@ from rey_lib.files.jsonl import JsonlReadError, read_jsonl_file, write_jsonl_fil
 from rey_lib.run import establish_run_identity
 from rey_lib.logs import (
     FileManifestError,
-    get_logger,
+    AppLogger,
     ProfileLibraryError,
     bind_run,
     bound_run_log,
@@ -467,7 +467,7 @@ _RECORDED_PATHS: dict[str, tuple[str, str]] = {
 }
 
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def _record_path(record: Mapping[str, Any], name: str) -> str:

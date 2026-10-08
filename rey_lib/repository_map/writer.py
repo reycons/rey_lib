@@ -27,7 +27,7 @@ from rey_lib.files.file_utils import read_text_file
 from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
 from rey_lib.git.errors import GitError
 from rey_lib.git.repo import get_head_commit, get_repo_status, run_git
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.architecture_policy import (
     CompiledArchitecturePolicy,
     EffectivePolicy,
@@ -51,7 +51,7 @@ __all__ = [
     "write_repository_map",
 ]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 # Bumped when the generated fact model changes, so a stale map is detectable
 # even when the commit and rules are unchanged.

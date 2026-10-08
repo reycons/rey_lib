@@ -320,9 +320,9 @@ def bind_run(run_log: Any) -> None:
             _CURRENT_RUN["owner"] = ident
 
     if violation:
-        from rey_lib.logs.logging_setup import get_logger
+        from rey_lib.logs.app_logger import AppLogger
 
-        get_logger(__name__).warning(
+        AppLogger(__name__).warning(
             "run log: thread %s bound run %s while thread %s held an ambient "
             "scope for run %s. Distinct ambient run scopes must not overlap in "
             "one process; ambient file operations may be recorded against the "

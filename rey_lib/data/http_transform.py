@@ -31,7 +31,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from rey_lib.data.data_transform import DataTransform, DeclaredTransform
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 if TYPE_CHECKING:
     from rey_lib.web_utils import HttpConnection
@@ -41,7 +41,7 @@ __all__ = [
     "http_transform_adapter_for", "http_transform_adapters",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class HttpTransformAdapter(ABC):

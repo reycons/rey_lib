@@ -39,7 +39,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.errors.error_utils import AppError
 __all__ = [
     "FileManifestError",
@@ -85,14 +85,14 @@ _CANONICAL_ROOT_FIELDS: tuple[str, ...] = (
     "producer",
 )
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class FileManifestError(AppError):
     """Raised when a governed manifest record cannot be sequenced or appended.
 
     Deliberately not derived from ``rey_lib.errors.AppError``: the logging layer
-    sits below ``rey_lib.errors``, which imports ``get_logger`` from this
+    sits below ``rey_lib.errors``, which imports ``AppLogger`` from this
     package, so a module-level errors import here would close a cycle. Every
     other rey_lib.logs module reaches ``rey_lib.errors`` through a lazy
     in-function import for the same reason.
@@ -127,7 +127,7 @@ def resolve_file_manifest_path(ctx: Any) -> Path:
             "Resolved context carries no path resolver; the installation-owned "
             "'file_manifest' path cannot be resolved."
         )
-    # Imported lazily because rey_lib.errors imports get_logger from this
+    # Imported lazily because rey_lib.errors imports AppLogger from this
     # package; a module-level import would close a cycle.
     from rey_lib.errors.error_utils import ConfigError
 

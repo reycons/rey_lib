@@ -38,7 +38,7 @@ from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextI
 
 from rey_lib.encryption import sha256_file, sha256_text
 from rey_lib.files import primitive_file_io
-from rey_lib.logs import get_logger, log_run_record, record_file_operation
+from rey_lib.logs import AppLogger, log_run_record, record_file_operation
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
@@ -92,7 +92,7 @@ __all__ = [
     "visible_files",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

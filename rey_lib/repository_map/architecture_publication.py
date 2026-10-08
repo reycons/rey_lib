@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.architecture_projection import (
     ArchitectureProjectionError,
     CONCEPTS_KEY,
@@ -37,7 +37,7 @@ from rey_lib.repository_map.architecture_projection import (
 
 __all__ = ["ArchitectureRows", "architecture_rows", "owned_seam_tokens"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 
 class ArchitectureRows:
@@ -228,7 +228,7 @@ def owned_seam_tokens(row: dict[str, Any]) -> list[tuple[str, str]]:
 
     Deliberately not read, because none of it can be read without guessing:
     a shorthand continuation (``Class.a / b / c`` -- only ``Class.a`` is
-    explicit), prose and call forms (``get_logger(__name__).debug``), another
+    explicit), prose and call forms (``AppLogger(__name__).debug``), another
     class's member, and any entry that is not active.
 
     Args:

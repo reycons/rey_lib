@@ -134,7 +134,7 @@ def load_contract_references(ctx: Any, declared: Any) -> list[dict[str, Any]] | 
     non-required one is omitted with a warning.
     """
     from rey_lib.files import read_text_file
-    from rey_lib.logs.log_utils import get_logger
+    from rey_lib.logs.app_logger import AppLogger
 
     if not declared:
         return None
@@ -155,7 +155,7 @@ def load_contract_references(ctx: Any, declared: Any) -> list[dict[str, Any]] | 
                     f"Required contract reference '{name}' could not be loaded "
                     f"from '{raw_path}': {exc}"
                 ) from exc
-            get_logger(__name__).warning(
+            AppLogger(__name__).warning(
                 "Skipping optional contract reference '%s' (%s): %s", name, raw_path, exc
             )
             continue

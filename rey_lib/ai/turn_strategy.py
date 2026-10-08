@@ -35,9 +35,9 @@ from rey_lib.ai.errors import AIOutputError
 from rey_lib.ai.policies import ValidationCorrectionPolicy
 from rey_lib.ai.providers.base import ProviderCall, ProviderReply
 from rey_lib.ai.tools import AITool, AIToolCall
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 __all__ = [
     "EmulatedTurnStrategy",

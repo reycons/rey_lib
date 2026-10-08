@@ -20,7 +20,7 @@ import ast
 from pathlib import Path
 
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.js_extractor import (
     js_text,
     parse_js_root,
@@ -37,7 +37,7 @@ from rey_lib.data.errors import DataStructureError
 
 __all__ = ["inventory_dispatchers_and_switches"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 # A decision point needs at least this many named branches to be a dispatcher.
 # One comparison is a condition, not a vocabulary.

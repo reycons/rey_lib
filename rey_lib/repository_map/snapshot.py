@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.architecture_projection import (
     ARCHITECTURE_SOURCE_NAME,
     ArchitectureProjection,
@@ -54,7 +54,7 @@ from rey_lib.repository_map.architecture_projection import ArchitectureProjectio
 
 __all__ = ["CodeIndexSnapshot", "scan"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 RULES_NAME = "repository_map.rules.yaml"
 

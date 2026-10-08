@@ -37,13 +37,13 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.web_utils.connection import HttpConnection
 from rey_lib.web_utils import HttpRequest
 
 __all__ = ["Exchange", "exchange", "main"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 @dataclass(frozen=True)

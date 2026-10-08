@@ -48,12 +48,12 @@ from typing import Any, Mapping, Optional
 
 from rey_lib.data.http_transform import HttpTransformAdapter, http_transform_adapter
 from rey_lib.errors.error_utils import AppError, ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.web_utils import HttpConnection, HttpRequest, HttpResponse
 
 __all__ = ["OUTPUT_COLUMNS", "OpenFigiAdapter", "OpenFigiError"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: The optional job properties OpenFIGI documents for /v3/mapping.
 _JOB_PROPERTIES: frozenset[str] = frozenset({

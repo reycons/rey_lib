@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 from rey_lib.load.input_utils import parse_column_list
 from rey_lib.load.profile_errors import ProfilingError
@@ -38,7 +38,7 @@ __all__: list[str] = [
     "DEFAULT_MAX_SAMPLE_VALUES",
 ]
 
-_log = get_logger(__name__)
+_log = AppLogger(__name__)
 
 # Code-level fallbacks used only when neither the YAML nor CLI specifies a value.
 DEFAULT_MAX_SAMPLE_ROWS: int = 500

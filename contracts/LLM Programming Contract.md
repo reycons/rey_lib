@@ -206,8 +206,7 @@ All reusable infrastructure is provided by `rey_lib`. Projects must use it — n
 - `rey_lib.config.config_utils` — `build_ctx()`, `Namespace`, `save_config()`, `print_ctx()`
 - `rey_lib.config.ctx` — `find_by_name()`, `find_in_ctx()`, `find_in_ctx_versioned()`
 - `rey_lib.errors.error_utils` — `AppError`, `ConfigError`, `DatabaseError`, `handle_exception()`, `validate_env()`, `validate_path()`, `validate_required()`
-- `rey_lib.logs` — `AppLogger` (defined in `rey_lib.logs.app_logger`): application logging (`debug`, `info`, `warning`, `isEnabledFor`) and the one process-wide call depth (`AppLogger.log_depth`, moved only by `enter()` / `exit()`)
-- `rey_lib.logs.logging_setup` — **transitional**: `get_logger(name)` returns `AppLogger(name)` (also re-exported by `rey_lib.logs.log_utils`); removed in S7, when callers use `AppLogger(__name__)`. Backlog `logging.app_logger_canonical_object`.
+- `rey_lib.logs` — `AppLogger` (defined in `rey_lib.logs.app_logger`; acquired as `AppLogger(__name__)`): application logging (`debug`, `info`, `warning`, `isEnabledFor`) and the one process-wide call depth (`AppLogger.log_depth`, moved only by `enter()` / `exit()`)
 - `rey_lib.db.sqlserver_utils` — SQL Server connections, query execution, bulk insert, transaction handling
 - `rey_lib.db.duckdb_utils` — DuckDB connections, SQL file loading, query execution
 - `rey_lib.files.file_utils` — `input_files()`, `get_reader()`, `write_file()`, `move_file()`, `converted_output_path()`

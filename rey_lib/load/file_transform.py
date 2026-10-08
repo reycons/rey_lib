@@ -43,14 +43,14 @@ from rey_lib.files.file_routing import (
     FileRoutingRole,
     GovernedFileReference,
 )
-from rey_lib.logs import bound_run_log, current_step, get_logger
+from rey_lib.logs import bound_run_log, current_step, AppLogger
 
 __all__ = [
     "FileKind", "FileTransform", "MoveTransform", "build_file_transform",
     "file_kind", "file_kinds", "file_transform",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: The bare lifecycle-root placeholder a route may carry. Resolved from the
 #: DataFile's own ``base_path``; ``<classification.*>`` is routing's.

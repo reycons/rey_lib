@@ -24,7 +24,7 @@ import ast
 from pathlib import Path
 
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.js_extractor import (
     js_text,
     parse_js_root,
@@ -44,7 +44,7 @@ from rey_lib.data.errors import DataStructureError
 
 __all__ = ["extract_registrations"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 # String literal node types across the supported grammars.
 _STRING_NODES = frozenset({"string", "template_string"})

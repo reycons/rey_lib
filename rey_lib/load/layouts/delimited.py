@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from rey_lib.encryption import sha256_text
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.files.csv import (
     CsvRead,
     parse_delimited_line,
@@ -48,7 +48,7 @@ from rey_lib.load.layouts.common import (
 )
 from rey_lib.load.profile_errors import ProfilingError
 
-_log = get_logger(__name__)
+_log = AppLogger(__name__)
 
 
 @dataclass

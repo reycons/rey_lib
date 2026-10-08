@@ -38,7 +38,7 @@ from typing import Any, Iterator, Sequence
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "CsvRead",
@@ -56,7 +56,7 @@ __all__ = [
     "sample_indices",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Header discovery is bounded to the opening rows. Every line is already in
 # memory, so this bounds the comparison work rather than the read.

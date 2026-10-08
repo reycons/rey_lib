@@ -59,7 +59,7 @@ import pyodbc
 
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import DatabaseError, ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import StateError
 
 __all__ = [
@@ -77,7 +77,7 @@ __all__ = [
     "is_truncation_error",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Neutral → SQL Server type map

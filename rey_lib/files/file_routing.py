@@ -12,14 +12,14 @@ from typing import Any, Mapping
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.file_utils import move_file
 from rey_lib.files.governed_file import FileId, governed_file_id
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.files.log_run_rollback import (
     SourceFileMutationEvidenceError,
     SourceFileMutationEvidenceFailurePhase,
     log_source_file_mutation,
 )
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 __all__ = [
     "CollisionPolicy",

@@ -41,7 +41,7 @@ from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "get_connection",
@@ -52,7 +52,7 @@ __all__ = [
     "is_truncation_error",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # PostgreSQL error code for string-data-right-truncation.
 _TRUNCATION_SQLSTATE = "22001"

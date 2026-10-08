@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.records import (
     RECORD_TYPE_ACCESS,
     RECORD_TYPE_ASSIGNMENT,
@@ -47,7 +47,7 @@ from rey_lib.repository_map.writer import RepositoryMap
 
 __all__ = ["CodeIndexWriter", "IndexedRepository", "index"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 
 @runtime_checkable

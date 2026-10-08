@@ -23,13 +23,13 @@ from __future__ import annotations
 from typing import Optional
 
 from rey_lib.errors.error_utils import AppError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.redaction.char_utils import analyze_pattern, generate_replacement
 from rey_lib.redaction.masks import KNOWN_MASKS, apply_mask
 
 __all__ = ["RedactionExhausted", "RedactionRegistry"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: How many successive counters the search will try before giving up. The
 #: encoding is periodic in the counter with period 10 for a single slot, so ten

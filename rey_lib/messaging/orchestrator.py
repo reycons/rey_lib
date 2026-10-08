@@ -7,7 +7,7 @@ from typing import Any
 
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.logs import (
-    get_logger,
+    AppLogger,
     log_artifact_reference,
     log_input_discovered,
     log_input_file_reference,
@@ -28,7 +28,7 @@ from rey_lib.messaging.router import create_message, send_message
 
 __all__ = ["execute_message_set"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Maximum records read from a JSONL log before passing to body builders.
 # Body builders apply their own per-filter limits.

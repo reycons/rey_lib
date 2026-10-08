@@ -61,13 +61,13 @@ from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
 from rey_lib.data.data_profile import DataProfile, FieldProfile, ProfileField
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile, data_file_for
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.errors.error_utils import StateError
 
 __all__ = ["ManifestSource", "SourceContextReader"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class SourceContextReader(Protocol):

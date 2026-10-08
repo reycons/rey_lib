@@ -277,20 +277,3 @@ class TestDepth:
             if name.ljust(32) in line
         ]
         assert messages == ["→ outer", "  inside", "← outer"]
-
-
-class TestGetLogger:
-    """S5: get_logger is a wrapper returning AppLogger(name)."""
-
-    def test_get_logger_returns_the_app_logger_of_that_name(self, caplog: pytest.LogCaptureFixture) -> None:
-        from rey_lib.logs import get_logger
-
-        caplog.set_level(logging.INFO, logger=_NAME)
-
-        logger = get_logger(_NAME)
-        logger.info("through the wrapper")
-
-        assert isinstance(logger, AppLogger)
-        (record,) = _records(caplog)
-        assert record.getMessage() == "through the wrapper"
-        assert record.funcName == "test_get_logger_returns_the_app_logger_of_that_name"

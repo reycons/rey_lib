@@ -50,7 +50,7 @@ from rey_lib.logs import (
     PROFILE_RECORD_TYPE,
     FileManifestError,
     bound_run_log,
-    get_logger,
+    AppLogger,
     log_file_manifest_record,
     log_run_record,
 )
@@ -63,7 +63,7 @@ __all__ = [
     "run_record_type_profiling",
 ]
 
-_log = get_logger(__name__)
+_log = AppLogger(__name__)
 
 #: The operation every profiling record and kickout move states.
 _OPERATION = "record_type_profiling"

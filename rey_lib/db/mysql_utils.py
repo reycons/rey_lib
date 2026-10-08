@@ -18,7 +18,7 @@ from mysql.connector import Error as MySQLError
 
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import DatabaseError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import ConfigError, StateError, UnsupportedDatabaseCapabilityError
 
 __all__ = [
@@ -36,7 +36,7 @@ __all__ = [
 	"is_truncation_error",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _sql_dir: Path | None = None
 _SQL: dict[str, str] = {}

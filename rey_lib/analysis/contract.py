@@ -28,7 +28,7 @@ from rey_lib.config.config_utils import parse_yaml
 from rey_lib.files.json import read_json_file
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["Contract", "load"]
 
@@ -39,7 +39,7 @@ _FRONTMATTER_RE = re.compile(
 )
 
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 @dataclass(frozen=True)

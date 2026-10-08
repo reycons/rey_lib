@@ -72,7 +72,7 @@ from rey_lib.analysis.execution import run
 from rey_lib.analysis.preparation import PreparedInput, prepare
 from rey_lib.analysis.records import ExecutionRecord
 from rey_lib.artifacts import ArtifactStore
-from rey_lib.logs.log_utils import get_logger
+from rey_lib.logs.app_logger import AppLogger
 
 __all__ = [
     "AnalysisContractSpec",
@@ -82,7 +82,7 @@ __all__ = [
     "load_analysis_contract",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Permitted source type values.
 _VALID_SOURCE_TYPES = frozenset({"sql", "csv", "excel", "text", "any"})

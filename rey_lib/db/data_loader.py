@@ -43,11 +43,11 @@ from rey_lib.data.logical_type import LogicalType
 # with DatabaseTable.replace_table so the two cannot drift.
 from rey_lib.db.database_objects import DatabaseTable, _beside, schema_and_table
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["DataLoader"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: "The caller did not ask" -- distinct from None, which means "the caller
 #: asked and the destination is not there". Without this sentinel the two

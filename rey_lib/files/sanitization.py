@@ -22,9 +22,9 @@ from rey_lib.files.log_run_rollback import (
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.governed_file import FileId
 from rey_lib.files.primitive_file_io import stage_stream_write
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 __all__ = [
     "EffectiveSanitizationPolicy",

@@ -42,13 +42,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from rey_lib.logs.log_utils import (
-    get_logger,
     log_artifact_reference,
     log_input_discovered,
     log_row_count,
     log_step_failure,
     log_validation_result,
 )
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.file_routing import FileRoutingError
 from rey_lib.data.logical_type import LogicalType
@@ -100,7 +100,7 @@ __all__ = [
     "resolve_pattern",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Fixed schema for the rejection table -- created on first use by DataLoader
 # (create_destination). Table name comes from ctx.rejection.table. Logical

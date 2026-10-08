@@ -34,7 +34,7 @@ from typing import Any, Optional
 
 from rey_lib.db.database_query import PageResult, StatementResult
 from rey_lib.db.routine_call import RoutineCall
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import (
     ConfigError,
     DatabaseError,
@@ -194,7 +194,7 @@ _PROVIDER_CONTRACT_CAPABILITIES = frozenset(
     }
 )
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: How much of a statement identifies it in a log. Enough to recognise which
 #: query was running, and never the whole text -- which is long and can carry

@@ -26,11 +26,11 @@ from typing import Any
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import data_file
 from rey_lib.files.data_file.base import DataFile
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["ExcelDataFile", "XlsFile", "XlsbFile", "XlsmFile", "XlsxFile"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: The worksheet this format reads: the first, as the loader's reader did.
 _FIRST_SHEET = 0

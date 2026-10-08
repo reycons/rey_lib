@@ -50,7 +50,7 @@ from rey_lib.encryption import sha256_text
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.errors.error_utils import AppError
 from rey_lib.files.jsonl import render_jsonl_line
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.records import (
     SYMBOL_KIND_FUNCTION,
     SYMBOL_KIND_METHOD,
@@ -80,7 +80,7 @@ __all__ = [
     "validate_architecture_projection",
 ]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 ARCHITECTURE_SOURCE_NAME = "01_core_architecture.yaml"
 

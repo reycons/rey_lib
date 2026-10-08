@@ -55,7 +55,7 @@ from rey_lib.artifacts import (
     loads_llm_json,
     process_artifact,
 )
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.logs.ai_evaluation import (
     record_evaluation_payload,
     record_evaluation_run,
@@ -63,7 +63,7 @@ from rey_lib.logs.ai_evaluation import (
 
 __all__ = ["run"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def run(

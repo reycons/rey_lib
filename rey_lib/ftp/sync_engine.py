@@ -34,11 +34,11 @@ from rey_lib.ftp.state_manager import (
     save_state,
 )
 from rey_lib.errors.error_utils import FtpDownloadError
-from rey_lib.logs.log_utils import get_logger
+from rey_lib.logs.app_logger import AppLogger
 
 __all__ = ["run_sync"]
 
-log = get_logger(__name__)
+log = AppLogger(__name__)
 
 
 def run_sync(ctx: Any, conn: Any, resync: bool = True) -> int:

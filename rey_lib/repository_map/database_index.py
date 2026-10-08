@@ -22,11 +22,11 @@ from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.db_adapter import DBAdapter
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 
 __all__ = ["DatabaseIndexWriter"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 SCHEMA = "code"
 

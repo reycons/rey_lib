@@ -40,11 +40,11 @@ from rey_lib.db.procedure_map import (
     execute_mapped_routine, get_procedure_map, resolve_routine_binding,
 )
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError, StateError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["Control"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: The batch status recorded when nobody said how the run ended. Distinct from
 #: success and from failure on purpose: a process that was collected without

@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.records import (
     EDGE_KIND_BACKEND_STRING_REFERENCE,
     EDGE_KIND_GLOBAL_REFERENCE,
@@ -52,7 +52,7 @@ __all__ = [
     "compute_reachability",
 ]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 # Edge kinds that carry a direct, in-language dependency. Everything else is
 # runtime-mechanism evidence: real, but a weaker claim about reachability.

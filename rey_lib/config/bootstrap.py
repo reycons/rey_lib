@@ -36,7 +36,7 @@ from typing import Optional
 from rey_lib.config.config_utils import Namespace, build_ctx_from_path
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.logs import (
-    AppLogger, classified, finalize_run_phases, get_logger,
+    AppLogger, classified, finalize_run_phases,
 )
 from rey_lib.db.connection import build_connections, connection_owner
 from rey_lib.run import Run, establish_run_identity
@@ -59,7 +59,7 @@ __all__ = [
     "app_runtime", "build_ctx_for_app", "open_shared_ai", "open_shared_control",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def build_ctx_for_app(

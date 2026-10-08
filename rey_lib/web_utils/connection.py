@@ -47,12 +47,12 @@ from corehttp.transport.httpx import HttpXTransport
 
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import ConfigError, HttpTransportError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.logs.app_logger import redacted_url
 
 __all__ = ["HttpConnection"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: The port a scheme means when a URL names none.
 _DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}

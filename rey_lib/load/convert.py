@@ -54,7 +54,7 @@ from rey_lib.files import (
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.logs import (
     bound_run_log,
-    get_logger,
+    AppLogger,
     log_artifact_reference,
     log_input_discovered,
     log_row_count,
@@ -110,7 +110,7 @@ _MISSING_SOURCE_REASONS = frozenset(
 _OPERATOR_NAME = "excel_conversion"
 _MUTATION_RECORD_TYPE = "source_file_mutation"
 _TEMPLATE_FIELD = re.compile(r"<([^<>]*)>")
-_log = get_logger(__name__)
+_log = AppLogger(__name__)
 
 
 @dataclass(frozen=True)

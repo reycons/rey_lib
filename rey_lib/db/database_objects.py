@@ -31,9 +31,9 @@ from typing import Any, ClassVar, Iterable
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db.database_type import DatabaseType
 from rey_lib.errors.error_utils import DatabaseError, UnsupportedDatabaseCapabilityError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 __all__ = [
     "DatabaseColumn",

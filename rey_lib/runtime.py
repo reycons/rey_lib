@@ -28,11 +28,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["register_runtime_object", "registered_runtime_objects", "collect_runtime"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _REGISTRY = "runtime_objects"
 

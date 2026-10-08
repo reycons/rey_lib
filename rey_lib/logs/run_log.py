@@ -620,9 +620,9 @@ class RunLog:
                 self._level_anchors[nest_level] = run_log_id
             return run_log_id
         except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
-            from rey_lib.logs.logging_setup import get_logger
+            from rey_lib.logs.app_logger import AppLogger
 
-            get_logger(__name__).warning(
+            AppLogger(__name__).warning(
                 "run log: could not append %s record: %s", record_type, exc
             )
             return None

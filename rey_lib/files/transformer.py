@@ -28,7 +28,7 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from rey_lib.data.date_formats import to_strptime_format
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "match_header",
@@ -36,7 +36,7 @@ __all__ = [
     "keyed_record",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def match_header(file_header: str, file_type_cfg: dict) -> bool:

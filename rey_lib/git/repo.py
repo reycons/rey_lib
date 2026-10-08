@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Iterable, Union
 
 from rey_lib.git.errors import CommitResult, GitError, RepoStatus
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "find_repo_root",
@@ -35,7 +35,7 @@ __all__ = [
     "run_git",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _PathLike = Union[str, Path]
 

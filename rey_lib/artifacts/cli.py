@@ -25,9 +25,9 @@ from pathlib import Path
 from rey_lib.artifacts.api import artifact_config_from_ctx, process_artifact
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.file_utils import read_text_file, write_file
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:

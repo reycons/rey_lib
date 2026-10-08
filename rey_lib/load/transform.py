@@ -54,14 +54,14 @@ from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
 from rey_lib.load.file_transform import build_file_transform, file_kind, file_kinds
 from rey_lib.errors.error_utils import StateError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "COLUMN_FIELDS", "Transform", "TRANSFORM_FIELDS", "TRANSFORM_KINDS", "TRANSFORM_PARAMETERS",
 ]
 
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 @dataclass(frozen=True)

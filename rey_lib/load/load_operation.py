@@ -87,11 +87,11 @@ from rey_lib.load.mutation_context import (
     log_governed_source_file_mutation,
 )
 from rey_lib.logs.log_utils import (
-    get_logger,
     log_input_discovered,
     log_row_count,
     log_validation_result,
 )
+from rey_lib.logs.app_logger import AppLogger
 
 __all__ = [
     "load_file_to_table",
@@ -101,7 +101,7 @@ __all__ = [
     "run_load",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # NO ADAPTER HERE. A destination is written through DataLoader, which reaches
 # the database only through DatabaseTable (backlog 751); a query source reads

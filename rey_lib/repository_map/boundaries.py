@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.records import (
     DispatcherRecord,
     EntryPointRecord,
@@ -36,7 +36,7 @@ from rey_lib.repository_map.rule_families import RULE_FAMILIES, Evidence
 
 __all__ = ["check_architecture_boundaries"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 
 def check_architecture_boundaries(

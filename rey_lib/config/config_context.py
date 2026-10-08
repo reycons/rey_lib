@@ -35,9 +35,9 @@ from rey_lib.config.provenance import (
     layer_for_source,
 )
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import get_logger, log_config_file_reference
+from rey_lib.logs import AppLogger, log_config_file_reference
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Config precedence layers map to human-facing configuration roles. Roles come
 # from recorded provenance (the layer a file contributed at), never from the

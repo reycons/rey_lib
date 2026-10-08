@@ -450,8 +450,8 @@ class TestSeamsResolveBeforeAnythingIsPublished:
         rows = [
             _canonical("loader.source", "rey_lib.load.source.Source",
                        "Source.from_declaration / select / update"),
-            _canonical("logging.logger", "rey_lib.logs.logging_setup.get_logger",
-                       "get_logger(__name__).debug / info / warning"),
+            _canonical("logging.logger", "rey_lib.logs.app_logger.AppLogger",
+                       "AppLogger(__name__).debug / info / warning"),
             _canonical("errors.error", "rey_lib.errors.error_utils.AppError",
                        "raise AppError, or one that extends it / Other.report(context)"),
             _canonical("old.table", _TABLE, "DatabaseTable.gone", status="superseded"),
@@ -489,8 +489,8 @@ class TestOwnedSeamTokens:
     def test_shorthand_continuations_and_call_forms_are_not_read(self) -> None:
         row = _canonical("tree.projection", "rey_console.tree_projection.TreeProjections",
                          "TreeProjections.of / holding / release")
-        prose = _canonical("logging.logger", "rey_lib.logs.logging_setup.get_logger",
-                           "get_logger(__name__).debug / info / warning")
+        prose = _canonical("logging.logger", "rey_lib.logs.app_logger.AppLogger",
+                           "AppLogger(__name__).debug / info / warning")
 
         assert [token for token, _ in owned_seam_tokens(row)] == ["TreeProjections.of"]
         assert owned_seam_tokens(prose) == []

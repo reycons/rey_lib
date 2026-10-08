@@ -62,7 +62,6 @@ from rey_lib.logs.file_records import (
     log_input_file_reference,
     record_file_operation,
 )
-from rey_lib.logs.logging_setup import get_logger
 from rey_lib.logs.record_enrichment import (
     EXECUTION_RECORD_TYPES,
     FILES_RECORD_SUBGROUP,
@@ -87,7 +86,6 @@ from rey_lib.logs.run_log import TYPE_PAYLOAD_COLUMNS, payload_column
 from rey_lib.logs.sql_records import log_sql_execution
 
 __all__ = [
-    "get_logger",
     "log_file_metadata",
     "format_jsonl_records",
     "build_jsonl_event_table",

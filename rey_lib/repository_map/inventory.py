@@ -15,7 +15,7 @@ from pathlib import Path
 from rey_lib.config.config_utils import parse_yaml
 from rey_lib.encryption import sha256_file
 from rey_lib.files.file_utils import is_hidden_path, read_text_file
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.repository_map.rule_families import RULE_FAMILIES
 from rey_lib.repository_map.records import (
     ENTRY_POINT_LOAD_UNKNOWN,
@@ -28,7 +28,7 @@ from rey_lib.errors.error_utils import ConfigError
 
 __all__ = ["inventory_files", "load_scan_rules"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 
 def load_scan_rules(rules_path: Path) -> ScanRules:

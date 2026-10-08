@@ -21,9 +21,9 @@ from dotenv import load_dotenv
 
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Matches ${VAR_NAME} and $VAR_NAME patterns in YAML string values.
 _ENV_VAR_PATTERN = re.compile(

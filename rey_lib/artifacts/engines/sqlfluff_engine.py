@@ -15,9 +15,9 @@ from typing import Any
 
 from rey_lib.artifacts.engines.base import ArtifactDiagnostic
 from rey_lib.artifacts.errors import ArtifactProcessingError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Narrow gap SQLFluff cannot close: it keeps "... AS SELECT" on one line for a
 # CREATE VIEW. Put SELECT on its own line. A bare "AS SELECT" (AS directly

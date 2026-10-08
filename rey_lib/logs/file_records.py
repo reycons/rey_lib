@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.logs.record_enrichment import _CURRENT_RUN, log_run_record
 
 
@@ -169,7 +169,7 @@ def record_file_operation(operation: str, *, source_path: str = "",
             status=status, **fields,
         )
     except Exception as exc:  # noqa: BLE001 — recording must never break a file op.
-        get_logger(__name__).warning(
+        AppLogger(__name__).warning(
             "run log: could not record file operation '%s': %s", operation, exc
         )
 

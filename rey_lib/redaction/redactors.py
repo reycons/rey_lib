@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.redaction.registry import RedactionRegistry
 
 __all__ = ["redact_delimited", "redact_fixed_width", "redact_excel_rows"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def redact_delimited(

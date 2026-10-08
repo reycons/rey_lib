@@ -34,9 +34,9 @@ from rey_lib.config.config_paths import (
 from rey_lib.config.env_reference import ENV_REFERENCE_PREFIX, declaration_map
 from rey_lib.config.provenance import ConfigMetadata
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class ContextBuilder:

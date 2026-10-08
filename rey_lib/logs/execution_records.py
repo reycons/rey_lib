@@ -7,12 +7,12 @@ import time
 import uuid
 from typing import Any
 
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 from rey_lib.logs.phase_timeline import PhaseTimeline
 from rey_lib.logs.record_enrichment import log_run_record
 
 #: Where a diagnostic that could not be persisted is reported instead.
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def log_run_start(run_log: 'RunLog', **fields: Any) -> None:

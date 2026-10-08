@@ -44,9 +44,9 @@ from pathlib import Path
 
 from rey_lib.config.config_utils import dump_yaml
 from rey_lib.errors.error_utils import AppError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 __all__ = [
     "FolderMakerResult",

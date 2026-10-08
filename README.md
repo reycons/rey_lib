@@ -13,7 +13,6 @@ rey_lib/
         ctx.py              # Generic context lookup helpers (find_by_name, etc.)
     logs/
         app_logger.py       # AppLogger: application logging, logging configuration, call depth
-        logging_setup.py    # Transitional: get_logger(name) returns AppLogger(name) (to S7)
         log_utils.py        # Compatibility re-exports of the logs package
     errors/
         error_utils.py      # AppError base, validators, handle_exception
@@ -64,10 +63,8 @@ from rey_lib.config.config_utils import build_ctx, inject_secrets, Namespace
 from rey_lib.config.ctx import find_in_ctx, find_by_name
 
 # Logging
-from rey_lib.logs import AppLogger
-# Transitional until S7, defined in rey_lib.logs.logging_setup: get_logger(name) returns
-# AppLogger(name), whose enter / exit move the call depth. Logging is started by the launch boundary.
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs import AppLogger   # logger = AppLogger(__name__); enter / exit move the call depth
+# Logging is started by the launch boundary.
 
 # Errors
 from rey_lib.errors.error_utils import AppError, ConfigError, handle_exception

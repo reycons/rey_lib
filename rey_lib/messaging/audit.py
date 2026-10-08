@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.messaging.models import Message
 
 __all__ = ["audit_event", "audit_payload"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def audit_payload(message: Message, event_type: str, error: str = "") -> dict[str, Any]:

@@ -30,11 +30,11 @@ from typing import Any, Generator
 
 from rey_lib.config.env_reference import resolve_env_reference
 from rey_lib.errors.error_utils import FtpConnectionError, FtpDownloadError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["ftp_session", "list_remote_files", "list_remote_dirs", "download_file"]
 
-log = get_logger(__name__)
+log = AppLogger(__name__)
 
 _FTP_TIMEOUT_SECONDS = 30
 _VALID_PROTOCOLS     = frozenset({"ftp", "ftps", "sftp"})

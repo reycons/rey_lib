@@ -42,11 +42,11 @@ from rey_lib.data.data_transform import DataTransform
 from rey_lib.db.data_loader import DataLoader
 from rey_lib.files.data_file import DataFile, data_file_for
 from rey_lib.files.file_utils import input_files
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["ConfiguredLoad", "LoadOneFile"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: How one already-selected file is loaded.
 #:

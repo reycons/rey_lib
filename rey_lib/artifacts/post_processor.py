@@ -12,9 +12,9 @@ from typing import Any, Optional
 
 from rey_lib.artifacts.engines import ArtifactDiagnostic, get_engine
 from rey_lib.artifacts.errors import ArtifactProcessingError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 def lint_artifact(

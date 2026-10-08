@@ -20,11 +20,11 @@ from rey_lib.files import file_utils
 from rey_lib.files.data_file import data_file
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file.base import DataFile
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["DelimitedHeaderFile"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 @data_file("CSV", "DELIMITED_HEADER")

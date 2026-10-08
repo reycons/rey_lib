@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from rey_lib.errors.error_utils import AppError
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "RunContext",
@@ -38,7 +38,7 @@ __all__ = [
     "run_steps",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class WorkflowError(AppError):

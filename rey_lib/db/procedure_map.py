@@ -61,7 +61,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.config.ctx import find_by_name
 from rey_lib.db.connection import call_routine
 from rey_lib.db.db_adapter import DBAdapter
@@ -79,7 +79,7 @@ __all__ = [
     "call_action",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _db = DBAdapter()
 

@@ -73,7 +73,7 @@ from typing import Any, Optional
 from rey_lib.data.data_transform import DeclaredTransform
 from rey_lib.data.date_formats import to_strptime_format
 from rey_lib.data.errors import TransformError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "AUTHORABLE_STARTERS",
@@ -84,7 +84,7 @@ __all__ = [
     "is_exported",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 #: A starting declaration per transform type a SURFACE may offer.

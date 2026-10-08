@@ -30,7 +30,7 @@ from collections import Counter
 from pathlib import PurePosixPath
 from typing import Any
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.profiling import value_patterns as vp
 
 # Header-name normalisation is CSV format, not profiling semantics, so it is
@@ -44,7 +44,7 @@ __all__ = [
     "PROFILE_VERSION",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 PROFILE_VERSION = "csv_v1"
 

@@ -57,7 +57,7 @@ from rey_lib.load.transform import Transform
 from rey_lib.logs import (
     FileManifestError,
     bound_run_log,
-    get_logger,
+    AppLogger,
     log_row_count,
     log_validation_result,
 )
@@ -74,7 +74,7 @@ __all__ = [
     "run_source_inventory",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _CONFIG_SECTION = "inventory_source_files"
 _PLACEHOLDER = re.compile(r"\{([^{}]*)\}")

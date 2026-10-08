@@ -25,11 +25,11 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 
 __all__ = ["REGISTRATION_GROUP", "discover_registrations"]
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 #: The entry-point group an application publishes itself under. One place knows
 #: the word.

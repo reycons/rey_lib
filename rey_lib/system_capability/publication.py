@@ -36,14 +36,14 @@ from typing import Any
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.procedure_map import execute_mapped_routine
 from rey_lib.errors.error_utils import AppError
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "CapabilityPublisher", "PublicationError", "StagedCapability",
     "StagedEvidence", "StagedGeneration", "generation_from_payload",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 #: The map these routines are bound in, and the bindings. Named once.
 _MAP = "code"

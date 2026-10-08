@@ -12,7 +12,7 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__: list[str] = [
     "ReyRequestHandler",
@@ -20,7 +20,7 @@ __all__: list[str] = [
     "serve",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class ReyRequestHandler(BaseHTTPRequestHandler):

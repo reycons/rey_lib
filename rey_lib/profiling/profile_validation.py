@@ -15,11 +15,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["validate_csv_profile"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _REQUIRED_TOP_LEVEL = (
     "source",

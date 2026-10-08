@@ -38,7 +38,7 @@ import duckdb
 
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.files.file_utils import read_text_file
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import StateError
 
 __all__ = [
@@ -67,7 +67,7 @@ __all__ = [
     "file_source_expression",
 ]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Neutral → DuckDB type map

@@ -23,12 +23,12 @@ from rey_lib.load import load_operation
 from rey_lib.load.execution import preview_selected, source_columns
 from rey_lib.load.source import Source
 from rey_lib.load.transform import Transform
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
 __all__ = ["LinkedLoad"]
 
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 
 class LinkedLoad:

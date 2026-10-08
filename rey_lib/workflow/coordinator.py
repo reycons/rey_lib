@@ -34,7 +34,7 @@ from rey_lib.logs import (
     bind_run,
     clear_step,
     clear_run,
-    get_logger,
+    AppLogger,
     finalize_run_log,
     log_run_complete,
     log_run_start,
@@ -47,7 +47,7 @@ from rey_lib.workflow.engine import RunContext, WorkflowError
 
 __all__ = ["StepOutcome", "WorkflowRun", "run_workflow", "ProcessHandler"]
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 # Workflow configuration this engine no longer honours. Declaring one is a hard
 # error, never a silently ignored key (SGC_Log_Run_Rollback).

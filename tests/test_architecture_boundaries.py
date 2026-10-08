@@ -82,7 +82,7 @@ def test_logging_routes_through_the_logging_owner(violations) -> None:
 
     Five sites constructed a logger directly when this policy was declared and
     were corrected: control_utils, db/procedure_map, and three logs modules.
-    record_enrichment uses a lazy in-function import because logging_setup
+    record_enrichment uses a lazy in-function import because app_logger
     imports from it, which is the idiom this package already uses to reach a
     higher layer.
 
@@ -226,7 +226,7 @@ def test_the_exemption_list_names_only_the_implementation_layer() -> None:
     Guards the failure mode this policy is most likely to suffer: an exemption
     list quietly growing until the rule holds by construction. There is exactly
     one logging infrastructure boundary: app_logger.py, the canonical one
-    (logging_setup.py left in S6; backlog logging.app_logger_canonical_object).
+    (backlog logging.app_logger_canonical_object).
     """
     rules = load_scan_rules(RULES_PATH)
     logging_rule = next(

@@ -50,9 +50,9 @@ from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.tools import AITool
 from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
-from rey_lib.logs.logging_setup import get_logger
+from rey_lib.logs.app_logger import AppLogger
 
-logger = get_logger(__name__)
+logger = AppLogger(__name__)
 
 __all__ = ["AI", "AISnapshot"]
 

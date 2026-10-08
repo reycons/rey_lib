@@ -17,9 +17,9 @@ from typing import Any
 
 from rey_lib.artifacts.errors import ArtifactProcessingError
 from rey_lib.config import config_utils
-from rey_lib.logs import get_logger
+from rey_lib.logs import AppLogger
 
-_logger = get_logger(__name__)
+_logger = AppLogger(__name__)
 
 _HEADER_MARKER = "# App:"
 _HEADER_SCAN_LINES = 12

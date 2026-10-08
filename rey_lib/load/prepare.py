@@ -50,7 +50,7 @@ from rey_lib.files.csv import (
 from rey_lib.files.primitive_file_io import render_jsonl_line
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import (
-    get_logger,
+    AppLogger,
     log_artifact_reference,
     log_input_file_reference,
 )
@@ -95,7 +95,7 @@ def _application(ctx: Any) -> str:
     """The producing application: the runtime context's, never a literal."""
     return str(getattr(ctx, "app_name", "") or "")
 
-_log = get_logger(__name__)
+_log = AppLogger(__name__)
 
 # The source-line column sanitization prepends. It is part of the canonical
 # header when the source carries it.
