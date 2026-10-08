@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from rey_lib.config.config_context import build_ctx_from_path
-from rey_lib.config.env_reference import resolve_env_reference
+from rey_lib.config.env_reference import is_declared, resolve_env_reference
 from rey_lib.errors.error_utils import ConfigError
 
 DIRECT_VAR = "REY_TEST_DIRECT_SECRET"
@@ -278,3 +278,29 @@ def test_the_reference_syntax_is_defined_once() -> None:
         and "ENV_REFERENCE_PREFIX = " in path.read_text(encoding="utf-8")
     ]
     assert definitions == ["rey_lib/config/env_reference.py"]
+
+
+def test_a_declared_reference_is_declared(ctx: Any) -> None:
+    """The declaration name, not the variable name, decides."""
+    assert is_declared(ctx, f"env.{DIRECT_DECLARATION}") is True
+    assert is_declared(ctx, f"env.{DIRECT_VAR}") is False
+
+
+def test_declared_does_not_depend_on_the_variable_being_set(
+    ctx: Any, environment: pytest.MonkeyPatch,
+) -> None:
+    """It reads no environment: an unset variable is still declared."""
+    environment.delenv(DIRECT_VAR)
+
+    assert is_declared(ctx, f"env.{DIRECT_DECLARATION}") is True
+    with pytest.raises(ConfigError, match=DIRECT_VAR):
+        resolve_env_reference(ctx, f"env.{DIRECT_DECLARATION}")
+
+
+@pytest.mark.parametrize("value", ["env.nobody_declared", "plain-text", None, 42, ""])
+def test_anything_else_is_not_declared(ctx: Any, value: Any) -> None:
+    assert is_declared(ctx, value) is False
+
+
+def test_a_context_without_an_env_block_declares_nothing() -> None:
+    assert is_declared(SimpleNamespace(), f"env.{DIRECT_DECLARATION}") is False

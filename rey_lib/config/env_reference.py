@@ -30,6 +30,8 @@ Public API
 ----------
 is_env_reference(value)
     Whether a configured value names an environment variable.
+is_declared(ctx, value)
+    Whether a reference names an entry the context's env block declares.
 resolve_env_reference(ctx, value)
     The current value of the variable a reference names.
 declaration_map(entries)
@@ -43,7 +45,10 @@ from typing import Any
 
 from rey_lib.errors.error_utils import ConfigError
 
-__all__ = ["ENV_REFERENCE_PREFIX", "declaration_map", "is_env_reference", "resolve_env_reference"]
+__all__ = [
+    "ENV_REFERENCE_PREFIX", "declaration_map", "is_declared", "is_env_reference",
+    "resolve_env_reference",
+]
 
 #: How a configured value names an environment variable rather than holding it.
 #: Uniform for every field: nothing here decides by name whether a value is a
@@ -66,6 +71,33 @@ def is_env_reference(value: Any) -> bool:
         including non-strings.
     """
     return isinstance(value, str) and value.startswith(ENV_REFERENCE_PREFIX)
+
+
+def is_declared(ctx: Any, value: Any) -> bool:
+    """Return whether ``value`` is a reference the context's env block declares.
+
+    Reads no environment variable. For a declared reference the only thing
+    ``resolve_env_reference`` can still refuse is an unset or empty variable,
+    so a caller that treats that as "absent" asks this first rather than
+    reading the reference itself.
+
+    Parameters
+    ----------
+    ctx : Any
+        The finalized application context; only its ``env`` block is read.
+    value : Any
+        A configured value, of any type.
+
+    Returns
+    -------
+    bool
+        True for an ``env.<name>`` reference whose name the env block declares;
+        False for everything else.
+    """
+    if not is_env_reference(value):
+        return False
+    name = value[len(ENV_REFERENCE_PREFIX):]
+    return name in declaration_map(getattr(ctx, "env", None))
 
 
 def declaration_map(entries: Any) -> dict[str, str]:

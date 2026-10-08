@@ -48,9 +48,7 @@ from corehttp.runtime.policies import HeadersPolicy, ServiceKeyCredentialPolicy
 from corehttp.transport import HttpTransport
 from corehttp.transport.httpx import HttpXTransport
 
-from rey_lib.config.env_reference import (
-    ENV_REFERENCE_PREFIX, declaration_map, is_env_reference, resolve_env_reference,
-)
+from rey_lib.config.env_reference import is_declared, resolve_env_reference
 from rey_lib.errors.error_utils import ConfigError, HttpTransportError
 from rey_lib.logs import AppLogger
 from rey_lib.logs.app_logger import redacted_url
@@ -159,7 +157,7 @@ class _EnvKeyCredential:
                 naming the connection and the reference -- never a value -- or
                 whatever else the resolver refuses.
         """
-        if not self._declared():
+        if not is_declared(self._ctx, self._reference):
             return str(resolve_env_reference(self._ctx, self._reference))
         try:
             return str(resolve_env_reference(self._ctx, self._reference))
@@ -175,13 +173,6 @@ class _EnvKeyCredential:
                 f"Connection '{self._connection_name}' requires credential "
                 f"{self._reference}, but the environment variable is unset or empty."
             ) from exc
-
-    def _declared(self) -> bool:
-        """Whether the reference names a declaration in the context's env block."""
-        if not is_env_reference(self._reference):
-            return False
-        name = str(self._reference)[len(ENV_REFERENCE_PREFIX):]
-        return name in declaration_map(getattr(self._ctx, "env", None))
 
 
 class _OptionalKeyCredentialPolicy(ServiceKeyCredentialPolicy):
