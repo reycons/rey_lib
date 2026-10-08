@@ -8,6 +8,7 @@ first place, so repairing it would re-cement what this migration removes.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -371,3 +372,28 @@ def _own_no_connections_between_tests() -> Any:
     connection_owner().close()
     yield
     connection_owner().close()
+
+
+@pytest.fixture(autouse=True)
+def _leave_the_logging_pipeline_as_found() -> Any:
+    """Restore the root logger's handlers and level after every test.
+
+    The logging pipeline is process-wide, configured once by the launch
+    boundary. A test that configures it leaves its handlers on the root logger,
+    and the next test then logs through them -- a leftover JSONL handler once
+    wrote an AppError's ERROR into a later test's bound run log
+    (backlog tests.configured_logging_pipeline_leaks_between_tests). Each test
+    is a fresh process, so what it added is removed and closed, and what was
+    there before is put back.
+    """
+    root = logging.root
+    handlers, level = list(root.handlers), root.level
+    yield
+    for handler in root.handlers[:]:
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    for handler in handlers:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(level)
