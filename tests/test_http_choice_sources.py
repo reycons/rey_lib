@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from rey_lib.config.applications import _choices
+from rey_lib.data import http_transform
+from rey_lib.data.http_transform import HttpTransformAdapter
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.db.connection import is_database_connection, is_http_connection, shared_connection
 
@@ -61,5 +65,9 @@ class TestChoiceSources:
         assert _offered("connections", ctx) == ("control", "web")
         assert _offered("database_connections", ctx) == ("control",)
 
-    def test_http_transform_adapters_offers_the_registry(self) -> None:
-        assert "openfigi" in _offered("http_transform_adapters", SimpleNamespace())
+    def test_http_transform_adapters_offers_the_registry(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setitem(http_transform._ADAPTERS, "registered", HttpTransformAdapter)
+
+        assert "registered" in _offered("http_transform_adapters", SimpleNamespace())

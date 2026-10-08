@@ -375,14 +375,14 @@ class TestTheBoundary:
     def test_adapters_are_discovered_on_the_first_lookup_only(self) -> None:
         probe = (
             "import sys, rey_lib.data\n"
-            "name = 'rey_lib.data.http_transform_adapters.openfigi'\n"
+            "name = 'rey_lib.data.http_transform_adapters'\n"
             "print(name in sys.modules)\n"
             "from rey_lib.data.http_transform import http_transform_adapter_for\n"
-            "print(type(http_transform_adapter_for('openfigi')).__name__, name in sys.modules)\n"
+            "print(http_transform_adapter_for('nobody'), name in sys.modules)\n"
         )
         found = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
 
-        assert found.stdout.split() == ["False", "OpenFigiAdapter", "True"]
+        assert found.stdout.split() == ["False", "None", "True"]
 
     def test_rey_lib_data_does_not_import_the_http_layer(self) -> None:
         probe = "import sys, rey_lib.data; print('rey_lib.web_utils' in sys.modules)"
