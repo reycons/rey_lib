@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from tests.conftest import make_run_log
@@ -104,6 +105,44 @@ def test_email_dry_run_lifecycle_writes_archive(tmp_path: Path) -> None:
     records = list(FileMessageRepository(tmp_path / "messages" / "archive.jsonl").records())
     assert any(record["kind"] == "event" and record["event_type"] == "message_sent" for record in records)
     assert any(record["kind"] == "message" and record["message_id"] == message.message_id for record in records)
+
+
+def test_a_delivery_failure_is_one_error_plus_one_warning_audit_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The audit records the failure at WARNING; AppError reports it once at ERROR (rule 79)."""
+    from types import SimpleNamespace
+
+    from rey_lib.config import bootstrap
+    from rey_lib.messaging import router
+    from rey_lib.messaging.errors import MessageDeliveryError
+
+    monkeypatch.setattr(bootstrap, "build_ctx_for_app", lambda *_a, **_k: SimpleNamespace(
+        run_id="00000000-0000-4000-8000-000000000001", run_timestamp="20260822_000000"))
+    failure = MessageDeliveryError("smtp unreachable")
+
+    def _fail(*_a: object, **_k: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(router, "_send_by_channel", _fail)
+    ctx = _ctx(tmp_path)
+    message = create_message(
+        ctx, message_type="etl_failure_summary", audience="internal", channel="email",
+        recipients=["ops@example.com"], subject="Failure", markdown="# Failed", dry_run=True,
+    )
+
+    with pytest.raises(MessageDeliveryError):
+        with bootstrap.app_runtime("cfg", "app", "run"):
+            send_message(ctx, message)
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None and errors[0].exc_info[1] is failure
+
+    (audit,) = [r for r in caplog.records if r.name == "rey_lib.messaging.audit" and r.levelno == logging.WARNING]
+    assert audit.event_type == "message_delivery_failed"
+    assert audit.message_id == message.message_id
+    assert audit.message_status == "failed"
 
 
 def test_email_markdown_uses_shared_semantic_html_rendering(tmp_path: Path) -> None:

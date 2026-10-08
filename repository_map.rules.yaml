@@ -70,14 +70,19 @@ architecture_rules:
   # rule conflated them, and enforcing it would have moved a CLI tool's summary
   # off stdout.
   #
-  # logging_setup wraps logging.getLogger, so it cannot route through itself.
-  # That is the only exemption: this list names infrastructure owners and is not
-  # a grandfather list for sites that have not been corrected.
+  # The allowed paths are the only permitted logging infrastructure boundaries
+  # -- the code that wraps logging.getLogger and so cannot route through itself.
+  # During the AppLogger migration (backlog logging.app_logger_canonical_object)
+  # there are exactly two: app_logger.py, the canonical stdlib boundary, which
+  # remains; and logging_setup.py, the legacy boundary, which leaves this list in
+  # slice S6 when its code is removed. This list names infrastructure owners and
+  # is not a grandfather list for sites that have not been corrected.
   - rule_id: logging_routes_through_the_logging_owner
     forbidden_target_globs:
       - logging.getLogger
     allowed_path_globs:
       - "rey_lib/logs/logging_setup.py"
+      - "rey_lib/logs/app_logger.py"
     scope_path_globs:
       - "rey_lib/*"
     edge_kinds:

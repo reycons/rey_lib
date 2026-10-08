@@ -296,9 +296,9 @@ class AppError(Exception):
                 error's text.
             source: The caller's ``__name__``: where the failure was handled.
         """
-        from rey_lib.logs import get_logger  # noqa: PLC0415 -- errors loads no logging
+        from rey_lib.logs import AppLogger  # noqa: PLC0415 -- errors loads no logging
 
-        get_logger(source).error(context, exc_info=self)
+        AppLogger(source)._error(context, exc_info=self)
 
 class ConfigError(AppError):
     """Raised when configuration is invalid, missing, or cannot be loaded."""

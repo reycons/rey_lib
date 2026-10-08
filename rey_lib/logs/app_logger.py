@@ -7,7 +7,8 @@ its handlers; this object adds no second path.
 The public surface is what application code is allowed to do: ``debug``,
 ``info``, ``warning`` and ``isEnabledFor``. There is no ``error``,
 ``exception``, ``critical`` or ``setLevel`` -- an ERROR record is AppError's to
-emit (rule 79), and configuring the logging pipeline is not a caller's job.
+emit (rule 79), through the private ``_error`` that only ``AppError.report``
+calls, and configuring the logging pipeline is not a caller's job.
 
 Records are attributed to the caller, not to this wrapper: each method raises
 the stdlib ``stacklevel`` by one, so ``funcName``, ``lineno`` and ``pathname``
@@ -47,6 +48,14 @@ class AppLogger:
     def isEnabledFor(self, level: int) -> bool:  # noqa: N802 -- the stdlib name callers use
         """Return whether a record at ``level`` would be processed by this logger."""
         return self._logger.isEnabledFor(level)
+
+    def _error(self, msg: object, *args: Any, **kwargs: Any) -> None:
+        """Log at ERROR. Private: AppError.report is its only caller (rule 79).
+
+        Not part of the application surface. ``AppError.report`` passes the
+        operational context as ``msg`` and the error itself as ``exc_info``.
+        """
+        self._logger.error(msg, *args, **_from_caller(kwargs))
 
 
 def _from_caller(kwargs: dict[str, Any]) -> dict[str, Any]:

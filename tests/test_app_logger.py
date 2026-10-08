@@ -13,6 +13,7 @@ import logging
 
 import pytest
 
+from rey_lib.errors.error_utils import ConfigError
 from rey_lib.logs import AppLogger
 
 _NAME = "rey_lib.tests.app_logger"
@@ -59,6 +60,30 @@ class TestPublicSurface:
         assert app_logger.isEnabledFor(logging.WARNING)
         assert not app_logger.isEnabledFor(logging.INFO)
 
-    @pytest.mark.parametrize("name", ["error", "exception", "critical", "setLevel", "log", "_error"])
+    @pytest.mark.parametrize("name", ["error", "exception", "critical", "setLevel", "log"])
     def test_it_offers_no_error_or_configuration_method(self, name: str) -> None:
         assert not hasattr(AppLogger(_NAME), name)
+
+
+class TestErrorPath:
+    """S2: AppError.report emits through the private AppLogger._error (rule 79)."""
+
+    def test_the_error_path_is_private(self) -> None:
+        assert callable(getattr(AppLogger, "_error"))
+        assert "_error" not in [name for name in dir(AppLogger) if not name.startswith("_")]
+
+    def test_app_error_report_emits_one_error_record_through_app_logger(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        error = ConfigError("the secret detail")
+
+        error.report("loading the feed", source=_NAME)
+
+        (record,) = [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+        assert record.levelno == logging.ERROR
+        assert record.getMessage() == "loading the feed"
+        assert record.exc_info is not None and record.exc_info[1] is error
+        # Attributed to AppError.report, as before the move: _error raises
+        # stacklevel past its own frame.
+        assert record.funcName == "report"
+        assert record.pathname.endswith("rey_lib/errors/error_utils.py")

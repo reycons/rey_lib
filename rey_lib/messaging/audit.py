@@ -33,7 +33,12 @@ def audit_payload(message: Message, event_type: str, error: str = "") -> dict[st
 
 
 def audit_event(message: Message, event_type: str, error: str = "") -> None:
-    """Write a structured messaging event to the configured JSONL logger."""
+    """Write a structured messaging event to the configured JSONL logger.
+
+    A failure event is recorded at WARNING: it says the failure occurred, it
+    does not handle it. The router propagates the failure, and its one ERROR
+    record comes from AppError.report where it is handled (rule 79).
+    """
     payload = audit_payload(message, event_type, error)
-    level = _logger.error if error else _logger.info
+    level = _logger.warning if error else _logger.info
     level("messaging %s message_id=%s status=%s", event_type, message.message_id, message.status, extra=payload)
