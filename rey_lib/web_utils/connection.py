@@ -166,6 +166,11 @@ class _EnvKeyCredential:
         except ConfigError as exc:
             if not self._required:
                 return None
+            # Located, never replayed: the connection and the reference name.
+            _logger.debug(
+                "http connection %s: required credential %s is unset",
+                self._connection_name, self._reference,
+            )
             raise ConfigError(
                 f"Connection '{self._connection_name}' requires credential "
                 f"{self._reference}, but the environment variable is unset or empty."
@@ -184,13 +189,23 @@ class _OptionalKeyCredentialPolicy(ServiceKeyCredentialPolicy):
 
     Decided at each request, as the key is read: a variable set later is sent
     from the next request, and one removed stops being sent, with no restart.
+    It keeps its own credential, header and prefix rather than reading
+    corehttp's private attributes, which are not corehttp's contract.
     """
+
+    def __init__(
+        self, credential: _EnvKeyCredential, name: str, *, prefix: Optional[str] = None,
+    ) -> None:
+        super().__init__(credential, name, prefix=prefix)
+        self._optional_credential = credential
+        self._header = name
+        self._header_prefix = f"{prefix} " if prefix else ""
 
     def on_request(self, request: Any) -> None:
         """Add the header only when the credential resolves to a value."""
-        key = self._credential.key
+        key = self._optional_credential.key
         if key is not None:
-            request.http_request.headers[self._name] = f"{self._prefix}{key}"
+            request.http_request.headers[self._header] = f"{self._header_prefix}{key}"
 
 
 class HttpConnection:
