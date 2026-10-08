@@ -91,7 +91,7 @@ def recorded(tmp_path: Path, monkeypatch, run_log) -> dict:
         data_file_for(source, file_type="CSV", encoding="utf-8"),
         None,
         _TARGET,
-        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        ctx=SimpleNamespace(), run_log=run_log,
         transform_cfg=None,
         load_cfg=SimpleNamespace(
             name="a_load",

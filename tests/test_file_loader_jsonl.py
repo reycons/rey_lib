@@ -36,8 +36,8 @@ _TARGET = DatabaseObjectIdentity(
 
 
 def _ctx() -> SimpleNamespace:
-    """The least a shared boundary needs: log_enter increments log_depth."""
-    return SimpleNamespace(log_depth=0)
+    """The least a shared boundary needs."""
+    return SimpleNamespace()
 
 
 def _jsonl(tmp_path: Path, *records: dict) -> Path:

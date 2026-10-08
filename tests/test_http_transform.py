@@ -328,7 +328,7 @@ class TestThroughTheLoadPath:
 
         load_operation._load_one_file(
             data_file_for(csv_file), built, data_file_for(out),
-            ctx=SimpleNamespace(app_name="test", log_depth=0), run_log=MagicMock(), movements=None,
+            ctx=SimpleNamespace(app_name="test"), run_log=MagicMock(), movements=None,
             load_name="http-transform-test",
         )
 

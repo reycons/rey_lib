@@ -159,3 +159,136 @@ class TestErrorPath:
         # stacklevel past its own frame.
         assert record.funcName == "report"
         assert record.pathname.endswith("rey_lib/errors/error_utils.py")
+
+
+class TestDepth:
+    """S4: AppLogger.log_depth is the one call depth; records carry it."""
+
+    @pytest.fixture(autouse=True)
+    def _depth_starts_at_zero(self):
+        AppLogger.log_depth = 0
+        yield
+        AppLogger.log_depth = 0
+
+    def test_enter_and_exit_log_their_arrows_at_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger=_NAME)
+
+        AppLogger(_NAME).enter("load_files: feed")
+        AppLogger(_NAME).exit("load_files done")
+
+        assert [r.getMessage() for r in _records(caplog)] == ["→ load_files: feed", "← load_files done"]
+        assert {r.levelno for r in _records(caplog)} == {logging.DEBUG}
+
+    def test_enter_increments_and_exit_decrements_to_a_floor_of_zero(self) -> None:
+        app_logger = AppLogger(_NAME)
+
+        app_logger.enter("a")
+        app_logger.enter("b")
+        assert AppLogger.log_depth == 2
+        app_logger.exit("b")
+        app_logger.exit("a")
+        app_logger.exit("unbalanced")
+
+        assert AppLogger.log_depth == 0
+
+    def test_depth_is_one_value_shared_by_every_app_logger(self) -> None:
+        AppLogger("module.a").enter("outer")
+
+        assert AppLogger("module.b").log_depth == 1
+        with pytest.raises(AttributeError):
+            AppLogger("module.b").log_depth = 5  # type: ignore[misc]
+
+    @staticmethod
+    def _configured(tmp_path: Path) -> SimpleNamespace:
+        ctx = SimpleNamespace(
+            log_level="DEBUG",
+            log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
+            jsonl_ctx_fields=(),
+            readable_enabled=True,
+        )
+        build_ctx_for_app(ctx=ctx, operation="run")
+        return ctx
+
+    @staticmethod
+    def _flush() -> None:
+        for handler in logging.root.handlers:
+            handler.flush()
+
+    def test_depth_entered_in_one_module_is_on_records_from_another(
+        self, run_log, recorded_run, tmp_path: Path,
+    ) -> None:
+        import json
+
+        self._configured(tmp_path)
+
+        AppLogger("module.a").enter("outer")
+        AppLogger("module.b").info("inside")
+        AppLogger("module.a").exit("outer")
+        self._flush()
+
+        lines = [json.loads(line) for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
+        by_message = {line["message"]: line for line in lines if line["source"].startswith("module.")}
+        outer, inside, back = by_message["→ outer"], by_message["inside"], by_message["← outer"]
+        assert (outer["depth"], inside["depth"], back["depth"]) == (0, 1, 0)
+        assert inside["source"] == "module.b"
+        assert inside["parent_sequence"] == outer["sequence"]
+        assert back["parent_sequence"] == outer["parent_sequence"]
+        assert all("log_depth" not in line for line in lines)
+
+    def test_the_console_formatter_indents_by_the_record_depth(
+        self, run_log, recorded_run, tmp_path: Path,
+    ) -> None:
+        self._configured(tmp_path)
+
+        AppLogger("module.a").enter("outer")
+        AppLogger("module.b").info("inside")
+        AppLogger("module.a").exit("outer")
+        self._flush()
+
+        text = next(tmp_path.glob("*.log")).read_text(encoding="utf-8")
+        # Timestamp, level and the 32-wide name are fixed; the indent follows.
+        messages = [
+            line.split(name.ljust(32), 1)[1]
+            for line in text.splitlines()
+            for name in ("module.a", "module.b")
+            if name.ljust(32) in line
+        ]
+        assert messages == ["→ outer", "  inside", "← outer"]
+
+    def test_legacy_log_enter_and_log_exit_pass_through_to_app_logger(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from rey_lib.logs.logging_setup import log_enter, log_exit
+
+        caplog.set_level(logging.DEBUG, logger=_NAME)
+        stdlib_logger = logging.getLogger(_NAME)
+
+        log_enter(None, "outer", stdlib_logger)
+        assert AppLogger.log_depth == 1
+        log_exit(None, "outer", stdlib_logger)
+
+        assert AppLogger.log_depth == 0
+        assert [(r.name, r.getMessage()) for r in _records(caplog)] == [(_NAME, "→ outer"), (_NAME, "← outer")]
+
+    def test_the_console_handler_indents_by_the_record_depth(
+        self, run_log, recorded_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from rey_lib.logs import app_logger
+
+        # A reader on stderr keeps the console handler after the JSONL log is live.
+        monkeypatch.setattr(app_logger, "_stderr_is_watched", lambda: True)
+        self._configured(tmp_path)
+
+        AppLogger("module.a").enter("outer")
+        AppLogger("module.b").info("inside")
+        AppLogger("module.a").exit("outer")
+        self._flush()
+
+        messages = [
+            line.split(name.ljust(32), 1)[1]
+            for line in capsys.readouterr().err.splitlines()
+            for name in ("module.a", "module.b")
+            if name.ljust(32) in line
+        ]
+        assert messages == ["→ outer", "  inside", "← outer"]

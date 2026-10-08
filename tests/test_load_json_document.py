@@ -112,7 +112,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
     )
     monkeypatch.setattr(load_operation, "execute_movements", lambda *a, **k: None)
     return load_operation.load_file_to_table(
-        SimpleNamespace(log_depth=0), run_log,
+        SimpleNamespace(), run_log,
         source if source is not None else _document(tmp_path, _EXPORTED),
         destination, "a_connection", **kwargs,
     )

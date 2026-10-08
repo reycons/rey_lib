@@ -85,7 +85,7 @@ def _recorded(tmp_path: Path, monkeypatch, run_log, source: Path,
         data_file_for(source, file_type=file_type, encoding="utf-8"),
         None,
         _TARGET,
-        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        ctx=SimpleNamespace(), run_log=run_log,
         transform_cfg=SimpleNamespace(file_type=file_type, encoding="utf-8"),
         load_cfg=SimpleNamespace(
             name="a_load",
@@ -179,7 +179,7 @@ class TestTheEvidenceSurvivedTheMove:
             data_file_for(source, file_type="JSONL", encoding="utf-8"),
             None,
             _TARGET,
-            ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+            ctx=SimpleNamespace(), run_log=run_log,
             transform_cfg=SimpleNamespace(file_type="JSONL", encoding="utf-8"),
             load_cfg=SimpleNamespace(
                 name="a_load",

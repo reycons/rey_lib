@@ -49,7 +49,7 @@ def named(engine, monkeypatch):
         load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(handle=lambda: engine),
     )
-    return SimpleNamespace(log_depth=0)
+    return SimpleNamespace()
 
 
 class TestTheBuilderChooses:

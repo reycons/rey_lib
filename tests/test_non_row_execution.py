@@ -93,7 +93,7 @@ def _run(tmp_path, monkeypatch, run_log, conn, source, *, declared=None,
         data_file_for(source, file_type="CSV", encoding="utf-8"),
         IdentityTransform(columns=declared) if transform is None else transform,
         _TARGET,
-        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        ctx=SimpleNamespace(), run_log=run_log,
         transform_cfg=SimpleNamespace(file_type="CSV", encoding="utf-8"),
         load_cfg=SimpleNamespace(
             name="my_load",
@@ -374,7 +374,7 @@ class TestEveryGateRefusesOnItsOwn:
         loaded = load_operation._load_one_file(
             data_file_for(source, file_type="JSONL", encoding="utf-8"),
             IdentityTransform(), _TARGET,
-            ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+            ctx=SimpleNamespace(), run_log=run_log,
             transform_cfg=SimpleNamespace(file_type="JSONL", encoding="utf-8"),
             load_cfg=SimpleNamespace(
                 name="my_load",

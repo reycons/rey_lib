@@ -28,7 +28,6 @@ def _ctx(manifest_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         paths=SimpleNamespace(resolve=lambda name: manifest_path),
         app_name="rey_lib",
-        log_depth=0,
     )
 
 
@@ -96,7 +95,6 @@ def _run_ctx(tmp_path: Path) -> SimpleNamespace:
         run_log_dir=str(run_dir),
         app_name="rey_lib",
         name="rey_lib",
-        log_depth=0,
     )
     start_test_run(ctx)
     return ctx

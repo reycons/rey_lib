@@ -58,7 +58,7 @@ def csv_file(tmp_path: Path) -> Path:
 def test_a_failed_query_load_raises(run_log, database: list[str]) -> None:
     with pytest.raises(DatabaseError, match="locked"):
         load_operation.load_query_to_table(
-            SimpleNamespace(log_depth=0), run_log, "select 1 as a", "src", "s.t", "w",
+            SimpleNamespace(), run_log, "select 1 as a", "src", "s.t", "w",
         )
     assert database == ["rollback"]
 
@@ -66,7 +66,7 @@ def test_a_failed_query_load_raises(run_log, database: list[str]) -> None:
 def test_a_failed_direct_file_load_raises(run_log, csv_file: Path) -> None:
     with pytest.raises(DatabaseError, match="locked"):
         load_operation.load_file_to_table(
-            SimpleNamespace(log_depth=0), run_log, csv_file, "s.t", "w", file_type="csv",
+            SimpleNamespace(), run_log, csv_file, "s.t", "w", file_type="csv",
         )
 
 
@@ -82,7 +82,7 @@ def test_a_configured_batch_still_counts_a_failed_file_as_zero(
         data_file_for(csv_file, file_type="CSV", encoding="utf-8"),
         None,
         _TARGET,
-        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        ctx=SimpleNamespace(), run_log=run_log,
         loader=_FailingLoader(),
         load_cfg=SimpleNamespace(
             name="a_load", load=SimpleNamespace(destination_table="s.t"),

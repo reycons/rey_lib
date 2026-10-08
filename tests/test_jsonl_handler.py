@@ -417,3 +417,30 @@ class TestAnAppErrorIsPersistedByTheLogger:
 
         written = json.loads(fallback.read_text(encoding="utf-8").strip())
         assert "the transform could not be created" in written["message"]
+
+
+class TestDepthFromTheRecord:
+    """S4: the handler reads record.log_depth; it owns no depth of its own."""
+
+    @staticmethod
+    def _write(tmp_path: Path, extra: dict | None = None) -> dict:
+        handler, path = _make_handler(tmp_path, _make_ctx(log_depth=7))
+        logger = logging.getLogger(f"test.depth.{id(handler)}")
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        logger.propagate = False
+        logger.info("depth", extra=extra or {})
+        handler.close()
+        return json.loads(path.read_text(encoding="utf-8").strip())
+
+    def test_depth_is_read_from_the_record_and_not_written_as_an_extra(self, tmp_path: Path) -> None:
+        written = self._write(tmp_path, {"log_depth": 2})
+
+        assert written["depth"] == 2
+        assert "log_depth" not in written
+
+    def test_a_record_without_a_depth_is_at_depth_zero(self, tmp_path: Path) -> None:
+        written = self._write(tmp_path)
+
+        assert written["depth"] == 0
+        assert written["parent_sequence"] is None

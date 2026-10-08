@@ -128,7 +128,6 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
         installation=SimpleNamespace(name="test_installation"),
         app_name="rey_loader",
         name="rey_loader",
-        log_depth=0,
         # The governed manifest is a table in the control database, so a
         # context that reaches it carries the Control it is reached through.
         shared_control=_InsertingControl(),

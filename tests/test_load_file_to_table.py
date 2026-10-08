@@ -86,7 +86,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, source=None,
         lambda *a, **k: moved.append(a) if moved is not None else None,
     )
     return load_operation.load_file_to_table(
-        SimpleNamespace(log_depth=0), run_log,
+        SimpleNamespace(), run_log,
         source if source is not None else _jsonl(tmp_path, {"a": 1, "b": "x"}),
         destination, "a_connection", **kwargs,
     )

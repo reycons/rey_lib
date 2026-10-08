@@ -128,7 +128,7 @@ def _load(tmp_path, monkeypatch, run_log, adapter, *, declared=None,
                       file_type=file_type, encoding="utf-8"),
         None,
         _TARGET,
-        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        ctx=SimpleNamespace(), run_log=run_log,
         transform_cfg=SimpleNamespace(file_type=file_type, encoding="utf-8"),
         load_cfg=SimpleNamespace(
             name="my_load", load=load_block,
@@ -216,7 +216,7 @@ class TestTheDestinationIsThere:
             data_file_for(path, file_type="CSV", encoding="utf-8"),
             None,
             _TARGET,
-            ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+            ctx=SimpleNamespace(), run_log=run_log,
             transform_cfg=SimpleNamespace(file_type="CSV", encoding="utf-8"),
             load_cfg=SimpleNamespace(
                 name="my_load",

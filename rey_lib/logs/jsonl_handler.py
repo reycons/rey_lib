@@ -16,9 +16,9 @@ Each record contains:
 
 Field names in the output can be renamed via ``field_map``.
 
-Depth and parent tracking use ``ctx.log_depth`` — the same counter that
-``log_enter`` / ``log_exit`` in ``log_utils`` already manage. No new
-instrumentation is required in application code.
+Depth and parent tracking use ``record.log_depth``, which the configured
+pipeline stamps from ``AppLogger.log_depth`` before the record reaches this
+handler. The handler reads it; it does not know where depth comes from.
 
 Public API
 ----------
@@ -76,6 +76,8 @@ _STANDARD_ATTRS: frozenset[str] = frozenset({
     "levelname", "levelno", "lineno", "message", "module", "msecs", "msg",
     "name", "pathname", "process", "processName", "relativeCreated",
     "stack_info", "thread", "threadName", "taskName",
+    # Stamped by the configured pipeline and written as the envelope's depth.
+    "log_depth",
 })
 
 # Extra keys considered SQL diagnostic data — excluded when dump_sql is false.
@@ -97,9 +99,9 @@ class JsonlHandler(logging.Handler):
     any logger whose records propagate to this handler produces one JSON line
     appended to the JSONL file, flushed immediately.
 
-    Depth and parent sequence are derived from ``ctx.log_depth``, which
-    ``log_enter`` / ``log_exit`` in ``log_utils`` already maintain. No
-    changes to application logging calls are needed.
+    Depth and parent sequence are derived from ``record.log_depth``, stamped
+    by the configured pipeline from ``AppLogger.log_depth``. No changes to
+    application logging calls are needed.
 
     Parameters
     ----------
@@ -153,7 +155,7 @@ class JsonlHandler(logging.Handler):
         """
         Write one JSON record to the JSONL file.
 
-        Reads ``ctx.log_depth`` at call time for depth and parent resolution.
+        Reads ``record.log_depth`` for depth and parent resolution.
         Any ``extra`` fields the caller passed to the log call are included
         as per-event data. Standard ``LogRecord`` attributes are excluded to
         avoid duplication.
@@ -166,7 +168,7 @@ class JsonlHandler(logging.Handler):
         try:
             self._sequence += 1
             seq   = self._sequence
-            depth = self._current_depth()
+            depth = max(0, getattr(record, "log_depth", 0))
 
             parent_seq = self._resolve_parent(depth)
             self._depth_seq[depth] = seq
@@ -224,12 +226,6 @@ class JsonlHandler(logging.Handler):
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
-
-    def _current_depth(self) -> int:
-        """Return the current call depth from ctx, defaulting to zero."""
-        if self._ctx is None:
-            return 0
-        return max(0, getattr(self._ctx, "log_depth", 0))
 
     def _resolve_parent(self, depth: int) -> Optional[int]:
         """Return the sequence number of the nearest ancestor record."""

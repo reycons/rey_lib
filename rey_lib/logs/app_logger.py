@@ -28,8 +28,14 @@ gate names its callers. Calling it again rebuilds the pipeline: existing root
 handlers are removed and closed first, so there is one set of handlers, not one
 per call.
 
-Call depth and the console formatter that indents by it still live in
-``logging_setup`` until the depth slice moves them here
+Call depth
+----------
+``AppLogger.log_depth`` is the one call depth, shared by every instance in the
+process: ``enter(msg)`` logs ``-> msg`` at DEBUG and then increments it,
+``exit(msg)`` decrements it (never below zero) and then logs ``<- msg``. The
+configured handlers stamp it onto each record as ``record.log_depth`` before
+the record is formatted or written; the console formatter indents by it and the
+JSONL handler records it. Neither consumer knows where it comes from
 (backlog logging.app_logger.s4_depth).
 """
 
@@ -47,6 +53,8 @@ from rey_lib.errors.error_utils import AppError
 from rey_lib.logs.jsonl_handler import JsonlHandler
 from rey_lib.logs.record_enrichment import require_run_id
 
+
+_INDENT = "  "
 
 _LEVEL_MAP: dict[str, int] = {
     "DEBUG":   logging.DEBUG,
@@ -69,9 +77,16 @@ class AppLogger:
 
     Args:
         name: Logger name. Conventionally the module's ``__name__``.
+
+    Attributes:
+        log_depth: The process-wide call depth. A class attribute, so every
+            ``AppLogger`` reads and moves the same value; ``enter`` and
+            ``exit`` are the only writers.
     """
 
     __slots__ = ("_logger",)
+
+    log_depth: int = 0
 
     def __init__(self, name: str) -> None:
         self._logger = logging.getLogger(name)
@@ -91,6 +106,16 @@ class AppLogger:
     def isEnabledFor(self, level: int) -> bool:  # noqa: N802 -- the stdlib name callers use
         """Return whether a record at ``level`` would be processed by this logger."""
         return self._logger.isEnabledFor(level)
+
+    def enter(self, msg: str) -> None:
+        """Log entry to ``msg`` at DEBUG, then go one level deeper."""
+        self._logger.debug("→ %s", msg, **_from_caller({}))
+        AppLogger.log_depth += 1
+
+    def exit(self, msg: str) -> None:
+        """Come back one level (never below zero), then log the exit at DEBUG."""
+        AppLogger.log_depth = max(0, AppLogger.log_depth - 1)
+        self._logger.debug("← %s", msg, **_from_caller({}))
 
     def _error(self, msg: object, *args: Any, **kwargs: Any) -> None:
         """Log at ERROR. Private: AppError.report is its only caller (rule 79).
@@ -138,10 +163,6 @@ class AppLogger:
             Current operation name. Substituted into path templates.
             Defaults to 'app'.
         """
-        # Depth and its indenting formatter move here in S4; until then they
-        # stay with the depth helpers they belong to.
-        from rey_lib.logs.logging_setup import _IndentFormatter, _initialise_depth  # noqa: PLC0415
-
         # Read, never resolved. _settle_log_level owns the precedence chain --
         # command line, application declaration, installation, default -- and hands
         # this one settled value over. The fallbacks here are for a context that
@@ -168,6 +189,7 @@ class AppLogger:
         console_handler.setLevel(level)
         console_handler.setFormatter(formatter)
         console_handler.addFilter(_ProviderWarningFilter())
+        console_handler.addFilter(_DepthFilter())
         root.addHandler(console_handler)
 
         for library, library_level in _LIBRARY_LEVELS.items():
@@ -203,6 +225,7 @@ class AppLogger:
                 file_handler.setLevel(level)
                 file_handler.setFormatter(formatter)
                 file_handler.addFilter(_ProviderWarningFilter())
+                file_handler.addFilter(_DepthFilter())
                 root.addHandler(file_handler)
                 log_file = str(resolved_log)
 
@@ -222,6 +245,7 @@ class AppLogger:
             )
             jsonl_handler.setLevel(level)
             jsonl_handler.addFilter(_ProviderWarningFilter())
+            jsonl_handler.addFilter(_DepthFilter())
             root.addHandler(jsonl_handler)
             log_file = str(jsonl_path)  # JSONL takes precedence for ctx.log_file
 
@@ -243,7 +267,6 @@ class AppLogger:
                 _bridge_stderr_to_logger()
 
         ctx.log_level = level_name
-        _initialise_depth(ctx)
 
         # ctx.log_file used by hooks (e.g. begin_batch) to record the log path.
         # JSONL path takes precedence when both are configured.
@@ -254,6 +277,34 @@ class AppLogger:
 def _from_caller(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return ``kwargs`` with ``stacklevel`` raised past this wrapper's frame."""
     return {**kwargs, "stacklevel": kwargs.get("stacklevel", 1) + 1}
+
+
+class _DepthFilter(logging.Filter):
+    """Stamp every record with the current ``AppLogger.log_depth``.
+
+    Attached to each configured handler, so the depth is on the record before
+    the formatter or the JSONL handler reads it.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return True after setting record.log_depth."""
+        record.log_depth = AppLogger.log_depth  # type: ignore[attr-defined]
+        return True
+
+
+class _IndentFormatter(logging.Formatter):
+    """Console formatter that indents the message by the record's call depth."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format a log record, indenting only the message portion.
+
+        Timestamp, level, and module name remain left-aligned and fixed width.
+        Only the message is indented to reflect call depth.
+        """
+        indent   = _INDENT * record.log_depth  # type: ignore[attr-defined]
+        asctime  = self.formatTime(record, self.datefmt)
+        prefix   = f"{asctime}  {record.levelname:<8}  {record.name:<32}"
+        return f"{prefix}{indent}{record.getMessage()}"
 
 
 class _TimestampFilter(logging.Filter):

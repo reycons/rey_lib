@@ -87,7 +87,7 @@ def _load(run_log, source: Any, target: Any, **kwargs) -> int:
         source,
         None,
         target,
-        ctx=SimpleNamespace(log_depth=0),
+        ctx=SimpleNamespace(),
         run_log=run_log,
         movements=None,
         load_name="a_file_destination_load",
@@ -339,7 +339,7 @@ class TestTheWayIn:
         )
 
         written = load_operation.load_query_to_file(
-            SimpleNamespace(log_depth=0), run_log,
+            SimpleNamespace(), run_log,
             "SELECT a, b FROM orders ORDER BY a", "warehouse", str(out),
         )
 
@@ -371,7 +371,7 @@ class TestTheWayIn:
 
         with pytest.raises(ConfigError) as raised:
             load_operation.load_query_to_file(
-                SimpleNamespace(log_depth=0), run_log,
+                SimpleNamespace(), run_log,
                 "SELECT a FROM orders", "warehouse",
                 str(tmp_path / "rows.out"),
             )

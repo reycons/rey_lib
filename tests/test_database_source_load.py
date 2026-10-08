@@ -114,7 +114,7 @@ def _load(monkeypatch, run_log, source: Any, destination: _Destination) -> int:
         # same construction a direct file load goes through.
         None,
         _TARGET,
-        ctx=SimpleNamespace(log_depth=0), run_log=run_log,
+        ctx=SimpleNamespace(), run_log=run_log,
         transform_cfg=None,
         load_cfg=SimpleNamespace(
             name="a_database_load",
@@ -266,7 +266,7 @@ class TestTheConstructionSite:
             **over,
         }
         loaded = load_operation.load_query_to_table(
-            SimpleNamespace(log_depth=0), run_log, **arguments
+            SimpleNamespace(), run_log, **arguments
         )
         return loaded, asked
 

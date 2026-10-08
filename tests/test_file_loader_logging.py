@@ -22,7 +22,6 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
     ctx = SimpleNamespace(
         log_file=str(tmp_path / "loader.run.jsonl"),
         owner_app_name="rey_loader",
-        log_depth=0,
     )
     start_test_run(ctx)
     return ctx

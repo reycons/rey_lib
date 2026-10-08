@@ -119,7 +119,6 @@ class ContextBuilder:
         # the configuration states nothing.
         if getattr(ctx, "log_level", None) is None:
             object.__setattr__(ctx, "log_level", "INFO")
-        object.__setattr__(ctx, "log_depth", 0)
         # Provenance is stored separately under a private attribute so it never
         # appears in ctx.keys() and never shadows a real config value. A source
         # that merged nothing has no provenance to attach, and attaching an
