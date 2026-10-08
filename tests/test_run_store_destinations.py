@@ -20,11 +20,13 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import make_db_run_log, start_test_run
+from tests.conftest import make_db_run_log, make_log_writer, start_test_run
 
 from rey_lib.control import Control
 from rey_lib.errors.error_utils import ConfigError, DatabaseError, StateError
 from rey_lib.logs import log_run_complete, log_run_start, log_step_end, log_step_start
+from rey_lib.logs.log_record_builder import LogRecordBuilder
+from rey_lib.logs.log_writer import DatabaseLogWriter
 
 
 @pytest.fixture()
@@ -93,24 +95,38 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
         def end_step(self, status=None, message=None, required=False, **kw):
             _CONTROL_CALLS.append(("end_step", {"status": status}, required))
 
-        def write_run_log_record(self, *, required=False, **values):
-            _CONTROL_CALLS.append(("write_run_log_record", {
-                **values,
-                "batch_id": self.batch_id, "batch_step_id": self.batch_step_id,
-            }, required))
+    control = _Control()
+
+    class _RecordingDatabase(DatabaseLogWriter):
+        """The database output: records each translated row, as the insert would see it."""
+
+        def __init__(self) -> None:
+            super().__init__(connection=None)
+            self._minted = 0
+
+        def write(self, record):
+            _CONTROL_CALLS.append(("insert_run_log_row", {
+                **self.row(record), "batch_id": control.batch_id,
+            }, True))
             # The database mints the row's identity and returns it. A writer
             # that got nothing back would read as a record that never
             # committed, which under `both` fails the run.
             self._minted += 1
             return self._minted
 
+    run_id = extra.pop("run_id", "00000000-0000-4000-8000-000000000001")
     run_log = RunLog(
         app="rey_loader",
-        run_id="00000000-0000-4000-8000-000000000001",
+        run_id=run_id,
         run_timestamp="20260822_000000",
-        log_dir=str(tmp_path),
-        destination=run_store,
-        control=_Control(),
+        writer=make_log_writer(
+            tmp_path, destination=run_store,
+            path=str(tmp_path / "rey_loader.20260822_000000.jsonl"),
+            database=_RecordingDatabase(),
+        ),
+        builder=LogRecordBuilder(run_id=run_id, run_timestamp="20260822_000000",
+                                 app="rey_loader"),
+        control=control,
     )
     for key, value in extra.items():
         # batch state is Control's; everything else is the run log's
@@ -124,11 +140,8 @@ _CONTROL_CALLS: list = []
 
 def _records(run_log: Any) -> list[dict]:
     """Every JSONL record written for this run, or [] if no log exists."""
-    try:
-        path = str(run_log.path())
-    except Exception:
-        path = None
-    if not path or not Path(path).exists():
+    path = run_log.path()
+    if path is None or not Path(path).exists():
         return []
     return [json.loads(line) for line in
             Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -159,7 +172,7 @@ class TestJsonlMode:
         log_run_complete(run_log, "success")
 
         # No run-log RECORD reaches the database: that is what jsonl means.
-        assert "write_run_log_record" not in _actions(control_calls)
+        assert "insert_run_log_row" not in _actions(control_calls)
         # The steps still do, because a step is attribution, not a record.
         assert _actions(control_calls) == ["start_step", "end_step"]
         # And no batch: the run log never starts one now, whatever the mode.
@@ -172,16 +185,13 @@ class TestJsonlMode:
 
         assert [r["record_type"] for r in _records(run_log)] == ["RUN_START"]
 
-    def test_an_absent_setting_means_jsonl(self, tmp_path, control_calls) -> None:
-        # An installation that says nothing keeps what it already had. The
-        # database is a migration someone performs, never a default.
-        run_log = _ctx(tmp_path, "jsonl")
-        # An absent run_store means jsonl: the default destination.
+    def test_an_absent_setting_means_db(self) -> None:
+        # JSONL is written only when it is asked for (backlog
+        # logging.app_logger.s8_json_output_cleanup): unset means the database.
+        from rey_lib.logs.run_store import run_store_mode
 
-        log_run_start(run_log, operation="scan")
-
-        assert control_calls == []
-        assert _records(run_log)
+        assert run_store_mode(SimpleNamespace()) == "db"
+        assert run_store_mode(SimpleNamespace(logging=SimpleNamespace())) == "db"
 
 
 class TestDbMode:
@@ -194,7 +204,7 @@ class TestDbMode:
 
         # No start_batch. The batch was opened where the run-starting Control
         # was created, before this run log existed.
-        assert _actions(control_calls) == ["write_run_log_record"]
+        assert _actions(control_calls) == ["insert_run_log_row"]
         assert _records(run_log) == []
 
     def test_the_full_lifecycle_reaches_control(self, tmp_path, control_calls) -> None:
@@ -208,10 +218,10 @@ class TestDbMode:
         # Neither start_batch nor end_batch: the batch lifecycle belongs to
         # the Control that owns the run, not to the log that describes it.
         assert _actions(control_calls) == [
-            "write_run_log_record",                    # RUN_START record
-            "write_run_log_record", "start_step",      # STEP_START record, then the step
-            "write_run_log_record", "end_step",        # STEP_END record, then step close
-            "write_run_log_record",                    # RUN_COMPLETE record
+            "insert_run_log_row",                    # RUN_START record
+            "insert_run_log_row", "start_step",      # STEP_START record, then the step
+            "insert_run_log_row", "end_step",        # STEP_END record, then step close
+            "insert_run_log_row",                    # RUN_COMPLETE record
         ]
 
     def test_every_run_log_control_call_is_required(self, tmp_path, control_calls) -> None:
@@ -233,15 +243,14 @@ class TestBothMode:
 
         log_run_start(run_log, operation="scan")
 
-        assert _actions(control_calls) == ["write_run_log_record"]
+        assert _actions(control_calls) == ["insert_run_log_row"]
         assert [r["record_type"] for r in _records(run_log)] == ["RUN_START"]
 
     def test_a_db_failure_under_both_is_surfaced(self, tmp_path) -> None:
-        """The run log holds its Control, so the failure comes from there.
+        """The database output fails; the logging writer surfaces it.
 
-        The break moved with the ownership: the run log no longer calls
-        start_batch, so a batch that cannot be opened is not its failure to
-        surface. Writing the RECORD is, and that is what breaks here.
+        Writing the RECORD is what breaks here, in the database output the
+        logging writer holds.
 
         It surfaces as StateError rather than the DatabaseError underneath it,
         and that is the more accurate answer: under `both` the fault is not
@@ -249,17 +258,11 @@ class TestBothMode:
         and not the other. The point the test holds is unchanged -- the failure
         is surfaced, not swallowed.
         """
-        class _Broken:
-            owns_batch = False
-            batch_id = None
-            batch_step_id = None
-            batch_root_step_id = None
-
-            def write_run_log_record(self, **kw):
-                raise DatabaseError("control unreachable")
+        def _unreachable(record):
+            raise DatabaseError("control unreachable")
 
         run_log = _ctx(tmp_path, "both")
-        run_log.control = _Broken()
+        run_log.writer._database.write = _unreachable
 
         with pytest.raises(StateError, match="not committed to every destination"):
             log_run_start(run_log, operation="scan")
@@ -370,7 +373,7 @@ class TestOneBatchManyRuns:
         log_step_start(run_log, "extract", 1)
 
         for name, values, _ in control_calls:
-            if name in ("start_step", "write_run_log_record"):
+            if name in ("start_step", "insert_run_log_row"):
                 assert values["run_id"] == run_log.run_id
 
 
@@ -392,9 +395,6 @@ class TestIdsArriveThroughTheMap:
             batch_id = None
             batch_step_id = None
             batch_root_step_id = None
-
-            def write_run_log_record(self, **kw):
-                return 1
 
         run_log = _ctx(tmp_path, "db")
         run_log.control = _NoPlacement()
@@ -430,7 +430,7 @@ class TestEveryRecordHonoursTheDestination:
         log_step_failure(run_log, failed_step_id="scan", failed_step_name="scan",
                          message="something failed", error_type="AppError")
 
-        events = [v for name, v, _ in control_calls if name == "write_run_log_record"]
+        events = [v for name, v, _ in control_calls if name == "insert_run_log_row"]
         assert [e["record_type"] for e in events] == ["STEP_FAILURE"]
 
     def test_a_failure_record_writes_no_jsonl_under_db(self, tmp_path,
@@ -455,7 +455,7 @@ class TestEveryRecordHonoursTheDestination:
 
         log_row_count(run_log, count_name="loaded", count=42)
 
-        events = [v for name, v, _ in control_calls if name == "write_run_log_record"]
+        events = [v for name, v, _ in control_calls if name == "insert_run_log_row"]
         assert [e["record_type"] for e in events] == ["ROW_COUNT"]
         assert [r["record_type"] for r in _records(run_log)][-1] == "ROW_COUNT"
 
@@ -471,15 +471,15 @@ class TestEveryRecordHonoursTheDestination:
 
         log_row_count(run_log, count_name="loaded", count=42)
 
-        written = [v for name, v, _ in control_calls if name == "write_run_log_record"][0]
+        written = [v for name, v, _ in control_calls if name == "insert_run_log_row"][0]
         assert written["record_type"] == "ROW_COUNT"
         assert written["run_id"] == run_log.run_id
         # The writer sends the parent it is under, not an id of its own: the
         # database mints that and hands it back.
-        assert written["parent_run_log_id"] is None
+        assert written.get("parent_run_log_id") is None
         # `subject` is log_row_count's own field, so it belongs in that record
         # type's payload column -- and in no other.
-        assert written["payloads"]["row_count"] == {
+        assert written["row_count"] == {
             "count_name": "loaded", "count": 42, "subject": "",
         }
-        assert written["payloads"]["sql_execution"] is None
+        assert "sql_execution" not in written

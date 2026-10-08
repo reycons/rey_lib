@@ -78,6 +78,7 @@ def test_log_utils_public_api_includes_package_facade_exports() -> None:
 def test_httpx_429_records_are_promoted_to_warning(run_log, recorded_run, tmp_path) -> None:
     """OpenAI/HTTPX 429 messages are warning-level in text and JSONL logs."""
     ctx = SimpleNamespace(
+        logging=SimpleNamespace(run_store="jsonl"),
         env="test",
         log_level="INFO",
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
@@ -110,6 +111,7 @@ def test_httpx_429_records_are_promoted_to_warning(run_log, recorded_run, tmp_pa
 def test_configuration_writes_jsonl_only_when_only_text_log_configured(run_log, recorded_run, tmp_path) -> None:
     """JSONL is written beside the configured log_path; no readable log is produced."""
     ctx = SimpleNamespace(
+        logging=SimpleNamespace(run_store="jsonl"),
         env="test",
         log_level="INFO",
         app_name="sample_app",
@@ -131,14 +133,28 @@ def test_configuration_writes_jsonl_only_when_only_text_log_configured(run_log, 
     assert ctx.log_file == str(jsonl_log.resolve())
 
 
-def test_configuration_can_disable_jsonl_with_yaml_flag(run_log, recorded_run, tmp_path) -> None:
-    """A YAML logging flag can opt out of JSONL for the rare readable-only case."""
+def test_the_database_mode_writes_no_jsonl(
+    run_log, recorded_run, tmp_path, monkeypatch,
+) -> None:
+    """logging.run_store: db writes the database and no JSONL file at all.
+
+    The database output is stood in for: its rows are captured as
+    DatabaseLogWriter translates them. The readable log is opted into so the
+    text handler shows the event reached the pipeline.
+    """
+    from rey_lib.logs import log_writer
+
+    rows: list[dict] = []
+    monkeypatch.setattr(log_writer, "_run_log_connection", lambda _ctx: None)
+    monkeypatch.setattr(
+        log_writer.DatabaseLogWriter, "write",
+        lambda self, record: rows.append(self.row(record)) or len(rows),
+    )
     ctx = SimpleNamespace(
         env="test",
         log_level="INFO",
         log_path=str(tmp_path / "sample.{operation}.{timestamp}.log"),
-        # Readable-only legacy case: JSONL off, so opt back into the text handler.
-        logging=SimpleNamespace(jsonl_enabled=False, readable_enabled=True),
+        logging=SimpleNamespace(run_store="db", readable_enabled=True),
     )
 
     build_ctx_for_app(ctx=ctx, operation="run")
@@ -149,6 +165,9 @@ def test_configuration_can_disable_jsonl_with_yaml_flag(run_log, recorded_run, t
 
     assert next(tmp_path.glob("*.log")).read_text(encoding="utf-8")
     assert list(tmp_path.glob("*.jsonl")) == []
+    hello = [row for row in rows if row.get("message") == "hello"]
+    assert hello and hello[0]["record_type"] == "INFO"
+    assert hello[0]["info"] == {"logger": "sample"}
 
 
 def test_log_file_metadata_marks_jsonl_as_authoritative(tmp_path) -> None:
@@ -267,6 +286,7 @@ def test_read_jsonl_records_rejects_text_logs(tmp_path) -> None:
 def test_configuration_works_without_env_attribute(run_log, recorded_run, tmp_path) -> None:
     """ctx built via build_ctx_from_path has no .env — must not raise."""
     ctx = SimpleNamespace(
+        logging=SimpleNamespace(run_store="jsonl"),
         log_level="INFO",
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_ctx_fields=(),
@@ -286,6 +306,7 @@ def test_configuration_accepts_path_object_for_log_path(run_log, recorded_run, t
 
     log_template = Path(tmp_path) / "app.{operation}.{timestamp}.log"
     ctx = SimpleNamespace(
+        logging=SimpleNamespace(run_store="jsonl"),
         log_level="INFO",
         log_path=log_template,
         jsonl_ctx_fields=(),
@@ -307,6 +328,7 @@ def test_configuration_accepts_path_object_for_log_path(run_log, recorded_run, t
 def test_configuration_substitutes_operation_and_timestamp(run_log, recorded_run, tmp_path) -> None:
     """{operation} and {timestamp} in the resolved log path are filled at runtime."""
     ctx = SimpleNamespace(
+        logging=SimpleNamespace(run_store="jsonl"),
         log_level="INFO",
         log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
         jsonl_path=str(tmp_path / "app.{operation}.{timestamp}.jsonl"),

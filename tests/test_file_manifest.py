@@ -125,9 +125,14 @@ def test_returned_record_id_matches_the_run_log_row(tmp_path: Path) -> None:
 
 def test_log_run_record_returns_none_when_it_cannot_append(tmp_path: Path) -> None:
     """The never-raise contract holds: an unusable run log returns None, not an error."""
-    from rey_lib.logs.run_log import RunLog
+    from tests.conftest import make_run_log
 
-    unusable = RunLog(app="rey_lib", run_id="R1", run_timestamp="20260822_000000")
+    unusable = make_run_log(tmp_path, app="rey_lib", run_id="R1", destination="db")
+
+    def _unreachable(record):
+        raise OSError("database gone")
+
+    unusable.writer._database.write = _unreachable
     assert log_run_record(unusable, "SOURCE_FILE_INVENTORY", path="/a") is None
 
 

@@ -94,11 +94,9 @@ def _finalize_run(ctx: Any, run_log: Any) -> None:
     """
     if _get(getattr(ctx, "runtime", None), "pipeline_run_id"):
         return
-    # Whether there is a durable log to finalize is the run log's own fact; the
-    # context used to answer it, which is the ownership this migration removed.
-    try:
-        run_log.path()
-    except Exception:  # noqa: BLE001 — nothing durable to finalize.
+    # Finalization reads the JSONL run log back; with no JSONL file
+    # (logging.run_store writes none) there is nothing to finalize from.
+    if run_log.path() is None:
         return
     finalize_run_log(run_log, ai=getattr(ctx, "shared_ai", None))
 

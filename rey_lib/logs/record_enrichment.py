@@ -291,18 +291,13 @@ def bind_run(run_log: Any) -> None:
     the one owner of the write, not a description of it. Rebuilding an owner
     from a description is how a single run ends up with two of them.
 
-    Binding a run log with no durable path keeps whatever was already bound --
-    there is nothing for an ambient record to be appended to -- but it still
-    opens a scope, so the matching ``clear_run`` closes its own scope and not
-    an enclosing one.
+    Any run log binds, whether or not it writes a JSONL file: a run whose
+    records go only to the database is still a run, and its nesting and
+    ambient context are still needed (backlog
+    logging.app_logger.s8_json_output_cleanup). Binding None still opens a
+    scope, so the matching ``clear_run`` closes its own scope and not an
+    enclosing one.
     """
-    if run_log is not None:
-        try:
-            if not run_log.path():
-                run_log = None
-        except Exception:  # noqa: BLE001 — an unopened run log binds nothing.
-            run_log = None
-
     ident = threading.get_ident()
     with _BINDING_GUARD:
         active = _CURRENT_RUN["run"]
@@ -375,11 +370,15 @@ def bound_run_log() -> Any:
 
 
 def current_run() -> dict[str, str] | None:
-    """Return the bound run's {run_log_path, run_id}, or None if unbound."""
+    """Return the bound run's {run_log_path, run_id}, or None if unbound.
+
+    ``run_log_path`` is None when the run writes no JSONL file.
+    """
     run = _CURRENT_RUN["run"]
     if run is None:
         return None
-    return {"run_log_path": str(run.path()), "run_id": run.run_id}
+    path = run.path()
+    return {"run_log_path": str(path) if path is not None else None, "run_id": run.run_id}
 
 
 def bind_step(

@@ -82,6 +82,7 @@ class TestConfiguration:
     @staticmethod
     def _ctx(tmp_path: Path) -> SimpleNamespace:
         return SimpleNamespace(
+            logging=SimpleNamespace(run_store="jsonl"),
             log_level="INFO",
             log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
             jsonl_ctx_fields=(),
@@ -201,6 +202,7 @@ class TestDepth:
     @staticmethod
     def _configured(tmp_path: Path) -> SimpleNamespace:
         ctx = SimpleNamespace(
+            logging=SimpleNamespace(run_store="jsonl"),
             log_level="DEBUG",
             log_path=str(tmp_path / "app.{operation}.{timestamp}.log"),
             jsonl_ctx_fields=(),

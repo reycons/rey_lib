@@ -1,10 +1,15 @@
 """The run log, as its owner.
 
-``RunLog`` owns a run's durable record writing: the identity every record
-carries, the mutable execution state that identity changes with, the record
-sequence, the destination, and the lifecycle. It takes no application context
+``RunLog`` owns a run's typed records: the identity every record carries, the
+mutable execution state that identity changes with, which records are
+structural, the nesting, and the lifecycle. It takes no application context
 and reads none — everything it needs it holds, and everything that changes it
 changes through its own methods.
+
+It decides no output. A record it builds goes to the logging writer
+(``rey_lib.logs.log_writer.LogWriter``), which writes it to the outputs
+``logging.run_store`` selects; the common run envelope is built by
+``LogRecordBuilder`` (backlog logging.app_logger.s8_json_output_cleanup).
 
 That is the distinction from the three attempts before it. A class constructed
 with ``ctx`` and reading fields off it per record is a namespace around
@@ -37,9 +42,6 @@ import time
 from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
 from rey_lib.logs.phase_timeline import PhaseTimeline
 
-from contextlib import contextmanager
-
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from rey_lib.errors.error_utils import ConfigError
@@ -71,6 +73,8 @@ _ENVELOPE_FIELDS: frozenset[str] = frozenset({
     "parent_run_id", "subject_type", "subject_id", "subject_name",
     "pipeline_run_id", "workflow_run_id", "pipeline_id", "workflow_id",
     "run_log_id", "parent_run_log_id", "nest_level",
+    # The governed step a record was written inside; correlation only.
+    "batch_step_id",
 })
 
 #: Facts any record type may state, each with a column of its own.
@@ -186,9 +190,8 @@ class RunLog:
         app: str,
         run_id: str,
         run_timestamp: str,
-        log_dir: Optional[str] = None,
-        path: Optional[str] = None,
-        destination: str = "jsonl",
+        writer: Any,
+        builder: Any,
         control: Any = None,
         new_batch: bool = True,
         workflow: Optional[str] = None,
@@ -204,17 +207,14 @@ class RunLog:
         run_id, run_timestamp : str
             Execution identity, established at the launch boundary through
             ``rey_lib.run`` and passed in. Never created here.
-        log_dir : str, optional
-            Directory the run log is written into. The filename is derived from
-            the execution name and ``run_timestamp``.
-        path : str, optional
-            An already-resolved run-log path. A subprocess step receives its
-            parent's path this way and continues the same log.
-        destination : str
-            ``jsonl``, ``db`` or ``both``.
+        writer : LogWriter
+            The process's logging writer. Every record built here is handed to
+            it; it alone selects the outputs.
+        builder : LogRecordBuilder
+            Builds the common run envelope of each record.
         control : Any, optional
-            The Control object used for database persistence. Referenced, not
-            owned: the runtime owns its lifecycle because it also serves
+            The Control the run's steps are opened and closed on. Referenced,
+            not owned: the runtime owns its lifecycle because it also serves
             artifacts, contracts and config snapshots.
         workflow, pipeline : str, optional
             Starting values. Both change during a run through their bind methods.
@@ -228,7 +228,8 @@ class RunLog:
         # records would then disagree with the context they came from.
         self.run_id = run_id
         self.run_timestamp = str(run_timestamp)
-        self.destination = str(destination or "jsonl").strip().lower()
+        self.writer = writer
+        self._builder = builder
         # Launch states whether this execution starts a batch or continues one.
         # Held here and never inferred: deciding from whether batch_id happens
         # to be set would make a leftover value silently mean "reuse", which is
@@ -236,16 +237,11 @@ class RunLog:
         self.new_batch = bool(new_batch)
         self.control = control
         if control is not None:
-            # Control is subordinate: it persists on this run log's behalf, so
-            # it is told which run log it serves rather than finding one.
+            # Control is subordinate: the SQL it runs on this run's behalf is
+            # recorded through this run log, so it is told which run log it
+            # serves rather than finding one.
             control.run_log = self
-        # True while this run log is writing a record to a destination. The DB
-        # sink runs SQL, and SQL execution is itself a logged event, so without
-        # this a persisted record would persist the record of its own write.
-        self._persisting = False
 
-        self._log_dir = log_dir
-        self._path = path
         self._workflow = workflow
         self._pipeline = pipeline
         self._step_name: Optional[str] = None
@@ -264,8 +260,6 @@ class RunLog:
         self._current_parent_run_log_id: Optional[int] = None
         #: nest level -> the run_log_id of the record that opened that level.
         self._level_anchors: dict[int, Optional[int]] = {}
-        #: Whether any record has been written, for the rebind guard alone.
-        self._has_records = False
         self._closed = False
         #: The run's phases, as a contiguous partition of its elapsed time.
         #:
@@ -287,19 +281,9 @@ class RunLog:
         )
 
     def __repr__(self) -> str:
-        return f"<RunLog {self.app} {self.run_id} {self._path or 'unopened'}>"
+        return f"<RunLog {self.app} {self.run_id} {self.path() or 'no JSONL'}>"
 
-    # -- identity and destination -------------------------------------------
-
-    @property
-    def writes_jsonl(self) -> bool:
-        """Whether the JSONL run log is a selected destination."""
-        return self.destination in ("jsonl", "both")
-
-    @property
-    def writes_db(self) -> bool:
-        """Whether the control database is a selected destination."""
-        return self.destination in ("db", "both")
+    # -- identity ------------------------------------------------------------
 
     @property
     def workflow(self) -> Optional[str]:
@@ -348,31 +332,6 @@ class RunLog:
     def clear_lineage(self) -> None:
         """Drop the bound lineage."""
         self._lineage.clear()
-
-    def bind_path(self, path: Any) -> None:
-        """Name the log this run writes to, before anything is written.
-
-        The launch boundary resolves a path for the process, but a pipeline
-        only learns its own log directory once the pipeline is resolved -- after
-        launch. Without this the pipeline's typed records and the pipeline's
-        logger events end up in two different files, which is the single-file
-        authority this owner exists to hold.
-
-        Raises
-        ------
-        StateError
-            When records have already been written. The path is the identity of
-            the log; moving it mid-run splits one run across two files.
-        """
-        resolved = str(path)
-        if self._path and str(self._path) != resolved and self._has_records:
-            from rey_lib.errors.error_utils import StateError
-
-            raise StateError(
-                f"Cannot rebind the run log to {resolved!r}: records are "
-                f"already written to {self._path!r}. One run is one log."
-            )
-        self._path = resolved
 
     def set_nest_level(self, semantic: str) -> int:
         """Establish a semantic base, or take a relative step.
@@ -495,23 +454,42 @@ class RunLog:
 
     # -- the log itself ------------------------------------------------------
 
-    def path(self) -> Path:
-        """Resolve the run-log path, once.
+    def path(self) -> Optional[Path]:
+        """The JSONL file the logging writer appends to, or None without JSONL.
 
-        A path supplied at construction is used as given, which is how a
-        subprocess step continues its parent's log.
+        A compatibility surface for the readers that open the file; the path
+        is the JSONL writer's.
         """
-        if self._path:
-            return Path(self._path)
-        if not self._log_dir:
-            raise ConfigError(
-                "Cannot open run log: no durable log path. A RunLog is built "
-                "with either a resolved path or the directory to write into."
-            )
-        name = self._pipeline or self._workflow or self.app or "app"
-        resolved = Path(self._log_dir) / f"{name}.{self.run_timestamp}.jsonl"
-        self._path = str(resolved)
-        return resolved
+        return self.writer.json_path()
+
+    def run_fields(self) -> dict[str, Any]:
+        """This run's context for a record built now: identity, names, lineage, nesting."""
+        fields: dict[str, Any] = {
+            "run_id": self.run_id,
+            "run_timestamp": self.run_timestamp,
+            "lineage": {key: self._lineage.get(key)
+                        for key in (*LINEAGE_FIELDS, *DOMAIN_FIELDS)},
+            "nest_level": self._current_nest_level,
+            "parent_run_log_id": self._current_parent_run_log_id,
+            # Correlation only: the governed step open on this run's Control.
+            "batch_step_id": getattr(self.control, "batch_step_id", None),
+        }
+        if self.app:
+            fields["app"] = self.app
+        if self._workflow:
+            fields["workflow_name"] = self._workflow
+        if self._pipeline:
+            fields["pipeline_name"] = self._pipeline
+        return fields
+
+    def recorded(self, nest_level: int, run_log_id: Optional[int]) -> None:
+        """Note that a record at ``nest_level`` was written as ``run_log_id``.
+
+        The first record written at a level anchors it: later records one level
+        deeper take it as their parent.
+        """
+        if nest_level not in self._level_anchors:
+            self._level_anchors[nest_level] = run_log_id
 
     def close(self) -> None:
         """Close the run log. Idempotent; called by runtime collection."""
@@ -524,100 +502,28 @@ class RunLog:
 
     # -- writing -------------------------------------------------------------
 
-    def _record(self, record_type: str, message: str,
-                fields: dict[str, Any]) -> dict[str, Any]:
-        """Build the enriched record from owned state and the supplied fields."""
-        from rey_lib.logs.record_enrichment import (
-            FILES_RECORD_SUBGROUP, _context_fields, _record_group,
-            _RUN_RECORD_SCHEMA_VERSION, sanitize_log_value,
-        )
-        from rey_lib.logs.record_validation import _validate_run_record
-
-        record: dict[str, Any] = {
-            "record_type": record_type,
-            "record_group": _record_group(record_type),
-            "run_id": self.run_id,
-            "run_timestamp": self.run_timestamp,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "record_schema_version": _RUN_RECORD_SCHEMA_VERSION,
-        }
-        subgroup = FILES_RECORD_SUBGROUP.get(record_type)
-        if subgroup:
-            # A record that states its own grouping value is believed over the
-            # per-type default. Every ARTIFACT_REFERENCE was stamped
-            # "artifacts" because the type map was asked and the record was
-            # not, which collapsed output_files, profiles, analysis_context
-            # and analysis_results into one indistinguishable group. The
-            # override is scoped to types the map already places in `files`,
-            # so a subgroup exists exactly where the group is `files`.
-            supplied = (fields or {}).get("artifact_group")
-            record["record_subgroup"] = str(supplied) if supplied else subgroup
-        if self.app:
-            record["app"] = self.app
-        if self._workflow:
-            record["workflow_name"] = self._workflow
-        if self._pipeline:
-            record["pipeline_name"] = self._pipeline
-        for key in (*LINEAGE_FIELDS, *DOMAIN_FIELDS):
-            value = self._lineage.get(key)
-            if value:
-                record[key] = value
-        if message:
-            record["message"] = message
-        # Step and correlation are bound ambiently around a block of work rather
-        # than passed per record, so they are stamped here and can still be
-        # overridden by an explicit field on the call.
-        record.update(_context_fields())
-        record.update(fields or {})
-        record = sanitize_log_value(record)
-        _validate_run_record(record)
-        return record
-
     def append(self, record_type: str, *, message: str = "",
                **fields: Any) -> int | None:
-        """Append one typed record, and return its ``control.run_log`` id.
+        """Build one typed record and hand it to the logging writer.
 
-        The database mints the identity, so the row is written first and the
-        JSONL serializes the key it was given. This is the one API for "what
-        run-log record did I just write": what comes back is
-        ``control.run_log.run_log_id`` and a governed record may point at it.
+        Returns the ``control.run_log`` id the database minted -- the one API
+        for "what run-log record did I just write", which a governed record may
+        point at -- or None when the database is not a selected output.
 
         Never raises: logging must not mask application execution. A record
-        that could not be committed to every selected destination returns
-        ``None``.
+        that could not be committed to every selected output returns ``None``.
         """
         from rey_lib.logs.record_validation import _validate_run_record_fields
 
-        if self._persisting:
-            # Raised by this run log's own persistence. Not run evidence; see
-            # _persistence.
+        if self.writer.persisting:
+            # Raised by the logging output's own persistence. Not run evidence.
             return None
         _validate_run_record_fields(record_type, fields)
         try:
-            record = self._record(record_type, message, fields)
-
-            nest_level = self._current_nest_level
-            record["nest_level"] = nest_level
-            record["parent_run_log_id"] = self._current_parent_run_log_id
-
-            # The database first: it mints the identity, and the JSONL is an
-            # output format that serializes it rather than a second source of
-            # one.
-            run_log_id: Optional[int] = None
-            if self.writes_db:
-                with self._persistence():
-                    run_log_id = self._persist_to_control(
-                        record_type, message, record)
-                record["run_log_id"] = run_log_id
-
-            if self.writes_jsonl:
-                from rey_lib.files import primitive_file_io
-
-                primitive_file_io.append_jsonl(self.path(), record)
-
-            self._has_records = True
-            if nest_level not in self._level_anchors:
-                self._level_anchors[nest_level] = run_log_id
+            run = self.run_fields()
+            record = self._builder.run_record(record_type, message, fields, run=run)
+            run_log_id = self.writer.write(record)
+            self.recorded(run["nest_level"], run_log_id)
             return run_log_id
         except Exception as exc:  # noqa: BLE001 — logging must never mask execution.
             from rey_lib.logs.app_logger import AppLogger
@@ -627,37 +533,21 @@ class RunLog:
             )
             return None
 
-    # -- the database destination -------------------------------------------
-    #
-    # Control is this run log's persistence mechanism, not a second logging
-    # owner. Every decision about whether to reach the database, and what to do
-    # when reaching it fails, is made here; Control executes the routine and
-    # owns only its own DB state -- batch_id, batch_step_id, owns_batch.
+    # -- structural records and steps ----------------------------------------
 
     def require_structural_record(self, run_log_id: Optional[int],
                                   record_type: str) -> None:
-        """Escalate a lost structural record when every destination is required.
-
-        Under ``both`` a missing record means the run log is half written. The
-        record writer has already warned and returned None on its own terms;
-        this is the separate durability contract on top of that.
+        """Require the configured persistence of a structural record.
 
         Structural records only -- run start, step start, step end, run
         complete. Losing one leaves a run log that does not describe a run.
         Evidence records degrade as they always have, because logging must not
         mask execution and an errored row count is not worth failing a run over.
 
-        Under ``jsonl`` nothing is raised: that is the historical behaviour.
+        This run log decides which records are structural; the logging writer
+        decides whether their write succeeded (``LogWriter.require_persisted``).
         """
-        if run_log_id is not None or self.destination != "both":
-            return
-        from rey_lib.errors.error_utils import StateError
-
-        raise StateError(
-            f"run_store is 'both' but the {record_type} record was not committed "
-            "to every destination. Both are required; the run log now describes "
-            "this run in one place and not the other."
-        )
+        self.writer.require_persisted(run_log_id, record_type)
 
     def open_batch(self, batch_name: str) -> None:
         """No longer starts a batch. Kept so existing callers do not break.
@@ -693,8 +583,8 @@ class RunLog:
         """
         if self.control is None:
             return
-        with self._persistence():
-            self._require_control().start_step(
+        with self.writer.persistence():
+            self.control.start_step(
                 step_name=step_name, step_sequence=step_sequence,
                 step_type=step_type or None, required=True,
             )
@@ -707,8 +597,8 @@ class RunLog:
         """
         if self.control is None:
             return
-        control = self._require_control()
-        with self._persistence():
+        control = self.control
+        with self.writer.persistence():
             control.end_step(status=status, message=message or None, required=True)
         # REALIGN TO THE ROOT, do not blank it. batch_root_step_id is the
         # permanent anchor for the life of the batch; between steps, work still
@@ -716,115 +606,3 @@ class RunLog:
         # outside a step with no parent at all, and f_batch_step_begin refuses
         # when it is given neither a batch nor a parent.
         control.batch_step_id = control.batch_root_step_id
-
-    @contextmanager
-    def _persistence(self) -> Any:
-        """Mark the block as this run log writing itself to a destination.
-
-        The database destination executes SQL, and SQL execution is a logged
-        event, so a control call made on this run log's behalf produces records
-        while it runs. Those are not run evidence -- they describe the run log
-        writing, not the application working -- and persisting them would call
-        the database to record the call that was recording something, without
-        end.
-
-        So a record raised inside this block is not written anywhere. The
-        boundary is the run log's own persistence, which is why it is marked
-        here rather than guessed at from record types.
-        """
-        outer = self._persisting
-        self._persisting = True
-        try:
-            yield
-        finally:
-            self._persisting = outer
-
-    def _require_control(self) -> Any:
-        """The Control this run log persists through, or a refusal."""
-        if self.control is None:
-            from rey_lib.errors.error_utils import StateError
-
-            raise StateError(
-                f"run_store is '{self.destination}' but no Control was supplied "
-                "to this run log. The database destination has no mechanism."
-            )
-        return self.control
-
-    def _persist_to_control(self, record_type: str, message: str,
-                            record: dict[str, Any]) -> Optional[int]:
-        """Persist one record to the control database as a run-log row.
-
-        A record's contents divide three ways, and nothing is written twice:
-
-        * the envelope, stamped by this writer, each with its own column
-        * the shared facts -- status, path, the governed file, its size and
-          checksum -- which any record type may state and which are columns
-          because they are queried across types
-        * whatever is left, which is that record type's own structure and goes
-          into the one jsonb column ``record_type`` selects
-
-        A record type with nothing left writes no payload at all, and every
-        other payload column stays NULL. There is no generic bucket: a key
-        arriving for a record type with no payload column is refused rather
-        than dropped somewhere unqueryable.
-
-        ``timestamp`` is not sent. The database stamps ``created_ts``.
-
-        Returns the minted ``run_log_id``, which is the row's identity and the
-        value a governed record stores.
-        """
-        if self.control is None:
-            raise ConfigError(
-                "run_store selects the control database but no Control was "
-                "supplied to this run log."
-            )
-        payload = {key: value for key, value in record.items()
-                   if key not in _ENVELOPE_FIELDS and key not in _SHARED_FIELDS}
-        payload_column = TYPE_PAYLOAD_COLUMNS.get(str(record_type).upper())
-        if payload and payload_column is None:
-            from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
-            raise DataStructureError(
-                f"{record_type} records have no typed payload column, but "
-                f"{sorted(payload)} was supplied. Either the value is a shared "
-                "fact with a column of its own, or this record type needs a "
-                "payload column declared in TYPE_PAYLOAD_COLUMNS."
-            )
-        return self.control.write_run_log_record(
-            run_id=record.get("run_id"),
-            parent_run_log_id=record.get("parent_run_log_id"),
-            nest_level=int(record["nest_level"]),
-            record_type=str(record_type),
-            record_group=str(record.get("record_group") or ""),
-            record_subgroup=record.get("record_subgroup"),
-            message=str(message or record.get("message") or "") or None,
-            app=record.get("app"),
-            workflow_name=record.get("workflow_name"),
-            pipeline_name=record.get("pipeline_name"),
-            step_id=record.get("step_id"),
-            step_name=record.get("step_name"),
-            step_sequence=record.get("step_sequence"),
-            correlation_id=record.get("correlation_id"),
-            parent_run_id=record.get("parent_run_id"),
-            subject_type=record.get("subject_type"),
-            subject_id=record.get("subject_id"),
-            subject_name=record.get("subject_name"),
-            pipeline_id=record.get("pipeline_id"),
-            workflow_id=record.get("workflow_id"),
-            record_schema_version=int(record["record_schema_version"]),
-            status=record.get("status"),
-            path=record.get("path"),
-            file_id=record.get("file_id"),
-            source_name=record.get("source_name"),
-            checksum_sha256=record.get("checksum_sha256"),
-            size_bytes=record.get("size_bytes"),
-            exists=record.get("exists"),
-            modified_at=record.get("modified_at"),
-            error_message=record.get("error_message"),
-            # Absent means unclassified, which is not the same as non-sensitive
-            # and is written as NULL rather than as false.
-            contains_sensitive_data=record.get(SENSITIVE_FIELD),
-            payloads={column: (payload or None) if column == payload_column
-                      else None
-                      for column in TYPE_PAYLOAD_COLUMNS.values()},
-            required=True,
-        )

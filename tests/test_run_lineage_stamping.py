@@ -30,6 +30,8 @@ from rey_lib.logs.record_enrichment import (
     clear_run,
     current_run,
 )
+from rey_lib.logs.log_record_builder import LogRecordBuilder
+from rey_lib.logs.log_writer import DatabaseLogWriter, LogWriter
 from rey_lib.logs.run_log import RunLog
 
 
@@ -44,16 +46,23 @@ def _base_record(ctx, record_type: str, message: str) -> dict:
         found = _lineage_value(ctx, field)
         if found:
             lineage[field] = found
+    run_id = getattr(ctx, "run_id", "")
+    run_timestamp = str(getattr(ctx, "run_timestamp", ""))
+    builder = LogRecordBuilder(run_id=run_id, run_timestamp=run_timestamp)
     run_log = RunLog(
         app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
                 or getattr(ctx, "name", "") or ""),
-        run_id=getattr(ctx, "run_id", ""),
-        run_timestamp=str(getattr(ctx, "run_timestamp", "")),
+        run_id=run_id,
+        run_timestamp=run_timestamp,
+        writer=LogWriter("db", database=DatabaseLogWriter(connection=None)),
+        builder=builder,
         workflow=getattr(ctx, "workflow_name", None),
         pipeline=getattr(ctx, "pipeline_name", None),
         lineage=lineage,
     )
-    return run_log._record(record_type, message, {})
+    # The envelope LogRecordBuilder builds from this run's context; RunLog no
+    # longer builds records itself (backlog logging.app_logger.s8_json_output_cleanup).
+    return builder.run_record(record_type, message, {}, run=run_log.run_fields())
 
 
 def _ctx(**fields: object) -> SimpleNamespace:

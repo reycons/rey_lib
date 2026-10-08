@@ -1,10 +1,13 @@
 """
-Tests for JsonlHandler diagnostics-aware ctx_dump behavior.
+Tests for the logging handler: one record built once, written by the writer.
 
 Covers:
 1. No diagnostics config — legacy flat ctx_fields behavior unchanged.
 2. diagnostics.error.dump_ctx = true — ctx_dump present with whitelisted fields only.
 3. diagnostics.error.dump_ctx = false — no ctx_dump, event fields still logged.
+4. One writer, one shape (backlog logging.app_logger.s8_json_output_cleanup): bound
+   or unbound, an event is the same record in the same file; the database row keeps
+   today's content; the writer's guard drops what its own persistence produces.
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ import pytest
 
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs.jsonl_handler import JsonlHandler
+from rey_lib.logs.log_record_builder import LogRecordBuilder
+from tests.conftest import MintingDatabaseWriter, make_log_writer
 
 
 # ---------------------------------------------------------------------------
@@ -53,15 +58,20 @@ def _emit_and_read(
     logger.log(level, message, extra=extra or {})
 
     handler.close()
-    path = Path(handler._fh.name) if not handler._fh.closed else _find_jsonl(handler)
+    path = handler._writer.json_path()
     return json.loads(path.read_text(encoding="utf-8").strip())
 
 
-def _make_handler(tmp_path: Path, ctx: Any, ctx_fields: tuple = ()) -> tuple[JsonlHandler, Path]:
-    """Return (handler, jsonl_path) writing to a temp file."""
+def _make_handler(
+    tmp_path: Path, ctx: Any, ctx_fields: tuple = (), *, destination: str = "jsonl",
+    database: Any = None,
+) -> tuple[JsonlHandler, Path]:
+    """Return (handler, jsonl_path): the handler over a builder and a writer."""
     p = tmp_path / "test.jsonl"
-    h = JsonlHandler(jsonl_path=p, context={}, ctx=ctx, ctx_fields=ctx_fields)
-    return h, p
+    writer = make_log_writer(tmp_path, destination=destination, path=str(p), database=database)
+    builder = LogRecordBuilder(run_id=7, run_timestamp="20260822_000000", ctx=ctx,
+                               ctx_fields=ctx_fields)
+    return JsonlHandler(builder, writer), p
 
 
 # ---------------------------------------------------------------------------
@@ -288,37 +298,8 @@ class TestDumpCtxFalse:
 
 
 # ---------------------------------------------------------------------------
-# The run's persistence path when the run has one; the file is the fallback.
+# One writer, one shape (backlog logging.app_logger.s8_json_output_cleanup).
 # ---------------------------------------------------------------------------
-
-class _BoundRunLog:
-    """Stands in for a bound RunLog: a durable path, and the records appended."""
-
-    def __init__(self, path: Path, on_append: Any = None) -> None:
-        self._path = path
-        self._on_append = on_append
-        self.appended: list[tuple[str, dict[str, Any]]] = []
-
-    def path(self) -> Path:
-        return self._path
-
-    def append(self, record_type: str, *, message: str = "", **fields: Any) -> int:
-        self.appended.append((record_type, {"message": message, **fields}))
-        if self._on_append is not None:
-            self._on_append()
-        return 1
-
-
-@pytest.fixture()
-def bound(tmp_path: Path):
-    """A stand-in RunLog bound as the run's, released after the test."""
-    from rey_lib.logs.record_enrichment import bind_run, reset_run_binding
-
-    run_log = _BoundRunLog(tmp_path / "run.jsonl")
-    bind_run(run_log)
-    yield run_log
-    reset_run_binding()
-
 
 def _logger_for(handler: JsonlHandler) -> logging.Logger:
     logger = logging.getLogger(f"test.bound.{id(handler)}")
@@ -328,53 +309,91 @@ def _logger_for(handler: JsonlHandler) -> logging.Logger:
     return logger
 
 
-class TestTheBoundRunLogIsThePersistencePath:
+def _lines(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
-    @pytest.mark.parametrize("level, record_type", [
-        (logging.WARNING, "WARNING"),
-        (logging.INFO, "INFO"),
-        (logging.DEBUG, "INFO"),
-    ])
-    def test_a_record_goes_to_the_run_log_and_not_the_file(
-        self, tmp_path: Path, bound: _BoundRunLog, level: int, record_type: str,
-    ) -> None:
-        handler, path = _make_handler(tmp_path, _make_ctx())
-        _logger_for(handler).log(level, "said %s", "this")
-        handler.close()
 
-        assert bound.appended == [
-            (record_type, {"message": "said this", "logger": f"test.bound.{id(handler)}"}),
-        ]
-        assert path.read_text(encoding="utf-8") == ""
+def _bound_run_log(handler: JsonlHandler) -> Any:
+    """A RunLog sharing the handler's writer and builder, as open_run_log builds it."""
+    from rey_lib.logs.run_log import RunLog
 
-    def test_with_no_run_bound_the_file_is_written(self, tmp_path: Path) -> None:
-        handler, path = _make_handler(tmp_path, _make_ctx())
-        _logger_for(handler).warning("unbound")
-        handler.close()
+    run_log = RunLog(app="sample", run_id=7, run_timestamp="20260822_000000",
+                     writer=handler._writer, builder=handler._builder)
+    run_log.set_nest_level("app")
+    return run_log
 
-        assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "unbound"
 
-    def test_a_record_logged_during_the_hand_off_goes_to_the_file(self, tmp_path: Path) -> None:
+class TestOneWriterOneShape:
+
+    def test_bound_and_unbound_events_are_one_shape_in_one_file(self, tmp_path: Path) -> None:
         from rey_lib.logs.record_enrichment import bind_run, reset_run_binding
 
         handler, path = _make_handler(tmp_path, _make_ctx())
         logger = _logger_for(handler)
-        run_log = _BoundRunLog(tmp_path / "run.jsonl",
-                               on_append=lambda: logger.warning("from inside"))
-        bind_run(run_log)
+        logger.info("before")
+        bind_run(_bound_run_log(handler))
         try:
-            logger.warning("outer")
+            logger.warning("during %s", "the run")
         finally:
             reset_run_binding()
         handler.close()
 
-        assert [one[1]["message"] for one in run_log.appended] == ["outer"]
-        assert json.loads(path.read_text(encoding="utf-8").strip())["message"] == "from inside"
+        before, during = _lines(path)
+        for line in (before, during):
+            assert {"record_type", "sequence", "parent_sequence", "depth", "level",
+                    "source", "run_id", "nest_level"} <= set(line)
+        assert (before["record_type"], before["nest_level"]) == ("INFO", 0)
+        assert (during["record_type"], during["message"]) == ("WARNING", "during the run")
+        assert (during["nest_level"], during["app"]) == (3, "sample")
 
+    @pytest.mark.parametrize("level, record_type", [
+        (logging.WARNING, "WARNING"), (logging.INFO, "INFO"), (logging.DEBUG, "INFO"),
+    ])
+    def test_both_writes_the_row_first_and_the_line_names_it(
+        self, tmp_path: Path, level: int, record_type: str,
+    ) -> None:
+        database = MintingDatabaseWriter()
+        handler, path = _make_handler(tmp_path, _make_ctx(), destination="both", database=database)
+        _logger_for(handler).log(level, "said %s", "this", extra={"step": "load"})
+        handler.close()
 
-# ---------------------------------------------------------------------------
-# An AppError logged through the logger is persisted by the logger.
-# ---------------------------------------------------------------------------
+        [line] = _lines(path)
+        [row] = database.rows
+        assert line["run_log_id"] == row["run_log_id"]
+        assert (line["record_type"], line["level"], line["step"]) == (
+            record_type, logging.getLevelName(level), "load")
+        # The row keeps today's content, not the structured envelope.
+        assert row["record_type"] == record_type and row["message"] == "said this"
+        assert row[record_type.lower()] == {"logger": f"test.bound.{id(handler)}"}
+        assert not {"sequence", "depth", "step", "level"} & set(row)
+
+    def test_db_writes_no_file(self, tmp_path: Path) -> None:
+        database = MintingDatabaseWriter()
+        handler, path = _make_handler(tmp_path, _make_ctx(), destination="db", database=database)
+        _logger_for(handler).warning("only a row")
+        handler.close()
+
+        assert handler._writer.json_path() is None
+        assert not path.exists()
+        assert [row["message"] for row in database.rows] == ["only a row"]
+
+    def test_what_persistence_produces_is_dropped_everywhere(self, tmp_path: Path) -> None:
+        class _Noisy(MintingDatabaseWriter):
+            logger: logging.Logger
+
+            def write(self, record: dict[str, Any]) -> int:
+                self.logger.warning("from inside the write")
+                return super().write(record)
+
+        database = _Noisy()
+        handler, path = _make_handler(tmp_path, _make_ctx(), destination="both", database=database)
+        database.logger = _logger_for(handler)
+        database.logger.warning("outer")
+        handler.close()
+
+        assert [line["message"] for line in _lines(path)] == ["outer"]
+        assert [row["message"] for row in database.rows] == ["outer"]
+
 
 class _Refused(AppError):
     """An application's own error, rooted in the canonical error object."""
@@ -388,35 +407,22 @@ def _log_app_error(logger: logging.Logger, level: int) -> None:
         logger.log(level, "refused: %s", exc, exc_info=exc)
 
 
-class TestAnAppErrorIsPersistedByTheLogger:
+class TestAnAppErrorIsOneErrorRecord:
 
     @pytest.mark.parametrize("level", [logging.ERROR, logging.CRITICAL])
-    def test_with_run_persistence_active_it_is_an_error_record_there(
-        self, tmp_path: Path, level: int,
-    ) -> None:
-        from rey_lib.logs.record_enrichment import bind_run, reset_run_binding
-        from tests.conftest import make_db_run_log
-
-        run_log = make_db_run_log(tmp_path / "run", path=str(tmp_path / "run.jsonl"))
-        handler, fallback = _make_handler(tmp_path, _make_ctx())
-        bind_run(run_log)
-        try:
-            _log_app_error(_logger_for(handler), level)
-        finally:
-            reset_run_binding()
+    def test_it_is_an_error_record_in_both_outputs(self, tmp_path: Path, level: int) -> None:
+        database = MintingDatabaseWriter()
+        handler, path = _make_handler(tmp_path, _make_ctx(), destination="both", database=database)
+        _log_app_error(_logger_for(handler), level)
         handler.close()
 
-        [row] = [one for one in run_log.control.rows if one["record_type"] == "ERROR"]
+        [line] = _lines(path)
+        [row] = database.rows
+        assert row["record_type"] == line["record_type"] == "ERROR"
+        assert line["level"] == logging.getLevelName(level)
         assert "the transform could not be created" in row["message"]
-        assert fallback.read_text(encoding="utf-8") == ""
-
-    def test_with_no_run_persistence_the_logger_writes_its_file(self, tmp_path: Path) -> None:
-        handler, fallback = _make_handler(tmp_path, _make_ctx())
-        _log_app_error(_logger_for(handler), logging.ERROR)
-        handler.close()
-
-        written = json.loads(fallback.read_text(encoding="utf-8").strip())
-        assert "the transform could not be created" in written["message"]
+        assert row["error_message"]["error_type"] == "_Refused"
+        assert "the transform could not be created" in line["exception"]
 
 
 class TestDepthFromTheRecord:

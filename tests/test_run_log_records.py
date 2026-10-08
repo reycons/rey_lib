@@ -92,13 +92,20 @@ def _read(path: Path) -> list[dict]:
 
 
 def test_run_log_named_with_run_timestamp(tmp_path: Path) -> None:
-    """The run log is {execution_name}.<run_timestamp>.jsonl in the log directory."""
-    from rey_lib.logs.run_log import RunLog
+    """The JSONL file is named beside the configured log path, with the run timestamp.
 
-    run_log = RunLog(app="rey_loader", run_id="r1", run_timestamp="20260822_000000",
-                     log_dir=str(tmp_path), workflow="transform_load")
-    path = run_log.path()
-    assert path.name == f"transform_load.{run_log.run_timestamp}.jsonl"
+    The path is the JSONL writer's, resolved when the logging writer is
+    assembled (backlog logging.app_logger.s8_json_output_cleanup).
+    """
+    from rey_lib.logs.log_writer import build_log_writer
+
+    ctx = SimpleNamespace(
+        run_timestamp="20260822_000000",
+        log_path=str(tmp_path / "transform_load.{operation}.{timestamp}.log"),
+        logging=SimpleNamespace(run_store="jsonl"),
+    )
+    path = build_log_writer(ctx, "scan").json_path()
+    assert path.name == "transform_load.scan.20260822_000000.jsonl"
     assert path.parent == tmp_path
 
 
@@ -307,12 +314,11 @@ def test_run_app_operation_nonzero_result_records_failed_lifecycle(
     assert not any(record["record_type"] == "RESULTS_SUMMARY" for record in records)
 
 
-def test_open_run_log_fails_closed_without_log_path() -> None:
-    """Without a durable log path, resolving the run log raises (fail closed)."""
-    from rey_lib.logs.run_log import RunLog
+def test_a_run_log_without_jsonl_has_no_path(tmp_path: Path) -> None:
+    """With JSONL not selected there is no JSONL path; none is manufactured."""
+    from tests.conftest import make_run_log
 
-    with pytest.raises(ConfigError):
-        RunLog(app="rey_loader", run_id="r1", run_timestamp="ts").path()
+    assert make_run_log(tmp_path, destination="db").path() is None
 
 
 def test_record_append_is_fail_safe(tmp_path: Path) -> None:

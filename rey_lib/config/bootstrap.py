@@ -189,7 +189,9 @@ def build_ctx_for_app(
     establish_run_identity(ctx)
 
     _settle_log_level(ctx)
-    AppLogger._configure(ctx, operation=operation)
+    from rey_lib.logs.log_writer import build_log_writer
+
+    AppLogger._configure(ctx, operation, build_log_writer(ctx, operation))
     return ctx
 
 
@@ -897,20 +899,17 @@ def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
     Any
         The process's ``RunLog``.
     """
+    from rey_lib.logs.app_logger import AppLogger
     from rey_lib.logs.record_enrichment import _lineage_value
     from rey_lib.logs.run_log import DOMAIN_FIELDS, LINEAGE_FIELDS, RunLog
-    from rey_lib.logs.run_store import run_store_mode
 
-    destination = run_store_mode(ctx)
     # REUSED, NEVER BUILT. The run was created through this Control before
     # logging opened, and it is the Control holding the open batch. Building a
     # second one here would open a second connection to the same database and
     # the two would disagree about which batch is open.
     #
-    # Not gated on the destination any more. The destination says where run-log
-    # RECORDS go; it does not decide whether this run log can reach the Control
-    # that already exists. An installation writing JSONL still does database
-    # work, and that work belongs to the batch this Control opened.
+    # The run log opens and closes its steps on it. Where its RECORDS go is the
+    # logging writer's (logging.run_store), not this Control's.
     control = getattr(ctx, "shared_control", None)
 
     lineage = {}
@@ -919,15 +918,24 @@ def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
         if found:
             lineage[field] = found
 
+    if AppLogger._writer is None:
+        from rey_lib.errors.error_utils import StateError
+
+        raise StateError(
+            "open_run_log: logging is not configured. build_ctx_for_app assembles "
+            "the logging writer before the run log opens; there is nothing to "
+            "write this run's records through."
+        )
     run_log = RunLog(
         phase_started=phase_started,
         app=str(getattr(ctx, "owner_app_name", "") or getattr(ctx, "app_name", "")
                 or getattr(ctx, "name", "") or ""),
         run_id=ctx.run_id,
         run_timestamp=ctx.run_timestamp,
-        log_dir=getattr(ctx, "run_log_dir", None),
-        path=getattr(ctx, "log_file", None),
-        destination=destination,
+        # The one writer and builder AppLogger's configuration assembled: the
+        # run's typed records and its application events share them.
+        writer=AppLogger._writer,
+        builder=AppLogger._builder,
         control=control,
         workflow=getattr(ctx, "workflow_name", None),
         pipeline=getattr(ctx, "pipeline_name", None),
@@ -949,7 +957,6 @@ def open_run_log(ctx: Namespace, *, phase_started: float | None = None) -> Any:
 # wider change than run-log ownership.
 _ADOPTED_FIELDS = (
     "owner_app_name",
-    "run_log_dir",
     "parent_run_id",
     "subject_type",
     "subject_id",

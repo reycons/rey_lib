@@ -323,7 +323,7 @@ class TestTheAmbientBindingIsScoped:
 
 
 class TestOneRunIsOneLog:
-    """The run log's path is its identity."""
+    """The JSONL path is the log's identity; the JSONL writer owns it (S8)."""
 
     def test_rebinding_after_records_are_written_is_refused(self, tmp_path) -> None:
         from rey_lib.errors.error_utils import StateError
@@ -332,14 +332,14 @@ class TestOneRunIsOneLog:
         run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
         run_log.append("ROW_COUNT", count_name="c", count=1)
         with pytest.raises(StateError, match="One run is one log"):
-            run_log.bind_path(tmp_path / "b.jsonl")
+            run_log.writer.bind_path(tmp_path / "b.jsonl")
 
     def test_rebinding_before_any_record_is_allowed(self, tmp_path) -> None:
         """A pipeline learns its log directory after launch, so it may still name it."""
         from tests.conftest import make_run_log
 
         run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
-        run_log.bind_path(tmp_path / "b.jsonl")
+        run_log.writer.bind_path(tmp_path / "b.jsonl")
         assert Path(run_log.path()).name == "b.jsonl"
 
     def test_concurrent_scopes_for_one_run_are_supported(self, tmp_path) -> None:
@@ -599,33 +599,28 @@ class TestTheControlLifecycleOwnsTheBatch:
         and persisting those would call the database to record the call that
         was recording something.
         """
-        from tests.conftest import make_run_log
+        from tests.conftest import MintingDatabaseWriter, make_run_log
         from rey_lib.logs.sql_records import log_sql_execution
 
-        class _Control:
-            batch_id = 1
-            batch_step_id = None
-            owns_batch = False
-            run_log = None
-            events: list = []
+        events: list = []
+        holder: dict = {}
 
-            def write_run_log_record(self, **kwargs) -> None:
-                type(self).events.append(kwargs["record_type"])
-                # What every real control routine does: run SQL.
-                log_sql_execution(self.run_log, operation="write_run_log_record",
+        class _Database(MintingDatabaseWriter):
+            def write(self, record) -> int:
+                events.append(record["record_type"])
+                # What every real database write does: run SQL, a logged event.
+                log_sql_execution(holder["run_log"], operation="insert run_log row",
                                   status="success")
+                return super().write(record)
 
-        control = _Control()
-        _Control.events = []
-        run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"))
-        run_log.destination = "both"
-        run_log.control = control
-        control.run_log = run_log
+        run_log = make_run_log(tmp_path, path=str(tmp_path / "a.jsonl"), destination="both")
+        run_log.writer._database = _Database()
+        holder["run_log"] = run_log
 
         run_log.append("ROW_COUNT", count_name="c", count=1)
 
-        assert _Control.events == ["ROW_COUNT"], (
-            f"persistence recursed or recorded itself: {_Control.events}"
+        assert events == ["ROW_COUNT"], (
+            f"persistence recursed or recorded itself: {events}"
         )
         written = [json.loads(line) for line
                    in (tmp_path / "a.jsonl").read_text().splitlines() if line.strip()]

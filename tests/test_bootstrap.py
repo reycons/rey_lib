@@ -48,6 +48,8 @@ def test_build_ctx_for_app_loads_shared_installation_configs(
         # context has to name a destination or the run log lands under the
         # home directory of whoever ran the suite.
         f"log_path: '{tmp_path}/logs/sample_app.{{operation}}.{{timestamp}}.log'\n"
+        # JSONL is written only when asked for (logging.run_store).
+        "logging:\n  run_store: jsonl\n"
         "config_loading:\n"
         "  apps:\n"
         "    sample_app:\n"
@@ -101,6 +103,8 @@ def test_the_run_records_the_installation_it_runs_under(
         "  - name: configs\n"
         "    path: '{root}/development/installations/ccc'\n"
         f"log_path: '{tmp_path}/logs/sample_app.{{operation}}.{{timestamp}}.log'\n"
+        # JSONL is written only when asked for (logging.run_store).
+        "logging:\n  run_store: jsonl\n"
         "config_loading:\n"
         "  apps:\n"
         "    sample_app:\n"
@@ -143,7 +147,8 @@ def test_the_resolve_branch_starts_logging_from_the_context_it_built(tmp_path: P
         "paths:\n"
         "  - name: root\n"
         f"    path: {tmp_path}\n"
-        f"log_path: '{tmp_path}/logs/sample.{{operation}}.{{timestamp}}.log'\n",
+        f"log_path: '{tmp_path}/logs/sample.{{operation}}.{{timestamp}}.log'\n"
+        "logging:\n  run_store: jsonl\n",
         encoding="utf-8",
     )
 
@@ -157,6 +162,7 @@ def test_the_resolve_branch_starts_logging_from_the_context_it_built(tmp_path: P
 def test_the_supplied_branch_uses_the_context_it_was_given(tmp_path: Path) -> None:
     """A caller that already holds a context hands it over and is not re-resolved."""
     supplied = SimpleNamespace(
+        logging=SimpleNamespace(run_store="jsonl"),
         log_path=f"{tmp_path}/logs/supplied.{{operation}}.{{timestamp}}.log",
         log_level="INFO",
         marker="the caller's own context",

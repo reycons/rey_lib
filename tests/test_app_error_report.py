@@ -63,6 +63,16 @@ def _ctx() -> SimpleNamespace:
 @pytest.fixture
 def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(bootstrap, "build_ctx_for_app", lambda *_a, **_k: _ctx())
+    # What the real build_ctx_for_app leaves for the run log: the logging
+    # writer its configuration assembled (a database output, unconnected).
+    from rey_lib.logs.app_logger import AppLogger
+    from rey_lib.logs.log_record_builder import LogRecordBuilder
+    from rey_lib.logs.log_writer import DatabaseLogWriter, LogWriter
+
+    monkeypatch.setattr(AppLogger, "_writer",
+                        LogWriter("db", database=DatabaseLogWriter(connection=None)))
+    monkeypatch.setattr(AppLogger, "_builder",
+                        LogRecordBuilder(run_id=1, run_timestamp="20260822_000000"))
     return bootstrap.app_runtime
 
 

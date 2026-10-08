@@ -1,20 +1,21 @@
 """What a run store destination is, read from configuration at launch.
 
-This module is the configuration reader, not an owner. It answers two
-questions before any run log exists -- which destination is configured, and
-whether that destination is reachable -- and nothing afterwards.
+This module is the configuration reader, not an owner. It answers which
+outputs are configured, before any record is written, and nothing afterwards.
 
-Everything that happens *at* a destination belongs to ``RunLog``: whether to
-write to the database, when to open and close the control batch and step, what
-a lost structural record means, and how a record type maps to an event
-severity. Those used to live here, taking a RunLog and re-deciding what the
-run log already knew, which made this a second authority over persistence.
+Everything that happens *at* an output belongs to the logging writer
+(``rey_lib.logs.log_writer.LogWriter``): which outputs a record is written to,
+and whether a required write succeeded. Which records are structural belongs to
+``RunLog``.
 
-``logging.run_store`` is authoritative for run-log persistence:
+``logging.run_store`` is the single authority for the logging outputs:
 
-    jsonl   the append-only JSONL run log only (the historical behaviour)
-    db      the control database only
+    db      the control database only (the default when unset)
+    jsonl   the append-only JSONL file only
     both    both, and both are required
+
+JSONL is never written unless ``jsonl`` or ``both`` is stated (backlog
+logging.app_logger.s8_json_output_cleanup).
 
 ``both`` exists for the migration. It is not best-effort: if either destination
 fails the run log is only half written, which is the two-sources-of-truth
@@ -36,8 +37,8 @@ failing under ``jsonl`` behaves exactly as it always has.
 Layering
 --------
 Configuration only. It calls nothing beneath it and never reaches up into
-``rey_lib.run``. ``RunLog`` calls ``Control``; ``Control`` calls the procedure
-map; nothing here does either.
+``rey_lib.run``. The database output writes through the launch Control, which
+the launch boundary already requires; nothing here reaches it.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ __all__ = [
 
 RUN_STORE_MODES = ("jsonl", "db", "both")
 
-_DEFAULT_MODE = "jsonl"
+_DEFAULT_MODE = "db"
 
 
 # rey_lib.errors imports rey_lib.logs for its logger, and rey_lib.control does
@@ -80,11 +81,9 @@ def _logging_setting(ctx: Any, name: str) -> Any:
 
 
 def run_store_mode(ctx: Any) -> str:
-    """Return the configured run-store mode, defaulting to ``jsonl``.
+    """Return the configured run-store mode, defaulting to ``db``.
 
-    Existing installations that say nothing keep the behaviour they already
-    have. Choosing the database is a migration someone performs, never
-    something a missing key turns on.
+    Unset means the database only: JSONL is written only when it is asked for.
 
     Raises
     ------
@@ -103,33 +102,19 @@ def run_store_mode(ctx: Any) -> str:
 
 
 def validate_run_store(ctx: Any) -> None:
-    """Refuse an impossible destination before any application work starts.
+    """Refuse an invalid logging-output configuration before any work starts.
 
-    A run that cannot reach its required run store should fail at launch rather
-    than part-way through, having already done work it cannot record.
+    Validates the writer configuration only: ``logging.run_store`` must name a
+    known mode. The database output writes through the launch Control, which
+    the launch boundary already requires, so no logging connection or routine
+    map is asked for here.
 
     Raises
     ------
     ConfigError
-        When ``db``/``both`` is selected without the connection or routine map
-        it needs, or when an invalid reuse of a batch has been requested.
+        When ``logging.run_store`` is not one of :data:`RUN_STORE_MODES`.
     """
-    mode = run_store_mode(ctx)
-    if mode == "jsonl":
-        return
-
-    if not _logging_setting(ctx, "db_connection"):
-        raise _errors().ConfigError(
-            f"logging.run_store is '{mode}' but logging.db_connection names no "
-            "connection. State which connection the run store is written to."
-        )
-
-    control_cfg = getattr(ctx, "control", None)
-    if not getattr(control_cfg, "procedure_map", None):
-        raise _errors().ConfigError(
-            f"logging.run_store is '{mode}' but control.procedure_map is not set. "
-            "The routine contract for control database calls must be named."
-        )
+    run_store_mode(ctx)
 
 
 # ---------------------------------------------------------------------------

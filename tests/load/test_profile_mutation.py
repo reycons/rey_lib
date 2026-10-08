@@ -34,16 +34,9 @@ import pytest
 
 def _run_log(tmp_path: Path, control: Any) -> Any:
     """A run log that commits, which is what governed evidence requires."""
-    from rey_lib.logs.run_log import RunLog
+    from tests.conftest import make_run_log
 
-    return RunLog(
-        app="file_operator",
-        run_id="00000000-0000-4000-8000-000000000001",
-        run_timestamp="20260822_000000",
-        log_dir=str(tmp_path),
-        destination="both",
-        control=control,
-    )
+    return make_run_log(tmp_path, app="file_operator", destination="both", control=control)
 
 
 def _ctx(tmp_path: Path, **extra: Any) -> SimpleNamespace:

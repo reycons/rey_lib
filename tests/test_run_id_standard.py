@@ -95,17 +95,15 @@ def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:
     execution. It is the launch boundary above that refuses loudly, not this,
     and nothing on this path invents the identity it is missing.
     """
-    from rey_lib.logs.run_log import RunLog
+    from tests.conftest import make_run_log
 
     # Identity is a constructor argument: a run log cannot exist without one,
     # so the write path has nothing left to mint.
-    run_log = RunLog(app="probe", run_id="R1", run_timestamp="20260822_000000",
-                     log_dir=str(tmp_path))
+    run_log = make_run_log(tmp_path, app="probe", run_id="R1")
     assert run_log.run_id == "R1"
 
     # And a write that cannot land still degrades rather than raising.
-    unwritable = RunLog(app="probe", run_id="R1", run_timestamp="20260822_000000")
-    assert log_run_record(unwritable, "RUN_START") is None
+    assert log_run_record(_unwritable_run_log(tmp_path), "RUN_START") is None
 
 
 def test_ensure_helpers_share_one_identity() -> None:
@@ -148,3 +146,16 @@ def test_run_artifact_path_collision_never_overwrites(tmp_path: Path) -> None:
     assert second != first
     assert second.name.startswith("run_log.20260706_091845_")
     assert second.name.endswith(".jsonl")
+
+
+def _unwritable_run_log(tmp_path):
+    """A run log whose only output refuses every write."""
+    from tests.conftest import make_run_log
+
+    run_log = make_run_log(tmp_path, destination="db")
+
+    def _unreachable(record):
+        raise OSError("database gone")
+
+    run_log.writer._database.write = _unreachable
+    return run_log

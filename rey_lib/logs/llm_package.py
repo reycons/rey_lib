@@ -54,8 +54,12 @@ def create_llm_package(
     Appending is idempotent: a package already describing this source is not
     written twice.
     """
-    path = Path(run_log.path()).expanduser().resolve()
-    records = read_run_log_sections(path)["records"]
+    # No JSONL file (logging.run_store writes none) reads exactly as an empty log.
+    json_path = run_log.path()
+    records = (
+        read_run_log_sections(Path(json_path).expanduser().resolve())["records"]
+        if json_path is not None else []
+    )
 
     source_record = next((
         record for record in reversed(records)
@@ -638,8 +642,12 @@ def run_configured_log_analysis(
 
     result: dict[str, Any] = {"result": None, "action": None, "skipped": [], "failures": []}
 
-    path = Path(run_log.path()).expanduser().resolve()
-    records = read_run_log_sections(path)["records"]
+    # No JSONL file (logging.run_store writes none) reads exactly as an empty log.
+    json_path = run_log.path()
+    records = (
+        read_run_log_sections(Path(json_path).expanduser().resolve())["records"]
+        if json_path is not None else []
+    )
 
     # Newest existing package record -- the complete, self-contained LLM input.
     package = next((

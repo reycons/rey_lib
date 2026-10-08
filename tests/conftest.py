@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+from rey_lib.logs.log_record_builder import LogRecordBuilder
+from rey_lib.logs.log_writer import DatabaseLogWriter, JsonLogWriter, LogWriter
 from rey_lib.logs.run_log import RunLog
 from rey_lib.run import establish_run_identity
 
@@ -59,22 +61,63 @@ def make_run_log(
     pipeline: str | None = None,
     path: str | None = None,
 ) -> RunLog:
-    """Build a RunLog writing into ``tmp_path``.
+    """Build a RunLog whose logging writer writes into ``tmp_path``.
 
-    ``path`` supplies an already-resolved run log, which is how a second writer
-    joins an existing run — the cross-process continuation case.
+    ``destination`` is the logging.run_store mode. The JSONL file is
+    ``<pipeline|workflow|app>.<run_timestamp>.jsonl`` in ``tmp_path``, or ``path``
+    when one is supplied -- how a second writer joins an existing run, the
+    cross-process continuation case. The database output is a
+    ``MintingDatabaseWriter``.
     """
+    writer = make_log_writer(
+        tmp_path, destination=destination,
+        path=path or str(Path(tmp_path) / f"{pipeline or workflow or app or 'app'}.{run_timestamp}.jsonl"),
+    )
     return RunLog(
         app=app,
         run_id=run_id,
         run_timestamp=run_timestamp,
-        log_dir=None if path else str(tmp_path),
-        path=path,
-        destination=destination,
+        writer=writer,
+        builder=LogRecordBuilder(run_id=run_id, run_timestamp=run_timestamp, app=app),
         control=control,
         workflow=workflow,
         pipeline=pipeline,
     )
+
+
+class MintingDatabaseWriter(DatabaseLogWriter):
+    """The database output, minting run_log_ids the way control.run_log does.
+
+    The row is the real translation (``DatabaseLogWriter.row``); only the insert
+    is stood in for, returning sequential ids and keeping every row.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(connection=None)
+        self.rows: list[dict[str, Any]] = []
+
+    def write(self, record: dict[str, Any]) -> int:
+        run_log_id = len(self.rows) + 1
+        self.rows.append({"run_log_id": run_log_id, **self.row(record)})
+        return run_log_id
+
+
+def make_log_writer(
+    tmp_path: Path | str,
+    *,
+    destination: str = "jsonl",
+    path: str | None = None,
+    database: Any = None,
+) -> LogWriter:
+    """A logging writer for ``destination``: JSONL at ``path`` (or in ``tmp_path``)
+    and/or a ``MintingDatabaseWriter`` (or ``database`` when given)."""
+    json = None
+    if destination in ("jsonl", "both"):
+        json = JsonLogWriter(path or str(Path(tmp_path) / "app.jsonl"))
+    db = None
+    if destination in ("db", "both"):
+        db = database if database is not None else MintingDatabaseWriter()
+    return LogWriter(destination, database=db, json=json)
 
 
 #: The columns ``control.update_file_manifest`` writes.

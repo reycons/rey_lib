@@ -17,8 +17,9 @@ name the line that called ``AppLogger``.
 
 Configuration
 -------------
-``AppLogger._configure(ctx, operation)`` owns the process-wide logging pipeline:
-the root logger's level and filters, the console, text-file and JSONL handlers,
+``AppLogger._configure(ctx, operation, writer)`` owns the process-wide logging pipeline:
+the root logger's level and filters, the console and text-file handlers, the
+handler that hands every record to the logging writer it is given,
 the stderr bridge, and the levels of named third-party libraries. It is the one
 place the pipeline is built, and it runs when the launch boundary
 (``rey_lib.config.bootstrap.build_ctx_for_app``) calls it -- constructing an
@@ -88,6 +89,11 @@ class AppLogger:
 
     log_depth: int = 0
 
+    #: The process's logging writer and record builder, set by ``_configure``.
+    #: Private: the launch boundary hands them to the run log it opens.
+    _writer: Any = None
+    _builder: Any = None
+
     def __init__(self, name: str) -> None:
         self._logger = logging.getLogger(name)
 
@@ -126,29 +132,29 @@ class AppLogger:
         self._logger.error(msg, *args, **_from_caller(kwargs))
 
     @classmethod
-    def _configure(cls, ctx: Any, operation: str = "app") -> None:
+    def _configure(cls, ctx: Any, operation: str, writer: Any) -> None:
         """
         Initialise logging for the application.
 
         Sets up handlers based on what is configured in ctx:
           - Console (stderr): the live transport, for a reader watching a terminal.
-            Removed once the JSONL log is live if stdout is not a terminal, because
-            a redirected stream turns every governed record into a second text copy
-            of the run log at a destination configuration never named.
-          - JSONL: active by default unless disabled in ctx.logging.jsonl_enabled
-            or ctx.jsonl_enabled. This is the single durable execution log.
+            Removed once the durable output is live if stdout is not a terminal,
+            because a redirected stream turns every governed record into a second
+            text copy of the run log at a destination configuration never named.
+          - The logging writer: every record is built once by ``LogRecordBuilder``
+            and handed to ``writer``, which writes it to the outputs it holds
+            (``rey_lib.logs.log_writer``). Which outputs those are is the writer's;
+            this method knows none of them.
           - Human-readable file: opt-in legacy only (readable_enabled=true). New runs
             do not produce a separate human-readable execution log
-            (SGC_Rey_Log_Utils_JSONL_Only_Human_View_Cleanup); readable views are
-            rendered on demand from the JSONL run log via the render_* helpers.
+            (SGC_Rey_Log_Utils_JSONL_Only_Human_View_Cleanup).
 
-        Both path templates support two placeholders:
+        The readable path template supports two placeholders:
           {operation}  — the current operation name (e.g. 'scan', 'import')
           {timestamp}  — run start time as YYYYMMDD_HHMMSS
 
-        When both are configured both handlers are active. When only one is
-        configured only that handler is added. ctx.log_file is set to the
-        JSONL path when present, otherwise the human-readable log path.
+        ctx.log_file is set to the writer's JSONL path when it writes one,
+        otherwise the human-readable log path when that is enabled.
 
         The resolved log level is written back to ctx.log_level. Named
         third-party libraries get their configured level (``_LIBRARY_LEVELS``).
@@ -161,7 +167,9 @@ class AppLogger:
             after setup.
         operation : str
             Current operation name. Substituted into path templates.
-            Defaults to 'app'.
+        writer : LogWriter
+            The process's logging writer, assembled by the caller
+            (``rey_lib.logs.log_writer.build_log_writer``).
         """
         # Read, never resolved. _settle_log_level owns the precedence chain --
         # command line, application declaration, installation, default -- and hands
@@ -202,13 +210,6 @@ class AppLogger:
         # the same <name>.<run_timestamp>.<ext> convention as every other artifact.
         require_run_id(ctx)
 
-        # The run store is validated here, before any application work: a run that
-        # cannot reach a required destination should fail at launch rather than
-        # part-way through, having already done work it cannot record.
-        from rey_lib.logs.run_store import validate_run_store
-
-        validate_run_store(ctx)
-
         timestamp = ctx.run_timestamp
         log_file  = None
 
@@ -229,42 +230,46 @@ class AppLogger:
                 root.addHandler(file_handler)
                 log_file = str(resolved_log)
 
-        if _log_bool(ctx, "jsonl_enabled", True):
-            jsonl_path = _resolve_jsonl_path(ctx, operation, timestamp, resolved_log)
-            # Every run log record carries the run identity so records can be correlated
-            # to the run regardless of filename.
-            jsonl_handler = JsonlHandler(
-                jsonl_path = jsonl_path,
-                context    = {
-                    "run_id":         ctx.run_id,
-                    "run_timestamp":  ctx.run_timestamp,
-                    "run_started_at": getattr(ctx, "run_started_at", ""),
-                },
-                ctx        = ctx,
-                ctx_fields = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
-            )
-            jsonl_handler.setLevel(level)
-            jsonl_handler.addFilter(_ProviderWarningFilter())
-            jsonl_handler.addFilter(_DepthFilter())
-            root.addHandler(jsonl_handler)
-            log_file = str(jsonl_path)  # JSONL takes precedence for ctx.log_file
+        from rey_lib.logs.log_record_builder import LogRecordBuilder
 
-            # The live transport is for a reader watching a terminal. When stderr is
-            # not a terminal it is a file or a pipe somebody redirected, and every
-            # governed record written there becomes a second, text copy of the run
-            # log at a destination configuration never named -- which is the one
-            # thing the JSONL run log exists to be the only one of.
-            #
-            # Capturing stderr before this point is right: there is no governed
-            # logger yet, and a run log at a configured destination cannot record
-            # that configuration failing to resolve. That capture ends here. After
-            # it, an error belongs in the run log, so anything still writing to
-            # stderr is an ungoverned error path -- a defect to fix or a bridge to
-            # add, not a second log to keep.
-            if not _stderr_is_watched():
-                root.removeHandler(console_handler)
-                console_handler.close()
-                _bridge_stderr_to_logger()
+        # Every record is built once and handed to the writer (backlog
+        # logging.app_logger.s8_json_output_cleanup).
+        builder = LogRecordBuilder(
+            run_id        = ctx.run_id,
+            run_timestamp = ctx.run_timestamp,
+            app           = str(getattr(ctx, "owner_app_name", "")
+                                or getattr(ctx, "app_name", "")
+                                or getattr(ctx, "name", "") or ""),
+            context       = {"run_started_at": getattr(ctx, "run_started_at", "")},
+            ctx           = ctx,
+            ctx_fields    = tuple(getattr(ctx, "jsonl_ctx_fields", ())),
+        )
+        output_handler = JsonlHandler(builder, writer)
+        output_handler.setLevel(level)
+        output_handler.addFilter(_ProviderWarningFilter())
+        output_handler.addFilter(_DepthFilter())
+        root.addHandler(output_handler)
+        cls._writer = writer
+        cls._builder = builder
+        if writer.json_path() is not None:
+            log_file = str(writer.json_path())  # JSONL takes precedence for ctx.log_file
+
+        # The live transport is for a reader watching a terminal. When stderr is
+        # not a terminal it is a file or a pipe somebody redirected, and every
+        # governed record written there becomes a second, text copy of the run
+        # log at a destination configuration never named -- which is the one
+        # thing the durable run log exists to be the only one of.
+        #
+        # Capturing stderr before this point is right: there is no governed
+        # logger yet, and a run log at a configured destination cannot record
+        # that configuration failing to resolve. That capture ends here. After
+        # it, an error belongs in the run log, so anything still writing to
+        # stderr is an ungoverned error path -- a defect to fix or a bridge to
+        # add, not a second log to keep.
+        if not _stderr_is_watched():
+            root.removeHandler(console_handler)
+            console_handler.close()
+            _bridge_stderr_to_logger()
 
         ctx.log_level = level_name
 
@@ -417,23 +422,6 @@ def _resolve_log_path(template: Any, ctx: Any, operation: str, timestamp: str) -
     return Path(
         str(template).format_map(_LogPathValues(ctx, operation, timestamp))
     ).expanduser().resolve()
-
-
-def _resolve_jsonl_path(
-    ctx: Any,
-    operation: str,
-    timestamp: str,
-    resolved_log: Path | None,
-) -> Path:
-    """Resolve the authoritative JSONL path, defaulting beside readable logs."""
-    if getattr(ctx, "jsonl_path", None):
-        return _resolve_log_path(ctx.jsonl_path, ctx, operation, timestamp)
-    if resolved_log is not None:
-        return resolved_log.with_suffix(".jsonl")
-
-    app_name = getattr(ctx, "app_name", None) or getattr(ctx, "name", None) or "app"
-    template = f"~/logs/{app_name}/{app_name}.{{operation}}.{{timestamp}}.jsonl"
-    return _resolve_log_path(template, ctx, operation, timestamp)
 
 
 class _LogPathValues(dict[str, Any]):

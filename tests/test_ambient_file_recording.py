@@ -142,12 +142,10 @@ def test_bind_clear_current_run(tmp_path: Path) -> None:
     assert current_run() is None
     bind_run(make_run_log(tmp_path, path=str(tmp_path / "run_log.x.jsonl"), run_id="r9"))
     assert current_run() == {"run_log_path": str(tmp_path / "run_log.x.jsonl"), "run_id": "r9"}
-    # Binding without a durable path keeps the prior binding, and still pushes,
-    # so the matching clear pops its own frame rather than someone else's.
-    from rey_lib.logs.run_log import RunLog
-
-    bind_run(RunLog(app="", run_id="r0", run_timestamp="20260707_000000"))
-    assert current_run()["run_id"] == "r9"
+    # Any run log binds, JSONL or not (S8); a nested scope pushes, and the
+    # matching clear pops its own frame rather than someone else's.
+    bind_run(make_run_log(tmp_path, run_id="r0", destination="db"))
+    assert current_run() == {"run_log_path": None, "run_id": "r0"}
     clear_run()
     assert current_run()["run_id"] == "r9"
     clear_run()

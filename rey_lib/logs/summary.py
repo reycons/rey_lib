@@ -144,10 +144,9 @@ def create_results_summary(
         "failures": [],
     }
 
-    try:
-        resolved = str(run_log.path())
-    except Exception:  # noqa: BLE001 — an unopened run log resolves nothing.
-        resolved = None
+    # None when the run writes no JSONL file: nothing to summarize from.
+    path = run_log.path()
+    resolved = str(path) if path is not None else None
     if not resolved:
         result["skipped"].append("no_run_log_path")
         return result

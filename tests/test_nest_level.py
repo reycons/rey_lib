@@ -16,10 +16,14 @@ from rey_lib.errors.error_utils import ConfigError
 
 
 def _ctx():
-    """A run log with no durable path: nesting state lives in memory."""
+    """A run log: nesting state lives on it, in memory."""
+    from rey_lib.logs.log_record_builder import LogRecordBuilder
+    from rey_lib.logs.log_writer import DatabaseLogWriter, LogWriter
     from rey_lib.logs.run_log import RunLog
 
-    return RunLog(app="test", run_id="r1", run_timestamp="20260101_000000")
+    return RunLog(app="test", run_id="r1", run_timestamp="20260101_000000",
+                  writer=LogWriter("db", database=DatabaseLogWriter(connection=None)),
+                  builder=LogRecordBuilder(run_id="r1", run_timestamp="20260101_000000"))
 
 
 # TEST-001 — corrected semantic level constants.

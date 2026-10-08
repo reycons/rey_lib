@@ -89,9 +89,6 @@ def finalize_run_phases(run_log: 'RunLog') -> None:
             # it. Writing again would give one run two records each claiming
             # to be its complete partition.
             return
-        # Nothing durable to write to is an ordinary state, not a failure --
-        # the same fact _finalize_run consults before finalizing.
-        run_log.path()
         run_log.append(
             "RUN_PHASES",
             phases=phases.phases(),

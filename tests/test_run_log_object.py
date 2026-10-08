@@ -127,41 +127,40 @@ class TestSequencing:
             assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
 
 class TestDestination:
-    """RunLog decides where a record goes."""
+    """The logging writer decides where a record goes; RunLog decides nothing (S8)."""
 
     def test_jsonl_writes_only_the_file(self, tmp_path: Path) -> None:
         run_log = make_db_run_log(tmp_path, destination="jsonl")
 
-        assert (run_log.writes_jsonl, run_log.writes_db) == (True, False)
+        assert (run_log.writer.writes_jsonl, run_log.writer.writes_db) == (True, False)
+        assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
+        assert list(Path(tmp_path).glob("*.jsonl"))
 
-    def test_db_writes_only_the_control_database(self, tmp_path: Path) -> None:
-        class FakeControl:
-            def __init__(self) -> None:
-                self.written: list[dict] = []
+    def test_db_writes_only_the_database(self, tmp_path: Path) -> None:
+        run_log = make_db_run_log(tmp_path, destination="db")
 
-            def write_run_log_record(self, **values):
-                self.written.append(values)
+        assert run_log.append("ROW_COUNT", count_name="a", count=1) == 1
 
-        control = FakeControl()
-        run_log = make_db_run_log(tmp_path, destination="db", control=control)
-
-        run_log.append("ROW_COUNT", count_name="a", count=1)
-
-        assert [row["record_type"] for row in control.written] == ["ROW_COUNT"]
-        # The envelope is passed by name; what the caller supplied for this
+        rows = run_log.writer._database.rows
+        assert [row["record_type"] for row in rows] == ["ROW_COUNT"]
+        # The envelope is written by column; what the caller supplied for this
         # record type goes to that type's own jsonb column, selected by
         # record_type. There is no generic `fields` bucket to hide a stamped
-        # field in, and every other payload column stays null.
-        payloads = control.written[0]["payloads"]
-        assert payloads["row_count"] == {"count_name": "a", "count": 1}
-        assert payloads["sql_execution"] is None
-        # The database mints the identity, so the writer sends the parent it
-        # is under -- null at the root -- and receives the row's id back.
-        assert control.written[0]["parent_run_log_id"] is None
+        # field in, and no other payload column is written.
+        assert rows[0]["row_count"] == {"count_name": "a", "count": 1}
+        assert "sql_execution" not in rows[0]
+        # The database mints the identity; a root record names no parent.
+        assert "parent_run_log_id" not in rows[0]
+        assert run_log.path() is None
         assert not list(Path(tmp_path).glob("*.jsonl"))
 
-    def test_a_missing_control_is_a_write_fault_not_a_crash(self, tmp_path: Path) -> None:
-        run_log = make_db_run_log(tmp_path, destination="db", control=None)
+    def test_a_failing_database_write_is_a_write_fault_not_a_crash(self, tmp_path: Path) -> None:
+        run_log = make_db_run_log(tmp_path, destination="db")
+
+        def _unreachable(record):
+            raise OSError("database gone")
+
+        run_log.writer._database.write = _unreachable
 
         assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
 

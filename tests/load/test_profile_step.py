@@ -65,16 +65,9 @@ def _ctx(tmp_path: Path, *selected: tuple[int, Path],
 
 def _run_log(tmp_path: Path, ctx: Any) -> Any:
     """A run log that commits, which is what governed evidence requires."""
-    from rey_lib.logs.run_log import RunLog
+    from tests.conftest import make_run_log
 
-    return RunLog(
-        app="rey_loader",
-        run_id="00000000-0000-4000-8000-000000000001",
-        run_timestamp="20260822_000000",
-        log_dir=str(tmp_path),
-        destination="both",
-        control=ctx.shared_control,
-    )
+    return make_run_log(tmp_path, app="rey_loader", destination="both", control=ctx.shared_control)
 
 
 def _profiles(ctx: Any) -> list[dict]:

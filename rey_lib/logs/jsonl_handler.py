@@ -1,38 +1,28 @@
 """
-JSONL logging handler.
+The logging handler, and the record-classification vocabulary.
 
-A standard ``logging.Handler`` that writes one JSON record per log event to
-an append-only JSONL file. Drop it into any Python logging setup via
-``logger.addHandler`` or ``logging.getLogger().addHandler`` — no application
-code changes are required.
+``JsonlHandler`` is plumbing. It receives each stdlib ``LogRecord`` that reaches
+the configured pipeline and forwards it: ``LogRecordBuilder`` builds the
+structured record once, and ``LogWriter`` writes it to the outputs
+``logging.run_store`` selects (db, jsonl or both). The handler builds nothing,
+owns no file and chooses no destination. Where a run log is bound, the record
+is built with that run's context and the run log is told the row it produced,
+so the row can anchor the run's nesting.
 
-Each record contains:
-  - envelope fields  (sequence, parent_sequence, depth, timestamp, level,
-                      source, message)
-  - session context  (static dict supplied at construction)
-  - ctx snapshot     (named attributes read from a ctx object at emit time,
-                      reflecting current runtime state)
-  - per-event data   (any ``extra`` fields the caller passed to the log call)
-
-Field names in the output can be renamed via ``field_map``.
-
-Depth and parent tracking use ``record.log_depth``, which the configured
-pipeline stamps from ``AppLogger.log_depth`` before the record reaches this
-handler. The handler reads it; it does not know where depth comes from.
+It keeps its historical name; it is no longer specific to JSONL.
 
 Public API
 ----------
-JsonlHandler   logging.Handler subclass. Add to any logger or root logger.
+JsonlHandler    logging.Handler subclass, added by AppLogger's configuration.
+SENSITIVE_FIELD The field a record states its own sensitivity in.
+classified / sensitive
+                Build a record's ``extra`` fields with that classification.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import threading
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 __all__ = ["JsonlHandler", "SENSITIVE_FIELD", "classified", "sensitive"]
 
@@ -69,286 +59,35 @@ def sensitive(**fields: Any) -> dict[str, Any]:
     """Fields for a record whose content is sensitive."""
     return classified(True, **fields)
 
-# LogRecord attributes that are always present — excluded from per-event extras
-# so we don't duplicate envelope fields or emit internal Python logging noise.
-_STANDARD_ATTRS: frozenset[str] = frozenset({
-    "args", "created", "exc_info", "exc_text", "filename", "funcName",
-    "levelname", "levelno", "lineno", "message", "module", "msecs", "msg",
-    "name", "pathname", "process", "processName", "relativeCreated",
-    "stack_info", "thread", "threadName", "taskName",
-    # Stamped by the configured pipeline and written as the envelope's depth.
-    "log_depth",
-})
-
-# Extra keys considered SQL diagnostic data — excluded when dump_sql is false.
-_SQL_EXTRA_KEYS: frozenset[str] = frozenset({
-    "sql", "proc", "query", "params", "inputs", "sql_type",
-})
-
-# True while this thread is handing a record to the bound run log. A record
-# logged during that hand-off -- the run log's own failure warning -- goes to
-# the fallback file instead of back into the run log.
-_DELIVERING = threading.local()
-
-
 class JsonlHandler(logging.Handler):
-    """
-    Logging handler that writes structured JSONL records to a file.
+    """Forwards each record to the structured-record builder and the logging writer.
 
-    Plugs into Python's logging system as a standard handler. Each call to
-    any logger whose records propagate to this handler produces one JSON line
-    appended to the JSONL file, flushed immediately.
-
-    Depth and parent sequence are derived from ``record.log_depth``, stamped
-    by the configured pipeline from ``AppLogger.log_depth``. No changes to
-    application logging calls are needed.
-
-    Parameters
-    ----------
-    jsonl_path : Path
-        Destination JSONL file. Parent directories are created automatically.
-        Opened in append mode — safe to reuse across restarts.
-    context : dict[str, Any]
-        Static key-value pairs stamped on every record (e.g. ``batch_id``,
-        ``env``). Snapshot at construction — values are not re-read.
-    ctx : Any, optional
-        Application context object. Attributes named in ``ctx_fields`` are
-        read at each emit call so the record reflects current runtime state.
-    ctx_fields : tuple[str, ...], optional
-        Names of ``ctx`` attributes to snapshot into each record.
-    field_map : dict[str, str], optional
-        Renames fields in the JSONL output. Maps canonical name to output
-        name (e.g. ``{"batch_id": "RunID"}``). Applied after all other
-        fields are assembled.
+    Args:
+        builder: The process's ``LogRecordBuilder``.
+        writer: The process's ``LogWriter``.
     """
 
-    def __init__(
-        self,
-        jsonl_path: Path,
-        context: dict[str, Any],
-        ctx: Any = None,
-        ctx_fields: tuple[str, ...] = (),
-        field_map: Optional[dict[str, str]] = None,
-    ) -> None:
-        """Open the JSONL file and initialise tracking state."""
+    def __init__(self, builder: Any, writer: Any) -> None:
         super().__init__()
-        self._context    = dict(context)
-        self._ctx        = ctx
-        self._ctx_fields = ctx_fields
-        self._field_map  = field_map or {}
-        self._sequence   = 0
-
-        # Maps depth level → sequence number of the last record at that depth.
-        # Used to resolve parent_sequence without requiring explicit span calls.
-        self._depth_seq: dict[int, int] = {}
-
-        from rey_lib.files.file_utils import open_text_file
-
-        resolved = Path(jsonl_path).expanduser().resolve()
-        self._fh = open_text_file(resolved, "a", encoding="utf-8")
-
-    # ------------------------------------------------------------------
-    # logging.Handler interface
-    # ------------------------------------------------------------------
+        self._builder = builder
+        self._writer = writer
 
     def emit(self, record: logging.LogRecord) -> None:
-        """
-        Write one JSON record to the JSONL file.
+        """Build the record once and hand it to the writer.
 
-        Reads ``record.log_depth`` for depth and parent resolution.
-        Any ``extra`` fields the caller passed to the log call are included
-        as per-event data. Standard ``LogRecord`` attributes are excluded to
-        avoid duplication.
-
-        Parameters
-        ----------
-        record : logging.LogRecord
-            The log record produced by the logging framework.
+        A record produced while the writer is persisting is dropped from every
+        output, as the writer's guard requires.
         """
+        if self._writer.persisting:
+            return
         try:
-            self._sequence += 1
-            seq   = self._sequence
-            depth = max(0, getattr(record, "log_depth", 0))
-
-            parent_seq = self._resolve_parent(depth)
-            self._depth_seq[depth] = seq
-            self._prune_depth_stack(depth)
-
-            rec = self._build_record(record, seq, parent_seq, depth)
-
-            # The run's persistence path when the run has one; this file is
-            # the fallback.
             from rey_lib.logs.record_enrichment import bound_run_log
 
             run_log = bound_run_log()
-            if run_log is not None and not getattr(_DELIVERING, "active", False):
-                _DELIVERING.active = True
-                try:
-                    if record.levelno >= logging.ERROR:
-                        self._persist_error(run_log, record, rec)
-                    else:
-                        record_type = "WARNING" if record.levelno >= logging.WARNING else "INFO"
-                        run_log.append(record_type, message=rec["message"], logger=record.name)
-                finally:
-                    _DELIVERING.active = False
-                return
-
-            self._write(rec)
+            run = run_log.run_fields() if run_log is not None else None
+            built, row = self._builder.log_record(record, run=run)
+            run_log_id = self._writer.write(built, database_record=row)
+            if run_log is not None:
+                run_log.recorded(built["nest_level"], run_log_id)
         except Exception:  # noqa: BLE001 — handler must never raise
             self.handleError(record)
-
-    @staticmethod
-    def _persist_error(run_log: Any, record: logging.LogRecord, rec: dict[str, Any]) -> None:
-        """Write one error event through the run's persistence as its ERROR record.
-
-        The error object the record carries names the error's type; the
-        exception text is the one this handler already derived. Shaping and
-        redaction are rey_lib.errors' payload builder's.
-        """
-        from rey_lib.errors.error_utils import build_error_record_payload
-
-        fields: dict[str, Any] = {"logger": record.name}
-        if record.exc_info and record.exc_info[0] is not None:
-            fields["error_type"] = record.exc_info[0].__name__
-        if "exception" in rec:
-            fields["sanitized_exception"] = rec["exception"]
-        built = build_error_record_payload(message=rec["message"], **fields)
-        run_log.append("ERROR", message=built["message"], error_message=built["error_message"])
-
-    def close(self) -> None:
-        """Flush and close the JSONL file."""
-        try:
-            self._fh.flush()
-            self._fh.close()
-        finally:
-            super().close()
-
-    # ------------------------------------------------------------------
-    # Private
-    # ------------------------------------------------------------------
-
-    def _resolve_parent(self, depth: int) -> Optional[int]:
-        """Return the sequence number of the nearest ancestor record."""
-        for d in range(depth - 1, -1, -1):
-            if d in self._depth_seq:
-                return self._depth_seq[d]
-        return None
-
-    def _prune_depth_stack(self, depth: int) -> None:
-        """Remove tracking entries for depths deeper than current."""
-        for d in list(self._depth_seq):
-            if d > depth:
-                del self._depth_seq[d]
-
-    def _walk_ctx_path(self, path: str) -> Any:
-        """Walk a dot-separated attribute path on ctx. Returns None if any segment is missing."""
-        obj = self._ctx
-        for part in path.split("."):
-            obj = getattr(obj, part, None)
-            if obj is None:
-                return None
-        return obj
-
-    def _diagnostics_level(self, level_key: str) -> Any:
-        """Return the diagnostics Namespace for ``level_key``, or ``None``.
-
-        Reads ``ctx.diagnostics.{level_key}`` at emit time so env-override
-        changes take effect without restarting. Returns ``None`` when
-        ``ctx.diagnostics`` is absent — all behaviour falls back to defaults.
-        """
-        if self._ctx is None:
-            return None
-        diag = getattr(self._ctx, "diagnostics", None)
-        if diag is None:
-            return None
-        return getattr(diag, level_key, None)
-
-    def _resolve_ctx_fields(self, diag_level: Any) -> tuple[str, ...]:
-        """Return ctx fields to snapshot.
-
-        When diagnostics config is present, reads ``ctx_fields`` from it.
-        Falls back to the constructor-supplied ``ctx_fields`` tuple so
-        existing callers that pass fields at construction keep working.
-        """
-        if diag_level is not None:
-            fields = getattr(diag_level, "ctx_fields", None)
-            if fields is not None:
-                return tuple(fields)
-        return self._ctx_fields
-
-    def _build_record(
-        self,
-        record:     logging.LogRecord,
-        seq:        int,
-        parent_seq: Optional[int],
-        depth:      int,
-    ) -> dict[str, Any]:
-        """Assemble the full JSON record and apply field renaming."""
-        ts = getattr(record, "timestamp", None) or datetime.fromtimestamp(
-            record.created, tz=timezone.utc
-        ).isoformat(timespec="milliseconds")
-
-        out: dict[str, Any] = {
-            "sequence":        seq,
-            "parent_sequence": parent_seq,
-            "depth":           depth,
-            "timestamp":       ts,
-            "level":           record.levelname,
-            "source":          record.name,
-            "message":         record.getMessage(),
-        }
-
-        # Session context
-        out.update(self._context)
-
-        # Resolve diagnostics config for this severity level.
-        level_key  = record.levelname.lower()
-        diag_level = self._diagnostics_level(level_key)
-        ctx_fields = self._resolve_ctx_fields(diag_level)
-
-        # ctx snapshot — whitelisted fields only.
-        # When diagnostics config is present: nest under ctx_dump (structured).
-        # When falling back to constructor ctx_fields: write flat (legacy behaviour).
-        if self._ctx is not None and ctx_fields:
-            if diag_level is not None and getattr(diag_level, "dump_ctx", False):
-                ctx_dump = {
-                    f: self._walk_ctx_path(f)
-                    for f in ctx_fields
-                    if self._walk_ctx_path(f) is not None
-                }
-                if ctx_dump:
-                    out["ctx_dump"] = ctx_dump
-            elif diag_level is None:
-                # Legacy: flat fields from constructor ctx_fields.
-                for field in ctx_fields:
-                    out[field] = self._walk_ctx_path(field)
-
-        # Per-event extras — caller-supplied extra={} fields.
-        # SQL-related keys are suppressed when dump_sql is explicitly false.
-        dump_sql = getattr(diag_level, "dump_sql", True) if diag_level is not None else True
-        for key, val in record.__dict__.items():
-            if key in _STANDARD_ATTRS or key.startswith("_"):
-                continue
-            if not dump_sql and key in _SQL_EXTRA_KEYS:
-                continue
-            out.setdefault(key, val)
-
-        # Exception info — controlled by dump_stack_trace (default true).
-        dump_stack_trace = (
-            getattr(diag_level, "dump_stack_trace", True)
-            if diag_level is not None else True
-        )
-        if dump_stack_trace and record.exc_info and record.exc_info[0] is not None:
-            out["exception"] = logging.Formatter().formatException(record.exc_info)
-
-        # Field renaming
-        for canonical, output_name in self._field_map.items():
-            if canonical in out:
-                out[output_name] = out.pop(canonical)
-
-        return out
-
-    def _write(self, record: dict[str, Any]) -> None:
-        """Append one JSON line and flush immediately."""
-        self._fh.write(json.dumps(record, default=str) + "\n")
-        self._fh.flush()
