@@ -1,7 +1,7 @@
 """No application starts its own logging.
 
 The shared bootstrap owns context acquisition, logging initialization and the
-process error boundary. An application that calls setup_logging itself has taken
+process error boundary. An application that configures logging itself has taken
 one of those back, and it does so invisibly: the process still starts, still
 logs, and nothing fails until two apps disagree about where records go.
 
@@ -26,9 +26,8 @@ APPS_ROOT = Path(__file__).resolve().parents[2]
 FROZEN = {"trade_analyzer"}
 
 # Logging is started by AppLogger._configure (backlog
-# logging.app_logger.s3_configuration). setup_logging is a delegate to it until
-# S6, so calling either one starts logging.
-_CALL = re.compile(r"^\s*[^#\n]*\b(?:setup_logging|AppLogger\._configure)\s*\(", re.MULTILINE)
+# logging.app_logger.s3_configuration); setup_logging was removed in S6.
+_CALL = re.compile(r"^\s*[^#\n]*\bAppLogger\._configure\s*\(", re.MULTILINE)
 
 
 def _application_sources() -> list[Path]:
@@ -55,7 +54,7 @@ def test_no_application_initializes_logging_itself() -> None:
         if _CALL.search(path.read_text(encoding="utf-8", errors="ignore"))
     ]
     assert offenders == [], (
-        "these call setup_logging directly instead of starting through "
+        "these configure logging directly instead of starting through "
         f"build_ctx_for_app: {offenders}"
     )
 
@@ -63,7 +62,7 @@ def test_no_application_initializes_logging_itself() -> None:
 def test_the_frozen_exception_is_still_real() -> None:
     """An exception that stops being true is worse than no exception.
 
-    If trade_analyzer no longer calls setup_logging, it has either been migrated
+    If trade_analyzer no longer configures logging, it has either been migrated
     or removed, and either way this entry should go rather than sit here
     implying a debt that no longer exists.
     """
@@ -84,6 +83,5 @@ def test_the_bootstrap_is_the_only_place_logging_starts() -> None:
     """One initializer, in the module that owns startup."""
     bootstrap = (APPS_ROOT / "rey_lib/rey_lib/config/bootstrap.py").read_text(encoding="utf-8")
     assert bootstrap.count("AppLogger._configure(") == 1
-    assert bootstrap.count("setup_logging(") == 0
     # No parallel error boundary: an uncaught failure is the interpreter's.
     assert "install_process_error_boundary" not in bootstrap

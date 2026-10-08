@@ -224,10 +224,9 @@ def test_the_exemption_list_names_only_the_implementation_layer() -> None:
     """The exemptions are exactly the modules that cannot route through themselves.
 
     Guards the failure mode this policy is most likely to suffer: an exemption
-    list quietly growing until the rule holds by construction. During the
-    AppLogger migration there are exactly two logging infrastructure boundaries:
-    app_logger.py, the canonical one, which remains, and logging_setup.py, the
-    legacy one, which leaves in slice S6 (backlog logging.app_logger_canonical_object).
+    list quietly growing until the rule holds by construction. There is exactly
+    one logging infrastructure boundary: app_logger.py, the canonical one
+    (logging_setup.py left in S6; backlog logging.app_logger_canonical_object).
     """
     rules = load_scan_rules(RULES_PATH)
     logging_rule = next(
@@ -236,10 +235,7 @@ def test_the_exemption_list_names_only_the_implementation_layer() -> None:
         if rule.rule_id == "logging_routes_through_the_logging_owner"
     )
 
-    assert logging_rule.allowed_path_globs == (
-        "rey_lib/logs/logging_setup.py",
-        "rey_lib/logs/app_logger.py",
-    )
+    assert logging_rule.allowed_path_globs == ("rey_lib/logs/app_logger.py",)
 
 
 def test_the_test_suite_is_outside_the_logging_rule_scope() -> None:

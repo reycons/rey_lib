@@ -42,8 +42,6 @@ from rey_lib.logs.log_utils import (
     discover_runs,
     get_run_file_reference,
     get_run_section,
-    log_enter,
-    log_exit,
     log_file_metadata,
     project_run_log,
     read_jsonl_file_record_page,
@@ -58,7 +56,6 @@ from rey_lib.logs.log_utils import (
     require_run_id,
     run_summary,
     runs_in_run_log,
-    setup_logging,
 )
 from rey_lib.logs.log_utils import (
     EXECUTION_RECORD_TYPES,
@@ -144,8 +141,6 @@ __all__ = [
     "build_artifact_manifest_entries",
     "format_jsonl_records",
     "get_logger",
-    "log_enter",
-    "log_exit",
     "log_file_metadata",
     "project_run_log",
     "discover_runs",
@@ -163,7 +158,6 @@ __all__ = [
     "render_summary_view",
     "render_error_warning_view",
     "require_run_id",
-    "setup_logging",
     "sanitize_log_value",
     "sanitize_command_arguments",
     "log_run_record",

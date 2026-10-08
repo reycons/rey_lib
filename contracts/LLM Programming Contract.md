@@ -207,7 +207,7 @@ All reusable infrastructure is provided by `rey_lib`. Projects must use it — n
 - `rey_lib.config.ctx` — `find_by_name()`, `find_in_ctx()`, `find_in_ctx_versioned()`
 - `rey_lib.errors.error_utils` — `AppError`, `ConfigError`, `DatabaseError`, `handle_exception()`, `validate_env()`, `validate_path()`, `validate_required()`
 - `rey_lib.logs` — `AppLogger` (defined in `rey_lib.logs.app_logger`): application logging (`debug`, `info`, `warning`, `isEnabledFor`) and the one process-wide call depth (`AppLogger.log_depth`, moved only by `enter()` / `exit()`)
-- `rey_lib.logs.logging_setup` — **transitional** legacy helpers, also re-exported by `rey_lib.logs.log_utils`: `get_logger()` (returns `AppLogger` from S5; removed in S7), `log_enter()` / `log_exit()` (pass-throughs to `AppLogger.enter()` / `exit()`; removed in S6), `setup_logging()` (delegate to AppLogger configuration; removed in S6). Backlog `logging.app_logger_canonical_object`.
+- `rey_lib.logs.logging_setup` — **transitional**: `get_logger(name)` returns `AppLogger(name)` (also re-exported by `rey_lib.logs.log_utils`); removed in S7, when callers use `AppLogger(__name__)`. Backlog `logging.app_logger_canonical_object`.
 - `rey_lib.db.sqlserver_utils` — SQL Server connections, query execution, bulk insert, transaction handling
 - `rey_lib.db.duckdb_utils` — DuckDB connections, SQL file loading, query execution
 - `rey_lib.files.file_utils` — `input_files()`, `get_reader()`, `write_file()`, `move_file()`, `converted_output_path()`
@@ -431,7 +431,7 @@ Before outputting any Python, verify each of the following:
 **Architecture:**
 
 - [ ] `ctx` passed as first argument to functions that need it — not injected globally
-- [ ] `ctx.log_level` is set; call depth is `AppLogger.log_depth`, moved only by `AppLogger.enter()` / `exit()` (the transitional `log_enter` / `log_exit` pass through to them until S6)
+- [ ] `ctx.log_level` is set; call depth is `AppLogger.log_depth`, moved only by `logger.enter()` / `logger.exit()`
 - [ ] `main.py` contains orchestration only
 - [ ] App-specific logic is in `{project_name}/`, reusable logic is in `rey_lib`
 - [ ] Dependency direction is correct: `main.py` → `{project_name}/` → `rey_lib` only

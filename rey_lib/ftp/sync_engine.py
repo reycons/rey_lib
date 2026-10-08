@@ -34,7 +34,7 @@ from rey_lib.ftp.state_manager import (
     save_state,
 )
 from rey_lib.errors.error_utils import FtpDownloadError
-from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
+from rey_lib.logs.log_utils import get_logger
 
 __all__ = ["run_sync"]
 
@@ -65,7 +65,7 @@ def run_sync(ctx: Any, conn: Any, resync: bool = True) -> int:
     Returns:
         Total number of files successfully downloaded in this run.
     """
-    log_enter(ctx, f"run_sync: {conn.name}", log)
+    log.enter(f"run_sync: {conn.name}")
     log.info("=== Starting sync for connection: %s ===", conn.name)
 
     state      = load_state(ctx, conn)
@@ -119,7 +119,7 @@ def run_sync(ctx: Any, conn: Any, resync: bool = True) -> int:
     save_state(ctx, conn, state)
 
     _log_summary(conn.name, all_downloaded, all_failed, all_abandoned)
-    log_exit(ctx, f"run_sync done: {conn.name}", log)
+    log.exit(f"run_sync done: {conn.name}")
     return len(all_downloaded)
 
 
@@ -151,7 +151,7 @@ def _retry_failed(
     Returns:
         Tuple of (downloaded filenames, still-failing filenames, abandoned filenames).
     """
-    log_enter(ctx, f"_retry_failed: {len(retry_queue)} file(s)", log)
+    log.enter(f"_retry_failed: {len(retry_queue)} file(s)")
     downloaded: list[str]  = []
     still_failed: list[str] = []
     abandoned: list[str]   = []
@@ -197,10 +197,10 @@ def _retry_failed(
             else:
                 still_failed.append(filename)
 
-    log_exit(ctx, (
+    log.exit(
         f"_retry_failed done: {len(downloaded)} recovered, "
         f"{len(still_failed)} still failing, {len(abandoned)} abandoned"
-    ), log)
+    )
     return downloaded, still_failed, abandoned
 
 
@@ -227,7 +227,7 @@ def _sync_path(
     Returns:
         Tuple of (downloaded filenames, failed filenames).
     """
-    log_enter(ctx, f"_sync_path: {remote_path}", log)
+    log.enter(f"_sync_path: {remote_path}")
     log.info("Scanning: %s", remote_path)
 
     all_files = list_remote_files(session, remote_path)
@@ -252,7 +252,7 @@ def _sync_path(
         to_download = to_download[:limit]
 
     downloaded, failed = _download_in_chunks(ctx, conn, session, remote_path, to_download, state)
-    log_exit(ctx, f"_sync_path done: {len(downloaded)} downloaded, {len(failed)} failed", log)
+    log.exit(f"_sync_path done: {len(downloaded)} downloaded, {len(failed)} failed")
     return downloaded, failed
 
 
@@ -277,7 +277,7 @@ def _download_in_chunks(
     Returns:
         Tuple of (downloaded filenames, failed filenames).
     """
-    log_enter(ctx, "_download_in_chunks", log)
+    log.enter("_download_in_chunks")
     local_dir   = _local_dir_for_path(conn, remote_path)
     downloaded: list[str] = []
     failed: list[str]     = []
@@ -302,7 +302,7 @@ def _download_in_chunks(
                 add_to_retry_queue(state, remote_path, filename, modified_dt, size)
                 failed.append(filename)
 
-    log_exit(ctx, "_download_in_chunks done", log)
+    log.exit("_download_in_chunks done")
     return downloaded, failed
 
 

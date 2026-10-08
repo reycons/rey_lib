@@ -44,8 +44,6 @@ from typing import Any, Callable, Optional
 from rey_lib.logs.log_utils import (
     get_logger,
     log_artifact_reference,
-    log_enter,
-    log_exit,
     log_input_discovered,
     log_row_count,
     log_step_failure,
@@ -193,11 +191,7 @@ def transform_files(
         f"{cfg.name} {cfg.version}" for cfg in transforms
     )
 
-    log_enter(
-        ctx,
-        f"transform_files: {data_source.name} / {transform_desc}",
-        _logger,
-    )
+    _logger.enter(f"transform_files: {data_source.name} / {transform_desc}")
     total = 0
 
     try:
@@ -248,7 +242,7 @@ def transform_files(
                 total += 1
 
     finally:
-        log_exit(ctx, f"transform_files done: {total} file(s) transformed", _logger)
+        _logger.exit(f"transform_files done: {total} file(s) transformed")
 
     return total
 
@@ -410,7 +404,7 @@ def load_files_to_callback(
     int
         Total rows loaded across all processed files.
     """
-    log_enter(ctx, f"load_files_to_callback: {data_source.name} / {load_cfg.name}", _logger)
+    _logger.enter(f"load_files_to_callback: {data_source.name} / {load_cfg.name}")
     total_rows = 0
 
     try:
@@ -486,11 +480,7 @@ def load_files_to_callback(
                                    ctx=ctx, run_log=run_log)
 
     finally:
-        log_exit(
-            ctx,
-            f"load_files_to_callback done: {total_rows} row(s) loaded",
-            _logger,
-        )
+        _logger.exit(f"load_files_to_callback done: {total_rows} row(s) loaded")
 
     return total_rows
 
@@ -719,7 +709,7 @@ def _transform_one_file(
 	file_path: Path,
 	header_line: Optional[str] = None,
 ) -> bool:
-    log_enter(ctx, f"_transform_one_file: {file_path.name}", _logger)
+    _logger.enter(f"_transform_one_file: {file_path.name}")
 
     try:
         if header_line is None and not _validate_header(file_path, transform_cfg):
@@ -739,11 +729,7 @@ def _transform_one_file(
                 transform_cfg.movements.failure, file_path, data_source.paths,
                 ctx=ctx, run_log=run_log,
             )
-            log_exit(
-                ctx,
-                f"_transform_one_file rejected (header): {file_path.name}",
-                _logger,
-            )
+            _logger.exit(f"_transform_one_file rejected (header): {file_path.name}")
             return False
 
         _setup_file_ctx(ctx, file_path, data_source.paths)
@@ -791,7 +777,7 @@ def _transform_one_file(
             if movements is not None and getattr(movements, "success", None):
                 execute_movements(movements.success, file_path, data_source.paths,
                                    ctx=ctx, run_log=run_log)
-            log_exit(ctx, f"_transform_one_file prepared: {file_path.name}", _logger)
+            _logger.exit(f"_transform_one_file prepared: {file_path.name}")
             return True
 
         rows, errors = _read_and_transform(
@@ -821,11 +807,7 @@ def _transform_one_file(
                 transform_cfg.movements.failure, file_path, data_source.paths,
                 ctx=ctx, run_log=run_log,
             )
-            log_exit(
-                ctx,
-                f"_transform_one_file rejected (errors): {file_path.name}",
-                _logger,
-            )
+            _logger.exit(f"_transform_one_file rejected (errors): {file_path.name}")
             return False
 
         if not rows:
@@ -840,11 +822,7 @@ def _transform_one_file(
                 transform_cfg.movements.failure, file_path, data_source.paths,
                 ctx=ctx, run_log=run_log,
             )
-            log_exit(
-                ctx,
-                f"_transform_one_file rejected (empty): {file_path.name}",
-                _logger,
-            )
+            _logger.exit(f"_transform_one_file rejected (empty): {file_path.name}")
             return False
 
         output_path = _build_output_path(data_source.paths, transform_cfg, file_path, ctx=ctx)
@@ -883,7 +861,7 @@ def _transform_one_file(
             transform_cfg.movements.success, file_path, data_source.paths,
                 ctx=ctx, run_log=run_log,
         )
-        log_exit(ctx, f"_transform_one_file done: {file_path.name}", _logger)
+        _logger.exit(f"_transform_one_file done: {file_path.name}")
         return True
 
     except _NON_FATAL_PIPELINE_ERRORS as exc:
@@ -904,7 +882,7 @@ def _transform_one_file(
             transform_cfg.movements.failure, file_path, data_source.paths,
                 ctx=ctx, run_log=run_log,
         )
-        log_exit(ctx, f"_transform_one_file failed: {file_path.name}", _logger)
+        _logger.exit(f"_transform_one_file failed: {file_path.name}")
         return False
     
 def _build_output_path(

@@ -255,21 +255,6 @@ class TestDepth:
         ]
         assert messages == ["→ outer", "  inside", "← outer"]
 
-    def test_legacy_log_enter_and_log_exit_pass_through_to_app_logger(
-        self, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        from rey_lib.logs.logging_setup import get_logger, log_enter, log_exit
-
-        caplog.set_level(logging.DEBUG, logger=_NAME)
-        logger = get_logger(_NAME)
-
-        log_enter(None, "outer", logger)
-        assert AppLogger.log_depth == 1
-        log_exit(None, "outer", logger)
-
-        assert AppLogger.log_depth == 0
-        assert [(r.name, r.getMessage()) for r in _records(caplog)] == [(_NAME, "→ outer"), (_NAME, "← outer")]
-
     def test_the_console_handler_indents_by_the_record_depth(
         self, run_log, recorded_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],

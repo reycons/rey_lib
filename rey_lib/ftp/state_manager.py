@@ -27,7 +27,7 @@ from typing import Any
 from rey_lib.errors.error_utils import FtpDownloadError, StateError
 from rey_lib.files.json import JsonReadError, read_json_file
 from rey_lib.files.file_utils import write_file
-from rey_lib.logs.log_utils import get_logger, log_enter, log_exit
+from rey_lib.logs.log_utils import get_logger
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
@@ -124,18 +124,18 @@ def load_state(ctx: Any, conn: Any) -> dict[str, str]:
     Raises:
         StateError: If the file exists but cannot be read or parsed.
     """
-    log_enter(ctx, "load_state", log)
+    log.enter("load_state")
     state_file: Path = get_state_file_path(ctx, conn)
 
     if not state_file.exists():
         log.info("No state file at '%s' — starting fresh.", state_file)
-        log_exit(ctx, "load_state done (fresh)", log)
+        log.exit("load_state done (fresh)")
         return {}
 
     try:
         state: dict[str, str] = read_json_file(state_file)
         log.info("Loaded state: %d entry/entries from '%s'", len(state), state_file)
-        log_exit(ctx, "load_state done", log)
+        log.exit("load_state done")
         return state
     except JsonReadError as exc:
         raise StateError(f"Cannot read state file '{state_file}'.") from exc
@@ -155,7 +155,7 @@ def save_state(ctx: Any, conn: Any, state: dict[str, str]) -> None:
     Raises:
         StateError: If the file cannot be written.
     """
-    log_enter(ctx, "save_state", log)
+    log.enter("save_state")
     state_file: Path = get_state_file_path(ctx, conn)
     try:
         write_file(state_file, state, "JSON", sort_keys=True)
@@ -163,7 +163,7 @@ def save_state(ctx: Any, conn: Any, state: dict[str, str]) -> None:
     except OSError as exc:
         raise StateError(f"Cannot write state file '{state_file}'.") from exc
     finally:
-        log_exit(ctx, "save_state done", log)
+        log.exit("save_state done")
 
 
 def is_new_or_updated(

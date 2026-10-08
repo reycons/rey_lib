@@ -254,13 +254,10 @@ class TestWritersTakeTheOwner:
         # Named, with the reason each is not a run-log writer:
         #   log_run_record  — the delegation itself; it takes the run log and is
         #                     only listed because its name starts with log_.
-        #   log_enter/exit  — indentation on the Python logger, not a record.
         #   log_file_manifest_record — writes the installation file manifest via
         #                     ctx.paths; a different artifact from the run log.
         expected = {
             "record_enrichment.py:log_run_record",
-            "logging_setup.py:log_enter",
-            "logging_setup.py:log_exit",
             "file_manifest.py:log_file_manifest_record",
         }
         assert set(offenders) - expected == set(), (

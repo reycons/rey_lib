@@ -1,27 +1,14 @@
-"""Legacy logging helpers: setup_logging, get_logger, log_enter and log_exit.
+"""Legacy logging access: get_logger, the transitional way in to AppLogger.
 
 Logging configuration and call depth are AppLogger's
-(rey_lib.logs.app_logger.AppLogger; backlog logging.app_logger.s3_configuration
-and s4_depth). What remains here is migration state with a scheduled removal:
-setup_logging, log_enter and log_exit are pass-throughs to AppLogger kept for
-their remaining callers until S6, and get_logger is a wrapper returning
-AppLogger(name) (S5) until S7 deletes it.
+(rey_lib.logs.app_logger.AppLogger; backlog logging.app_logger_canonical_object).
+setup_logging, log_enter and log_exit were removed in S6; get_logger returns
+AppLogger(name) until S7 moves its callers to AppLogger(__name__) and deletes it.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 from rey_lib.logs.app_logger import AppLogger
-
-
-def setup_logging(ctx: Any, operation: str = "app") -> None:
-    """Configure logging through ``AppLogger._configure`` (removed in S6).
-
-    The configuration itself is AppLogger's; this delegate keeps the remaining
-    callers working until the legacy helpers are removed.
-    """
-    AppLogger._configure(ctx, operation)
 
 
 def get_logger(name: str) -> AppLogger:
@@ -41,33 +28,3 @@ def get_logger(name: str) -> AppLogger:
         The application logger for ``name``.
     """
     return AppLogger(name)
-
-
-def log_enter(ctx: Any, msg: str, logger: AppLogger) -> None:
-    """Log function entry through ``AppLogger.enter`` (removed in S6).
-
-    Parameters
-    ----------
-    ctx : Any
-        Unused. Kept so the existing callers are unchanged until S6.
-    msg : str
-        Entry message describing the function and its key inputs.
-    logger : AppLogger
-        The caller's logger, from get_logger.
-    """
-    logger.enter(msg)
-
-
-def log_exit(ctx: Any, msg: str, logger: AppLogger) -> None:
-    """Log function exit through ``AppLogger.exit`` (removed in S6).
-
-    Parameters
-    ----------
-    ctx : Any
-        Unused. Kept so the existing callers are unchanged until S6.
-    msg : str
-        Exit message describing the outcome.
-    logger : AppLogger
-        The caller's logger, from get_logger.
-    """
-    logger.exit(msg)

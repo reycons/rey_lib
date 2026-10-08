@@ -29,7 +29,6 @@ from rey_lib.run import establish_run_identity
 
 from rey_lib.files.file_utils import run_artifact_path
 from rey_lib.logs import log_run_record, require_run_id
-from rey_lib.logs.logging_setup import setup_logging
 from rey_lib.errors.error_utils import StateError
 
 # Filename-safe run timestamp pattern: YYYYMMDD_HHMMSS.
@@ -86,14 +85,6 @@ def test_logging_requires_an_identity_it_did_not_create() -> None:
     ctx = SimpleNamespace(run_id=42)
     start_test_run(ctx)
     assert require_run_id(ctx) == 42
-
-
-def test_setup_logging_refuses_an_unidentified_context(run_log, tmp_path: Path) -> None:
-    """The launch boundary fails loudly rather than inventing an identity."""
-    ctx = SimpleNamespace(log_path=str(tmp_path / "app.{operation}.{timestamp}.log"))
-
-    with pytest.raises(StateError, match="No run identity has been established"):
-        setup_logging(ctx, operation="run")
 
 
 def test_the_write_path_neither_mints_nor_masks(tmp_path: Path) -> None:

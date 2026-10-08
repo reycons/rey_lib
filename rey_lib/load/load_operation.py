@@ -88,8 +88,6 @@ from rey_lib.load.mutation_context import (
 )
 from rey_lib.logs.log_utils import (
     get_logger,
-    log_enter,
-    log_exit,
     log_input_discovered,
     log_row_count,
     log_validation_result,
@@ -146,7 +144,7 @@ def load_files(
     int
         Total number of rows successfully loaded across all files.
     """
-    log_enter(ctx, f"load_files: {data_source.name} / {load_cfg.name}", _logger)
+    _logger.enter(f"load_files: {data_source.name} / {load_cfg.name}")
     total_rows = 0
 
     try:
@@ -155,11 +153,7 @@ def load_files(
         )
 
     finally:
-        log_exit(
-            ctx,
-            f"load_files done: {total_rows} total row(s) loaded",
-            _logger,
-        )
+        _logger.exit(f"load_files done: {total_rows} total row(s) loaded")
 
     return total_rows
 
@@ -1490,7 +1484,7 @@ def _reject_structure(
         **_source_path_field(source),
     )
     _route_file(ctx, run_log, movements, "failure", source, paths)
-    log_exit(ctx, f"_load_one_file rejected (structure): {source!r}", _logger)
+    _logger.exit(f"_load_one_file rejected (structure): {source!r}")
     return 0
 
 def _reject_empty(
@@ -1523,7 +1517,7 @@ def _reject_empty(
         **_source_path_field(source),
     )
     _route_file(ctx, run_log, movements, "failure", source, paths)
-    log_exit(ctx, f"_load_one_file rejected (empty): {source!r}", _logger)
+    _logger.exit(f"_load_one_file rejected (empty): {source!r}")
     return 0
 
 def _non_row_execution_possible(
@@ -1670,7 +1664,7 @@ def _load_one_file(
     # to roll back -- the connection is resolved inside, and a failure before
     # that point has opened nothing.
     conn: Any = None
-    log_enter(ctx, f"_load_one_file: {source!r}", _logger)
+    _logger.enter(f"_load_one_file: {source!r}")
 
     try:
         # RESOLVED, not re-read. A configured load supplies its definition's
@@ -1815,7 +1809,7 @@ def _load_one_file(
                     transform_snapshot=transform_snapshot,
                     destination=destination_identity,
                 )
-            log_exit(ctx, f"_load_one_file done: {source!r}", _logger)
+            _logger.exit(f"_load_one_file done: {source!r}")
             return inserted
 
         try:
@@ -1894,7 +1888,7 @@ def _load_one_file(
                 transform_snapshot=transform_snapshot,
                 destination=destination_identity,
             )
-        log_exit(ctx, f"_load_one_file done: {source!r}", _logger)
+        _logger.exit(f"_load_one_file done: {source!r}")
         return len(rows)
 
     except DatabaseError as exc:
@@ -1945,7 +1939,7 @@ def _load_one_file(
                 destination=destination_identity,
                 message=str(exc),
             )
-        log_exit(ctx, f"_load_one_file failed: {source!r}", _logger)
+        _logger.exit(f"_load_one_file failed: {source!r}")
         if movements is None:
             # A single load has no routing policy and no batch to carry on
             # with: its one transfer failing IS the load failing, so the error

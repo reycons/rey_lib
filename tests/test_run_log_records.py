@@ -60,7 +60,7 @@ def _ctx(tmp_path: Path) -> SimpleNamespace:
     """
     ctx = SimpleNamespace(
         log_file=str(tmp_path / "app.scan.jsonl"),
-        # setup_logging resolves the run log and names it on both fields; the
+        # AppLogger's configuration resolves the run log and names it on both fields; the
         # fixture does the same so code reading the path as a fact about the
         # execution sees the file the owner writes.
         run_log_path=str(tmp_path / "app.scan.jsonl"),

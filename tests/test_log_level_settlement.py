@@ -10,7 +10,7 @@ write that too -- and one attribute carrying both would make the first term win
 whenever either had spoken, leaving an application's declaration unreachable and
 ``applications.yaml`` decorative.
 
-Settlement is also the only place the chain exists. ``setup_logging`` reads one
+Settlement is also the only place the chain exists. ``AppLogger._configure`` reads one
 already-settled value and knows nothing about command lines, applications or
 installations; the last test here is what keeps it that way.
 """
@@ -134,7 +134,7 @@ class TestTheVocabulary:
     def test_an_unknown_name_is_refused_and_names_its_source(self) -> None:
         """A typo must fail rather than quietly record the wrong amount.
 
-        setup_logging maps a name it does not know to a default silently, which
+        AppLogger._configure maps a name it does not know to a default silently, which
         is exactly the run that looks normal and is not.
         """
         with pytest.raises(ConfigError, match="verbose"):
@@ -168,7 +168,7 @@ class TestLoggingConsumesTheSettledValueOnly:
     """The architectural boundary, protected rather than a value.
 
     This is what stops precedence logic being reintroduced into the logging
-    layer later: setup_logging is handed a context with nothing to resolve
+    layer later: AppLogger._configure is handed a context with nothing to resolve
     from, and must still log at the settled level.
     """
 
@@ -176,7 +176,7 @@ class TestLoggingConsumesTheSettledValueOnly:
         """The logging layer must not read either source of the chain.
 
         Asserted against the module's source rather than by calling
-        setup_logging, which needs a fuller runtime context -- run identity,
+        AppLogger._configure, which needs a fuller runtime context -- run identity,
         timestamps, a run store -- none of which bears on this property. A
         fixture built to satisfy all that would drift, and its failures would
         say nothing about the boundary.
@@ -186,11 +186,10 @@ class TestLoggingConsumesTheSettledValueOnly:
         """
         import inspect
 
-        from rey_lib.logs import app_logger, logging_setup
+        from rey_lib.logs import app_logger
 
-        # Configuration moved from logging_setup into AppLogger (backlog
-        # logging.app_logger.s3_configuration); both are checked until S6.
-        source = inspect.getsource(logging_setup) + inspect.getsource(app_logger)
+        # Configuration is AppLogger's (backlog logging.app_logger.s3_configuration).
+        source = inspect.getsource(app_logger)
 
         assert "applications" not in source, (
             "logging configuration reads ctx.applications. Precedence belongs to "
