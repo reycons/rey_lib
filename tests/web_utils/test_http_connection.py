@@ -414,6 +414,128 @@ class TestPolicies:
         assert "python-core" not in seen[0].headers.get("User-Agent", "")
 
 
+def _optional_auth(**extra: Any) -> SimpleNamespace:
+    """An auth block whose credential the connection does not require."""
+    return SimpleNamespace(header="X-API-KEY", value="env.example_api_key", required=False, **extra)
+
+
+class TestAnOptionalCredential:
+    """auth.required: false -- sent while its variable is set, omitted while it is not."""
+
+    def test_a_set_variable_is_sent(self, app: Any) -> None:
+        seen, connect = app
+
+        _get(connect(auth=_optional_auth()), "x")
+
+        assert seen[0].headers["X-API-KEY"] == _SECRET
+
+    def test_an_unset_variable_sends_the_request_without_the_header(
+        self, app: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen, connect = app
+        monkeypatch.delenv("EXAMPLE_API_KEY")
+
+        response = _get(connect(auth=_optional_auth()), "x")
+
+        assert response.status_code == 200
+        assert "X-API-KEY" not in seen[0].headers
+
+    def test_an_empty_variable_is_unset(
+        self, app: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen, connect = app
+        monkeypatch.setenv("EXAMPLE_API_KEY", "")
+
+        _get(connect(auth=_optional_auth()), "x")
+
+        assert "X-API-KEY" not in seen[0].headers
+
+    def test_presence_is_decided_at_each_request(
+        self, app: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Absent, added, removed -- one connection, no restart, no cache."""
+        seen, connect = app
+        connection = connect(auth=_optional_auth())
+        monkeypatch.delenv("EXAMPLE_API_KEY")
+        _get(connection, "one")
+        monkeypatch.setenv("EXAMPLE_API_KEY", _SECRET)
+        _get(connection, "two")
+        monkeypatch.delenv("EXAMPLE_API_KEY")
+        _get(connection, "three")
+
+        assert [request.headers.get("X-API-KEY") for request in seen] == [None, _SECRET, None]
+
+    def test_a_prefix_is_sent_only_with_a_value(
+        self, app: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen, connect = app
+        auth = SimpleNamespace(
+            header="Authorization", value="env.example_api_key", prefix="Bearer", required=False,
+        )
+        connection = connect(auth=auth)
+        _get(connection, "x")
+        monkeypatch.delenv("EXAMPLE_API_KEY")
+        _get(connection, "y")
+
+        assert seen[0].headers["Authorization"] == f"Bearer {_SECRET}"
+        assert "Authorization" not in seen[1].headers
+
+    def test_an_undeclared_reference_is_still_refused(self, app: Any) -> None:
+        """Optional covers an unset variable, not a configuration mistake."""
+        _seen, connect = app
+        auth = SimpleNamespace(header="X-API-KEY", value="env.nobody_declared", required=False)
+
+        with pytest.raises(ConfigError, match="nobody_declared"):
+            _get(connect(auth=auth), "x")
+
+    def test_an_optional_credential_still_stays_in_its_origin(self, app: Any) -> None:
+        seen, connect = app
+
+        with pytest.raises(ConfigError, match="base_url origin"):
+            connect(auth=_optional_auth()).send_request(
+                HttpRequest("GET", "https://other.example.test/v3/x"),
+            )
+        assert seen == []
+
+
+class TestARequiredCredential:
+    """auth.required omitted or true -- an unset variable fails before any request."""
+
+    @pytest.mark.parametrize("required", [None, True])
+    def test_an_unset_variable_fails_naming_connection_and_reference(
+        self, required: Any, app: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen, connect = app
+        monkeypatch.delenv("EXAMPLE_API_KEY")
+        fields = {"header": "X-API-KEY", "value": "env.example_api_key"}
+        if required is not None:
+            fields["required"] = required
+
+        with pytest.raises(ConfigError) as caught:
+            _get(connect(auth=SimpleNamespace(**fields)), "x")
+
+        assert "Connection 'example' requires credential env.example_api_key" in str(caught.value)
+        assert seen == []
+
+    def test_the_failure_carries_no_value(
+        self, app: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seen, connect = app
+        monkeypatch.setenv("EXAMPLE_API_KEY", "")
+
+        with pytest.raises(ConfigError) as caught:
+            _get(connect(), "x")
+
+        assert _SECRET not in str(caught.value)
+        assert _SECRET not in str(caught.value.__cause__)
+
+    def test_required_must_be_a_boolean(self) -> None:
+        auth = SimpleNamespace(header="X-API-KEY", value="env.example_api_key", required="no")
+
+        with pytest.raises(ConfigError, match="auth.required"):
+            HttpConnection(_record(auth=auth), ctx=_ctx())
+
+
 class TestTheSecret:
     def test_the_auth_header_carries_the_resolved_value(self, app: Any) -> None:
         seen, connect = app

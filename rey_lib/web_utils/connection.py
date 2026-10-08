@@ -15,6 +15,9 @@ What it owns
 - building exactly one corehttp client from that configuration -- base URL,
   default headers, timeout, TLS verification, and the authentication header,
   whose value is a secret reference read at each request
+- whether that credential is required (``auth.required``, default true): a
+  required one whose variable is unset is a ConfigError before anything is
+  sent; an optional one is simply not sent while its variable is unset
 - the client's lifetime: built on first use, reused after, closed once
 - the credential's boundary: an authenticated connection sends its credential
   only to the HTTPS origin its base URL declares, never through a redirect
@@ -45,7 +48,9 @@ from corehttp.runtime.policies import HeadersPolicy, ServiceKeyCredentialPolicy
 from corehttp.transport import HttpTransport
 from corehttp.transport.httpx import HttpXTransport
 
-from rey_lib.config.env_reference import resolve_env_reference
+from rey_lib.config.env_reference import (
+    ENV_REFERENCE_PREFIX, declaration_map, is_env_reference, resolve_env_reference,
+)
 from rey_lib.errors.error_utils import ConfigError, HttpTransportError
 from rey_lib.logs import AppLogger
 from rey_lib.logs.app_logger import redacted_url
@@ -125,19 +130,67 @@ class _EnvKeyCredential:
     is resolved at the moment of use and held by nothing between requests. The
     policy's own construction checks ``hasattr(credential, "key")``, which reads
     it once more as the client is built; that value is discarded.
+
+    Whether the credential is REQUIRED is the connection's to say (``auth.required``,
+    default true). ``resolve_env_reference`` stays the only place the value is
+    read; this decides only what an unset variable means. A reference the env
+    block declares can fail to resolve for one reason alone -- its variable is
+    unset or empty -- so that is the condition caught, and only for a declared
+    reference. Anything else the resolver refuses is raised as it stands.
     """
 
-    def __init__(self, ctx: Any, reference: Any) -> None:
+    def __init__(
+        self, ctx: Any, reference: Any, *, connection_name: str = "", required: bool = True,
+    ) -> None:
         self._ctx = ctx
         self._reference = reference
+        self._connection_name = connection_name
+        self._required = required
 
     def __repr__(self) -> str:
         return f"<_EnvKeyCredential {self._reference}>"
 
     @property
-    def key(self) -> str:
-        """The resolved key."""
-        return str(resolve_env_reference(self._ctx, self._reference))
+    def key(self) -> Optional[str]:
+        """The resolved key; None when an optional credential's variable is unset.
+
+        Raises:
+            ConfigError: A required credential whose variable is unset or empty,
+                naming the connection and the reference -- never a value -- or
+                whatever else the resolver refuses.
+        """
+        if not self._declared():
+            return str(resolve_env_reference(self._ctx, self._reference))
+        try:
+            return str(resolve_env_reference(self._ctx, self._reference))
+        except ConfigError as exc:
+            if not self._required:
+                return None
+            raise ConfigError(
+                f"Connection '{self._connection_name}' requires credential "
+                f"{self._reference}, but the environment variable is unset or empty."
+            ) from exc
+
+    def _declared(self) -> bool:
+        """Whether the reference names a declaration in the context's env block."""
+        if not is_env_reference(self._reference):
+            return False
+        name = str(self._reference)[len(ENV_REFERENCE_PREFIX):]
+        return name in declaration_map(getattr(self._ctx, "env", None))
+
+
+class _OptionalKeyCredentialPolicy(ServiceKeyCredentialPolicy):
+    """The key header when the optional credential has a value; none when it has not.
+
+    Decided at each request, as the key is read: a variable set later is sent
+    from the next request, and one removed stops being sent, with no restart.
+    """
+
+    def on_request(self, request: Any) -> None:
+        """Add the header only when the credential resolves to a value."""
+        key = self._credential.key
+        if key is not None:
+            request.http_request.headers[self._name] = f"{self._prefix}{key}"
 
 
 class HttpConnection:
@@ -210,6 +263,10 @@ class HttpConnection:
                 raise ConfigError(
                     f"connection '{name}': auth.prefix, when given, must not be empty."
                 )
+            if not isinstance(auth.get("required", True), bool):
+                raise ConfigError(
+                    f"connection '{name}': auth.required, when given, must be true or false."
+                )
             if _origin(base_url)[0] != "https":
                 raise ConfigError(
                     f"connection '{name}': auth is sent only over https; base_url "
@@ -279,8 +336,17 @@ class HttpConnection:
             policies: list[Any] = [HeadersPolicy(base_headers=headers)]
             if self._auth:
                 prefix = self._auth.get("prefix")
-                policies.append(ServiceKeyCredentialPolicy(
-                    _EnvKeyCredential(self._ctx, self._auth["value"]),
+                # An optional credential omits its header while its variable is
+                # unset; a required one keeps corehttp's policy unchanged.
+                required = self._auth.get("required", True)
+                policy = (
+                    ServiceKeyCredentialPolicy if required else _OptionalKeyCredentialPolicy
+                )
+                policies.append(policy(
+                    _EnvKeyCredential(
+                        self._ctx, self._auth["value"],
+                        connection_name=self._name, required=required,
+                    ),
                     str(self._auth["header"]).strip(),
                     prefix=str(prefix).strip() if prefix is not None else None,
                 ))
