@@ -258,14 +258,14 @@ class TestDepth:
     def test_legacy_log_enter_and_log_exit_pass_through_to_app_logger(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        from rey_lib.logs.logging_setup import log_enter, log_exit
+        from rey_lib.logs.logging_setup import get_logger, log_enter, log_exit
 
         caplog.set_level(logging.DEBUG, logger=_NAME)
-        stdlib_logger = logging.getLogger(_NAME)
+        logger = get_logger(_NAME)
 
-        log_enter(None, "outer", stdlib_logger)
+        log_enter(None, "outer", logger)
         assert AppLogger.log_depth == 1
-        log_exit(None, "outer", stdlib_logger)
+        log_exit(None, "outer", logger)
 
         assert AppLogger.log_depth == 0
         assert [(r.name, r.getMessage()) for r in _records(caplog)] == [(_NAME, "→ outer"), (_NAME, "← outer")]
@@ -292,3 +292,20 @@ class TestDepth:
             if name.ljust(32) in line
         ]
         assert messages == ["→ outer", "  inside", "← outer"]
+
+
+class TestGetLogger:
+    """S5: get_logger is a wrapper returning AppLogger(name)."""
+
+    def test_get_logger_returns_the_app_logger_of_that_name(self, caplog: pytest.LogCaptureFixture) -> None:
+        from rey_lib.logs import get_logger
+
+        caplog.set_level(logging.INFO, logger=_NAME)
+
+        logger = get_logger(_NAME)
+        logger.info("through the wrapper")
+
+        assert isinstance(logger, AppLogger)
+        (record,) = _records(caplog)
+        assert record.getMessage() == "through the wrapper"
+        assert record.funcName == "test_get_logger_returns_the_app_logger_of_that_name"

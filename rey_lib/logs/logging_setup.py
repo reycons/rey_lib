@@ -4,13 +4,12 @@ Logging configuration and call depth are AppLogger's
 (rey_lib.logs.app_logger.AppLogger; backlog logging.app_logger.s3_configuration
 and s4_depth). What remains here is migration state with a scheduled removal:
 setup_logging, log_enter and log_exit are pass-throughs to AppLogger kept for
-their remaining callers until S6, and get_logger becomes a wrapper in S5 and is
-deleted in S7.
+their remaining callers until S6, and get_logger is a wrapper returning
+AppLogger(name) (S5) until S7 deletes it.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from rey_lib.logs.app_logger import AppLogger
@@ -25,12 +24,11 @@ def setup_logging(ctx: Any, operation: str = "app") -> None:
     AppLogger._configure(ctx, operation)
 
 
-def get_logger(name: str) -> logging.Logger:
-    """
-    Return a named logger for use in an application module.
+def get_logger(name: str) -> AppLogger:
+    """Return ``AppLogger(name)`` (compatibility wrapper, deleted in S7).
 
-    All modules should obtain their logger via this function rather than
-    calling logging.getLogger() directly.
+    Existing callers keep calling this and now hold the canonical object; S7
+    moves them to ``AppLogger(__name__)`` directly.
 
     Parameters
     ----------
@@ -39,13 +37,13 @@ def get_logger(name: str) -> logging.Logger:
 
     Returns
     -------
-    logging.Logger
-        A configured logger instance.
+    AppLogger
+        The application logger for ``name``.
     """
-    return logging.getLogger(name)
+    return AppLogger(name)
 
 
-def log_enter(ctx: Any, msg: str, logger: logging.Logger) -> None:
+def log_enter(ctx: Any, msg: str, logger: AppLogger) -> None:
     """Log function entry through ``AppLogger.enter`` (removed in S6).
 
     Parameters
@@ -54,13 +52,13 @@ def log_enter(ctx: Any, msg: str, logger: logging.Logger) -> None:
         Unused. Kept so the existing callers are unchanged until S6.
     msg : str
         Entry message describing the function and its key inputs.
-    logger : logging.Logger
-        The caller's logger; the record is emitted under its name.
+    logger : AppLogger
+        The caller's logger, from get_logger.
     """
-    AppLogger(logger.name).enter(msg)
+    logger.enter(msg)
 
 
-def log_exit(ctx: Any, msg: str, logger: logging.Logger) -> None:
+def log_exit(ctx: Any, msg: str, logger: AppLogger) -> None:
     """Log function exit through ``AppLogger.exit`` (removed in S6).
 
     Parameters
@@ -69,7 +67,7 @@ def log_exit(ctx: Any, msg: str, logger: logging.Logger) -> None:
         Unused. Kept so the existing callers are unchanged until S6.
     msg : str
         Exit message describing the outcome.
-    logger : logging.Logger
-        The caller's logger; the record is emitted under its name.
+    logger : AppLogger
+        The caller's logger, from get_logger.
     """
-    AppLogger(logger.name).exit(msg)
+    logger.exit(msg)
