@@ -22,7 +22,7 @@ def _ctx():
     from rey_lib.logs.run_log import RunLog
 
     return RunLog(app="test", run_id="r1", run_timestamp="20260101_000000",
-                  writer=LogWriter("db", database=DatabaseLogWriter(connection=None)),
+                  writer=LogWriter("db", database=DatabaseLogWriter(control=None)),
                   builder=LogRecordBuilder(run_id="r1", run_timestamp="20260101_000000"))
 
 

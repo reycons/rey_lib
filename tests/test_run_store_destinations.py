@@ -101,7 +101,7 @@ def _ctx(tmp_path: Path, run_store: str, **extra: Any):
         """The database output: records each translated row, as the insert would see it."""
 
         def __init__(self) -> None:
-            super().__init__(connection=None)
+            super().__init__(control=None)
             self._minted = 0
 
         def write(self, record):

@@ -145,7 +145,6 @@ def test_the_database_mode_writes_no_jsonl(
     from rey_lib.logs import log_writer
 
     rows: list[dict] = []
-    monkeypatch.setattr(log_writer, "_run_log_connection", lambda _ctx: None)
     monkeypatch.setattr(
         log_writer.DatabaseLogWriter, "write",
         lambda self, record: rows.append(self.row(record)) or len(rows),

@@ -52,11 +52,7 @@ _SQL_EXTRA_KEYS: frozenset[str] = frozenset({
 })
 
 #: Run-context keys a run supplies to the envelope, beyond identity and nesting.
-_RUN_CONTEXT_KEYS: tuple[str, ...] = (
-    "app", "workflow_name", "pipeline_name",
-    # Correlation only: the governed step the record was written inside.
-    "batch_step_id",
-)
+_RUN_CONTEXT_KEYS: tuple[str, ...] = ("app", "workflow_name", "pipeline_name")
 
 
 def _record_type(levelno: int) -> str:

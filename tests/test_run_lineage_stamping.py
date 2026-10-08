@@ -54,7 +54,7 @@ def _base_record(ctx, record_type: str, message: str) -> dict:
                 or getattr(ctx, "name", "") or ""),
         run_id=run_id,
         run_timestamp=run_timestamp,
-        writer=LogWriter("db", database=DatabaseLogWriter(connection=None)),
+        writer=LogWriter("db", database=DatabaseLogWriter(control=None)),
         builder=builder,
         workflow=getattr(ctx, "workflow_name", None),
         pipeline=getattr(ctx, "pipeline_name", None),

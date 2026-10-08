@@ -73,8 +73,6 @@ _ENVELOPE_FIELDS: frozenset[str] = frozenset({
     "parent_run_id", "subject_type", "subject_id", "subject_name",
     "pipeline_run_id", "workflow_run_id", "pipeline_id", "workflow_id",
     "run_log_id", "parent_run_log_id", "nest_level",
-    # The governed step a record was written inside; correlation only.
-    "batch_step_id",
 })
 
 #: Facts any record type may state, each with a column of its own.
@@ -471,8 +469,6 @@ class RunLog:
                         for key in (*LINEAGE_FIELDS, *DOMAIN_FIELDS)},
             "nest_level": self._current_nest_level,
             "parent_run_log_id": self._current_parent_run_log_id,
-            # Correlation only: the governed step open on this run's Control.
-            "batch_step_id": getattr(self.control, "batch_step_id", None),
         }
         if self.app:
             fields["app"] = self.app

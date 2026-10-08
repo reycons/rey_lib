@@ -93,7 +93,7 @@ class MintingDatabaseWriter(DatabaseLogWriter):
     """
 
     def __init__(self) -> None:
-        super().__init__(connection=None)
+        super().__init__(control=None)
         self.rows: list[dict[str, Any]] = []
 
     def write(self, record: dict[str, Any]) -> int:
@@ -177,7 +177,7 @@ class MintingControl:
 
     def write_run_log_record(self, *, required: bool = False, **values: Any) -> int:
         run_log_id = len(self.rows) + 1
-        self.rows.append({"run_log_id": run_log_id, **values})
+        self.rows.append({"run_log_id": run_log_id, "required": required, **values})
         return run_log_id
 
 

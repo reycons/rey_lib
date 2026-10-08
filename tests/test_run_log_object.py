@@ -165,6 +165,78 @@ class TestDestination:
         assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
 
 
+class TestTheDatabaseOutputUsesTheGovernedRoutine:
+    """control.run_log is written through Control.write_run_log_record (p_run_log_ins)."""
+
+    def test_a_record_reaches_the_routine_with_its_envelope_and_one_payload(
+        self, tmp_path: Path,
+    ) -> None:
+        from rey_lib.logs.log_writer import DatabaseLogWriter, LogWriter
+        from tests.conftest import MintingControl, make_run_log
+
+        import inspect
+
+        from rey_lib.control.control import Control
+
+        class _StrictControl(MintingControl):
+            """Refuses a call the real Control.write_run_log_record could not take."""
+
+            def write_run_log_record(self, **values):
+                inspect.signature(Control.write_run_log_record).bind(self, **values)
+                return super().write_run_log_record(**values)
+
+        control = _StrictControl()
+        run_log = make_run_log(tmp_path, destination="db", control=control)
+        run_log.writer = LogWriter("db", database=DatabaseLogWriter(control))
+
+        assert run_log.append("ROW_COUNT", count_name="a", count=1) == 1
+
+        [row] = control.rows
+        assert row["record_type"] == "ROW_COUNT"
+        assert row["run_id"] == run_log.run_id
+        assert row["nest_level"] == 0 and row["parent_run_log_id"] is None
+        assert row["payloads"]["row_count"] == {"count_name": "a", "count": 1}
+        assert row["payloads"]["sql_execution"] is None
+        assert "batch_step_id" not in row  # Control attaches its own open step
+        assert row["required"] is True
+
+    def test_without_a_control_it_is_a_write_fault_not_a_crash(self, tmp_path: Path) -> None:
+        from rey_lib.logs.log_writer import DatabaseLogWriter, LogWriter
+        from tests.conftest import make_run_log
+
+        run_log = make_run_log(tmp_path, destination="db")
+        run_log.writer = LogWriter("db", database=DatabaseLogWriter(None))
+
+        assert run_log.append("ROW_COUNT", count_name="a", count=1) is None
+
+
+class TestTheAssemblyHandsOverTheLaunchControl:
+    """build_log_writer gives the database output the launch Control, or refuses."""
+
+    def test_the_database_output_holds_the_launch_control(self) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.logs.log_writer import build_log_writer
+
+        control = object()
+        writer = build_log_writer(SimpleNamespace(shared_control=control), "run")
+
+        assert writer.mode == "db"
+        assert writer._database._control is control
+
+    @pytest.mark.parametrize("mode", ["db", "both"])
+    def test_a_database_mode_without_a_control_refuses_at_launch(self, mode: str) -> None:
+        from types import SimpleNamespace
+
+        from rey_lib.errors.error_utils import ConfigError
+        from rey_lib.logs.log_writer import build_log_writer
+
+        ctx = SimpleNamespace(run_timestamp="20260822_000000",
+                              logging=SimpleNamespace(run_store=mode))
+        with pytest.raises(ConfigError, match="no Control"):
+            build_log_writer(ctx, "run")
+
+
 class TestLifecycle:
     """Closed by runtime collection, once."""
 

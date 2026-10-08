@@ -89,7 +89,7 @@ _ROW_COLUMNS: tuple[str, ...] = (
     "record_subgroup", "message", "app", "workflow_name", "pipeline_name",
     "step_id", "step_name", "step_sequence", "correlation_id", "parent_run_id",
     "subject_type", "subject_id", "subject_name", "pipeline_id", "workflow_id",
-    "record_schema_version", "batch_step_id", "status", "path", "file_id",
+    "record_schema_version", "status", "path", "file_id",
     "source_name", "checksum_sha256", "size_bytes", "exists", "modified_at",
     "error_message",
 )
@@ -98,17 +98,20 @@ _ROW_COLUMNS: tuple[str, ...] = (
 class DatabaseLogWriter:
     """The database output: one ``control.run_log`` row per record.
 
-    It knows its destination is a table and translates a record into that
-    table's row; ``DatabaseTable.insert`` writes the row and returns the key
-    the database generated. It resolves no connection and runs no statement.
+    ``control.run_log`` is a governed control table, written through its
+    governed routine: the record is translated into its row and handed to
+    ``Control.write_run_log_record`` (``control.p_run_log_ins``, SECURITY
+    DEFINER), which inserts it, attaches the open batch step and returns the
+    ``run_log_id`` the database generated. It resolves no connection and runs
+    no statement of its own.
 
     Args:
-        connection: The connection handle the row is inserted on, resolved by
-            whoever assembled the writer. Referenced, not owned.
+        control: The launch Control the rows are written through, handed over
+            by whoever assembled the writer. Referenced, not owned.
     """
 
-    def __init__(self, connection: Any) -> None:
-        self._connection = connection
+    def __init__(self, control: Any) -> None:
+        self._control = control
 
     def row(self, record: dict[str, Any]) -> dict[str, Any]:
         """Translate one record into its ``control.run_log`` row.
@@ -162,11 +165,26 @@ class DatabaseLogWriter:
         return {column: value for column, value in row.items() if value is not None}
 
     def write(self, record: dict[str, Any]) -> Any:
-        """Insert one record as a ``control.run_log`` row; the ``run_log_id`` it was given."""
-        from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
+        """Write one record as a ``control.run_log`` row; the ``run_log_id`` it was given.
 
-        run_log = DatabaseObjectIdentity(connection="", catalog="", schema="control", name="run_log")
-        return DatabaseTable.insert(self._connection, run_log, self.row(record))
+        Raises:
+            ConfigError: When no Control was handed to this writer.
+        """
+        from rey_lib.errors.error_utils import ConfigError
+        from rey_lib.logs.run_log import TYPE_PAYLOAD_COLUMNS
+
+        if self._control is None:
+            raise ConfigError(
+                "run_store selects the control database but no Control was handed "
+                "to the database output."
+            )
+        row = self.row(record)
+        return self._control.write_run_log_record(
+            **{column: row.get(column) for column in _ROW_COLUMNS},
+            contains_sensitive_data=row.get("contains_sensitive_data"),
+            payloads={column: row.get(column) for column in TYPE_PAYLOAD_COLUMNS.values()},
+            required=True,
+        )
 
 
 class LogWriter:
@@ -304,7 +322,7 @@ def build_log_writer(ctx: Any, operation: str = "app") -> LogWriter:
     """Assemble the process's logging writer from resolved configuration.
 
     Called by the launch boundary, which already holds the run identity and
-    its configured connections, and by the frozen trade_analyzer's configuration
+    the launch Control, and by the frozen trade_analyzer's configuration
     points. The result is handed to ``AppLogger._configure``; AppLogger knows
     nothing about which outputs it holds.
 
@@ -313,7 +331,8 @@ def build_log_writer(ctx: Any, operation: str = "app") -> LogWriter:
         operation: The operation name, substituted into the JSONL path.
 
     Raises:
-        ConfigError: When ``logging.run_store`` is not a known mode.
+        ConfigError: When ``logging.run_store`` is not a known mode, or selects
+            the database and the launch has no Control.
     """
     from rey_lib.logs.run_store import run_store_mode, validate_run_store
 
@@ -324,30 +343,17 @@ def build_log_writer(ctx: Any, operation: str = "app") -> LogWriter:
         json = JsonLogWriter(_resolve_jsonl_path(ctx, operation))
     database = None
     if mode in ("db", "both"):
-        database = DatabaseLogWriter(_run_log_connection(ctx))
+        # The launch Control: control.run_log is written through its governed routine.
+        control = getattr(ctx, "shared_control", None)
+        if control is None:
+            from rey_lib.errors.error_utils import ConfigError
+
+            raise ConfigError(
+                f"logging.run_store is '{mode}', but this launch has no Control to write "
+                "control.run_log through."
+            )
+        database = DatabaseLogWriter(control)
     return LogWriter(mode, database=database, json=json)
-
-
-def _run_log_connection(ctx: Any) -> Any:
-    """The handle of the connection run-log rows are inserted on.
-
-    The launch Control's own connection -- already resolved when the run was
-    created through it -- so nothing here reads a setting or picks between
-    connections. It is handed to DatabaseLogWriter, which knows only that it
-    hands rows to DatabaseTable.insert.
-
-    Raises:
-        ConfigError: When the launch has no Control connection to write on.
-    """
-    from rey_lib.errors.error_utils import ConfigError
-
-    connection = getattr(getattr(ctx, "shared_control", None), "connection", None)
-    if connection is None:
-        raise ConfigError(
-            "logging.run_store writes to the database, but this launch has no "
-            "control connection to write run-log rows on."
-        )
-    return connection.handle()
 
 
 def _resolve_jsonl_path(ctx: Any, operation: str) -> Path:
