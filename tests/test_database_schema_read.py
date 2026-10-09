@@ -421,6 +421,49 @@ def test_a_provider_invocation_is_carried_to_the_object(
     assert procedure.invocation == "CALL control.sweep();"
 
 
+def test_provider_parameters_arrive_on_the_routine_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listed parameters become DatabaseParameters, by ordinal (backlog 747)."""
+    routines = {
+        "procedures": [],
+        "functions": [{"name": "rate", "signature": "text, date", "parameters": [
+            {"name": "p_on", "ordinal": 2, "type": "date", "mode": "IN",
+             "has_default": None, "default": None},
+            {"name": "p_from", "ordinal": 1, "type": "text", "mode": "INOUT",
+             "has_default": True, "default": "'EUR'::text"},
+        ]}],
+    }
+    function = _loaded(_Adapter(routines=routines), monkeypatch).functions[0]
+
+    assert [(one.name, one.ordinal, one.role, one.has_default, one.default)
+            for one in function.parameters] == [
+        ("p_from", 1, "input_output", True, "'EUR'::text"),
+        ("p_on", 2, "input", None, None),
+    ]
+
+
+def test_parameters_no_source_reported_are_unknown_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routines = {"procedures": [{"name": "sweep", "signature": ""}], "functions": []}
+    procedure = _loaded(_Adapter(routines=routines), monkeypatch).procedures[0]
+
+    assert procedure.parameters is None
+
+
+def test_a_routine_listed_with_no_parameters_takes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routines = {
+        "procedures": [{"name": "sweep", "signature": "", "parameters": []}],
+        "functions": [],
+    }
+    procedure = _loaded(_Adapter(routines=routines), monkeypatch).procedures[0]
+
+    assert procedure.parameters == ()
+
+
 def test_the_reader_rewrites_nothing_about_the_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

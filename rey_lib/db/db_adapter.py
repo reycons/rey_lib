@@ -886,7 +886,7 @@ class DBAdapter:
         conn: Any,
         capability: str,
         schema: str | None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """Return Rey-owned routine records for one capability.
 
         The signature is the provider's identity argument list, normalized to a
@@ -895,7 +895,8 @@ class DBAdapter:
         catalog, schema, name, object_type and signature together, never by
         name alone.
 
-        ``invocation`` rides along untouched where the provider rendered one.
+        ``invocation`` rides along untouched where the provider rendered one,
+        and ``parameters`` where the provider listed them (backlog 747).
         This layer normalizes identity; it does not read, validate or rewrite a
         statement, because it does not know the syntax the statement is in.
         """
@@ -918,6 +919,11 @@ class DBAdapter:
             invocation = row.get("invocation")
             if invocation:
                 record["invocation"] = str(invocation)
+            # The routine's parameters (backlog 747), carried as the provider
+            # listed them and only where it listed them, like the call.
+            parameters = row.get("parameters")
+            if parameters is not None:
+                record["parameters"] = [dict(one) for one in parameters]
             result.append(record)
         return sorted(
             result,

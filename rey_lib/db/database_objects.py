@@ -44,6 +44,7 @@ __all__ = [
     "DatabaseObjectIdentity",
     "DatabaseObjectListing",
     "DatabaseObjectReference",
+    "DatabaseParameter",
     "DatabasePrimaryKey",
     "DatabaseProcedure",
     "DatabaseRoutineIdentity",
@@ -269,6 +270,54 @@ class DatabaseColumn:
             "default": self.default,
             "ordinal": self.ordinal,
             "ddl": self.ddl,
+        }
+
+
+#: Each parameter mode's role in a call (backlog 747). An input is passed by
+#: the caller; an output comes back; INOUT is both. A TABLE parameter is a
+#: column of the routine's result, so it is an output.
+_PARAMETER_ROLES: dict[str, str] = {
+    "IN": "input",
+    "VARIADIC": "input",
+    "OUT": "output",
+    "TABLE": "output",
+    "INOUT": "input_output",
+}
+
+
+@dataclass(frozen=True)
+class DatabaseParameter:
+    """One routine parameter, in the position its provider reported it (backlog 747).
+
+    ``mode`` is the provider's parameter mode in the canonical spelling -- IN,
+    OUT, INOUT, VARIADIC or TABLE -- and ``role`` is what that mode means to a
+    caller. ``has_default`` is authoritative where the provider states it and
+    None where the provider cannot state it; it is never inferred from a
+    default expression the reader could not see.
+    ``default`` is that expression where the provider exposes it, else None.
+    """
+
+    name: str
+    ordinal: int
+    type: str
+    mode: str
+    has_default: bool | None
+    default: str | None = None
+
+    @property
+    def role(self) -> str:
+        """input, output or input_output, from the mode."""
+        return _PARAMETER_ROLES.get(self.mode, "input")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "ordinal": self.ordinal,
+            "type": self.type,
+            "mode": self.mode,
+            "role": self.role,
+            "has_default": self.has_default,
+            "default": self.default,
         }
 
 
@@ -1458,6 +1507,9 @@ class DatabaseProcedure:
     ddl: str = ""
     invocation: str = ""
     depends_on: tuple[DatabaseObjectReference, ...] = ()
+    #: Its parameters in call order (backlog 747): None where no source
+    #: reported them, empty where the provider reported that there are none.
+    parameters: tuple[DatabaseParameter, ...] | None = None
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "procedures"
@@ -1503,6 +1555,10 @@ class DatabaseProcedure:
             "identity": self.identity.to_dict(),
             "ddl": self.ddl,
             "invocation": self.invocation,
+            "parameters": (
+                None if self.parameters is None
+                else [parameter.to_dict() for parameter in self.parameters]
+            ),
         }
 
 
@@ -1518,6 +1574,9 @@ class DatabaseFunction:
     ddl: str = ""
     invocation: str = ""
     depends_on: tuple[DatabaseObjectReference, ...] = ()
+    #: Its parameters in call order (backlog 747): None where no source
+    #: reported them, empty where the provider reported that there are none.
+    parameters: tuple[DatabaseParameter, ...] | None = None
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "functions"
@@ -1562,6 +1621,10 @@ class DatabaseFunction:
             "identity": self.identity.to_dict(),
             "ddl": self.ddl,
             "invocation": self.invocation,
+            "parameters": (
+                None if self.parameters is None
+                else [parameter.to_dict() for parameter in self.parameters]
+            ),
         }
 
 
@@ -2147,8 +2210,31 @@ def _routines(
             # something that does not know the provider's rules can reach the
             # wrong routine rather than fail.
             invocation=str(entry.get("invocation") or ""),
+            # Carried beside the call, as its provider reported them (747).
+            parameters=_parameters(entry.get("parameters")),
         ))
     return built
+
+
+def _parameters(listed: Any) -> tuple[DatabaseParameter, ...] | None:
+    """A routine's parameters as its provider listed them, in ordinal order.
+
+    None when the provider listed none at all -- not reported is not "takes
+    no parameters".
+    """
+    if listed is None:
+        return None
+    return tuple(
+        DatabaseParameter(
+            name=str(one.get("name") or ""),
+            ordinal=int(one["ordinal"]),
+            type=str(one.get("type") or ""),
+            mode=str(one.get("mode") or "IN"),
+            has_default=one.get("has_default"),
+            default=one.get("default"),
+        )
+        for one in sorted(listed, key=lambda one: int(one["ordinal"]))
+    )
 
 
 def _described(

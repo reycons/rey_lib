@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from rey_lib.db.database_objects import (
     DatabaseColumn,
     DatabaseFunction,
@@ -17,6 +19,7 @@ from rey_lib.db.database_objects import (
     DatabaseForeignKey,
     DatabaseIndex,
     DatabaseObjectIdentity,
+    DatabaseParameter,
     DatabasePrimaryKey,
     DatabaseProcedure,
     DatabaseRoutineIdentity,
@@ -193,6 +196,8 @@ def test_a_procedure_serializes_its_identity_and_its_source() -> None:
         },
         "ddl": "CREATE PROCEDURE control.rate(text, date) ...",
         "invocation": "",
+        # No source reported them: unknown, not "takes none" (747).
+        "parameters": None,
     }
 
 
@@ -201,7 +206,42 @@ def test_a_function_serializes_the_same_way() -> None:
         "identity": ROUTINE.to_dict(),
         "ddl": "",
         "invocation": "",
+        # No source reported them: unknown, not "takes none" (747).
+        "parameters": None,
     }
+
+
+def test_a_routine_serializes_its_parameters_in_order() -> None:
+    """Each parameter with its mode's role; an unknown default stays None (747)."""
+    routine = DatabaseFunction(identity=ROUTINE, parameters=(
+        DatabaseParameter(name="p_from", ordinal=1, type="text", mode="IN", has_default=False),
+        DatabaseParameter(name="p_on", ordinal=2, type="date", mode="IN",
+                          has_default=True, default="CURRENT_DATE"),
+        DatabaseParameter(name="rate", ordinal=3, type="numeric", mode="TABLE", has_default=False),
+    ))
+
+    assert routine.to_dict()["parameters"] == [
+        {"name": "p_from", "ordinal": 1, "type": "text", "mode": "IN", "role": "input",
+         "has_default": False, "default": None},
+        {"name": "p_on", "ordinal": 2, "type": "date", "mode": "IN", "role": "input",
+         "has_default": True, "default": "CURRENT_DATE"},
+        {"name": "rate", "ordinal": 3, "type": "numeric", "mode": "TABLE", "role": "output",
+         "has_default": False, "default": None},
+    ]
+
+
+def test_a_routine_reported_to_take_none_says_so() -> None:
+    assert DatabaseProcedure(identity=ROUTINE, parameters=()).to_dict()["parameters"] == []
+
+
+@pytest.mark.parametrize(("mode", "role"), [
+    ("IN", "input"), ("VARIADIC", "input"), ("OUT", "output"),
+    ("TABLE", "output"), ("INOUT", "input_output"),
+])
+def test_a_parameters_role_is_its_modes(mode: str, role: str) -> None:
+    assert DatabaseParameter(
+        name="p", ordinal=1, type="text", mode=mode, has_default=None,
+    ).role == role
 
 
 def test_two_overloads_are_two_identities() -> None:

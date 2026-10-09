@@ -203,10 +203,12 @@ class TestListing:
             self._Conn(rows), "catalog", "control", "function",
         )
 
-    #: One catalog row, in the order the query selects.
+    #: One catalog row, in the order the query selects: identity, the call's
+    #: facts, then the parameter arrays and the visible defaults (backlog 747).
     _ROW = (
         "control", "f_thing", "p_id bigint", "control.f_thing", False,
         "NULL::bigint", "p_id => NULL::bigint", True, False,
+        ["bigint"], ["p_id"], None, 0, None,
     )
 
     def test_a_rendered_routine_carries_its_invocation(self) -> None:
@@ -223,7 +225,8 @@ class TestListing:
         # Not an empty string to be truthiness-tested downstream: absent.
         listed = self._listed([
             ("control", "f_var", "VARIADIC t text[]", "control.f_var", False,
-             "NULL::text[]", "p_tags => NULL::text[]", True, True),
+             "NULL::text[]", "p_tags => NULL::text[]", True, True,
+             ["text[]"], ["p_tags"], ["v"], 0, None),
         ])
         assert "invocation" not in listed[0]
 
@@ -231,6 +234,40 @@ class TestListing:
         conn = self._Conn([])
         postgres_utils.list_routines(conn, "catalog", None, "function")
         assert conn.cursor_object.closed
+
+    def test_its_parameters_are_listed_in_call_order(self) -> None:
+        listed = self._listed([self._ROW])
+        assert listed[0]["parameters"] == [{
+            "name": "p_id", "ordinal": 1, "type": "bigint", "mode": "IN",
+            "has_default": False, "default": None,
+        }]
+
+    def test_a_visible_default_carries_its_expression(self) -> None:
+        listed = self._listed([(
+            "control", "f_find", "p_key text, p_limit integer", "control.f_find", True,
+            "NULL::text, NULL::integer", "p_key => NULL::text, p_limit => NULL::integer",
+            True, False,
+            ["text", "integer", "bigint"], ["p_key", "p_limit", "found_id"],
+            ["i", "i", "t"], 1, {"2": "10"},
+        )])
+        parameters = listed[0]["parameters"]
+        assert [(one["name"], one["mode"], one["has_default"], one["default"])
+                for one in parameters] == [
+            ("p_key", "IN", False, None),
+            ("p_limit", "IN", True, "10"),
+            ("found_id", "TABLE", False, None),
+        ]
+
+    def test_a_default_the_role_cannot_see_is_still_a_default(self) -> None:
+        # has_default comes from pronargdefaults, never from whether the
+        # expression was visible.
+        listed = self._listed([(
+            "control", "f_opt", "p_flag boolean", "control.f_opt", False,
+            "NULL::boolean", "p_flag => NULL::boolean", True, False,
+            ["boolean"], ["p_flag"], None, 1, None,
+        )])
+        assert listed[0]["parameters"][0]["has_default"] is True
+        assert listed[0]["parameters"][0]["default"] is None
 
 
 class TestObjects:

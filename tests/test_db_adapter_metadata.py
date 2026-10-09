@@ -147,9 +147,11 @@ def test_postgres_routines_normalize_with_their_signatures(
         [[
             ("public", "audit_trade", "integer, text", "public.audit_trade",
              False, "NULL::integer, NULL::text",
-             "p_id => NULL::integer, p_note => NULL::text", True, False),
+             "p_id => NULL::integer, p_note => NULL::text", True, False,
+             ["integer", "text"], ["p_id", "p_note"], None, 1, {"2": "NULL::text"}),
             ("public", "audit_trade", "bigint", "public.audit_trade",
-             False, "NULL::bigint", "p_id => NULL::bigint", True, False),
+             False, "NULL::bigint", "p_id => NULL::bigint", True, False,
+             ["bigint"], ["p_id"], None, 0, None),
         ]],
     )
     monkeypatch.setattr(postgres_utils, "get_current_database", lambda _conn: "reporting")
@@ -164,6 +166,8 @@ def test_postgres_routines_normalize_with_their_signatures(
             "object_type": "function",
             "signature": "bigint",
             "invocation": "SELECT public.audit_trade(p_id => NULL::bigint);",
+            "parameters": [{"name": "p_id", "ordinal": 1, "type": "bigint", "mode": "IN",
+                            "has_default": False, "default": None}],
         },
         {
             "catalog": "reporting",
@@ -172,6 +176,12 @@ def test_postgres_routines_normalize_with_their_signatures(
             "object_type": "function",
             "signature": "integer, text",
             "invocation": "SELECT public.audit_trade(p_id => NULL::integer, p_note => NULL::text);",
+            "parameters": [
+                {"name": "p_id", "ordinal": 1, "type": "integer", "mode": "IN",
+                 "has_default": False, "default": None},
+                {"name": "p_note", "ordinal": 2, "type": "text", "mode": "IN",
+                 "has_default": True, "default": "NULL::text"},
+            ],
         },
     ]
     for record in records:
@@ -214,13 +224,28 @@ def test_postgres_missing_routine_reports_its_full_identity(
         )
 
 
+class _SequencedCursor(_StubCursor):
+    """One cursor answering each statement in turn, as MySQL's listing uses it."""
+
+    def __init__(self, answers: list[list[Any]], calls: list[tuple[str, Any]]) -> None:
+        super().__init__([], calls)
+        self._answers = list(answers)
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        super().execute(sql, params)
+        self._rows = self._answers.pop(0) if self._answers else []
+
+
 def test_mysql_routines_normalize_to_the_same_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conn = _StubConnection(
-        "mysql",
-        [[{"schema_name": "reporting", "routine_name": "refresh_totals"}]],
-    )
+    conn = _StubConnection("mysql", [])
+    cursor = _SequencedCursor([
+        [{"schema_name": "reporting", "routine_name": "refresh_totals"}],
+        [{"routine_name": "refresh_totals", "ordinal": 1, "parameter_name": "p_day",
+          "mode": "IN", "data_type": "date"}],
+    ], conn.calls)
+    conn.cursor = lambda *_args, **_kwargs: cursor
     monkeypatch.setattr(mysql_utils, "get_current_database", lambda _conn: "reporting")
 
     records = DBAdapter().list_procedures(conn, "reporting")
@@ -234,10 +259,16 @@ def test_mysql_routines_normalize_to_the_same_shape(
             # MySQL does not overload, so the signature is empty and the name
             # alone still addresses the routine.
             "signature": "",
+            # MySQL routine parameters take no defaults (backlog 747).
+            "parameters": [{"name": "p_day", "ordinal": 1, "type": "date", "mode": "IN",
+                            "has_default": False, "default": None}],
         }
     ]
-    _, params = conn.calls[0]
-    assert params == ["PROCEDURE", "reporting"]
+    (_, routines), (parameters_sql, parameters) = conn.calls
+    assert routines == parameters == ["PROCEDURE", "reporting"]
+    assert "information_schema.parameters" in parameters_sql
+    assert "ordinal_position > 0" in parameters_sql
+    assert cursor.closed
 
 
 def test_mysql_routine_definition_validates_identifiers_before_quoting(
@@ -282,7 +313,12 @@ def test_sql_server_routines_reach_its_listing_and_normalize(
     asked: list[tuple[str, dict]] = []
     monkeypatch.setattr(sqlserver_utils, "get_current_database", lambda _conn: "rey")
     monkeypatch.setattr(sqlserver_utils, "fetch_rows", lambda _c, sql_text, params: asked.append(
-        (sql_text, dict(params))) or [{"schema_name": "control", "routine_name": "load_runs"}])
+        (sql_text, dict(params))) or (
+            [{"schema_name": "control", "routine_name": "load_runs", "ordinal": 1,
+              "parameter_name": "@since", "data_type": "date", "is_output": True}]
+            if "sys.parameters" in sql_text
+            else [{"schema_name": "control", "routine_name": "load_runs"}]
+        ))
     conn = SimpleNamespace(provider="sqlserver")
     adapter = DBAdapter()
 
@@ -296,11 +332,17 @@ def test_sql_server_routines_reach_its_listing_and_normalize(
             "object_type": "procedure",
             # SQL Server does not overload a routine name.
             "signature": "",
+            # OUTPUT is also an input; a T-SQL default is not kept (747).
+            "parameters": [{
+                "name": "@since", "ordinal": 1, "type": "date", "mode": "INOUT",
+                "has_default": None, "default": None,
+            }],
         }
     ]
-    ((sql_text, params),) = asked
-    assert "o.type IN ('P')" in sql_text
-    assert params == {"schema": "control"}
+    (routines, parameters) = asked
+    assert "o.type IN ('P')" in routines[0]
+    assert "o.type IN ('P')" in parameters[0] and "sys.parameters" in parameters[0]
+    assert routines[1] == parameters[1] == {"schema": "control"}
 
 
 def test_sql_server_lists_each_function_type_and_every_schema(
@@ -311,9 +353,10 @@ def test_sql_server_lists_each_function_type_and_every_schema(
         (sql_text, dict(params))) or [])
 
     assert sqlserver_utils.list_routines(object(), "rey", None, "function") == []
-    ((sql_text, params),) = asked
-    assert "o.type IN ('FN', 'IF', 'TF')" in sql_text
-    assert params == {"schema": None}
+    (routines, parameters) = asked
+    assert "o.type IN ('FN', 'IF', 'TF')" in routines[0]
+    assert "o.type IN ('FN', 'IF', 'TF')" in parameters[0]
+    assert routines[1] == parameters[1] == {"schema": None}
 
 
 def test_sql_server_refuses_an_unknown_routine_kind() -> None:

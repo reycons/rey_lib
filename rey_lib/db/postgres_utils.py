@@ -1163,7 +1163,7 @@ def list_routines(
     catalog: str,
     schema: str | None,
     kind: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Return one routine kind from the catalog, with its identity arguments.
 
     Read from ``pg_proc`` so overloaded routines are listed once each, and
@@ -1179,6 +1179,34 @@ def list_routines(
     try:
         cursor.execute(
             """
+            -- The parameters (backlog 747): the catalog arrays
+            -- _routine_parameters decodes, so there is one decoder, and each
+            -- defaulted parameter's expression by ordinal over the full
+            -- argument list. pg_get_function_arg_default, not
+            -- information_schema.parameters, which shows a default only to the
+            -- owner's role. Whether a default exists is pronargdefaults',
+            -- never inferred from an absent expression.
+            WITH arg_types AS (
+                SELECT p.oid,
+                       array_agg(format_type(t.t, NULL) ORDER BY t.ord) AS types
+                FROM pg_proc p
+                CROSS JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
+                     WITH ORDINALITY AS t(t, ord)
+                WHERE p.prokind = %s
+                GROUP BY p.oid
+            ), arg_defaults AS (
+                SELECT p.oid,
+                       json_object_agg(t.ord, d.expression) AS by_ordinal
+                FROM pg_proc p
+                CROSS JOIN LATERAL generate_series(
+                         1, COALESCE(array_length(p.proallargtypes, 1), p.pronargs::int)
+                     ) AS t(ord)
+                CROSS JOIN LATERAL pg_get_function_arg_default(p.oid, t.ord) AS d(expression)
+                WHERE p.prokind = %s
+                    AND p.pronargdefaults > 0
+                    AND d.expression IS NOT NULL
+                GROUP BY p.oid
+            )
             SELECT n.nspname,
                    p.proname,
                    pg_get_function_identity_arguments(p.oid),
@@ -1193,9 +1221,16 @@ def list_routines(
                    call.positional,
                    call.named,
                    call.all_named,
-                   call.has_variadic
+                   call.has_variadic,
+                   arg_types.types,
+                   p.proargnames,
+                   p.proargmodes::text[],
+                   p.pronargdefaults,
+                   arg_defaults.by_ordinal
             FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
+            LEFT JOIN arg_types ON arg_types.oid = p.oid
+            LEFT JOIN arg_defaults ON arg_defaults.oid = p.oid
             LEFT JOIN LATERAL (
                 SELECT
                     bool_or(a.amode = 'v') AS has_variadic,
@@ -1233,7 +1268,7 @@ def list_routines(
                 AND (%s::text IS NULL OR n.nspname = %s::text)
             ORDER BY n.nspname, p.proname
             """,
-            [prokind, schema, schema],
+            [prokind, prokind, prokind, schema, schema],
         )
         rows = cursor.fetchall()
     finally:
@@ -1243,11 +1278,16 @@ def list_routines(
     for (
         schema_name, routine_name, signature, qualified, returns_set,
         positional, named, all_named, has_variadic,
+        arg_types, arg_names, arg_modes, n_defaults, defaults,
     ) in rows:
         routine = {
             "schema": str(schema_name),
             "name": str(routine_name),
             "signature": str(signature or ""),
+            "parameters": _listed_parameters(
+                _routine_parameters(arg_types, arg_names, arg_modes, n_defaults),
+                defaults or {},
+            ),
         }
         rendered = _routine_invocation(
             kind=kind,
@@ -1262,6 +1302,28 @@ def list_routines(
             routine["invocation"] = rendered
         listed.append(routine)
     return listed
+
+
+def _listed_parameters(
+    decoded: list[dict[str, Any]],
+    defaults: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The decoded parameters in the routine listing's vocabulary (backlog 747).
+
+    ``has_default`` is the decoder's, from ``pronargdefaults``; ``default`` is
+    the expression ``pg_get_function_arg_default`` gave, else None.
+    """
+    return [
+        {
+            "name": one["member_name"],
+            "ordinal": one["ordinal"],
+            "type": one["data_type"],
+            "mode": one["member_mode"],
+            "has_default": one["has_default"],
+            "default": defaults.get(str(one["ordinal"])),
+        }
+        for one in decoded
+    ]
 
 
 def _routine_invocation(

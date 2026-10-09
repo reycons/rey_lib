@@ -821,7 +821,7 @@ def list_routines(
 	catalog: str,
 	schema: str | None,
 	kind: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
 	"""Return one routine kind from information_schema.
 
 	MySQL does not overload routines, so a name is unique within its schema and
@@ -845,14 +845,40 @@ def list_routines(
 			[routine_type, target_schema],
 		)
 		rows = cursor.fetchall()
+		# The parameters (backlog 747). Ordinal 0 is a function's return value,
+		# not a parameter. MySQL routine parameters take no defaults.
+		cursor.execute(
+			"""
+			SELECT specific_name AS routine_name, ordinal_position AS ordinal,
+			       parameter_name AS parameter_name, parameter_mode AS mode,
+			       dtd_identifier AS data_type
+			FROM information_schema.parameters
+			WHERE routine_type = %s AND specific_schema = %s AND ordinal_position > 0
+			ORDER BY specific_name, ordinal_position
+			""",
+			[routine_type, target_schema],
+		)
+		parameter_rows = cursor.fetchall()
 	finally:
 		cursor.close()
+
+	parameters: dict[str, list[dict[str, Any]]] = {}
+	for row in parameter_rows:
+		parameters.setdefault(str(row["routine_name"]), []).append({
+			"name": str(row["parameter_name"] or ""),
+			"ordinal": int(row["ordinal"]),
+			"type": str(row["data_type"] or ""),
+			"mode": str(row["mode"] or "IN"),
+			"has_default": False,
+			"default": None,
+		})
 
 	return [
 		{
 			"schema": str(row["schema_name"]),
 			"name": str(row["routine_name"]),
 			"signature": "",
+			"parameters": parameters.get(str(row["routine_name"]), []),
 		}
 		for row in rows
 	]

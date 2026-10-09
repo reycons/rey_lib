@@ -934,13 +934,41 @@ _ROUTINE_LISTINGS: dict[str, str] = {
 	)
 }
 
+#: Each listed routine's parameters (backlog 747), over the same T-SQL object
+#: types as its listing; no CLR type is listed. parameter_id 0 is a function's
+#: return value, not a parameter.
+_ROUTINE_PARAMETERS: dict[str, str] = {
+	"procedure": (
+		"SELECT s.name AS schema_name, o.name AS routine_name, p.parameter_id AS ordinal, "
+		"p.name AS parameter_name, TYPE_NAME(p.user_type_id) AS data_type, "
+		"p.is_output AS is_output "
+		"FROM sys.parameters p "
+		"JOIN sys.objects o ON o.object_id = p.object_id "
+		"JOIN sys.schemas s ON s.schema_id = o.schema_id "
+		"WHERE o.type IN ('P') AND o.is_ms_shipped = 0 AND p.parameter_id > 0 "
+		"AND (:schema IS NULL OR s.name = :schema) "
+		"ORDER BY s.name, o.name, p.parameter_id"
+	),
+	"function": (
+		"SELECT s.name AS schema_name, o.name AS routine_name, p.parameter_id AS ordinal, "
+		"p.name AS parameter_name, TYPE_NAME(p.user_type_id) AS data_type, "
+		"p.is_output AS is_output "
+		"FROM sys.parameters p "
+		"JOIN sys.objects o ON o.object_id = p.object_id "
+		"JOIN sys.schemas s ON s.schema_id = o.schema_id "
+		"WHERE o.type IN ('FN', 'IF', 'TF') AND o.is_ms_shipped = 0 AND p.parameter_id > 0 "
+		"AND (:schema IS NULL OR s.name = :schema) "
+		"ORDER BY s.name, o.name, p.parameter_id"
+	),
+}
+
 
 def list_routines(
 	conn: pyodbc.Connection,
 	catalog: str,
 	schema: str | None,
 	kind: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
 	"""Return one routine kind from the connected database's catalog (backlog 726).
 
 	SQL Server does not overload a routine name, so a name is unique within its
@@ -956,11 +984,29 @@ def list_routines(
 		raise DatabaseError(f"sqlserver_utils: unsupported routine kind '{kind}'.")
 
 	rows = fetch_rows(conn, statement, {"schema": schema or None})
+	# The parameters (backlog 747). A T-SQL OUTPUT parameter is also passed in,
+	# so it is INOUT. SQL Server keeps has_default_value and default_value only
+	# for CLR routines, and none is listed, so whether a default exists is
+	# unknown (None) rather than false, and no expression is exposed.
+	parameters: dict[tuple[str, str], list[dict[str, Any]]] = {}
+	for row in fetch_rows(conn, _ROUTINE_PARAMETERS[kind], {"schema": schema or None}):
+		routine = (str(row["schema_name"]), str(row["routine_name"]))
+		parameters.setdefault(routine, []).append({
+			"name": str(row["parameter_name"] or ""),
+			"ordinal": int(row["ordinal"]),
+			"type": str(row["data_type"] or ""),
+			"mode": "INOUT" if row["is_output"] else "IN",
+			"has_default": None,
+			"default": None,
+		})
 	return [
 		{
 			"schema": str(row["schema_name"]),
 			"name": str(row["routine_name"]),
 			"signature": "",
+			"parameters": parameters.get(
+				(str(row["schema_name"]), str(row["routine_name"])), [],
+			),
 		}
 		for row in rows
 	]
