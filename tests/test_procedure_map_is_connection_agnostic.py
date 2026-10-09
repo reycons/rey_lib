@@ -30,7 +30,7 @@ from tests.conftest import make_run_log
 
 from rey_lib.db import connection as connection_module
 from rey_lib.db.connection import build_connections, shared_connection
-from rey_lib.db.procedure_map import execute_mapped_routine, get_procedure_map
+from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -158,25 +158,31 @@ class TestOneMapRunsAgainstTwoConnections:
 
         seen: list[tuple[str, Any]] = []
 
-        def _call_routine(conn: Any, routine: str, arguments: Any,
-                          *, routine_type: str, result_mode: str) -> int:
-            seen.append((routine, conn))
-            return 1
+        class _Catalog:
+            """Lists the one canonical function and records where each call went."""
 
-        # Connection opens the handle; the map hands one normalized call to the
-        # connector's routine entry. The map itself renders nothing.
+            def list_functions(self, conn: Any, schema: str) -> list[dict[str, Any]]:
+                return [{"schema": "control", "name": "mapped_function", "signature": "",
+                         "returns_rows": False, "parameters": [
+                             {"name": "p_batch_name", "ordinal": 1, "type": "text",
+                              "mode": "IN", "has_default": False, "default": None}]}]
+
+            def call_routine(self, conn: Any, call: Any) -> int:
+                seen.append((call.routine, conn))
+                return 1
+
+        # Connection opens the handle; the map resolves the canonical routine
+        # on it and the routine executes there. The map itself renders nothing.
         with patch.object(connection_module, "_db") as opener, \
-             patch("rey_lib.db.procedure_map.call_routine") as executor:
+             patch("rey_lib.db.procedure_map._db", _Catalog()):
             opener.get_connection.side_effect = lambda cfg, ctx=None: f"handle:{cfg.name}"
-            executor.side_effect = _call_routine
 
             for connection in (live, test):
-                execute_mapped_routine(
-                    ctx=ctx, run_log=make_run_log(tmp_path),
-                    conn=connection.handle(), procedure_map="control",
-                    routine_name="start_batch", values={"batch_name": "B"},
-                    run_ctx=SimpleNamespace(), map_cfg=ctx.procedure_maps[0],
-                )
+                handle = connection.handle()
+                ProcedureMap.resolve(
+                    handle, ctx.procedure_maps[0], "control", "start_batch",
+                ).call(handle, {"batch_name": "B"}, make_run_log(tmp_path),
+                       run_ctx=SimpleNamespace())
 
         # One routine contract, two databases, no duplicated bindings.
         assert [routine for routine, _ in seen] == [

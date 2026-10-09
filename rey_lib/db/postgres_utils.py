@@ -1288,6 +1288,9 @@ def list_routines(
                 _routine_parameters(arg_types, arg_names, arg_modes, n_defaults),
                 defaults or {},
             ),
+            # Whether a call answers with rows (backlog 822): the routine's own
+            # return characteristic, so its invocation shape is not configured.
+            "returns_rows": bool(returns_set),
         }
         rendered = _routine_invocation(
             kind=kind,

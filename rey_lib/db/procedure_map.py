@@ -59,24 +59,24 @@ procedure_no_return``, and ``return_variable`` normalize into the new shape:
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional
 
 from rey_lib.logs import AppLogger
 from rey_lib.config.ctx import find_by_name
-from rey_lib.db.connection import call_routine
+from rey_lib.db.database_objects import DatabaseFunction, DatabaseProcedure
 from rey_lib.db.db_adapter import DBAdapter
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import ConfigError, DatabaseError
 from rey_lib.logs import log_sql_execution
 
 __all__ = [
     "get_procedure_map",
     "resolve_routine_binding",
     "resolve_sql_binding",
-    "execute_mapped_routine",
+    "ProcedureMap",
     "execute_operation",
     "execute_sql_text",
     "execute_procedure_call",
-    "call_action",
 ]
 
 _logger = AppLogger(__name__)
@@ -347,8 +347,10 @@ def execute_operation(
 
     if target == "routine":
         binding_name = _get(config, "binding") or _get(config, "routine")
-        return execute_mapped_routine(ctx, run_log, conn, operation_map, str(binding_name),
-                                      values, run_ctx=run_ctx)
+        procedure = ProcedureMap.resolve(
+            conn, get_procedure_map(ctx, operation_map), operation_map, str(binding_name),
+        )
+        return procedure.call(conn, values, run_log, run_ctx=run_ctx)
 
     if target == "mapped_sql":
         binding = resolve_sql_binding(get_procedure_map(ctx, operation_map),
@@ -368,122 +370,170 @@ def execute_operation(
                         _get(config, "output"), values, run_ctx)
 
 
-def execute_mapped_routine(
-    ctx: Any, run_log,
-    conn: Any,
-    procedure_map: str,
-    routine_name: str,
-    values: dict[str, Any],
-    run_ctx: Any = None,
-    map_cfg: Any = None,
-) -> dict[str, Any]:
-    """Execute one mapped routine (function/procedure) and capture its output.
+@dataclass(frozen=True)
+class ProcedureMap:
+    """How Rey uses one database routine: one action of a procedure map (backlog 822).
 
-    Resolves the named routine binding, binds inputs, executes per
-    ``result_mode`` (``scalar_result`` -> function/SELECT; ``no_return`` ->
-    procedure/CALL; ``dataset_result`` -> set-returning function/SELECT FROM),
-    and stores a captured scalar via ``output``.
+    Rey integration policy, not a database object. It names the action and the
+    canonical routine it resolved, and holds the policy the map states for it:
+    where each parameter's value comes from, how a procedure's outputs are used,
+    what is written back to the run context, and whether a success is logged.
+    The routine itself -- its identity, parameters, return characteristics and
+    invocation -- is the canonical :class:`DatabaseProcedure` or
+    :class:`DatabaseFunction`, which executes the call.
 
-    A routine that returns rows is bound like any other routine. Restating its
-    signature as SQL in a mapped_sql binding would put the routine's shape in a
-    second place and give it a second path in, so the binding carries the
-    dataset instead. Rows are returned under ``rows``, as the mapped-SQL path
-    returns them.
-
-    ``map_cfg`` lets a caller that already holds the resolved map supply it
-    rather than have it looked up on ``ctx`` again. That is not a shortcut: an
-    owner which has taken a map off the context is the only place it still
-    exists, so the lookup would fail. ``ctx`` is still used for logging
-    evidence, which is why the two are separate parameters.
-
-    ``run_ctx`` is the binding target -- the object ``input`` reads unsupplied
-    values from and ``output.load_to_ctx`` writes results onto. It is not
-    required to be the application context.
+    The map in context is the configuration source and is read once, by
+    :meth:`resolve`. This object owns the resolved copy for its lifetime; no
+    call reads the map from context again.
     """
-    binding = resolve_routine_binding(
-        map_cfg if map_cfg is not None else get_procedure_map(ctx, procedure_map),
-        procedure_map, routine_name)
-    named_params = _bind_inputs(binding["inputs"], values, run_ctx,
-                                procedure_map, routine_name)
-    result_mode = binding["result_mode"]
 
-    _logger.debug(
-        "procedure_map: %s.%s -> %s(%s) [%s]",
-        procedure_map, routine_name, binding["routine"], list(named_params), result_mode,
-    )
+    map_name: str
+    action: str
+    routine: DatabaseProcedure | DatabaseFunction
+    inputs: Mapping[str, str] | None
+    result_mode: str
+    output: Any
+    log_execution: bool
 
-    t0 = time.monotonic()
-    outputs: dict[str, Any] = {}
-    rows: Optional[list[dict[str, Any]]] = None
-    try:
-        # One call. Which statement form this becomes is the connector's, not
-        # this module's and not a provider's: every backend deciding it for
-        # itself is how the same rule came to be written once per provider and
-        # drift in one of them.
-        returned = call_routine(
-            conn, binding["routine"], named_params,
-            routine_type=binding["routine_type"], result_mode=result_mode,
+    @classmethod
+    def resolve(cls, conn: Any, map_cfg: Any, map_name: str, action: str) -> "ProcedureMap":
+        """Read one action from a procedure map and resolve its routine (backlog 822).
+
+        The routine is the canonical object its provider lists. What the map
+        states about the routine is checked against it here, once: its kind, a
+        function's result against whether it returns rows, and the mapped
+        parameters through the routine's own argument check.
+
+        Raises:
+            ConfigError: When the binding is malformed, the routine does not
+                exist or is ambiguous, or the map disagrees with the routine.
+        """
+        binding = resolve_routine_binding(map_cfg, map_name, action)
+        inputs = binding["inputs"]
+        if inputs is not None and not _is_mapping(inputs):
+            _logger.debug("procedure_map: refusing %s.%s: input is not a mapping",
+                          map_name, action)
+            raise ConfigError(
+                f"procedure_map: binding '{action}' in map '{map_name}' has a "
+                "non-mapping 'input'."
+            )
+        # An undeclared kind has always been called as a function.
+        owner = DatabaseProcedure if binding["routine_type"] == "procedure" else DatabaseFunction
+        _logger.debug("procedure_map: resolving %s.%s -> %s", map_name, action, binding["routine"])
+        routine = owner.resolve(conn, binding["routine"], _db)
+        result_mode = binding["result_mode"]
+        if owner is DatabaseFunction and routine.returns_rows is not None and \
+                routine.returns_rows != (result_mode == "dataset_result"):
+            _logger.debug("procedure_map: refusing %s.%s: result_mode %s disagrees with the routine",
+                          map_name, action, result_mode)
+            raise ConfigError(
+                f"procedure_map: binding '{action}' in map '{map_name}' declares "
+                f"'{result_mode}', but {binding['routine']} "
+                f"{'returns rows' if routine.returns_rows else 'returns one value'}."
+            )
+        # Every value a call passes comes through this mapping, so the routine's
+        # own check of those names holds for every call this action makes.
+        routine.check_arguments(str(param) for param, _ in _items(inputs or {}))
+        return cls(
+            map_name=map_name, action=action, routine=routine,
+            inputs=dict(_items(inputs)) if inputs is not None else None,
+            result_mode=result_mode, output=binding["output"],
+            log_execution=binding["log_execution"],
         )
-        # What the answer means is map semantics, and stays here.
-        if binding["routine_type"] == "procedure":
-            # A procedure returns through OUT parameters, so what it gives back
-            # is decided by how it is called, not by whether it is a function.
-            # This is what lets a write record its own batch step and still
-            # hand the caller the id it generated.
-            if result_mode == "scalar_result":
-                # The first OUT parameter is the result, as a function's return
-                # value is. A converted routine declares its id first.
-                scalar = next(iter((returned or {}).values()), None)
-                outputs = _apply_output(scalar, binding["output"], values, run_ctx)
+
+    def call(
+        self, conn: Any, values: dict[str, Any], run_log: Any, run_ctx: Any = None,
+    ) -> dict[str, Any]:
+        """Call the routine with this action's policy applied, and capture its output.
+
+        Each mapped parameter takes its value from ``values``, else from
+        ``run_ctx``. The routine executes the call. A procedure's outputs are
+        used as the map says -- the first as the result (``scalar_result``),
+        all as one row (``dataset_result``), or none (``no_return``); a
+        function answers its value or rows. ``output.load_to_ctx`` writes the
+        result onto ``run_ctx``. Failures are always logged; a success is
+        logged unless the map declines it.
+
+        ``run_ctx`` is the binding target -- the object ``input`` reads
+        unsupplied values from and ``output.load_to_ctx`` writes results onto.
+        It is not required to be the application context.
+        """
+        named_params = _bind_inputs(self.inputs, values, run_ctx, self.map_name, self.action)
+        routine_name = f"{self.routine.identity.schema}.{self.routine.identity.name}"
+        routine_type = "procedure" if isinstance(self.routine, DatabaseProcedure) else "function"
+        result_mode = self.result_mode
+
+        _logger.debug(
+            "procedure_map: %s.%s -> %s(%s) [%s]",
+            self.map_name, self.action, routine_name, list(named_params), result_mode,
+        )
+
+        t0 = time.monotonic()
+        outputs: dict[str, Any] = {}
+        rows: Optional[list[dict[str, Any]]] = None
+        try:
+            returned = self.routine.call(conn, named_params, _db)
+            # What the answer means is map semantics, and stays here.
+            if routine_type == "procedure":
+                # A procedure returns through OUT parameters, so what it gives
+                # back is decided by how the map uses it, not by the routine.
+                # This is what lets a write record its own batch step and still
+                # hand the caller the id it generated.
+                if result_mode == "scalar_result":
+                    # The first OUT parameter is the result, as a function's
+                    # return value is. A converted routine declares its id first.
+                    scalar = next(iter((returned or {}).values()), None)
+                    outputs = _apply_output(scalar, self.output, values, run_ctx)
+                elif result_mode == "dataset_result":
+                    rows = [dict(returned)] if returned else []
+            elif result_mode == "scalar_result":
+                outputs = _apply_output(returned, self.output, values, run_ctx)
             elif result_mode == "dataset_result":
-                rows = [dict(returned)] if returned else []
-        elif result_mode == "scalar_result":
-            outputs = _apply_output(returned, binding["output"], values, run_ctx)
-        elif result_mode == "dataset_result":
-            rows = returned
-    except Exception as exc:
-        log_sql_execution(run_log,
-            sql_label=routine_name,
-            operation="routine",
-            status="failed",
-            duration_ms=int((time.monotonic() - t0) * 1000),
-            error_message=str(exc),
-            safe_to_preview=False,
-            procedure_map=procedure_map,
-            routine=str(binding["routine"]),
-            routine_type=str(binding.get("routine_type") or ""),
-            result_mode=result_mode,
-        )
-        raise
+                rows = returned
+        except (ConfigError, DatabaseError) as exc:
+            log_sql_execution(run_log,
+                sql_label=self.action,
+                operation="routine",
+                status="failed",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                error_message=str(exc),
+                safe_to_preview=False,
+                procedure_map=self.map_name,
+                routine=routine_name,
+                routine_type=routine_type,
+                result_mode=result_mode,
+            )
+            raise
 
-    # Failures are logged unconditionally above. This is the success record,
-    # and it is the only one a binding may decline. Only the logging is skipped:
-    # what the call returns is the caller's contract and never varies with it.
-    if binding.get("log_execution", True):
-        log_sql_execution(run_log,
-            sql_label=routine_name,
-            operation="routine",
-            status="success",
-            duration_ms=int((time.monotonic() - t0) * 1000),
-            safe_to_preview=False,
-            procedure_map=procedure_map,
-            routine=str(binding["routine"]),
-            routine_type=str(binding.get("routine_type") or ""),
-            result_mode=result_mode,
-            row_count=len(rows) if rows is not None else None,
-            object_count=len(outputs) if outputs else None,
-        )
+        # Failures are logged unconditionally above. This is the success record,
+        # and it is the only one a binding may decline. Only the logging is
+        # skipped: what the call returns is the caller's contract and never
+        # varies with it.
+        if self.log_execution:
+            log_sql_execution(run_log,
+                sql_label=self.action,
+                operation="routine",
+                status="success",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                safe_to_preview=False,
+                procedure_map=self.map_name,
+                routine=routine_name,
+                routine_type=routine_type,
+                result_mode=result_mode,
+                row_count=len(rows) if rows is not None else None,
+                object_count=len(outputs) if outputs else None,
+            )
 
-    return {
-        "procedure_map": procedure_map,
-        "routine_name": routine_name,
-        "routine": binding["routine"],
-        "execution_target": "routine",
-        "result_mode": result_mode,
-        "outputs": outputs,
-        "rows": rows,
-        "status": "success",
-    }
+        return {
+            "procedure_map": self.map_name,
+            "routine_name": self.action,
+            "routine": routine_name,
+            "execution_target": "routine",
+            "result_mode": result_mode,
+            "outputs": outputs,
+            "rows": rows,
+            "status": "success",
+        }
 
 
 def execute_sql_text(
@@ -695,23 +745,6 @@ def _guard_no_interpolation(sql_text: str, named_params: dict[str, Any],
                 f"procedure_map: sql operation '{name}' in map '{map_name}' appears "
                 f"to interpolate '{param}'; use ':{param}' bind parameters instead."
             )
-
-
-def call_action(
-    ctx: Any, run_log,
-    conn: Any,
-    map_name: str,
-    action_name: str,
-    variables: dict[str, Any],
-) -> Optional[Any]:
-    """Deprecated scalar-returning shim over :func:`execute_mapped_routine`.
-
-    Returns the captured scalar (functions) or None (procedures). New callers
-    should use ``execute_mapped_routine`` or ``execute_operation``.
-    """
-    result = execute_mapped_routine(ctx, run_log, conn, map_name, action_name, variables, run_ctx=ctx)
-    outputs = result.get("outputs") or {}
-    return next(iter(outputs.values()), None)
 
 
 # ---------------------------------------------------------------------------

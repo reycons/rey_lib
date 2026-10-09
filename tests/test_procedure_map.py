@@ -22,7 +22,7 @@ from tests.conftest import make_run_log, start_test_run
 from rey_lib.db._sqlalchemy import ReyConnection
 from rey_lib.db.postgres_utils import execute_named_sql
 from rey_lib.db.procedure_map import (
-    execute_mapped_routine,
+    ProcedureMap,
     execute_operation,
     execute_procedure_call,
     execute_sql_text,
@@ -30,6 +30,7 @@ from rey_lib.db.procedure_map import (
     resolve_routine_binding,
     resolve_sql_binding,
 )
+from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
 
@@ -200,42 +201,78 @@ def test_sql_binding_scalar_requires_output():
 
 
 # ---------------------------------------------------------------------------
-# execute_mapped_routine (routine target)
+# ProcedureMap (routine target)
 # ---------------------------------------------------------------------------
+
+class _Catalog:
+    """A stand-in adapter: lists canonical routines and records each RoutineCall (822)."""
+
+    def __init__(self, *routines: dict, answer=None):
+        self.routines = list(routines)
+        self.answer = answer
+        self.calls: list = []
+
+    def _listed(self, kind, schema):
+        return [r for r in self.routines if r["kind"] == kind and r["schema"] == schema]
+
+    def list_procedures(self, conn, schema):
+        return self._listed("procedure", schema)
+
+    def list_functions(self, conn, schema):
+        return self._listed("function", schema)
+
+    def call_routine(self, conn, call):
+        self.calls.append((conn, call))
+        return self.answer
+
+
+def _routine(qualified, kind="function", params=(), returns_rows=False):
+    """One listed routine; params are (name, mode, has_default) in call order."""
+    schema, _, name = qualified.partition(".")
+    return {
+        "kind": kind, "schema": schema, "name": name, "signature": "",
+        "returns_rows": returns_rows if kind == "function" else None,
+        "parameters": [
+            {"name": n, "ordinal": i, "type": "text", "mode": mode,
+             "has_default": has_default, "default": None}
+            for i, (n, mode, has_default) in enumerate(params, start=1)
+        ],
+    }
+
+
+def _called(catalog, conn, m, action, values, run_log, run_ctx=None):
+    with patch("rey_lib.db.procedure_map._db", catalog):
+        procedure = ProcedureMap.resolve(conn, m, "control", action)
+        return procedure.call(conn, values, run_log, run_ctx=run_ctx)
+
 
 def test_routine_scalar_executes_and_loads_output(run_log):
     conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
                  inp={"p_run_id": "run_id"}))
+    catalog = _Catalog(_routine("control.mapped_function", params=[("p_run_id", "IN", False)]),
+                       answer=123)
     values = {"run_id": "R1"}
     run_ctx = SimpleNamespace()
-    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map.call_routine") as call:
-        call.return_value = 123
-        result = execute_mapped_routine(object(), run_log, conn, "control", "start_batch",
-                                        values, run_ctx=run_ctx)
-    call.assert_called_once_with(conn, "control.mapped_function", {"p_run_id": "R1"},
-                                routine_type="function",
-                                result_mode="scalar_result")
+    result = _called(catalog, conn, m, "start_batch", values, run_log, run_ctx)
+    assert catalog.calls == [(conn, RoutineCall(
+        routine="control.mapped_function", shape=InvocationShape.SCALAR_FUNCTION,
+        arguments={"p_run_id": "R1"}))]
     assert values["batch_id"] == 123 and run_ctx.batch_id == 123
     assert result["outputs"] == {"batch_id": 123}
     assert result["result_mode"] == "scalar_result"
 
 
 def test_routine_execution_logs_sql_execution_evidence(tmp_path: Path):
-    ctx = _log_ctx(tmp_path)
+    _log_ctx(tmp_path)
     run_log = make_run_log(tmp_path)
-    conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
                  inp={"p_run_id": "run_id"}))
-    run_ctx = SimpleNamespace()
-    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map.call_routine") as call:
-        call.return_value = 123
-        execute_mapped_routine(ctx, run_log, conn, "control", "start_batch",
-                               {"run_id": "R1"}, run_ctx=run_ctx)
+    catalog = _Catalog(_routine("control.mapped_function", params=[("p_run_id", "IN", False)]),
+                       answer=123)
+    _called(catalog, object(), m, "start_batch", {"run_id": "R1"}, run_log, SimpleNamespace())
 
     record = next(r for r in _run_records(run_log) if r["record_type"] == "SQL_EXECUTION")
     assert record["operation"] == "routine"
@@ -250,66 +287,128 @@ def test_routine_no_return_executes_procedure(run_log):
     conn = object()
     m = _map(_rb(name="end_batch", routine="control.mapped_procedure",
                  call_type="procedure_no_return", inp={"p_batch_id": "batch_id"}))
-    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map.call_routine") as call:
-        result = execute_mapped_routine(object(), run_log, conn, "control", "end_batch",
-                                        {"batch_id": 5})
-    call.assert_called_once_with(conn, "control.mapped_procedure", {"p_batch_id": 5},
-                                routine_type="procedure",
-                                result_mode="no_return")
+    catalog = _Catalog(_routine("control.mapped_procedure", kind="procedure",
+                                params=[("p_batch_id", "IN", False)]))
+    result = _called(catalog, conn, m, "end_batch", {"batch_id": 5}, run_log)
+    assert catalog.calls == [(conn, RoutineCall(
+        routine="control.mapped_procedure", shape=InvocationShape.PROCEDURE,
+        arguments={"p_batch_id": 5}))]
     assert result["result_mode"] == "no_return" and result["outputs"] == {}
 
 
 def test_missing_input_fails_closed(run_log):
-    conn = object()
-    m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_x": "x"}))
-    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map._db"):
-        with pytest.raises(ConfigError, match="missing from the runtime context"):
-            execute_mapped_routine(object(), run_log, conn, "control", "a", {})
+    m = _map(_rb(name="a", routine="control.r", call_type="procedure_no_return",
+                 inp={"p_x": "x"}))
+    catalog = _Catalog(_routine("control.r", kind="procedure", params=[("p_x", "IN", False)]))
+    with pytest.raises(ConfigError, match="missing from the runtime context"):
+        _called(catalog, object(), m, "a", {}, run_log)
+    assert catalog.calls == []
 
 
 def test_present_none_input_binds_as_null(run_log):
     conn = object()
-    m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_x": "x"}))
-    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map.call_routine") as call:
-        execute_mapped_routine(object(), run_log, conn, "control", "a", {"x": None})
-    call.assert_called_once_with(conn, "r", {"p_x": None},
-                                routine_type="procedure",
-                                result_mode="no_return")
+    m = _map(_rb(name="a", routine="control.r", call_type="procedure_no_return",
+                 inp={"p_x": "x"}))
+    catalog = _Catalog(_routine("control.r", kind="procedure", params=[("p_x", "IN", False)]))
+    _called(catalog, conn, m, "a", {"x": None}, run_log)
+    assert catalog.calls[0][1].arguments == {"p_x": None}
 
 
 def test_input_resolves_from_run_ctx(run_log):
     conn = object()
-    m = _map(_rb(name="a", routine="r", call_type="procedure_no_return", inp={"p_b": "batch_id"}))
-    run_ctx = SimpleNamespace(batch_id=99)
-    with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map.call_routine") as call:
-        execute_mapped_routine(object(), run_log, conn, "control", "a", {}, run_ctx=run_ctx)
-    call.assert_called_once_with(conn, "r", {"p_b": 99},
-                                routine_type="procedure",
-                                result_mode="no_return")
+    m = _map(_rb(name="a", routine="control.r", call_type="procedure_no_return",
+                 inp={"p_b": "batch_id"}))
+    catalog = _Catalog(_routine("control.r", kind="procedure", params=[("p_b", "IN", False)]))
+    _called(catalog, conn, m, "a", {}, run_log, SimpleNamespace(batch_id=99))
+    assert catalog.calls[0][1].arguments == {"p_b": 99}
 
-
-# ---------------------------------------------------------------------------
-# execute_operation (generic dispatch: routine / mapped_sql / adhoc_sql)
-# ---------------------------------------------------------------------------
 
 def test_operation_routine_delegates(run_log):
     conn = object()
     m = _map(_rb(name="start_batch", call_type="function_with_return",
                  output={"variable": "batch_id", "load_to_ctx": "batch_id"},
                  inp={"p_run_id": "run_id"}))
+    catalog = _Catalog(_routine("control.mapped_function", params=[("p_run_id", "IN", False)]),
+                       answer=7)
     run_ctx = SimpleNamespace()
     with patch("rey_lib.db.procedure_map.get_procedure_map", return_value=m), \
-         patch("rey_lib.db.procedure_map.call_routine") as call:
-        call.return_value = 7
+         patch("rey_lib.db.procedure_map._db", catalog):
         result = execute_operation(object(), run_log, conn, "control",
                                    {"execution_target": "routine", "binding": "start_batch"},
                                    {"run_id": "R"}, run_ctx)
     assert result["execution_target"] == "routine" and result["outputs"] == {"batch_id": 7}
     assert run_ctx.batch_id == 7
+
+
+def test_a_procedure_dataset_answers_its_outputs_as_one_row(run_log):
+    m = _map(_rb(name="a", routine="control.p", routine_type="procedure",
+                 result_mode="dataset_result"))
+    catalog = _Catalog(_routine("control.p", kind="procedure",
+                                params=[("o_id", "INOUT", True), ("o_n", "INOUT", True)]),
+                       answer={"o_id": 1, "o_n": 2})
+    result = _called(catalog, object(), m, "a", {}, run_log)
+    assert result["rows"] == [{"o_id": 1, "o_n": 2}]
+
+
+def test_after_creation_the_map_is_never_read_again(run_log):
+    """The ProcedureMap owns its resolved policy; calls do not reach back (822)."""
+    conn = object()
+    m = _map(_rb(name="a", routine="control.r", call_type="procedure_no_return",
+                 inp={"p_x": "x"}))
+    catalog = _Catalog(_routine("control.r", kind="procedure", params=[("p_x", "IN", False)]))
+    with patch("rey_lib.db.procedure_map._db", catalog):
+        procedure = ProcedureMap.resolve(conn, m, "control", "a")
+        m["routine_bindings"].clear()
+        with patch("rey_lib.db.procedure_map.get_procedure_map",
+                   side_effect=AssertionError("the map was read again")), \
+             patch("rey_lib.db.procedure_map.resolve_routine_binding",
+                   side_effect=AssertionError("the binding was resolved again")):
+            procedure.call(conn, {"x": 1}, run_log)
+            procedure.call(conn, {"x": 2}, run_log)
+    assert [c.arguments for _, c in catalog.calls] == [{"p_x": 1}, {"p_x": 2}]
+
+
+def test_a_mapped_parameter_the_routine_does_not_take_is_refused_at_creation():
+    m = _map(_rb(name="a", routine="control.r", call_type="procedure_no_return",
+                 inp={"p_typo": "x"}))
+    catalog = _Catalog(_routine("control.r", kind="procedure", params=[("p_x", "IN", False)]))
+    with patch("rey_lib.db.procedure_map._db", catalog), \
+         pytest.raises(ConfigError, match="no input parameter p_typo"):
+        ProcedureMap.resolve(object(), m, "control", "a")
+
+
+def test_a_functions_declared_result_must_match_what_it_returns():
+    m = _map(_rb(name="a", routine="control.f", routine_type="function",
+                 result_mode="scalar_result", output={"variable": "v"}))
+    catalog = _Catalog(_routine("control.f", returns_rows=True))
+    with patch("rey_lib.db.procedure_map._db", catalog), \
+         pytest.raises(ConfigError, match="returns rows"):
+        ProcedureMap.resolve(object(), m, "control", "a")
+
+
+def test_a_routine_that_does_not_exist_is_refused_at_creation():
+    m = _map(_rb(name="a", routine="control.gone", call_type="procedure_no_return"))
+    with patch("rey_lib.db.procedure_map._db", _Catalog()), \
+         pytest.raises(ConfigError, match="no procedure control.gone exists"):
+        ProcedureMap.resolve(object(), m, "control", "a")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# execute_operation (generic dispatch: routine / mapped_sql / adhoc_sql)
+# ---------------------------------------------------------------------------
+
 
 
 def test_operation_mapped_sql_scalar(run_log):

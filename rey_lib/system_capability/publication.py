@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
-from rey_lib.db.procedure_map import execute_mapped_routine
+from rey_lib.db.procedure_map import ProcedureMap, get_procedure_map
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import AppLogger
 
@@ -333,10 +333,14 @@ class CapabilityPublisher:
         supplied parent, and what makes the call visible to the code index --
         a procedure name passed as a string literal appears in no edge.
         """
-        execute_mapped_routine(
-            ctx, run_log, self._connection, _MAP, binding,
+        procedure = ProcedureMap.resolve(
+            self._connection, get_procedure_map(ctx, _MAP), _MAP, binding,
+        )
+        procedure.call(
+            self._connection,
             {
                 "publication_key": publication_key,
                 "batch_step_id": parent_batch_step_id,
             },
+            run_log,
         )

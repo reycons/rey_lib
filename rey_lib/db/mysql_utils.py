@@ -879,6 +879,8 @@ def list_routines(
 			"name": str(row["routine_name"]),
 			"signature": "",
 			"parameters": parameters.get(str(row["routine_name"]), []),
+			# A MySQL function answers one value, never rows (backlog 822).
+			"returns_rows": False,
 		}
 		for row in rows
 	]

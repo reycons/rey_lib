@@ -896,7 +896,8 @@ class DBAdapter:
         name alone.
 
         ``invocation`` rides along untouched where the provider rendered one,
-        and ``parameters`` where the provider listed them (backlog 747).
+        ``parameters`` where the provider listed them (backlog 747), and
+        ``returns_rows`` where it stated it (backlog 822).
         This layer normalizes identity; it does not read, validate or rewrite a
         statement, because it does not know the syntax the statement is in.
         """
@@ -924,6 +925,10 @@ class DBAdapter:
             parameters = row.get("parameters")
             if parameters is not None:
                 record["parameters"] = [dict(one) for one in parameters]
+            # Whether a call answers with rows (backlog 822), where stated.
+            returns_rows = row.get("returns_rows")
+            if returns_rows is not None:
+                record["returns_rows"] = bool(returns_rows)
             result.append(record)
         return sorted(
             result,

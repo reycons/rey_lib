@@ -1527,6 +1527,42 @@ class DatabaseProcedure:
         """One procedure this type claimed, addressed as its ``read_ddl`` addresses it."""
         return cls(identity=_row_routine_identity(row), depends_on=_depends_on(row))
 
+    @classmethod
+    def resolve(
+        cls, conn: Any, routine: str, adapter: Any = None,
+    ) -> "DatabaseProcedure":
+        """The one procedure ``schema.name`` names, as its provider lists it (backlog 822).
+
+        Raises:
+            ConfigError: When no procedure has that name, or several overloads do.
+        """
+        return _resolved_routine(cls, conn, routine, adapter or _adapter())
+
+    def call(self, conn: Any, arguments: dict[str, Any], adapter: Any = None) -> Any:
+        """Call this procedure with these named arguments (backlog 822).
+
+        A procedure is CALLed whatever it returns; what comes back is its OUT
+        row, or None. The arguments are checked against its parameters first.
+
+        Raises:
+            ConfigError: When an argument names no input parameter, or a
+                required input is missing.
+        """
+        return _called(self, conn, arguments, _procedure_shape(), adapter or _adapter())
+
+    def check_arguments(self, names: Iterable[str]) -> None:
+        """Refuse argument names this routine cannot take, or a required input left out (822).
+
+        The one check of a call's arguments against this routine's parameters,
+        used before every call and by whatever prepares one. Where no source
+        reported the parameters there is nothing to check against.
+
+        Raises:
+            ConfigError: When a name is not an input parameter, or an input the
+                provider says has no default is not named.
+        """
+        _check_arguments(self, names)
+
     @_ReadDdl
     def read_ddl(
         cls, conn: Any, identity: DatabaseRoutineIdentity, adapter: Any = None,
@@ -1577,6 +1613,10 @@ class DatabaseFunction:
     #: Its parameters in call order (backlog 747): None where no source
     #: reported them, empty where the provider reported that there are none.
     parameters: tuple[DatabaseParameter, ...] | None = None
+    #: Whether a call answers with rows rather than one value (backlog 822):
+    #: the function's own return characteristic, which decides how it is
+    #: invoked. None where no source reported it.
+    returns_rows: bool | None = None
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "functions"
@@ -1593,6 +1633,43 @@ class DatabaseFunction:
     def _from_inventory(cls, row: dict[str, Any]) -> "DatabaseFunction":
         """One function this type claimed, addressed as its ``read_ddl`` addresses it."""
         return cls(identity=_row_routine_identity(row), depends_on=_depends_on(row))
+
+    @classmethod
+    def resolve(
+        cls, conn: Any, routine: str, adapter: Any = None,
+    ) -> "DatabaseFunction":
+        """The one function ``schema.name`` names, as its provider lists it (backlog 822).
+
+        Raises:
+            ConfigError: When no function has that name, or several overloads do.
+        """
+        return _resolved_routine(cls, conn, routine, adapter or _adapter())
+
+    def call(self, conn: Any, arguments: dict[str, Any], adapter: Any = None) -> Any:
+        """Call this function with these named arguments (backlog 822).
+
+        Its own return characteristic decides the invocation: a function that
+        returns rows answers its rows, any other its one value. The arguments
+        are checked against its parameters first.
+
+        Raises:
+            ConfigError: When an argument names no input parameter, a required
+                input is missing, or no source said whether it returns rows.
+        """
+        return _called(self, conn, arguments, _function_shape(self), adapter or _adapter())
+
+    def check_arguments(self, names: Iterable[str]) -> None:
+        """Refuse argument names this routine cannot take, or a required input left out (822).
+
+        The one check of a call's arguments against this routine's parameters,
+        used before every call and by whatever prepares one. Where no source
+        reported the parameters there is nothing to check against.
+
+        Raises:
+            ConfigError: When a name is not an input parameter, or an input the
+                provider says has no default is not named.
+        """
+        _check_arguments(self, names)
 
     @_ReadDdl
     def read_ddl(
@@ -1625,6 +1702,7 @@ class DatabaseFunction:
                 None if self.parameters is None
                 else [parameter.to_dict() for parameter in self.parameters]
             ),
+            "returns_rows": self.returns_rows,
         }
 
 
@@ -2212,8 +2290,125 @@ def _routines(
             invocation=str(entry.get("invocation") or ""),
             # Carried beside the call, as its provider reported them (747).
             parameters=_parameters(entry.get("parameters")),
+            **_return_characteristics(build, entry),
         ))
     return built
+
+
+def _return_characteristics(build: Any, entry: dict[str, Any]) -> dict[str, Any]:
+    """A function's returns_rows as its provider stated it (822); a procedure has none."""
+    if build is not DatabaseFunction:
+        return {}
+    returns_rows = entry.get("returns_rows")
+    return {"returns_rows": None if returns_rows is None else bool(returns_rows)}
+
+
+def _resolved_routine(owner: type, conn: Any, routine: str, adapter: Any) -> Any:
+    """The one routine of ``owner``'s kind that ``schema.name`` names (backlog 822).
+
+    Read from the provider's listing -- the same source that fills the Database
+    tree -- so the object that executes is the canonical one, with its
+    parameters and return characteristics. A name without its schema, a name
+    nothing answers to, and a name several overloads share are refused: the
+    caller names no signature, so it could only guess.
+    """
+    from rey_lib.errors.error_utils import ConfigError  # noqa: PLC0415
+
+    kind = "procedure" if owner is DatabaseProcedure else "function"
+    schema, dot, name = str(routine or "").strip().partition(".")
+    if not (dot and schema and name):
+        _logger.debug("database_objects: refusing %s '%s': not schema-qualified", kind, routine)
+        raise ConfigError(
+            f"database_objects: '{routine}' is not a schema-qualified routine name."
+        )
+    lister = adapter.list_procedures if owner is DatabaseProcedure else adapter.list_functions
+    _logger.debug("database_objects: resolving %s %s.%s from the catalog", kind, schema, name)
+    matches = [entry for entry in (lister(conn, schema) or []) if entry.get("name") == name]
+    if not matches:
+        _logger.debug("database_objects: refusing %s %s.%s: not listed", kind, schema, name)
+        raise ConfigError(f"database_objects: no {kind} {schema}.{name} exists.")
+    if len(matches) > 1:
+        _logger.debug("database_objects: refusing %s %s.%s: %d overloads",
+                      kind, schema, name, len(matches))
+        signatures = ", ".join(f"({m.get('signature') or ''})" for m in matches)
+        raise ConfigError(
+            f"database_objects: {kind} {schema}.{name} is overloaded -- {signatures} -- "
+            "and nothing names which one."
+        )
+    entry = matches[0]
+    return owner(
+        identity=DatabaseRoutineIdentity(
+            connection="", catalog=str(entry.get("catalog") or ""), schema=schema,
+            name=name, signature=str(entry.get("signature") or ""),
+        ),
+        invocation=str(entry.get("invocation") or ""),
+        parameters=_parameters(entry.get("parameters")),
+        **_return_characteristics(owner, entry),
+    )
+
+
+def _procedure_shape() -> Any:
+    """A procedure is CALLed, whatever its OUT parameters return."""
+    from rey_lib.db.routine_call import InvocationShape  # noqa: PLC0415
+
+    return InvocationShape.PROCEDURE
+
+
+def _function_shape(function: "DatabaseFunction") -> Any:
+    """How a function is invoked, from its own return characteristic (backlog 822)."""
+    from rey_lib.db.routine_call import InvocationShape  # noqa: PLC0415
+    from rey_lib.errors.error_utils import ConfigError  # noqa: PLC0415
+
+    if function.returns_rows is None:
+        _logger.debug("database_objects: refusing to invoke %s.%s: returns_rows unknown",
+                      function.identity.schema, function.identity.name)
+        raise ConfigError(
+            f"database_objects: no source said whether {function.identity.schema}."
+            f"{function.identity.name} returns rows, so it cannot be invoked."
+        )
+    return InvocationShape.ROW_FUNCTION if function.returns_rows else InvocationShape.SCALAR_FUNCTION
+
+
+def _check_arguments(routine: Any, names: Iterable[str]) -> None:
+    """The routine's one argument check (backlog 822); see ``check_arguments``."""
+    from rey_lib.errors.error_utils import ConfigError  # noqa: PLC0415
+
+    if routine.parameters is None:
+        return
+    qualified = f"{routine.identity.schema}.{routine.identity.name}"
+    named = set(names)
+    inputs = [p for p in routine.parameters if p.role in ("input", "input_output")]
+    unknown = sorted(named - {p.name for p in inputs})
+    if unknown:
+        _logger.debug("database_objects: refusing a call to %s: %d unknown argument(s)",
+                      qualified, len(unknown))
+        raise ConfigError(
+            f"database_objects: {qualified} has no input parameter {', '.join(unknown)}."
+        )
+    missing = [p.name for p in inputs if p.has_default is False and p.name not in named]
+    if missing:
+        _logger.debug("database_objects: refusing a call to %s: %d required input(s) absent",
+                      qualified, len(missing))
+        raise ConfigError(
+            f"database_objects: {qualified} requires {', '.join(missing)}, "
+            "which the call does not supply."
+        )
+
+
+def _called(routine: Any, conn: Any, arguments: dict[str, Any], shape: Any, adapter: Any) -> Any:
+    """Check the arguments against the routine's parameters, then call it once (822).
+
+    A required input is one the provider says has no default; an unknown
+    default is not treated as required.
+    """
+    from rey_lib.db.routine_call import RoutineCall  # noqa: PLC0415
+
+    _check_arguments(routine, arguments)
+    qualified = f"{routine.identity.schema}.{routine.identity.name}"
+    _logger.debug("database_objects: calling %s as %s", qualified, shape.value)
+    return adapter.call_routine(
+        conn, RoutineCall(routine=qualified, shape=shape, arguments=dict(arguments)),
+    )
 
 
 def _parameters(listed: Any) -> tuple[DatabaseParameter, ...] | None:

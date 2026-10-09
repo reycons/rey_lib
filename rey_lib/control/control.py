@@ -37,7 +37,7 @@ from typing import Any, Optional, Sequence
 
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.procedure_map import (
-    execute_mapped_routine, get_procedure_map, resolve_routine_binding,
+    ProcedureMap, get_procedure_map, resolve_routine_binding,
 )
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError, StateError
 from rey_lib.logs import AppLogger
@@ -155,6 +155,9 @@ class Control:
         self._map_name = str(map_name)
         self._map = get_procedure_map(ctx, self._map_name)
         self._refuse_sql_bindings()
+        # Each action this object calls, resolved from the owned map on first
+        # use and held for its lifetime (backlog 822).
+        self._procedures: dict[str, ProcedureMap] = {}
 
         # Only the named map is taken; other maps stay for their own owners.
         maps = list(getattr(ctx, "procedure_maps", None) or [])
@@ -546,10 +549,8 @@ class Control:
             return None
 
         try:
-            result = execute_mapped_routine(
-                ctx=self._ctx, run_log=self.run_log, conn=conn,
-                procedure_map=self._map_name, routine_name=action_name,
-                values=variables, run_ctx=self, map_cfg=self._map,
+            result = self._procedure(action_name, conn).call(
+                conn, variables, self.run_log, run_ctx=self,
             )
             outputs = result.get("outputs") or {}
             return next(iter(outputs.values()), None)
@@ -569,6 +570,19 @@ class Control:
             return None
         # No close: the Connection is shared and outlives this call. Its
         # lifetime belongs to runtime shutdown, not to one control routine.
+
+    def _procedure(self, action_name: str, conn: Any) -> ProcedureMap:
+        """The resolved action, from the map this object owns (backlog 822).
+
+        Resolved once, on first use, and held for this object's lifetime: the
+        map is never read again to call it. Nothing is cached when resolution
+        fails, so the next call tries again.
+        """
+        procedure = self._procedures.get(action_name)
+        if procedure is None:
+            procedure = ProcedureMap.resolve(conn, self._map, self._map_name, action_name)
+            self._procedures[action_name] = procedure
+        return procedure
 
     def _call_rows(self, action_name: str, variables: dict[str, Any],
                    required: bool = False) -> list[dict[str, Any]]:
@@ -591,10 +605,8 @@ class Control:
             return []
 
         try:
-            result = execute_mapped_routine(
-                ctx=self._ctx, run_log=self.run_log, conn=conn,
-                procedure_map=self._map_name, routine_name=action_name,
-                values=variables, run_ctx=self, map_cfg=self._map,
+            result = self._procedure(action_name, conn).call(
+                conn, variables, self.run_log, run_ctx=self,
             )
             return list(result.get("rows") or [])
         except (ConfigError, DatabaseError):

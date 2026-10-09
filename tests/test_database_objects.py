@@ -208,6 +208,8 @@ def test_a_function_serializes_the_same_way() -> None:
         "invocation": "",
         # No source reported them: unknown, not "takes none" (747).
         "parameters": None,
+        # Nor whether it returns rows (822).
+        "returns_rows": None,
     }
 
 

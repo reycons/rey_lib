@@ -15,6 +15,8 @@ import pytest
 from rey_lib.db import postgres_utils
 from rey_lib.db.database_objects import DatabaseFunction, DatabaseProcedure
 from rey_lib.db.database_objects import DatabaseRoutineIdentity
+from rey_lib.db.routine_call import InvocationShape
+from rey_lib.errors.error_utils import ConfigError
 
 
 def _render(
@@ -293,3 +295,116 @@ class TestObjects:
         # The object holds the provider's answer. With none, it has none --
         # it does not derive a call from the identity it happens to carry.
         assert build(identity=self._identity()).to_dict()["invocation"] == ""
+
+
+class TestExecution:
+    """The canonical routine resolves itself and executes its own call (backlog 822)."""
+
+    class _Adapter:
+        def __init__(self, procedures=(), functions=()):
+            self.procedures, self.functions = list(procedures), list(functions)
+            self.calls: list[Any] = []
+
+        def list_procedures(self, conn: Any, schema: str) -> list[dict[str, Any]]:
+            return [r for r in self.procedures if r["schema"] == schema]
+
+        def list_functions(self, conn: Any, schema: str) -> list[dict[str, Any]]:
+            return [r for r in self.functions if r["schema"] == schema]
+
+        def call_routine(self, conn: Any, call: Any) -> Any:
+            self.calls.append(call)
+            return "answer"
+
+    @staticmethod
+    def _entry(name: str, params=(), signature: str = "", returns_rows=None) -> dict[str, Any]:
+        return {
+            "schema": "control", "name": name, "signature": signature,
+            "returns_rows": returns_rows,
+            "parameters": [
+                {"name": n, "ordinal": i, "type": "text", "mode": mode,
+                 "has_default": has_default, "default": None}
+                for i, (n, mode, has_default) in enumerate(params, start=1)
+            ],
+        }
+
+    def test_a_function_resolves_with_its_parameters_and_return(self) -> None:
+        adapter = self._Adapter(functions=[self._entry(
+            "f_find", [("p_key", "IN", False)], "p_key text", returns_rows=True)])
+        found = DatabaseFunction.resolve(object(), "control.f_find", adapter)
+        assert found.identity.signature == "p_key text"
+        assert found.returns_rows is True
+        assert [p.name for p in found.parameters] == ["p_key"]
+
+    @pytest.mark.parametrize(("name", "message"), [
+        ("control.f_gone", "no function control.f_gone exists"),
+        ("f_find", "not a schema-qualified routine name"),
+    ])
+    def test_a_name_nothing_answers_to_is_refused(self, name: str, message: str) -> None:
+        with pytest.raises(ConfigError, match=message):
+            DatabaseFunction.resolve(object(), name, self._Adapter())
+
+    def test_an_overloaded_name_is_refused(self) -> None:
+        adapter = self._Adapter(functions=[
+            self._entry("f_rate", signature="integer"), self._entry("f_rate", signature="text")])
+        with pytest.raises(ConfigError, match="overloaded"):
+            DatabaseFunction.resolve(object(), "control.f_rate", adapter)
+
+    @pytest.mark.parametrize(("build", "returns_rows", "shape"), [
+        (DatabaseProcedure, None, InvocationShape.PROCEDURE),
+        (DatabaseFunction, False, InvocationShape.SCALAR_FUNCTION),
+        (DatabaseFunction, True, InvocationShape.ROW_FUNCTION),
+    ])
+    def test_the_routine_decides_its_own_shape(self, build, returns_rows, shape) -> None:
+        adapter = self._Adapter()
+        extra = {} if build is DatabaseProcedure else {"returns_rows": returns_rows}
+        routine = build(identity=DatabaseRoutineIdentity(
+            connection="", catalog="", schema="control", name="r", signature=""),
+            parameters=(), **extra)
+        assert routine.call("conn", {}, adapter) == "answer"
+        assert adapter.calls[0].routine == "control.r" and adapter.calls[0].shape is shape
+
+    def test_a_function_that_never_said_what_it_returns_is_not_invoked(self) -> None:
+        function = DatabaseFunction(identity=DatabaseRoutineIdentity(
+            connection="", catalog="", schema="control", name="f", signature=""))
+        with pytest.raises(ConfigError, match="returns rows"):
+            function.call("conn", {}, self._Adapter())
+
+    def _procedure(self, params) -> DatabaseProcedure:
+        adapter = self._Adapter(procedures=[self._entry("p_do", params)])
+        return DatabaseProcedure.resolve(object(), "control.p_do", adapter)
+
+    def test_an_argument_naming_no_input_is_refused(self) -> None:
+        procedure = self._procedure([("p_a", "IN", False), ("o_id", "OUT", False)])
+        with pytest.raises(ConfigError, match="no input parameter o_id"):
+            procedure.call("conn", {"p_a": 1, "o_id": 2}, self._Adapter())
+
+    def test_a_required_input_must_be_supplied(self) -> None:
+        procedure = self._procedure([("p_a", "IN", False), ("p_b", "IN", True)])
+        with pytest.raises(ConfigError, match="requires p_a"):
+            procedure.call("conn", {"p_b": 1}, self._Adapter())
+
+    def test_an_unknown_default_is_not_treated_as_required(self) -> None:
+        procedure = self._procedure([("@p_a", "INOUT", None)])
+        adapter = self._Adapter()
+        procedure.call("conn", {}, adapter)
+        assert adapter.calls[0].arguments == {}
+
+    def test_sql_server_table_valued_functions_return_rows(self, monkeypatch) -> None:
+        from rey_lib.db import sqlserver_utils  # noqa: PLC0415
+
+        rows = [{"schema_name": "dbo", "routine_name": name, "object_type": kind}
+                for name, kind in (("fn_one", "FN"), ("fn_inline", "IF "), ("fn_multi", "TF"),
+                                   ("fn_unstated", None))]
+        monkeypatch.setattr(sqlserver_utils, "fetch_rows",
+                            lambda _c, sql, _p: [] if "sys.parameters" in sql else rows)
+        listed = sqlserver_utils.list_routines(object(), "rey", "dbo", "function")
+        assert {r["name"]: r["returns_rows"] for r in listed} == {
+            "fn_one": False, "fn_inline": True, "fn_multi": True, "fn_unstated": None}
+
+    def test_postgres_states_a_set_returning_function_returns_rows(self) -> None:
+        conn = TestListing._Conn([(
+            "control", "f_rows", "", "control.f_rows", True, "", "", True, False,
+            [], None, None, 0, None,
+        )])
+        listed = postgres_utils.list_routines(conn, "catalog", "control", "function")
+        assert listed[0]["returns_rows"] is True

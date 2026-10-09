@@ -168,6 +168,7 @@ def test_postgres_routines_normalize_with_their_signatures(
             "invocation": "SELECT public.audit_trade(p_id => NULL::bigint);",
             "parameters": [{"name": "p_id", "ordinal": 1, "type": "bigint", "mode": "IN",
                             "has_default": False, "default": None}],
+            "returns_rows": False,
         },
         {
             "catalog": "reporting",
@@ -182,6 +183,7 @@ def test_postgres_routines_normalize_with_their_signatures(
                 {"name": "p_note", "ordinal": 2, "type": "text", "mode": "IN",
                  "has_default": True, "default": "NULL::text"},
             ],
+            "returns_rows": False,
         },
     ]
     for record in records:
@@ -262,6 +264,7 @@ def test_mysql_routines_normalize_to_the_same_shape(
             # MySQL routine parameters take no defaults (backlog 747).
             "parameters": [{"name": "p_day", "ordinal": 1, "type": "date", "mode": "IN",
                             "has_default": False, "default": None}],
+            "returns_rows": False,
         }
     ]
     (_, routines), (parameters_sql, parameters) = conn.calls
@@ -337,6 +340,8 @@ def test_sql_server_routines_reach_its_listing_and_normalize(
                 "name": "@since", "ordinal": 1, "type": "date", "mode": "INOUT",
                 "has_default": None, "default": None,
             }],
+            # This listing named no object type, so whether it answers rows is
+            # unknown and no key is carried (backlog 822).
         }
     ]
     (routines, parameters) = asked

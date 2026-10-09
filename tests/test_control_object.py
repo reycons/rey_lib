@@ -25,6 +25,31 @@ import rey_lib.control as control_package
 from rey_lib.control import Control
 from rey_lib.errors.error_utils import AppError, ConfigError, StateError
 
+def _executor(execute: Any) -> Any:
+    """Route Control's ProcedureMap resolution and calls to ``execute(**kwargs)`` (822).
+
+    ``execute`` receives what the old executor did -- the action as
+    ``routine_name``, the map Control resolved it from as ``map_cfg``, the
+    values and the binding target ``run_ctx`` -- and answers the result dict.
+    """
+
+    class _ProcedureMap:
+        def __init__(self, map_cfg: Any, map_name: str, action: str) -> None:
+            self.map_cfg, self.map_name, self.action = map_cfg, map_name, action
+
+        @classmethod
+        def resolve(cls, _conn: Any, map_cfg: Any, map_name: str, action: str,
+                    adapter: Any = None) -> "_ProcedureMap":
+            return cls(map_cfg, map_name, action)
+
+        def call(self, conn: Any, values: dict, run_log: Any, run_ctx: Any = None) -> Any:
+            return execute(routine_name=self.action, map_cfg=self.map_cfg,
+                           procedure_map=self.map_name, values=values,
+                           run_ctx=run_ctx, run_log=run_log, conn=conn)
+
+    return patch("rey_lib.control.control.ProcedureMap", _ProcedureMap)
+
+
 
 def _map(name: str = "control", sql_bindings: Any = None) -> SimpleNamespace:
     """A resolved procedure map, shaped as the config loader yields it."""
@@ -354,7 +379,7 @@ class TestBatchResultPlacement:
             setattr(kwargs["run_ctx"], "batch_id", 7)
             return {"outputs": {"batch_id": 7}}
 
-        with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
+        with _executor(_execute), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             control.start_batch(batch_name="nightly")
@@ -374,13 +399,14 @@ class TestBatchResultPlacement:
             captured.update(kwargs)
             return {"outputs": {}}
 
-        with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
+        with _executor(_execute), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             control.start_batch(batch_name="nightly")
 
         assert captured["map_cfg"] is control.procedure_map
-        assert captured["ctx"] is ctx  # logging evidence still uses the real ctx
+        # Logging evidence goes to Control's run log, not through ctx (822).
+        assert captured["run_log"] is control.run_log
 
 
 class TestControlDoesNotOwnIdentity:
@@ -473,7 +499,7 @@ class TestConstructionStartsTheBatch:
             reached.append(kwargs["routine_name"])
             return {"rows": list(_BATCH_ROWS)}
 
-        with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
+        with _executor(_execute), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             return Control(ctx), reached
@@ -505,8 +531,7 @@ class TestConstructionStartsTheBatch:
 
     def test_construction_fails_when_the_batch_does_not_start(self) -> None:
         """No Control is handed back without one, rather than one that fails later."""
-        with patch("rey_lib.control.control.execute_mapped_routine",
-                   return_value={"rows": []}), \
+        with _executor(lambda **kw: {"rows": []}), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)), \
              pytest.raises(StateError, match="the batch was not started"):
@@ -535,9 +560,8 @@ class TestControlEnabledDoesNotVetoRunLogging:
         control = _built(ctx)
         reached: list[str] = []
 
-        with patch("rey_lib.control.control.execute_mapped_routine",
-                   side_effect=lambda **kw: reached.append(kw["routine_name"])
-                   or {"outputs": {"batch_id": 1}}), \
+        with _executor(lambda **kw: reached.append(kw["routine_name"])
+                       or {"outputs": {"batch_id": 1}}), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             control.start_batch(batch_name="nightly")
@@ -551,8 +575,7 @@ class TestControlEnabledDoesNotVetoRunLogging:
         control = _built(ctx)
         reached: list[str] = []
 
-        with patch("rey_lib.control.control.execute_mapped_routine",
-                   side_effect=lambda **kw: reached.append(kw["routine_name"])):
+        with _executor(lambda **kw: reached.append(kw["routine_name"])):
             control.get_or_create_artifact(artifact_type="report",
                                            artifact_name="summary")
 
@@ -590,7 +613,7 @@ class TestInventoryFileReturnsTheIdItPromises:
                               "o_batch_step_id": 11}],
                     "outputs": {}}
 
-        with patch("rey_lib.control.control.execute_mapped_routine", _execute), \
+        with _executor(_execute), \
              patch.object(Control, "_handle",
                           return_value=SimpleNamespace(close=lambda: None)):
             file_manifest_id = control.inventory_file(

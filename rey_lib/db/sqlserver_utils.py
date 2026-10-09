@@ -921,7 +921,7 @@ def view_native_definition(conn: pyodbc.Connection, schema: str, view: str) -> s
 # Each routine kind's listing: the sys.objects types it answers for, fixed.
 _ROUTINE_LISTINGS: dict[str, str] = {
 	kind: (
-		"SELECT s.name AS schema_name, o.name AS routine_name "
+		"SELECT s.name AS schema_name, o.name AS routine_name, o.type AS object_type "
 		"FROM sys.objects o "
 		"JOIN sys.schemas s ON s.schema_id = o.schema_id "
 		f"WHERE o.type IN ({object_types}) AND o.is_ms_shipped = 0 "
@@ -961,6 +961,12 @@ _ROUTINE_PARAMETERS: dict[str, str] = {
 		"ORDER BY s.name, o.name, p.parameter_id"
 	),
 }
+
+
+def _returns_rows(object_type: Any) -> bool | None:
+	"""Whether a routine of this sys.objects type answers rows; None when unstated."""
+	stated = str(object_type or "").strip()
+	return (stated in ("IF", "TF")) if stated else None
 
 
 def list_routines(
@@ -1007,6 +1013,10 @@ def list_routines(
 			"parameters": parameters.get(
 				(str(row["schema_name"]), str(row["routine_name"])), [],
 			),
+			# Inline (IF) and multi-statement (TF) table-valued functions answer
+			# rows; a scalar function (FN) one value; an unstated type is
+			# unknown, not "one value" (backlog 822).
+			"returns_rows": _returns_rows(row.get("object_type")),
 		}
 		for row in rows
 	]

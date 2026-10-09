@@ -153,12 +153,8 @@ class TestLifetime:
         with patch.object(connection_module, "_db") as adapter:
             adapter.get_connection.return_value = "live-handle"
             control.execute("SELECT 1", {}, "scalar_result")
-            control.call_routine("control.mapped_function", {},
-                                 routine_type="function",
-                                 result_mode="scalar_result")
-            control.call_routine("control.mapped_procedure", {},
-                                 routine_type="procedure",
-                                 result_mode="no_return")
+            control.execute("SELECT 2", {}, "scalar_result")
+            control.execute("SELECT 3", {}, "no_return")
 
         assert adapter.get_connection.call_count == 1
 
@@ -189,8 +185,8 @@ class TestLifetime:
         handle.close = lambda: setattr(handle, "closed", handle.closed + 1)
 
         with patch.object(connection_module, "_db") as adapter, \
-             patch("rey_lib.control.control.execute_mapped_routine",
-                   return_value={"outputs": {}}):
+             patch("rey_lib.control.control.ProcedureMap") as procedure_map:
+            procedure_map.resolve.return_value.call.return_value = {"outputs": {}}
             adapter.get_connection.return_value = handle
             control.start_batch(batch_name="nightly")
             control.start_batch(batch_name="nightly again")
@@ -209,19 +205,12 @@ class TestProviderBehaviourStaysUnderneath:
         with patch.object(connection_module, "_db") as adapter:
             adapter.get_connection.return_value = "h"
             shared.execute("SELECT 1", {"a": 1}, "scalar_result")
-            shared.call_routine("f", {"b": 2},
-                                routine_type="function", result_mode="scalar_result")
-            shared.call_routine("p", {"c": 3},
-                                routine_type="procedure", result_mode="no_return")
 
         adapter.execute_sql.assert_called_once_with("h", "SELECT 1", {"a": 1},
                                                     "scalar_result")
-        # One entry for every routine, whatever its shape. The adapter is given
-        # a decided call and never asked which statement form to write.
-        assert adapter.call_routine.call_count == 2
-        shapes = [c.args[1].shape.value for c in adapter.call_routine.call_args_list]
-        assert shapes == ["scalar_function", "procedure"]
-        assert [c.args[1].routine for c in adapter.call_routine.call_args_list] == ["f", "p"]
+        # Routine calls are the canonical routine objects' own (backlog 822);
+        # a connection no longer decides a routine's invocation shape.
+        assert not hasattr(shared, "call_routine")
 
     def test_the_module_imports_no_provider_backend(self) -> None:
         """Dispatch on provider belongs to DBAdapter, and only there.

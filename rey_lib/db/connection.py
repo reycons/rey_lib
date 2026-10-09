@@ -53,7 +53,6 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from rey_lib.db.db_adapter import DBAdapter
-from rey_lib.db.routine_call import InvocationShape, RoutineCall
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
@@ -187,83 +186,6 @@ class Connection:
                 result_mode: str) -> Any:
         """Execute parameter-bound SQL text through the provider backend."""
         return _db.execute_sql(self.handle(), sql_text, named_params, result_mode)
-
-    # -- routine calls ------------------------------------------------------
-    #
-    # This is the last layer that receives procedure-map semantics. A caller
-    # says which routine, of what kind, expecting what -- and that is turned
-    # into one RoutineCall here, once. Providers receive the normalized call
-    # and render it; none of them reads a binding or a result mode.
-    #
-    # The shape is decided here on purpose. A backend left to re-derive
-    # scalar-versus-row-returning would be reinterpreting the contract again,
-    # one field smaller, which is how PostgreSQL came to bind three call sites
-    # positionally while SQL Server bound the same routines by name.
-
-    #: How a function's result mode decides its invocation. A procedure has one
-    #: shape whatever it returns -- it is CALLed and answers through its OUT
-    #: parameters -- so only functions vary.
-    _FUNCTION_SHAPES = {
-        "dataset_result": InvocationShape.ROW_FUNCTION,
-        "scalar_result":  InvocationShape.SCALAR_FUNCTION,
-        "no_return":      InvocationShape.SCALAR_FUNCTION,
-    }
-
-    def call_routine(self, routine: str, arguments: dict[str, Any], *,
-                     routine_type: str, result_mode: str) -> Any:
-        """Normalize one procedure-map binding into a call, and execute it.
-
-        Parameters
-        ----------
-        routine : str
-            Fully-qualified routine name, as configuration named it.
-        arguments : dict[str, Any]
-            DB parameter name -> value. Names are the contract; order is not.
-        routine_type : str
-            ``function`` or ``procedure``, as the binding declares it.
-        result_mode : str
-            ``no_return``, ``scalar_result`` or ``dataset_result``. Read here
-            and nowhere below: it decides the shape and then stops travelling.
-
-        Raises
-        ------
-        ConfigError
-            When the pair names no invocation shape. A binding that reaches a
-            provider undecided is a binding the provider would have to guess
-            about.
-        """
-        return call_routine(self.handle(), routine, arguments,
-                            routine_type=routine_type, result_mode=result_mode)
-
-
-def call_routine(handle: Any, routine: str, arguments: dict[str, Any], *,
-                 routine_type: str, result_mode: str) -> Any:
-    """Normalize one procedure-map binding into a routine call and execute it.
-
-    The connector layer's entry point for callers that hold a live handle
-    rather than the Connection object -- the procedure map, which resolved the
-    binding, is the one that does. Everything below here sees a RoutineCall and
-    nothing else: no binding, no result mode, no map.
-
-    ``result_mode`` is read here to decide the invocation shape and then stops
-    travelling. What a caller does with the answer is its own business.
-    """
-    # A procedure is CALLed whatever it returns; anything else is a function,
-    # which is the reading this replaced -- everything not declared a procedure
-    # went to execute_function.
-    if str(routine_type) == "procedure":
-        shape = InvocationShape.PROCEDURE
-    else:
-        shape = Connection._FUNCTION_SHAPES.get(str(result_mode))
-        if shape is None:
-            raise ConfigError(
-                f"connection: routine '{routine}' declares result_mode "
-                f"'{result_mode}', which names no way to invoke a function."
-            )
-    return _db.call_routine(
-        handle, RoutineCall(routine=routine, shape=shape,
-                            arguments=dict(arguments)),
-    )
 
 
 class ConnectionOwner:

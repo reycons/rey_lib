@@ -61,16 +61,35 @@ class _Adapter:
 
 
 class _Calls(list):
-    """Stands in for execute_mapped_routine, recording binding and values."""
+    """Stands in for ProcedureMap, recording each call's map, action and values."""
 
-    def __call__(self, _ctx, _run_log, _conn, procedure_map, routine, values):
+    def __call__(self, procedure_map, routine, values):
         self.append((procedure_map, routine, dict(values)))
+
+    def install(self, monkeypatch) -> None:
+        """Route the publisher's ProcedureMap resolution and calls to this recorder."""
+        calls = self
+
+        class _ProcedureMap:
+            def __init__(self, map_name, action):
+                self.map_name, self.action = map_name, action
+
+            @classmethod
+            def resolve(cls, _conn, _map_cfg, map_name, action, adapter=None):
+                return cls(map_name, action)
+
+            def call(self, _conn, values, _run_log, run_ctx=None):
+                calls(self.map_name, self.action, values)
+                return {"outputs": {}, "rows": None}
+
+        monkeypatch.setattr(module, "ProcedureMap", _ProcedureMap)
+        monkeypatch.setattr(module, "get_procedure_map", lambda _ctx, name: object())
 
 
 @pytest.fixture()
 def calls(monkeypatch):
     recorded = _Calls()
-    monkeypatch.setattr(module, "execute_mapped_routine", recorded)
+    recorded.install(monkeypatch)
     return recorded
 
 
@@ -174,10 +193,11 @@ class TestTheOrderTheProcedureExpects:
                 sequence.append("stage")
                 return super().bulk_insert(*a, **k)
 
-        def _call(_ctx, _log, _conn, _map, routine, _values):
-            sequence.append(routine)
+        class _Sequenced(_Calls):
+            def __call__(self, _map, routine, _values):
+                sequence.append(routine)
 
-        monkeypatch.setattr(module, "execute_mapped_routine", _call)
+        _Sequenced().install(monkeypatch)
 
         CapabilityPublisher(_Recording(), object()).publish(
             object(), object(), _generation("a"), 77)
