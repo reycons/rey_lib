@@ -313,7 +313,13 @@ class UnsupportedDatabaseCapabilityError(DatabaseError):
 
 
 class StateError(AppError):
-    """Raised when a JSON state file cannot be read, parsed, or written."""
+    """Raised when runtime state is invalid or contradicts an invariant.
+
+    A JSON state file that cannot be read, parsed or written is one case; a
+    received answer whose shape contradicts what the exchange guarantees -- a
+    position-correlated HTTP answer whose length is not its batch's -- is
+    another (backlog 813).
+    """
 
 
 class FtpConnectionError(AppError):
@@ -325,12 +331,13 @@ class FtpDownloadError(AppError):
 
 
 class HttpTransportError(AppError):
-    """Raised when an HTTP request could not be sent or no response came back.
+    """Raised when an HTTP exchange fails.
 
-    A transport failure only -- DNS, connect, timeout, protocol. A response that
-    arrived with any status is not this error: interpreting it belongs to the
-    caller, which keeps transport and provider errors distinct. The corehttp
-    transport failure is its cause.
+    A request that could not be sent or got no response -- DNS, connect,
+    timeout, protocol -- with the corehttp transport failure as its cause; or a
+    final response outside 2xx once the caller's retry policy is exhausted
+    (backlog 813). A provider's own answer inside a 2xx response is the
+    caller's to interpret, not this error.
     """
 
 
