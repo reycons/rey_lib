@@ -1,9 +1,9 @@
 """HTTP choices, selected positively (backlog 668).
 
 http_connections offers the connections is_http_connection accepts -- the http
-provider, not "anything that is not a database" -- and http_transform_adapters
-offers what the adapter registry has registered. connections and
-database_connections are unchanged.
+provider, not "anything that is not a database" -- and http_operations offers
+the installation's enabled HTTP operations, as the control database answers
+them (backlog 813). connections and database_connections are unchanged.
 """
 
 from __future__ import annotations
@@ -13,8 +13,6 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.config.applications import _choices
-from rey_lib.data import http_transform
-from rey_lib.data.http_transform import HttpTransformAdapter
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.db.connection import is_database_connection, is_http_connection, shared_connection
 
@@ -65,9 +63,18 @@ class TestChoiceSources:
         assert _offered("connections", ctx) == ("control", "web")
         assert _offered("database_connections", ctx) == ("control",)
 
-    def test_http_transform_adapters_offers_the_registry(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setitem(http_transform._ADAPTERS, "registered", HttpTransformAdapter)
+    def test_http_operations_offers_the_enabled_operations(self) -> None:
+        asked: list[str] = []
+        control = SimpleNamespace(http_operation=lambda installation: asked.append(installation) or [
+            {"adapter_key": "lookup", "is_enabled": True},
+            {"adapter_key": "dormant", "is_enabled": False},
+            {"adapter_key": "fetch", "is_enabled": True},
+        ])
+        ctx = SimpleNamespace(shared_control=control, installation=SimpleNamespace(name="local"))
 
-        assert "registered" in _offered("http_transform_adapters", SimpleNamespace())
+        assert _offered("http_operations", ctx) == ("fetch", "lookup")
+        assert asked == ["local"]
+
+    def test_a_runtime_without_control_offers_none(self) -> None:
+        # Absence of control is ordinary; the transform refuses where it resolves.
+        assert _offered("http_operations", SimpleNamespace(shared_control=None)) == ()

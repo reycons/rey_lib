@@ -17,8 +17,8 @@ transform object, a context or a secret.
     identity     (nothing)                     -> IdentityTransform
     declaration  transform                     -> ColumnTransform
     yaml         transform-file                -> ColumnTransform
-    http         http-connection, http-adapter,  -> HTTPTransform (a ColumnTransform
-                 http-options, http-transform       from http-transform, then the adapter)
+    http         http-adapter, http-transform  -> HTTPTransform (a ColumnTransform from
+                                                  http-transform, then the HTTP operation)
     manifest     declaration, persistence      -> ColumnTransform
 
 **MANIFEST AND YAML ARE CONFIGURATION ORIGINS, not implementations.** A stored
@@ -71,9 +71,9 @@ class _Kind:
     id: str
     fields: tuple[str, ...]
     required: tuple[str, ...]
-    #: The field naming the connection this kind SENDS RECORDS THROUGH, for a
-    #: kind whose execution reaches outside Rey; None for a local one. What
-    #: makes a preview of it an outbound operation (backlog 668, 663 inv. 4).
+    #: The field naming what this kind SENDS RECORDS THROUGH, for a kind whose
+    #: execution reaches outside Rey; None for a local one. What makes a
+    #: preview of it an outbound operation (backlogs 668, 813; 663 inv. 4).
     outbound_via: Optional[str] = None
 
 
@@ -82,14 +82,15 @@ TRANSFORM_KINDS: tuple[_Kind, ...] = (
     _Kind("identity", (), ()),
     _Kind("declaration", ("transform",), ("transform",)),
     _Kind("yaml", ("transform-file",), ("transform-file",)),
-    # Records sent through a named HTTP connection by a registered adapter
-    # (backlogs 671, 668). The field names are the load command's flat
-    # parameter namespace; executed_declaration normalises them.
-    # `http-transform` is the column mapping applied BEFORE sending (backlog
-    # 679): authored as Declaration's is, never required.
+    # Records sent through a governed HTTP operation (backlogs 671, 813): the
+    # job named by `http-adapter` carries its own connection and behaviour.
+    # The field names are the load command's flat parameter namespace;
+    # executed_declaration normalises them. `http-transform` is the column
+    # mapping applied BEFORE sending (backlog 679): authored as Declaration's
+    # is, never required.
     _Kind(
-        "http", ("http-connection", "http-adapter", "http-options", "http-transform"),
-        ("http-connection", "http-adapter"), outbound_via="http-connection",
+        "http", ("http-adapter", "http-transform"),
+        ("http-adapter",), outbound_via="http-adapter",
     ),
     # `persistence` is never required to EXECUTE: a declaration defines the
     # transform, and the identities only say where it can be written back.
@@ -103,8 +104,7 @@ TRANSFORM_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 
 #: The fields the loader declares as parameters -- the externally typed subset.
 TRANSFORM_PARAMETERS: tuple[str, ...] = (
-    "transform", "transform-file", "http-connection", "http-adapter", "http-options",
-    "http-transform",
+    "transform", "transform-file", "http-adapter", "http-transform",
 )
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TRANSFORM_KINDS}
@@ -145,10 +145,6 @@ COLUMN_FIELDS: tuple[str, ...] = ("source", "name", "datatype", "export", "type"
 _AUTHORED_IN: dict[str, str] = {
     "declaration": "transform", "http": "http-transform", "manifest": "declaration",
 }
-
-#: The field each kind's OPTIONS TABLE authors (backlog 687): written by
-#: :meth:`Transform.edit_option`, never drawn as a control.
-_OPTIONS_IN: dict[str, str] = {"http": "http-options"}
 
 #: The persisted facts held per entry, beside the declaration and never in it.
 _ALIGNED: tuple[str, ...] = ("column_ids", "column_ordinals")
@@ -273,13 +269,12 @@ class Transform:
         field is written by the grid's operations -- ``edit_column`` and its
         siblings -- and is never a second, editable representation of the same
         state. It stays a field of the kind -- held, configurable and typed on
-        the CLI -- and is only not drawn (backlog 679). Nor is the field its
-        options table authors (``_OPTIONS_IN``, backlog 687).
+        the CLI -- and is only not drawn (backlog 679).
         """
         return {
             kind.id: [
                 name for name in kind.fields
-                if name not in (_AUTHORED_IN.get(kind.id), _OPTIONS_IN.get(kind.id))
+                if name != _AUTHORED_IN.get(kind.id)
             ]
             for kind in TRANSFORM_KINDS
         }
@@ -321,14 +316,14 @@ class Transform:
                 previewing surface's own limit, stated back with the fact.
 
         Returns:
-            None for a local kind; otherwise ``{"connection": <name>,
+            None for a local kind; otherwise ``{"operation": <name>,
             "max_preview_records": <limit>}``.
         """
         kind = _kind_of(self.selected_kind())
         if kind is None or kind.outbound_via is None:
             return None
         return {
-            "connection": str(self._values.get(kind.outbound_via) or ""),
+            "operation": str(self._values.get(kind.outbound_via) or ""),
             "max_preview_records": int(max_preview_records),
         }
 
@@ -506,56 +501,6 @@ class Transform:
             key: list(held.get(key) or ())
             for key in _ALIGNED if key == "column_ids" or key in held
         }
-
-    def http_options(self) -> list[dict[str, Any]]:
-        """The selected adapter's declared options, each with its current value.
-
-        Empty unless ``http`` is selected and its adapter is registered. A
-        ``column`` option is offered the mapping's exported output names; held
-        options that are not readable JSON show no values rather than failing
-        a read -- an edit refuses them (backlog 687).
-        """
-        from rey_lib.data.http_transform import http_transform_adapter_for  # noqa: PLC0415
-
-        if self.selected_kind() != "http":
-            return []
-        adapter = http_transform_adapter_for(str(self._values.get("http-adapter") or ""))
-        if adapter is None:
-            return []
-        held = _json_mapping(self._values.get("http-options")) or {}
-        exported = [
-            str(entry.get("name") or entry.get("source") or "")
-            for entry in self.columns() if entry.get("export") is not False
-        ]
-        return [
-            {
-                **declared,
-                **({"choices": exported} if declared["kind"] == "column" else {}),
-                "value": held.get(declared["name"]),
-            }
-            for declared in adapter.options()
-        ]
-
-    def edit_option(self, name: str, value: Any) -> None:
-        """Set one declared option of the selected adapter, or clear it.
-
-        The value is held as its declared kind says: an ``integer`` as a whole
-        number, ``properties`` as a mapping, the rest as text. Written into
-        ``http-options`` as its loader parameter's JSON text.
-
-        Raises:
-            ConfigError: The adapter declares no such option, the held options
-                are not readable, or the value is not of the option's kind.
-        """
-        declared = next((one for one in self.http_options() if one["name"] == name), None)
-        if declared is None:
-            raise ConfigError(f"Transform (http): the adapter takes no option '{name}'.")
-        held = _http_options(self._values.get("http-options"))
-        if _held(value):
-            held[name] = _option_value(declared, value)
-        else:
-            held.pop(name, None)
-        self._values["http-options"] = json.dumps(held, indent=2) if held else ""
 
     def edit_column(self, at: int, field: str, value: Any) -> None:
         """Change one field of one entry, and nothing else about it.
@@ -739,13 +684,10 @@ class Transform:
         # shows, where it shows one; otherwise the authored text as it stands.
         shown = self._shown_declaration()
         if kind == "http":
-            # NAMES ONLY: the connection, the adapter and its options. The
-            # connection's credential is an env reference held by the
-            # connection, never here.
+            # NAMES ONLY: the operation's key. Its connection, credential
+            # reference and behaviour are the governed job's (backlog 813).
             return {
-                "connection": str(held["http-connection"]),
                 "adapter": str(held["http-adapter"]),
-                "options": _http_options(held.get("http-options")),
                 # THE SHOWN MAPPING, applied before sending; None only where
                 # nothing is shown or authored.
                 "declaration": shown if shown is not None else (
@@ -833,65 +775,6 @@ def _json_mapping(value: Any) -> Optional[dict[str, Any]]:
     except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def _option_value(declared: Mapping[str, Any], value: Any) -> Any:
-    """One option's value as its declared kind holds it.
-
-    Raises:
-        ConfigError: Not a whole number for ``integer``; not a mapping, or JSON
-            text of one, for ``properties``; not one of ``choices`` for ``choice``.
-    """
-    name, kind = declared["name"], declared["kind"]
-    if kind == "integer":
-        try:
-            return int(str(value).strip())
-        except ValueError as exc:
-            raise ConfigError(f"Transform (http): option {name} must be a whole number.") from exc
-    if kind == "properties":
-        held = _json_mapping(value)
-        if held is None:
-            raise ConfigError(f"Transform (http): option {name} must be a JSON object.")
-        return held
-    text = str(value).strip()
-    if kind == "choice" and text not in (declared.get("choices") or ()):
-        raise ConfigError(f"Transform (http): '{text}' is not a choice of option {name}.")
-    return text
-
-
-def _http_options(value: Any) -> dict[str, Any]:
-    """An http transform's options as a mapping -- never a silent ``{}``.
-
-    Empty or unset is no options; a mapping, or JSON text of an object, is the
-    options. Anything else is refused by name, so a configuration fault is
-    never mistaken for options that were not given (backlog 668). What the
-    options MEAN is the adapter's to validate.
-
-    Raises:
-        ConfigError: Non-empty text that is not valid JSON, or valid JSON that
-            is not an object.
-    """
-    if not _held(value):
-        return {}
-    if isinstance(value, Mapping):
-        return deepcopy(dict(value))
-    text = str(value).strip()
-    try:
-        parsed = json.loads(text)
-    except ValueError as exc:
-        curly = " Curly quotes are not JSON quotes." if any(
-            mark in text for mark in "\u201c\u201d\u2018\u2019"
-        ) else ""
-        raise ConfigError(
-            f"Transform (http): http-options is not valid JSON ({exc.msg} at "
-            f"position {exc.pos}).{curly}"
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise ConfigError(
-            "Transform (http): http-options must be a JSON object, got "
-            f"{type(parsed).__name__}."
-        )
-    return parsed
 
 
 def _entries(declared: Mapping[str, Any]) -> list[tuple[int, dict[str, Any]]]:

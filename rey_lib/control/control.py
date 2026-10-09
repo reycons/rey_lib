@@ -1293,6 +1293,22 @@ class Control:
             }, required=required) or [])
         ]
 
+    def http_operation(self, installation: str, adapter_key: Optional[str] = None,
+                       required: bool = True) -> list[dict[str, Any]]:
+        """One installation's HTTP operations, execution-ready (backlog 813).
+
+        Each row is one operation as control.http_operation_vw shapes it: the
+        operation and its settings in typed columns. The view owns that
+        assembly; nothing here re-derives it. ``adapter_key`` None answers
+        every operation of the installation.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_http_operation", {
+                "installation": str(installation),
+                "adapter_key": None if adapter_key is None else str(adapter_key),
+            }, required=required) or [])
+        ]
+
     def ai_engine_profiles(self, required: bool = True) -> list[dict[str, Any]]:
         """Every engine profile the estate offers.
 

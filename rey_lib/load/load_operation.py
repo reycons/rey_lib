@@ -273,43 +273,48 @@ def _build_transform(
 
 
 def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
-    """Build the HTTPTransform an ``http`` Transform declares (backlog 671).
+    """Build the HTTPTransform an ``http`` Transform declares (backlogs 671, 813).
 
-    **THE SINGLE PLACE AN HTTPTransform IS BUILT.** The connection is the shared
-    one its name resolves to, and must be an HTTP connection; the adapter is the
-    one registered under its name. Nothing is sent here.
+    **THE SINGLE PLACE AN HTTPTransform IS BUILT.** The operation is the
+    governed HTTP job its ``adapter`` key names, read whole through
+    ``Control.http_operation`` and hydrated; it carries its own connection, so
+    nothing is resolved by connection name. Nothing is sent here.
 
     Args:
-        ctx: Application context, for the connection lookup.
+        ctx: Application context: the shared control, the installation, and
+            what the job's connection resolves its secret reference through.
         declared: ``Transform.executed_declaration()`` for an ``http`` kind --
-            ``connection``, ``adapter``, ``options`` and ``declaration``.
+            ``adapter`` and ``declaration``.
 
     Returns:
         The HTTPTransform.
 
     Raises:
-        ConfigError: If the connection is not an HTTP connection, or no adapter
-            is registered under that name.
+        ConfigError: If the control database is not configured, the
+            installation has no such operation, or the operation cannot be
+            executed.
     """
-    from rey_lib.data.http_transform import (  # noqa: PLC0415
-        HTTPTransform, http_transform_adapter_for, http_transform_adapters,
-    )
-    from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
+    from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415 -- the bootstrap reaches the load package, not the other way
+    from rey_lib.data.http_transform import HTTPTransform  # noqa: PLC0415
+    from rey_lib.web_utils.operation import HttpOperation  # noqa: PLC0415
 
-    name = str(declared["connection"])
-    connection = shared_connection(ctx, name)
-    if not isinstance(connection, HttpConnection):
+    control = open_shared_control(ctx).shared_control
+    if control is None:
+        _logger.debug("Transform (http): refused -- no control database to read the operation from")
         raise ConfigError(
-            f"Transform (http): connection '{name}' is a "
-            f"{getattr(connection, 'provider', 'non-http')} connection, not http."
+            "Transform (http): an HTTP operation is read from the control database, "
+            "which this application has not configured."
         )
-    adapter_name = str(declared["adapter"])
-    adapter = http_transform_adapter_for(adapter_name)
-    if adapter is None:
+    adapter_key = str(declared["adapter"])
+    jobs = control.http_operation(ctx.installation.name, adapter_key)
+    if not jobs:
+        _logger.debug("Transform (http): refused -- installation %s has no operation %s",
+                      ctx.installation.name, adapter_key)
         raise ConfigError(
-            f"Transform (http): no HTTP adapter is registered as '{adapter_name}'. "
-            f"Adapters: {', '.join(http_transform_adapters()) or 'none'}."
+            f"Transform (http): installation '{ctx.installation.name}' has no HTTP "
+            f"operation '{adapter_key}'."
         )
+    operation = HttpOperation.hydrate(jobs[0])
     # THE MAPPING BEFORE SENDING, where one is authored (backlog 679): built by
     # the single builder, so it is a ColumnTransform with its secrets resolved
     # exactly as anywhere else. None is a genuine pass-through.
@@ -317,7 +322,7 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
         _build_transform(ctx, None, declared["declaration"])
         if declared.get("declaration") else None
     )
-    return HTTPTransform(connection, adapter, declared.get("options") or {}, mapping)
+    return HTTPTransform(operation, ctx, mapping)
 
 
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:

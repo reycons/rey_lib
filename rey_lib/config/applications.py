@@ -86,18 +86,29 @@ def with_choice_collections(raw: dict[str, Any]) -> dict[str, Any]:
     return filled
 
 
-#: Sources answered by a RUNTIME REGISTRY in code rather than a collection on
-#: ctx: the choices are what the code registers, not what an installation says.
+#: Sources ANSWERED AT RUNTIME rather than read from a collection on ctx, each
+#: given the context: the choices are what the runtime answers, not what an
+#: installation's YAML lists.
 _REGISTRY_CHOICES: dict[str, Any] = {
-    "http_transform_adapters": lambda: _registered_http_transform_adapters(),
+    "http_operations": lambda ctx: _http_operations(ctx),
 }
 
 
-def _registered_http_transform_adapters() -> tuple[str, ...]:
-    """The registered HTTP transform adapters' names."""
-    from rey_lib.data.http_transform import http_transform_adapters  # noqa: PLC0415
+def _http_operations(ctx: Any) -> tuple[str, ...]:
+    """The installation's enabled HTTP operations, as the control database holds them (813).
 
-    return http_transform_adapters()
+    A runtime without a control database offers none: absence of control is an
+    ordinary state (``open_shared_control``), and a transform that names an
+    operation is refused where it resolves, not where its choices are listed.
+    """
+    control = getattr(ctx, "shared_control", None)
+    if control is None:
+        return ()
+    return tuple(
+        str(job["adapter_key"])
+        for job in control.http_operation(ctx.installation.name)
+        if job.get("is_enabled")
+    )
 
 
 def _database_members(members: Any) -> list[Any]:
@@ -776,7 +787,7 @@ def _choices(entry: dict[str, Any], ctx: Any, application: str) -> tuple[str, ..
         return tuple(str(value) for value in (entry.get("possible_values") or []))
     registry = _REGISTRY_CHOICES.get(named)
     if registry is not None:
-        return tuple(sorted(registry()))
+        return tuple(sorted(registry(ctx)))
     collection = _CHOICE_SOURCES.get(named)
     if collection is None:
         raise ConfigError(
