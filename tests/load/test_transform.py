@@ -634,17 +634,150 @@ class TestFromSource:
 
         assert built.source_columns() == []
 
-    def test_it_keeps_neither_the_source_nor_the_context(self, tmp_path: Any) -> None:
+    def test_it_references_its_source_and_target_never_the_context(
+        self, tmp_path: Any,
+    ) -> None:
         from types import SimpleNamespace
 
-        from rey_lib.load import Source
+        from rey_lib.load import Source, Target
 
         source = Source({"file": self._csv(tmp_path)})
+        target = Target()
         ctx = SimpleNamespace()
-        built = Transform.from_source(ctx, source)
+        built = Transform.from_source(ctx, source, target=target)
 
-        assert all(value is not source and value is not ctx for value in vars(built).values())
+        assert built.source() is source
+        assert any(value is target for value in vars(built).values())
+        assert all(value is not ctx for value in vars(built).values())
         assert built.declaration() == Transform().declaration()
+
+
+class TestItsSourceAndTarget:
+    """The Transform reads and previews the Source it references (backlog 831).
+
+    Moved from LinkedLoad (backlog 681), which held the same two objects and is
+    gone. Observing the Source tells the Transform its columns; a preview runs
+    the REFERENCED Source and this Transform, so an edit to either is what the
+    next preview executes; an incomplete Transform is refused; nothing about a
+    preview is kept; and a released Source or Target is no longer referenced.
+    """
+
+    @staticmethod
+    def _csv(tmp_path: Path) -> Path:
+        held = tmp_path / "in.csv"
+        held.write_text("a,b\n1,x\n2,y\n3,z\n", encoding="utf-8")
+        return held
+
+    @staticmethod
+    def _from(source: Any, declaration: Optional[dict[str, Any]] = None, **given: Any) -> Transform:
+        return Transform.from_source(SimpleNamespace(), source, declaration, **given)
+
+    @classmethod
+    def _declared(cls, tmp_path: Path) -> Transform:
+        from rey_lib.load import Source
+
+        return cls._from(Source({"file": str(cls._csv(tmp_path))}), {"selected": "declaration"})
+
+    def test_the_transform_reads_its_source_columns_again(self, tmp_path: Path) -> None:
+        other = tmp_path / "other.csv"
+        other.write_text("c,d\n1,2\n", encoding="utf-8")
+        transform = self._declared(tmp_path)
+
+        transform.source().update("file", str(other))
+
+        assert transform.observe_source(SimpleNamespace()) is True
+        assert transform.source_columns() == ["c", "d"]
+
+    def test_a_source_that_cannot_be_read_tells_it_nothing(self, tmp_path: Path) -> None:
+        from rey_lib.load import Source
+
+        transform = self._from(Source({"file": str(tmp_path / "no.unknown")}))
+        transform.observe_source_columns(["kept"])
+
+        assert transform.observe_source(SimpleNamespace()) is False
+        assert transform.source_columns() == ["kept"]
+
+    def test_it_previews_the_mapping_it_shows(self, tmp_path: Path) -> None:
+        found = self._declared(tmp_path).preview(SimpleNamespace(), 10)
+
+        assert list(found.columns) == ["a", "b"]
+        assert [row["a"] for row in found.rows] == ["1", "2", "3"]
+
+    def test_an_edit_to_the_transform_is_what_the_next_preview_runs(
+        self, tmp_path: Path,
+    ) -> None:
+        transform = self._declared(tmp_path)
+        transform.preview(SimpleNamespace(), 10)
+
+        transform.edit_column(0, "name", "a_out")
+
+        assert list(transform.preview(SimpleNamespace(), 10).columns) == ["a_out", "b"]
+
+    def test_an_edit_to_the_referenced_source_is_what_the_next_preview_runs(
+        self, tmp_path: Path,
+    ) -> None:
+        shorter = tmp_path / "shorter.csv"
+        shorter.write_text("a,b\n9,8\n", encoding="utf-8")
+        transform = self._declared(tmp_path)
+
+        transform.source().update("file", str(shorter))
+
+        assert transform.preview(SimpleNamespace(), 10).rows == ({"a": "9", "b": "8"},)
+
+    def test_an_incomplete_transform_is_refused(self, tmp_path: Path) -> None:
+        from rey_lib.load import Source
+
+        transform = self._from(Source({"file": str(self._csv(tmp_path))}), {"selected": "declaration"})
+        transform.observe_source_columns([])
+
+        with pytest.raises(ConfigError, match="is missing: transform"):
+            transform.preview(SimpleNamespace(), 10)
+
+    def test_nothing_about_a_preview_is_kept(self, tmp_path: Path) -> None:
+        from rey_lib.load import Source
+
+        transform = self._from(
+            Source({"file": str(self._csv(tmp_path))}),
+            {"values": {"transform": json.dumps({"columns": [{"source": "a", "name": "a"}]})}},
+        )
+        before = (dict(vars(transform)), transform.declaration())
+
+        transform.preview(SimpleNamespace(), 10)
+
+        assert (dict(vars(transform)), transform.declaration()) == before
+
+    def test_a_released_source_cannot_be_previewed(self, tmp_path: Path) -> None:
+        transform = self._declared(tmp_path)
+
+        transform.release(transform.source())
+
+        assert transform.source() is None
+        assert transform.observe_source(SimpleNamespace()) is False
+        with pytest.raises(StateError, match="no Source to preview"):
+            transform.preview(SimpleNamespace(), 10)
+
+    def test_a_released_target_drops_only_the_target(self, tmp_path: Path) -> None:
+        from rey_lib.load import Source, Target
+
+        source, target = Source({"file": str(self._csv(tmp_path))}), Target()
+        transform = self._from(source, target=target)
+
+        transform.release(target)
+
+        assert transform.source() is source
+        assert all(value is not target for value in vars(transform).values())
+
+    def test_releasing_anything_else_changes_nothing(self, tmp_path: Path) -> None:
+        from rey_lib.load import Source, Target
+
+        source, target = Source({"file": str(self._csv(tmp_path))}), Target()
+        transform = self._from(source, target=target)
+        before = dict(vars(transform))
+
+        transform.release(Source({"file": str(self._csv(tmp_path))}))
+        transform.release(None)
+
+        assert dict(vars(transform)) == before
 
 
 class TestFormFields:

@@ -192,6 +192,12 @@ class Transform:
         # CONTEXT, NOT CONFIGURATION: the columns the source was last observed
         # to carry. Never in `declaration()`, never persisted.
         self._source_columns: tuple[str, ...] = ()
+        # Source -> Transform -> Target: THIS TRANSFORM REFERENCES ITS CURRENT
+        # SOURCE AND TARGET (backlog 831) -- the objects themselves, handed over
+        # by `from_source`, dropped by `release`. Held, never in `declaration()`,
+        # never an execution argument, never persisted.
+        self._source: Any = None
+        self._target: Any = None
         # THE HTTP LIFECYCLE IS THIS OBJECT'S (backlog 829). Held, never in
         # `declaration()`, never an execution argument, never persisted:
         #   _control       the page's one Control, handed over by `from_source`
@@ -226,20 +232,22 @@ class Transform:
         ctx: Any,
         source: Any,
         declaration: Optional[Mapping[str, Any]] = None,
+        *,
+        target: Any = None,
     ) -> "Transform":
         """Build a Transform that starts from what its Source carries (backlog 677).
 
         THE TRANSFORM READS ITS SOURCE TO CREATE ITSELF. Built from its
         declarative form exactly as :meth:`from_declaration`, then told the
-        columns the Source carries -- read through the one existing reading,
-        ``rey_lib.load.execution.source_columns`` -- as the context its initial
-        mapping is completed against.
+        columns the Source carries through :meth:`observe_source` -- the context
+        its initial mapping is completed against.
 
-        INITIALISATION ONLY. The Source is read once, here; neither it nor the
-        context is kept, and nothing is re-read later. A declaration given is
-        kept as it is: the columns are context, never a field, so a profiled
-        declaration is never overwritten. A Source that cannot be read yet --
-        incomplete, or not resolvable -- starts the Transform with no columns.
+        **IT REFERENCES ITS SOURCE AND TARGET** (backlog 831): the objects
+        themselves, so an edit to either is what this Transform sees next. The
+        runtime is not kept. A declaration given is kept as it is: the columns
+        are context, never a field, so a profiled declaration is never
+        overwritten. A Source that cannot be read yet -- incomplete, or not
+        resolvable -- starts the Transform with no columns.
 
         **THE TRANSFORM IS ESTABLISHED HERE**, and handed the one collaborator
         its HTTP kind needs: the runtime's Control, and the installation's name
@@ -250,6 +258,7 @@ class Transform:
             ctx: The runtime context, to resolve the Source.
             source: The canonical Source this Transform transforms.
             declaration: This Transform's declarative form, if it has one.
+            target: The canonical Target this Transform feeds, if there is one.
 
         Returns:
             The Transform, its source columns observed where they could be read.
@@ -259,22 +268,15 @@ class Transform:
                 cannot be established.
         """
         from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415 -- the bootstrap reaches the load package, not the other way
-        from rey_lib.load.execution import source_columns  # noqa: PLC0415
 
         built = cls.from_declaration(declaration or {})
+        built._source = source
+        built._target = target
         built._control = open_shared_control(ctx).shared_control
         built._installation = str(ctx.installation.name) if built._control is not None else ""
         if built.selected_kind() == _HTTP:
             built.select(_HTTP)
-        try:
-            columns = source_columns(ctx, source)
-        except (AppError, ValueError, OSError) as exc:
-            _logger.debug(
-                "transform: the source could not be read for its initial columns (%s)",
-                type(exc).__name__,
-            )
-            columns = []
-        built.observe_source_columns(columns)
+        built.observe_source(ctx)
         return built
 
     def declaration(self) -> dict[str, Any]:
@@ -513,6 +515,78 @@ class Transform:
     def source_columns(self) -> list[str]:
         """The columns the source was last observed to carry."""
         return list(self._source_columns)
+
+    # -- its Source and Target -------------------------------------------------
+
+    def source(self) -> Any:
+        """The Source this Transform references, or None."""
+        return self._source
+
+    def observe_source(self, ctx: Any) -> bool:
+        """Read which columns its Source now carries, and be told them.
+
+        Read through the one existing reading, ``source_columns``. No Source, or
+        one that cannot be read yet -- incomplete, or not resolvable -- tells
+        this Transform nothing.
+
+        Args:
+            ctx: The runtime context, to resolve the Source.
+
+        Returns:
+            Whether this Transform was told.
+        """
+        from rey_lib.load.execution import source_columns  # noqa: PLC0415 -- execution imports this module
+
+        if self._source is None:
+            _logger.debug("transform: there is no source to read for its columns")
+            return False
+        try:
+            columns = source_columns(ctx, self._source)
+        except (AppError, ValueError, OSError) as exc:
+            _logger.debug(
+                "transform: the source could not be read for its columns (%s)",
+                type(exc).__name__,
+            )
+            return False
+        self.observe_source_columns(columns)
+        return True
+
+    def preview(self, ctx: Any, limit: int) -> load_operation.LoadPreview:
+        """The first records its Source carries through this Transform.
+
+        The one preview path, ``preview_selected``, on the Source this Transform
+        references and on itself. A Transform that is not complete is refused,
+        never passed through.
+
+        Args:
+            ctx: The runtime context, for configured connections.
+            limit: How many records at most.
+
+        Returns:
+            A fresh result; nothing about it is kept.
+
+        Raises:
+            StateError: If this Transform references no Source.
+            ConfigError: If it is not complete, or either object cannot be
+                resolved.
+        """
+        from rey_lib.load.execution import preview_selected  # noqa: PLC0415 -- execution imports this module
+
+        if self._source is None:
+            _logger.debug("transform: refused -- a preview with no source")
+            raise StateError("Transform has no Source to preview.")
+        return preview_selected(ctx, self._source, self, limit=limit)
+
+    def release(self, held: Any) -> None:
+        """Stop referencing ``held`` if it is this Transform's Source or Target.
+
+        Anything else changes nothing. A Transform whose Source was released has
+        no Source, so it cannot preview.
+        """
+        if held is not None and held is self._source:
+            self._source = None
+        if held is not None and held is self._target:
+            self._target = None
 
     def http_request(self) -> Optional[dict[str, Any]]:
         """The selected HTTP operation's request, for display, or None.
