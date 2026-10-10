@@ -173,13 +173,66 @@ class TestTheConnection:
 
         assert "X-API-KEY" not in seen[0].headers
 
-    def test_the_connection_lives_for_one_execute(self, monkeypatch: pytest.MonkeyPatch) -> None:
+class TestTheSharedConnection:
+    """The job's connection is the shared owner's, built once (backlog 838)."""
+
+    def test_one_connection_is_held_across_executes_and_none_is_closed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
+        operation = HttpOperation.hydrate(_job(batch_size=1))
+
+        operation.execute([{"code": "A"}], _ctx())
+        operation.execute([{"code": "B"}], _ctx())
+
+        (built,) = seen.built
+        assert built.is_open is True
+
+    def test_two_jobs_naming_one_connection_share_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
 
         _run(_job(batch_size=1), [{"code": "A"}])
+        _run(_job(adapter_key="other", path="other", batch_size=1), [{"code": "B"}])
 
-        (built,) = seen.built
-        assert built.is_open is False
+        assert len(seen.built) == 1
+        assert [request.url.path for request in seen] == ["/v1/find", "/v1/other"]
+
+    def test_a_disagreeing_definition_is_refused_naming_fields_not_values(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
+        _run(_job(batch_size=1), [{"code": "A"}])
+
+        with pytest.raises(ConfigError, match=r"\(base_url differ\)") as refused:
+            _run(_job(base_url="https://elsewhere.example.test/", batch_size=1), [{"code": "B"}])
+
+        assert "elsewhere" not in str(refused.value)
+
+    def test_jobs_with_different_default_headers_share_one_connection(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
+
+        _run(_job(default_headers={"User-Agent": "one"}, batch_size=1), [{"code": "A"}])
+        _run(_job(default_headers={"User-Agent": "two"}, batch_size=1), [{"code": "B"}])
+
+        assert len(seen.built) == 1
+        assert [request.headers["User-Agent"] for request in seen] == ["one", "two"]
+
+    def test_a_default_header_wins_a_same_named_header_field(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
+
+        _run(_job(
+            default_headers={"Accept": "application/json"},
+            request_header_fields=["Accept"], request_header_kinds=["literal"],
+            request_header_values=["text/plain"], batch_size=1,
+        ), [{"code": "A"}])
+
+        assert seen[0].headers["Accept"] == "application/json"
 
 
 class TestRequests:

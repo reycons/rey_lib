@@ -169,3 +169,38 @@ class TestTheContextNeverHoldsIt:
         ]
 
         assert offenders == []
+
+
+class TestAGovernedConnectionIsHeldToo:
+    """A governed HTTP job's connection definition is held by the same owner (backlog 838)."""
+
+    _DEFINITION = {
+        "name": "permid", "base_url": "https://api.example.test/", "timeout_seconds": 5,
+        "verify": True,
+    }
+
+    def test_it_is_held_apart_from_a_declared_connection_of_the_same_name(self) -> None:
+        from rey_lib.web_utils import HttpConnection
+
+        ctx = SimpleNamespace(config_path="/installations/a.yaml", connections=[
+            {"name": "permid", "provider": "http", "base_url": "https://declared.example.test/",
+             "timeout_seconds": 5},
+        ])
+
+        governed = shared_connection(ctx, "permid", definition=self._DEFINITION)
+        declared = shared_connection(ctx, "permid")
+
+        assert isinstance(governed, HttpConnection) and isinstance(declared, HttpConnection)
+        assert governed is not declared
+        assert governed.base_url != declared.base_url
+        assert shared_connection(ctx, "permid", definition=dict(self._DEFINITION)) is governed
+
+    def test_collecting_the_owner_closes_it_and_forgets_its_definition(self) -> None:
+        ctx = SimpleNamespace(config_path="/installations/a.yaml", connections=[])
+        held = shared_connection(ctx, "permid", definition=self._DEFINITION)
+
+        connection_owner().close()
+
+        assert held.is_open is False
+        changed = {**self._DEFINITION, "base_url": "https://moved.example.test/"}
+        assert shared_connection(ctx, "permid", definition=changed) is not held

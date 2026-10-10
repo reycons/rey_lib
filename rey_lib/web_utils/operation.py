@@ -219,9 +219,10 @@ class HttpOperation:
     def execute(self, records: list[dict[str, Any]], ctx: Any) -> list[dict[str, Any]]:
         """Send the records through the job and return what came back.
 
-        The job's own ``HttpConnection`` is built for this call and closed after
-        it; ``ctx`` is what that connection resolves the secret reference
-        through.
+        Sent through the job's connection as the shared owner holds it
+        (backlog 838): ``shared_connection`` with the job's governed definition,
+        built once and closed at runtime collection, never here. ``ctx`` is what
+        that connection resolves the secret reference through.
 
         Raises:
             ConfigError: When the input cannot run through this job, or the job
@@ -231,35 +232,41 @@ class HttpOperation:
             StateError: When a position-correlated answer's length is not the
                 batch's.
         """
-        from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
+        # rey_lib.db reaches web_utils, not the other way.
+        from rey_lib.db.connection import shared_connection  # noqa: PLC0415
 
         records = [dict(record) for record in records]
         if not records:
             return []
         self.check_references({column for record in records for column in record})
-        connection = HttpConnection(self._connection_config(), ctx)
-        try:
-            size = int(self.batch_size) if self.correlation_mode == "position" else 1
-            produced: list[dict[str, Any]] = []
-            batches = [records[start:start + size] for start in range(0, len(records), size)]
-            for number, batch in enumerate(batches, start=1):
-                _logger.debug(
-                    "http operation %s: batch %d of %d, %d input(s), connection %s",
-                    self.adapter_key, number, len(batches), len(batch), self.connection_name,
-                )
-                produced.extend(self._batch(batch, connection))
-            return produced
-        finally:
-            connection.close()
+        connection = shared_connection(
+            ctx, str(self.connection_name), definition=self._connection_config(),
+        )
+        size = int(self.batch_size) if self.correlation_mode == "position" else 1
+        produced: list[dict[str, Any]] = []
+        batches = [records[start:start + size] for start in range(0, len(records), size)]
+        for number, batch in enumerate(batches, start=1):
+            _logger.debug(
+                "http operation %s: batch %d of %d, %d input(s), connection %s",
+                self.adapter_key, number, len(batches), len(batch), self.connection_name,
+            )
+            produced.extend(self._batch(batch, connection))
+        return produced
 
     def _connection_config(self) -> dict[str, Any]:
-        """The job's connection, as HttpConnection takes it; the secret stays a reference."""
+        """The job's connection definition, as HttpConnection takes it.
+
+        The secret stays a reference.
+
+        Its identity only: a job's ``default_headers`` are its own request
+        semantics and travel on each request (backlog 838), so jobs carrying
+        different headers can share one connection.
+        """
         config: dict[str, Any] = {
             "name": self.connection_name,
             "base_url": self.base_url,
             "timeout_seconds": self.timeout_seconds,
             "verify": self.verify,
-            "headers": dict(self.default_headers or {}),
         }
         if self.auth_header:
             auth: dict[str, Any] = {
@@ -327,7 +334,7 @@ class HttpOperation:
             self.http_method,
             connection.format_url(self.path),
             params=first["query"] or None,
-            headers=first["header"] or None,
+            headers=self._headers(first["header"]),
             json=body if self.request_format == "json" else None,
         )
         payload = self._parsed(self._sent(connection, request))
@@ -350,11 +357,22 @@ class HttpOperation:
                 break
             _logger.debug("http operation %s: following the next page", self.adapter_key)
             pages.append(self._parsed(self._sent(connection, HttpRequest(
-                "GET", connection.format_url(str(following)), headers=first["header"] or None,
+                "GET", connection.format_url(str(following)),
+                headers=self._headers(first["header"]),
             ))))
         if self.pagination_mode not in (None, "link"):
             _refuse(self.adapter_key, f"pagination_mode '{self.pagination_mode}' is not implemented")
         return [pages]
+
+    def _headers(self, fields: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """One request's headers: its header fields, then the job's defaults.
+
+        Defaults go LAST, so a default wins a same-named field -- the precedence
+        the connection's HeadersPolicy gave them before they moved onto the
+        request (backlog 838).
+        """
+        merged = {**fields, **dict(self.default_headers or {})}
+        return merged or None
 
     def _sent(self, connection: Any, request: Any) -> Any:
         """The response to one request, retried while its status is a listed one."""

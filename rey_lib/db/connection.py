@@ -77,6 +77,9 @@ CONNECTION_ALIASES_ATTR = "connection_aliases"
 # The provider whose records are HTTP endpoints, not databases. Named here, at
 # the dispatch, and nowhere else: a consumer asks is_database_connection.
 _HTTP_PROVIDER = "http"
+#: Where a governed HTTP job's connection is authoritative; also the namespace
+#: the owner holds it under, apart from the declared connections (backlog 838).
+_GOVERNED_NAMESPACE = "control.http_adapter"
 
 _db = DBAdapter()
 
@@ -210,7 +213,10 @@ class ConnectionOwner:
 
     def __init__(self) -> None:
         """Hold nothing yet."""
-        self._owned: dict[tuple[str, str], Connection] = {}
+        self._owned: dict[tuple[str, ...], Connection] = {}
+        #: Each held governed connection's definition, to check the next asker
+        #: against (backlog 838). Never a value read from the environment.
+        self._definitions: dict[tuple[str, ...], dict[str, Any]] = {}
 
     def __repr__(self) -> str:
         return f"<ConnectionOwner {len(self._owned)} held>"
@@ -220,11 +226,22 @@ class ConnectionOwner:
         """A label for runtime collection reporting."""
         return "connections"
 
-    def resolve(self, ctx: Any, name: str) -> Connection:
+    def resolve(
+        self, ctx: Any, name: str, definition: Optional[dict[str, Any]] = None,
+    ) -> Connection:
         """Return the Connection for the named configured connection.
 
         Built from the definition ``ctx`` carries the first time it is asked
         for, and returned as-is afterwards.
+
+        **A GOVERNED HTTP CONNECTION** (backlog 838) is handed in as
+        ``definition`` -- a governed job's connection record, authoritative in
+        ``control.http_adapter`` -- rather than declared in ``connections``. It
+        is held in a namespace of its own, so it never collides with a declared
+        connection of the same name, and is never translated as a declared name
+        is. Asked again with an equal definition, the held one is returned; with
+        a different one, it is refused: two governed jobs naming one connection
+        must agree on what it is.
 
         Parameters
         ----------
@@ -235,15 +252,19 @@ class ConnectionOwner:
             variable can be read as the handle opens.
         name : str
             The connection's name within that configuration.
+        definition : dict, optional
+            A governed job's connection record. None resolves a declared one.
 
         Raises
         ------
         ConfigError
-            When no name is given, or the configuration declares none by that
-            name.
+            When no name is given, the configuration declares none by that
+            name, or a governed definition disagrees with the one held.
         """
         if not name:
             raise ConfigError("connection: no connection name was given.")
+        if definition is not None:
+            return self._governed(ctx, str(name), definition)
 
         # Translate BEFORE the cache key is built. The contract above is that
         # naming a connection yields the object every other consumer of that
@@ -276,6 +297,37 @@ class ConnectionOwner:
         self._owned[key] = built
         return built
 
+    def _governed(self, ctx: Any, name: str, definition: dict[str, Any]) -> Any:
+        """The held HttpConnection for one governed connection definition."""
+        key = (_config_identity(ctx), _GOVERNED_NAMESPACE, name)
+        wanted = dict(definition)
+        held = self._owned.get(key)
+        if held is not None:
+            differing = sorted(
+                field for field in set(wanted) | set(self._definitions[key])
+                if wanted.get(field) != self._definitions[key].get(field)
+            )
+            if differing:
+                # logs reaches the control layer, which uses this module.
+                from rey_lib.logs import AppLogger  # noqa: PLC0415
+
+                AppLogger(__name__).debug(
+                    "connection: refused -- governed connection %s asked for with differing %s",
+                    name, ", ".join(differing),
+                )
+                raise ConfigError(
+                    f"connection: governed connection '{name}' is already held with a "
+                    f"different definition ({', '.join(differing)} differ). Every governed "
+                    f"job naming one connection must agree on it."
+                )
+            return held
+        from rey_lib.web_utils import HttpConnection  # noqa: PLC0415
+
+        built = HttpConnection({**wanted, "name": name}, ctx=ctx)
+        self._owned[key] = built
+        self._definitions[key] = wanted
+        return built
+
     def close(self) -> None:
         """Close every connection held, and hold none.
 
@@ -284,6 +336,7 @@ class ConnectionOwner:
         broken handle leaves the others open.
         """
         held, self._owned = list(self._owned.values()), {}
+        self._definitions = {}
         for connection in held:
             connection.close()
 
@@ -471,7 +524,9 @@ def build_connections(ctx: Any) -> dict[str, Connection]:
     }
 
 
-def shared_connection(ctx: Any, name: str) -> Connection:
+def shared_connection(
+    ctx: Any, name: str, definition: Optional[dict[str, Any]] = None,
+) -> Connection:
     """Return the shared Connection named ``name``.
 
     The one lookup surface for consumers. Nothing resolves a connection config
@@ -483,9 +538,14 @@ def shared_connection(ctx: Any, name: str) -> Connection:
     a Console request resolve a fresh context per request and still reach the
     connection everything else is using.
 
+    A governed HTTP job hands in its connection ``definition`` (backlog 838):
+    the owner holds that HttpConnection, apart from the declared connections,
+    for every job naming it.
+
     Raises
     ------
     ConfigError
-        When no connection is configured under that name.
+        When no connection is configured under that name, or a governed
+        definition disagrees with the one held.
     """
-    return _OWNER.resolve(ctx, name)
+    return _OWNER.resolve(ctx, name, definition)
