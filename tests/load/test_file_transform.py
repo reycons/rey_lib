@@ -116,7 +116,8 @@ class TestTheKindRegistry:
     """File kinds resolve through Transform but are never a record-load choice."""
 
     def test_record_kinds_are_unchanged(self) -> None:
-        assert Transform.kinds() == ("identity", "declaration", "yaml", "manifest")
+        # http IS a record kind: the record-to-HTTP boundary (backlog 671, 781).
+        assert Transform.kinds() == ("identity", "declaration", "yaml", "http", "manifest")
         assert "move" not in [kind.id for kind in TRANSFORM_KINDS]
 
     def test_move_registers_itself(self) -> None:
