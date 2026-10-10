@@ -53,6 +53,7 @@ from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
 from rey_lib.load.file_transform import build_file_transform, file_kind, file_kinds
+from rey_lib.load.http_transform_source import HttpTransformSource
 from rey_lib.errors.error_utils import StateError
 from rey_lib.logs import AppLogger
 
@@ -108,6 +109,9 @@ TRANSFORM_PARAMETERS: tuple[str, ...] = (
 )
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TRANSFORM_KINDS}
+
+#: The kind that sends records through a governed HTTP operation.
+_HTTP = "http"
 
 # THE FILE-LEVEL KINDS -- what is done to a governed file rather than to its
 # records -- are a REGISTRY OF THEIR OWN (``rey_lib.load.file_transform``),
@@ -188,10 +192,23 @@ class Transform:
         # CONTEXT, NOT CONFIGURATION: the columns the source was last observed
         # to carry. Never in `declaration()`, never persisted.
         self._source_columns: tuple[str, ...] = ()
+        # THE HTTP LIFECYCLE IS THIS OBJECT'S (backlog 829). Held, never in
+        # `declaration()`, never an execution argument, never persisted:
+        #   _control       the page's one Control, handed over by `from_source`
+        #   _installation  whose jobs the source reads -- a name, not a runtime
+        #   _http_source   the jobs read once while this transform is in http
+        #   _http_request  the selected operation's request, for display
+        self._control: Any = None
+        self._installation: str = ""
+        self._http_source: Optional[HttpTransformSource] = None
+        self._http_request: Optional[dict[str, Any]] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
-            self.select(selected)
+            # DECLARATIVE: the kind as declared, validated and nothing more. A
+            # declaration rebuilt for execution establishes no HTTP source; a
+            # preview or run reads its job when it resolves.
+            self._selected = self._known_kind(selected)
 
     # -- construction --------------------------------------------------------
 
@@ -224,6 +241,11 @@ class Transform:
         declaration is never overwritten. A Source that cannot be read yet --
         incomplete, or not resolvable -- starts the Transform with no columns.
 
+        **THE TRANSFORM IS ESTABLISHED HERE**, and handed the one collaborator
+        its HTTP kind needs: the runtime's Control, and the installation's name
+        -- the objects, never the runtime (backlog 829). A Transform declared in
+        kind ``http`` establishes its HTTP source now, or is refused.
+
         Args:
             ctx: The runtime context, to resolve the Source.
             source: The canonical Source this Transform transforms.
@@ -231,10 +253,19 @@ class Transform:
 
         Returns:
             The Transform, its source columns observed where they could be read.
+
+        Raises:
+            ConfigError: If it is declared in kind ``http`` and its HTTP source
+                cannot be established.
         """
+        from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415 -- the bootstrap reaches the load package, not the other way
         from rey_lib.load.execution import source_columns  # noqa: PLC0415
 
         built = cls.from_declaration(declaration or {})
+        built._control = open_shared_control(ctx).shared_control
+        built._installation = str(ctx.installation.name) if built._control is not None else ""
+        if built.selected_kind() == _HTTP:
+            built.select(_HTTP)
         try:
             columns = source_columns(ctx, source)
         except (AppError, ValueError, OSError) as exc:
@@ -347,18 +378,35 @@ class Transform:
     def select(self, kind: str) -> None:
         """Choose which kind is in force. The other kinds' values are kept.
 
+        **ATOMIC WITH THE HTTP SOURCE (backlog 829).** Choosing ``http``
+        establishes the source first -- the one read of the installation's
+        jobs, through the Control this transform was handed -- and reconciles
+        an operation it already names; only then is anything changed, so a
+        refusal leaves the kind as it was. A source already held is kept,
+        unread. Choosing any other kind lets the source and the request go.
+
         Raises:
-            ValueError: If no kind is called that.
+            ConfigError: If no kind is called that, or ``http`` is chosen and
+                its source cannot be established.
         """
-        if _kind_of(kind) is None:
-            raise ConfigError(
-                f"Transform: no transform kind is called '{kind}'. Kinds: "
-                f"{', '.join((*self.kinds(), *(one.id for one in file_kinds())))}."
-            )
-        self._selected = kind
+        chosen = self._known_kind(kind)
+        if chosen != _HTTP:
+            self._selected = chosen
+            self._http_source = None
+            self._http_request = None
+            return
+        source, request = self._http_established()
+        self._selected = chosen
+        self._http_source = source
+        self._http_request = request
 
     def update(self, name: str, value: Any) -> None:
         """Say something about one field.
+
+        The field an HTTP operation is chosen through, while this transform
+        holds its HTTP source, IS choosing one: it goes through
+        :meth:`select_http_operation`, so the request shown is never another
+        operation's.
 
         Raises:
             ValueError: If the field is not a Transform field. A source or a
@@ -369,7 +417,87 @@ class Transform:
                 f"Transform: '{name}' is not a transform field. "
                 f"Fields: {', '.join((*TRANSFORM_FIELDS, *_file_fields()))}."
             )
+        if name == HttpTransformSource.SELECTION_FIELD and self._http_source is not None:
+            self.select_http_operation(name, value)
+            return
         self._values[name] = value
+
+    # -- the HTTP operation --------------------------------------------------
+
+    def select_http_operation(self, name: str, value: Any) -> None:
+        """Choose this HTTP transform's operation, in memory. Nothing is read.
+
+        The held source answers the operation's request before anything is
+        chosen, so a refusal leaves the operation as it was; then the source
+        selects it and this transform holds its key and its request.
+
+        Args:
+            name: The field chosen through -- the source's selection field.
+            value: The operation's key.
+
+        Raises:
+            StateError: If this transform holds no HTTP source -- it is not in
+                kind http.
+            ConfigError: If the field is not the selection field, or the
+                operation is not an enabled one of the installation.
+        """
+        if self._http_source is None:
+            _logger.debug("transform: refused -- an HTTP operation chosen outside kind http")
+            raise StateError("Transform: no HTTP operation can be chosen -- it is not in kind http.")
+        if name != HttpTransformSource.SELECTION_FIELD:
+            _logger.debug("transform: refused -- an HTTP operation chosen through field %s", name)
+            raise ConfigError(
+                f"Transform: an HTTP operation is chosen through "
+                f"'{HttpTransformSource.SELECTION_FIELD}', not '{name}'."
+            )
+        request = self._http_source.request(str(value or ""))
+        self._http_source.select_operation(str(value or ""))
+        self._values[name] = self._http_source.selected_operation
+        self._http_request = request
+
+    def choices(self) -> dict[str, list[dict[str, str]]]:
+        """The values a field may be chosen from: the held source's operations, or none."""
+        if self._http_source is None:
+            return {}
+        return {HttpTransformSource.SELECTION_FIELD: self._http_source.choices()}
+
+    def field_operations(self) -> dict[str, str]:
+        """The operation a field's edit invokes, where it is not an ordinary update."""
+        if self._http_source is None:
+            return {}
+        return {HttpTransformSource.SELECTION_FIELD: "select_http_operation"}
+
+    def _http_established(self) -> tuple[HttpTransformSource, Optional[dict[str, Any]]]:
+        """The HTTP source and request this transform would hold in kind http. Changes nothing.
+
+        Raises:
+            ConfigError: If no Control was handed to this transform, or the
+                operation it names is not an enabled one.
+        """
+        if self._http_source is not None:
+            return self._http_source, self._http_request
+        if self._control is None:
+            _logger.debug("transform: refused -- kind http without a control database")
+            raise ConfigError(
+                "Transform (http): HTTP operations are read from the control database, "
+                "which this application has not configured."
+            )
+        source = HttpTransformSource.create(self._control, self._installation)
+        named = self._values.get(HttpTransformSource.SELECTION_FIELD)
+        if not named:
+            return source, None
+        request = source.request(str(named))
+        source.select_operation(str(named))
+        return source, request
+
+    def _known_kind(self, kind: str) -> str:
+        """The kind, refused unless one is called that."""
+        if _kind_of(kind) is None:
+            raise ConfigError(
+                f"Transform: no transform kind is called '{kind}'. Kinds: "
+                f"{', '.join((*self.kinds(), *(one.id for one in file_kinds())))}."
+            )
+        return kind
 
     # -- authoring -----------------------------------------------------------
 
@@ -385,6 +513,14 @@ class Transform:
     def source_columns(self) -> list[str]:
         """The columns the source was last observed to carry."""
         return list(self._source_columns)
+
+    def http_request(self) -> Optional[dict[str, Any]]:
+        """The selected HTTP operation's request, for display, or None.
+
+        Held state (backlog 829): nothing executes from it -- a preview or run
+        reads the governed job again -- and it is never in :meth:`declaration`.
+        """
+        return deepcopy(self._http_request) if self._http_request is not None else None
 
     # -- persistence ---------------------------------------------------------
 
