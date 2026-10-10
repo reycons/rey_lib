@@ -272,12 +272,16 @@ def _build_transform(
     return _build_identity_transform(transform_cfg)
 
 
-def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
-    """Build the HTTPTransform an ``http`` Transform declares (backlogs 671, 813).
+def _build_http_transform(
+    ctx: Any, declared: Mapping[str, Any], operation: Any = None,
+) -> Any:
+    """Build the HTTPTransform an ``http`` Transform declares (backlogs 671, 813, 837).
 
-    **THE SINGLE PLACE AN HTTPTransform IS BUILT.** The operation is the
-    governed HTTP job its ``adapter`` key names, read whole through
-    ``Control.http_operation`` and hydrated; it carries its own connection, so
+    **THE SINGLE PLACE AN HTTPTransform IS BUILT.** The operation is the one
+    the held Transform selected, where it holds one (backlog 837). Otherwise --
+    a Transform rebuilt from its declaration, in a separate process or run --
+    it is the governed HTTP job its ``adapter`` key names, read whole through
+    ``Control.http_operation`` and hydrated. It carries its own connection, so
     nothing is resolved by connection name. Nothing is sent here.
 
     Args:
@@ -285,6 +289,8 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
             what the job's connection resolves its secret reference through.
         declared: ``Transform.executed_declaration()`` for an ``http`` kind --
             ``adapter`` and ``declaration``.
+        operation: The HttpOperation the held Transform selected, or None to
+            read the declared job.
 
     Returns:
         The HTTPTransform.
@@ -298,6 +304,8 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
     from rey_lib.data.http_transform import HTTPTransform  # noqa: PLC0415
     from rey_lib.web_utils.operation import HttpOperation  # noqa: PLC0415
 
+    if operation is not None:
+        return HTTPTransform(operation, ctx, _http_mapping(ctx, declared))
     control = open_shared_control(ctx).shared_control
     if control is None:
         _logger.debug("Transform (http): refused -- no control database to read the operation from")
@@ -314,15 +322,19 @@ def _build_http_transform(ctx: Any, declared: Mapping[str, Any]) -> Any:
             f"Transform (http): installation '{ctx.installation.name}' has no HTTP "
             f"operation '{adapter_key}'."
         )
-    operation = HttpOperation.hydrate(jobs[0])
-    # THE MAPPING BEFORE SENDING, where one is authored (backlog 679): built by
-    # the single builder, so it is a ColumnTransform with its secrets resolved
-    # exactly as anywhere else. None is a genuine pass-through.
-    mapping = (
+    return HTTPTransform(HttpOperation.hydrate(jobs[0]), ctx, _http_mapping(ctx, declared))
+
+
+def _http_mapping(ctx: Any, declared: Mapping[str, Any]) -> Any:
+    """The mapping before sending, where one is authored (backlog 679), or None.
+
+    Built by the single builder, so it is a ColumnTransform with its secrets
+    resolved exactly as anywhere else. None is a genuine pass-through.
+    """
+    return (
         _build_transform(ctx, None, declared["declaration"])
         if declared.get("declaration") else None
     )
-    return HTTPTransform(operation, ctx, mapping)
 
 
 def _build_identity_transform(transform_cfg: Any) -> IdentityTransform:

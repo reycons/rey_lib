@@ -135,7 +135,7 @@ class Source:
         # validated, never persisted.
         self._governed: Optional[dict[str, Any]] = None
         # THE GOVERNED FILE'S ONE READ (backlog 830), held as the Transform holds
-        # its HTTP source: the ManifestSource this source was established from,
+        # its selected HTTP operation: the ManifestSource this source was established from,
         # replaced by its own re-read after a save. Never in `declaration()`,
         # never an execution argument, never persisted.
         self._manifest: Optional[ManifestSource] = None
