@@ -844,6 +844,18 @@ class ManifestSource:
             source: The canonical Source to tell its governed context.
             transform: The canonical Transform to configure.
         """
+        self.populate_source(source)
+        self.populate_transform(transform)
+
+    def populate_source(self, source: Any) -> None:
+        """Hydrate one canonical Source from this file: the Source half of :meth:`populate`.
+
+        A Source established from its governed file (``Source.from_governed``) is
+        populated alone, before any Transform exists (backlog 830).
+
+        Args:
+            source: The canonical Source to populate and tell its governed context.
+        """
         # A REHYDRATION STARTS CLEAN: context told for an earlier selection must
         # not answer while this one's identities are written -- filling
         # file-mutation-id would otherwise restore the earlier transform's SQL.
@@ -861,6 +873,15 @@ class ManifestSource:
         # LAST: filling the identities clears context about any earlier file, so
         # this file's facts are told once its identities are in place.
         source.observe_governed_context(self.governed_context())
+
+    def populate_transform(self, transform: Any) -> None:
+        """Configure one canonical Transform: the Transform half of :meth:`populate`.
+
+        Where the selection is unresolved the Transform is left exactly as it was.
+
+        Args:
+            transform: The canonical Transform to configure.
+        """
         built = self.column_transform() if self.selected_transform_id is not None else None
         if built is None:
             return

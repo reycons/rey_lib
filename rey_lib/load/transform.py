@@ -276,6 +276,11 @@ class Transform:
         built._installation = str(ctx.installation.name) if built._control is not None else ""
         if built.selected_kind() == _HTTP:
             built.select(_HTTP)
+        # A SOURCE ESTABLISHED FROM A GOVERNED FILE gives this Transform its half
+        # of the same one read: the selected saved setting (backlog 830).
+        manifest = source.manifest() if source is not None else None
+        if manifest is not None:
+            manifest.populate_transform(built)
         built.observe_source(ctx)
         return built
 
@@ -588,6 +593,93 @@ class Transform:
         if held is not None and held is self._target:
             self._target = None
 
+    # -- its Source's saved settings -------------------------------------------
+    #
+    # A SAVED SETTING IS ONE OF THE GOVERNED FILE'S TRANSFORMS (backlog 830).
+    # Choosing, creating or deleting one rehydrates this Transform AND its
+    # Source from the Source's governed read, so this Transform -- the one
+    # object referencing both -- performs it. The ManifestSource decides and
+    # hydrates; nothing else sequences it.
+
+    def select_saved_setting(self, ctx: Any, transform_id: Any) -> None:
+        """Make one saved setting the active configuration, in memory.
+
+        The Source's governed read selects the transform -- nothing is read --
+        and rehydrates the Source and this Transform; this Transform then reads
+        the columns its Source now carries.
+
+        Args:
+            ctx: The runtime context, to read the Source's columns.
+            transform_id: The saved setting, by its transform id.
+
+        Raises:
+            StateError: If this Transform's Source was not opened on a governed file.
+            ConfigError: If the id is not a whole number.
+            DataStructureError: If it is not one of the file type's transforms.
+        """
+        manifest = self._governed_manifest()
+        try:
+            chosen = int(transform_id)
+        except (ValueError, TypeError) as exc:
+            _logger.debug("transform: refused -- a saved setting named by %r", transform_id)
+            raise ConfigError(
+                f"A saved setting is named by its transform id, a whole number; "
+                f"got {transform_id!r}."
+            ) from exc
+        manifest.select_transform(chosen)
+        manifest.populate(self._source, self)
+        self.observe_source(ctx)
+
+    def new_saved_setting(self, ctx: Any) -> None:
+        """Create a saved setting from the selected one, select it, and rehydrate both objects.
+
+        Args:
+            ctx: The runtime context, whose control database is written.
+
+        Raises:
+            StateError: If this Transform's Source was not opened on a governed file.
+            ConfigError: If the runtime has no control database.
+        """
+        manifest = self._governed_manifest()
+        manifest.new_transform(self._saved_settings_control(ctx), self._source, self)
+
+    def delete_saved_setting(self, ctx: Any) -> None:
+        """Delete the selected saved setting, resolve the next, and rehydrate both objects.
+
+        Args:
+            ctx: The runtime context, whose control database is written.
+
+        Raises:
+            StateError: If this Transform's Source was not opened on a governed
+                file, or nothing is selected.
+            ConfigError: If the runtime has no control database.
+        """
+        manifest = self._governed_manifest()
+        manifest.delete_transform(self._saved_settings_control(ctx), self._source, self)
+
+    def _governed_manifest(self) -> Any:
+        """The governed read of the Source this Transform references, or a refusal."""
+        manifest = self._source.manifest() if self._source is not None else None
+        if manifest is None:
+            _logger.debug("transform: refused -- saved settings with no governed source")
+            raise StateError(
+                "Transform: its source was not opened on a governed file; "
+                "it has no saved settings."
+            )
+        return manifest
+
+    @staticmethod
+    def _saved_settings_control(ctx: Any) -> Any:
+        """The runtime's one Control, or a refusal."""
+        # Imported here: the bootstrap reaches the load package, not the other way.
+        from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415
+
+        control = open_shared_control(ctx).shared_control
+        if control is None:
+            _logger.debug("transform: refused -- saved settings with no control database")
+            raise ConfigError("Transform: this runtime has no control database for saved settings.")
+        return control
+
     def http_request(self) -> Optional[dict[str, Any]]:
         """The selected HTTP operation's request, for display, or None.
 
@@ -644,6 +736,10 @@ class Transform:
             "column_ids": list(saved),
             "column_ordinals": list(range(1, len(saved) + 1)),
         })
+        # ITS SOURCE'S GOVERNED READ IS STALE: the persisted columns changed
+        # (backlog 830). The Source re-reads itself; a plain Source reads nothing.
+        if self._source is not None:
+            self._source.reread_governed(ctx)
 
     def in_force_declaration(self) -> Optional[dict[str, Any]]:
         """The selected kind's declaration as data, or None where there is none to read.

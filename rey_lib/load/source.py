@@ -45,8 +45,11 @@ from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
 from rey_lib.errors.error_utils import StateError
+from rey_lib.logs import AppLogger
 
 __all__ = ["Source", "SOURCE_FIELDS", "SOURCE_KINDS"]
+
+_logger = AppLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,22 @@ def _held(value: Any) -> bool:
     return value is not None and str(value).strip() != ""
 
 
+def _control_of(ctx: Any, purpose: str) -> Any:
+    """The runtime's one Control, or a refusal naming what needed it.
+
+    Raises:
+        ConfigError: If the runtime has no control database.
+    """
+    # Imported here: the bootstrap reaches the load package, not the other way.
+    from rey_lib.config.bootstrap import open_shared_control  # noqa: PLC0415
+
+    control = open_shared_control(ctx).shared_control
+    if control is None:
+        _logger.debug("source: refused -- no control database to %s", purpose)
+        raise ConfigError(f"Source: this runtime has no control database to {purpose}.")
+    return control
+
+
 class Source:
     """Where a load's records come from: its configurations, and the one selected.
 
@@ -115,6 +134,11 @@ class Source:
         # with, once, and keeps for its lifetime. Never in `declaration()`, never
         # validated, never persisted.
         self._governed: Optional[dict[str, Any]] = None
+        # THE GOVERNED FILE'S ONE READ (backlog 830), held as the Transform holds
+        # its HTTP source: the ManifestSource this source was established from,
+        # replaced by its own re-read after a save. Never in `declaration()`,
+        # never an execution argument, never persisted.
+        self._manifest: Optional[ManifestSource] = None
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -134,6 +158,48 @@ class Source:
             values=dict(declaration.get("values") or {}),
             selected=declaration.get("selected") or None,
         )
+
+    @classmethod
+    def from_governed(
+        cls,
+        ctx: Any,
+        *,
+        file_manifest_id: Any = None,
+        file_mutation_id: Any = None,
+    ) -> "Source":
+        """Establish a Source from one governed file: its ONE read (backlog 830).
+
+        The file's persisted type governs, so its stored transform is read. The
+        ManifestSource that read is held -- the Source's saved settings and its
+        re-reads go through it -- and the Source is populated from it as an
+        ordinary source. No Transform is needed: one built ``from_source`` on
+        this Source takes its own half from the same read.
+
+        Args:
+            ctx: The runtime context, whose control database is read.
+            file_manifest_id: The governed file, by manifest.
+            file_mutation_id: The governed file, by one of its mutations.
+
+        Returns:
+            The Source, populated and holding its governed read.
+
+        Raises:
+            ConfigError: If the runtime has no control database.
+        """
+        manifest = ManifestSource.create(
+            _control_of(ctx, "read a governed file"),
+            file_manifest_id=file_manifest_id,
+            file_mutation_id=file_mutation_id,
+            adopt_persisted_type=True,
+        )
+        built = cls()
+        built._manifest = manifest
+        manifest.populate_source(built)
+        return built
+
+    def manifest(self) -> Optional[ManifestSource]:
+        """The governed read this Source was established from, or None."""
+        return self._manifest
 
     def declaration(self) -> dict[str, Any]:
         """The declarative form: what was said, and what was chosen.
@@ -280,6 +346,55 @@ class Source:
         control.update_transform_query_sql(
             self._governed["transform_query_id"], self._values.get("statement"),
         )
+        # THE HELD READ IS STALE: the persisted query changed (backlog 830).
+        self.reread_governed(ctx)
+
+    def reread_governed(self, ctx: Any) -> bool:
+        """Read this Source's governed file again, after a save made its read stale.
+
+        ONE re-read through the held ManifestSource, keeping the selected
+        transform; this Source is then told the fresh governed context. Its own
+        configuration, unsaved edits included, is kept. A Source not established
+        from a governed file reads nothing.
+
+        Args:
+            ctx: The runtime context, whose control database is read.
+
+        Returns:
+            Whether anything was read.
+
+        Raises:
+            ConfigError: If the runtime has no control database.
+        """
+        if self._manifest is None:
+            return False
+        self._manifest = self._manifest.reread(_control_of(ctx, "re-read a governed file"))
+        self.observe_governed_context(self._manifest.governed_context())
+        return True
+
+    def save_saved_settings(self, ctx: Any, settings: Any) -> None:
+        """Persist the edited names and default of this governed file's saved settings.
+
+        The one write, through the held ManifestSource; this Source is then told
+        its governed context once more, so it carries the saved names and default.
+
+        Args:
+            ctx: The runtime context, whose control database is written.
+            settings: The edited rows, each ``transform_id``, ``transform_name``
+                and ``is_default``.
+
+        Raises:
+            StateError: If this Source was not established from a governed file.
+            ConfigError: If the runtime has no control database.
+            DataStructureError: If a row is not one of the file type's transforms.
+        """
+        if self._manifest is None:
+            _logger.debug("source: refused -- saved settings on a source with no governed file")
+            raise StateError(
+                "Source: this source was not opened on a governed file; it has no saved settings."
+            )
+        self._manifest.save_transforms(_control_of(ctx, "save saved settings"), settings)
+        self.observe_governed_context(self._manifest.governed_context())
 
     # -- execution -----------------------------------------------------------
 
