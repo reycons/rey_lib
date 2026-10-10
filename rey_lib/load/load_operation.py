@@ -51,7 +51,7 @@ run_load(ctx, run_log, sql_dir)
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -304,8 +304,11 @@ def _build_http_transform(
     from rey_lib.data.http_transform import HTTPTransform  # noqa: PLC0415
     from rey_lib.web_utils.operation import HttpOperation  # noqa: PLC0415
 
+    # THE VALUES SET FOR THE REQUEST SETTINGS (backlog 841) apply to the held
+    # operation and to one read here alike, so a run sends what was shown.
+    values = declared.get("request") or {}
     if operation is not None:
-        return HTTPTransform(operation, ctx, _http_mapping(ctx, declared))
+        return HTTPTransform(with_request_values(operation, values), ctx, _http_mapping(ctx, declared))
     control = open_shared_control(ctx).shared_control
     if control is None:
         _logger.debug("Transform (http): refused -- no control database to read the operation from")
@@ -322,7 +325,32 @@ def _build_http_transform(
             f"Transform (http): installation '{ctx.installation.name}' has no HTTP "
             f"operation '{adapter_key}'."
         )
-    return HTTPTransform(HttpOperation.hydrate(jobs[0]), ctx, _http_mapping(ctx, declared))
+    return HTTPTransform(
+        with_request_values(HttpOperation.hydrate(jobs[0]), values), ctx, _http_mapping(ctx, declared),
+    )
+
+
+def with_request_values(operation: Any, values: Mapping[str, Any]) -> Any:
+    """The operation with the values set for its request settings (backlog 841).
+
+    Each setting keeps its hydrated part, name and kind; a value given under
+    ``values[part][name]`` replaces its value. A value named for no setting
+    changes nothing. The operation itself is never modified.
+
+    Args:
+        operation: A hydrated HttpOperation.
+        values: ``{part: {name: value}}``, as ``http-request`` holds them.
+
+    Returns:
+        The operation as it will be sent.
+    """
+    if not values:
+        return operation
+    return replace(operation, request_fields=tuple(
+        replace(field, value=values[field.part][field.name])
+        if field.name in (values.get(field.part) or {}) else field
+        for field in operation.request_fields
+    ))
 
 
 def _http_mapping(ctx: Any, declared: Mapping[str, Any]) -> Any:

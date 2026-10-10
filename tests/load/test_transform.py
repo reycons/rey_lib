@@ -63,7 +63,7 @@ class TestTheVocabulary:
 
     def test_the_fields_are_everything_the_transform_holds(self) -> None:
         assert TRANSFORM_FIELDS == (
-            "transform", "transform-file", "http-adapter", "http-transform",
+            "transform", "transform-file", "http-adapter", "http-transform", "http-request",
             "declaration", "persistence",
         )
 
@@ -71,7 +71,7 @@ class TestTheVocabulary:
         # declaration and persistence are the Transform's fields, and not
         # parameters any loader invocation types.
         assert TRANSFORM_PARAMETERS == (
-            "transform", "transform-file", "http-adapter", "http-transform",
+            "transform", "transform-file", "http-adapter", "http-transform", "http-request",
         )
         assert set(TRANSFORM_PARAMETERS) <= set(TRANSFORM_FIELDS)
 
@@ -1023,15 +1023,58 @@ class TestChoosingTheKind:
         assert transform.choices() == {} and transform.field_operations() == {}
         assert transform.value("http-adapter") == "alpha"
 
-    def test_returning_to_http_reads_again_and_repopulates(self) -> None:
+    def test_returning_to_http_reads_nothing_and_repopulates(self) -> None:
         control = _control()
         transform = _established(control, {"selected": "http", "values": {"http-adapter": "alpha"}})
         transform.select("declaration")
 
         transform.select("http")
 
-        assert control.calls == ["local", "local"]
+        assert control.calls == ["local"]
         assert transform.http_request() == _REQUEST_ALPHA
+
+
+class TestTheInitialHydration:
+    """HTTP operations are hydrated once, at initialization; selection is in memory (841)."""
+
+    def test_initialization_reads_once_whatever_kind_is_declared(self) -> None:
+        control = _control()
+
+        _established(control, {"selected": "declaration"})
+
+        assert control.calls == ["local"]
+
+    def test_selecting_http_and_an_operation_reads_nothing(self) -> None:
+        control = _control()
+        transform = _established(control, {"selected": "declaration"})
+
+        transform.select("http")
+        transform.select_http_operation("http-adapter", "gamma")
+
+        assert control.calls == ["local"]
+
+    def test_selecting_an_operation_hydrates_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from rey_lib.web_utils.operation import HttpOperation
+
+        transform = _established(_control(), {"selected": "http"})
+        monkeypatch.setattr(
+            HttpOperation, "hydrate",
+            classmethod(lambda cls, job: pytest.fail("selection hydrated an operation")),
+        )
+
+        transform.select_http_operation("http-adapter", "alpha")
+        transform.select("declaration")
+        transform.select("http")
+
+        assert transform.value("http-adapter") == "alpha"
+
+    def test_a_job_that_cannot_hydrate_is_not_offered_and_initialization_succeeds(self) -> None:
+        broken = _Control([_job("alpha"), _job("broken", correlation_mode=None)])
+
+        transform = _established(broken, {"selected": "declaration"})
+        transform.select("http")
+
+        assert [one["value"] for one in transform.choices()["http-adapter"]] == ["alpha"]
 
 
 class TestEstablishment:
@@ -1112,3 +1155,86 @@ class TestTheHeldStateIsNeverConfiguration:
         assert load_arguments(
             Source.from_declaration({}), transform, Target.from_declaration({}),
         ) == {"http-adapter": "alpha"}
+
+
+class TestTheRequestSettingsAreChosenFromTheHydration:
+    """Only what was hydrated can be chosen; the choice is declared state (backlog 841)."""
+
+    @staticmethod
+    def _mapped() -> _Control:
+        # Synthetic governed rows: idType carries a value map; its inputs are the choices.
+        return _Control([_job(
+            "alpha",
+            value_map_parts=["body", "body"], value_map_fields=["idType", "idType"],
+            value_map_inputs=["ONE", "TWO"], value_map_outputs=["SENT_ONE", "SENT_TWO"],
+        )])
+
+    def _held(self, control: Any = None) -> Transform:
+        transform = _established(control or self._mapped(), {
+            "selected": "http", "values": {"http-adapter": "alpha"},
+        })
+        transform.observe_source_columns(["symbol", "identifier_value"])
+        return transform
+
+    @staticmethod
+    def _field(transform: Transform, name: str) -> dict[str, Any]:
+        return next(one for one in transform.http_request()["fields"] if one["name"] == name)
+
+    def test_a_value_mapped_field_offers_its_map_inputs_in_order(self) -> None:
+        assert self._field(self._held(), "idType")["choices"] == ["ONE", "TWO"]
+
+    def test_a_field_without_a_value_map_offers_no_choices(self) -> None:
+        assert "choices" not in self._field(self._held(), "idValue")
+
+    def test_choosing_one_is_declared_state_and_shown(self) -> None:
+        transform = self._held()
+
+        transform.edit_request_field("body", "idType", "TWO")
+
+        assert json.loads(transform.declaration()["values"]["http-request"]) == {"body": {"idType": "TWO"}}
+        assert self._field(transform, "idType")["value"] == "TWO"
+
+    def test_a_reference_chooses_from_the_held_source_columns(self) -> None:
+        transform = self._held()
+
+        transform.edit_request_field("body", "idValue", "identifier_value")
+
+        assert self._field(transform, "idValue")["value"] == "identifier_value"
+
+    @pytest.mark.parametrize(("name", "value"), [("idType", "THREE"), ("idValue", "not_a_column")])
+    def test_a_value_that_was_not_hydrated_is_refused(self, name: str, value: str) -> None:
+        with pytest.raises(ConfigError, match="is not a choice"):
+            self._held().edit_request_field("body", name, value)
+
+    def test_a_setting_the_operation_does_not_have_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="no body setting 'missing'"):
+            self._held().edit_request_field("body", "missing", "ONE")
+
+    def test_without_an_operation_nothing_can_be_set(self) -> None:
+        transform = _established(self._mapped(), {"selected": "http"})
+
+        with pytest.raises(StateError, match="no HTTP operation is held"):
+            transform.edit_request_field("body", "idType", "ONE")
+
+    def test_execution_sends_the_choice_through_the_value_map(self) -> None:
+        control = self._mapped()
+        transform = self._held(control)
+        transform.edit_request_field("body", "idType", "TWO")
+
+        sent = transform.resolve(_runtime(control)).operation
+        filled, refusal = sent._filled({"symbol": "AAPL"})
+
+        assert refusal is None and filled["body"]["idType"] == "SENT_TWO"
+
+    def test_a_rebuilt_transform_sends_the_same_choice(self) -> None:
+        held = self._held()
+        held.edit_request_field("body", "idType", "TWO")
+        rebuilt = Transform.from_declaration(held.declaration())
+
+        sent = rebuilt.resolve(_runtime(self._mapped())).operation
+        filled, _ = sent._filled({"symbol": "AAPL"})
+
+        assert filled["body"]["idType"] == "SENT_TWO"
+
+    def test_it_is_not_drawn_as_a_form_field(self) -> None:
+        assert "http-request" not in Transform.form_fields()["http"]

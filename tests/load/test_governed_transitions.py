@@ -61,6 +61,10 @@ class _Control:
     def update_transform_columns(self, _transform_id: Any, entries: list[Any]) -> list[int]:
         return [900 + at for at, _ in enumerate(entries)]
 
+    def http_operation(self, _installation: str, _adapter_key: Any = None) -> list[dict[str, Any]]:
+        # The Transform's initial HTTP hydration (backlog 841): no HTTP jobs here.
+        return []
+
 
 def _runtime(control: Any) -> SimpleNamespace:
     return SimpleNamespace(shared_control=control, installation=SimpleNamespace(name="local"))

@@ -293,7 +293,7 @@ class TestThroughTheLoadPath:
     def test_what_ran_is_recorded_without_a_secret(self) -> None:
         declared = _http().executed_declaration()
 
-        assert declared == {"adapter": "echo", "declaration": None}
+        assert declared == {"adapter": "echo", "declaration": None, "request": None}
         assert _SECRET not in json.dumps(declared)
 
 
