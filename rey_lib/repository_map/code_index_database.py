@@ -10,12 +10,9 @@ so a failure anywhere leaves the previous index exactly as it was. Sequencing a
 wipe and a repopulate from here would put a visible half-index between two
 statements, and no amount of care in Python closes that window.
 
-**It declares what it is promoting.** The two lifecycles are separate calls:
-``replace_index`` promotes the scan, ``replace_architecture`` promotes the
-authored architecture, and neither touches the other's rows. What it does have to answer for is that
-the scan it is publishing still satisfies every authored reference, and
-``p_publish`` refuses the promotion when it does not -- which is why the
-validation is a parameter of the call rather than a check made here.
+**It publishes facts only (backlog 639).** ``replace_index`` promotes the scan
+and nothing else. No authored declaration is staged, resolved or checked: the
+facts of the current code publish whatever any architecture document says.
 
 Staging is filled as ordinary inserts and deliberately needs no transaction:
 nothing reads it, and a half-filled staging table means nothing until a call
@@ -32,11 +29,8 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
-from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.db.db_adapter import DBAdapter
 from rey_lib.logs.app_logger import AppLogger
-from rey_lib.repository_map.architecture_projection import ArchitectureProjectionError
-from rey_lib.repository_map.architecture_publication import owned_seam_tokens
 from rey_lib.repository_map.code_index import IndexedRepository
 
 __all__ = ["CodeIndexDatabaseWriter"]
@@ -78,15 +72,6 @@ _ACCESS_COLUMNS = (
     "owner_column", "source_line", "source_column", "access_kind",
     "object_chain", "attribute_name", "method_name", "argument_present",
     "argument_kind", "literal_argument",
-)
-_CONCEPT_COLUMNS = (
-    "concept_key", "parent_concept_key", "label", "statement", "sort_order",
-)
-_REALIZATION_COLUMNS = ("concept_key", "reference", "sort_order")
-_CANONICAL_OBJECT_COLUMNS = (
-    "object_key", "concept_key", "responsibility", "implementation_reference",
-    "authority", "public_seam", "must_not_bypass", "evidence", "status",
-    "superseded_by_key", "notes",
 )
 _CLASS_ATTRIBUTE_COLUMNS = (
     "repository_key", "relative_path", "owner_qualified_name", "owner_line",
@@ -231,112 +216,10 @@ class CodeIndexDatabaseWriter:
             len(raise_sites),
             len(call_arguments),
         )
-        # The scan side only. The authored architecture is not staged here and
-        # is therefore not replaced -- but every surviving realization is
-        # resolved against this scan before it goes live, so a rename that
-        # orphans one refuses the whole promotion.
+        # The scan only. Nothing authored is staged or resolved here: a
+        # declaration cannot refuse the publication of current facts.
         self._call("p_publish", "true, false")
         logger.info("Promoted the staged scan to the live index")
-
-    def replace_architecture(
-        self,
-        concepts: list[dict[str, Any]],
-        realizations: list[dict[str, Any]],
-        canonical_objects: list[dict[str, Any]],
-    ) -> None:
-        """Replace the authored architecture, all or nothing.
-
-        The other half of the schema's two lifecycles. ``replace_index``
-        promotes the scan and never touches this side; this promotes the
-        authored side and never touches the scan, which is what lets a scan run
-        without republishing architecture and the reverse.
-
-        **Nothing the schema resolves is resolved here.** A ``realized_by``
-        reference is staged as authored, and ``code.p_publish`` refuses the
-        promotion unless every one of them resolves to exactly one place
-        against the scan already published. That check is the schema's and
-        must not be anticipated in Python: two implementations of one rule are
-        two answers waiting to disagree.
-
-        **The one exception is a seam, which the schema does not check.**
-        Before anything is cleared or staged, every member a seam names on its
-        own object must exist in that scan (backlog 754, gate 4); see
-        ``_require_seams_resolve``.
-
-        Args:
-            concepts: One row per concept, naming its parent by
-                ``concept_key``. A domain names the empty string.
-            realizations: One row per authored reference.
-            canonical_objects: One row per authored canonical owner. REQUIRED:
-                the promotion replaces the registry with what is staged, so an
-                omitted list would publish an empty registry.
-
-        Raises:
-            ArchitectureProjectionError: If a seam names a member its own
-                object does not have. Nothing is cleared, staged or published.
-        """
-        self._require_seams_resolve(canonical_objects)
-        self._clear_architecture_staging()
-        self._stage("concept_stage", concepts, _CONCEPT_COLUMNS)
-        self._stage("realization_stage", realizations, _REALIZATION_COLUMNS)
-        self._stage("canonical_object_stage", canonical_objects, _CANONICAL_OBJECT_COLUMNS)
-        logger.info(
-            "Staged %d concepts, %d realizations and %d canonical objects",
-            len(concepts), len(realizations), len(canonical_objects),
-        )
-        self._call("p_publish", "false, true")
-        logger.info("Promoted the staged architecture to the live index")
-
-    def _require_seams_resolve(self, canonical_objects: list[dict[str, Any]]) -> None:
-        """Refuse a seam naming a member its own object does not have.
-
-        One read for every entry: which of the identities the seams name the
-        published scan actually holds. An entry naming nothing checkable --
-        shorthand, prose, another class's member, or not active -- asks
-        nothing (``owned_seam_tokens``). Whether every public method appears in
-        its seam is NOT asked: a seam is the governed surface, not a listing.
-        """
-        named = [
-            (str(row.get("object_key") or ""), token, identity)
-            for row in canonical_objects
-            for token, identity in owned_seam_tokens(row)
-        ]
-        if not named:
-            return
-        held = {
-            row["dotted_identity"]
-            for row in DatabaseQuery(
-                # A list binds as JSON text on this provider (postgres_utils.
-                # _adapt_parameters), so the set is unpacked here: still one read.
-                f"SELECT dotted_identity FROM {SCHEMA}.symbol_vw "
-                "WHERE dotted_identity IN "
-                "(SELECT jsonb_array_elements_text(CAST(:wanted AS jsonb)))",
-                {"wanted": sorted({identity for _key, _token, identity in named})},
-            ).rows(self._connection, self._adapter)
-        }
-        missing = [
-            f"{object_key}: {token}"
-            for object_key, token, identity in named if identity not in held
-        ]
-        if missing:
-            raise ArchitectureProjectionError(
-                "A canonical seam names a member its object does not have, so "
-                "nothing was published: " + "; ".join(missing) + "."
-            )
-
-    def _clear_architecture_staging(self) -> None:
-        """Empty the authored staging before filling it.
-
-        A promotion empties it itself, so this only matters after a run that
-        staged and then failed to promote -- exactly as the scan side does it.
-        Realizations and canonical objects first: they name the concepts.
-        """
-        for table in ("canonical_object_stage", "realization_stage", "concept_stage"):
-            DatabaseTable.delete_all_rows(
-                self._connection,
-                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
-                self._adapter,
-            )
 
     def clear(self) -> None:
         """Empty the index and its staging.

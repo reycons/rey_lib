@@ -28,12 +28,6 @@ from rey_lib.files.jsonl import render_jsonl_line, write_jsonl_file
 from rey_lib.git.errors import GitError
 from rey_lib.git.repo import get_head_commit, get_repo_status, run_git
 from rey_lib.logs.app_logger import AppLogger
-from rey_lib.repository_map.architecture_policy import (
-    CompiledArchitecturePolicy,
-    EffectivePolicy,
-    build_effective_policy,
-    compile_architecture_policy,
-)
 from rey_lib.repository_map.emitters import RECORD_EMITTERS, ScanContext
 from rey_lib.repository_map.inventory import load_scan_rules
 from rey_lib.repository_map.records import RECORD_TYPE_REPOSITORY_MAP, ScanRules
@@ -122,32 +116,6 @@ class MapDiff:
         return not (self.added or self.removed or self.changed)
 
 
-def effective_policy_for(
-    repository: str,
-    rules: ScanRules,
-    architecture_path: Path | None,
-) -> EffectivePolicy:
-    """Return the policy actually evaluated for a repository.
-
-    The repository's own rules and the architecture context answer different
-    questions and are merged into one policy. Everything downstream — the
-    evaluator and the reported policy status — reads this, so neither source
-    can be enforced while the other is reported.
-
-    Args:
-        repository: Repository name, used to select architecture statements.
-        rules: The repository's own scan rules.
-        architecture_path: The architecture context, or None when it does not
-            participate.
-
-    Returns:
-        The effective policy.
-    """
-    if architecture_path is None:
-        return build_effective_policy(rules, CompiledArchitecturePolicy())
-    return build_effective_policy(rules, compile_architecture_policy(architecture_path, repository))
-
-
 def build_repository_map(
     repo_root: Path,
     rules: ScanRules,
@@ -185,13 +153,11 @@ def _policy_status(rules: ScanRules) -> str:
     found nothing, or no policy exists. Reporting only a count would let the
     second read as the first.
 
-    Derived from the effective policy, not from the repository's own rules
-    file. A repository whose only policy comes from architecture annotations is
-    enforced, and a header saying not_configured would understate its coverage
-    (INC-004).
+    Derived from the repository's own scan rules, the only policy a scan
+    evaluates: authored architecture is not an input to scanning (backlog 639).
 
     Args:
-        rules: The effective scan rules, after any architecture merge.
+        rules: The repository's scan rules.
 
     Returns:
         POLICY_EVALUATED when any rule family is declared, otherwise

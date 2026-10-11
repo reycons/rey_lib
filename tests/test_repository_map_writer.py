@@ -25,14 +25,12 @@ from rey_lib.repository_map.writer import (
     build_repository_map,
     content_hash_of,
     compare_repository_maps,
-    effective_policy_for,
 )
 
 
 def _scan(
     repo_root: Path,
     rules_path: Path | None = None,
-    architecture_path: Path | None = None,
 ) -> RepositoryMap:
     """Scan one repository and return its map.
 
@@ -44,15 +42,12 @@ def _scan(
     Args:
         repo_root: Repository to scan.
         rules_path: The repository's scan rules, or None when it declares none.
-        architecture_path: The architecture context carrying enforcement
-            annotations, or None when policy does not participate.
 
     Returns:
         The map this scan produced.
     """
     rules = load_scan_rules(rules_path) if rules_path is not None else ScanRules.unconfigured()
-    policy = effective_policy_for(repo_root.name, rules, architecture_path)
-    return build_repository_map(repo_root, policy.rules, rules_path)
+    return build_repository_map(repo_root, rules, rules_path)
 
 RULES_NAME = "repository_map.rules.yaml"
 

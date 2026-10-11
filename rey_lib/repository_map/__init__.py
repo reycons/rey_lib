@@ -13,18 +13,6 @@ line, every record carrying record_type and record_id.
 
 from __future__ import annotations
 
-from rey_lib.repository_map.architecture_policy import (
-    ArchitectureRuleSource,
-    CompiledArchitecturePolicy,
-    compile_architecture_policy,
-)
-from rey_lib.repository_map.architecture_projection import (
-    ArchitectureProjection,
-    ArchitectureProjectionError,
-    build_architecture_projection,
-    system_membership,
-    validate_architecture_projection,
-)
 from rey_lib.repository_map.boundaries import check_architecture_boundaries
 from rey_lib.repository_map.code_index import (
     CodeIndexWriter,
@@ -155,9 +143,6 @@ __all__ = [
     "SymbolInventory",
     "SymbolRecord",
     "build_dependency_graph",
-    "build_architecture_projection",
-    "ArchitectureRuleSource",
-    "CompiledArchitecturePolicy",
     "AgentHandoff",
     "ArchitectureDiff",
     "MigrationManifest",
@@ -171,16 +156,11 @@ __all__ = [
     "IndexedRepository",
     "index",
     "scan",
-    "ArchitectureProjection",
-    "ArchitectureProjectionError",
-    "system_membership",
-    "validate_architecture_projection",
     "diff_architecture_violations",
     "load_migration_manifest",
     "validate_map_provenance",
     "validate_migration_manifest",
     "verify_retirement_ready",
-    "compile_architecture_policy",
     "compare_repository_maps",
     "compute_reachability",
     "extract_executable_references",
