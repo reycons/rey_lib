@@ -321,3 +321,24 @@ class TestTheDerivedLoadShape:
         assert set(shape_module.LOAD_SHAPES.values()) == {
             "direct", "query", "query_file", "manifest", "query_to_file",
         }
+
+
+class TestItsSnapshot:
+    """The Target answers its own projection (backlog 681)."""
+
+    def test_the_external_contract(self) -> None:
+        target = Target({"connection": "w", "table": "s.t", "replace": "true"})
+
+        assert target.projection(SimpleNamespace()) == {
+            "kinds": list(target.kinds()),
+            "fields": {
+                "database": ["connection", "table", "create", "replace", "recreate", "append"],
+                "file": ["out-file"],
+            },
+            "selected": "database",
+            "values": dict(target.declaration()["values"]),
+            "configuration": dict(target.configuration()),
+            "missing": [],
+            "write_policy": "replace",
+            "modes": ["create", "replace", "recreate", "append"],
+        }

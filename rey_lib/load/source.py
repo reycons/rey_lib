@@ -33,6 +33,7 @@ CLI reads ``--sql-file`` at its boundary. Both end in one ``QuerySource``.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -82,6 +83,11 @@ SOURCE_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 ))
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in SOURCE_KINDS}
+
+#: The governed identities, in the order they are shown.
+_GOVERNED_IDENTITY: tuple[str, ...] = (
+    "file_manifest_id", "file_mutation_id", "installation_id", "data_profile_id",
+)
 
 def _held(value: Any) -> bool:
     """Whether a value says anything. Empty text and None say nothing."""
@@ -139,6 +145,9 @@ class Source:
         # replaced by its own re-read after a save. Never in `declaration()`,
         # never an execution argument, never persisted.
         self._manifest: Optional[ManifestSource] = None
+        # ONE ACT AT A TIME: an operation and the snapshot answering it are taken
+        # under this, so the snapshot is the state that operation produced.
+        self._acting = threading.RLock()
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -317,6 +326,39 @@ class Source:
         """Whether this source's statement can be saved as a governed template."""
         return (self._governed or {}).get("transform_query_id") is not None
 
+    # -- its snapshot --------------------------------------------------------
+
+    def act(self) -> Any:
+        """The lock one act is taken under: an operation, and the snapshot answering it."""
+        return self._acting
+
+    def projection(self, ctx: Any) -> dict[str, Any]:
+        """What this Source shows: ONE snapshot of ONE state (backlog 681).
+
+        Built from copies, never from its own containers, so the snapshot is
+        never a second path into its state. Its governed context is read once,
+        and DISTRIBUTED here to where each fact is shown, so a surface never
+        reads a governed column name to decide anything.
+
+        Args:
+            ctx: The runtime context. Unused: nothing is read.
+        """
+        with self._acting:
+            governed = self.governed_context()
+            return {
+                "kinds": list(self.kinds()),
+                # EACH KIND'S OWN FIELDS, as the Source declares them and in order.
+                "fields": {kind.id: list(kind.fields) for kind in SOURCE_KINDS},
+                "selected": self.selected_kind(),
+                "values": dict(self.declaration()["values"]),
+                "configuration": dict(self.configuration()),
+                "missing": list(self.validate()),
+                "governed": _governed_projection(governed),
+                "choices": _choices(governed),
+                # WHAT IT CAN DO BEYOND ITS EDITS.
+                "operations": ["save_query"] if self.saves_query() else [],
+            }
+
     def save_query(self, ctx: Any) -> None:
         """Save the working statement as the governed transform's template.
 
@@ -489,3 +531,35 @@ def _statement_in(path_text: Any) -> str:
 def _as_int(value: Any) -> Optional[int]:
     """An identity as the contract takes it, or None where none was given."""
     return int(value) if _held(value) else None
+
+
+def _governed_projection(context: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    """A Source's governed facts, DISTRIBUTED to where each is shown.
+
+    The file's identities as one group, its name as another, and its saved
+    settings -- every transform of the file's type, and the one selected, None
+    while the selection is unresolved.
+    """
+    if not context:
+        return None
+    return {
+        "identity": {name: context.get(name) for name in _GOVERNED_IDENTITY},
+        "file": {"file_name": context.get("file_name")},
+        "saved_settings": {
+            "choices": [dict(one) for one in context.get("transform_choices") or []],
+            "selected": context.get("selected_transform_id"),
+        },
+    }
+
+
+def _choices(context: Optional[Mapping[str, Any]]) -> dict[str, list[dict[str, str]]]:
+    """The values a Source field may be chosen from, labelled for display.
+
+    The governed file's live mutations offer `file-mutation-id`, each labelled
+    by its `result`. No field is offered anything where there is nothing held.
+    """
+    offered = [
+        {"value": str(one.get("file_mutation_id")), "label": str(one.get("result") or "")}
+        for one in (context or {}).get("mutation_choices") or []
+    ]
+    return {"file-mutation-id": offered} if offered else {}

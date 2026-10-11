@@ -62,23 +62,19 @@ class TestPreviewSelected:
             )
 
     def test_an_untouched_grid_executes_as_the_pass_through_it_shows(self, csv_file: Path) -> None:
-        shown = Transform(selected="declaration")
-        shown.observe_source_columns(["a", "b"])
+        source = Source({"file": str(csv_file)})
+        shown = Transform.from_source(SimpleNamespace(), source, {"selected": "declaration"})
 
-        found = preview_selected(
-            SimpleNamespace(), Source({"file": str(csv_file)}), shown, limit=10,
-        )
+        found = preview_selected(SimpleNamespace(), source, shown, limit=10)
 
         assert list(found.columns) == ["a", "b"]
         assert found.rows[0] == {"a": "1", "b": "x"}
 
     def test_a_partial_declaration_executes_every_column_it_shows(self, csv_file: Path) -> None:
-        shown = _renaming()
-        shown.observe_source_columns(["a", "b"])
+        source = Source({"file": str(csv_file)})
+        shown = Transform.from_source(SimpleNamespace(), source, _renaming().declaration())
 
-        found = preview_selected(
-            SimpleNamespace(), Source({"file": str(csv_file)}), shown, limit=10,
-        )
+        found = preview_selected(SimpleNamespace(), source, shown, limit=10)
 
         assert list(found.columns) == ["a_out", "b"]
         assert found.rows[0] == {"a_out": "1", "b": "x"}

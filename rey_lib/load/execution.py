@@ -65,7 +65,7 @@ def run_selected_load(
         f"{name}: {', '.join(found)}"
         for name, found in (
             ("Source", source.validate()),
-            ("Transform", transform.validate()),
+            ("Transform", transform.validate(ctx)),
             ("Target", target.validate()),
         )
         if found
@@ -117,7 +117,7 @@ def run_selected_load(
         governed["transform_id"] = int(saved) if saved is not None else None
         governed["transform_snapshot"] = {
             "kind": transform.selected_kind(),
-            "declaration": transform.executed_declaration(),
+            "declaration": transform.executed_declaration(ctx),
         }
         governed["destination_identity"] = (
             {"path": str(target.value("out-file")), "file_type": resolved_target.file_type}
@@ -203,7 +203,7 @@ def preview_selected(
         return load_operation.LoadPreview()
     # THE SELECTED TRANSFORM, OR ITS REFUSAL (backlog 681): never a pass-through
     # stood in for one that is not complete -- the refusal a load makes.
-    missing = transform.validate()
+    missing = transform.validate(ctx)
     if missing:
         raise ConfigError(
             f"Transform ({transform.selected_kind()}) is missing: {', '.join(missing)}."

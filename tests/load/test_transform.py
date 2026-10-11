@@ -10,6 +10,7 @@ nothing live behind.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -25,6 +26,7 @@ from rey_lib.data.data_transform import IdentityTransform
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.load import Transform
 from rey_lib.load import load_operation
+from rey_lib.load import transform as transform_module
 from rey_lib.load.transform import (
     TRANSFORM_FIELDS,
     TRANSFORM_KINDS,
@@ -364,13 +366,44 @@ def _declared(transform: Transform) -> dict[str, Any]:
     return held
 
 
-def _authoring(*source: str, declared: Optional[dict[str, Any]] = None) -> Transform:
-    """A Declaration transform that has been told what the source carries."""
-    transform = Transform(
-        {"transform": json.dumps(declared) if declared else ""}, selected="declaration",
+class _Carrying:
+    """A Source carrying these columns, read through its resolution as a real one is.
+
+    ``columns`` may be changed, as an edit to a real Source changes what it
+    carries; the Transform holding it reads it again each time.
+    """
+
+    def __init__(self, *columns: str) -> None:
+        self.columns = list(columns)
+
+    def validate(self) -> list[str]:
+        return []
+
+    def resolve(self, ctx: Any, reader: Any = None) -> Any:
+        return SimpleNamespace(source_structure=lambda: list(self.columns))
+
+    def manifest(self) -> None:
+        return None
+
+    def governed_context(self) -> None:
+        return None
+
+
+def _holding(
+    source: Any, selected: str, values: Optional[dict[str, Any]] = None,
+) -> Transform:
+    """A Transform established on this Source, as the Loader establishes one."""
+    return Transform.from_source(
+        _runtime(_Control([])), source, {"selected": selected, "values": values or {}},
     )
-    transform.observe_source_columns(list(source))
-    return transform
+
+
+def _authoring(*source: str, declared: Optional[dict[str, Any]] = None) -> Transform:
+    """A Declaration transform holding a Source that carries these columns."""
+    return _holding(
+        _Carrying(*source), "declaration",
+        {"transform": json.dumps(declared) if declared else ""},
+    )
 
 
 class TestTheCompletedView:
@@ -581,15 +614,13 @@ class TestAddingAndMoving:
 class TestWhereAuthoringLands:
 
     def test_identity_authors_nothing_and_says_to_choose_declaration(self) -> None:
-        transform = Transform(selected="identity")
-        transform.observe_source_columns(["a"])
+        transform = _holding(_Carrying("a"), "identity")
 
         with pytest.raises(StateError, match="Declaration"):
             transform.edit_column(0, "name", "b")
 
     def test_a_declaration_file_is_not_edited_here(self) -> None:
-        transform = Transform({"transform-file": "/t.yaml"}, selected="yaml")
-        transform.observe_source_columns(["a"])
+        transform = _holding(_Carrying("a"), "yaml", {"transform-file": "/t.yaml"})
 
         with pytest.raises(StateError, match="where it lives"):
             transform.add_column()
@@ -604,11 +635,10 @@ class TestWhereAuthoringLands:
         assert transform.in_force_declaration() is None
 
     def test_a_manifest_keeps_its_stored_ids_aligned(self) -> None:
-        transform = Transform({
+        transform = _holding(_Carrying("a", "b"), "manifest", {
             "declaration": {"columns": [{"source": "b", "name": "b"}]},
             "persistence": {"transform_id": 7, "file_type_id": 4, "column_ids": [31]},
-        }, selected="manifest")
-        transform.observe_source_columns(["a", "b"])
+        })
 
         # Completion puts `a` before `b`, with no stored id of its own.
         transform.add_column(1)
@@ -620,10 +650,10 @@ class TestWhereAuthoringLands:
         assert transform.value("persistence")["transform_id"] == 7
 
     def test_a_manifest_without_persistence_authors_and_manufactures_none(self) -> None:
-        transform = Transform(
-            {"declaration": {"columns": [{"source": "a", "name": "a"}]}}, selected="manifest",
+        transform = _holding(
+            _Carrying("a", "b"), "manifest",
+            {"declaration": {"columns": [{"source": "a", "name": "a"}]}},
         )
-        transform.observe_source_columns(["a", "b"])
 
         transform.edit_column(0, "name", "a_out")
         transform.add_column(0)
@@ -727,10 +757,11 @@ class TestItsSourceAndTarget:
     """The Transform reads and previews the Source it references (backlog 831).
 
     Moved from LinkedLoad (backlog 681), which held the same two objects and is
-    gone. Observing the Source tells the Transform its columns; a preview runs
-    the REFERENCED Source and this Transform, so an edit to either is what the
-    next preview executes; an incomplete Transform is refused; nothing about a
-    preview is kept; and a released Source or Target is no longer referenced.
+    gone. The Transform reads its columns FROM the Source it holds, each time
+    (backlogs 681, 830) -- nothing tells it; a preview runs the REFERENCED
+    Source and this Transform, so an edit to either is what the next preview
+    executes; an incomplete Transform is refused; nothing about a preview is
+    kept; and a released Source or Target is no longer referenced.
     """
 
     @staticmethod
@@ -749,24 +780,27 @@ class TestItsSourceAndTarget:
 
         return cls._from(Source({"file": str(cls._csv(tmp_path))}), {"selected": "declaration"})
 
-    def test_the_transform_reads_its_source_columns_again(self, tmp_path: Path) -> None:
+    def test_an_edit_to_its_source_is_what_it_completes_against_next(
+        self, tmp_path: Path,
+    ) -> None:
+        """No synchronising step exists: nothing is called between the two."""
         other = tmp_path / "other.csv"
         other.write_text("c,d\n1,2\n", encoding="utf-8")
         transform = self._declared(tmp_path)
+        assert transform.source_columns(SimpleNamespace()) == ["a", "b"]
 
         transform.source().update("file", str(other))
 
-        assert transform.observe_source(SimpleNamespace()) is True
-        assert transform.source_columns() == ["c", "d"]
+        assert transform.source_columns(SimpleNamespace()) == ["c", "d"]
+        assert [one["source"] for one in transform.columns(SimpleNamespace())] == ["c", "d"]
+        assert transform.projection(SimpleNamespace())["source_columns"] == ["c", "d"]
 
-    def test_a_source_that_cannot_be_read_tells_it_nothing(self, tmp_path: Path) -> None:
+    def test_a_source_that_cannot_be_read_carries_no_columns(self, tmp_path: Path) -> None:
         from rey_lib.load import Source
 
         transform = self._from(Source({"file": str(tmp_path / "no.unknown")}))
-        transform.observe_source_columns(["kept"])
 
-        assert transform.observe_source(SimpleNamespace()) is False
-        assert transform.source_columns() == ["kept"]
+        assert transform.source_columns(SimpleNamespace()) == []
 
     def test_it_previews_the_mapping_it_shows(self, tmp_path: Path) -> None:
         found = self._declared(tmp_path).preview(SimpleNamespace(), 10)
@@ -798,8 +832,10 @@ class TestItsSourceAndTarget:
     def test_an_incomplete_transform_is_refused(self, tmp_path: Path) -> None:
         from rey_lib.load import Source
 
-        transform = self._from(Source({"file": str(self._csv(tmp_path))}), {"selected": "declaration"})
-        transform.observe_source_columns([])
+        # A Source carrying no columns gives a declaration with nothing to show.
+        transform = self._from(
+            Source({"file": str(tmp_path / "no.unknown")}), {"selected": "declaration"},
+        )
 
         with pytest.raises(ConfigError, match="is missing: transform"):
             transform.preview(SimpleNamespace(), 10)
@@ -823,7 +859,7 @@ class TestItsSourceAndTarget:
         transform.release(transform.source())
 
         assert transform.source() is None
-        assert transform.observe_source(SimpleNamespace()) is False
+        assert transform.source_columns(SimpleNamespace()) == []
         with pytest.raises(StateError, match="no Source to preview"):
             transform.preview(SimpleNamespace(), 10)
 
@@ -888,10 +924,10 @@ class TestWhatIsShownIsWhatExecutes:
         assert [one["name"] for one in shown.executed_declaration()["columns"]] == ["a_out", "b"]
 
     def test_hand_written_text_executes_as_it_stands(self) -> None:
-        written = Transform(
-            {"transform": "columns:\n  - source: a\n    name: a_out\n"}, selected="declaration",
+        written = _holding(
+            _Carrying("a", "b"), "declaration",
+            {"transform": "columns:\n  - source: a\n    name: a_out\n"},
         )
-        written.observe_source_columns(["a", "b"])
 
         assert written.executed_declaration() == {"columns": [{"source": "a", "name": "a_out"}]}
 
@@ -1238,11 +1274,10 @@ class TestTheRequestSettingsAreChosenFromTheHydration:
         )])
 
     def _held(self, control: Any = None) -> Transform:
-        transform = _established(control or self._mapped(), {
-            "selected": "http", "values": {"http-adapter": "alpha"},
-        })
-        transform.observe_source_columns(["symbol", "identifier_value"])
-        return transform
+        return Transform.from_source(
+            _runtime(control or self._mapped()), _Carrying("symbol", "identifier_value"),
+            {"selected": "http", "values": {"http-adapter": "alpha"}},
+        )
 
     @staticmethod
     def _field(transform: Transform, name: str) -> dict[str, Any]:
@@ -1329,7 +1364,7 @@ class TestTheRequestSettingsAreChosenFromTheHydration:
             request_body_kinds=["reference", "reference"],
             request_body_values=["symbol", "market_code"],
         )]))
-        transform.observe_source_columns(["instrument_name", "symbol", "market_code"])
+        transform.source().columns = ["instrument_name", "symbol", "market_code"]
 
         assert self._field(transform, "idValue")["value"] == "symbol"
         assert self._field(transform, "micCode")["value"] == "market_code"
@@ -1342,7 +1377,7 @@ class TestTheRequestSettingsAreChosenFromTheHydration:
             request_body_kinds=["reference", "reference"],
             request_body_values=["symbol", "market_code"],
         )]))
-        transform.observe_source_columns(["instrument_name", "symbol", "market_code"])
+        transform.source().columns = ["instrument_name", "symbol", "market_code"]
 
         for name in ("idValue", "micCode"):
             with pytest.raises(ConfigError, match="is not a choice"):
@@ -1486,3 +1521,108 @@ class TestItsTargetsColumns:
         assert transform.target() is None
         assert transform.target_columns(SimpleNamespace()) is None
         assert target.reads == []
+
+
+class TestItsSnapshot:
+    """One Transform projection represents one Transform state (backlogs 681, 830)."""
+
+    _STORED = {
+        "declaration": {"columns": [
+            {"source": "run_date", "name": "run_date"},
+            {"source": "account", "name": "account"},
+            {"source": "action", "name": "action"},
+        ]},
+        "persistence": {
+            "transform_id": 7, "file_type_id": 4,
+            "column_ids": [37318, 37319, 37320], "column_ordinals": [1, 2, 3],
+        },
+    }
+
+    @staticmethod
+    def _csv(tmp_path: Path) -> Path:
+        held = tmp_path / "trades.csv"
+        held.write_text(
+            "source_line_number,run_date,account,action\n2,03/29/2019,A1,BUY\n",
+            encoding="utf-8",
+        )
+        return held
+
+    def _stored(self, tmp_path: Path) -> Transform:
+        return Transform.from_source(
+            SimpleNamespace(), Source({"file": str(self._csv(tmp_path))}),
+            {"selected": "manifest", "values": deepcopy_values(self._STORED)},
+        )
+
+    def test_one_read_of_its_source_and_one_completion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        transform = self._stored(tmp_path)
+        completions: list[tuple[str, ...]] = []
+        real = transform_module._completed
+
+        def counting(entries: Any, stored: Any, structure: Any) -> Any:
+            completions.append(tuple(structure))
+            return real(entries, stored, structure)
+
+        monkeypatch.setattr(transform_module, "_completed", counting)
+
+        transform.projection(SimpleNamespace())
+
+        assert completions == [("source_line_number", "run_date", "account", "action")]
+
+    def test_every_aligned_field_comes_from_that_one_completion(self, tmp_path: Path) -> None:
+        shown = self._stored(tmp_path).projection(SimpleNamespace())
+
+        assert [one["name"] for one in shown["columns"]] == [
+            "source_line_number", "run_date", "account", "action",
+        ]
+        assert shown["column_ids"] == [None, 37318, 37319, 37320]
+        assert shown["column_ordinals"] == [None, 1, 2, 3]
+        assert len(shown["column_settings"]) == len(shown["output_missing"]) == 4
+
+    def test_an_operation_and_its_snapshot_are_one_act(self, tmp_path: Path) -> None:
+        """An operation waiting on another cannot land between that one and its snapshot."""
+        ctx = SimpleNamespace()
+        transform = self._stored(tmp_path)
+        started = threading.Event()
+
+        def another() -> None:
+            started.set()
+            with transform.act():
+                transform.move_column(3, 0, ctx=ctx)
+
+        with transform.act():
+            transform.edit_column(1, "name", "run_day", ctx=ctx)
+            waiting = threading.Thread(target=another)
+            waiting.start()
+            started.wait(1)
+            shown = transform.projection(ctx)
+        waiting.join(1)
+
+        assert [one["name"] for one in shown["columns"]] == [
+            "source_line_number", "run_day", "account", "action",
+        ]
+        assert [one["name"] for one in transform.columns(ctx)][0] == "action"
+
+    def test_preview_runs_exactly_the_snapshot_it_answers_with(self, tmp_path: Path) -> None:
+        """The run_date case: a row added beside run_date, moved to the top."""
+        ctx = SimpleNamespace()
+        transform = self._stored(tmp_path)
+        transform.add_column(1, ctx=ctx)
+        transform.move_column(2, 0, ctx=ctx)
+        transform.edit_column(0, "name", "file_manifest_id", ctx=ctx)
+
+        with transform.act():
+            found = transform.preview(ctx)
+            shown = transform.projection(ctx)
+
+        exported = [one["name"] for one in shown["columns"] if one.get("export") is not False]
+        assert list(found.columns) == exported
+        assert exported == [
+            "file_manifest_id", "source_line_number", "run_date", "account", "action",
+        ]
+
+
+def deepcopy_values(values: dict[str, Any]) -> dict[str, Any]:
+    """A fresh copy of declared values, so one test's edits never reach another's."""
+    return json.loads(json.dumps(values))

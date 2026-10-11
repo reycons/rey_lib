@@ -31,6 +31,7 @@ Manifest supplies nothing here: the governed context carries no destination.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -105,6 +106,9 @@ class Target:
         """
         self._values: dict[str, Any] = {}
         self._selected: Optional[str] = None
+        # ONE ACT AT A TIME: an operation and the snapshot answering it are taken
+        # under this, so the snapshot is the state that operation produced.
+        self._acting = threading.RLock()
         for name, value in (values or {}).items():
             self.update(name, value)
         if selected is not None:
@@ -181,6 +185,35 @@ class Target:
             if len(given) > 1:
                 problems.append(f"one mode, not {', '.join(given)} together")
         return problems
+
+    # -- its snapshot --------------------------------------------------------
+
+    def act(self) -> Any:
+        """The lock one act is taken under: an operation, and the snapshot answering it."""
+        return self._acting
+
+    def projection(self, ctx: Any) -> dict[str, Any]:
+        """What this Target shows: ONE snapshot of ONE state (backlog 681).
+
+        Built from copies, so the snapshot is never a second path into its
+        state. ``write_policy`` is its own answer to what the load may do, and
+        ``modes`` the ones it offers, so a surface draws the choice and works
+        out neither.
+
+        Args:
+            ctx: The runtime context. Unused: nothing is read.
+        """
+        with self._acting:
+            return {
+                "kinds": list(self.kinds()),
+                "fields": {kind.id: list(kind.fields) for kind in TARGET_KINDS},
+                "selected": self.selected_kind(),
+                "values": dict(self.declaration()["values"]),
+                "configuration": dict(self.configuration()),
+                "missing": list(self.validate()),
+                "write_policy": self.write_policy(),
+                "modes": list(MODES),
+            }
 
     # -- changing ------------------------------------------------------------
 

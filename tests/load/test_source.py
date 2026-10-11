@@ -215,3 +215,69 @@ class TestResolution:
         source.resolve(SimpleNamespace())
 
         assert vars(source) == before
+
+
+class TestItsSnapshot:
+    """The Source answers its own projection: one snapshot of one state (backlog 681)."""
+
+    _FACTS = {
+        "file_manifest_id": 3, "file_mutation_id": 12, "installation_id": 1,
+        "data_profile_id": 4, "file_name": "trades.csv",
+        "mutation_choices": [{"file_mutation_id": 12, "result": "sanitized"}],
+        "transform_choices": [{"transform_id": 20, "transform_name": "t", "is_default": True}],
+        "selected_transform_id": 20, "transform_query_id": None,
+    }
+
+    def test_the_external_contract(self) -> None:
+        source = Source({"file": "/in.csv"})
+        source.observe_governed_context(self._FACTS)
+
+        shown = source.projection(SimpleNamespace())
+
+        assert shown == {
+            "kinds": list(source.kinds()),
+            "fields": {
+                "file": ["file", "file-type", "file-mutation-id"],
+                "database": ["source-connection", "statement"],
+                "sql_file": ["source-connection", "sql-file"],
+                "manifest": ["file-manifest-id", "file-mutation-id", "file-type-id"],
+            },
+            "selected": "file",
+            "values": {"file": "/in.csv"},
+            "configuration": dict(source.configuration()),
+            "missing": [],
+            "governed": {
+                "identity": {
+                    "file_manifest_id": 3, "file_mutation_id": 12,
+                    "installation_id": 1, "data_profile_id": 4,
+                },
+                "file": {"file_name": "trades.csv"},
+                "saved_settings": {
+                    "choices": [{"transform_id": 20, "transform_name": "t", "is_default": True}],
+                    "selected": 20,
+                },
+            },
+            "choices": {"file-mutation-id": [{"value": "12", "label": "sanitized"}]},
+            "operations": [],
+        }
+
+    def test_its_governed_context_is_read_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        source = Source({"file": "/in.csv"})
+        source.observe_governed_context(self._FACTS)
+        reads: list[int] = []
+        real = Source.governed_context
+
+        def counting(self: Source) -> Any:
+            reads.append(1)
+            return real(self)
+
+        monkeypatch.setattr(Source, "governed_context", counting)
+
+        source.projection(SimpleNamespace())
+
+        assert len(reads) == 1
+
+    def test_ungoverned_it_shows_no_governed_facts(self) -> None:
+        shown = Source({"file": "/in.csv"}).projection(SimpleNamespace())
+
+        assert (shown["governed"], shown["choices"]) == (None, {})

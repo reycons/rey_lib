@@ -238,11 +238,11 @@ class TestThroughTheLoadPath:
     ) -> None:
         # ONE PATH (backlog 681): the shown mapping, and an edit to it, reach
         # the operation on the next preview.
-        held = _http()
-        held.observe_source_columns(["a", "b"])
-        held.edit_column(1, "name", "b_out")
+        source = Source({"file": str(csv_file)})
+        held = Transform.from_source(_ctx(), source, _http().declaration())
+        held.edit_column(1, "name", "b_out", ctx=_ctx())
 
-        first = preview_selected(_ctx(), Source({"file": str(csv_file)}), held, limit=10)
+        first = preview_selected(_ctx(), source, held, limit=10)
 
         assert list(first.columns) == ["a", "b_out", "echoed", "operation_status", "operation_message"]
         assert first.rows[0] == {
@@ -404,25 +404,34 @@ class TestTheMappingBeforeSending:
 
         assert declared["declaration"]["columns"][0] == {"source": "cusip", "name": "a"}
 
-    def test_the_shown_mapping_is_the_one_executed(self) -> None:
+    @staticmethod
+    def _holding(tmp_path: Path) -> Transform:
+        """An http Transform holding a Source that carries cusip and asset_id."""
+        carrying = tmp_path / "lookups.csv"
+        carrying.write_text("cusip,asset_id\n1,2\n", encoding="utf-8")
+        return Transform.from_source(
+            _ctx(), Source({"file": str(carrying)}), _http().declaration(),
+        )
+
+    def test_the_shown_mapping_is_the_one_executed(self, tmp_path: Path) -> None:
         # WHAT IS SHOWN IS WHAT EXECUTES (backlog 681): nothing is written to
         # the field, and the mapping the grid shows is applied before sending.
-        held = Transform({"http-adapter": "echo"}, selected="http")
-        held.observe_source_columns(["cusip", "asset_id"])
+        held = self._holding(tmp_path)
 
         assert held.value("http-transform") is None
-        assert held.executed_declaration()["declaration"] == {"columns": held.columns()}
+        assert held.executed_declaration(_ctx())["declaration"] == {
+            "columns": held.columns(_ctx()),
+        }
 
     def test_nothing_shown_and_nothing_authored_maps_nothing(self) -> None:
         held = Transform({"http-adapter": "echo"}, selected="http")
 
         assert held.executed_declaration()["declaration"] is None
 
-    def test_it_is_authored_like_a_declaration(self) -> None:
-        held = Transform({"http-adapter": "echo"}, selected="http")
-        held.observe_source_columns(["cusip", "asset_id"])
+    def test_it_is_authored_like_a_declaration(self, tmp_path: Path) -> None:
+        held = self._holding(tmp_path)
 
-        held.edit_column(0, "name", "lookup_id")
+        held.edit_column(0, "name", "lookup_id", ctx=_ctx())
 
         assert json.loads(held.value("http-transform"))["columns"][0]["name"] == "lookup_id"
-        assert held.executed_declaration()["declaration"]["columns"][0]["name"] == "lookup_id"
+        assert held.executed_declaration(_ctx())["declaration"]["columns"][0]["name"] == "lookup_id"

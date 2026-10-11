@@ -294,12 +294,19 @@ class TestTheStoredFactsStayAligned:
         assert transform.column_ids() == [301, None, 302, 303]
         assert transform.column_ordinals() == [10, None, 20, 30]
 
-    def test_a_spliced_source_column_has_none(self, transform: Transform) -> None:
-        transform.observe_source_columns(["a", "b", "c", "d"])
+    def test_a_spliced_source_column_has_none(self, tmp_path: Any) -> None:
+        # Its held Source carries a column the stored mapping does not name.
+        carrying = tmp_path / "in.csv"
+        carrying.write_text("a,b,c,d\n1,2,3,4\n", encoding="utf-8")
+        transform = Transform.from_source(SimpleNamespace(), Source({"file": str(carrying)}))
+        _manifest(_joined([
+            _column(301, "a", 10), _column(302, "b", 20), _column(303, "c", 30),
+        ])).populate_transform(transform)
+        ctx = SimpleNamespace()
 
-        assert [one["name"] for one in transform.columns()] == ["a", "b", "c", "d"]
-        assert transform.column_ids() == [301, 302, 303, None]
-        assert transform.column_ordinals() == [10, 20, 30, None]
+        assert [one["name"] for one in transform.columns(ctx)] == ["a", "b", "c", "d"]
+        assert transform.column_ids(ctx) == [301, 302, 303, None]
+        assert transform.column_ordinals(ctx) == [10, 20, 30, None]
 
     def test_ordinals_are_not_manufactured_for_a_persistence_without_them(self) -> None:
         transform = Transform({

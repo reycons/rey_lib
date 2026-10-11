@@ -29,9 +29,14 @@ execution, and what a later write back to the database keys on.
 
 **IT AUTHORS ITS OWN DECLARATION.** A column mapping is edited here -- one
 field of one entry, a column added or moved -- and never by whatever draws it.
-Every edit first COMPLETES the declaration against the source's columns, which
-this instance is told (``observe_source_columns``) as a fact of its context:
-never a field, never in the declarative form, never persisted.
+Every edit first COMPLETES the declaration against the columns its HELD SOURCE
+carries, read from that Source at the time (backlogs 681, 830): never told,
+never copied, never a field, never persisted. Nothing keeps the two in step,
+because nothing needs to -- the Transform reads the Source it holds.
+
+**ONE ACT, ONE STATE.** ``projection`` is this object's own snapshot: one read
+of its Source, one completion, every aligned field derived from that one list.
+``act`` is the lock an operation and its snapshot are taken under together.
 
 **TWO VOCABULARIES.** ``TRANSFORM_FIELDS`` is everything this object holds.
 ``TRANSFORM_PARAMETERS`` is the subset the loader declares as parameters --
@@ -42,6 +47,7 @@ fields of this object and not loader parameters.
 from __future__ import annotations
 
 import json
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,8 +64,12 @@ from rey_lib.logs import AppLogger
 from rey_lib.web_utils.operation import HttpOperation
 
 __all__ = [
-    "COLUMN_FIELDS", "Transform", "TRANSFORM_FIELDS", "TRANSFORM_KINDS", "TRANSFORM_PARAMETERS",
+    "COLUMN_FIELDS", "PREVIEW_ROWS", "Transform", "TRANSFORM_FIELDS", "TRANSFORM_KINDS",
+    "TRANSFORM_PARAMETERS",
 ]
+
+#: How many records a preview carries, unless asked for another number.
+PREVIEW_ROWS = 50
 
 
 _logger = AppLogger(__name__)
@@ -199,9 +209,9 @@ class Transform:
         """
         self._values: dict[str, Any] = {}
         self._selected: Optional[str] = None
-        # CONTEXT, NOT CONFIGURATION: the columns the source was last observed
-        # to carry. Never in `declaration()`, never persisted.
-        self._source_columns: tuple[str, ...] = ()
+        # ONE ACT AT A TIME: an operation and the snapshot answering it are taken
+        # under this, so the snapshot is the state that operation produced.
+        self._acting = threading.RLock()
         # Source -> Transform -> Target: THIS TRANSFORM REFERENCES ITS CURRENT
         # SOURCE AND TARGET (backlog 831) -- the objects themselves, handed over
         # by `from_source`, dropped by `release`. Held, never in `declaration()`,
@@ -248,17 +258,13 @@ class Transform:
     ) -> "Transform":
         """Build a Transform that starts from what its Source carries (backlog 677).
 
-        THE TRANSFORM READS ITS SOURCE TO CREATE ITSELF. Built from its
-        declarative form exactly as :meth:`from_declaration`, then told the
-        columns the Source carries through :meth:`observe_source` -- the context
-        its initial mapping is completed against.
+        Built from its declarative form exactly as :meth:`from_declaration`.
 
         **IT REFERENCES ITS SOURCE AND TARGET** (backlog 831): the objects
-        themselves, so an edit to either is what this Transform sees next. The
-        runtime is not kept. A declaration given is kept as it is: the columns
-        are context, never a field, so a profiled declaration is never
-        overwritten. A Source that cannot be read yet -- incomplete, or not
-        resolvable -- starts the Transform with no columns.
+        themselves, so an edit to either is what this Transform sees next --
+        whatever it needs of its Source it reads from it then (backlog 681),
+        and nothing is copied in here. The runtime is not kept. A declaration
+        given is kept as it is, so a profiled declaration is never overwritten.
 
         **THE TRANSFORM IS ESTABLISHED HERE**, and handed the one collaborator
         its HTTP kind needs: the runtime's Control, and the installation's name
@@ -272,7 +278,7 @@ class Transform:
             target: The canonical Target this Transform feeds, if there is one.
 
         Returns:
-            The Transform, its source columns observed where they could be read.
+            The Transform, holding its Source and Target.
 
         Raises:
             ConfigError: If it is declared in kind ``http`` and its jobs cannot
@@ -296,7 +302,6 @@ class Transform:
         manifest = source.manifest() if source is not None else None
         if manifest is not None:
             manifest.populate_transform(built)
-        built.observe_source(ctx)
         return built
 
     def declaration(self) -> dict[str, Any]:
@@ -384,16 +389,23 @@ class Transform:
             "max_preview_records": int(max_preview_records),
         }
 
-    def validate(self) -> list[str]:
+    def validate(self, ctx: Any = None) -> list[str]:
         """What the selected kind still needs, or nothing where it is complete.
 
         WHAT IS SHOWN IS CONFIGURED (backlog 681): the field a kind's grid
         authors is satisfied by the mapping :meth:`columns` shows, so an
         untouched pass-through grid is a complete transform.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
         """
+        return self._missing(self._mapping(self._structure(ctx))[0])
+
+    def _missing(self, columns: list[dict[str, Any]]) -> list[str]:
+        """What the selected kind still needs, given the mapping it shows."""
         kind = _kind_of(self.selected_kind())
         held = self.configuration()
-        shown = _AUTHORED_IN.get(kind.id) if self.columns() else None
+        shown = _AUTHORED_IN.get(kind.id) if columns else None
         return [
             name for name in kind.required
             if not _held(held.get(name)) and name != shown
@@ -578,18 +590,38 @@ class Transform:
 
     # -- authoring -----------------------------------------------------------
 
-    def observe_source_columns(self, columns: Any) -> None:
-        """Be told which columns the source carries, so a mapping can be completed.
+    def source_columns(self, ctx: Any = None) -> list[str]:
+        """The columns its held Source carries now, read from that Source.
 
-        A fact of this instance's context -- whoever read the source says so --
-        and not configuration: it changes what an edit completes against and
-        what :meth:`columns` shows, and nothing about what is declared.
+        Args:
+            ctx: The runtime context, to resolve the Source.
         """
-        self._source_columns = tuple(str(one) for one in (columns or ()))
+        return list(self._structure(ctx))
 
-    def source_columns(self) -> list[str]:
-        """The columns the source was last observed to carry."""
-        return list(self._source_columns)
+    def _structure(self, ctx: Any) -> tuple[str, ...]:
+        """The columns its held Source carries NOW, read from the Source itself.
+
+        **THE ONE READ OF THE SOURCE** a mapping is completed against (backlogs
+        681, 830). Nothing is kept: the Source this Transform holds is asked
+        each time, so an edit to it is what the next answer sees. No Source --
+        or one that cannot be read yet, incomplete or not resolvable -- carries
+        no columns.
+
+        Args:
+            ctx: The runtime context the Source resolves through.
+        """
+        from rey_lib.load.execution import source_columns  # noqa: PLC0415 -- execution imports this module
+
+        if self._source is None:
+            return ()
+        try:
+            return tuple(str(one) for one in source_columns(ctx, self._source))
+        except (AppError, ValueError, OSError) as exc:
+            _logger.debug(
+                "transform: the source could not be read for its columns (%s)",
+                type(exc).__name__,
+            )
+            return ()
 
     def target_columns(self, ctx: Any) -> Optional[list[str]]:
         """The columns an output may be chosen from: the target table's.
@@ -624,15 +656,22 @@ class Transform:
         are no target columns.
 
         Args:
-            ctx: The runtime context, to reach the Target's table.
+            ctx: The runtime context, to reach the Target's table and read the
+                held Source's columns.
 
         Returns:
             The target columns (or None), and one missing flag per mapping entry.
         """
+        return self._target_state(ctx, self.columns(ctx))
+
+    def _target_state(
+        self, ctx: Any, columns: list[dict[str, Any]],
+    ) -> tuple[Optional[list[str]], list[bool]]:
+        """The target table's columns, and which of these entries' outputs it lacks."""
         allowed = self.target_columns(ctx)
         missing = [
             allowed is not None and bool(entry.get("name")) and entry.get("name") not in allowed
-            for entry in self.columns()
+            for entry in columns
         ]
         return allowed, missing
 
@@ -646,36 +685,7 @@ class Transform:
         """The Target this Transform references, or None."""
         return self._target
 
-    def observe_source(self, ctx: Any) -> bool:
-        """Read which columns its Source now carries, and be told them.
-
-        Read through the one existing reading, ``source_columns``. No Source, or
-        one that cannot be read yet -- incomplete, or not resolvable -- tells
-        this Transform nothing.
-
-        Args:
-            ctx: The runtime context, to resolve the Source.
-
-        Returns:
-            Whether this Transform was told.
-        """
-        from rey_lib.load.execution import source_columns  # noqa: PLC0415 -- execution imports this module
-
-        if self._source is None:
-            _logger.debug("transform: there is no source to read for its columns")
-            return False
-        try:
-            columns = source_columns(ctx, self._source)
-        except (AppError, ValueError, OSError) as exc:
-            _logger.debug(
-                "transform: the source could not be read for its columns (%s)",
-                type(exc).__name__,
-            )
-            return False
-        self.observe_source_columns(columns)
-        return True
-
-    def preview(self, ctx: Any, limit: int) -> load_operation.LoadPreview:
+    def preview(self, ctx: Any, limit: int = PREVIEW_ROWS) -> load_operation.LoadPreview:
         """The first records its Source carries through this Transform.
 
         The one preview path, ``preview_selected``, on the Source this Transform
@@ -719,17 +729,23 @@ class Transform:
     # Source from the Source's governed read, so this Transform -- the one
     # object referencing both -- performs it. The ManifestSource decides and
     # hydrates; nothing else sequences it.
+    #
+    # EACH ANSWERS THE OTHER OBJECTS IT CHANGED -- its Source -- so whoever
+    # shows them knows to read them again. The Transform says so; nothing
+    # outside it works out the relationship.
 
-    def select_saved_setting(self, ctx: Any, transform_id: Any) -> None:
+    def select_saved_setting(self, ctx: Any, transform_id: Any) -> list[Any]:
         """Make one saved setting the active configuration, in memory.
 
         The Source's governed read selects the transform -- nothing is read --
-        and rehydrates the Source and this Transform; this Transform then reads
-        the columns its Source now carries.
+        and rehydrates the Source and this Transform.
 
         Args:
-            ctx: The runtime context, to read the Source's columns.
+            ctx: The runtime context. Unused: nothing is read.
             transform_id: The saved setting, by its transform id.
+
+        Returns:
+            The other objects it changed: its Source.
 
         Raises:
             StateError: If this Transform's Source was not opened on a governed file.
@@ -747,13 +763,16 @@ class Transform:
             ) from exc
         manifest.select_transform(chosen)
         manifest.populate(self._source, self)
-        self.observe_source(ctx)
+        return [self._source]
 
-    def new_saved_setting(self, ctx: Any) -> None:
+    def new_saved_setting(self, ctx: Any) -> list[Any]:
         """Create a saved setting from the selected one, select it, and rehydrate both objects.
 
         Args:
             ctx: The runtime context, whose control database is written.
+
+        Returns:
+            The other objects it changed: its Source.
 
         Raises:
             StateError: If this Transform's Source was not opened on a governed file.
@@ -761,12 +780,16 @@ class Transform:
         """
         manifest = self._governed_manifest()
         manifest.new_transform(self._saved_settings_control(ctx), self._source, self)
+        return [self._source]
 
-    def delete_saved_setting(self, ctx: Any) -> None:
+    def delete_saved_setting(self, ctx: Any) -> list[Any]:
         """Delete the selected saved setting, resolve the next, and rehydrate both objects.
 
         Args:
             ctx: The runtime context, whose control database is written.
+
+        Returns:
+            The other objects it changed: its Source.
 
         Raises:
             StateError: If this Transform's Source was not opened on a governed
@@ -775,6 +798,7 @@ class Transform:
         """
         manifest = self._governed_manifest()
         manifest.delete_transform(self._saved_settings_control(ctx), self._source, self)
+        return [self._source]
 
     def _governed_manifest(self) -> Any:
         """The governed read of the Source this Transform references, or a refusal."""
@@ -823,7 +847,7 @@ class Transform:
         persistence = self._values.get("persistence")
         return _held(persistence) and dict(persistence).get("transform_id") is not None
 
-    def save(self, ctx: Any) -> None:
+    def save(self, ctx: Any) -> list[Any]:
         """Save the working column mapping to the governed transform it came from.
 
         THE TRANSFORM SAVES ITSELF: every entry of :meth:`columns` is sent as it
@@ -835,6 +859,10 @@ class Transform:
         Args:
             ctx: The runtime context, whose control database this is saved to.
 
+        Returns:
+            The other objects it changed: its Source, which re-reads its
+            governed file -- or nothing where it holds none.
+
         Raises:
             ValueError: If this transform holds no governed transform to save to.
             ConfigError: If the runtime has no control database.
@@ -843,7 +871,7 @@ class Transform:
             raise StateError(
                 "Transform: only a transform populated from a governed file can save it."
             )
-        declared, columns, aligned = self._authoring()
+        declared, columns, aligned = self._authoring(ctx)
         ids = list((aligned or {}).get("column_ids") or [None] * len(columns))
         entries = [
             {**deepcopy(entry), "transform_column_id": ids[at] if at < len(ids) else None}
@@ -864,8 +892,10 @@ class Transform:
         })
         # ITS SOURCE'S GOVERNED READ IS STALE: the persisted columns changed
         # (backlog 830). The Source re-reads itself; a plain Source reads nothing.
-        if self._source is not None:
-            self._source.reread_governed(ctx)
+        if self._source is None:
+            return []
+        self._source.reread_governed(ctx)
+        return [self._source]
 
     def in_force_declaration(self) -> Optional[dict[str, Any]]:
         """The selected kind's declaration as data, or None where there is none to read.
@@ -879,42 +909,67 @@ class Transform:
             return None
         return _json_mapping(self._values.get(field))
 
-    def columns(self) -> list[dict[str, Any]]:
+    def columns(self, ctx: Any = None) -> list[dict[str, Any]]:
         """The mapping as it would be authored: every source column represented.
 
         READ-ONLY. It shows what a first edit would write -- a pass-through for
-        each source column the declaration does not already name -- and writes
-        nothing, so looking at a mapping authors none.
+        each column its held Source carries that the declaration does not
+        already name -- and writes nothing, so looking at a mapping authors none.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
+        """
+        return self._mapping(self._structure(ctx))[0]
+
+    def _mapping(
+        self, structure: tuple[str, ...],
+    ) -> tuple[list[dict[str, Any]], Optional[dict[str, list[Any]]]]:
+        """The ONE completion: the mapping against these source columns, with its stored facts.
+
+        Every aligned answer -- the entries, their stored ids and ordinals, their
+        settings, which outputs the target lacks -- is derived from what this
+        returns, so one call is one state.
         """
         declared = self.in_force_declaration() or {}
-        completed, _ = _completed(_entries(declared), None, self._source_columns)
-        return completed
+        return _completed(_entries(declared), self._held_alignment(), structure)
 
-    def column_settings(self) -> list[list[dict[str, Any]]]:
+    def column_settings(self, ctx: Any = None) -> list[list[dict[str, Any]]]:
         """What a surface draws to author each entry's rule, as its choice says.
 
         Aligned to :meth:`columns`: per entry, its TransformChoice's settings --
         each ``{name, label, control, value, choices}`` -- with any choices asked
         of the held Source now. Empty for an entry with no rule, or one no
         choice owns. Nothing is kept.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
         """
+        return self._settings(self.columns(ctx))
+
+    def _settings(self, columns: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Each of these entries' settings, as its choice states them."""
         return [
             chosen.settings_for(rule, self._source) if chosen is not None else []
-            for rule, chosen in (_rule_and_choice(entry) for entry in self.columns())
+            for rule, chosen in (_rule_and_choice(entry) for entry in columns)
         ]
 
-    def edit_column_setting(self, at: int, setting: str, value: Any) -> None:
+    def edit_column_setting(
+        self, at: int, setting: str, value: Any, *, ctx: Any = None,
+    ) -> None:
         """Author one setting of one entry's rule, through the rule's own choice.
 
         The choice decides what the value becomes in the declaration, and
         refuses what it does not offer.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
 
         Raises:
             ValueError: If the selected kind is not authored here, no entry is
                 at that position, the entry has no rule a choice owns, or the
                 choice refuses the setting or value.
         """
-        declared, columns, aligned = self._authoring()
+        declared, columns, aligned = self._authoring(ctx)
         entry = columns[_position(at, columns)]
         rule, chosen = _rule_and_choice(entry)
         if chosen is None:
@@ -924,31 +979,28 @@ class Transform:
         entry["transform"] = chosen.edit(rule, setting, value, self._source)
         self._write(declared, columns, aligned)
 
-    def column_ids(self) -> list[Optional[int]]:
+    def column_ids(self, ctx: Any = None) -> list[Optional[int]]:
         """The stored ``transform_column_id`` of each entry of :meth:`columns`.
 
         None for an entry no stored row stands behind -- one spliced in or
         added -- and empty where no stored identities are held at all.
-        """
-        return self._stored("column_ids")
 
-    def column_ordinals(self) -> list[Optional[int]]:
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
+        """
+        return _stored(self._mapping(self._structure(ctx))[1], "column_ids")
+
+    def column_ordinals(self, ctx: Any = None) -> list[Optional[int]]:
         """The stored ``column_ordinal`` of each entry of :meth:`columns`.
 
         The PERSISTED ordinal, not the entry's position: the two agree only
         until an entry is moved or added, and what is shown as stored must be
         what is stored. Aligned as :meth:`column_ids` is.
-        """
-        return self._stored("column_ordinals")
 
-    def _stored(self, key: str) -> list[Any]:
-        """One persisted per-entry fact, aligned to :meth:`columns`."""
-        aligned = self._held_alignment()
-        if aligned is None or key not in aligned:
-            return []
-        declared = self.in_force_declaration() or {}
-        _, completed = _completed(_entries(declared), aligned, self._source_columns)
-        return list(completed[key])
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
+        """
+        return _stored(self._mapping(self._structure(ctx))[1], "column_ordinals")
 
     def _held_alignment(self) -> Optional[dict[str, list[Any]]]:
         """The per-entry persisted facts the Manifest kind holds, or None.
@@ -968,7 +1020,7 @@ class Transform:
             for key in _ALIGNED if key == "column_ids" or key in held
         }
 
-    def edit_column(self, at: int, field: str, value: Any) -> None:
+    def edit_column(self, at: int, field: str, value: Any, *, ctx: Any = None) -> None:
         """Change one field of one entry, and nothing else about it.
 
         Clearing ``source`` or ``datatype`` removes it -- no source is a
@@ -977,6 +1029,9 @@ class Transform:
         of that type's starter on the entry, and leaves the entry alone for a
         type the library publishes no starter for. ``transform`` sets the rule,
         or removes it for None.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
 
         Raises:
             ValueError: If the selected kind is not authored here, the field is
@@ -987,7 +1042,7 @@ class Transform:
                 f"Transform: '{field}' is not a column field. "
                 f"Fields: {', '.join(COLUMN_FIELDS)}."
             )
-        declared, columns, aligned = self._authoring()
+        declared, columns, aligned = self._authoring(ctx)
         entry = columns[_position(at, columns)]
 
         if field == "source":
@@ -1018,18 +1073,21 @@ class Transform:
 
         self._write(declared, columns, aligned)
 
-    def add_column(self, after: Optional[int] = None) -> None:
+    def add_column(self, after: Optional[int] = None, *, ctx: Any = None) -> None:
         """Add an entry after one, from the same source, or at the end.
 
         After an entry, the new one is a second output from that entry's source,
         named as it; with none given, or beside an entry with no source, it is an
         empty output the reader names.
 
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
+
         Raises:
             ValueError: If the selected kind is not authored here, or ``after``
                 names no entry.
         """
-        declared, columns, aligned = self._authoring()
+        declared, columns, aligned = self._authoring(ctx)
         if after is None:
             landed, made = len(columns), {"name": ""}
         else:
@@ -1042,14 +1100,17 @@ class Transform:
             stored.insert(landed, None)
         self._write(declared, columns, aligned)
 
-    def move_column(self, at: int, to: int) -> None:
+    def move_column(self, at: int, to: int, *, ctx: Any = None) -> None:
         """Move one entry to another position. Moving it nowhere authors nothing.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
 
         Raises:
             ValueError: If the selected kind is not authored here, or either
                 position names no entry.
         """
-        declared, columns, aligned = self._authoring()
+        declared, columns, aligned = self._authoring(ctx)
         start, end = _position(at, columns), _position(to, columns)
         if start == end:
             return
@@ -1059,9 +1120,11 @@ class Transform:
         self._write(declared, columns, aligned)
 
     def _authoring(
-        self,
+        self, ctx: Any,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], Optional[dict[str, list[Any]]]]:
         """The declaration an edit lands in, completed, with its stored facts where held.
+
+        Completed against the columns its held Source carries now.
 
         Raises:
             ValueError: For a kind that is not authored here, or declaration
@@ -1084,7 +1147,7 @@ class Transform:
                 "it was written rather than reformatted."
             )
         columns, aligned = _completed(
-            _entries(declared), self._held_alignment(), self._source_columns,
+            _entries(declared), self._held_alignment(), self._structure(ctx),
         )
         return declared, columns, aligned
 
@@ -1111,15 +1174,75 @@ class Transform:
                 **{key: list(stored) for key, stored in aligned.items()},
             }
 
+    # -- its snapshot ----------------------------------------------------------
+
+    def act(self) -> Any:
+        """The lock one act is taken under: an operation, and the snapshot answering it.
+
+        Reentrant, so an operation may read this object's own answers inside it.
+        """
+        return self._acting
+
+    def projection(self, ctx: Any) -> dict[str, Any]:
+        """What this Transform shows: ONE snapshot of ONE state (backlogs 681, 830).
+
+        Its held Source is read once, the mapping completed once, and every
+        aligned field -- ``columns``, ``column_ids``, ``column_ordinals``,
+        ``column_settings``, ``output_missing`` -- derived from that one list,
+        with the Target read once for ``target_columns``. Built from copies, so
+        the snapshot is never a second path into this object's state.
+
+        Args:
+            ctx: The runtime context, to read the held Source and Target.
+        """
+        with self._acting:
+            structure = self._structure(ctx)
+            columns, aligned = self._mapping(structure)
+            target_columns, output_missing = self._target_state(ctx, columns)
+            return {
+                "kinds": list(self.kinds()),
+                # THE FIELDS DRAWN BESIDE THE GRID: never the field its grid
+                # authors (backlog 679).
+                "fields": self.form_fields(),
+                "selected": self.selected_kind(),
+                "values": dict(self.declaration()["values"]),
+                "configuration": dict(self.configuration()),
+                "missing": self._missing(columns),
+                # The completed mapping -- what an edit would author -- and the
+                # in-force declaration, so a surface works out neither.
+                "columns": deepcopy(columns),
+                "declaration": self.in_force_declaration(),
+                # THE STORED FACTS of each entry of `columns`, aligned to it.
+                "column_ids": _stored(aligned, "column_ids"),
+                "column_ordinals": _stored(aligned, "column_ordinals"),
+                # WHAT ITS SOURCE CARRIES, read from it now.
+                "source_columns": list(structure),
+                "target_columns": target_columns,
+                "output_missing": output_missing,
+                # HOW EACH ENTRY'S RULE IS AUTHORED, as its TransformChoice states it.
+                "column_settings": self._settings(columns),
+                # WHERE A PREVIEW WOULD SEND RECORDS, or None.
+                "outbound": self.outbound(PREVIEW_ROWS),
+                # ITS OWN HTTP STATE AND OFFER (backlog 829).
+                "http_request": self.http_request(),
+                "choices": self.choices(),
+                "field_operations": self.field_operations(),
+                # WHAT IT CAN DO BEYOND ITS EDITS.
+                "operations": ["save"] if self.saves() else [],
+            }
+
     # -- execution -----------------------------------------------------------
 
-    def executed_declaration(self) -> Optional[dict[str, Any]]:
+    def executed_declaration(self, ctx: Any = None) -> Optional[dict[str, Any]]:
         """The declaration execution sees, as data -- or None for identity.
 
         THE ONE STATEMENT OF WHAT RUNS. ``resolve`` builds from this, and
         anything that must show what a load would do -- a preview, an
         inspection -- reads it rather than working it out again. Data, never a
         built transform: building is ``_build_transform``'s.
+
+        Args:
+            ctx: The runtime context, to read the held Source's columns.
 
         Returns:
             None for ``identity``; the parsed declaration for ``declaration``
@@ -1132,7 +1255,9 @@ class Transform:
             ConfigError: If the selected kind is incomplete, or a declaration is
                 missing, empty, unreadable or declares no columns.
         """
-        missing = self.validate()
+        # ONE READ OF ITS SOURCE, ONE COMPLETION: what is validated is what runs.
+        columns = self._mapping(self._structure(ctx))[0]
+        missing = self._missing(columns)
         if missing:
             raise ConfigError(
                 f"Transform ({self.selected_kind()}) is missing: {', '.join(missing)}."
@@ -1148,7 +1273,7 @@ class Transform:
             return None
         # WHAT IS SHOWN IS WHAT EXECUTES (backlog 681): the mapping the grid
         # shows, where it shows one; otherwise the authored text as it stands.
-        shown = self._shown_declaration()
+        shown = self._shown_declaration(columns)
         if kind == "http":
             # NAMES ONLY: the operation's key. Its connection, credential
             # reference and behaviour are the governed job's (backlog 813).
@@ -1172,8 +1297,8 @@ class Transform:
             return _declared_in(held["transform-file"])
         return shown if shown is not None else _plain(held["declaration"], "declaration")
 
-    def _shown_declaration(self) -> Optional[dict[str, Any]]:
-        """The declaration the grid shows -- every source column represented -- or None.
+    def _shown_declaration(self, columns: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        """The declaration the grid shows -- these completed entries -- or None.
 
         None where the kind has no grid, where nothing is shown, or where the
         authored field holds text that is not JSON: hand-written text is
@@ -1185,7 +1310,6 @@ class Transform:
         declared = self.in_force_declaration()
         if declared is None and _held(self._values.get(field)):
             return None
-        columns = self.columns()
         if not columns:
             return None
         return {**(declared or {}), "columns": columns}
@@ -1214,21 +1338,21 @@ class Transform:
         """
         kind = self.selected_kind()
         if _is_file_kind(kind):
-            missing = self.validate()
+            missing = self.validate(ctx)
             if missing:
                 raise ConfigError(
                     f"Transform ({kind}) is missing: {', '.join(missing)}."
                 )
             return build_file_transform(ctx, kind, self.configuration())
         if kind == "http":
-            declared = self.executed_declaration()
+            declared = self.executed_declaration(ctx)
             # THE HELD OPERATION EXECUTES (backlog 837): the one selected, whose
             # request is shown. A transform rebuilt from its declaration -- a
             # separate process or run -- holds none, and the job is read there.
             return load_operation._build_http_transform(
                 ctx, declared, operation=self._http_operation,
             )
-        declared = self.executed_declaration()
+        declared = self.executed_declaration(ctx)
         # GOVERNED PERSISTENCE travels only where it is held, for the kinds
         # authored here.
         persistence = self._values.get("persistence")
@@ -1379,6 +1503,13 @@ def _completed(
         for facts in (aligned or {}).values():
             facts.insert(landed, None)
     return columns, aligned
+
+
+def _stored(aligned: Optional[Mapping[str, list[Any]]], key: str) -> list[Any]:
+    """One persisted per-entry fact from a completion, or empty where none is held."""
+    if aligned is None or key not in aligned:
+        return []
+    return list(aligned[key])
 
 
 def _position(at: Any, columns: list[Any]) -> int:

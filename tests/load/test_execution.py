@@ -120,9 +120,9 @@ class TestValidationComesFirst:
         for cls in (Source, Transform, Target):
             real = cls.validate
 
-            def spy(self: Any, _real: Any = real, _name: str = cls.__name__) -> Any:
+            def spy(self: Any, *given: Any, _real: Any = real, _name: str = cls.__name__) -> Any:
                 asked.append(_name)
-                return _real(self)
+                return _real(self, *given)
 
             monkeypatch.setattr(cls, "validate", spy)
 
