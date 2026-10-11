@@ -68,6 +68,15 @@ class TestTheBuilderChooses:
         assert isinstance(built, ColumnTransform)
         assert not isinstance(built, IdentityTransform)
 
+    def test_it_hands_the_source_to_what_it_builds_as_it_does_ctx(self) -> None:
+        source = SimpleNamespace()
+
+        built = load_operation._build_transform(SimpleNamespace(), None, DECLARATION, source=source)
+        unspoken = load_operation._build_transform(SimpleNamespace(), None, DECLARATION)
+
+        assert built.source is source
+        assert unspoken.source is None
+
     def test_it_resolves_secrets_rather_than_leaving_the_object_none(
         self, monkeypatch
     ) -> None:

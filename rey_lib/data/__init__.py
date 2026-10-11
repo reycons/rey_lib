@@ -37,10 +37,13 @@ from rey_lib.data.data_profile import (
 )
 from rey_lib.data.column_transform import (
     OUTPUT_DATATYPES,
+    TRANSFORM_CHOICES,
     ColumnTransform,
     authorable_starters,
+    choice_for,
     is_exported,
 )
+from rey_lib.data.transform_choice import TransformChoice
 from rey_lib.data.data_transform import (
     IDENTITY_EXECUTION,
     DataTransform,
@@ -54,6 +57,9 @@ from rey_lib.data.http_transform import HTTPTransform
 __all__ = [
     "IDENTITY_EXECUTION",
     "OUTPUT_DATATYPES",
+    "TRANSFORM_CHOICES",
+    "TransformChoice",
+    "choice_for",
     "DataProfile",
     "DataStructureError",
     "TransformError",

@@ -308,11 +308,77 @@ class TestTheStartersItPublishesForAuthoring:
         """
         first, second = authorable_starters(), authorable_starters()
 
-        first["prefix_map"]["prefixes"]["BUY"] = "Buy"
         first["hash"]["columns"].append("a")
 
-        assert second["prefix_map"]["prefixes"] == {}
         assert second["hash"]["columns"] == []
+
+
+class TestRegexExtractReadsTheRowsInput:
+    """An authored rule names no `source`: it applies to the row's own input value."""
+
+    def test_with_no_source_it_reads_the_rows_input(self) -> None:
+        held = ColumnTransform(_declaration(
+            {"name": "ticker", "source": "Symbol",
+             "transform": {"type": "regex_extract", "pattern": r"^-?([A-Z]{1,6})"}},
+        ))
+
+        assert held.transform([{"Symbol": " -AAPL260116C200 "}]) == [{"ticker": "AAPL"}]
+
+    def test_a_saved_rule_naming_a_source_still_reads_that_column(self) -> None:
+        """Compatibility for saved declarations only; not the authoring model."""
+        held = ColumnTransform(_declaration(
+            {"name": "ticker", "source": "Symbol",
+             "transform": {"type": "regex_extract", "source": "Other",
+                           "pattern": r"^([A-Z]+)", "group": 1}},
+        ))
+
+        assert held.transform([{"Symbol": "AAPL", "Other": "MSFT"}]) == [{"ticker": "MSFT"}]
+
+    def test_prefix_map_and_regex_date_still_execute(self) -> None:
+        held = ColumnTransform(_declaration(
+            {"name": "action", "source": "A",
+             "transform": {"type": "prefix_map", "source": "A",
+                           "prefixes": {"YOU BOUGHT": "Buy"}, "default": "Other"}},
+            {"name": "expires", "source": "S",
+             "transform": {"type": "regex_date", "source": "S",
+                           "pattern": r"(\d{6})", "format": "%y%m%d", "group": 1}},
+        ))
+
+        assert held.transform([{"A": "YOU BOUGHT 10", "S": "AAPL260116C200"}]) \
+            == [{"action": "Buy", "expires": "2026-01-16"}]
+
+
+class TestContextReadsTheSource:
+    """`context` resolves `source.<name>` through the Source's own governed_context."""
+
+    @staticmethod
+    def _rule(value: str) -> dict[str, Any]:
+        return {"name": "out", "source": None, "transform": {"type": "context", "value": value}}
+
+    def test_a_source_value_is_written_into_each_row(self) -> None:
+        source = SimpleNamespace(governed_context=lambda: {"file_mutation_id": 12})
+        held = ColumnTransform(_declaration(self._rule("source.file_mutation_id")), source=source)
+
+        assert held.transform([{}, {}]) == [{"out": 12}, {"out": 12}]
+
+    @pytest.mark.parametrize("source", [
+        None,
+        SimpleNamespace(governed_context=lambda: None),
+        SimpleNamespace(governed_context=lambda: {"file_name": "a.csv"}),
+    ])
+    def test_no_source_no_context_or_no_such_name_writes_blank(self, source: Any) -> None:
+        held = ColumnTransform(_declaration(self._rule("source.file_mutation_id")), source=source)
+
+        assert held.transform([{}]) == [{"out": ""}]
+
+    def test_ctx_values_are_unchanged(self) -> None:
+        source = SimpleNamespace(governed_context=lambda: {"who": "source"})
+        held = ColumnTransform(
+            _declaration(self._rule("ctx.who")),
+            context=SimpleNamespace(who="ctx"), source=source,
+        )
+
+        assert held.transform([{}]) == [{"out": "ctx"}]
 
 
 class TestExportSelectsTheOutputWithoutChangingExecution:

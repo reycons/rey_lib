@@ -191,7 +191,9 @@ class TestResolutionThroughTheOneBuilder:
 
         (args, kwargs), = builds
         assert args == (ctx, None, _DECLARED)
-        assert set(kwargs) == {"_returned"}
+        # Its Source travels where ctx does -- None for a Transform with none.
+        assert set(kwargs) == {"_returned", "source"}
+        assert kwargs["source"] is None
         assert isinstance(resolved, ColumnTransform)
         assert not resolved.is_persistable
 
@@ -288,6 +290,71 @@ class TestTheBuilderCarriesPersistence:
 
         assert isinstance(built, ColumnTransform)
         assert built.persistence is None
+
+
+class TestItsColumnSettings:
+    """Each entry's rule authored through its own TransformChoice's settings."""
+
+    _FACTS = {
+        "file_manifest_id": 3, "file_mutation_id": 12, "file_name": "trades.csv",
+        "mutation_choices": [{"file_mutation_id": 12}], "transform_choices": [],
+    }
+    _MAPPING = {"columns": [{"source": "A", "name": "a"}, {"name": "mutation"}]}
+
+    def _governed(self) -> Transform:
+        source = Source.from_declaration({})
+        source.observe_governed_context(self._FACTS)
+        return Transform.from_source(
+            _runtime(_Control([])), source,
+            {"selected": "declaration", "values": {"transform": json.dumps(self._MAPPING)}},
+        )
+
+    def test_an_entry_without_a_rule_has_no_settings(self) -> None:
+        assert self._governed().column_settings() == [[], []]
+
+    def test_a_context_rule_offers_the_sources_names_as_a_select(self) -> None:
+        transform = self._governed()
+        transform.edit_column(1, "type", "context")
+
+        assert transform.column_settings()[1] == [{
+            "name": "value", "label": "Value", "control": "select",
+            "value": "ctx.row_num",
+            "choices": ["file_manifest_id", "file_mutation_id", "file_name"],
+        }]
+
+    def test_choosing_a_name_stores_the_source_reference_and_shows_the_name(self) -> None:
+        transform = self._governed()
+        transform.edit_column(1, "type", "context")
+
+        transform.edit_column_setting(1, "value", "file_mutation_id")
+
+        assert transform.columns()[1]["transform"] == {
+            "type": "context", "value": "source.file_mutation_id",
+        }
+        assert transform.column_settings()[1][0]["value"] == "file_mutation_id"
+
+    def test_a_name_the_source_does_not_offer_is_refused(self) -> None:
+        transform = self._governed()
+        transform.edit_column(1, "type", "context")
+
+        with pytest.raises(ConfigError, match="not one of"):
+            transform.edit_column_setting(1, "value", "run_id")
+
+    def test_an_entry_without_a_rule_takes_no_setting(self) -> None:
+        with pytest.raises(ConfigError, match="no transform choice"):
+            self._governed().edit_column_setting(0, "value", "x")
+
+    def test_resolved_it_writes_the_sources_value_and_leaves_ctx_alone(self) -> None:
+        transform = self._governed()
+        transform.edit_column(1, "type", "context")
+        transform.edit_column_setting(1, "value", "file_mutation_id")
+        ctx = SimpleNamespace(run_id=5)
+
+        resolved = transform.resolve(ctx)
+
+        assert resolved.source is transform.source()
+        assert resolved.context is ctx and vars(ctx) == {"run_id": 5}
+        assert resolved.transform([{"A": "x"}]) == [{"a": "x", "mutation": 12}]
 
 
 def _declared(transform: Transform) -> dict[str, Any]:

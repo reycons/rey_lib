@@ -231,6 +231,7 @@ def _build_transform(
     declaration: Any = None,
     *,
     persistence: Optional[TransformPersistence] = None,
+    source: Any = None,
 ) -> Any:
     """Build the transform object for one load.
 
@@ -259,6 +260,9 @@ def _build_transform(
             governed transform built here keeps the identities an edit is
             written back by. Nothing about applying the rules reads it, and a
             declaration without one executes the same.
+        source: The canonical Source the records come from, where there is
+            one, for ``source.*`` context values. Passed straight to the
+            ``ColumnTransform``, as ``ctx`` is.
 
     Returns:
         The transform this load runs.
@@ -267,7 +271,7 @@ def _build_transform(
         plain = namespace_to_plain(declaration) or {}
         return ColumnTransform(
             plain, context=ctx, secrets=build_secrets(plain),
-            persistence=persistence,
+            persistence=persistence, source=source,
         )
     return _build_identity_transform(transform_cfg)
 

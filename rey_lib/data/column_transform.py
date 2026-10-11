@@ -49,6 +49,10 @@ regex_date, prefix_map, strip_parens_suffix, encrypt, file_hash, not_blank, and
 ``hash`` over a fixed set of output columns. Each is declared per column under
 ``transform:`` and each is implemented below.
 
+``context`` writes one value from outside the record: ``ctx.<name>`` from the
+run's context, or ``source.<name>`` from what the canonical Source exposes
+through its ``governed_context``.
+
 ``passthrough`` returns the source value UNCHANGED -- no trim, conversion or
 coercion. It is not the same as declaring no rule at all: the absent-rule path
 strips strings, and a column that declares this operator has asked for the value
@@ -73,74 +77,28 @@ from typing import Any, Optional
 from rey_lib.data.data_transform import DeclaredTransform
 from rey_lib.data.date_formats import to_strptime_format
 from rey_lib.data.errors import TransformError
+from rey_lib.data.transform_choice import (
+    ChoiceSetting,
+    RuleCall,
+    TransformChoice,
+    shown_source_name,
+    source_metadata_names,
+    stored_source_name,
+)
 from rey_lib.logs import AppLogger
 
 __all__ = [
     "AUTHORABLE_STARTERS",
     "OUTPUT_DATATYPES",
+    "TRANSFORM_CHOICES",
     "ColumnTransform",
     "TransformPersistence",
     "authorable_starters",
+    "choice_for",
     "is_exported",
 ]
 
 _logger = AppLogger(__name__)
-
-
-#: A starting declaration per transform type a SURFACE may offer.
-#:
-#: **Authoring aids, not defaults.** Nothing below reads this: it changes no
-#: runtime behaviour and no reading of an omitted key. A declaration is only
-#: ever what its author actually wrote, and a starter is what an author is
-#: handed before they write it.
-#:
-#: It sits beside the dispatch because the dispatch owns the types. A surface
-#: holding its own list would be a second answer about what a transform is,
-#: free to drift from the one that executes.
-#:
-#: **``encrypt`` IS DELIBERATELY ABSENT, and its absence here is not a claim
-#: that it is invalid.** ``_transform_encrypt`` resolves ``key_env`` against a
-#: secrets map supplied at construction, so a declaration naming one is only
-#: as good as the store the thing that built it can reach. Existing
-#: declarations keep using it through the trusted paths that already supply
-#: that map. What is missing is the rule for a declaration arriving from a
-#: BROWSER -- which secret namespace it may name, and how those names are
-#: offered without the values -- and until that rule exists, offering the
-#: starter would advertise a capability that is not whole.
-AUTHORABLE_STARTERS: dict[str, dict[str, Any]] = {
-    "constant": {"type": "constant", "value": ""},
-    "context": {"type": "context", "value": "ctx.row_num"},
-    # TWO FORMATS, because they are two questions and only one of them was
-    # being offered. `format` READS the value; `output_format` WRITES it, and
-    # without it a rule falls back to the ANSI spelling. An author who wanted
-    # dates written as MM/dd/yyyy had to know the second key existed and type it
-    # in, because the starter mentioned only the first.
-    #
-    # Each is seeded with the ANSI default that rule already falls back to, so
-    # the key is visible and editable and changes nothing for anyone who leaves
-    # it alone.
-    "date": {
-        "type": "date", "format": "MM/dd/yyyy", "output_format": "yyyy-MM-dd",
-    },
-    "datetime": {
-        "type": "datetime", "format": "yyyy-MM-dd HH:mm:ss",
-        "output_format": "yyyy-MM-dd HH:mm:ss",
-    },
-    "time": {
-        "type": "time", "format": "HH:mm:ss", "output_format": "HH:mm:ss",
-    },
-    "numeric": {"type": "numeric", "strip_chars": ","},
-    "boolean": {"type": "boolean"},
-    "regex_extract": {"type": "regex_extract", "source": "", "pattern": "", "group": 1},
-    "regex_date": {
-        "type": "regex_date", "source": "", "pattern": "", "format": "yyMMdd", "group": 1,
-    },
-    "prefix_map": {"type": "prefix_map", "source": "", "prefixes": {}, "default": "Other"},
-    "strip_parens_suffix": {"type": "strip_parens_suffix"},
-    "file_hash": {"type": "file_hash"},
-    "not_blank": {"type": "not_blank"},
-    "hash": {"type": "hash", "hash_type": "sha256", "columns": []},
-}
 
 
 #: The output datatypes a declaration may state, as LOGICAL types.
@@ -270,6 +228,7 @@ class ColumnTransform(DeclaredTransform):
         context: Any = None,
         secrets: dict[str, str] | None = None,
         persistence: Optional[TransformPersistence] = None,
+        source: Any = None,
     ) -> None:
         """Hold the rules, and the trusted things applying them needs.
 
@@ -291,6 +250,9 @@ class ColumnTransform(DeclaredTransform):
                 state; absent for a declaration read from YAML, which has no
                 stored identity to carry. **Nothing about applying the rules
                 reads it** -- see :class:`TransformPersistence`.
+            source: The canonical Source the records come from, for ``context``
+                values that reference it as ``source.<name>`` -- read through
+                its own ``governed_context``. None where there is none.
 
         The declared columns and their types are derived here, once, so the
         schema half this shares with the identity transform answers from the
@@ -339,6 +301,8 @@ class ColumnTransform(DeclaredTransform):
         self.secrets = secrets or {}
         #: Which stored definition this is, or None where it is not one.
         self.persistence = persistence
+        #: The canonical Source, for ``source.*`` context values, or None.
+        self.source = source
         #: Records seen, 1-based, for the ``ctx.row_num`` context value. The
         #: object's own, because a caller passing it in per record is what
         #: made this a function taking configuration.
@@ -454,7 +418,8 @@ class ColumnTransform(DeclaredTransform):
             name = col_cfg["name"]
             transform_cfg = col_cfg.get("transform") or {}
 
-            if transform_cfg.get("type") == "hash":
+            chosen = TRANSFORM_CHOICES.get(str(transform_cfg.get("type") or ""))
+            if chosen is not None and chosen.deferred:
                 deferred.append(col_cfg)
                 continue
 
@@ -473,6 +438,7 @@ class ColumnTransform(DeclaredTransform):
                 self.secrets,
                 row_num=self._row_num,
                 ctx=self.context,
+                source=self.source,
             )
 
         for col_cfg in deferred:
@@ -489,10 +455,21 @@ class ColumnTransform(DeclaredTransform):
         return {name: out[name] for name in self.columns if name in out}
 
 
-def _resolve_context_value(value_str: str, ctx: Any = None, row_num: int = 0) -> Any:
-    """Resolve a ``ctx.*`` reference string to its runtime value."""
+def _resolve_context_value(
+    value_str: str, ctx: Any = None, row_num: int = 0, source: Any = None,
+) -> Any:
+    """Resolve a ``ctx.*`` or ``source.*`` reference string to its runtime value.
+
+    ``source.<name>`` is what the canonical Source exposes through its own
+    ``governed_context``; blank where there is no Source, no governed context
+    or no such name.
+    """
     if value_str == "ctx.row_num":
         return row_num
+    if value_str.startswith("source."):
+        facts = source.governed_context() if source is not None else None
+        held = (facts or {}).get(value_str[len("source."):])
+        return held if held is not None else ""
     if value_str.startswith("ctx.") and ctx is not None:
         current = ctx
         for part in value_str[4:].split("."):
@@ -529,6 +506,7 @@ def _apply_transform_v2(
     secrets: dict[str, str],
     row_num: int = 0,
     ctx: Any = None,
+    source: Any = None,
 ) -> Any:
     """Transform dispatcher for the new list-based column shape."""
     if not transform_cfg:
@@ -588,57 +566,14 @@ def _apply_transform_v2(
         value = str(value)
 
     try:
-        if transform_type == "constant":
-            return _resolve_constant_value(transform_cfg.get("value"), ctx=ctx)
-
-        if transform_type == "context":
-            return _resolve_context_value(
-                transform_cfg.get("value", ""), ctx=ctx, row_num=row_num,
-            )
-
-        if transform_type == "date":
-            return _transform_date(
-                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
-            )
-
-        if transform_type == "datetime":
-            return _transform_datetime(
-                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
-            )
-
-        if transform_type == "time":
-            return _transform_time(
-                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
-            )
-
-        if transform_type == "numeric":
-            return _transform_numeric(
-                (value or "").strip() if isinstance(value, str) else "", transform_cfg,
-            )
-
-        if transform_type == "boolean":
-            return _transform_boolean(value, db_col)
-
-        if transform_type == "regex_extract":
-            return _transform_regex_extract(raw_row, transform_cfg)
-
-        if transform_type == "prefix_map":
-            return _transform_prefix_map(db_col, out, raw_row, transform_cfg)
-
-        if transform_type == "strip_parens_suffix":
-            return _transform_strip_parens((value or "") if isinstance(value, str) else "")
-
-        if transform_type == "regex_date":
-            return _transform_regex_date(raw_row, transform_cfg)
-
-        if transform_type == "encrypt":
-            return _transform_encrypt(value, raw_row, transform_cfg, secrets)
-
-        if transform_type == "file_hash":
-            return _resolve_context_value("ctx.file_checksum", ctx=ctx)
-
-        if transform_type == "not_blank":
-            return out.get(db_col, "")
+        # EACH CHOICE EXECUTES ITSELF: the one owner of what a type does.
+        chosen = TRANSFORM_CHOICES.get(transform_type)
+        if chosen is not None:
+            return chosen.execute(RuleCall(
+                db_col=db_col, value=value, rule=transform_cfg, out=out,
+                raw_row=raw_row, secrets=secrets, row_num=row_num, ctx=ctx,
+                source=source,
+            ))
 
         raise TransformError(
             f"Unknown transform type '{transform_type}' for column '{db_col}'",
@@ -1022,9 +957,9 @@ def _transform_boolean(value: Optional[str], column: str) -> Optional[bool]:
     )
 
 
-def _transform_regex_extract(raw_row: dict[str, str], cfg: dict) -> Any:
+def _transform_regex_extract(raw_row: dict[str, str], cfg: dict, value: Any = None) -> Any:
     """
-    Extract a capture group from a source field using a regex pattern.
+    Extract a capture group from the row's input value using a regex pattern.
 
     Parameters
     ----------
@@ -1032,11 +967,14 @@ def _transform_regex_extract(raw_row: dict[str, str], cfg: dict) -> Any:
         Original raw CSV row.
     cfg : dict
         Transform config. Keys:
-            source   — source column name in the raw row
+            source   — COMPATIBILITY ONLY: a saved rule naming its input column.
+                       An authored rule names none and reads ``value``.
             pattern  — regex pattern with capture group(s)
             group    — capture group index (default 1)
             strip    — strip whitespace from result (default True)
             cast_to  — optional: 'float'/'double' or 'int'/'integer'
+    value : Any
+        The row's input value -- what the rule applies to.
 
     Returns
     -------
@@ -1050,7 +988,10 @@ def _transform_regex_extract(raw_row: dict[str, str], cfg: dict) -> Any:
     do_strip    = cfg.get("strip", True)
     allow_blank = cfg.get("allow_blank", False)
 
-    value = _raw_text(raw_row, source)
+    if source:
+        value = _raw_text(raw_row, source)
+    else:
+        value = (value if isinstance(value, str) else ("" if value is None else str(value))).strip()
     if not value or not pattern:
         return None if allow_blank else ""
 
@@ -1395,3 +1336,144 @@ def _try_parse_time(value: str, fmt: str) -> Optional[time]:
         return datetime.strptime(value.strip(), fmt).time()
     except ValueError:
         return None
+
+
+def _text(call: RuleCall) -> str:
+    """The value a text-reading rule is given: stripped text, or blank."""
+    return (call.value or "").strip() if isinstance(call.value, str) else ""
+
+
+def _setting(name: str, label: str, key: Optional[str] = None) -> ChoiceSetting:
+    """A text setting authoring one declaration key."""
+    return ChoiceSetting(name=name, label=label, control="text", key=key or name)
+
+
+#: Every choice the Transform dropdown may hold, each the one owner of its type.
+#:
+#: It sits beside the rules because the dispatch owns the types. A surface
+#: holding its own list would be a second answer about what a transform is,
+#: free to drift from the one that executes.
+#:
+#: **Declarations are authoring aids, not defaults.** Nothing reads them at run
+#: time: a declaration is only ever what its author actually wrote, and a
+#: starter is what an author is handed before they write it. The date rules
+#: carry both formats -- ``format`` READS the value, ``output_format`` WRITES it
+#: -- each seeded with the ANSI default the rule already falls back to.
+#:
+#: **``encrypt`` IS NOT AUTHORABLE, and that is not a claim that it is invalid.**
+#: ``_transform_encrypt`` resolves ``key_env`` against a secrets map supplied at
+#: construction. What is missing is the rule for a declaration arriving from a
+#: BROWSER -- which secret namespace it may name, and how those names are offered
+#: without the values -- and until that exists, offering it would advertise a
+#: capability that is not whole.
+#:
+#: **``passthrough`` IS THE DROPDOWN'S "NONE"**: the stored spelling of "no
+#: rule" (``transform_column.transform_type`` is NOT NULL), so choosing it
+#: authors exactly what a stored mapping already holds. It returns before any
+#: choice executes.
+TRANSFORM_CHOICES: dict[str, TransformChoice] = {one.name: one for one in (
+    TransformChoice(
+        "constant", True, {"type": "constant", "value": ""},
+        lambda call: _resolve_constant_value(call.rule.get("value"), ctx=call.ctx),
+        _setting("value", "Value"),
+    ),
+    TransformChoice(
+        "context", True, {"type": "context", "value": "ctx.row_num"},
+        lambda call: _resolve_context_value(
+            call.rule.get("value", ""), ctx=call.ctx, row_num=call.row_num, source=call.source,
+        ),
+        # WHAT THE CANONICAL SOURCE EXPOSES, by name: chosen bare, stored as
+        # `source.<name>`, resolved through the Source at run time.
+        ChoiceSetting(
+            name="value", label="Value", control="select", key="value",
+            choices=source_metadata_names, shown=shown_source_name, stored=stored_source_name,
+        ),
+    ),
+    TransformChoice(
+        "date", True,
+        {"type": "date", "format": "MM/dd/yyyy", "output_format": "yyyy-MM-dd"},
+        lambda call: _transform_date(_text(call), call.rule),
+        _setting("format", "Format"),
+    ),
+    TransformChoice(
+        "datetime", True,
+        {"type": "datetime", "format": "yyyy-MM-dd HH:mm:ss",
+         "output_format": "yyyy-MM-dd HH:mm:ss"},
+        lambda call: _transform_datetime(_text(call), call.rule),
+        _setting("format", "Format"),
+    ),
+    TransformChoice(
+        "time", True, {"type": "time", "format": "HH:mm:ss", "output_format": "HH:mm:ss"},
+        lambda call: _transform_time(_text(call), call.rule),
+        _setting("format", "Format"),
+    ),
+    TransformChoice(
+        "numeric", True, {"type": "numeric", "strip_chars": ","},
+        lambda call: _transform_numeric(_text(call), call.rule),
+        _setting("strip_chars", "Strip characters"),
+    ),
+    TransformChoice(
+        "boolean", True, {"type": "boolean"},
+        lambda call: _transform_boolean(call.value, call.db_col),
+    ),
+    TransformChoice(
+        "regex_extract", True, {"type": "regex_extract", "pattern": ""},
+        lambda call: _transform_regex_extract(call.raw_row, call.rule, call.value),
+        _setting("pattern", "Pattern"),
+    ),
+    # NOT AUTHORABLE, STILL EXECUTABLE: saved declarations use both. regex_date
+    # is regex_extract plus date parsing, which is the Output datatype's;
+    # prefix_map is hidden from authoring for now.
+    TransformChoice(
+        "regex_date", False,
+        {"type": "regex_date", "source": "", "pattern": "", "format": "yyMMdd", "group": 1},
+        lambda call: _transform_regex_date(call.raw_row, call.rule),
+    ),
+    TransformChoice(
+        "prefix_map", False,
+        {"type": "prefix_map", "source": "", "prefixes": {}, "default": "Other"},
+        lambda call: _transform_prefix_map(call.db_col, call.out, call.raw_row, call.rule),
+    ),
+    TransformChoice(
+        "strip_parens_suffix", True, {"type": "strip_parens_suffix"},
+        lambda call: _transform_strip_parens(
+            (call.value or "") if isinstance(call.value, str) else "",
+        ),
+    ),
+    TransformChoice(
+        "file_hash", True, {"type": "file_hash"},
+        lambda call: _resolve_context_value("ctx.file_checksum", ctx=call.ctx),
+    ),
+    # NOT AUTHORABLE: as a column rule it returns the value unchanged -- not a
+    # transformation. Kept executable for any stored rule naming it.
+    TransformChoice(
+        "not_blank", False, {"type": "not_blank"},
+        lambda call: call.out.get(call.db_col, ""),
+    ),
+    TransformChoice(
+        "hash", True, {"type": "hash", "hash_type": "sha256", "columns": []},
+        lambda call: _compute_hash(call.out, call.rule),
+        _setting("columns", "Columns"),
+        deferred=True,
+    ),
+    TransformChoice(
+        "passthrough", True, {"type": "passthrough"},
+        lambda call: call.value,
+    ),
+    TransformChoice(
+        "encrypt", False, {"type": "encrypt", "key_env": ""},
+        lambda call: _transform_encrypt(call.value, call.raw_row, call.rule, call.secrets),
+    ),
+)}
+
+
+def choice_for(name: str) -> Optional[TransformChoice]:
+    """The choice a rule ``type`` names, or None for one no choice owns."""
+    return TRANSFORM_CHOICES.get(str(name or ""))
+
+
+#: A starting declaration per choice a SURFACE may offer -- the authorable
+#: choices' own, read from them so there is one answer.
+AUTHORABLE_STARTERS: dict[str, dict[str, Any]] = {
+    name: one.declaration for name, one in TRANSFORM_CHOICES.items() if one.authorable
+}

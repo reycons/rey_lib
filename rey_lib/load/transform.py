@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from rey_lib.config.config_loader import parse_yaml
-from rey_lib.data.column_transform import TransformPersistence, authorable_starters
+from rey_lib.data.column_transform import TransformPersistence, authorable_starters, choice_for
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
@@ -890,6 +890,40 @@ class Transform:
         completed, _ = _completed(_entries(declared), None, self._source_columns)
         return completed
 
+    def column_settings(self) -> list[list[dict[str, Any]]]:
+        """What a surface draws to author each entry's rule, as its choice says.
+
+        Aligned to :meth:`columns`: per entry, its TransformChoice's settings --
+        each ``{name, label, control, value, choices}`` -- with any choices asked
+        of the held Source now. Empty for an entry with no rule, or one no
+        choice owns. Nothing is kept.
+        """
+        return [
+            chosen.settings_for(rule, self._source) if chosen is not None else []
+            for rule, chosen in (_rule_and_choice(entry) for entry in self.columns())
+        ]
+
+    def edit_column_setting(self, at: int, setting: str, value: Any) -> None:
+        """Author one setting of one entry's rule, through the rule's own choice.
+
+        The choice decides what the value becomes in the declaration, and
+        refuses what it does not offer.
+
+        Raises:
+            ValueError: If the selected kind is not authored here, no entry is
+                at that position, the entry has no rule a choice owns, or the
+                choice refuses the setting or value.
+        """
+        declared, columns, aligned = self._authoring()
+        entry = columns[_position(at, columns)]
+        rule, chosen = _rule_and_choice(entry)
+        if chosen is None:
+            raise ConfigError(
+                f"Transform: entry {at} has no transform choice to author a setting of."
+            )
+        entry["transform"] = chosen.edit(rule, setting, value, self._source)
+        self._write(declared, columns, aligned)
+
     def column_ids(self) -> list[Optional[int]]:
         """The stored ``transform_column_id`` of each entry of :meth:`columns`.
 
@@ -1198,11 +1232,13 @@ class Transform:
         # GOVERNED PERSISTENCE travels only where it is held, for the kinds
         # authored here.
         persistence = self._values.get("persistence")
+        # ITS SOURCE TRAVELS WHERE CTX DOES, for `source.*` context values.
         if self.selected_kind() in _AUTHORED_IN and _held(persistence):
             return load_operation._build_transform(
                 ctx, None, declared, persistence=_persistence(persistence),
+                source=self._source,
             )
-        return load_operation._build_transform(ctx, None, declared)
+        return load_operation._build_transform(ctx, None, declared, source=self._source)
 
 
 def _hydrated_operations(control: Any, installation: str) -> dict[str, HttpOperation]:
@@ -1362,6 +1398,14 @@ def _set_or_clear(entry: dict[str, Any], key: str, value: Any) -> None:
         entry[key] = str(value)
     else:
         entry.pop(key, None)
+
+
+def _rule_and_choice(entry: Mapping[str, Any]) -> tuple[Optional[dict[str, Any]], Any]:
+    """An entry's rule, and the TransformChoice that owns it -- or None for either."""
+    rule = entry.get("transform")
+    if not isinstance(rule, Mapping):
+        return None, None
+    return dict(rule), choice_for(str(rule.get("type") or ""))
 
 
 def _plain(value: Any, named: str) -> dict[str, Any]:
