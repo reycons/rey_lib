@@ -1626,3 +1626,30 @@ class TestItsSnapshot:
 def deepcopy_values(values: dict[str, Any]) -> dict[str, Any]:
     """A fresh copy of declared values, so one test's edits never reach another's."""
     return json.loads(json.dumps(values))
+
+
+class TestItsRowsTransformOptions:
+    """Each row's Transform dropdown is projected whole, by the offer policy."""
+
+    def test_each_row_carries_exactly_its_offer(self, tmp_path: Path) -> None:
+        from rey_lib.data import choice_options
+
+        held = tmp_path / "in.csv"
+        held.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
+        transform = Transform.from_source(
+            SimpleNamespace(), Source({"file": str(held)}),
+            {"selected": "declaration", "values": {"transform": json.dumps({"columns": [
+                {"source": "a", "name": "a"},
+                {"source": "b", "name": "b", "transform": {"type": "context", "value": "x"}},
+                {"source": "c", "name": "c", "transform": {"type": "encrypt", "key_env": "K"}},
+            ]})}},
+        )
+
+        shown = transform.projection(SimpleNamespace())
+
+        assert shown["column_choices"] == [
+            choice_options(None), choice_options("context"), choice_options("encrypt"),
+        ]
+        assert shown["column_choices"][2][-1] == {
+            "value": "encrypt", "label": "encrypt", "disabled": True,
+        }

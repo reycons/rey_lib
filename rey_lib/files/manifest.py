@@ -43,10 +43,54 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.encryption import sha256_file
 from rey_lib.errors.error_utils import ConfigError, DatabaseError
 
-__all__ = ["FileManifest", "InventoryOutcome"]
+__all__ = ["FileManifest", "InventoryOutcome", "MutationDestination"]
+
+
+@dataclass(frozen=True)
+class MutationDestination:
+    """Where one mutation wrote, as the manifest stored it (backlog 733).
+
+    **THE STORED SHAPES ARE THIS OBJECT'S TO READ.** An executed load records its
+    destination (``rey_lib.load.execution.run_selected_load``) as one of two
+    shapes, and nothing outside the manifest interprets them:
+
+        a table   DatabaseObjectIdentity.to_dict() -- connection, catalog,
+                  schema, name
+        a file    path, file_type
+
+    Attributes:
+        file_mutation_id: The mutation it belongs to.
+        stored: The destination as stored -- empty where the mutation recorded none.
+    """
+
+    file_mutation_id: int
+    stored: Mapping[str, Any]
+
+    def is_database(self) -> bool:
+        """Whether this destination is a database object (a table), not a file."""
+        return bool(self.stored.get("name")) and not self.stored.get("path")
+
+    def database_identity(self) -> DatabaseObjectIdentity:
+        """The database object this mutation wrote to, through its own identity contract.
+
+        Raises:
+            ConfigError: For a mutation that recorded no destination, or wrote a
+                FILE -- explicitly, as not a queryable database destination -- or
+                whose stored identity is incomplete.
+        """
+        if not self.stored:
+            raise ConfigError(f"File mutation {self.file_mutation_id} has no destination.")
+        if not self.is_database():
+            raise ConfigError(
+                f"File mutation {self.file_mutation_id} wrote a file "
+                f"({self.stored.get('path') or 'no path'}), not a queryable "
+                f"database destination."
+            )
+        return DatabaseObjectIdentity.from_dict(self.stored)
 
 
 @dataclass(frozen=True)
@@ -308,6 +352,33 @@ class FileManifest:
     def all_mutations(self) -> list[dict[str, Any]]:
         """Return every mutation, in order, for building a whole hierarchy."""
         return self._control.list_file_mutations(None)
+
+    def mutation(self, file_mutation_id: int) -> dict[str, Any]:
+        """One mutation, read through the manifest's own mutation read (backlog 733).
+
+        Raises:
+            ConfigError: When no mutation has that id.
+        """
+        rows = self._control.list_file_mutations(
+            file_mutation_id=int(file_mutation_id), required=False,
+        )
+        if not rows:
+            raise ConfigError(f"No file mutation {file_mutation_id} is recorded.")
+        return dict(rows[0])
+
+    def mutation_destination(self, file_mutation_id: int) -> MutationDestination:
+        """Where one mutation wrote, as the manifest stored it (backlog 733).
+
+        The manifest answers WHERE; what reads it is someone else's question.
+
+        Raises:
+            ConfigError: When no mutation has that id.
+        """
+        stored = self.mutation(file_mutation_id).get("destination")
+        return MutationDestination(
+            file_mutation_id=int(file_mutation_id),
+            stored=dict(stored) if isinstance(stored, Mapping) else {},
+        )
 
     # -- rollback ------------------------------------------------------------
 

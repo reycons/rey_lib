@@ -41,6 +41,7 @@ from rey_lib.data.column_transform import (
     ColumnTransform,
     authorable_starters,
     choice_for,
+    choice_options,
     is_exported,
 )
 from rey_lib.data.transform_choice import TransformChoice
@@ -60,6 +61,7 @@ __all__ = [
     "TRANSFORM_CHOICES",
     "TransformChoice",
     "choice_for",
+    "choice_options",
     "DataProfile",
     "DataStructureError",
     "TransformError",

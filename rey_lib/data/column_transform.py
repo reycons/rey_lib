@@ -95,6 +95,7 @@ __all__ = [
     "TransformPersistence",
     "authorable_starters",
     "choice_for",
+    "choice_options",
     "is_exported",
 ]
 
@@ -1470,6 +1471,29 @@ TRANSFORM_CHOICES: dict[str, TransformChoice] = {one.name: one for one in (
 def choice_for(name: str) -> Optional[TransformChoice]:
     """The choice a rule ``type`` names, or None for one no choice owns."""
     return TRANSFORM_CHOICES.get(str(name or ""))
+
+
+def choice_options(held: Optional[str] = None) -> list[dict[str, Any]]:
+    """EXACTLY what one row's Transform dropdown offers: ``{value, label, disabled}``.
+
+    **THE WHOLE OFFER POLICY, HERE.** Every authorable choice, in the
+    registry's order, may be chosen. A type the row already holds that is not
+    offered -- a saved ``encrypt``, ``prefix_map`` or ``regex_date``, or one no
+    choice owns -- is shown for that row alone, disabled: what it holds is
+    displayed, and it is never offered for choosing. A surface renders this
+    list as it is and decides nothing.
+
+    Args:
+        held: The type this row's rule holds, or None where it holds none.
+    """
+    offered = [
+        {"value": name, "label": name, "disabled": False}
+        for name, one in TRANSFORM_CHOICES.items() if one.authorable
+    ]
+    kept = str(held or "")
+    if kept and kept not in AUTHORABLE_STARTERS:
+        offered.append({"value": kept, "label": kept, "disabled": True})
+    return offered
 
 
 #: A starting declaration per choice a SURFACE may offer -- the authorable

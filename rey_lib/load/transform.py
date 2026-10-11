@@ -54,7 +54,12 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from rey_lib.config.config_loader import parse_yaml
-from rey_lib.data.column_transform import TransformPersistence, authorable_starters, choice_for
+from rey_lib.data.column_transform import (
+    TransformPersistence,
+    authorable_starters,
+    choice_for,
+    choice_options,
+)
 from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load import load_operation
@@ -1188,7 +1193,8 @@ class Transform:
 
         Its held Source is read once, the mapping completed once, and every
         aligned field -- ``columns``, ``column_ids``, ``column_ordinals``,
-        ``column_settings``, ``output_missing`` -- derived from that one list,
+        ``column_choices``, ``column_settings``, ``output_missing`` -- derived
+        from that one list,
         with the Target read once for ``target_columns``. Built from copies, so
         the snapshot is never a second path into this object's state.
 
@@ -1219,6 +1225,12 @@ class Transform:
                 "source_columns": list(structure),
                 "target_columns": target_columns,
                 "output_missing": output_missing,
+                # EXACTLY WHAT EACH ENTRY'S TRANSFORM DROPDOWN OFFERS, as the
+                # TransformChoice offer policy decides it -- disabled entries too.
+                "column_choices": [
+                    choice_options((_rule_and_choice(entry)[0] or {}).get("type"))
+                    for entry in columns
+                ],
                 # HOW EACH ENTRY'S RULE IS AUTHORED, as its TransformChoice states it.
                 "column_settings": self._settings(columns),
                 # WHERE A PREVIEW WOULD SEND RECORDS, or None.

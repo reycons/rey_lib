@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from rey_lib.data import TRANSFORM_CHOICES, authorable_starters, choice_for
+from rey_lib.data import TRANSFORM_CHOICES, authorable_starters, choice_for, choice_options
 from rey_lib.data.transform_choice import CONTROLS
 from rey_lib.errors.error_utils import ConfigError
 
@@ -159,3 +159,27 @@ class TestAnEditBecomesTheDeclaration:
         choice_for("date").edit(given, "format", "c", None)
 
         assert given == {"type": "date", "format": "a", "output_format": "b"}
+
+
+class TestTheOfferPolicy:
+    """choice_options is the whole Transform-dropdown offer; a surface decides nothing."""
+
+    def test_every_authorable_choice_is_offered_enabled_in_registry_order(self) -> None:
+        offered = choice_options(None)
+
+        assert [one["value"] for one in offered] == [
+            name for name, one in TRANSFORM_CHOICES.items() if one.authorable
+        ]
+        assert not any(one["disabled"] for one in offered)
+
+    def test_a_held_type_that_is_offered_adds_nothing(self) -> None:
+        assert choice_options("context") == choice_options(None)
+
+    @pytest.mark.parametrize("held", ["encrypt", "prefix_map", "regex_date", "unheard_of"])
+    def test_a_held_type_that_is_not_offered_is_shown_disabled_for_that_row(
+        self, held: str,
+    ) -> None:
+        offered = choice_options(held)
+
+        assert offered[-1] == {"value": held, "label": held, "disabled": True}
+        assert offered[:-1] == choice_options(None)

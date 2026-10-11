@@ -1,0 +1,245 @@
+"""One subject, resolved to the statement that reads it (backlog 733).
+
+    run · feed · declared statement · database object · database identity
+        -> ResolvedQuery(display_name, statement, connection_map, ddl, name, schema_name)
+
+**WHAT SQL READS THIS DATABASE THING.** That is this object's whole question. A
+run and a feed are read by a configured statement filtered to one subject; a
+declared statement is a template with one value; a browsed database object
+travelled with its own statement; a database identity is read as its table.
+Nothing here executes anything -- a query surface draws the statement and its
+Run button executes it, which is what a query surface is for.
+
+**IT DOES NOT ASK WHERE A MUTATION WENT.** That is the file manifest's question
+(``FileManifest.mutation_destination``), answered as a
+``DatabaseObjectIdentity``; this takes the identity. Nothing here imports
+``rey_lib.files``.
+
+**SUBSTITUTED RATHER THAN BOUND**, because the statement is read by a person
+before it is run. Only rendered values reach it: a value is rendered as the
+SQL literal that stands for it first, and only then written in, so no value's
+characters compose SQL.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any, Final, Optional
+
+from rey_lib.db.connection import shared_connection
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
+from rey_lib.db.procedure_map import get_procedure_map, resolve_sql_binding
+from rey_lib.errors.error_utils import ConfigError
+
+__all__ = ["ResolvedQuery"]
+
+#: The map the run and feed statements live in, and the binding within it for
+#: each subject. Named for the connection they run on, which is an ordinary one:
+#: these are queries handed to a person, not the application reaching its own
+#: control tables.
+_USER_MAP: Final = "rey_apps"
+_RUN_VIEW: Final = "run_view"
+_FILE_VIEW: Final = "file_view"
+
+#: What a declared statement calls the node's own value. One name, so a
+#: declaration is written against the contract rather than against whichever
+#: node type happens to use it.
+_CURRENT_VALUE: Final = ":current_value"
+
+
+class ResolvedQuery:
+    """One subject, as the representations it can be read through.
+
+    Attributes:
+        display_name: What the surface calls it.
+        statement: The SQL text, with this subject's filters written in.
+        connection_map: Which configured map the statement runs on.
+        ddl: The definition that created it, for a subject that has one; empty
+            for one that does not -- a run and a feed were never defined by one.
+        name: What the subject is CALLED, where it is an object with a name of
+            its own -- identity, not presentation, so not ``display_name``.
+        schema_name: Where the object LIVES, for a subject that lives somewhere.
+    """
+
+    __slots__ = (
+        "connection_map", "ddl", "display_name", "name", "schema_name", "statement",
+    )
+
+    def __init__(
+        self,
+        display_name: str,
+        statement: str,
+        connection_map: str,
+        ddl: str = "",
+        name: str = "",
+        schema_name: str = "",
+    ) -> None:
+        self.display_name = display_name
+        self.statement = statement
+        self.connection_map = connection_map
+        self.ddl = ddl
+        self.name = name
+        self.schema_name = schema_name
+
+    # -- configured statements -------------------------------------------------
+
+    @classmethod
+    def for_run(cls, ctx: Any, run_id: Any) -> "ResolvedQuery":
+        """The statement that reads what one run recorded.
+
+        Raises:
+            ConfigError: When the run is not named by a whole-number identity,
+                or the binding cannot be resolved.
+        """
+        try:
+            run = int(run_id)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"A run is named by its identity; {run_id!r} is not one.") from exc
+        return cls(
+            display_name=f"Run {run}",
+            statement=_bound(ctx, _RUN_VIEW, {":run_id": str(run), ":run_log_id": "NULL"}),
+            connection_map=_USER_MAP,
+        )
+
+    @classmethod
+    def for_feed(cls, ctx: Any, feed_identity: Any) -> "ResolvedQuery":
+        """The statement that reads one feed's files.
+
+        Raises:
+            ConfigError: When the feed is not named, or the binding cannot be
+                resolved.
+        """
+        feed = str(feed_identity or "").strip()
+        if not feed:
+            raise ConfigError("A feed is named by its identity.")
+        return cls(
+            display_name=feed,
+            statement=_bound(
+                ctx, _FILE_VIEW, {":feed": _sql_text(feed), ":file_manifest_id": "NULL"},
+            ),
+            connection_map=_USER_MAP,
+        )
+
+    @classmethod
+    def for_declared(cls, statement: Any, current_value: Any) -> "ResolvedQuery":
+        """A declared statement, with the node's value written in.
+
+        The statement came from the declaration, so there is no binding to look
+        up and no subject to recognise -- a template and a value.
+
+        Raises:
+            ConfigError: When the declaration carries no statement.
+        """
+        template = str(statement or "").strip()
+        if not template:
+            raise ConfigError(
+                "A declared query carries the statement it opens, and this one "
+                "declared none."
+            )
+        return cls(
+            # The value is the only thing known about the subject, so it is
+            # what the surface calls it.
+            display_name=str(current_value or ""),
+            statement=template.replace(_CURRENT_VALUE, _sql_literal(current_value)),
+            connection_map=_USER_MAP,
+        )
+
+    # -- database objects --------------------------------------------------------
+
+    @classmethod
+    def for_database_object(
+        cls,
+        name: Any,
+        statement: Any,
+        ddl: Any,
+        connection: Any,
+        schema_name: Any = "",
+    ) -> "ResolvedQuery":
+        """A browsed database object, with the representations it travelled with.
+
+        NOTHING IS COMPOSED. Its statement was written when the database object
+        was constructed and travelled signed, so what opens is what the server
+        established. Refused only with nothing to show: a routine whose
+        provider rendered no call still opens on its definition.
+
+        Raises:
+            ConfigError: When it is unnamed, or arrived with neither a statement
+                nor a definition.
+        """
+        named = str(name or "").strip()
+        if not named:
+            raise ConfigError("A database object is named, never blank.")
+        text = str(statement or "").strip()
+        definition = str(ddl or "").strip()
+        if not text and not definition:
+            raise ConfigError(
+                f"No representation was authorized for '{named}', so there is "
+                "nothing to open."
+            )
+        return cls(
+            display_name=named,
+            statement=text,
+            connection_map=str(connection or "").strip(),
+            ddl=definition,
+            name=named,
+            schema_name=str(schema_name or "").strip(),
+        )
+
+    @classmethod
+    def for_database_identity(
+        cls, ctx: Any, identity: DatabaseObjectIdentity,
+    ) -> "ResolvedQuery":
+        """The table one identity names, read as itself: its select and its DDL.
+
+        ONE TABLE, READ BY ``DatabaseTable.read`` -- as a schema read would build
+        it -- never a whole schema scanned for it.
+
+        Raises:
+            ConfigError: When the connection cannot be opened.
+            DatabaseError: When the schema holds no such table.
+        """
+        handle = shared_connection(ctx, identity.connection).handle()
+        table = DatabaseTable.read(handle, identity)
+        return cls(
+            display_name=identity.name,
+            statement=str(table.initial_select or ""),
+            connection_map=identity.connection,
+            ddl=str(table.ddl or ""),
+            name=identity.name,
+            schema_name=identity.schema,
+        )
+
+
+def _bound(ctx: Any, binding_name: str, filters: dict[str, str]) -> str:
+    """One configured statement, its filters written in as already-rendered literals.
+
+    The filter a subject does not use says so in SQL (``NULL``) rather than
+    being left dangling.
+    """
+    binding = resolve_sql_binding(get_procedure_map(ctx, _USER_MAP), _USER_MAP, binding_name)
+    statement = str(binding["sql"])
+    for placeholder, value in filters.items():
+        statement = statement.replace(placeholder, value)
+    return statement
+
+
+def _sql_text(value: str) -> str:
+    """One value as a SQL text literal."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sql_literal(value: Optional[Any]) -> str:
+    """Any node value as the SQL literal that stands for it.
+
+    A number as itself, absence as NULL, a boolean as TRUE/FALSE, and
+    everything else as quoted text with its quotes doubled. A value that looks
+    like SQL is text like any other -- rendered, never spliced, so it can close
+    no literal and open no statement of its own.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float, Decimal)):
+        return str(value)
+    return _sql_text(str(value))

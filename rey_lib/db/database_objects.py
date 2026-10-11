@@ -26,11 +26,15 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from hashlib import sha1
 from types import MethodType
-from typing import Any, ClassVar, Iterable
+from typing import Any, ClassVar, Iterable, Mapping
 
 from rey_lib.data.logical_type import LogicalType
 from rey_lib.db.database_type import DatabaseType
-from rey_lib.errors.error_utils import DatabaseError, UnsupportedDatabaseCapabilityError
+from rey_lib.errors.error_utils import (
+    ConfigError,
+    DatabaseError,
+    UnsupportedDatabaseCapabilityError,
+)
 from rey_lib.logs import AppLogger
 
 _logger = AppLogger(__name__)
@@ -79,6 +83,28 @@ class DatabaseObjectIdentity:
             "schema": self.schema,
             "name": self.name,
         }
+
+    @classmethod
+    def from_dict(cls, stored: Mapping[str, Any]) -> "DatabaseObjectIdentity":
+        """The identity :meth:`to_dict` wrote, read back (backlog 733).
+
+        THE INVERSE, AND ONLY THAT: the same four names. ``catalog`` may be
+        empty, as ``to_dict`` writes it for a provider with no catalog; the
+        others are what make an identity whole.
+
+        Raises:
+            ConfigError: When ``connection``, ``schema`` or ``name`` is absent --
+                naming which -- because an identity without one is partial.
+        """
+        held = {key: str((stored or {}).get(key) or "").strip()
+                for key in ("connection", "catalog", "schema", "name")}
+        missing = [key for key in ("connection", "schema", "name") if not held[key]]
+        if missing:
+            raise ConfigError(
+                f"A database object identity names its {', '.join(missing)}; "
+                f"this one does not."
+            )
+        return cls(**held)
 
 
 @dataclass(frozen=True)
