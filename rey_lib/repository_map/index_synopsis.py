@@ -66,7 +66,7 @@ class IndexFacet:
 
     Attributes:
         key: How this facet is asked for.
-        population: Which of the seven it groups.
+        population: Which of the eight it groups.
         group_by: Dimension names, resolved against **that population's**
             declared vocabulary. Never a global dimension dictionary --
             ``symbol.repository`` and ``repository.repository_key`` are
@@ -86,10 +86,10 @@ class IndexFacet:
     exemplars: int = 2
 
 
-#: Every facet, in the order a reader meets them. All seven populations appear,
+#: Every facet, in the order a reader meets them. All eight populations appear,
 #: independent of whether anything would ever cite them: a census describes the
 #: whole index, while evidence cites only what a conclusion needed. Conflating
-#: those two is what makes "all seven populations" a coherent requirement here
+#: those two is what makes "all eight populations" a coherent requirement here
 #: and an incoherent one for capability evidence.
 #: `top` is raised only where the population's groups are naturally few enough
 #: to show whole -- a repository list that omitted repositories would be a poor
@@ -110,7 +110,14 @@ FACETS: tuple[IndexFacet, ...] = (
                top=25),
     IndexFacet("database_objects", "db_member", ("schema_name", "object_name"),
                parent="database_schemas"),
-    IndexFacet("concepts_by_root", "concept", ("root_concept_key",), top=25),
+    # Structure derived from the index (backlog 540): packages by their factual
+    # repository. layer and cycle_size are metrics recomputed with every index,
+    # never identities, so no facet groups by them.
+    IndexFacet("packages_by_repository", "package", ("repository_key",), top=25),
+    # Canonical objects: explicit ownership decisions, grouped only by the
+    # owner's factual repository and package -- never by an authored area.
+    IndexFacet("canonical_objects_by_owner_package", "canonical_object",
+               ("owner_repository_key", "owner_package"), top=25),
     IndexFacet("code_relations", "code_relation", ("relation_kind",), top=25),
 )
 

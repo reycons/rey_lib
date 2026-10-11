@@ -1,6 +1,6 @@
 """The synopsis maps the index; it never says what the map means.
 
-These run without a database. What needs a live index -- that the seven
+These run without a database. What needs a live index -- that the eight
 populations resolve, that exemplars round-trip -- is asserted against the real
 server; what is asserted here is the part a wrong refactor would break
 silently: which dimensions may be named, what a bounded answer admits to
@@ -29,7 +29,9 @@ _VOCABULARY = {
     "symbol": ["repository", "relative_path", "language", "symbol_kind",
                "is_public"],
     "edge": ["source_repository", "relative_path", "edge_kind", "to_reference"],
-    "concept": ["concept_key", "parent_concept_key", "root_concept_key"],
+    "package": ["repository_key", "package_path", "languages", "layer",
+                "cycle_size"],
+    "canonical_object": ["owner_repository_key", "owner_package"],
     "repository": ["repository_key", "branch", "working_tree_status"],
     "db_object": ["schema_name", "object_name", "object_type", "provider"],
     "db_member": ["schema_name", "object_name", "object_type", "member_kind"],
@@ -293,7 +295,7 @@ class TestTheRegistryIsProvenance:
             module.FACETS = original
 
     def test_every_population_is_covered(self) -> None:
-        """All seven, independent of whether anything would cite them.
+        """All eight, independent of whether anything would cite them.
 
         A census describes the whole index; evidence cites only what a
         conclusion needed. Conflating the two is what made an earlier draft's
