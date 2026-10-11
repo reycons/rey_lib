@@ -30,6 +30,9 @@ logger = AppLogger(__name__)
 
 SCHEMA = "code"
 
+#: Where the database index is staged before it is published (backlog 855).
+STAGE_SCHEMA = "code_stage"
+
 _SOURCE_COLUMNS = ("source_key", "provider", "catalog_name", "generator_version")
 _OBJECT_COLUMNS = (
     "source_key", "schema_name", "object_name", "object_type", "signature",
@@ -160,7 +163,7 @@ class DatabaseIndexWriter:
         for table in _STAGING:
             DatabaseTable.delete_all_rows(
                 self._connection,
-                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+                DatabaseObjectIdentity(connection="", catalog="", schema=STAGE_SCHEMA, name=table),
                 self._adapter,
             )
 
@@ -178,7 +181,7 @@ class DatabaseIndexWriter:
             return
         DatabaseTable.bulk_insert(
             self._connection,
-            DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+            DatabaseObjectIdentity(connection="", catalog="", schema=STAGE_SCHEMA, name=table),
             rows,
             list(columns),
             self._adapter,

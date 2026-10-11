@@ -44,6 +44,9 @@ logger = AppLogger(__name__)
 
 SCHEMA = "code"
 
+#: Where the bridge is staged before it is published (backlog 855).
+STAGE_SCHEMA = "code_stage"
+
 #: What produced an extraction. Recorded on coverage, so a published bridge
 #: says which extractor's reach it reflects.
 EXTRACTOR_VERSION = "rey_repository_map/bridge 3"
@@ -468,7 +471,7 @@ class BridgeIndexWriter:
         for table in _STAGING:
             DatabaseTable.delete_all_rows(
                 self._connection,
-                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+                DatabaseObjectIdentity(connection="", catalog="", schema=STAGE_SCHEMA, name=table),
                 self._adapter,
             )
 
@@ -480,7 +483,7 @@ class BridgeIndexWriter:
             return
         DatabaseTable.bulk_insert(
             self._connection,
-            DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+            DatabaseObjectIdentity(connection="", catalog="", schema=STAGE_SCHEMA, name=table),
             rows,
             list(columns),
             self._adapter,

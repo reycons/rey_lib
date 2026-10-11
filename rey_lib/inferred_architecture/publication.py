@@ -54,7 +54,7 @@ _MAP = "code"
 _CLEAR = "clear_inferred_architecture_stage"
 _PUBLISH = "publish_inferred_architecture"
 
-_SCHEMA = "code"
+_SCHEMA = "code_stage"
 _GENERATION_TABLE = "inferred_architecture_generation_stage"
 _AREA_TABLE = "inferred_architecture_area_stage"
 _MEMBERSHIP_TABLE = "inferred_architecture_membership_stage"

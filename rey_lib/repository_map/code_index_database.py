@@ -40,6 +40,9 @@ logger = AppLogger(__name__)
 #: The schema owning the code index. One place knows the word.
 SCHEMA = "code"
 
+#: Where the scan is staged before code.p_publish admits it (backlog 855).
+STAGE_SCHEMA = "code_stage"
+
 #: What each staging table is filled with, in the order its columns are named.
 #: Kept beside the SQL rather than derived from a row, so a column added to one
 #: side without the other is a failure at the insert rather than a silent skip.
@@ -245,7 +248,7 @@ class CodeIndexDatabaseWriter:
                       "repository_stage"):
             DatabaseTable.delete_all_rows(
                 self._connection,
-                DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+                DatabaseObjectIdentity(connection="", catalog="", schema=STAGE_SCHEMA, name=table),
                 self._adapter,
             )
 
@@ -267,7 +270,7 @@ class CodeIndexDatabaseWriter:
             return
         DatabaseTable.bulk_insert(
             self._connection,
-            DatabaseObjectIdentity(connection="", catalog="", schema=SCHEMA, name=table),
+            DatabaseObjectIdentity(connection="", catalog="", schema=STAGE_SCHEMA, name=table),
             rows,
             list(columns),
             self._adapter,

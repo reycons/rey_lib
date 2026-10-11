@@ -125,7 +125,7 @@ class TestTheWriteBoundary:
         for statement in adapter.statements:
             if statement.startswith("CALL"):
                 continue
-            assert statement.startswith('DELETE FROM "code".')
+            assert statement.startswith('DELETE FROM "code_stage".')
             assert statement.endswith('_stage"')
 
     def test_the_replacement_is_one_call(self) -> None:
@@ -156,17 +156,17 @@ class TestTheWriteBoundary:
 
         deletes = [s for s in adapter.statements if s.startswith("DELETE")]
         assert deletes == [
-            'DELETE FROM "code"."call_argument_stage"',
-            'DELETE FROM "code"."raise_site_stage"',
-            'DELETE FROM "code"."return_site_stage"',
-            'DELETE FROM "code"."class_attribute_stage"',
-            'DELETE FROM "code"."access_stage"',
-            'DELETE FROM "code"."assignment_stage"',
-            'DELETE FROM "code"."parameter_stage"',
-            'DELETE FROM "code"."edge_stage"',
-            'DELETE FROM "code"."symbol_stage"',
-            'DELETE FROM "code"."file_stage"',
-            'DELETE FROM "code"."repository_stage"',
+            'DELETE FROM "code_stage"."call_argument_stage"',
+            'DELETE FROM "code_stage"."raise_site_stage"',
+            'DELETE FROM "code_stage"."return_site_stage"',
+            'DELETE FROM "code_stage"."class_attribute_stage"',
+            'DELETE FROM "code_stage"."access_stage"',
+            'DELETE FROM "code_stage"."assignment_stage"',
+            'DELETE FROM "code_stage"."parameter_stage"',
+            'DELETE FROM "code_stage"."edge_stage"',
+            'DELETE FROM "code_stage"."symbol_stage"',
+            'DELETE FROM "code_stage"."file_stage"',
+            'DELETE FROM "code_stage"."repository_stage"',
         ]
 
     def test_a_symbol_carries_the_keys_that_resolve_it(self) -> None:

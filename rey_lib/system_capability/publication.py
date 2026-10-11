@@ -50,7 +50,7 @@ _MAP = "code"
 _CLEAR = "clear_capability_stage"
 _PUBLISH = "publish_system_capability"
 
-_SCHEMA = "code"
+_SCHEMA = "code_stage"
 _GENERATION_TABLE = "system_capability_generation_stage"
 _CAPABILITY_TABLE = "system_capability_stage"
 _EVIDENCE_TABLE = "system_capability_evidence_stage"

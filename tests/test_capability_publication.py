@@ -50,7 +50,7 @@ class _Adapter:
         self.staged: list[tuple[str, list[dict]]] = []
 
     def bulk_insert(self, _conn, schema, table, rows, columns):
-        assert schema == "code"
+        assert schema == "code_stage"
         for row in rows:
             assert set(row) == set(columns), f"{table}: row/column mismatch"
         self.staged.append((table, list(rows)))
