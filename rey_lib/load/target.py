@@ -34,13 +34,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from rey_lib.db.connection import shared_connection
+from rey_lib.db.database_objects import DatabaseTable
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.data_file import data_file_for
 from rey_lib.load import load_operation
+from rey_lib.logs import AppLogger
 
 __all__ = [
     "MODES", "Target", "TARGET_FIELDS", "TARGET_KINDS", "TARGET_PARAMETERS",
 ]
+
+_logger = AppLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -222,6 +227,39 @@ class Target:
             )
         for mode in MODES:
             self._values[mode] = mode == policy
+
+    # -- its destination ------------------------------------------------------
+
+    def destination_columns(self, ctx: Any) -> Optional[list[str]]:
+        """The selected database table's column names, in order, or None.
+
+        The table's own answer -- ``DatabaseTable.exists`` and
+        ``DatabaseTable.column_names``, as a load asks them -- on the
+        configured connection, for the destination identity :meth:`resolve`
+        builds. None where there is no table to read: a file destination, a
+        connection or table not yet named, or a table that does not exist yet.
+        Nothing is kept here.
+
+        Args:
+            ctx: The runtime context, for the configured connection.
+
+        Raises:
+            ValueError: Where the identity resolution refuses the table name.
+        """
+        if self.selected_kind() != "database":
+            return None
+        held = self.configuration()
+        if not (_held(held.get("table")) and _held(held.get("connection"))):
+            return None
+        identity = load_operation._destination_identity(
+            str(held["table"]), str(held["connection"]),
+        )
+        _logger.debug("target: reading the columns of its table on connection %s",
+                      identity.connection)
+        conn = shared_connection(ctx, identity.connection).handle()
+        if not DatabaseTable.exists(conn, identity):
+            return None
+        return list(DatabaseTable.column_names(conn, identity))
 
     # -- execution -----------------------------------------------------------
 

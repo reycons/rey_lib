@@ -34,6 +34,7 @@ from rey_lib.errors.error_utils import StateError
 from rey_lib.load.execution import load_arguments
 from rey_lib.load.source import Source
 from rey_lib.load.target import Target
+from rey_lib.web_utils.operation import HttpOperation
 
 _DECLARED = {"columns": [{"source": "A", "name": "a"}]}
 _STORED = {"transform_id": 7, "file_type_id": 4, "column_ids": [31]}
@@ -791,7 +792,7 @@ class TestFormFields:
             "identity": [],
             "declaration": [],
             "yaml": ["transform-file"],
-            "http": ["http-adapter"],
+            "http": [],
             "manifest": ["persistence"],
         }
 
@@ -896,9 +897,9 @@ def _established(control: Any, declaration: dict[str, Any] | None = None) -> Tra
 _REQUEST_ALPHA = {
     "method": "POST",
     "fields": [
-        {"part": "body", "name": "idType", "kind": "literal", "value": "TICKER"},
-        {"part": "body", "name": "idValue", "kind": "reference", "value": "symbol"},
-        {"part": "query", "name": "limit", "kind": "literal", "value": "10"},
+        {"part": "body", "name": "idType", "kind": "literal", "value": "TICKER", "label": None},
+        {"part": "body", "name": "idValue", "kind": "reference", "value": "symbol", "label": None},
+        {"part": "query", "name": "limit", "kind": "literal", "value": "10", "label": None},
     ],
     "headers": [
         {"part": "header", "name": "Accept", "kind": "configured", "value": "application/json"},
@@ -917,7 +918,7 @@ class TestTheOneRead:
 
         assert control.calls == ["local"]
         assert transform.choices() == {"http-adapter": [
-            {"value": "alpha", "label": "alpha"}, {"value": "gamma", "label": "gamma"},
+            {"value": "alpha", "label": ""}, {"value": "gamma", "label": ""},
         ]}
         assert transform.http_request() is None
 
@@ -986,7 +987,7 @@ class TestChoosingTheKind:
         assert control.calls == ["local"]
         assert transform.selected_kind() == "http"
         assert transform.choices() == {"http-adapter": [
-            {"value": "alpha", "label": "alpha"}, {"value": "gamma", "label": "gamma"},
+            {"value": "alpha", "label": ""}, {"value": "gamma", "label": ""},
         ]}
         assert transform.field_operations() == {"http-adapter": "select_http_operation"}
         assert transform.http_request() is None
@@ -1194,12 +1195,12 @@ class TestTheRequestSettingsAreChosenFromTheHydration:
         assert json.loads(transform.declaration()["values"]["http-request"]) == {"body": {"idType": "TWO"}}
         assert self._field(transform, "idType")["value"] == "TWO"
 
-    def test_a_reference_chooses_from_the_held_source_columns(self) -> None:
+    def test_a_reference_is_never_chosen_from_the_source_columns(self) -> None:
         transform = self._held()
 
-        transform.edit_request_field("body", "idValue", "identifier_value")
-
-        assert self._field(transform, "idValue")["value"] == "identifier_value"
+        with pytest.raises(ConfigError, match="is not a choice"):
+            transform.edit_request_field("body", "idValue", "identifier_value")
+        assert self._field(transform, "idValue")["value"] == "symbol"
 
     @pytest.mark.parametrize(("name", "value"), [("idType", "THREE"), ("idValue", "not_a_column")])
     def test_a_value_that_was_not_hydrated_is_refused(self, name: str, value: str) -> None:
@@ -1238,3 +1239,183 @@ class TestTheRequestSettingsAreChosenFromTheHydration:
 
     def test_it_is_not_drawn_as_a_form_field(self) -> None:
         assert "http-request" not in Transform.form_fields()["http"]
+
+    def test_the_operation_is_chosen_in_the_request_not_the_kind_form(self) -> None:
+        assert "http-adapter" not in Transform.form_fields()["http"]
+        assert "http-adapter" in TRANSFORM_FIELDS
+
+    def test_a_governed_label_is_shown_and_an_ungoverned_one_is_none(self) -> None:
+        transform = self._held(_Control([_job(
+            "alpha", request_body_labels=["Identifier type", None],
+        )]))
+
+        assert self._field(transform, "idType")["label"] == "Identifier type"
+        assert self._field(transform, "idValue")["label"] is None
+        assert self._field(transform, "limit")["label"] is None
+
+    def test_two_references_keep_their_own_hydrated_defaults(self) -> None:
+        # The live shape: two reference fields with different governed values,
+        # and a Source whose FIRST column is neither of them.
+        transform = self._held(_Control([_job(
+            "alpha",
+            request_body_fields=["idValue", "micCode"],
+            request_body_kinds=["reference", "reference"],
+            request_body_values=["symbol", "market_code"],
+        )]))
+        transform.observe_source_columns(["instrument_name", "symbol", "market_code"])
+
+        assert self._field(transform, "idValue")["value"] == "symbol"
+        assert self._field(transform, "micCode")["value"] == "market_code"
+        assert "http-request" not in transform.declaration()["values"]
+
+    def test_neither_reference_can_be_edited_and_both_keep_their_defaults(self) -> None:
+        transform = self._held(_Control([_job(
+            "alpha",
+            request_body_fields=["idValue", "micCode"],
+            request_body_kinds=["reference", "reference"],
+            request_body_values=["symbol", "market_code"],
+        )]))
+        transform.observe_source_columns(["instrument_name", "symbol", "market_code"])
+
+        for name in ("idValue", "micCode"):
+            with pytest.raises(ConfigError, match="is not a choice"):
+                transform.edit_request_field("body", name, "instrument_name")
+
+        assert self._field(transform, "idValue")["value"] == "symbol"
+        assert self._field(transform, "micCode")["value"] == "market_code"
+
+    @staticmethod
+    def _figi() -> _Control:
+        # The governed shape (load.http_request_selected_reference).
+        return _Control([_job(
+            "alpha",
+            request_body_fields=["idType", "idValue", "micCode"],
+            request_body_kinds=["literal", "selected_reference", "reference"],
+            request_body_values=["TICKER", "idType", "market_code"],
+            value_map_parts=["body"] * 4,
+            value_map_fields=["idType", "idType", "idValue", "idValue"],
+            value_map_inputs=["ISIN", "TICKER", "ISIN", "TICKER"],
+            value_map_outputs=["ID_ISIN", "TICKER", "isin", "ticker"],
+        )])
+
+    def test_only_the_identifier_type_is_chosen_and_idvalue_shows_its_column(self) -> None:
+        transform = self._held(self._figi())
+
+        assert self._field(transform, "idType")["choices"] == ["ISIN", "TICKER"]
+        assert self._field(transform, "idValue")["value"] == "ticker"
+        assert "choices" not in self._field(transform, "idValue")
+        assert "choices" not in self._field(transform, "micCode")
+
+    def test_choosing_isin_moves_idvalue_to_the_isin_column(self) -> None:
+        transform = self._held(self._figi())
+
+        transform.edit_request_field("body", "idType", "ISIN")
+
+        assert self._field(transform, "idType")["value"] == "ISIN"
+        assert self._field(transform, "idValue")["value"] == "isin"
+
+    def test_the_selected_reference_is_never_edited(self) -> None:
+        with pytest.raises(ConfigError, match="is not a choice"):
+            self._held(self._figi()).edit_request_field("body", "idValue", "isin")
+
+    def test_a_value_held_for_a_reference_is_refused_by_name(self) -> None:
+        operation = HttpOperation.hydrate(self._figi().rows[0])
+
+        with pytest.raises(ConfigError, match="'instrument_name' is not a choice for body setting 'idValue'"):
+            operation.with_request_values({"body": {
+                "idValue": "instrument_name", "micCode": "instrument_name",
+            }})
+
+    def test_the_operations_are_labelled_by_their_governed_display_name(self) -> None:
+        transform = _established(_Control([
+            _job("alpha", display_name="Alpha service"), _job("gamma"),
+        ]), {"selected": "http"})
+
+        assert transform.choices() == {"http-adapter": [
+            {"value": "alpha", "label": "Alpha service"}, {"value": "gamma", "label": ""},
+        ]}
+
+
+class TestItsTargetsColumns:
+    """Its held Target, asked for its columns when they are wanted (load.mapping_output_from_target_columns)."""
+
+    _MAPPING = {"columns": [{"source": "A", "name": "a"}, {"source": "B", "name": "old_name"}]}
+
+    @staticmethod
+    def _target(answer: Any) -> SimpleNamespace:
+        """A Target answering its destination columns, recording each read."""
+        reads: list[Any] = []
+
+        def destination_columns(ctx: Any) -> Any:
+            reads.append(ctx)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        return SimpleNamespace(destination_columns=destination_columns, reads=reads)
+
+    def _established(self, target: Any, *, governed: bool = True) -> Transform:
+        """Established as the governed read leaves it: kind declaration, its mapping filled."""
+        source = Source.from_declaration({})
+        if governed:
+            # A Source established from a governed Manifest read answers it.
+            source._manifest = SimpleNamespace(populate_transform=lambda transform: None)
+        return Transform.from_source(
+            _runtime(_Control([])), source,
+            {"selected": "declaration", "values": {"transform": json.dumps(self._MAPPING)}},
+            target=target,
+        )
+
+    def test_established_it_reads_nothing_and_holds_its_target(self) -> None:
+        target = self._target(["a", "z"])
+
+        transform = self._established(target)
+
+        assert target.reads == []
+        assert transform.target() is target
+
+    def test_it_asks_its_held_target_each_time(self) -> None:
+        target = self._target(["a", "z"])
+        transform = self._established(target)
+        ctx = SimpleNamespace()
+
+        assert transform.target_columns(ctx) == ["a", "z"]
+        target.destination_columns = self._target(["a", "b", "c"]).destination_columns
+
+        assert transform.target_columns(ctx) == ["a", "b", "c"]
+        assert target.reads == [ctx]
+
+    def test_one_read_gives_the_columns_and_the_missing_outputs(self) -> None:
+        target = self._target(["a", "z"])
+        transform = self._established(target)
+
+        state = transform.target_mapping_state(SimpleNamespace())
+
+        assert state == (["a", "z"], [False, True])
+        assert len(target.reads) == 1
+        assert [entry["name"] for entry in transform.columns()] == ["a", "old_name"]
+
+    def test_without_a_governed_manifest_there_are_no_choices_and_nothing_missing(self) -> None:
+        target = self._target(["a", "z"])
+        transform = self._established(target, governed=False)
+
+        assert transform.target_columns(SimpleNamespace()) is None
+        assert not any(transform.target_mapping_state(SimpleNamespace())[1])
+        assert target.reads == []
+
+    @pytest.mark.parametrize("answer", [None, ConfigError("no such connection")])
+    def test_no_table_or_a_refused_read_gives_no_choices(self, answer: Any) -> None:
+        transform = self._established(self._target(answer))
+
+        assert transform.target_columns(SimpleNamespace()) is None
+        assert transform.target_mapping_state(SimpleNamespace()) == (None, [False, False])
+
+    def test_a_released_target_is_not_asked(self) -> None:
+        target = self._target(["a", "z"])
+        transform = self._established(target)
+
+        transform.release(target)
+
+        assert transform.target() is None
+        assert transform.target_columns(SimpleNamespace()) is None
+        assert target.reads == []

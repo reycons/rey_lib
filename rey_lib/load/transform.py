@@ -118,6 +118,8 @@ _HTTP = "http"
 _HTTP_ADAPTER = "http-adapter"
 #: The field the user's values for the request settings are held in (backlog 841).
 _HTTP_REQUEST = "http-request"
+#: The http fields the Request sub-tab draws, so the kind's form does not.
+_DRAWN_IN_REQUEST = (_HTTP_ADAPTER, _HTTP_REQUEST)
 #: How a configured header is marked in the request shown.
 _CONFIGURED = "configured"
 
@@ -322,12 +324,14 @@ class Transform:
         state. It stays a field of the kind -- held, configurable and typed on
         the CLI -- and is only not drawn (backlog 679). ``http-request`` is
         likewise written by the Request sub-tab's ``edit_request_field``
-        (backlog 841), and is not drawn.
+        (backlog 841), and is not drawn. ``http-adapter`` is drawn in the
+        Request sub-tab, above the settings it selects
+        (load.http_request_display_names_are_hydrated), so not here either.
         """
         return {
             kind.id: [
                 name for name in kind.fields
-                if name != _AUTHORED_IN.get(kind.id) and name != _HTTP_REQUEST
+                if name != _AUTHORED_IN.get(kind.id) and name not in _DRAWN_IN_REQUEST
             ]
             for kind in TRANSFORM_KINDS
         }
@@ -488,45 +492,35 @@ class Transform:
             part: The setting's request part, as hydrated (``body``, ``query``,
                 ``header``).
             name: The setting's name, as hydrated.
-            value: The value to send -- for a reference, the Source column read.
+            value: One of a literal setting's value-map inputs.
 
         Raises:
             StateError: If this transform holds no HTTP operation.
-            ConfigError: If the held operation has no such request setting.
+            ConfigError: If the held operation has no such request setting, or
+                the value is not one of a literal's value-map inputs.
         """
         if self._http_operation is None:
             _logger.debug("transform: refused -- a request setting edited with no HTTP operation")
             raise StateError("Transform: no request setting can be set -- no HTTP operation is held.")
-        setting = next((
-            one for one in self._http_operation.request_fields
-            if (one.part, one.name) == (str(part), str(name))
-        ), None)
-        if setting is None:
-            _logger.debug("transform: refused -- %s field %s is not a request setting", part, name)
-            raise ConfigError(
-                f"Transform: the HTTP operation has no {part} setting '{name}'."
-            )
-        # ONLY WHAT WAS HYDRATED (backlog 841): one of the setting's value-map
-        # inputs, or -- for a reference -- one of the Source columns held here.
-        choices = list(self._http_operation.value_maps.get((setting.part, setting.name)) or ())
-        allowed = choices or (list(self._source_columns) if setting.kind == "reference" else [])
-        if str(value) not in allowed:
-            _logger.debug("transform: refused -- %s for %s field %s is not a hydrated choice",
-                          value, part, name)
-            raise ConfigError(
-                f"Transform: '{value}' is not a choice for {part} setting '{name}'. "
-                f"Choices: {', '.join(allowed) or 'none'}."
-            )
+        # THE OPERATION DECIDES what its settings take -- one of a literal's
+        # hydrated choices -- the same check it makes on every declared value
+        # when it is executed (load.http_request_selected_reference).
+        self._http_operation.check_request_value(part, name, value)
         values = _request_values(self._values.get(_HTTP_REQUEST))
         values.setdefault(str(part), {})[str(name)] = value
         self._values[_HTTP_REQUEST] = json.dumps(values)
 
     def choices(self) -> dict[str, list[dict[str, str]]]:
-        """The values a field may be chosen from: the hydrated HTTP operations, or none."""
+        """The values a field may be chosen from: the hydrated HTTP operations, or none.
+
+        Each is labelled by its hydrated ``display_name``; where none is
+        governed the label is empty -- nothing is put in its place.
+        """
         if not self._in_http():
             return {}
         return {_HTTP_ADAPTER: [
-            {"value": key, "label": key} for key in (self._http_operations or {})
+            {"value": key, "label": operation.display_name or ""}
+            for key, operation in (self._http_operations or {}).items()
         ]}
 
     def field_operations(self) -> dict[str, str]:
@@ -597,11 +591,60 @@ class Transform:
         """The columns the source was last observed to carry."""
         return list(self._source_columns)
 
+    def target_columns(self, ctx: Any) -> Optional[list[str]]:
+        """The columns an output may be chosen from: the target table's.
+
+        ASKED OF THE HELD TARGET NOW, never kept: its ``destination_columns``
+        answers for the destination it currently holds. Only for a Transform
+        established from a governed Manifest source -- the fact itself, not a
+        kind: the governed read selects ``declaration``. None otherwise, with no
+        Target, or where the Target has no table to read.
+
+        Args:
+            ctx: The runtime context, to reach the Target's table.
+        """
+        if self._source is None or self._source.manifest() is None or self._target is None:
+            return None
+        try:
+            return self._target.destination_columns(ctx)
+        except (AppError, ValueError, OSError) as exc:
+            _logger.debug(
+                "transform: the target could not be read for its columns (%s)",
+                type(exc).__name__,
+            )
+            return None
+
+    def target_mapping_state(self, ctx: Any) -> tuple[Optional[list[str]], list[bool]]:
+        """The target table's columns, and which outputs of the mapping it lacks.
+
+        ONE READ: the held Target is asked once, through :meth:`target_columns`,
+        and the missing flags are worked out against those same columns. Nothing
+        is kept. The flags are aligned to :meth:`columns`; an entry is only said
+        to be missing -- never replaced, never cleared. All False where there
+        are no target columns.
+
+        Args:
+            ctx: The runtime context, to reach the Target's table.
+
+        Returns:
+            The target columns (or None), and one missing flag per mapping entry.
+        """
+        allowed = self.target_columns(ctx)
+        missing = [
+            allowed is not None and bool(entry.get("name")) and entry.get("name") not in allowed
+            for entry in self.columns()
+        ]
+        return allowed, missing
+
     # -- its Source and Target -------------------------------------------------
 
     def source(self) -> Any:
         """The Source this Transform references, or None."""
         return self._source
+
+    def target(self) -> Any:
+        """The Target this Transform references, or None."""
+        return self._target
 
     def observe_source(self, ctx: Any) -> bool:
         """Read which columns its Source now carries, and be told them.
@@ -767,8 +810,8 @@ class Transform:
         """
         if self._http_operation is None:
             return None
-        return _request_of(load_operation.with_request_values(
-            self._http_operation, _request_values(self._values.get(_HTTP_REQUEST)),
+        return _request_of(self._http_operation.with_request_values(
+            _request_values(self._values.get(_HTTP_REQUEST)),
         ))
 
     # -- persistence ---------------------------------------------------------
@@ -1207,11 +1250,16 @@ def _request_of(operation: HttpOperation) -> dict[str, Any]:
         "method": operation.http_method,
         "fields": [
             {
-                "part": one.part, "name": one.name, "kind": one.kind, "value": one.value,
-                # THE HYDRATED CHOICES (backlog 841): the inputs of this field's
-                # value map, in hydrated order, only where it has one.
-                **({"choices": list(operation.value_maps[(one.part, one.name)])}
-                   if operation.value_maps.get((one.part, one.name)) else {}),
+                "part": one.part, "name": one.name, "kind": one.kind,
+                # A SELECTED REFERENCE shows the column its selection names --
+                # the relationship applied to every row, never a row's value.
+                "value": operation.shown_value(one),
+                # THE HYDRATED LABEL: what a reader is shown; None where none is governed.
+                "label": one.label,
+                # THE HYDRATED CHOICES (backlog 841): a literal's value-map
+                # inputs, in hydrated order, only where it has a map. A
+                # reference is never chosen here.
+                **({"choices": operation.choices(one)} if operation.choices(one) else {}),
             }
             for one in operation.request_fields
         ],

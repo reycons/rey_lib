@@ -26,7 +26,7 @@ so.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Mapping, Optional
@@ -45,18 +45,28 @@ _logger = AppLogger(__name__)
 OPERATION_STATUS = "operation_status"
 OPERATION_MESSAGE = "operation_message"
 
+#: A field whose input column is another field's selection, through its value map.
+_SELECTED_REFERENCE = "selected_reference"
+#: The one field kind whose value is sent as written -- and the only one a reader sets.
+_LITERAL = "literal"
+
 #: How waits are taken; a test replaces it rather than sleeping.
 _sleep = time.sleep
 
 
 @dataclass(frozen=True)
 class _RequestField:
-    """One request field of the job: a reference to an input column, or a literal."""
+    """One request field of the job: a reference to an input column, or a literal.
+
+    ``label`` is what a reader is shown for it, as governed; None where none
+    is. ``name`` stays the name sent.
+    """
 
     part: str
     name: str
     kind: str
     value: str
+    label: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +101,8 @@ class HttpOperation:
     response_error_path: Optional[str]
     response_message_path: Optional[str]
     response_text_format: Optional[str]
+    #: What a reader is shown for this job, as governed; None where none is.
+    display_name: Optional[str] = None
 
     # -- hydration ------------------------------------------------------------
 
@@ -109,12 +121,16 @@ class HttpOperation:
         if not job.get("is_enabled"):
             _refuse(key, "it is disabled")
         fields = tuple(
-            _RequestField(part, name, kind, value)
+            _RequestField(part, name, kind, value, label)
             for part in ("body", "query", "header")
-            for name, kind, value in zip(
+            for name, kind, value, label in zip(
                 job.get(f"request_{part}_fields") or (),
                 job.get(f"request_{part}_kinds") or (),
                 job.get(f"request_{part}_values") or (),
+                # PAIRED BY POSITION like the three above; a row without the
+                # array governs no label for any of its fields.
+                job.get(f"request_{part}_labels")
+                or (None,) * len(job.get(f"request_{part}_fields") or ()),
             )
         )
         value_maps: dict[tuple[str, str], dict[str, str]] = {}
@@ -154,6 +170,7 @@ class HttpOperation:
             response_error_path=job.get("response_error_path"),
             response_message_path=job.get("response_message_path"),
             response_text_format=job.get("response_text_format"),
+            display_name=job.get("display_name"),
         )
         operation._check_job()
         return operation
@@ -177,10 +194,27 @@ class HttpOperation:
         if any(f.part == "body" for f in self.request_fields) and self.request_format != "json":
             _refuse(key, "body fields are sent only as a json request")
         if position and (self.batch_size or 0) > 1 and any(
-            f.part in ("query", "header") and f.kind == "reference" for f in self.request_fields
+            f.part in ("query", "header") and f.kind in ("reference", _SELECTED_REFERENCE)
+            for f in self.request_fields
         ):
             _refuse(key, "a query or header field referencing an input is not supported under "
                          "position correlation with batch_size above 1")
+        literals = {f.name: f for f in self.request_fields if f.kind == _LITERAL}
+        for field in self.request_fields:
+            if field.kind != _SELECTED_REFERENCE:
+                continue
+            selector = literals.get(field.value)
+            if selector is None:
+                _refuse(key, f"{field.part} field {field.name} selects through {field.value}, "
+                             "which is not a literal field of the request")
+            # EVERY SELECTION NAMES A COLUMN: each value the selector can hold
+            # -- its own and its map's inputs -- has an entry in this field's map.
+            columns = self.value_maps.get((field.part, field.name)) or {}
+            selectable = {selector.value, *(self.value_maps.get((selector.part, selector.name)) or {})}
+            uncovered = sorted(one for one in selectable if one not in columns)
+            if uncovered:
+                _refuse(key, f"{field.part} field {field.name} names no column for "
+                             f"{field.value} {', '.join(uncovered)}")
         known = {(f.part, f.name) for f in self.request_fields}
         for part, name in self.value_maps:
             if (part, name) not in known:
@@ -191,19 +225,17 @@ class HttpOperation:
     def check_references(self, columns: Any) -> None:
         """Refuse input that cannot run through this job, before anything is sent.
 
-        The one pre-execution check: every referenced column is supplied, and
-        no response field would overwrite an input column. :meth:`execute`
-        makes it; a caller that knows its columns earlier makes the same call.
+        The one pre-execution check: no response field would overwrite an
+        input column. A referenced column the input does not supply is not
+        refused -- it is the same as a value not populated, and the field is
+        left out of each request (load.http_request_selected_reference).
+        :meth:`execute` makes it; a caller that knows its columns earlier makes
+        the same call.
 
         Raises:
             ConfigError: Naming the columns, never a value.
         """
         supplied = set(columns)
-        missing = sorted({f.value for f in self.request_fields
-                          if f.kind == "reference" and f.value not in supplied})
-        if missing:
-            _refuse(self.adapter_key, f"the request reads column(s) {', '.join(missing)}, "
-                                      "which the input does not supply")
         colliding = sorted(name for name, _ in self.response_fields if name in supplied)
         if colliding:
             _refuse(self.adapter_key, f"response field(s) {', '.join(colliding)} would overwrite "
@@ -299,11 +331,23 @@ class HttpOperation:
     def _filled(self, record: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], Optional[str]]:
         """The record's request parts, or why the record cannot be sent.
 
-        A reference whose value is null leaves its field out. A value-mapped
-        field's value must be a string with an entry in its map.
+        A reference whose column is absent or whose value is null leaves its
+        field out. A selected_reference reads the column its selection names
+        and refuses the record where that column holds nothing. A value-mapped
+        literal or reference must be a string with an entry in its map.
         """
         filled: dict[str, dict[str, Any]] = {"body": {}, "query": {}, "header": {}}
         for field in self.request_fields:
+            if field.kind == _SELECTED_REFERENCE:
+                # THE COLUMN IS THE SELECTION'S: the named field's selected
+                # value, through this field's own value map. The value read is
+                # sent as it is; a record without one is not sent.
+                column = self.selected_column(field)
+                value = record.get(column) if column is not None else None
+                if value is None:
+                    return filled, f"{field.part} field {field.name} has no value in column {column}"
+                filled[field.part][field.name] = value
+                continue
             value = record.get(field.value) if field.kind == "reference" else field.value
             if value is None:
                 continue
@@ -316,6 +360,96 @@ class HttpOperation:
                 value = translation[value]
             filled[field.part][field.name] = value
         return filled, None
+
+    def selected_column(self, field: _RequestField) -> Optional[str]:
+        """The input column a selected_reference field reads, or None.
+
+        The field its ``value`` names holds the selection; this field's value
+        map turns that selection into the column.
+        """
+        selector = next((one for one in self.request_fields if one.name == field.value), None)
+        if selector is None:
+            return None
+        return (self.value_maps.get((field.part, field.name)) or {}).get(selector.value)
+
+    # -- what a reader can set ------------------------------------------------
+
+    @staticmethod
+    def takes_value(field: _RequestField) -> bool:
+        """Whether a value can be set for the field: only a literal's.
+
+        A reference's column is governed, and a selected reference's is
+        another field's selection (load.http_request_selected_reference).
+        """
+        return field.kind == _LITERAL
+
+    def choices(self, field: _RequestField) -> list[str]:
+        """The values the field can be set to: a literal's value-map inputs, in order; else none."""
+        if not self.takes_value(field):
+            return []
+        return list(self.value_maps.get((field.part, field.name)) or ())
+
+    def shown_value(self, field: _RequestField) -> Any:
+        """What the field is, for display: a selected reference's column, else its value.
+
+        The relationship applied to every record, never one record's value.
+        """
+        if field.kind == _SELECTED_REFERENCE:
+            return self.selected_column(field)
+        return field.value
+
+    def check_request_value(self, part: str, name: str, value: Any) -> None:
+        """Refuse a value this operation's request setting cannot take.
+
+        The one validation, made both when a value is chosen and when the
+        effective operation is built: the setting exists, and the value is one
+        of its choices -- only a literal has any.
+
+        Raises:
+            ConfigError: Naming the setting and its choices.
+        """
+        field = next((
+            one for one in self.request_fields if (one.part, one.name) == (str(part), str(name))
+        ), None)
+        if field is None:
+            _logger.debug("http operation %s: refused -- %s field %s is not a request setting",
+                          self.adapter_key, part, name)
+            raise ConfigError(
+                f"HTTP operation '{self.adapter_key}' has no {part} setting '{name}'."
+            )
+        allowed = self.choices(field)
+        if str(value) not in allowed:
+            _logger.debug("http operation %s: refused -- a value for %s field %s is not a choice",
+                          self.adapter_key, part, name)
+            raise ConfigError(
+                f"HTTP operation '{self.adapter_key}': '{value}' is not a choice for {part} "
+                f"setting '{name}'. Choices: {', '.join(allowed) or 'none'}."
+            )
+
+    def with_request_values(self, values: Mapping[str, Any]) -> "HttpOperation":
+        """This operation with the values declared for its request settings applied.
+
+        Every declared value is checked as :meth:`check_request_value` checks
+        a choice, so a value held for a setting that takes none is refused,
+        never applied. This operation is not modified.
+
+        Args:
+            values: ``{part: {name: value}}``, as a Transform's ``http-request``
+                holds them.
+
+        Raises:
+            ConfigError: Naming the first value refused.
+        """
+        if not values:
+            return self
+        for part, named in values.items():
+            for name, value in (named or {}).items():
+                self.check_request_value(part, name, value)
+        return replace(self, request_fields=tuple(
+            replace(field, value=values[field.part][field.name])
+            if field.name in (values.get(field.part) or {}) else field
+            for field in self.request_fields
+        ))
 
     def _answers(self, sent: list[tuple[dict[str, Any], dict[str, dict[str, Any]]]],
                  connection: Any) -> list[list[Any]]:

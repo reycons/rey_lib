@@ -129,10 +129,33 @@ class TestHydrationRefuses:
         ))
 
 
+class TestTheDisplayValues:
+    """What a reader is shown is hydrated as governed; NULL stays None."""
+
+    def test_labels_pair_with_their_fields_by_position(self) -> None:
+        operation = HttpOperation.hydrate(_job(
+            request_body_fields=["id", "mic"], request_body_kinds=["reference", "reference"],
+            request_body_values=["code", "market"], request_body_labels=["Identifier", None],
+        ))
+
+        assert [(one.name, one.label) for one in operation.request_fields] == [
+            ("id", "Identifier"), ("mic", None),
+        ]
+
+    def test_a_row_without_labels_governs_none(self) -> None:
+        operation = HttpOperation.hydrate(_job())
+
+        assert [one.label for one in operation.request_fields] == [None]
+        assert operation.display_name is None
+
+    def test_the_display_name_is_carried(self) -> None:
+        assert HttpOperation.hydrate(_job(display_name="Lookup site")).display_name == "Lookup site"
+
+
 class TestThePreExecutionCheck:
-    def test_a_referenced_column_must_be_supplied(self) -> None:
-        with pytest.raises(ConfigError, match="reads column\\(s\\) code"):
-            HttpOperation.hydrate(_job()).check_references(["other"])
+    def test_a_referenced_column_not_supplied_is_not_refused(self) -> None:
+        # The same as a value not populated: the field is left out of each request.
+        HttpOperation.hydrate(_job()).check_references(["other"])
 
     def test_a_response_field_may_not_overwrite_an_input_column(self) -> None:
         with pytest.raises(ConfigError, match="found.*would overwrite"):
@@ -141,8 +164,8 @@ class TestThePreExecutionCheck:
     def test_execute_checks_before_sending(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[]))
 
-        with pytest.raises(ConfigError):
-            _run(_job(), [{"other": "x"}])
+        with pytest.raises(ConfigError, match="would overwrite"):
+            _run(_job(), [{"code": "x", "found": "y"}])
         assert seen == []
 
     def test_output_columns_send_nothing(self) -> None:
@@ -301,6 +324,111 @@ class TestValueMaps:
         assert refused["operation_status"] == "error"
         assert reason in refused["operation_message"] and "body field id" in refused["operation_message"]
         assert str(value) not in refused["operation_message"].replace("body field id", "")
+
+
+class TestSelectedReference:
+    """idValue's column is idType's selection, applied to every row (load.http_request_selected_reference)."""
+
+    @staticmethod
+    def _figi(chosen: str = "TICKER") -> dict[str, Any]:
+        # The governed shape: idType chosen, idValue selected through it, micCode a reference.
+        return _job(
+            batch_size=5,
+            request_body_fields=["idType", "idValue", "micCode"],
+            request_body_kinds=["literal", "selected_reference", "reference"],
+            request_body_values=[chosen, "idType", "market_code"],
+            value_map_parts=["body"] * 4,
+            value_map_fields=["idType", "idType", "idValue", "idValue"],
+            value_map_inputs=["ISIN", "TICKER", "ISIN", "TICKER"],
+            value_map_outputs=["ID_ISIN", "TICKER", "isin", "ticker"],
+        )
+
+    _ROWS = [
+        {"ticker": "AAPL", "isin": None, "market_code": "XNAS"},
+        {"ticker": "IBM", "isin": "US4592001014", "market_code": "XNYS"},
+        {"ticker": "MSFT", "isin": None, "market_code": None},
+    ]
+
+    def test_ticker_reads_each_rows_ticker_and_sends_mic_only_where_populated(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}] * 3))
+
+        _run(self._figi(), self._ROWS)
+
+        assert json.loads(seen[0].content) == [
+            {"idType": "TICKER", "idValue": "AAPL", "micCode": "XNAS"},
+            {"idType": "TICKER", "idValue": "IBM", "micCode": "XNYS"},
+            {"idType": "TICKER", "idValue": "MSFT"},
+        ]
+
+    def test_isin_reads_each_rows_isin_and_a_row_without_one_is_not_sent(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
+
+        rows = _run(self._figi("ISIN"), self._ROWS)
+
+        assert json.loads(seen[0].content) == [
+            {"idType": "ID_ISIN", "idValue": "US4592001014", "micCode": "XNYS"},
+        ]
+        refused = [row for row in rows if row["operation_status"] == "error"]
+        assert [row["ticker"] for row in refused] == ["AAPL", "MSFT"]
+        assert all("no value in column isin" in row["operation_message"] for row in refused)
+
+    def test_a_reference_column_the_source_lacks_is_left_out(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = _wire(monkeypatch, lambda request: httpx.Response(200, json=[{"data": []}]))
+
+        _run(self._figi(), [{"ticker": "AAPL"}])
+
+        assert json.loads(seen[0].content) == [{"idType": "TICKER", "idValue": "AAPL"}]
+
+    def test_the_selected_column_is_the_selection_through_the_fields_own_map(self) -> None:
+        operation = HttpOperation.hydrate(self._figi("ISIN"))
+        id_value = next(one for one in operation.request_fields if one.name == "idValue")
+
+        assert operation.selected_column(id_value) == "isin"
+
+    @pytest.mark.parametrize(("part", "name", "value", "reason"), [
+        ("body", "idValue", "isin", "is not a choice"),
+        ("body", "micCode", "market_code", "is not a choice"),
+        ("body", "idType", "CUSIP", "is not a choice"),
+        ("body", "missing", "TICKER", "has no body setting 'missing'"),
+    ])
+    def test_only_a_literals_choice_is_a_value(self, part: str, name: str, value: str, reason: str) -> None:
+        operation = HttpOperation.hydrate(self._figi())
+
+        operation.check_request_value("body", "idType", "ISIN")
+        with pytest.raises(ConfigError, match=reason):
+            operation.check_request_value(part, name, value)
+
+    def test_declared_values_make_a_new_operation_and_leave_this_one(self) -> None:
+        operation = HttpOperation.hydrate(self._figi())
+
+        effective = operation.with_request_values({"body": {"idType": "ISIN"}})
+
+        id_value = next(one for one in effective.request_fields if one.name == "idValue")
+        assert effective.selected_column(id_value) == "isin"
+        assert next(one for one in operation.request_fields if one.name == "idType").value == "TICKER"
+        assert operation.with_request_values({}) is operation
+
+    def test_a_selection_its_map_names_no_column_for_is_refused_on_hydration(self) -> None:
+        job = self._figi()
+        job["value_map_fields"] = ["idType", "idType", "idValue", "idValue"]
+        job["value_map_inputs"] = ["ISIN", "TICKER", "TICKER", "CUSIP"]
+        job["value_map_outputs"] = ["ID_ISIN", "TICKER", "ticker", "cusip"]
+
+        with pytest.raises(ConfigError, match="names no column for idType ISIN"):
+            HttpOperation.hydrate(job)
+
+    def test_a_selection_through_a_field_that_is_not_a_literal_is_refused(self) -> None:
+        job = self._figi()
+        job["request_body_values"] = ["TICKER", "micCode", "market_code"]
+
+        with pytest.raises(ConfigError, match="selects through micCode, which is not a literal"):
+            HttpOperation.hydrate(job)
 
 
 class TestOutcomes:

@@ -22,6 +22,7 @@ from rey_lib.files.data_file.base import DataFile
 from rey_lib.load import Source, Target, derived_load_shape
 from rey_lib.load import load_operation
 from rey_lib.load import shape as shape_module
+from rey_lib.load import target as target_module
 from rey_lib.load.target import TARGET_FIELDS, TARGET_PARAMETERS
 
 _TABLE = {"connection": "warehouse", "table": "landing.orders"}
@@ -164,6 +165,50 @@ class TestTheDeclarativeForm:
         declared = Target({**_TABLE, "recreate": True}).declaration()
 
         assert json.loads(json.dumps(declared)) == declared
+
+
+class TestItsDestinationColumns:
+    """The selected table's columns, through the table's own answer (load.mapping_output_from_target_columns)."""
+
+    @staticmethod
+    def _table(monkeypatch: pytest.MonkeyPatch, *, exists: bool) -> list[Any]:
+        """The connection and table answers, recorded; the table holds a, b."""
+        seen: list[Any] = []
+        handle = object()
+        monkeypatch.setattr(target_module, "shared_connection", lambda ctx, name: (
+            seen.append(("connection", name)) or SimpleNamespace(handle=lambda: handle)
+        ))
+        monkeypatch.setattr(target_module.DatabaseTable, "exists", classmethod(
+            lambda cls, conn, identity: seen.append(("exists", conn is handle, identity.name)) or exists
+        ))
+        monkeypatch.setattr(target_module.DatabaseTable, "column_names", classmethod(
+            lambda cls, conn, identity: ["a", "b"]
+        ))
+        return seen
+
+    def test_the_tables_columns_in_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen = self._table(monkeypatch, exists=True)
+
+        assert Target(_TABLE).destination_columns(SimpleNamespace()) == ["a", "b"]
+        assert seen == [("connection", "warehouse"), ("exists", True, "orders")]
+
+    def test_none_where_the_table_does_not_exist(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._table(monkeypatch, exists=False)
+
+        assert Target(_TABLE).destination_columns(SimpleNamespace()) is None
+
+    @pytest.mark.parametrize("declared", [
+        {"out-file": "out.csv"},
+        {"table": "landing.orders"},
+        {"connection": "warehouse"},
+    ])
+    def test_none_and_nothing_read_where_there_is_no_table(
+        self, monkeypatch: pytest.MonkeyPatch, declared: dict[str, Any],
+    ) -> None:
+        seen = self._table(monkeypatch, exists=True)
+
+        assert Target(declared).destination_columns(SimpleNamespace()) is None
+        assert seen == []
 
 
 class TestResolution:
