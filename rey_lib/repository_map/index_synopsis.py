@@ -66,7 +66,7 @@ class IndexFacet:
 
     Attributes:
         key: How this facet is asked for.
-        population: Which of the eight it groups.
+        population: Which of the nine it groups.
         group_by: Dimension names, resolved against **that population's**
             declared vocabulary. Never a global dimension dictionary --
             ``symbol.repository`` and ``repository.repository_key`` are
@@ -86,10 +86,10 @@ class IndexFacet:
     exemplars: int = 2
 
 
-#: Every facet, in the order a reader meets them. All eight populations appear,
+#: Every facet, in the order a reader meets them. All nine populations appear,
 #: independent of whether anything would ever cite them: a census describes the
 #: whole index, while evidence cites only what a conclusion needed. Conflating
-#: those two is what makes "all eight populations" a coherent requirement here
+#: those two is what makes "all nine populations" a coherent requirement here
 #: and an incoherent one for capability evidence.
 #: `top` is raised only where the population's groups are naturally few enough
 #: to show whole -- a repository list that omitted repositories would be a poor
@@ -118,6 +118,10 @@ FACETS: tuple[IndexFacet, ...] = (
     # owner's factual repository and package -- never by an authored area.
     IndexFacet("canonical_objects_by_owner_package", "canonical_object",
                ("owner_repository_key", "owner_package"), top=25),
+    # The latest LLM-inferred architecture generation (backlog 540): areas by
+    # their root. Empty until a generation is published, and never authored.
+    IndexFacet("inferred_architecture_by_root", "inferred_architecture",
+               ("root_area_key",), top=25),
     IndexFacet("code_relations", "code_relation", ("relation_kind",), top=25),
 )
 

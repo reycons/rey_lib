@@ -1,6 +1,6 @@
 """The synopsis maps the index; it never says what the map means.
 
-These run without a database. What needs a live index -- that the eight
+These run without a database. What needs a live index -- that the nine
 populations resolve, that exemplars round-trip -- is asserted against the real
 server; what is asserted here is the part a wrong refactor would break
 silently: which dimensions may be named, what a bounded answer admits to
@@ -32,6 +32,7 @@ _VOCABULARY = {
     "package": ["repository_key", "package_path", "languages", "layer",
                 "cycle_size"],
     "canonical_object": ["owner_repository_key", "owner_package"],
+    "inferred_architecture": ["area_key", "parent_area_key", "root_area_key"],
     "repository": ["repository_key", "branch", "working_tree_status"],
     "db_object": ["schema_name", "object_name", "object_type", "provider"],
     "db_member": ["schema_name", "object_name", "object_type", "member_kind"],
@@ -295,7 +296,7 @@ class TestTheRegistryIsProvenance:
             module.FACETS = original
 
     def test_every_population_is_covered(self) -> None:
-        """All eight, independent of whether anything would cite them.
+        """All nine, independent of whether anything would cite them.
 
         A census describes the whole index; evidence cites only what a
         conclusion needed. Conflating the two is what made an earlier draft's
