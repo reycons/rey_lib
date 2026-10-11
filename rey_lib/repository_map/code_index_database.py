@@ -218,7 +218,7 @@ class CodeIndexDatabaseWriter:
         )
         # The scan only. Nothing authored is staged or resolved here: a
         # declaration cannot refuse the publication of current facts.
-        self._call("p_publish", "true, false")
+        self._call("p_publish", "true")
         logger.info("Promoted the staged scan to the live index")
 
     def clear(self) -> None:

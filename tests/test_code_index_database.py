@@ -134,14 +134,14 @@ class TestTheWriteBoundary:
         CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
 
         calls = [s for s in adapter.statements if s.startswith("CALL")]
-        assert calls == ["CALL code.p_publish(true, false)"]
+        assert calls == ["CALL code.p_publish(true)"]
 
     def test_it_promotes_the_scan_and_never_the_architecture(self) -> None:
         """Facts only (backlog 639): nothing authored is staged beside the scan."""
         adapter = _Adapter()
         CodeIndexDatabaseWriter(adapter, None).replace_index(_indexed())
 
-        assert "CALL code.p_publish(true, false)" in adapter.statements
+        assert "CALL code.p_publish(true)" in adapter.statements
         staged = {table for _schema, table, _count, _columns in adapter.inserts}
         assert "concept_stage" not in staged
         assert "realization_stage" not in staged
@@ -243,4 +243,4 @@ class TestPublicationIsAllOrNothing:
             "symbol_stage",
             "edge_stage",
         ]
-        assert adapter.statements[-1] == "CALL code.p_publish(true, false)"
+        assert adapter.statements[-1] == "CALL code.p_publish(true)"
