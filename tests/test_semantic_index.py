@@ -175,6 +175,29 @@ class TestRepeatedOccurrences:
         assert evidence.coverage[0].occurrences == 2
 
 
+class TestLocalBindings:
+    """A local symbol is a binding only where the document defines it."""
+
+    def test_defined_and_undefined_locals_are_told_apart(self, tmp_path: Path) -> None:
+        """local 0 is defined in the document; local 1 is not."""
+        from rey_lib.repository_map import scip_pb2
+
+        (tmp_path / "m.py").write_text("x = 1\nf(x)\nlen(x)\n", encoding="utf-8")
+        document = scip_pb2.Document(relative_path="m.py", occurrences=[
+            scip_pb2.Occurrence(range=[0, 0, 1], symbol="local 0", symbol_roles=1),
+            scip_pb2.Occurrence(range=[1, 2, 3], symbol="local 0"),
+            scip_pb2.Occurrence(range=[2, 0, 3], symbol="local 1"),
+        ])
+
+        evidence = semantic_index._read_documents(
+            PRODUCERS[0], "0.6.6", tmp_path, {"m.py": "Python"},
+            {("m.py", 1, 3), ("m.py", 2, 3)}, [("m.py", document)],
+        )
+
+        kinds = {(r.end_line, r.occurrence_kind) for r in evidence.references}
+        assert kinds == {(1, "local"), (2, "local_no_definition")}
+
+
 class TestCoverageSaysWhatHappened:
     """failed and not_applicable never stand in for each other."""
 

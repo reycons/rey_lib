@@ -2355,8 +2355,10 @@ class ReferenceEvidence:
         end_line: Zero-based line the referenced name ends on.
         end_column: Exclusive UTF-8 byte offset it ends at.
         symbol: The producer's symbol name for what the name refers to.
-        occurrence_kind: ``local`` (a name local to its file),
-            ``indexed`` (defined in this repository's own index) or
+        occurrence_kind: ``local`` (a local symbol this document defines --
+            a real local binding), ``local_no_definition`` (a local symbol
+            with no definition in this document: the producer bound the name
+            to nothing), ``indexed`` (defined in this repository's own index) or
             ``external`` (defined elsewhere -- another repository, a library,
             the language itself).
         package: The package the producer names the symbol under.

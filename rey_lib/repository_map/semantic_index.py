@@ -69,6 +69,7 @@ COVERAGE_FAILED = "failed"
 COVERAGE_NOT_APPLICABLE = "not_applicable"
 
 OCCURRENCE_LOCAL = "local"
+OCCURRENCE_LOCAL_NO_DEFINITION = "local_no_definition"
 OCCURRENCE_INDEXED = "indexed"
 OCCURRENCE_EXTERNAL = "external"
 
@@ -452,7 +453,7 @@ def _read_documents(
     """
     from rey_lib.repository_map import scip_pb2
 
-    read: list[tuple[str, list[tuple[Any, int, int, int, int]]]] = []
+    read: list[tuple[str, list[tuple[Any, int, int, int, int]], set[str]]] = []
     encodings: set[str] = set()
     refused = 0
     defined: set[str] = set()
@@ -469,6 +470,15 @@ def _read_documents(
         encodings.add(encoding)
         lines = _source_lines(repo_root / path)
         converted: list[tuple[Any, int, int, int, int]] = []
+        # A local symbol is only a local binding where this document defines
+        # it. Without a definition here the producer named the occurrence and
+        # bound it to nothing (scip-python does this for builtins it special-
+        # cases, such as len and isinstance, and for genuinely undefined names).
+        defined_locals = {
+            occurrence.symbol for occurrence in document.occurrences
+            if occurrence.symbol.startswith("local ")
+            and occurrence.symbol_roles & _DEFINITION_ROLE
+        }
         for occurrence in document.occurrences:
             position = _canonical_range(occurrence, lines, encoding)
             if position is None:
@@ -477,7 +487,7 @@ def _read_documents(
             converted.append((occurrence, *position))
             if occurrence.symbol_roles & _DEFINITION_ROLE:
                 defined.add(occurrence.symbol)
-        read.append((path, converted))
+        read.append((path, converted, defined_locals))
 
     evidence = SemanticEvidence()
     occurrences = 0
@@ -486,7 +496,7 @@ def _read_documents(
     # Each fact is kept once: a definition per (file, name position, symbol), a
     # reference per (file, end position, symbol).
     seen: set[tuple[str, str, int, int, str]] = set()
-    for path, converted in read:
+    for path, converted, defined_locals in read:
         for occurrence, start_line, start_column, end_line, end_column in converted:
             occurrences += 1
             symbol = occurrence.symbol
@@ -517,7 +527,8 @@ def _read_documents(
                 end_column=end_column,
                 symbol=symbol,
                 occurrence_kind=(
-                    OCCURRENCE_LOCAL if symbol.startswith("local ")
+                    (OCCURRENCE_LOCAL if symbol in defined_locals else OCCURRENCE_LOCAL_NO_DEFINITION)
+                    if symbol.startswith("local ")
                     else OCCURRENCE_INDEXED if symbol in defined
                     else OCCURRENCE_EXTERNAL
                 ),
