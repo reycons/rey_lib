@@ -36,9 +36,7 @@ from rey_lib.logs.summary import create_results_summary, finalize_run_log
 from rey_lib.logs.llm_package import (
     create_llm_package,
     run_configured_log_analysis,
-    run_configured_record_analysis,
     run_uncontracted_record_analysis,
-    run_workbench_input_stream,
 )
 from rey_lib.logs.execution_records import (
     log_app_execution,
@@ -115,9 +113,7 @@ __all__ = [
     "finalize_run_log",
     "create_llm_package",
     "run_configured_log_analysis",
-    "run_configured_record_analysis",
     "run_uncontracted_record_analysis",
-    "run_workbench_input_stream",
     "log_step_start",
     "finalize_run_phases",
     "log_step_end",

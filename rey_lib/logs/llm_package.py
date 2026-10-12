@@ -13,9 +13,7 @@ __all__ = [
     "create_llm_package",
     "load_contract_references",
     "run_configured_log_analysis",
-    "run_configured_record_analysis",
     "run_uncontracted_record_analysis",
-    "run_workbench_input_stream",
 ]
 
 
@@ -87,23 +85,6 @@ def create_llm_package(
 
     run_log.append(package_record_type, record_group="results", **package)
     return package
-
-
-def _analysis_instructions(analysis: Any) -> Any:
-    """Return the parsed contract configured for one analysis.
-
-    The contract is configuration, so it is read through the same file and YAML
-    helpers as the rest of the configuration tree.
-    """
-    from rey_lib.config.config_utils import parse_yaml
-    from rey_lib.files import read_text_file
-
-    contract_path = Path(str(analysis.contract))
-    if not contract_path.is_file():
-        raise FileNotFoundError(
-            f"Configured log_analysis contract not found: {contract_path}"
-        )
-    return parse_yaml(read_text_file(contract_path))
 
 
 def _resolve_reference_path(ctx: Any, raw_path: str) -> Path:
@@ -299,99 +280,6 @@ def _execute_analysis_package(
     return loads_llm_json(content)
 
 
-def run_configured_record_analysis(
-    ctx: Any,
-    record: dict[str, Any],
-    analysis_name: str,
-    source_record_type: str = "",
-    max_input_characters: int = 0,
-) -> dict[str, Any]:
-    """Run a configured analysis over one supplied record and return the result.
-
-    The on-demand counterpart to ``run_configured_log_analysis``. That function
-    owns the finalization lifecycle: it reads a run log, selects the newest
-    record of a type, and writes the result back as a new record. This one is
-    given the exact record to analyse and returns the parsed result to its
-    caller — no log is read, and nothing is written to any log or file. It runs
-    the same configured analysis, contract, and execution profile, so a caller
-    gains no analysis behavior of its own.
-
-    The record is packaged as supplied. Callers pass records that the run-log
-    projection has already masked; a caller sourcing records from anywhere else
-    is responsible for masking them first.
-
-    Parameters
-    ----------
-    ctx : Any
-        A resolved installation context carrying ``log_analysis`` and
-        ``llm_profiles``.
-    record : dict[str, Any]
-        The already-parsed record to analyse, exactly as selected by the caller.
-    analysis_name : str
-        The configured ``log_analysis`` entry to run (for example
-        ``log_interpreter``).
-    source_record_type : str
-        Optional declared type of the supplied record, recorded in the package
-        for the contract's benefit. Defaults to the record's own
-        ``record_type`` when present.
-    max_input_characters : int
-        Optional serialized-package size limit. ``0`` disables the check.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"result": parsed_result_or_None, "action": ..., "skipped": [...]}``
-        where action is ``"analysed"``, ``"skipped"``, or ``"failed"``.
-
-    Raises
-    ------
-    AIConfigurationError
-        The analysis or its execution profile is not configured, or the
-        configured contract cannot be read.
-    ValueError
-        The supplied record is not a JSON object, or exceeds the size limit.
-    AIProviderError, ArtifactEnvelopeError
-        Raised by the shared execution path; the caller owns presentation.
-    """
-    from rey_lib.ai.errors import AIConfigurationError
-
-    result: dict[str, Any] = {"result": None, "action": None, "skipped": []}
-
-    if not isinstance(record, dict):
-        from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
-        raise DataStructureError("Record analysis requires a JSON object record")
-
-    analyses = getattr(ctx, "log_analysis", None)
-    analysis = analyses.get(analysis_name) if analyses is not None else None
-    if analysis is None:
-        raise AIConfigurationError(f"log_analysis configuration not found: {analysis_name}")
-    if not getattr(analysis, "enabled", False):
-        result["skipped"].append("disabled")
-        result["action"] = "skipped"
-        return result
-
-    package = _build_analysis_package(
-        ctx,
-        analysis_name,
-        source_record_type or str(record.get("record_type") or ""),
-        _analysis_instructions(analysis),
-        record,
-    )
-    result["result"] = _execute_analysis_package(
-        ctx,
-        # This entry point takes a ctx by contract, so the runtime's AI is read
-        # once here at the boundary rather than looked up further down.
-        getattr(ctx, "shared_ai", None),
-        str(analysis.llm_execution_profile),
-        str(getattr(analysis, "artifact_type", "")),
-        package,
-        max_input_characters,
-        payload_id=str(record["payload_id"]) if record.get("payload_id") else None,
-    )
-    result["action"] = "analysed"
-    return result
-
-
 def run_uncontracted_record_analysis(
     ctx: Any,
     record: dict[str, Any],
@@ -402,7 +290,7 @@ def run_uncontracted_record_analysis(
 ) -> dict[str, Any]:
     """Run one already-complete package through the LLM with NO contract added.
 
-    The No Contract counterpart to ``run_configured_record_analysis``. No contract
+    No contract
     is resolved or inserted and no package is assembled: the supplied ``record`` is
     itself the complete package, serialized and sent raw through ``direct_ask``
     (no envelope instruction appended, raw response returned) using the
@@ -467,135 +355,6 @@ def run_uncontracted_record_analysis(
     )
     result["action"] = "analysed"
     return result
-
-
-def run_workbench_input_stream(
-    ctx: Any,
-    profile_name: str,
-    instruction_mode: str,
-    instruction_value: str,
-    input_text: str,
-    payload_id: str | None = None,
-    on_chunk: Callable[[str], None] | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> Any:
-    """Run one AI Workbench request through the configured LLM execution owner.
-
-    The Workbench supplies only the selected execution profile, the instruction
-    mode, an instruction value, and the operator's input text. Provider and
-    credential resolution stay internal: the profile is resolved from
-    ``ctx.llm_profiles``, its ``api_key`` read from the environment as this
-    request is built, and
-    execution goes through ``runner.run``, so recording and evaluation logging are
-    unchanged. When ``on_chunk`` is supplied and the provider supports streaming,
-    each response delta is delivered to it as it arrives.
-
-    Parameters
-    ----------
-    ctx : Any
-        A resolved context carrying ``llm_profiles`` (and ``log_analysis`` for
-        the contract mode).
-    profile_name : str
-        Name of the selected ``llm_profiles`` entry.
-    instruction_mode : str
-        ``'contract'``, ``'none'``, or ``'text_prompt'``.
-    instruction_value : str
-        For ``'contract'`` the configured-contract analysis name; for
-        ``'text_prompt'`` the free-form instructions; ignored for ``'none'``.
-    input_text : str
-        The operator's left-pane input, sent unchanged.
-    payload_id : Optional[str]
-        Existing evaluation-payload identity to preserve for a rerun.
-    on_chunk : Optional[Callable[[str], None]]
-        Optional incremental-output callback forwarded to the provider.
-    cancelled : Optional[Callable[[], bool]]
-        Optional cooperative cancellation check forwarded to the LLM runner.
-
-    Returns
-    -------
-    RunResponse
-        The runner response (its ``raw_text`` / ``parsed_response`` hold the
-        complete result for providers that do not stream).
-    """
-    import json
-
-    from rey_lib.analysis.api import RunRequest
-    from rey_lib.analysis.execution import run as _run
-    from rey_lib.artifacts import build_envelope_instruction
-
-    common: dict[str, Any] = {
-        "pipeline_id": "ai_workbench",
-        "stage_id": "run",
-        "profile_id": str(profile_name or ""),
-        "payload_id": payload_id or None,
-    }
-
-    if instruction_mode == "contract":
-        analyses = getattr(ctx, "log_analysis", None)
-        entry = (
-            analyses.get(instruction_value)
-            if analyses is not None and hasattr(analyses, "get") else None
-        )
-        if entry is None or not str(getattr(entry, "contract", "") or ""):
-            raise AIConfigurationError(
-                f"No contract configured for '{instruction_value}'."
-            )
-        # Match configured AI Analysis exactly: read the configured YAML through
-        # _analysis_instructions(), place that parsed contract in the established
-        # analysis package, include its configured references, and send the whole
-        # package through the inline/direct execution behavior. These analysis
-        # contracts intentionally use Rey's `contract: {name, ...}` document
-        # convention; they are not low-level rey_lib.analysis Contract files
-        # and must never be passed to contract.load().
-        try:
-            source: Any = json.loads(input_text)
-        except (TypeError, json.JSONDecodeError):
-            source = input_text
-        source_record_type = (
-            str(source.get("record_type") or "") if isinstance(source, dict) else ""
-        )
-        package = _build_analysis_package(
-            ctx,
-            instruction_value,
-            source_record_type,
-            _analysis_instructions(entry),
-            source,
-        )
-        prompt = json.dumps(package) + build_envelope_instruction(
-            str(getattr(entry, "artifact_type", "") or "")
-        )
-        request = RunRequest(
-            contract_text=prompt,
-            input_data=prompt,
-            raw_output=True,
-            **common,
-        )
-    elif instruction_mode == "text_prompt":
-        # The free-form instructions become the contract body; the input is the
-        # user turn and is sent unchanged.
-        request = RunRequest(
-            contract_text=str(instruction_value or ""),
-            input_data=input_text,
-            raw_output=True,
-            **common,
-        )
-    else:
-        # None: send the input exactly as entered, with no separate instructions.
-        request = RunRequest(
-            contract_text=input_text,
-            input_data=input_text,
-            raw_output=True,
-            **common,
-        )
-
-    from rey_lib.ai.errors import AIUnavailableError  # noqa: PLC0415
-
-    ai = getattr(ctx, "shared_ai", None)
-    if ai is None:
-        raise AIUnavailableError(
-            "This runtime has no AI configured, so the workbench cannot run."
-        )
-    return _run(request, ai, on_text=on_chunk, cancelled=cancelled)
 
 
 def run_configured_log_analysis(
