@@ -843,7 +843,7 @@ def test_workbench_configured_contract_uses_ai_analysis_package_path(
 
     request = capture["request"]
     package, _ = json.JSONDecoder().raw_decode(request.contract_text)
-    assert request.contract_path == Path("<ai_workbench>")
+    assert request.contract is None
     assert request.input_data == request.contract_text
     assert request.raw_output is True
     assert request.payload_id == "existing-payload-id"

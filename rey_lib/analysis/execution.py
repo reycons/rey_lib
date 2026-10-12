@@ -39,8 +39,9 @@ from rey_lib.ai import (
     AIRequest,
     AIUnavailableError,
 )
+from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.analysis.api import RunRequest, RunResponse
-from rey_lib.analysis.contract import Contract, load as _load_contract
+from rey_lib.analysis.contract import Contract
 from rey_lib.analysis.records import (
     STATUS_FAILED,
     STATUS_PENDING_APPROVAL,
@@ -103,11 +104,17 @@ def run(
             "This runtime has no AI configured, so an analysis stage cannot run."
         )
 
-    contract = (
-        _inline_contract(request.contract_text)
-        if request.contract_text
-        else _load_contract(request.contract_path)
-    )
+    # The stage's contract: the parsed stored contract, or the AI workbench's
+    # inline text. There is no file to fall back to (backlog 903).
+    if request.contract is not None:
+        contract = request.contract
+    elif request.contract_text:
+        contract = _inline_contract(request.contract_text)
+    else:
+        raise AIConfigurationError(
+            f"Analysis stage '{request.stage_id}' carries no contract: pass the "
+            "parsed contract (rey_lib.analysis.analysis_contract) or inline text."
+        )
 
     raw_text = _input_text(request)
     input_text = redactor(raw_text) if redactor is not None else raw_text
@@ -315,7 +322,7 @@ def _instruction(body: str) -> Any:
 
 
 def _inline_contract(text: str) -> Contract:
-    """A contract supplied as text rather than named as a file."""
+    """An ad-hoc instruction supplied as text rather than a stored contract."""
     return Contract(
         name="inline", version="0", effective_date="",
         body=text, path=None, hash=_hashed(text),

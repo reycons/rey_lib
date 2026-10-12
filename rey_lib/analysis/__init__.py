@@ -28,10 +28,11 @@ from rey_lib.analysis.analyzer import (
     AnalysisContractSpec,
     AnalysisResult,
     Analyzer,
-    load_analysis_contract,
+    analysis_contract,
+    parse_analysis_contract,
 )
 from rey_lib.analysis.api import RunRequest, RunResponse
-from rey_lib.analysis.contract import Contract, load
+from rey_lib.analysis.contract import Contract, parse_contract
 from rey_lib.analysis.datasource import (
     CSVDataSource,
     DataSource,
@@ -78,12 +79,13 @@ __all__ = [
     "RunResponse",
     "SourceData",
     "TextDataSource",
+    "analysis_contract",
     "approve",
     "build_package",
     "execute",
-    "load",
-    "load_analysis_contract",
     "load_latest_record",
+    "parse_analysis_contract",
+    "parse_contract",
     "prepare",
     "reject",
     "store_record",

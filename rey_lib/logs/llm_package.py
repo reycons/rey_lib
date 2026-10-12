@@ -565,7 +565,6 @@ def run_workbench_input_stream(
             str(getattr(entry, "artifact_type", "") or "")
         )
         request = RunRequest(
-            contract_path=Path("<ai_workbench>"),
             contract_text=prompt,
             input_data=prompt,
             raw_output=True,
@@ -575,7 +574,6 @@ def run_workbench_input_stream(
         # The free-form instructions become the contract body; the input is the
         # user turn and is sent unchanged.
         request = RunRequest(
-            contract_path=Path("<ai_workbench>"),
             contract_text=str(instruction_value or ""),
             input_data=input_text,
             raw_output=True,
@@ -584,7 +582,6 @@ def run_workbench_input_stream(
     else:
         # None: send the input exactly as entered, with no separate instructions.
         request = RunRequest(
-            contract_path=Path("<ai_workbench>"),
             contract_text=input_text,
             input_data=input_text,
             raw_output=True,

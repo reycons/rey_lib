@@ -1365,6 +1365,20 @@ class Control:
             (self._call_rows("get_ai_instruction", {}, required=required) or [])
         ]
 
+    def analysis_contract(self, name: str) -> Optional[dict[str, Any]]:
+        """This installation's stored analysis contract ``name``, or None.
+
+        Read on demand (backlog 903): ``name``, ``format`` and the complete
+        ``contract_text``. The installation is not passed -- the binding reads
+        it off :attr:`installation_id`. Always required: a caller asks only
+        when it names a contract, so a missing binding is a configuration
+        fault, refused by the procedure map. Parsing is rey_lib.analysis'.
+        """
+        rows = self._call_rows("get_analysis_contract", {
+            "name": str(name),
+        }, required=True) or []
+        return dict(rows[0]) if rows else None
+
     def data_profile_for_key(self, data_profile_key: str,
                              required: bool = True) -> Optional[int]:
         """The profile this group already has, or None.

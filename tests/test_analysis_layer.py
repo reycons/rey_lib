@@ -24,7 +24,7 @@ from rey_lib.analysis.analyzer import (
     AnalysisContractSpec,
     AnalysisResult,
     Analyzer,
-    load_analysis_contract,
+    parse_analysis_contract,
 )
 from rey_lib.analysis.datasource import CSVDataSource, SourceData, TextDataSource
 from rey_lib.analysis.preparation import prepare
@@ -37,13 +37,11 @@ from rey_lib.ai.errors import AIConfigurationError
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _write_analysis_contract(
-    tmp_path:   Path,
+def _analysis_contract_text(
     extra_yaml: str = "",
     body:       str = "Analyse the data.",
-) -> Path:
-    """Write a minimal analysis contract with optional extra frontmatter."""
-    contract = tmp_path / "analysis.md"
+) -> str:
+    """A minimal Markdown analysis contract with optional extra frontmatter."""
     parts = [
         "---\n",
         "name: test-analysis\n",
@@ -53,8 +51,12 @@ def _write_analysis_contract(
     if extra_yaml:
         parts.append(extra_yaml if extra_yaml.endswith("\n") else extra_yaml + "\n")
     parts.append(f"---\n\n{body}\n")
-    contract.write_text("".join(parts), encoding="utf-8")
-    return contract
+    return "".join(parts)
+
+
+def _contract(extra_yaml: str = "", body: str = "Analyse the data.") -> AnalysisContract:
+    """The minimal contract, parsed as a stored Markdown contract is."""
+    return parse_analysis_contract(_analysis_contract_text(extra_yaml, body), "markdown")
 
 
 def _make_source_data(
@@ -79,16 +81,16 @@ def _make_source_data(
 
 
 # ---------------------------------------------------------------------------
-# load_analysis_contract — contract spec parsing
+# parse_analysis_contract — contract spec parsing
 # ---------------------------------------------------------------------------
 
 class TestLoadAnalysisContract:
-    """Tests for load_analysis_contract()."""
+    """Tests for parse_analysis_contract()."""
 
     def test_minimal_contract_uses_defaults(self, tmp_path: Path) -> None:
         """A contract with no domain fields gets permissive defaults."""
-        path     = _write_analysis_contract(tmp_path)
-        contract = load_analysis_contract(path)
+        text     = _analysis_contract_text()
+        contract = parse_analysis_contract(text, "markdown")
 
         assert contract.name    == "test-analysis"
         assert contract.version == "1.0"
@@ -103,21 +105,21 @@ class TestLoadAnalysisContract:
 
     def test_allowed_columns_parsed(self, tmp_path: Path) -> None:
         """allowed_columns list is parsed from YAML."""
-        path = _write_analysis_contract(tmp_path, extra_yaml=(
+        text = _analysis_contract_text(extra_yaml=(
             "allowed_columns:\n  - revenue\n  - region"
         ))
-        contract = load_analysis_contract(path)
+        contract = parse_analysis_contract(text, "markdown")
         assert contract.spec.allowed_columns == ["revenue", "region"]
 
     def test_required_filters_parsed(self, tmp_path: Path) -> None:
         """required_filters list is parsed from YAML."""
-        path = _write_analysis_contract(tmp_path, extra_yaml=(
+        text = _analysis_contract_text(extra_yaml=(
             "required_filters:\n"
             "  - column: status\n"
             "    operator: \"==\"\n"
             "    value: active\n"
         ))
-        contract = load_analysis_contract(path)
+        contract = parse_analysis_contract(text, "markdown")
         assert len(contract.spec.required_filters) == 1
         assert contract.spec.required_filters[0]["column"]   == "status"
         assert contract.spec.required_filters[0]["operator"] == "=="
@@ -125,61 +127,64 @@ class TestLoadAnalysisContract:
 
     def test_sampling_parsed(self, tmp_path: Path) -> None:
         """sampling.method and sampling.seed are parsed."""
-        path = _write_analysis_contract(tmp_path, extra_yaml=(
+        text = _analysis_contract_text(extra_yaml=(
             "sampling:\n  method: random\n  seed: 42\n"
         ))
-        contract = load_analysis_contract(path)
+        contract = parse_analysis_contract(text, "markdown")
         assert contract.spec.sampling_method == "random"
         assert contract.spec.sampling_seed   == 42
 
     def test_redaction_parsed(self, tmp_path: Path) -> None:
         """redaction rules are parsed from YAML."""
-        path = _write_analysis_contract(tmp_path, extra_yaml=(
+        text = _analysis_contract_text(extra_yaml=(
             "redaction:\n  - column: ssn\n    mask: \"[SSN]\"\n"
         ))
-        contract = load_analysis_contract(path)
+        contract = parse_analysis_contract(text, "markdown")
         assert contract.spec.redaction == [{"column": "ssn", "mask": "[SSN]"}]
 
     def test_output_schema_parsed(self, tmp_path: Path) -> None:
         """Inline output_schema dict is parsed from YAML."""
-        path = _write_analysis_contract(tmp_path, extra_yaml=(
+        text = _analysis_contract_text(extra_yaml=(
             "output_schema:\n  type: object\n  properties:\n    total: {type: number}\n"
         ))
-        contract = load_analysis_contract(path)
+        contract = parse_analysis_contract(text, "markdown")
         assert contract.spec.output_schema is not None
         assert contract.spec.output_schema["type"] == "object"
 
     def test_nested_output_config_parsed(self, tmp_path: Path) -> None:
         """Canonical output.format settings drive raw artifact execution."""
-        path = _write_analysis_contract(tmp_path, extra_yaml=(
+        text = _analysis_contract_text(extra_yaml=(
             "output:\n"
             "  format: raw\n"
             "  artifact_type: rey_loader_yaml\n"
         ))
-        contract = load_analysis_contract(path)
+        contract = parse_analysis_contract(text, "markdown")
         assert contract.spec.output_format == "raw"
         assert contract.spec.artifact_type == "rey_loader_yaml"
 
     def test_invalid_source_type_raises(self, tmp_path: Path) -> None:
         """An unrecognised source_type raises AIConfigurationError."""
 
-        path = _write_analysis_contract(tmp_path, extra_yaml="source_type: ftp\n")
+        text = _analysis_contract_text(extra_yaml="source_type: ftp\n")
         with pytest.raises(AIConfigurationError, match="source_type"):
-            load_analysis_contract(path)
+            parse_analysis_contract(text, "markdown")
 
     def test_invalid_sampling_method_raises(self, tmp_path: Path) -> None:
         """An unrecognised sampling.method raises AIConfigurationError."""
 
-        path = _write_analysis_contract(tmp_path, extra_yaml="sampling:\n  method: zigzag\n")
+        text = _analysis_contract_text(extra_yaml="sampling:\n  method: zigzag\n")
         with pytest.raises(AIConfigurationError, match="sampling.method"):
-            load_analysis_contract(path)
+            parse_analysis_contract(text, "markdown")
 
-    def test_contract_hash_and_path_set(self, tmp_path: Path) -> None:
-        """hash and path are accessible as properties on AnalysisContract."""
-        path     = _write_analysis_contract(tmp_path)
-        contract = load_analysis_contract(path)
-        assert contract.hash != ""
-        assert contract.path == path.resolve()
+    def test_contract_hash_text_and_no_path(self, tmp_path: Path) -> None:
+        """A stored contract keeps its text and hash, and names no file."""
+        from rey_lib.encryption import sha256_text
+
+        text     = _analysis_contract_text()
+        contract = parse_analysis_contract(text, "markdown")
+        assert contract.hash == sha256_text(text)
+        assert contract.base.text == text
+        assert contract.path is None
 
 
 # ---------------------------------------------------------------------------
@@ -500,15 +505,13 @@ class TestAnalyzerEndToEnd:
 
     def test_analyze_returns_analysis_result(self, tmp_path: Path) -> None:
         """analyze() returns an AnalysisResult with populated fields."""
-        contract_path = _write_analysis_contract(
-            tmp_path,
-            extra_yaml=(
+        contract = _contract(extra_yaml=(
                 "output_schema:\n  type: object\n  properties:\n"
                 "    result: {type: string}\n"
             ),
         )
         analyzer = Analyzer(
-            contract_path=contract_path,
+            contract=contract,
             ai=_runtime('{"result": "ok"}', value={"result": "ok"}),
             profile_id="mock",
         )
@@ -521,9 +524,7 @@ class TestAnalyzerEndToEnd:
 
     def test_nested_raw_output_retains_generated_artifact_text(self, tmp_path: Path) -> None:
         """output.format raw carries extracted model content in the result."""
-        contract_path = _write_analysis_contract(
-            tmp_path,
-            extra_yaml=(
+        contract = _contract(extra_yaml=(
                 "output:\n"
                 "  format: raw\n"
                 "  artifact_type: rey_loader_yaml\n"
@@ -531,7 +532,7 @@ class TestAnalyzerEndToEnd:
         )
         generated = "data_sources:\n  - name: example\n    enabled: true"
         analyzer = Analyzer(
-            contract_path=contract_path,
+            contract=contract,
             ai=_runtime(
                 '{"artifact_type":"rey_loader_yaml","content":'
                 '"data_sources:\\n  - name: example\\n    enabled: true\\n","notes":[]}'
@@ -546,9 +547,9 @@ class TestAnalyzerEndToEnd:
 
     def test_prepared_metadata_in_result(self, tmp_path: Path) -> None:
         """AnalysisResult.prepared carries the DataProfile from preparation."""
-        contract_path = _write_analysis_contract(tmp_path)
+        contract = _contract()
         analyzer = Analyzer(
-            contract_path=contract_path, ai=_runtime("answer"), profile_id="mock",
+            contract=contract, ai=_runtime("answer"), profile_id="mock",
         )
 
         result = analyzer.analyze(TextDataSource("some text"), analysis_id="run-002")
@@ -560,7 +561,7 @@ class TestAnalyzerEndToEnd:
         """No AI configured is a refusal, not a silent no-op."""
         from rey_lib.ai.errors import AIUnavailableError
 
-        analyzer = Analyzer(contract_path=_write_analysis_contract(tmp_path))
+        analyzer = Analyzer(contract=_contract())
 
         with pytest.raises(AIUnavailableError):
             analyzer.analyze(TextDataSource("text"), analysis_id="run-003")

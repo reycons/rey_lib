@@ -10,10 +10,13 @@ requires bumping the version. The content hash provides a tamper-evident
 check — if a file is edited without bumping the version the hash will differ
 from the stored value and the discrepancy can be detected at audit time.
 
+Contracts are stored in control.analysis_contract (backlog 903) as their
+complete raw text plus its format; nothing reads a contract file at runtime.
+
 Public API
 ----------
-load(path)
-    Parse a contract file and return a Contract instance.
+parse_contract(text, fmt)
+    Parse a contract's raw text and return a Contract instance.
 """
 
 from __future__ import annotations
@@ -25,12 +28,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rey_lib.config.config_utils import parse_yaml
-from rey_lib.files.json import read_json_file
 from rey_lib.encryption import sha256_text
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.logs import AppLogger
 
-__all__ = ["Contract", "load"]
+__all__ = ["CONTRACT_FORMATS", "Contract", "parse_contract"]
 
 # Matches a YAML frontmatter block at the top of the file.
 _FRONTMATTER_RE = re.compile(
@@ -39,7 +40,11 @@ _FRONTMATTER_RE = re.compile(
 )
 
 
-_logger = AppLogger(__name__)
+#: The serializations a contract is stored in: YAML (the whole document is the
+#: contract) or Markdown (a frontmatter block, then the body). Not derivable
+#: from the text alone -- both may begin with ``---`` -- so it is stored with it.
+CONTRACT_FORMATS: tuple[str, ...] = ("yaml", "markdown")
+
 
 
 @dataclass(frozen=True)
@@ -59,11 +64,14 @@ class Contract:
     hash : str
         SHA-256 hex digest of the full file content (frontmatter + body).
         Used as a tamper-evident fingerprint in stored results.
-    path : Path
-        Absolute path the contract was loaded from.
+    path : Optional[Path]
+        Where the contract came from, when it came from a file; None for a
+        stored or inline contract.
     raw_frontmatter : dict[str, Any]
         Full parsed frontmatter as a Python dict. Consumers (e.g. analysis.py)
         read domain-specific fields from here without this module knowing them.
+    text : str
+        The complete raw serialization the contract was parsed from.
     """
 
     name:            str
@@ -71,22 +79,28 @@ class Contract:
     effective_date:  date
     body:            str
     hash:            str
-    path:            Path
+    path:            Optional[Path]
     raw_frontmatter: dict[str, Any] = field(default_factory=dict, compare=False)
+    text:            str            = field(default="", compare=False)
 
 
-def load(path: Path) -> Contract:
-    """Parse a contract markdown file and return a Contract instance.
+def parse_contract(text: str, fmt: str, *, path: Optional[Path] = None) -> Contract:
+    """Parse a contract's raw text and return a Contract instance.
 
-    The file must begin with a YAML frontmatter block containing at least
-    ``name``, ``version``, and ``effective_date``. Everything after the
-    closing ``---`` is the instruction body.  Nested YAML structures (lists,
-    dicts) are fully parsed and available via ``Contract.raw_frontmatter``.
+    The one contract parser (backlog 903). ``yaml``: the whole document is the
+    contract -- it is parsed as one mapping and the complete text is the
+    instruction body. ``markdown``: a ``---`` delimited frontmatter block, then
+    the body. Either way it must declare ``name``, ``version`` and
+    ``effective_date``, and the hash is taken over the full text.
 
     Parameters
     ----------
-    path : Path
-        Absolute path to the contract markdown file.
+    text : str
+        The complete raw contract text.
+    fmt : str
+        Its serialization, one of :data:`CONTRACT_FORMATS`.
+    path : Optional[Path]
+        Where the text came from, when it came from a file; recorded only.
 
     Returns
     -------
@@ -96,54 +110,54 @@ def load(path: Path) -> Contract:
     Raises
     ------
     ConfigError
-        If the file is missing, has no frontmatter, or is missing required
-        frontmatter fields.
+        If the format is unknown, there is no frontmatter, or a required field
+        is missing or invalid.
     """
-    path = Path(path).resolve()
-    if not path.exists():
-        raise ConfigError(f"Contract file not found: {path}")
+    label = path.name if path is not None else f"{fmt} contract text"
+    if fmt not in CONTRACT_FORMATS:
+        raise ConfigError(
+            f"Contract '{label}': format '{fmt}' is not one of {list(CONTRACT_FORMATS)}."
+        )
 
-    raw          = path.read_text(encoding="utf-8")
-    content_hash = sha256_text(raw)
+    content_hash = sha256_text(text)
 
-    suffix = path.suffix.lower()
-    if suffix in (".yaml", ".yml"):
+    if fmt == "yaml":
         # Native YAML contract: the whole document is the contract. Parse it as
         # one mapping and keep the complete raw text as the instruction body.
         try:
-            parsed = parse_yaml(raw)
+            parsed = parse_yaml(text)
         except ConfigError as exc:
             raise ConfigError(
-                f"Contract '{path.name}' has invalid YAML: {exc}"
+                f"Contract '{label}' has invalid YAML: {exc}"
             ) from exc
         if not isinstance(parsed, dict):
             raise ConfigError(
-                f"Contract '{path.name}' YAML root must be a mapping."
+                f"Contract '{label}' YAML root must be a mapping."
             )
         fields: dict[str, Any] = parsed
-        body                   = raw
+        body                   = text
         field_source           = "document root"
     else:
-        # Markdown contract: existing frontmatter-plus-body format, unchanged.
-        m = _FRONTMATTER_RE.match(raw)
+        # Markdown contract: frontmatter-plus-body format.
+        m = _FRONTMATTER_RE.match(text)
         if not m:
             raise ConfigError(
-                f"Contract '{path.name}' has no frontmatter block. "
+                f"Contract '{label}' has no frontmatter block. "
                 "Add a '---' delimited block with name, version, and effective_date."
             )
         try:
             fields = parse_yaml(m.group(1)) or {}
         except ConfigError as exc:
             raise ConfigError(
-                f"Contract '{path.name}' has invalid YAML frontmatter: {exc}"
+                f"Contract '{label}' has invalid YAML frontmatter: {exc}"
             ) from exc
-        body         = raw[m.end():].strip()
+        body         = text[m.end():].strip()
         field_source = "frontmatter"
 
     for required in ("name", "version", "effective_date"):
         if required not in fields:
             raise ConfigError(
-                f"Contract '{path.name}' {field_source} is missing required field '{required}'."
+                f"Contract '{label}' {field_source} is missing required field '{required}'."
             )
 
     raw_date = fields["effective_date"]
@@ -154,7 +168,7 @@ def load(path: Path) -> Contract:
         )
     except ValueError as exc:
         raise ConfigError(
-            f"Contract '{path.name}': effective_date '{raw_date}' "
+            f"Contract '{label}': effective_date '{raw_date}' "
             "is not a valid ISO date (YYYY-MM-DD)."
         ) from exc
 
@@ -166,23 +180,5 @@ def load(path: Path) -> Contract:
         hash            = content_hash,
         path            = path,
         raw_frontmatter = fields,
+        text            = text,
     )
-
-
-def load_sidecar_schema(contract_path: Path) -> Optional[dict[str, Any]]:
-    """The JSON Schema beside a contract, when one exists.
-
-    Named ``<contract_stem>.schema.json``. A contract and the shape it must
-    produce are one decision, so the schema is read here rather than by whatever
-    happens to execute the contract.
-
-    A malformed sidecar names itself: ``JsonReadError`` carries the path, so an
-    operator is not left with a line and column belonging to no file. Nothing is
-    asserted about the shape -- whether a schema must be an object is a schema
-    decision, not a reading one.
-    """
-    schema_path = contract_path.with_name(contract_path.stem + ".schema.json")
-    if schema_path.exists():
-        _logger.debug("contract: loaded sidecar schema from %s", schema_path)
-        return read_json_file(schema_path)
-    return None

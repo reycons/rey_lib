@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from rey_lib.analysis.contract import Contract
 from rey_lib.analysis.records import ExecutionRecord
 
 __all__ = ["RunRequest", "RunResponse"]
@@ -49,8 +50,6 @@ class RunRequest:
         Logical pipeline identifier.
     stage_id : str
         Stage identifier within the pipeline.
-    contract_path : Path
-        Path to the versioned contract markdown file.
     input_data : str | list[dict]
         Input data.  A string is sent as-is; a list of dicts is formatted
         as a markdown table.
@@ -84,7 +83,6 @@ class RunRequest:
 
     pipeline_id:       str
     stage_id:          str
-    contract_path:     Path
     input_data:        Union[str, list[dict[str, Any]]]
 
     profile_id:        str            = ""
@@ -136,9 +134,14 @@ class RunRequest:
     # not recorded twice. Where that record goes is rey_lib.logs' decision.
     payload_id:            Optional[str]  = None
 
-    # In-memory contract text for the deprecated direct_ask() compatibility
-    # adapter. When set, the runner uses this as the contract instead of loading
-    # contract_path — no file is read and nothing is persisted or registered.
+    # The parsed contract this stage runs (backlog 903): read from
+    # control.analysis_contract through rey_lib.analysis.analysis_contract.
+    # Nothing here names a file.
+    contract:              Optional[Contract] = None
+
+    # In-memory contract text for the AI workbench: an ad-hoc instruction, not
+    # a stored contract -- used only when no contract is given, and nothing is
+    # persisted or registered.
     contract_text:         Optional[str]  = None
 
 

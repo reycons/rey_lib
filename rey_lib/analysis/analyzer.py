@@ -55,7 +55,8 @@ AnalysisContractSpec
 AnalysisContract
 AnalysisResult
 Analyzer
-load_analysis_contract(path)
+parse_analysis_contract(text, fmt)
+analysis_contract(control, name)
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ from typing import Any, Optional
 
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.analysis.api import RunRequest, RunResponse
-from rey_lib.analysis.contract import Contract, load as _load_contract
+from rey_lib.analysis.contract import Contract, parse_contract
 from rey_lib.analysis.datasource import DataSource
 from rey_lib.analysis.execution import run
 from rey_lib.analysis.preparation import PreparedInput, prepare
@@ -79,7 +80,8 @@ __all__ = [
     "AnalysisContract",
     "AnalysisResult",
     "Analyzer",
-    "load_analysis_contract",
+    "analysis_contract",
+    "parse_analysis_contract",
 ]
 
 _logger = AppLogger(__name__)
@@ -162,13 +164,13 @@ class AnalysisContract:
         return self.base.version
 
     @property
-    def path(self) -> Path:
-        """Absolute path the contract was loaded from."""
+    def path(self) -> Optional[Path]:
+        """Where the contract came from when it came from a file; None when stored."""
         return self.base.path
 
     @property
     def hash(self) -> str:
-        """SHA-256 of the full contract file content."""
+        """SHA-256 of the full contract text."""
         return self.base.hash
 
 
@@ -206,8 +208,64 @@ class AnalysisResult:
 # Loader
 # ---------------------------------------------------------------------------
 
-def load_analysis_contract(path: Path) -> AnalysisContract:
-    """Parse and validate an analysis contract file.
+def analysis_contract(control: Any, name: str) -> AnalysisContract:
+    """The installation's analysis contract named ``name``, read when asked.
+
+    The one runtime path to an analysis contract (backlog 903): the contract
+    is read on demand from control.analysis_contract through ``control`` --
+    the runtime's own Control, whose installation scopes the read -- and
+    parsed here. Nothing reads a contract file, and nothing falls back to one.
+
+    Fails closed: no Control, no stored contract by that name, or a stored
+    text that declares a different name are each refused by name.
+
+    Parameters
+    ----------
+    control : Any
+        The runtime's Control (``ctx.shared_control``).
+    name : str
+        The contract's declared name, as the configuration selects it.
+
+    Returns
+    -------
+    AnalysisContract
+        Parsed from the stored text and format.
+
+    Raises
+    ------
+    ConfigError
+        If there is no Control, no such contract, or the stored text names
+        another contract.
+    AIConfigurationError
+        If the stored contract is invalid.
+    """
+    from rey_lib.errors.error_utils import ConfigError  # noqa: PLC0415
+
+    wanted = str(name or "").strip()
+    if not wanted:
+        raise ConfigError("An analysis contract must be selected by its name.")
+    if control is None:
+        raise ConfigError(
+            f"Analysis contract '{wanted}' is read from the control database, "
+            "and this runtime has none."
+        )
+    row = control.analysis_contract(wanted)
+    if row is None:
+        raise ConfigError(
+            f"Installation {getattr(control, 'installation_id', None)} has no "
+            f"analysis contract named '{wanted}' in control.analysis_contract."
+        )
+    contract = parse_analysis_contract(str(row["contract_text"]), str(row["format"]))
+    if contract.name != wanted:
+        raise ConfigError(
+            f"Stored analysis contract '{wanted}' declares the name "
+            f"'{contract.name}'; the stored name and the text must agree."
+        )
+    return contract
+
+
+def parse_analysis_contract(text: str, fmt: str) -> AnalysisContract:
+    """Parse and validate an analysis contract's raw text.
 
     Reads the base contract fields (name, version, effective_date, body,
     hash) then extracts domain-specific preparation rules from
@@ -216,8 +274,10 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
 
     Parameters
     ----------
-    path : Path
-        Path to the contract markdown file.
+    text : str
+        The complete raw contract text.
+    fmt : str
+        Its serialization: ``yaml`` or ``markdown``.
 
     Returns
     -------
@@ -232,7 +292,7 @@ def load_analysis_contract(path: Path) -> AnalysisContract:
     from rey_lib.errors.error_utils import ConfigError  # noqa: PLC0415
 
     try:
-        base = _load_contract(Path(path))
+        base = parse_contract(text, fmt)
     except ConfigError as exc:
         raise AIConfigurationError(str(exc)) from exc
 
@@ -286,13 +346,13 @@ class Analyzer:
     """Orchestrate contract-driven data analysis.
 
     The Analyzer is the main entry point for application code.  It owns the
-    full lifecycle: load the contract once, then call analyze() with any
+    full lifecycle: hold the contract, then call analyze() with any
     DataSource.
 
     Parameters
     ----------
-    contract_path : Path
-        Path to the analysis contract markdown file.
+    contract : AnalysisContract
+        The analysis contract, as :func:`analysis_contract` read it.
     provider : str
         Provider name (e.g. 'anthropic', 'openai', 'ollama').
     model : str
@@ -316,7 +376,7 @@ class Analyzer:
 
     def __init__(
         self,
-        contract_path:    Path,
+        contract:         AnalysisContract,
         ai:               Any                          = None,
         profile_id:       str                          = "",
         log:              Optional[Path]               = None,
@@ -328,14 +388,14 @@ class Analyzer:
         run_log:               Any                     = None,
         payload_id:            Optional[str]           = None,
     ) -> None:
-        """Load the contract and hold the runtime this analysis executes on.
+        """Hold the contract and the runtime this analysis executes on.
 
         ``ai`` is the bootstrap-owned shared runtime, handed in rather than
         discovered. Which provider and model answer, and how a failed call is
         retried, are its decisions -- this object names a profile and nothing
         more about how the model is reached.
         """
-        self._contract         = load_analysis_contract(contract_path)
+        self._contract         = contract
         self._ai               = ai
         self._profile_id       = profile_id
         self._log              = Path(log) if log else None
@@ -351,10 +411,9 @@ class Analyzer:
         self._payload_id            = payload_id
 
         _logger.info(
-            "analyzer: loaded contract '%s' v%s from %s",
+            "analyzer: holding contract '%s' v%s",
             self._contract.name,
             self._contract.version,
-            self._contract.path,
         )
 
     @property
@@ -422,7 +481,7 @@ class Analyzer:
         request = RunRequest(
             pipeline_id       = analysis_id,
             stage_id          = self._contract.name,
-            contract_path     = self._contract.path,
+            contract          = self._contract.base,
             input_data        = prepared.rendered_text,
             profile_id        = self._profile_id,
             output_schema     = spec.output_schema,

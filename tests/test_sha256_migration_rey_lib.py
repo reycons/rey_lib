@@ -139,17 +139,15 @@ def test_the_datasource_row_hash_keeps_its_rendering_and_digest(
     assert llm_datasource._hash_rows(rows) == _utf8(rendered)
 
 
-def test_the_contract_content_hash_is_of_the_file_text(tmp_path: Path) -> None:
-    contract_path = tmp_path / "c.yaml"
+def test_the_contract_content_hash_is_of_the_contract_text() -> None:
     raw = (
         "name: analysis\n"
         "version: 1\n"
         "effective_date: 2026-01-01\n"
         "prompt: Ünïcode café\n"
     )
-    contract_path.write_text(raw, encoding="utf-8")
 
-    loaded = llm_contract.load(contract_path)
+    loaded = llm_contract.parse_contract(raw, "yaml")
 
     assert loaded.hash == _utf8(raw)
 

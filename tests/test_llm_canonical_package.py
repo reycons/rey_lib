@@ -34,7 +34,9 @@ def test_build_canonical_package_with_one_input() -> None:
     )
     assert set(package) == {"analysis", "contract", "inputs", "execution_context"}
     assert package["analysis"]["name"] == "file_profile_to_loader_config"
-    assert package["contract"] == {"path": "/contracts/x.md", "hash": "c0ffee", "content": "RULES"}
+    assert package["contract"] == {
+        "path": "/contracts/x.md", "name": "", "hash": "c0ffee", "content": "RULES",
+    }
     assert isinstance(package["inputs"], list)
     assert len(package["inputs"]) == 1
     # The contract is never one of the inputs.

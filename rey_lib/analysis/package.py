@@ -7,7 +7,7 @@ an LLM invocation:
 
     {
       "analysis":          {"name": ..., ...},
-      "contract":          {"path": ..., "hash": ..., "content": ...},
+      "contract":          {"path": ..., "name": ..., "hash": ..., "content": ...},
       "inputs":            [{"source_path": ..., "content": ..., ...}, ...],
       "execution_context": {...},
     }
@@ -47,23 +47,28 @@ __all__ = [
 class LlmPackageContract:
     """Identity and content evidence for the resolved LLM contract.
 
-    ``path`` and ``hash`` are the already-resolved contract evidence supplied by
-    the caller; this builder never performs a second contract lookup. ``content``
-    is the contract text preserved in the package.
+    ``path`` or ``name``, and ``hash``, are the already-resolved contract
+    evidence supplied by the caller; this builder never performs a second
+    contract lookup. ``content`` is the contract text preserved in the package.
 
     Attributes
     ----------
     path : str
-        Resolved contract file path.
+        Resolved contract file path, for a contract that is still a file; empty
+        for a stored analysis contract.
     hash : str
         Content hash of the resolved contract, as already computed by the caller.
     content : str
         Contract text. May be empty when the caller intentionally omits content.
+    name : str
+        The stored analysis contract's declared name (control.analysis_contract,
+        backlog 903); empty for a file contract.
     """
 
     path: str
     hash: str
     content: str = ""
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,10 +152,14 @@ def _analysis_section(analysis: Mapping[str, Any] | str) -> dict[str, Any]:
 def _contract_section(contract: LlmPackageContract | Mapping[str, Any]) -> dict[str, Any]:
     """Return the contract section, keeping it separate from inputs."""
     if isinstance(contract, LlmPackageContract):
-        return {"path": contract.path, "hash": contract.hash, "content": contract.content}
+        return {
+            "path": contract.path, "name": contract.name,
+            "hash": contract.hash, "content": contract.content,
+        }
     data = dict(contract)
     return {
         "path": str(data.get("path") or ""),
+        "name": str(data.get("name") or ""),
         "hash": str(data.get("hash") or ""),
         "content": data.get("content", ""),
     }
