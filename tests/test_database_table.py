@@ -459,14 +459,41 @@ class TestTheCatalogPrimitives:
 
         def _rows(_conn: Any, sql_text: str, params: dict) -> list[dict]:
             asked.append(sql_text)
-            return [{"name": "a", "type": "integer", "default_value": None, "nullable": False}]
+            return [{"name": "a", "type": "integer", "default_value": None, "nullable": False,
+                     "identity_kind": "", "identity_options_default": None}]
 
         monkeypatch.setattr(postgres_utils, "fetch_rows", _rows)
 
         assert postgres_utils.table_column_catalog(object(), "s", "t") == [
-            {"name": "a", "type": "integer", "default": None, "nullable": False},
+            {"name": "a", "type": "integer", "default": None, "nullable": False,
+             "identity": None, "identity_options_default": None},
         ]
         assert "pg_attribute" in asked[0] and "format_type" in asked[0]
+
+    def test_postgres_states_an_identity_column_and_whether_its_options_are_default(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An identity column has no default: attidentity says it is one (backlog 911)."""
+        asked: list[str] = []
+
+        def _rows(_conn: Any, sql_text: str, params: dict) -> list[dict]:
+            asked.append(sql_text)
+            return [
+                {"name": "id", "type": "bigint", "default_value": None, "nullable": False,
+                 "identity_kind": "a", "identity_options_default": True},
+                {"name": "n", "type": "integer", "default_value": None, "nullable": False,
+                 "identity_kind": "d", "identity_options_default": False},
+            ]
+
+        monkeypatch.setattr(postgres_utils, "fetch_rows", _rows)
+
+        stated = postgres_utils.table_column_catalog(object(), "s", "t")
+
+        assert [(c["identity"], c["identity_options_default"]) for c in stated] == [
+            ("always", True), ("by_default", False),
+        ]
+        assert "a.attidentity" in asked[0] and "pg_sequence" in asked[0]
+        assert "deptype = 'i'" in asked[0]
 
     def test_sql_server_states_each_type_as_it_declares_it(
         self, monkeypatch: pytest.MonkeyPatch,

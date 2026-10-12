@@ -75,22 +75,27 @@ def test_a_sequence_that_is_not_there_is_refused_by_name() -> None:
         DatabaseSequence.read_ddl(object(), _IDENTITY, _Connector("postgres", {}))
 
 
-def test_postgres_reads_the_increment_column_it_actually_has(
+def test_postgres_reads_every_sequence_the_listing_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The old branch asked for increment_by, which information_schema.sequences lacks."""
+    """From pg_sequence, as the listing reads pg_class (backlog 911).
+
+    information_schema.sequences shows only what the reading role owns or
+    holds privileges on: the listing named sequences the reader then could
+    not find.
+    """
     asked: list[tuple] = []
     monkeypatch.setattr(postgres_utils, "fetch_rows", lambda _c, sql, params: asked.append(
         (sql, params)) or [{
             "start_value": 1, "increment": 2, "minimum_value": 1,
-            "maximum_value": 10, "cycle_option": "YES",
+            "maximum_value": 10, "cycle_option": True,
         }])
 
     catalog = postgres_utils.sequence_catalog(object(), "control", "run_seq")
 
     assert catalog == {"start": 1, "increment": 2, "minimum": 1, "maximum": 10, "cycle": True}
     ((sql, params),) = asked
-    assert "increment AS increment" in sql and "increment_by" not in sql
+    assert "FROM pg_sequence s" in sql and "information_schema" not in sql
     assert params == {"schema": "control", "name": "run_seq"}
 
 
@@ -132,6 +137,28 @@ def test_the_postgres_listing_names_a_sequence_by_its_plain_name(
     # role holds privileges on, so the listing depended on who read it (760).
     assert "c.relkind = 'S'" in asked
     assert "FROM information_schema.sequences" not in asked
+
+
+def test_the_postgres_listing_leaves_an_identity_column_s_sequence_to_its_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity sequence is created by its column's GENERATED ... AS IDENTITY (911).
+
+    It is excluded by its identity dependency (deptype 'i'); a serial's
+    sequence ('a') stays a sequence of its own, because its column's default
+    names it.
+    """
+    cursor = _Cursor()
+    monkeypatch.setattr(postgres_utils, "_postgres_dependencies", lambda *_a, **_k: [])
+
+    postgres_utils.list_database_objects(
+        types.SimpleNamespace(cursor=lambda: cursor), database="rey",
+    )
+
+    (asked,) = [sql for sql in cursor.statements if "WITH base AS" in sql]
+    sequences = asked[asked.index("'sequences'::text"):asked.index("'views'::text")]
+    assert "NOT EXISTS" in sequences and "d.deptype = 'i'" in sequences
+    assert "deptype = 'a'" not in sequences
 
 
 def test_duckdb_answers_from_its_own_catalog_end_to_end() -> None:
