@@ -96,6 +96,18 @@ _CALL_ARGUMENT_COLUMNS = (
     "callee", "edge_kind", "ordinal", "argument_form", "keyword",
     "argument_kind", "literal_argument", "expression",
 )
+_SEMANTIC_COVERAGE_COLUMNS = (
+    "repository_key", "producer", "producer_version", "status", "reason",
+    "position_encoding", "documents", "occurrences", "refused_occurrences",
+)
+_DEFINITION_EVIDENCE_COLUMNS = (
+    "repository_key", "relative_path", "qualified_name", "name_line",
+    "name_column", "symbol", "producer",
+)
+_REFERENCE_EVIDENCE_COLUMNS = (
+    "repository_key", "relative_path", "end_line", "end_column", "symbol",
+    "occurrence_kind", "package", "is_standard_library", "producer",
+)
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
     "from_id", "from_symbol", "from_symbol_line", "from_symbol_column",
@@ -202,11 +214,32 @@ class CodeIndexDatabaseWriter:
         ]
         self._stage("call_argument_stage", call_arguments,
                     _CALL_ARGUMENT_COLUMNS)
+        # Semantic evidence (backlog 872): staged per repository, correlated
+        # across all of them by the promotion, which alone sees every one.
+        semantic_coverage = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.semantic_coverage
+        ]
+        definition_evidence = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.definition_evidence
+        ]
+        reference_evidence = [
+            {"repository_key": entry.header["repository_key"], **row}
+            for entry in indexed for row in entry.reference_evidence
+        ]
+        self._stage("semantic_coverage_stage", semantic_coverage,
+                    _SEMANTIC_COVERAGE_COLUMNS)
+        self._stage("definition_evidence_stage", definition_evidence,
+                    _DEFINITION_EVIDENCE_COLUMNS)
+        self._stage("reference_evidence_stage", reference_evidence,
+                    _REFERENCE_EVIDENCE_COLUMNS)
 
         logger.info(
             "Staged %d repositories, %d files, %d symbols, %d edges, "
             "%d parameters, %d writes, %d accesses, %d class attributes, "
-            "%d return sites, %d raise sites, %d call arguments",
+            "%d return sites, %d raise sites, %d call arguments, "
+            "%d semantic coverage, %d definition evidence, %d reference evidence",
             len(repositories),
             len(files),
             len(symbols),
@@ -218,6 +251,9 @@ class CodeIndexDatabaseWriter:
             len(return_sites),
             len(raise_sites),
             len(call_arguments),
+            len(semantic_coverage),
+            len(definition_evidence),
+            len(reference_evidence),
         )
         # The scan only. Nothing authored is staged or resolved here: a
         # declaration cannot refuse the publication of current facts.
@@ -239,7 +275,8 @@ class CodeIndexDatabaseWriter:
         that staged and then failed to promote. Leaving those rows would let
         the next scan promote a mixture of two.
         """
-        for table in ("call_argument_stage",
+        for table in ("reference_evidence_stage", "definition_evidence_stage",
+                      "semantic_coverage_stage", "call_argument_stage",
                       "raise_site_stage", "return_site_stage",
                       "class_attribute_stage",
                       "access_stage",

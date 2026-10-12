@@ -120,6 +120,7 @@ def build_repository_map(
     repo_root: Path,
     rules: ScanRules,
     rules_path: Path | None,
+    publication_roots: tuple[Path, ...] = (),
 ) -> RepositoryMap:
     """Collect every generated fact for a repository.
 
@@ -132,11 +133,13 @@ def build_repository_map(
         rules: The repository's scan rules.
         rules_path: Path the rules were loaded from, or None when the
             repository declares none.
+        publication_roots: Every repository checkout in the publication this
+            map belongs to; empty outside one.
 
     Returns:
         The map, with records in emission order.
     """
-    context = ScanContext(repo_root, rules)
+    context = ScanContext(repo_root, rules, publication_roots)
 
     records: list[dict[str, Any]] = []
     for emitter in RECORD_EMITTERS:

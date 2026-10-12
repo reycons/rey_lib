@@ -26,7 +26,9 @@ language_by_extension:
   ".yaml": YAML
   ".yml": YAML
 
-generated_path_globs: []
+generated_path_globs:
+  # SCIP bindings generated from the pinned scip.proto (backlog 872).
+  - "rey_lib/repository_map/scip_pb2.py"
 
 vendor_path_globs: []
 

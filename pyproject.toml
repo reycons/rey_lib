@@ -49,6 +49,14 @@ control = [
 db_references = [
     "pglast>=8.4",
 ]
+# Semantic reference evidence for the code index (backlog 872): the protobuf
+# runtime that reads the SCIP indexers' output through the generated
+# rey_lib/repository_map/scip_pb2.py. Index-build only, imported by
+# semantic_index alone; the indexers themselves are pinned in
+# rey_lib/repository_map/semantic_tools/package.json.
+semantic_index = [
+    "protobuf==7.36.2",
+]
 mysql = [
     "mysql-connector-python>=9.0.0",
 ]

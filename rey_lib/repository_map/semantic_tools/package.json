@@ -1,0 +1,10 @@
+{
+  "name": "rey-lib-semantic-tools",
+  "private": true,
+  "description": "The external indexers rey_lib's semantic reference evidence runs (backlog 872). Index-build only: nothing outside the repository-map scan needs them. Each pin's position encoding is measured and recorded in semantic_index.py; changing a version revalidates that entry first.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@sourcegraph/scip-python": "0.6.6",
+    "@sourcegraph/scip-typescript": "0.4.0"
+  }
+}

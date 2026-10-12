@@ -70,6 +70,9 @@ def scan(apps_root: Path, repositories: Sequence[str]) -> CodeIndexSnapshot:
         raise ConfigError("No repositories are configured to scan.")
     logger.info("Scanning %d configured repositories", len(repositories))
 
+    # The publication's own checkouts: the only source roots a semantic
+    # producer may resolve imports against (backlog 872).
+    publication_roots = tuple(apps_root / repository for repository in repositories)
     maps: dict[str, RepositoryMap] = {}
     for repository in repositories:
         repo_root = apps_root / repository
@@ -82,7 +85,9 @@ def scan(apps_root: Path, repositories: Sequence[str]) -> CodeIndexSnapshot:
         # missing file: it still produces a file inventory.
         declared = rules_path if rules_path.is_file() else None
         rules = load_scan_rules(declared) if declared else ScanRules.unconfigured()
-        maps[repository] = build_repository_map(repo_root, rules, declared)
+        maps[repository] = build_repository_map(
+            repo_root, rules, declared, publication_roots=publication_roots
+        )
     logger.info("Scanned %d repository maps", len(maps))
 
     return CodeIndexSnapshot(maps=maps)

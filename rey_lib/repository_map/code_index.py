@@ -41,6 +41,9 @@ from rey_lib.repository_map.records import (
     RECORD_TYPE_PARAMETER,
     RECORD_TYPE_FILE,
     RECORD_TYPE_SYMBOL,
+    RECORD_TYPE_DEFINITION_EVIDENCE,
+    RECORD_TYPE_REFERENCE_EVIDENCE,
+    RECORD_TYPE_SEMANTIC_COVERAGE,
 )
 from rey_lib.repository_map.snapshot import CodeIndexSnapshot
 from rey_lib.repository_map.writer import RepositoryMap
@@ -102,11 +105,19 @@ class IndexedRepository:
             attributed to a file but is not a property of one, and grouping it
             underneath would suggest the extractor resolved an owner it did
             not.
+        semantic_coverage: One entry per semantic producer: whether it ran,
+            failed or does not apply to this repository (backlog 872).
+        definition_evidence: A producer's definitions of declarations this
+            repository records, carrying the symbol identity's fields.
+        reference_evidence: A producer's symbol for each name ending exactly
+            where an extracted edge ends. Publication correlates it with
+            definition evidence from every repository and resolves to ids.
     """
 
     __slots__ = ("repository", "header", "files", "edges", "parameters",
                  "writes", "accesses", "class_attributes", "return_sites",
-                 "raise_sites", "call_arguments")
+                 "raise_sites", "call_arguments", "semantic_coverage",
+                 "definition_evidence", "reference_evidence")
 
     def __init__(
         self,
@@ -121,6 +132,9 @@ class IndexedRepository:
         return_sites: list[dict[str, Any]] | None = None,
         raise_sites: list[dict[str, Any]] | None = None,
         call_arguments: list[dict[str, Any]] | None = None,
+        semantic_coverage: list[dict[str, Any]] | None = None,
+        definition_evidence: list[dict[str, Any]] | None = None,
+        reference_evidence: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.header = header
@@ -137,6 +151,11 @@ class IndexedRepository:
         self.call_arguments = (
             call_arguments if call_arguments is not None else []
         )
+        self.semantic_coverage = semantic_coverage if semantic_coverage is not None else []
+        self.definition_evidence = (
+            definition_evidence if definition_evidence is not None else []
+        )
+        self.reference_evidence = reference_evidence if reference_evidence is not None else []
 
 
 def index(snapshot: CodeIndexSnapshot, writer: CodeIndexWriter) -> int:
@@ -185,6 +204,17 @@ _CALL_ARGUMENT_FIELDS = (
     "source_line", "source_column", "callee", "edge_kind", "ordinal",
     "argument_form", "keyword", "argument_kind", "literal_argument",
     "expression",
+)
+_DEFINITION_EVIDENCE_FIELDS = (
+    "qualified_name", "name_line", "name_column", "symbol", "producer",
+)
+_REFERENCE_EVIDENCE_FIELDS = (
+    "end_line", "end_column", "symbol", "occurrence_kind", "package",
+    "is_standard_library", "producer",
+)
+_SEMANTIC_COVERAGE_FIELDS = (
+    "producer", "producer_version", "status", "reason", "position_encoding",
+    "documents", "occurrences", "refused_occurrences",
 )
 _ACCESS_FIELDS = (
     "owner_qualified_name", "owner_line", "owner_column", "source_line",
@@ -380,5 +410,19 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
         call_arguments=_owned_rows(
             repository, repository_map, files,
             RECORD_TYPE_CALL_ARGUMENT, _CALL_ARGUMENT_FIELDS,
+        ),
+        # Coverage belongs to the repository, not to a file.
+        semantic_coverage=[
+            {field: record[field] for field in _SEMANTIC_COVERAGE_FIELDS}
+            for record in repository_map.records
+            if record["record_type"] == RECORD_TYPE_SEMANTIC_COVERAGE
+        ],
+        definition_evidence=_owned_rows(
+            repository, repository_map, files,
+            RECORD_TYPE_DEFINITION_EVIDENCE, _DEFINITION_EVIDENCE_FIELDS,
+        ),
+        reference_evidence=_owned_rows(
+            repository, repository_map, files,
+            RECORD_TYPE_REFERENCE_EVIDENCE, _REFERENCE_EVIDENCE_FIELDS,
         ),
     )

@@ -44,6 +44,7 @@ from rey_lib.repository_map.inventory import inventory_files
 from rey_lib.repository_map.records import attributed_edges
 from rey_lib.repository_map.records import ScanRules
 from rey_lib.repository_map.registrations import extract_registrations
+from rey_lib.repository_map.semantic_index import SemanticEvidence, semantic_evidence
 
 __all__ = ["RECORD_EMITTERS", "RecordEmitter", "ScanContext"]
 
@@ -77,17 +78,23 @@ class ScanContext:
     Attributes:
         repo_root: Repository being scanned.
         rules: That repository's scan rules.
+        publication_roots: Every repository checkout in the same publication.
     """
 
-    def __init__(self, repo_root: Path, rules: ScanRules) -> None:
+    def __init__(
+        self, repo_root: Path, rules: ScanRules, publication_roots: tuple[Path, ...] = ()
+    ) -> None:
         """Initialize the context.
 
         Args:
             repo_root: Repository being scanned.
             rules: That repository's scan rules.
+            publication_roots: Every repository checkout in the same
+                publication; empty outside one.
         """
         self.repo_root = repo_root
         self.rules = rules
+        self.publication_roots = publication_roots
 
     @cached_property
     def files(self) -> list[Any]:
@@ -213,6 +220,20 @@ class ScanContext:
         )
 
     @cached_property
+    def semantic(self) -> SemanticEvidence:
+        """Return the semantic producers' evidence about the extracted facts.
+
+        Asked for after extraction, because evidence only attaches where an
+        extracted edge ends or a recorded declaration is named.
+        """
+        return semantic_evidence(
+            self.repo_root,
+            {file_record.path: file_record.language for file_record in self.files},
+            self.references,
+            self.publication_roots,
+        )
+
+    @cached_property
     def violations(self) -> list[Any]:
         """Return the architecture violations.
 
@@ -257,4 +278,11 @@ RECORD_EMITTERS: tuple[RecordEmitter, ...] = (
     RecordEmitter("reachability", lambda ctx: [r.to_dict() for r in ctx.reachability]),
     RecordEmitter("dispatcher", lambda ctx: [r.to_dict() for r in ctx.dispatchers]),
     RecordEmitter("architecture_violation", lambda ctx: [r.to_dict() for r in ctx.violations]),
+    RecordEmitter("semantic_coverage", lambda ctx: [r.to_dict() for r in ctx.semantic.coverage]),
+    RecordEmitter(
+        "definition_evidence", lambda ctx: [r.to_dict() for r in ctx.semantic.definitions]
+    ),
+    RecordEmitter(
+        "reference_evidence", lambda ctx: [r.to_dict() for r in ctx.semantic.references]
+    ),
 )

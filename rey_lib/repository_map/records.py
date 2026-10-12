@@ -43,6 +43,9 @@ __all__ = [
     "RECORD_TYPE_ASSIGNMENT",
     "RECORD_TYPE_PARAMETER",
     "RECORD_TYPE_SYMBOL",
+    "RECORD_TYPE_SEMANTIC_COVERAGE",
+    "RECORD_TYPE_DEFINITION_EVIDENCE",
+    "RECORD_TYPE_REFERENCE_EVIDENCE",
     "SYMBOL_KIND_CLASS",
     "SYMBOL_KIND_ENUM",
     "SYMBOL_KIND_EXPORT",
@@ -70,6 +73,9 @@ __all__ = [
     "ScanRules",
     "SymbolInventory",
     "SymbolRecord",
+    "SemanticCoverage",
+    "DefinitionEvidence",
+    "ReferenceEvidence",
 ]
 
 # Tri-state for REQ-011's "loaded by a known runtime entry point".
@@ -101,6 +107,13 @@ RECORD_TYPE_GLOBAL_PUBLICATION = "global_publication"
 RECORD_TYPE_GLOBAL_CONSUMER = "global_consumer"
 RECORD_TYPE_REACHABILITY = "reachability"
 RECORD_TYPE_ARCHITECTURE_VIOLATION = "architecture_violation"
+# Semantic reference evidence (backlog 872): what a language's own semantic
+# indexer says a reference names. Evidence beside the extracted facts, never a
+# fact of its own -- an occurrence is only recorded where an extracted edge or
+# a recorded declaration already stands.
+RECORD_TYPE_SEMANTIC_COVERAGE = "semantic_coverage"
+RECORD_TYPE_DEFINITION_EVIDENCE = "definition_evidence"
+RECORD_TYPE_REFERENCE_EVIDENCE = "reference_evidence"
 
 # The derived architecture projection: authored meaning joined to current
 # structure. Its own artifact, never records inside a repository map.
@@ -2219,3 +2232,173 @@ def _require_str_mapping(data: dict[str, Any], key: str) -> dict[str, str]:
     ):
         raise ConfigError(f"Scan rules section '{key}' must map strings to strings.")
     return value
+
+
+@dataclass(frozen=True)
+class SemanticCoverage:
+    """Whether one semantic producer covered one repository, and how.
+
+    Absence of evidence only means something where coverage says the producer
+    ran. ``not_applicable`` is a repository with none of the producer's
+    languages; ``failed`` is a repository that has them and got no evidence --
+    an unprovisioned tool included -- so an environment that could not run the
+    producer never reads as a repository that needs none.
+
+    Attributes:
+        producer: The producer's key, such as ``scip-python``.
+        producer_version: The pinned version that ran, from the lockfile;
+            empty where none could run.
+        status: ``ran``, ``failed`` or ``not_applicable``.
+        reason: Why it failed, empty otherwise.
+        position_encoding: The encoding its positions were read in, empty
+            where none were read.
+        documents: Documents read and matched to inventoried files.
+        occurrences: Occurrences converted to Rey's canonical position.
+        refused_occurrences: Occurrences in a shape this reader does not
+            support, refused rather than reinterpreted.
+    """
+
+    producer: str
+    status: str
+    producer_version: str = ""
+    reason: str = ""
+    position_encoding: str = ""
+    documents: int = 0
+    occurrences: int = 0
+    refused_occurrences: int = 0
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this coverage fact."""
+        return f"{RECORD_TYPE_SEMANTIC_COVERAGE}:{self.producer}"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this coverage as a JSONL 'semantic_coverage' record."""
+        return {
+            "record_type": RECORD_TYPE_SEMANTIC_COVERAGE,
+            "record_id": self.record_id,
+            "producer": self.producer,
+            "producer_version": self.producer_version,
+            "status": self.status,
+            "reason": self.reason,
+            "position_encoding": self.position_encoding,
+            "documents": self.documents,
+            "occurrences": self.occurrences,
+            "refused_occurrences": self.refused_occurrences,
+        }
+
+
+@dataclass(frozen=True)
+class DefinitionEvidence:
+    """A semantic producer's definition of a declaration this file records.
+
+    Carries exactly the fields Rey's symbol identity resolves by -- the file,
+    the qualified name and the name token's position -- and the producer's
+    symbol name, which is only a publication-time correlation key: a reference
+    in another repository names the same symbol, and publication matches them
+    before resolving to the Rey symbol. It never becomes an identity.
+
+    Attributes:
+        source_path: The defining file.
+        qualified_name: The declaration's qualified name, read from the
+            producer's descriptors the way Rey qualifies it.
+        name_line: Zero-based line of the name token.
+        name_column: UTF-8 byte offset the name token begins at.
+        symbol: The producer's symbol name.
+        producer: The producer's key.
+    """
+
+    source_path: str
+    qualified_name: str
+    name_line: int
+    name_column: int
+    symbol: str
+    producer: str
+
+    @property
+    def source_line(self) -> int:
+        """Return the 1-indexed line, as every owned record reports it."""
+        return self.name_line + 1
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this evidence fact."""
+        return (
+            f"{RECORD_TYPE_DEFINITION_EVIDENCE}:{self.source_path}"
+            f":{self.name_line}:{self.name_column}:{self.symbol}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this evidence as a JSONL 'definition_evidence' record."""
+        return {
+            "record_type": RECORD_TYPE_DEFINITION_EVIDENCE,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "qualified_name": self.qualified_name,
+            "name_line": self.name_line,
+            "name_column": self.name_column,
+            "symbol": self.symbol,
+            "producer": self.producer,
+        }
+
+
+@dataclass(frozen=True)
+class ReferenceEvidence:
+    """What a semantic producer says the name ending at an extracted edge is.
+
+    Recorded only where an extracted edge ends at exactly this position in
+    this file, so it attaches evidence to a fact and never creates one.
+
+    Attributes:
+        source_path: The file the reference is written in.
+        end_line: Zero-based line the referenced name ends on.
+        end_column: Exclusive UTF-8 byte offset it ends at.
+        symbol: The producer's symbol name for what the name refers to.
+        occurrence_kind: ``local`` (a name local to its file),
+            ``indexed`` (defined in this repository's own index) or
+            ``external`` (defined elsewhere -- another repository, a library,
+            the language itself).
+        package: The package the producer names the symbol under.
+        is_standard_library: True where that package is the language's own
+            library, as the producer names it.
+        producer: The producer's key.
+    """
+
+    source_path: str
+    end_line: int
+    end_column: int
+    symbol: str
+    occurrence_kind: str
+    package: str
+    is_standard_library: bool
+    producer: str
+
+    @property
+    def source_line(self) -> int:
+        """Return the 1-indexed line, as every owned record reports it."""
+        return self.end_line + 1
+
+    @property
+    def record_id(self) -> str:
+        """Return the stable identity of this evidence fact."""
+        return (
+            f"{RECORD_TYPE_REFERENCE_EVIDENCE}:{self.source_path}"
+            f":{self.end_line}:{self.end_column}:{self.symbol}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return this evidence as a JSONL 'reference_evidence' record."""
+        return {
+            "record_type": RECORD_TYPE_REFERENCE_EVIDENCE,
+            "record_id": self.record_id,
+            "source_path": self.source_path,
+            "source_line": self.source_line,
+            "end_line": self.end_line,
+            "end_column": self.end_column,
+            "symbol": self.symbol,
+            "occurrence_kind": self.occurrence_kind,
+            "package": self.package,
+            "is_standard_library": self.is_standard_library,
+            "producer": self.producer,
+        }
