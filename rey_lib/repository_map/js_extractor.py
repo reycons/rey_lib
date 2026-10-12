@@ -316,7 +316,7 @@ def extract_js_references(
         callee.id
         for node in nodes
         if node.type in {"call_expression", "new_expression"}
-        and (callee := node.child_by_field_name("function")) is not None
+        and (callee := _callee(node)) is not None
     }
     # The left-hand side of a window publication is a declaration, not a use.
     # The locating node is what must be excluded here -- the assignment beside
@@ -335,9 +335,7 @@ def extract_js_references(
             target, kind = classified
             # The call ends where its callee's name ends -- not after its
             # arguments.
-            callee = node.child_by_field_name(
-                "function" if node.type == "call_expression" else "constructor"
-            )
+            callee = _callee(node)
             edges.append(
                 _edge(recorded_path, node, from_id, target, kind, node.type, end=callee)
             )
@@ -1769,6 +1767,25 @@ def _heritage_edges(
     return edges
 
 
+def _callee(node: Node) -> Node | None:
+    """Return what a call or a construction invokes.
+
+    The grammar names it differently for the two: a call_expression's callee
+    is its ``function`` field, a new_expression's its ``constructor``. Reading
+    ``function`` from both recorded no edge at all for ``new X(...)`` (backlog
+    768), where Python records the same construction, ``X()``, as a call.
+
+    Args:
+        node: A call_expression or new_expression node.
+
+    Returns:
+        The invoked expression, or None where the grammar gives none.
+    """
+    return node.child_by_field_name(
+        "constructor" if node.type == "new_expression" else "function"
+    )
+
+
 def _classify_call(node: Node) -> tuple[str, str] | None:
     """Return what a call targets and the edge kind it is recorded as.
 
@@ -1790,7 +1807,7 @@ def _classify_call(node: Node) -> tuple[str, str] | None:
         The target and one of the ``EDGE_KIND_*`` constants, or None when no
         edge is recorded for this call.
     """
-    callee = node.child_by_field_name("function")
+    callee = _callee(node)
     target = _dotted_name(callee) if callee is not None else None
     if target is None:
         return None
