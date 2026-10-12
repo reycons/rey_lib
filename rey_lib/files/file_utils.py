@@ -806,8 +806,6 @@ def _resolve_relevant_source(source_decl: str, ctx: Any) -> Path:
         "root": _ctx_path_value(ctx, "root"),
         "data": _ctx_path_value(ctx, "data"),
         "logs": _ctx_path_value(ctx, "logs"),
-        "contracts": _ctx_path_value(ctx, "contracts")
-        or _ctx_path_value(ctx, "llmcontracts"),
     }
     for name, value in _ctx_path_map(ctx).items():
         tokens.setdefault(name, value)

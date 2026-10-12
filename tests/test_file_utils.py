@@ -61,7 +61,6 @@ def _relevant_ctx(tmp_path: Path) -> SimpleNamespace:
             {
                 "root": tmp_path,
                 "configs": tmp_path / "configs",
-                "contracts": tmp_path / "contracts",
                 "data": tmp_path / "data",
             }
         ),
@@ -254,17 +253,17 @@ def test_list_relevant_files_resolves_sources_and_includes(tmp_path: Path) -> No
 
 def test_list_relevant_files_applies_excludes_and_secret_defaults(tmp_path: Path) -> None:
     ctx = _relevant_ctx(tmp_path)
-    contracts = tmp_path / "contracts"
-    contracts.mkdir()
-    (contracts / "SGC_keep.md").write_text("ok\n")
-    (contracts / "SGC_skip.bak").write_text("old\n")
-    (contracts / ".env").write_text("SECRET=1\n")
-    (contracts / "client_credentials.md").write_text("secret\n")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "SGC_keep.md").write_text("ok\n")
+    (data / "SGC_skip.bak").write_text("old\n")
+    (data / ".env").write_text("SECRET=1\n")
+    (data / "client_credentials.md").write_text("secret\n")
 
     files = list_relevant_files(
         ctx=ctx,
         metadata={
-            "sources": ["{contracts}"],
+            "sources": ["{data}"],
             "include": ["SGC_*", "*.env", "*credentials*"],
             "exclude": ["*.bak"],
             "roles": {"contract": ["SGC_*.md"]},

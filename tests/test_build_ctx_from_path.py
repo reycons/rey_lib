@@ -6,7 +6,7 @@ Covers:
 - App-level paths: dict does not corrupt PathResolver list
 - Individual app.yaml finds parent PathResolver via _find_parent_install_raw
 - App.yaml with paths: dict triggers parent search (not isinstance check)
-- _root suffix keys resolved as Path objects (contracts_root, output_root)
+- _root suffix keys resolved as Path objects (output_root)
 - {operation} and {timestamp} placeholders survive resolution
 """
 
@@ -165,16 +165,16 @@ log_path: "{console_log}"
         assert "{operation}" in log_path
         assert "{timestamp}" in log_path
 
-    def test_contracts_root_resolved_as_path(self, install_root: Path, tmp_path: Path) -> None:
+    def test_output_root_resolved_as_path(self, install_root: Path, tmp_path: Path) -> None:
         """Keys ending in _root are resolved to Path objects."""
         _write(install_root / "analyzer" / "app.yaml", """\
 name: analyzer
-contracts_root: "{analyzer_contracts}"
+output_root: "{analyzer_contracts}"
 """)
         ctx = build_ctx_from_path(install_root / "config.yaml")
         expected = (tmp_path / "contracts" / "v01").resolve()
-        assert ctx.contracts_root == expected
-        assert isinstance(ctx.contracts_root, Path)
+        assert ctx.output_root == expected
+        assert isinstance(ctx.output_root, Path)
 
     def test_output_root_resolved_as_path(self, install_root: Path, tmp_path: Path) -> None:
         _write(install_root / "redactor" / "app.yaml", """\
@@ -278,18 +278,18 @@ paths:
         )
         assert "{operation}" in str(ctx.log_path)
 
-    def test_app_yaml_contracts_root_resolved_as_path(
+    def test_app_yaml_output_root_resolved_as_path(
         self, install_root: Path, tmp_path: Path
     ) -> None:
         app_yaml = install_root / "analyzer" / "app.yaml"
         _write(app_yaml, """\
 name: analyzer
-contracts_root: "{analyzer_contracts}"
+output_root: "{analyzer_contracts}"
 """)
         ctx = build_ctx_from_path(app_yaml)
         expected = (tmp_path / "contracts" / "v01").resolve()
-        assert isinstance(ctx.contracts_root, Path)
-        assert ctx.contracts_root == expected
+        assert isinstance(ctx.output_root, Path)
+        assert ctx.output_root == expected
 
 
 # ---------------------------------------------------------------------------

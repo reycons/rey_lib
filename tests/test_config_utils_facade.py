@@ -59,7 +59,7 @@ def test_private_helpers_still_importable() -> None:
 
 def test_path_key_allowlist_moved_unchanged() -> None:
     """The moved path-key allowlist keeps its membership (constant parity)."""
-    assert "contract_file" in config_paths._PATH_KEYS
+    assert "inbox_path" in config_paths._PATH_KEYS
     assert "log_path" in config_paths._LOG_PATH_KEYS
     # A non-path key must never have been added.
     assert "name" not in config_paths._PATH_KEYS

@@ -94,25 +94,24 @@ def test_no_suffix_fallback_for_arbitrary_path_suffix() -> None:
     assert out["thing_file"] == "f"
 
 
-def test_contract_file_is_resolved() -> None:
-    """'contract_file' is an explicit path key and resolves like other paths."""
-    out = _resolve({"contract_file": "ddl_comment_enrichment.md"})
-    assert isinstance(out["contract_file"], Path)
-    assert out["contract_file"] == (_BASE / "ddl_comment_enrichment.md").resolve()
+def test_a_contract_is_a_name_not_a_path_key() -> None:
+    """Analysis contracts are selected by name from the database (backlog 903):
+    neither 'contract' nor the retired 'contract_file' is resolved as a path."""
+    out = _resolve({"contract": "ddl_comment_enrichment", "contract_file": "x.md"})
+    assert out["contract"] == "ddl_comment_enrichment"
+    assert out["contract_file"] == "x.md"
 
 
-def test_contract_file_path_root_token_resolves() -> None:
-    """Path-root tokens in contract_file resolve to a concrete Path."""
+def test_path_root_token_resolves_in_a_nested_path_key() -> None:
+    """Path-root tokens in a nested path key resolve to a concrete Path."""
     ctx = Namespace({
-        "assist_sql": {"contract_file": "{llmcontracts}/db_admin/ddl_comment_enrichment.md"}
+        "step": {"sql_path": "{scripts}/db_admin/apply.sql"}
     })
-    resolver = PathResolver({"llmcontracts": Path("/contracts")})
+    resolver = PathResolver({"scripts": Path("/scripts")})
 
     _apply_path_resolver(ctx, resolver)
 
-    assert ctx.assist_sql.contract_file == Path(
-        "/contracts/db_admin/ddl_comment_enrichment.md"
-    )
+    assert ctx.step.sql_path == Path("/scripts/db_admin/apply.sql")
 
 
 def test_workflow_local_token_resolves_path_key_at_load() -> None:
@@ -354,6 +353,6 @@ def test_is_path_key_is_membership_only() -> None:
     assert not _is_path_key("output_path")
     assert not _is_path_key("log_dir")
     assert not _is_path_key("path")
-    assert _is_path_key("contract_file")
+    assert not _is_path_key("contract_file")
     assert not _is_path_key("contract")
     assert not _is_path_key("foo_path")

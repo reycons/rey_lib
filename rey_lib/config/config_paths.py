@@ -22,8 +22,8 @@ from rey_lib.errors.error_utils import ConfigError
 # key here, under review, to opt it in. Notably absent: bare 'path' (the
 # 'paths:' block is resolved explicitly by _build_path_resolver).
 _PATH_KEYS = frozenset({
-    "app_path", "artifacts_path", "config_path", "contracts_root",
-    "contract_file", "converted_path", "env_file", "failed_path",
+    "app_path", "artifacts_path", "config_path",
+    "converted_path", "env_file", "failed_path",
     "inbox_path", "jsonl_path", "jsonl_root", "output_root",
     "pipeline_log_dir", "processing_path", "raw_output_path",
     "readable_root", "records_path", "rejected_path", "repo_root",
