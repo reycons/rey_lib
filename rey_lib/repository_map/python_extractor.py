@@ -288,7 +288,11 @@ def extract_python_references(
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             target, kind = _classify_call(node)
-            edges.append(_edge(recorded_path, node, from_id, target, kind, "ast.Call"))
+            # The call is located where it starts, and ends where its callee's
+            # name ends -- not after its arguments.
+            edges.append(
+                _edge(recorded_path, node, from_id, target, kind, "ast.Call", end=node.func)
+            )
         elif isinstance(node, ast.ClassDef):
             # One edge per base, located at the base itself -- which sits on
             # the class's own line, before any method begins, so attribution
@@ -302,10 +306,13 @@ def extract_python_references(
                         _base_name(base),
                         EDGE_KIND_INHERITS,
                         "ast.ClassDef",
+                        # Generic[T] names Generic: its end, not the brackets'.
+                        end=base.value if isinstance(base, ast.Subscript) else base,
                     )
                 )
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for record in _import_records(node):
+            for alias, record in zip(node.names, _import_records(node), strict=True):
+                end_line, end_column = _imported_name_end(alias)
                 edges.append(
                     ReferenceEdge(
                         source_path=recorded_path,
@@ -315,6 +322,8 @@ def extract_python_references(
                         to=record.target,
                         edge_kind=EDGE_KIND_IMPORT,
                         evidence=f"ast.{type(node).__name__}",
+                        end_line=end_line,
+                        end_column=end_column,
                     )
                 )
                 if record.local_name in exported_names:
@@ -327,6 +336,8 @@ def extract_python_references(
                             to=record.target,
                             edge_kind=EDGE_KIND_RE_EXPORT,
                             evidence="__all__",
+                            end_line=end_line,
+                            end_column=end_column,
                         )
                     )
         elif isinstance(node, ast.Attribute) and id(node) not in callee_nodes:
@@ -354,6 +365,7 @@ def _edge(
     target: str,
     edge_kind: str,
     evidence: str,
+    end: ast.AST | None = None,
 ) -> ReferenceEdge:
     """Build one reference edge from a located syntax node.
 
@@ -364,10 +376,13 @@ def _edge(
         target: Referenced name as written.
         edge_kind: One of the ``EDGE_KIND_*`` constants.
         evidence: The syntax node kind proving the reference.
+        end: The node the referenced name ends with, when it is not ``node``
+            itself -- a call's callee.
 
     Returns:
         The edge.
     """
+    end_line, end_column = _reference_end(end if end is not None else node)
     return ReferenceEdge(
         source_path=recorded_path,
         source_line=getattr(node, "lineno", 0),
@@ -376,7 +391,54 @@ def _edge(
         to=target,
         edge_kind=edge_kind,
         evidence=evidence,
+        end_line=end_line,
+        end_column=end_column,
     )
+
+
+def _reference_end(node: ast.AST) -> tuple[int | None, int | None]:
+    """Return where a node ends, as Rey's canonical reference position.
+
+    The canonical position is a zero-based line and a UTF-8 byte offset
+    (backlog 871). ``ast`` numbers lines from one and already measures
+    ``end_col_offset`` in UTF-8 bytes, so only the line moves.
+
+    Args:
+        node: Any parsed node.
+
+    Returns:
+        Zero-based end line and exclusive byte end column, or None for both
+        where the parse recorded no end.
+    """
+    end_line = getattr(node, "end_lineno", None)
+    end_column = getattr(node, "end_col_offset", None)
+    if end_line is None or end_column is None:
+        return None, None
+    return end_line - 1, end_column
+
+
+def _imported_name_end(alias: ast.alias) -> tuple[int | None, int | None]:
+    """Return where the imported name of one import binding ends.
+
+    An alias without ``as`` spans exactly its name. With ``as`` it spans
+    ``name as other``, so the name ends its own UTF-8 length past the alias's
+    start; a dotted name written with inner whitespace would end later, match
+    no evidence, and keep the resolver's own answer.
+
+    Args:
+        alias: One binding of an ``import`` or ``from ... import`` statement.
+
+    Returns:
+        Zero-based end line and exclusive byte end column, or None for both
+        where the parse recorded no position.
+    """
+    if alias.asname is None:
+        return _reference_end(alias)
+    line = getattr(alias, "lineno", None)
+    column = getattr(alias, "col_offset", None)
+    if line is None or column is None:
+        return None, None
+    return line - 1, column + len(alias.name.encode("utf-8"))
 
 
 def _methods(node: ast.ClassDef) -> list[tuple[str, int, int, tuple[int, int]]]:

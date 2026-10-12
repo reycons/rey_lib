@@ -313,6 +313,8 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "to_reference": record["to"],
                 "edge_kind": record["edge_kind"],
                 "evidence": record["evidence"],
+                "end_line": record["end_line"],
+                "end_column": record["end_column"],
             }
         )
 

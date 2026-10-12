@@ -591,6 +591,13 @@ class ReferenceEdge:
             unresolved here; resolving it to a record_id is graph work.
         edge_kind: One of the ``EDGE_KIND_*`` constants.
         evidence: The syntax node kind that proves the reference.
+        end_line: Where the referenced name ends -- a call's callee, an
+            attribute, a base, an imported name -- as Rey's canonical
+            reference position: a zero-based line (backlog 871). Semantic
+            evidence is matched to this edge on its file and this position.
+        end_column: The exclusive UTF-8 byte offset on ``end_line`` at which
+            that name ends. Both are None where the parse proved no end: a
+            position that was not proved is absent, never guessed.
     """
 
     source_path: str
@@ -603,6 +610,8 @@ class ReferenceEdge:
     from_symbol: str = ""
     from_symbol_line: int = 0
     from_symbol_column: int = 0
+    end_line: int | None = None
+    end_column: int | None = None
 
     @property
     def record_id(self) -> str:
@@ -635,6 +644,8 @@ class ReferenceEdge:
             "to": self.to,
             "edge_kind": self.edge_kind,
             "evidence": self.evidence,
+            "end_line": self.end_line,
+            "end_column": self.end_column,
         }
 
 

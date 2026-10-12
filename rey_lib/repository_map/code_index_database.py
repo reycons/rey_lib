@@ -99,7 +99,7 @@ _CALL_ARGUMENT_COLUMNS = (
 _EDGE_COLUMNS = (
     "repository_key", "relative_path", "source_line", "source_column",
     "from_id", "from_symbol", "from_symbol_line", "from_symbol_column",
-    "to_reference", "edge_kind", "evidence",
+    "to_reference", "edge_kind", "evidence", "end_line", "end_column",
 )
 
 

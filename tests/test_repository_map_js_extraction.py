@@ -411,6 +411,8 @@ def test_records_match_the_jsonl_shapes(tmp_path: Path) -> None:
         "to": "run",
         "edge_kind": EDGE_KIND_CALL,
         "evidence": "call_expression",
+        "end_line": 0,
+        "end_column": 19,
     }
 
 

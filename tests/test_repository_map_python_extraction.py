@@ -355,6 +355,9 @@ def test_edge_serializes_to_the_jsonl_dependency_edge_shape(tmp_path: Path) -> N
             "to": "handler",
             "edge_kind": EDGE_KIND_CALL,
             "evidence": "ast.Call",
+            # Where the callee's name ends: zero-based line, UTF-8 bytes.
+            "end_line": 1,
+            "end_column": 11,
         }
     ]
 

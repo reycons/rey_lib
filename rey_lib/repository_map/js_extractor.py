@@ -333,7 +333,14 @@ def extract_js_references(
             if classified is None:
                 continue
             target, kind = classified
-            edges.append(_edge(recorded_path, node, from_id, target, kind, node.type))
+            # The call ends where its callee's name ends -- not after its
+            # arguments.
+            callee = node.child_by_field_name(
+                "function" if node.type == "call_expression" else "constructor"
+            )
+            edges.append(
+                _edge(recorded_path, node, from_id, target, kind, node.type, end=callee)
+            )
         elif node.type in _CLASS_DECLARATIONS:
             edges.extend(_heritage_edges(recorded_path, from_id, node))
         elif node.type == "member_expression" and node.id not in callee_ids:
@@ -1334,6 +1341,7 @@ def _edge(
     target: str,
     edge_kind: str,
     evidence: str,
+    end: Node | None = None,
 ) -> ReferenceEdge:
     """Build one reference edge located at a syntax node.
 
@@ -1344,11 +1352,16 @@ def _edge(
         target: Referenced name as written.
         edge_kind: One of the ``EDGE_KIND_*`` constants.
         evidence: The syntax node type proving the reference.
+        end: The node the referenced name ends with, when it is not ``node``
+            itself -- a call's callee, an imported name.
 
     Returns:
         The edge.
     """
     line, column = node.start_point
+    # tree-sitter already counts rows from zero and columns in bytes of the
+    # UTF-8 source: Rey's canonical reference position as it stands (871).
+    end_line, end_column = (end if end is not None else node).end_point
     return ReferenceEdge(
         source_path=recorded_path,
         source_line=line + 1,
@@ -1357,6 +1370,8 @@ def _edge(
         to=target,
         edge_kind=edge_kind,
         evidence=evidence,
+        end_line=end_line,
+        end_column=end_column,
     )
 
 
@@ -1578,25 +1593,31 @@ def _module_edges(recorded_path: str, from_id: str, statement: Node) -> list[Ref
     members = _imported_members(statement) if is_import else _reexported_members(statement)
     if not members:
         # A side-effect import, namespace import or star re-export references
-        # the module itself.
-        return [_edge(recorded_path, statement, from_id, specifier, kind, statement.type)]
+        # the module itself, written as its source string.
+        return [
+            _edge(recorded_path, statement, from_id, specifier, kind, statement.type, end=source)
+        ]
+    # Each member edge ends where that member's name ends.
     return [
-        _edge(recorded_path, statement, from_id, f"{specifier}.{member}", kind, statement.type)
+        _edge(
+            recorded_path, statement, from_id, f"{specifier}.{_text(member)}", kind,
+            statement.type, end=member,
+        )
         for member in members
     ]
 
 
-def _imported_members(statement: Node) -> list[str]:
-    """Return the member names a named import binds.
+def _imported_members(statement: Node) -> list[Node]:
+    """Return the member name nodes a named import binds.
 
     Args:
         statement: An ``import_statement`` node.
 
     Returns:
-        The imported member names, empty for default, namespace and
+        The imported member name nodes, empty for default, namespace and
         side-effect imports.
     """
-    members: list[str] = []
+    members: list[Node] = []
     for clause in statement.named_children:
         if clause.type != "import_clause":
             continue
@@ -1608,24 +1629,24 @@ def _imported_members(statement: Node) -> list[str]:
                     continue
                 name = specifier.child_by_field_name("name")
                 if name is not None:
-                    members.append(_text(name))
+                    members.append(name)
     return members
 
 
-def _reexported_members(statement: Node) -> list[str]:
-    """Return the member names an export-from statement republishes.
+def _reexported_members(statement: Node) -> list[Node]:
+    """Return the member name nodes an export-from statement republishes.
 
     Args:
         statement: An ``export_statement`` node with a source.
 
     Returns:
-        The republished member names, empty for a star re-export.
+        The republished member name nodes, empty for a star re-export.
     """
-    members = []
+    members: list[Node] = []
     for specifier in _export_specifiers(statement):
         name = specifier.child_by_field_name("name")
         if name is not None:
-            members.append(_text(name))
+            members.append(name)
     return members
 
 
@@ -1734,8 +1755,10 @@ def _heritage_edges(
             target = _dotted_name(named) or _text(named).split("<", 1)[0].strip()
             if not target:
                 continue
+            # Foo<T> as one generic type names Foo: its end, not the brackets'.
+            name = named.child_by_field_name("name") if named.type == "generic_type" else None
             edges.append(
-                _edge(recorded_path, named, from_id, target, kind, clause.type)
+                _edge(recorded_path, named, from_id, target, kind, clause.type, end=name)
             )
     return edges
 
