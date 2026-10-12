@@ -10,8 +10,11 @@ from rey_lib.workflow.coordinator import (
     ProcessHandler,
     StepOutcome,
     WorkflowRun,
+    run_canonical_workflow,
     run_workflow,
 )
+from rey_lib.workflow.hydration import hydrate_workflow
+from rey_lib.workflow.model import Workflow, WorkflowProcess, WorkflowStep
 from rey_lib.workflow.engine import (
     RunContext,
     StepResult,
@@ -34,4 +37,9 @@ __all__ = [
     "StepOutcome",
     "WorkflowRun",
     "run_workflow",
+    "run_canonical_workflow",
+    "Workflow",
+    "WorkflowProcess",
+    "WorkflowStep",
+    "hydrate_workflow",
 ]
