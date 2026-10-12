@@ -70,6 +70,8 @@ def _symbol(path: str, name: str, owner: str = "") -> dict[str, object]:
         "returns_annotation": None,
         "is_generator": False,
         "dotted_identity": dotted_identity(path, qualified),
+        "name_line": 9,
+        "name_column": 4,
     }
 
 

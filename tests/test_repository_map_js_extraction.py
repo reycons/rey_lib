@@ -397,6 +397,8 @@ def test_records_match_the_jsonl_shapes(tmp_path: Path) -> None:
         "returns_annotation": None,
         "dotted_identity": "pkg.small.go",
         "is_generator": False,
+        "name_line": 0,
+        "name_column": 9,
     }
     assert edge == {
         "record_type": "dependency_edge",

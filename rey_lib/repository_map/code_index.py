@@ -286,6 +286,8 @@ def _indexed(repository: str, repository_map: RepositoryMap) -> IndexedRepositor
                 "returns_annotation": record["returns_annotation"],
                 "dotted_identity": record["dotted_identity"],
                 "is_generator": record["is_generator"],
+                "name_line": record["name_line"],
+                "name_column": record["name_column"],
             }
         )
 

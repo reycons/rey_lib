@@ -1283,6 +1283,10 @@ def _symbol(
     """
     line, column = node.start_point
     end_line, end_column = declaration.end_point
+    # Where the name itself is written (backlog 872): the locating node, when
+    # it is exactly the name. tree-sitter already counts zero-based rows and
+    # UTF-8 byte columns -- Rey's canonical position as it stands.
+    named_here = _text(node) == name
     return SymbolRecord(
         source_path=recorded_path,
         source_line=line + 1,
@@ -1304,6 +1308,8 @@ def _symbol(
         # with no yield is still a generator, and a `*` method carries the star
         # rather than a distinct node type.
         is_generator=_js_is_generator(declaration),
+        name_line=line if named_here else None,
+        name_column=column if named_here else None,
     )
 
 

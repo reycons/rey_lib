@@ -58,7 +58,7 @@ _SYMBOL_COLUMNS = (
     "repository_key", "relative_path", "symbol_kind", "name",
     "qualified_name", "owner", "is_public", "start_line", "start_column",
     "end_line", "end_column", "returns_annotation", "dotted_identity",
-    "is_generator",
+    "is_generator", "name_line", "name_column",
 )
 _PARAMETER_COLUMNS = (
     "repository_key", "relative_path", "owner_qualified_name", "owner_line",

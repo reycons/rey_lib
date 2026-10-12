@@ -466,6 +466,15 @@ class SymbolRecord:
             ``return 2``. It is what lets a reader tell a return site in a
             generator from one in an ordinary declaration, which otherwise
             costs reopening the source.
+        name_line: Where the declared name itself is written -- not where the
+            construct starts -- as Rey's canonical position: a zero-based line
+            (backlog 872). Semantic evidence names a definition by its name
+            token, and resolves to this symbol on its file, qualified name and
+            this position. It adds to the identity above; it replaces nothing.
+        name_column: The UTF-8 byte offset on ``name_line`` at which the name
+            begins. Both are None where the parse cannot locate the name token
+            exactly -- absent, never guessed -- and for a re-export or a bare
+            export, whose declaration is not in this file.
     """
 
     source_path: str
@@ -479,6 +488,8 @@ class SymbolRecord:
     end_column: int = 0
     returns_annotation: Optional[str] = None
     is_generator: bool = False
+    name_line: int | None = None
+    name_column: int | None = None
 
     @property
     def dotted_identity(self) -> str:
@@ -526,6 +537,8 @@ class SymbolRecord:
             "returns_annotation": self.returns_annotation,
             "dotted_identity": self.dotted_identity,
             "is_generator": self.is_generator,
+            "name_line": self.name_line,
+            "name_column": self.name_column,
         }
 
 

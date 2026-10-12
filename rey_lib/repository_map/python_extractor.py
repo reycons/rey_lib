@@ -170,6 +170,9 @@ def extract_python_symbols(
     """
     tree = _parse(path)
     recorded_path = source_path if source_path is not None else path.as_posix()
+    # The source as the parser numbered it, one bytes line per line, so a
+    # declared name is located in the byte offsets ast itself reports.
+    source_lines = _source_lines(path)
     exported_names = _collect_dunder_all(tree)
     imports = _collect_imports(tree)
     imported_names = {record.local_name: record for record in imports}
@@ -180,6 +183,7 @@ def extract_python_symbols(
     for node in tree.body:
         for name, line, column, kind, end_position in _declarations(node):
             declared_names.add(name)
+            name_line, name_column = _name_position(source_lines, line, column, name)
             symbols.append(
                 SymbolRecord(
                     source_path=recorded_path,
@@ -200,6 +204,8 @@ def extract_python_symbols(
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                         else False
                     ),
+                    name_line=name_line,
+                    name_column=name_column,
                 )
             )
         if isinstance(node, ast.ClassDef):
@@ -208,6 +214,7 @@ def extract_python_symbols(
             # private helper is exported because the class it hides in is.
             owner_exported = node.name in exported_names
             for member, line, column, end_position in _methods(node):
+                name_line, name_column = _name_position(source_lines, line, column, member)
                 symbols.append(
                     SymbolRecord(
                         source_path=recorded_path,
@@ -221,6 +228,8 @@ def extract_python_symbols(
                         end_line=end_position[0],
                         end_column=end_position[1],
                         is_generator=_member_is_generator(node, member),
+                        name_line=name_line,
+                        name_column=name_column,
                     )
                 )
 
@@ -1344,6 +1353,84 @@ def _access_of(
             literal_argument=literal,
         )
     return None
+
+
+def _source_lines(path: Path) -> list[bytes]:
+    """Return a file's lines as UTF-8 bytes, split where ``ast`` splits them.
+
+    ``ast`` ends a line at CR LF, CR or LF and nowhere else; ``str.splitlines``
+    would also split at form feeds and separators ast treats as ordinary
+    characters, and shift every later line.
+
+    Args:
+        path: Python file to read.
+
+    Returns:
+        One bytes object per source line.
+    """
+    text = read_text_file(path).replace("\r\n", "\n").replace("\r", "\n")
+    return [line.encode("utf-8") for line in text.split("\n")]
+
+
+def _name_position(
+    source_lines: list[bytes], line: int, column: int, name: str
+) -> tuple[int | None, int | None]:
+    """Return where a declared name is written, as Rey's canonical position.
+
+    ``ast`` locates a ``def`` or ``class`` at its keyword and a bound variable
+    at the name itself, and gives the name of neither a position of its own.
+    The grammar fixes it: the name is the identifier after ``async``,
+    ``def`` or ``class`` on the declaration's own line. It is accepted only
+    where the bytes there spell the name and the identifier ends with it.
+
+    Args:
+        source_lines: The file's lines as UTF-8 bytes.
+        line: The declaration's 1-indexed line, as ast reports it.
+        column: Its UTF-8 byte column, as ast reports it.
+        name: The declared name.
+
+    Returns:
+        Zero-based line and UTF-8 byte column where the name begins, or None
+        for both where it is not exactly there -- a name continued onto the
+        next line, for instance.
+    """
+    if not 1 <= line <= len(source_lines):
+        return None, None
+    text = source_lines[line - 1]
+    at = column
+    # At most two keywords (async def) precede the name.
+    for _ in range(3):
+        while text[at:at + 1] in (b" ", b"\t"):
+            at += 1
+        word = _identifier_at(text, at)
+        if word == name.encode("utf-8"):
+            return line - 1, at
+        if word not in _DECLARATION_KEYWORDS:
+            return None, None
+        at += len(word)
+    return None, None
+
+
+#: The keywords that may stand between a declaration's start and its name.
+_DECLARATION_KEYWORDS = (b"async", b"def", b"class")
+
+
+def _identifier_at(text: bytes, at: int) -> bytes:
+    """Return the whole identifier beginning at a byte offset, or empty.
+
+    Args:
+        text: One source line as UTF-8 bytes.
+        at: Byte offset the identifier begins at.
+
+    Returns:
+        The identifier's bytes. Any non-ASCII byte belongs to one, since
+        Python identifiers may be non-ASCII and UTF-8 never encodes an ASCII
+        delimiter inside a multi-byte character.
+    """
+    end = at
+    while end < len(text) and (text[end] >= 0x80 or chr(text[end]).isalnum() or text[end] == 0x5F):
+        end += 1
+    return text[at:end]
 
 
 def _parse(path: Path) -> ast.Module:

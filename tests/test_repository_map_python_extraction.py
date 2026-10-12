@@ -200,6 +200,10 @@ def test_symbol_serializes_to_the_jsonl_symbol_record_shape(module_path: Path) -
         "qualified_name": "TopClass",
         # A class does not yield. The flag is a declaration's own body fact.
         "is_generator": False,
+        # Where the name itself is written: zero-based line, UTF-8 bytes,
+        # after "class ".
+        "name_line": 33,
+        "name_column": 6,
     }
 
 
