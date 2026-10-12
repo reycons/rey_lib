@@ -29,7 +29,7 @@ from rey_lib.workflow import (
     WorkflowProcess,
     WorkflowStep,
     hydrate_workflow,
-    run_canonical_workflow,
+    run_workflow,
 )
 
 _INSTALLATIONS = Path("/workspaces/installations")
@@ -294,7 +294,7 @@ def test_a_disabled_workflow_is_identity_only_and_never_refused_for_its_steps() 
 
 def test_the_coordinator_refuses_anything_but_a_canonical_workflow(run_log) -> None:
     with pytest.raises(WorkflowError, match="canonical Workflow"):
-        run_canonical_workflow(SimpleNamespace(applications=()), run_log, dict(_DEFINITION), {},
+        run_workflow(SimpleNamespace(applications=()), run_log, dict(_DEFINITION), {},
                      application="app_a")
 
 
@@ -312,6 +312,6 @@ def test_the_coordinator_executes_only_its_own_applications_processes(run_log) -
     ))
 
     with pytest.raises(WorkflowError, match="belongs to 'app_b'"):
-        run_canonical_workflow(ctx, run_log, mixed,
+        run_workflow(ctx, run_log, mixed,
                      {"op": lambda *_args: called.append("op")}, application="app_a")
     assert called == ["op"], "the application's own process ran; the other was refused"

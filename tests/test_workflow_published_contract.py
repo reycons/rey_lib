@@ -19,7 +19,8 @@ from rey_lib.config.applications import (
     ApplicationCommand,
     ApplicationCommandParameter,
 )
-from rey_lib.workflow import StepResult, WorkflowError, run_workflow
+from tests.support.workflow_publication import run_hydrated
+from rey_lib.workflow import StepResult, WorkflowError
 
 
 def published(*operations: ApplicationCommand) -> SimpleNamespace:
@@ -59,7 +60,7 @@ class TestMembershipIsDeclared:
 
     def test_a_declared_process_runs_through_the_catalog(self, run_log) -> None:
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(operation("load")),
             run_log,
             workflow({"ingest": {"implementation": "load"}},
@@ -77,7 +78,7 @@ class TestMembershipIsDeclared:
         Python changed to add the second.
         """
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(operation("load", source=False)),
             run_log,
             workflow(
@@ -95,7 +96,7 @@ class TestMembershipIsDeclared:
 
     def test_a_process_naming_no_implementation_is_refused(self, run_log) -> None:
         with pytest.raises(WorkflowError, match="names no 'implementation'"):
-            run_workflow(
+            run_hydrated(
                 published(operation("load")),
                 run_log,
                 workflow({"ingest": {}}, [{"id": "s", "process": "ingest"}]),
@@ -108,7 +109,7 @@ class TestTheContractIsPublished:
 
     def test_an_unpublished_implementation_is_refused(self, run_log) -> None:
         with pytest.raises(WorkflowError, match="does not publish"):
-            run_workflow(
+            run_hydrated(
                 published(operation("load")),
                 run_log,
                 workflow({"ingest": {"implementation": "elsewhere"}},
@@ -121,7 +122,7 @@ class TestTheContractIsPublished:
     ) -> None:
         """Publication is what an author reads; the catalog is what runs."""
         with pytest.raises(WorkflowError, match="approved implementation catalog"):
-            run_workflow(
+            run_hydrated(
                 published(operation("load")),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
@@ -133,7 +134,7 @@ class TestTheContractIsPublished:
         self, run_log
     ) -> None:
         with pytest.raises(WorkflowError, match="does not publish"):
-            run_workflow(
+            run_hydrated(
                 published(),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
@@ -149,7 +150,7 @@ class TestValidationPrecedesDispatch:
         """A typo becoming a setting nobody applied is what this prevents."""
         calls: list[Any] = []
         with pytest.raises(WorkflowError, match="'typo'"):
-            run_workflow(
+            run_hydrated(
                 published(operation("load", source=False)),
                 run_log,
                 workflow({"ingest": {"implementation": "load", "typo": 1}},
@@ -162,7 +163,7 @@ class TestValidationPrecedesDispatch:
     def test_a_missing_required_parameter_is_refused(self, run_log) -> None:
         calls: list[Any] = []
         with pytest.raises(WorkflowError, match="missing required 'source'"):
-            run_workflow(
+            run_hydrated(
                 published(operation("load", source=True)),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
@@ -175,7 +176,7 @@ class TestValidationPrecedesDispatch:
     def test_a_nested_setting_is_named_by_its_path(self, run_log) -> None:
         """target.connection is one setting whose value sits in a mapping."""
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(ApplicationCommand(
                 name="load",
                 parameters=(ApplicationCommandParameter(
@@ -202,7 +203,7 @@ class TestValidationPrecedesDispatch:
         exists to remove.
         """
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(operation("load", file_selection=True)),
             run_log,
             workflow(
@@ -220,7 +221,7 @@ class TestValidationPrecedesDispatch:
     def test_a_required_block_is_satisfied_by_its_contents(self, run_log) -> None:
         """Supplying the leaves is supplying the block."""
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(operation("load", target=True)),
             run_log,
             workflow({"ingest": {"implementation": "load",
@@ -240,7 +241,7 @@ class TestValidationPrecedesDispatch:
         reader has to go and fix.
         """
         with pytest.raises(WorkflowError, match=r"file_selections\.a"):
-            run_workflow(
+            run_hydrated(
                 published(operation("load", file_selection=False)),
                 run_log,
                 workflow({"ingest": {"implementation": "load",
@@ -261,7 +262,7 @@ class TestValidationPrecedesDispatch:
         which is what the dict-based ones could not show.
         """
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(ApplicationCommand(
                 name="load",
                 parameters=(ApplicationCommandParameter(
@@ -283,7 +284,7 @@ class TestValidationPrecedesDispatch:
     ) -> None:
         """Reaching the leaves must not become accepting everything."""
         with pytest.raises(WorkflowError, match=r"target\.typo"):
-            run_workflow(
+            run_hydrated(
                 published(ApplicationCommand(
                     name="load",
                     parameters=(ApplicationCommandParameter(
@@ -303,7 +304,7 @@ class TestValidationPrecedesDispatch:
     ) -> None:
         """apply_only says how the engine treats a step, not what to configure."""
         calls: list[Any] = []
-        run = run_workflow(
+        run = run_hydrated(
             published(operation("load")),
             run_log,
             workflow({"ingest": {"implementation": "load", "apply_only": True}},
@@ -330,7 +331,7 @@ class TestTheRuntimeInvariant:
     ) -> None:
         """Named for what is wrong, before the first step is considered."""
         with pytest.raises(WorkflowError, match="ctx.applications is missing"):
-            run_workflow(
+            run_hydrated(
                 SimpleNamespace(),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
@@ -348,7 +349,7 @@ class TestTheRuntimeInvariant:
         which is correct.
         """
         with pytest.raises(WorkflowError) as raised:
-            run_workflow(
+            run_hydrated(
                 SimpleNamespace(),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
@@ -363,7 +364,7 @@ class TestTheRuntimeInvariant:
     ) -> None:
         """An installation with no applications is a state, not a fault."""
         with pytest.raises(WorkflowError, match="does not publish"):
-            run_workflow(
+            run_hydrated(
                 SimpleNamespace(applications=()),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
@@ -374,7 +375,7 @@ class TestTheRuntimeInvariant:
     def test_no_step_runs_when_the_context_is_missing(self, run_log) -> None:
         calls: list[Any] = []
         with pytest.raises(WorkflowError):
-            run_workflow(
+            run_hydrated(
                 SimpleNamespace(),
                 run_log,
                 workflow({"ingest": {"implementation": "load"}},
