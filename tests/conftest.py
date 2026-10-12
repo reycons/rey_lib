@@ -21,10 +21,6 @@ from rey_lib.run import establish_run_identity
 
 _NEXT_TEST_RUN_ID = [1]
 
-#: What the registry answers for any installation a test names. One value,
-#: because a test asserting attribution cares that the id arrived, not which.
-_TEST_INSTALLATION_ID = 1
-
 
 def start_test_run(ctx: Any, run_id: int | None = None) -> Any:
     """Give ``ctx`` the identity a launched run would carry.
@@ -368,20 +364,15 @@ def recorded_run(monkeypatch: pytest.MonkeyPatch) -> None:
     class _ResolvingControl:
         """The Control surface the launch boundary uses before the run exists.
 
-        It resolves an installation and starts a batch, because bootstrap does
-        both between opening control and creating the run. A double with no
-        method there would make production code that legitimately calls one
-        look broken, or push a defensive getattr into the boundary that would
-        then hide a Control whose binding really is missing.
+        It starts a batch, because bootstrap does between opening control and
+        creating the run. Installation settlement happens inside
+        ``_open_control``, which this fixture replaces whole, so the double
+        needs no resolver (backlog 887).
         """
 
         batch_id = None
         batch_step_id = None
         batch_root_step_id = None
-
-        def resolve_installation(self, installation_key: str) -> int:
-            """Return a stable id for any key, as the registry would."""
-            return _TEST_INSTALLATION_ID
 
         def start_batch(self, batch_name=None, **kw):
             """Bind a batch and its root step, as p_batch_start returns both.

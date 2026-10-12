@@ -1081,6 +1081,43 @@ class Control:
             "installation_key": installation_key,
         }, required=True)
 
+    def set_installation(self, name: str) -> None:
+        """Settle the selected installation's id onto the context, once.
+
+        The one place a selected installation name becomes its registry id
+        (backlog 887). ``_open_control`` calls it as soon as this Control exists,
+        because the installation is chosen per request and is known by then;
+        everything downstream -- ``Run.start``, ``installation_id`` -- only reads
+        the settled object and resolves nothing.
+
+        Not in ``__init__``: the name is the caller's selection, not something a
+        Control decides.
+
+        An id the context already carries -- a child that inherited its parent's
+        -- is not resolved again.
+
+        Raises:
+            ConfigError: If the context carries no installation, or one under a
+                different name, or the binding returns no id.
+        """
+        installation = getattr(self._ctx, "installation", None)
+        if installation is None or installation.name != name:
+            raise ConfigError(
+                f"control: cannot set installation {name!r}; the context carries "
+                f"{getattr(installation, 'name', None)!r}."
+            )
+        if installation.installation_id is not None:
+            return
+        resolved = self.resolve_installation(name)
+        if resolved is None:
+            raise ConfigError(
+                f"Resolving installation {name!r} returned no id. The control "
+                "procedure map's 'resolve_installation' binding must name a "
+                "routine that returns the id through an OUT parameter, bound "
+                "result_mode: scalar_result."
+            )
+        installation.attach_installation_id(resolved)
+
     def create_run_manifest(self, subject_type: Optional[str] = None,
                             subject_id: Optional[str] = None,
                             subject_name: Optional[str] = None,

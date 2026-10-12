@@ -12,19 +12,21 @@ Covers:
 - the string form is the name, so the mistake is no longer expressible
 - ctx.paths remains the single path authority
 - the registry id is attached once, and excluded from what the object *is*
-- the bootstrap seam resolves exactly once, and only where there is something
-  to resolve
+- Control.set_installation resolves exactly once, and only for the
+  installation the context carries; _open_control is its one caller
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.config.bootstrap import _settle_installation_id
+from rey_lib.config.bootstrap import _open_control
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_utils import PathResolver, build_ctx_from_path
+from rey_lib.control import Control
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.installation.installation import Installation
 
@@ -248,94 +250,116 @@ class TestTheResolvedId:
 
 
 # ---------------------------------------------------------------------------
-# The bootstrap seam
+# The settlement seam: Control.set_installation, called once by _open_control
 # ---------------------------------------------------------------------------
 
-class _CountingControl:
-    """A Control that records how many times it was asked to resolve."""
-
-    def __init__(self, installation_id: int = 4) -> None:
-        self.installation_id = installation_id
-        self.calls: list[str] = []
-
-    def resolve_installation(self, installation_key: str) -> int:
-        """Answer, and remember having been asked."""
-        self.calls.append(installation_key)
-        return self.installation_id
-
-
-class _SilentControl:
-    """A Control whose binding returns nothing, as a misbound one would."""
-
-    def resolve_installation(self, installation_key: str) -> None:
-        """Return nothing at all."""
-        return None
-
-
-def _ctx(installation: Installation | None, control: object | None) -> Namespace:
+def _ctx(installation: Installation | None) -> Namespace:
     """A context carrying only what the seam reads."""
     ctx = Namespace({})
     object.__setattr__(ctx, "installation", installation)
-    object.__setattr__(ctx, "shared_control", control)
     return ctx
 
 
-class TestTheBootstrapSeam:
-    """Resolve once, and only where there is something to resolve."""
+def _control(installation: Installation | None, resolved: int | None = 4):
+    """A real Control's set_installation over a stubbed resolver.
+
+    Built without ``__init__``, which opens a connection and starts a batch;
+    the method under test reads only the context and the resolver.
+    """
+    control = object.__new__(Control)
+    control._ctx = _ctx(installation)
+    calls: list[str] = []
+
+    def resolve_installation(installation_key: str) -> int | None:
+        calls.append(installation_key)
+        return resolved
+
+    control.resolve_installation = resolve_installation
+    return control, calls
+
+
+class TestSetInstallation:
+    """Resolve once, and only for the installation the context carries."""
 
     def test_it_resolves_and_attaches(self) -> None:
-        """The ordinary case: installation-backed, control open, id unknown."""
+        """The ordinary case: installation-backed, id unknown."""
         installation = Installation(name="ccc")
-        control = _CountingControl(installation_id=4)
+        control, calls = _control(installation, resolved=4)
 
-        _settle_installation_id(_ctx(installation, control))
+        control.set_installation("ccc")
 
         assert installation.installation_id == 4
-        assert control.calls == ["ccc"]
+        assert calls == ["ccc"]
 
     def test_an_already_known_id_is_not_resolved_again(self) -> None:
-        """The invariant: one resolution per identity, not one per bootstrap.
-
-        A child arrives carrying its parent's id. Attaching the same value would
-        succeed, so a correct end state proves nothing -- the call count is what
-        distinguishes inheriting an answer from asking the question twice.
-        """
+        """A child arrives carrying its parent's id; the call count proves it
+        inherited the answer rather than asking twice."""
         installation = Installation(name="ccc", installation_id=4)
-        control = _CountingControl(installation_id=4)
+        control, calls = _control(installation)
 
-        _settle_installation_id(_ctx(installation, control))
+        control.set_installation("ccc")
 
-        assert control.calls == []
+        assert calls == []
         assert installation.installation_id == 4
 
-    def test_an_installation_less_context_resolves_nothing(self) -> None:
-        """A standalone CLI context does not acquire an installation here."""
-        control = _CountingControl()
+    def test_a_context_without_an_installation_is_refused(self) -> None:
+        """Nothing is synthesized to receive the id."""
+        control, calls = _control(None)
 
-        _settle_installation_id(_ctx(None, control))
+        with pytest.raises(ConfigError, match="cannot set installation"):
+            control.set_installation("ccc")
+        assert calls == []
 
-        assert control.calls == []
+    def test_a_different_name_is_refused(self) -> None:
+        """The context's installation is the selection; another name is not."""
+        control, calls = _control(Installation(name="ccc"))
 
-    def test_no_control_means_no_resolution_and_no_failure(self) -> None:
-        """An installation with no control database still boots.
-
-        The Console's own is this case. There is no registry to ask, which is an
-        ordinary state rather than a reason to refuse.
-        """
-        installation = Installation(name="ccc")
-
-        _settle_installation_id(_ctx(installation, None))
-
-        assert installation.installation_id is None
+        with pytest.raises(ConfigError, match="cannot set installation"):
+            control.set_installation("ddd")
+        assert calls == []
 
     def test_a_binding_that_returns_nothing_is_reported(self) -> None:
-        """A misbound resolver is a configuration fault, named as one.
-
-        The routine raises on an unknown or blank key, so returning None means
-        the binding names the wrong routine or reads no OUT parameter -- and a
-        binding is never checked against the catalog.
-        """
+        """A misbound resolver is a configuration fault, named as one."""
         installation = Installation(name="ccc")
+        control, _ = _control(installation, resolved=None)
 
         with pytest.raises(ConfigError, match="returned no id"):
-            _settle_installation_id(_ctx(installation, _SilentControl()))
+            control.set_installation("ccc")
+        assert installation.installation_id is None
+
+
+class _OpenedControl:
+    """What _open_control builds, recording the settlement it is asked for."""
+
+    def __init__(self, ctx: object) -> None:
+        self.settled: list[str] = []
+
+    def set_installation(self, name: str) -> None:
+        self.settled.append(name)
+
+    def close(self) -> None:
+        """Collected with the runtime."""
+
+
+class TestOpenControlSettlesOnce:
+    """The one place settlement happens is where Control is opened."""
+
+    def test_it_settles_the_selected_installation_once(self, monkeypatch) -> None:
+        import rey_lib.control
+
+        monkeypatch.setattr(rey_lib.control, "Control", _OpenedControl)
+        ctx = SimpleNamespace(installation=Installation(name="ccc"))
+
+        control = _open_control(ctx)
+
+        assert control.settled == ["ccc"]
+
+    def test_an_installation_less_context_settles_nothing(self, monkeypatch) -> None:
+        """A standalone CLI context declares no installation."""
+        import rey_lib.control
+
+        monkeypatch.setattr(rey_lib.control, "Control", _OpenedControl)
+
+        control = _open_control(SimpleNamespace(installation=None))
+
+        assert control.settled == []
