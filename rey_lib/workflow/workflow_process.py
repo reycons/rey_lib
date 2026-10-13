@@ -21,11 +21,14 @@ WorkflowProcess    A configured Application instance and its ordered steps.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from rey_lib.config.applications import Application
 from rey_lib.workflow.engine import WorkflowError
 from rey_lib.workflow.workflow_step import WorkflowStep
+
+if TYPE_CHECKING:
+    from rey_lib.workflow.workflow import Workflow
 
 __all__ = ["WorkflowProcess"]
 
@@ -46,6 +49,9 @@ class WorkflowProcess:
         governed value is null, kept distinct from an empty mapping.
     steps : tuple[WorkflowStep, ...]
         The process's steps, in the order hydration gives them.
+    workflow : Workflow | None
+        The Workflow this process belongs to; set by that Workflow when it is
+        constructed, None before.
     """
 
     def __init__(
@@ -96,3 +102,4 @@ class WorkflowProcess:
                     f"'{application.name}' does not publish."
                 )
         self.steps: tuple[WorkflowStep, ...] = tuple(steps)
+        self.workflow: Optional["Workflow"] = None

@@ -93,6 +93,15 @@ def test_a_step_of_another_application_is_refused() -> None:
         )
 
 
+def test_a_process_belongs_to_no_workflow_until_one_holds_it() -> None:
+    application = Application(name="app")
+
+    process = WorkflowProcess(name="app", ordinal=1, application=application,
+                              config=None, steps=[])
+
+    assert process.workflow is None
+
+
 def test_a_process_without_a_name_is_refused() -> None:
     application = Application(name="app")
 
