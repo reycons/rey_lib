@@ -24,7 +24,8 @@ WorkflowStep    A bound, configured, executable operation instance.
 from __future__ import annotations
 
 import time
-from typing import Any, Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.config.inventory import to_plain_data
@@ -40,12 +41,31 @@ from rey_lib.logs import (
     monotonic_ms,
 )
 from rey_lib.logs.run_log import RunLog
-from rey_lib.workflow.coordinator import ProcessHandler, StepOutcome
 from rey_lib.workflow.engine import RunContext, WorkflowError
 
-__all__ = ["WorkflowStep"]
+__all__ = ["ProcessHandler", "StepOutcome", "WorkflowStep"]
 
 _logger = AppLogger(__name__)
+
+# A process handler: (ctx, run_log, effective_config, run_context) -> result-or-None.
+# The result may be any object exposing ``status``/``detail``; None means "ok".
+#
+# The run log is passed rather than reached through ctx or the run context: a
+# handler that writes records is a run-log writer, and a writer takes its owner.
+ProcessHandler = Callable[[Any, Any, dict[str, Any], RunContext], Any]
+
+
+@dataclass
+class StepOutcome:
+    """One workflow step's recorded outcome."""
+
+    id: str
+    label: str
+    process: str
+    status: str                       # "ok" | "skipped" | "failed"
+    detail: str = ""
+    artifacts: list[Any] = field(default_factory=list)
+    error: Optional[str] = None
 
 
 class WorkflowStep:
@@ -173,7 +193,7 @@ class WorkflowStep:
         """
         self.outcome = None
         self.failure_record_id = None
-        refusal = self._contract_refusal(workflow_name)
+        refusal = self.contract_refusal(workflow_name)
         if refusal:
             raise WorkflowError(refusal)
 
@@ -256,12 +276,14 @@ class WorkflowStep:
         finally:
             clear_step()
 
-    def _contract_refusal(self, workflow_name: str) -> str:
+    def contract_refusal(self, workflow_name: str) -> str:
         """Why this step's settings do not satisfy its operation's contract, or ''.
 
         The settings are reviewed whole against the operation's
         ``contract_definition`` (JSON Schema, backlog 939). Unsupported keys are
-        tolerated with a warning naming them; a violation refuses.
+        tolerated with a warning naming them; a violation refuses. ``execute``
+        calls this first; the Workflow calls it on the dry-run path, where it does
+        not execute the step, so each step is reviewed once per run.
         """
         unsupported, violations = contract_review(
             self.operation.contract_definition or {},
@@ -269,14 +291,16 @@ class WorkflowStep:
         )
         if unsupported:
             _logger.warning(
-                "workflow '%s': step '%s' carries settings the contract of "
+                "workflow '%s': process '%s' carries settings the contract of "
                 "implementation '%s' does not support; they are ignored: %s",
-                workflow_name, self.id, self.operation.name, "; ".join(unsupported),
+                workflow_name, self.process_name, self.operation.name,
+                "; ".join(unsupported),
             )
         if not violations:
             return ""
         return (
-            f"workflow '{workflow_name}': step '{self.id}' settings do not satisfy the "
+            f"workflow '{workflow_name}': process '{self.process_name}' settings do not "
+            "satisfy the "
             f"contract of implementation '{self.operation.name}': "
             + "; ".join(violations)
         )

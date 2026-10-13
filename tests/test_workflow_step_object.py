@@ -222,6 +222,21 @@ def test_a_contract_violation_refuses_before_any_record_and_never_invokes(
     assert step.outcome is None
 
 
+def test_the_contract_refusal_names_the_workflow_process_and_implementation() -> None:
+    required = _operation("p1", {
+        "$schema": _SCHEMA, "type": "object",
+        "properties": {"source": {"type": "string"}}, "required": ["source"],
+    })
+    step = _step(lambda *_args: None, application=_application(required))
+
+    refusal = step.contract_refusal("wf")
+
+    assert refusal.startswith(
+        "workflow 'wf': process 'p1' settings do not satisfy the contract of "
+        "implementation 'p1': "
+    )
+
+
 def test_unsupported_settings_are_warned_about_and_the_step_runs(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
