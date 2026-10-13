@@ -114,6 +114,62 @@ class TestBothParameterLevels:
         assert build([declaration()])[0].command("nothing") is None
 
 
+class TestParameterGroups:
+    """Groups name parameters of their own scope, as the parser groups them (940)."""
+
+    @staticmethod
+    def _group(**extra: Any) -> dict[str, Any]:
+        return {"name": "target", "mutually_exclusive": True, "members": ["a", "b"], **extra}
+
+    def test_an_application_level_group_is_read(self) -> None:
+        built = build([declaration(
+            parameters=[{"name": "a"}, {"name": "b"}],
+            parameter_groups=[self._group(description="One or the other.")],
+        )])
+
+        (group,) = built[0].parameter_groups
+        assert (group.name, group.mutually_exclusive, group.required, group.members) == (
+            "target", True, False, ("a", "b"))
+        assert group.description == "One or the other."
+        assert [p.name for p in built[0].parameters] == ["a", "b"]
+
+    def test_a_command_level_group_is_read(self) -> None:
+        built = build([declaration(commands=[{
+            "name": "export",
+            "parameters": [{"name": "a"}, {"name": "b"}],
+            "parameter_groups": [self._group(required=True)],
+        }])])
+
+        (group,) = built[0].command("export").parameter_groups
+        assert group.required is True and group.members == ("a", "b")
+        assert built[0].parameter_groups == ()
+
+    @pytest.mark.parametrize(("parameters", "groups", "message"), [
+        ([{"name": "a"}], [{"members": ["a"]}], "with no name"),
+        ([{"name": "a"}, {"name": "b"}],
+         [{"name": "g", "members": ["a"]}, {"name": "g", "members": ["b"]}], "more than once"),
+        ([], [{"name": "g", "parameters": [{"name": "a"}]}], "nests parameter declarations"),
+        ([{"name": "a"}], [{"name": "g"}], "names no members"),
+        ([{"name": "a"}], [{"name": "g", "members": ["a", "z"]}], "does not declare"),
+        ([{"name": "a"}, {"name": "b"}],
+         [{"name": "g", "members": ["a"]}, {"name": "h", "members": ["a", "b"]}],
+         "another group"),
+    ], ids=["no_name", "duplicate", "nested", "no_members", "unknown_member", "two_groups"])
+    def test_a_group_the_parser_could_not_have_is_refused(
+        self, parameters: list[dict[str, Any]], groups: list[dict[str, Any]], message: str,
+    ) -> None:
+        with pytest.raises(ConfigError, match=message):
+            build([declaration(parameters=parameters, parameter_groups=groups)])
+
+    def test_a_member_must_belong_to_the_same_scope(self) -> None:
+        with pytest.raises(ConfigError, match="does not declare"):
+            build([declaration(
+                parameters=[{"name": "a"}],
+                commands=[{"name": "export", "parameters": [{"name": "b"}],
+                           "parameter_groups": [self._group()]}],
+            )])
+
+
 class TestCommandNames:
     """Two declarations for what an application offers, stated once."""
 

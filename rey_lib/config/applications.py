@@ -33,6 +33,7 @@ __all__ = [
     "ApplicationMode",
     "ApplicationModeGroup",
     "ApplicationOperation",
+    "ApplicationParameterGroup",
     "build_applications",
 ]
 
@@ -239,6 +240,24 @@ class ApplicationCommandParameter:
 
 
 @dataclass(frozen=True)
+class ApplicationParameterGroup:
+    """Parameters the parser treats together, at the scope that declares them.
+
+    The members are named, and each is an ordinary parameter of the same scope:
+    an application's own parameters for a group under ``cli``, one command's for
+    a group under that command. ``mutually_exclusive`` with ``required`` false
+    is at most one member; with ``required`` true, exactly one -- what argparse's
+    ``add_mutually_exclusive_group(required=...)`` enforces (backlog 940).
+    """
+
+    name: str
+    description: str = ""
+    mutually_exclusive: bool = False
+    required: bool = False
+    members: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ApplicationCommand:
     """One command an application exposes, and what it takes."""
 
@@ -246,6 +265,7 @@ class ApplicationCommand:
     description: str = ""
     parameters: tuple[ApplicationCommandParameter, ...] = ()
     mode_groups: tuple[ApplicationModeGroup, ...] = ()
+    parameter_groups: tuple[ApplicationParameterGroup, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -322,6 +342,8 @@ class Application:
     #: application that takes arguments without naming a command is an ordinary
     #: shape, not a declaration missing its commands.
     parameters: tuple[ApplicationCommandParameter, ...] = field(default=())
+    #: Groups over :attr:`parameters`, declared under ``cli.parameter_groups``.
+    parameter_groups: tuple[ApplicationParameterGroup, ...] = field(default=())
     commands: tuple[ApplicationCommand, ...] = field(default=())
     #: The operations this application allows a workflow to invoke.
     #:
@@ -478,6 +500,11 @@ def _from_registration(
 
     cli = registration.get("cli")
     cli = cli if isinstance(cli, dict) else {}
+    parameters = tuple(
+        _parameter(one, ctx, name)
+        for one in (_plain(item) for item in (cli.get("parameters") or []))
+        if isinstance(one, dict)
+    )
     return Application(
         name=name,
         # THREE SOURCES, IN THAT ORDER. An installation naming an application
@@ -500,11 +527,8 @@ def _from_registration(
         # From the installation entry, not the registration: how loud this
         # application runs here is this installation's decision.
         log_level=str(entry.get("log_level") or ""),
-        parameters=tuple(
-            _parameter(one, ctx, name)
-            for one in (_plain(item) for item in (cli.get("parameters") or []))
-            if isinstance(one, dict)
-        ),
+        parameters=parameters,
+        parameter_groups=_parameter_groups(cli, parameters, name),
         commands=_commands(cli, ctx, name),
         workflow_operations=_operations(registration, name),
     )
@@ -665,16 +689,78 @@ def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCo
     """
     name = str(entry.get("name") or "")
     groups = _mode_groups(entry, application, name)
+    parameters = tuple(
+        _parameter(one, ctx, application, name, groups)
+        for one in (_plain(item) for item in (entry.get("parameters") or []))
+        if isinstance(one, dict)
+    )
     return ApplicationCommand(
         name=name,
         description=str(entry.get("description") or ""),
-        parameters=tuple(
-            _parameter(one, ctx, application, name, groups)
-            for one in (_plain(item) for item in (entry.get("parameters") or []))
-            if isinstance(one, dict)
-        ),
+        parameters=parameters,
         mode_groups=groups,
+        parameter_groups=_parameter_groups(entry, parameters, application, name),
     )
+
+
+def _parameter_groups(
+    entry: dict[str, Any],
+    parameters: tuple[ApplicationCommandParameter, ...],
+    application: str,
+    command: str = "",
+) -> tuple[ApplicationParameterGroup, ...]:
+    """One scope's parameter groups, each checked against that scope's parameters.
+
+    Raises:
+        ConfigError: A group with no name, a duplicate group name, a group
+            still nesting its members' declarations, no members, a member that
+            is not a parameter of the same scope, or a parameter in two groups.
+            Each would publish a group the parser does not have.
+    """
+    where = f"Application '{application}'" + (f" command '{command}'" if command else "")
+    declared = {one.name for one in parameters}
+    built: list[ApplicationParameterGroup] = []
+    grouped: set[str] = set()
+    for item in (_plain(one) for one in (entry.get("parameter_groups") or [])):
+        if not isinstance(item, dict):
+            continue
+        group = str(item.get("name") or "")
+        if not group:
+            raise ConfigError(f"{where} declares a parameter group with no name.")
+        if any(one.name == group for one in built):
+            raise ConfigError(f"{where} declares parameter group '{group}' more than once.")
+        if "parameters" in item:
+            # Refused rather than read: members declared inside a group are
+            # invisible to every reader of the scope's parameters.
+            raise ConfigError(
+                f"{where} parameter group '{group}' nests parameter declarations. "
+                "Declare them as parameters of the same scope and name them under "
+                "'members'."
+            )
+        members = tuple(str(one) for one in (item.get("members") or ()))
+        if not members:
+            raise ConfigError(f"{where} parameter group '{group}' names no members.")
+        unknown = [one for one in members if one not in declared]
+        if unknown:
+            raise ConfigError(
+                f"{where} parameter group '{group}' names {', '.join(unknown)}, "
+                "which this scope does not declare as parameters."
+            )
+        twice = [one for one in members if one in grouped]
+        if twice:
+            raise ConfigError(
+                f"{where} parameter group '{group}' names {', '.join(twice)}, "
+                "already a member of another group."
+            )
+        grouped.update(members)
+        built.append(ApplicationParameterGroup(
+            name=group,
+            description=str(item.get("description") or ""),
+            mutually_exclusive=bool(item.get("mutually_exclusive")),
+            required=bool(item.get("required")),
+            members=members,
+        ))
+    return tuple(built)
 
 
 def _mode_groups(
