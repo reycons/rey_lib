@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from rey_lib.config.config_utils import record_config_file_references
 from rey_lib.config.inventory import to_plain_data
+from rey_lib.config.operation_contract import contract_review
 from rey_lib.errors.error_utils import AppError, build_safe_error_payload
 from rey_lib.logs import (
     bind_step,
@@ -605,74 +606,42 @@ def _contract_refusal(
     workflow: str,
     process: str,
 ) -> str:
-    """Why this configuration does not satisfy the published contract, or ''.
+    """Why these settings do not satisfy the published contract, or ''.
 
-    Two rules, both fail-closed. Configuration the contract does not declare is
-    refused rather than passed through, because an implementation that silently
-    receives an unknown key is how a typo becomes a setting nobody applied. A
-    declared parameter marked required must be present.
+    The operation's contract_definition is a JSON Schema of the settings it
+    reads (backlog 939), and the effective settings -- process defaults with the
+    step's overrides, tokens expanded, engine vocabulary removed -- are reviewed
+    against it whole. Fail closed on a violation: a missing required setting, a
+    wrong type, a value outside the allowed set, settings matching no variant.
+    An implementation never receives settings its published contract refuses.
 
-    What a value *means* is not checked here. Publication says a parameter
-    exists, is required and which values are valid; the implementation still
-    owns what a name resolves to.
+    Unsupported keys are tolerated, with a warning naming them. They are not
+    part of the contract and nothing reads them, but existing configuration may
+    still carry them, and refusing them would stop workflows that run today
+    (user, 2026-10-13). New configuration is generated only from the contract.
+
+    What a value *means* is not checked here. The contract says which settings
+    exist and what shape they take; the implementation still owns what a name
+    resolves to.
     """
-    declared = {
-        str(getattr(parameter, "name", "")): parameter
-        for parameter in getattr(operation, "parameters", ()) or ()
-    }
-    # Through the one namespace-to-plain-data conversion. A resolved
-    # configuration nests Namespace objects rather than dicts, and a Namespace
-    # is not a Mapping, so walking the structure directly would read every
-    # nested block as a single leaf -- target instead of target.connection.
-    supplied = set(_flattened(to_plain_data(effective)))
-
-    # A declared name covers its own subtree. An application that publishes a
-    # block says it takes that block; requiring every leaf would make the
-    # contract a copy of one installation's current configuration, which is the
-    # drift publication exists to remove.
-    undeclared = sorted(
-        name for name in supplied
-        if not any(
-            name == one or name.startswith(f"{one}.") for one in declared
-        )
+    implementation = getattr(operation, "name", "")
+    # Through the one namespace-to-plain-data conversion: a resolved
+    # configuration nests Namespace objects rather than dicts, and JSON Schema
+    # validates plain data.
+    unsupported, violations = contract_review(
+        getattr(operation, "contract_definition", None) or {},
+        to_plain_data(effective),
     )
-    if undeclared:
-        return (
-            f"workflow '{workflow}': process '{process}' supplies "
-            f"{', '.join(repr(one) for one in undeclared)}, which "
-            f"implementation '{getattr(operation, 'name', '')}' does not "
-            "declare."
+    if unsupported:
+        _logger.warning(
+            "workflow '%s': process '%s' carries settings the contract of "
+            "implementation '%s' does not support; they are ignored: %s",
+            workflow, process, implementation, "; ".join(unsupported),
         )
-
-    missing = sorted(
-        name for name, parameter in declared.items()
-        if getattr(parameter, "required", False)
-        and not any(
-            one == name or one.startswith(f"{name}.") for one in supplied
-        )
+    if not violations:
+        return ""
+    return (
+        f"workflow '{workflow}': process '{process}' settings do not satisfy the "
+        f"contract of implementation '{implementation}': "
+        + "; ".join(violations)
     )
-    if missing:
-        return (
-            f"workflow '{workflow}': process '{process}' is missing required "
-            f"{', '.join(repr(one) for one in missing)} for implementation "
-            f"'{getattr(operation, 'name', '')}'."
-        )
-    return ""
-
-
-def _flattened(config: Mapping[str, Any], prefix: str = "") -> list[str]:
-    """Every configured key, nested ones written as ``parent.child``.
-
-    A published parameter names one setting. ``target.connection`` is the name
-    of a setting whose value happens to sit inside a mapping, so a contract can
-    declare it without the declaration having to be flat -- and an application
-    that publishes ``target`` instead has declared the whole block.
-    """
-    names: list[str] = []
-    for key, value in config.items():
-        name = f"{prefix}{key}"
-        if isinstance(value, Mapping):
-            names.extend(_flattened(value, prefix=f"{name}."))
-        else:
-            names.append(name)
-    return names

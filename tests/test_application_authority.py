@@ -165,19 +165,25 @@ class TestCapabilityHasOneSource:
 
         assert built[0].workflow_operations == ()
 
-    def test_published_operations_carry_their_parameters(self) -> None:
+    def test_published_operations_carry_their_contract(self) -> None:
+        definition = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"connection": {"type": "string"}},
+            "required": ["connection"],
+            "additionalProperties": False,
+        }
         built = build_applications(
             ctx([declared()]),
             registrations=registered(workflow_operations=[
-                {"name": "index", "parameters": [
-                    {"name": "connection", "required": True},
-                ]},
+                {"name": "index", "contract_definition": definition,
+                 "contract_sample": {"connection": ""}},
             ]),
         )
 
         operation = built[0].workflow_operations[0]
         assert operation.name == "index"
-        assert operation.parameters[0].required is True
+        assert operation.contract_definition["required"] == ["connection"]
 
 
 class TestInstallationOwnedFields:

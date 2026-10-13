@@ -20,8 +20,9 @@ or resolve differently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
+from rey_lib.config.operation_contract import check_contract
 from rey_lib.config.registration import REGISTRATION_GROUP, discover_registrations
 from rey_lib.errors.error_utils import ConfigError
 
@@ -31,6 +32,7 @@ __all__ = [
     "ApplicationCommandParameter",
     "ApplicationMode",
     "ApplicationModeGroup",
+    "ApplicationOperation",
     "build_applications",
 ]
 
@@ -247,6 +249,24 @@ class ApplicationCommand:
 
 
 @dataclass(frozen=True)
+class ApplicationOperation:
+    """One operation an application publishes for workflows, with its contract.
+
+    ``contract_definition`` is a JSON Schema (2020-12) of the settings the
+    operation reads; ``contract_sample`` is the starter settings a new settings
+    instance copies. Both are the application's own published answer, checked
+    when the registration is read (rey_lib.config.operation_contract), and the
+    coordinator validates every step's settings against the definition before
+    dispatch. Neither holds workflow values.
+    """
+
+    name: str
+    description: str = ""
+    contract_definition: Mapping[str, Any] = field(default_factory=dict, hash=False)
+    contract_sample: Mapping[str, Any] = field(default_factory=dict, hash=False)
+
+
+@dataclass(frozen=True)
 class Application:
     """One configured application.
 
@@ -306,15 +326,15 @@ class Application:
     #: The operations this application allows a workflow to invoke.
     #:
     #: The published half of the workflow contract: a declared process names one
-    #: of these, and its step configuration is validated against the parameters
-    #: named here before anything is dispatched. Reuses the command parameter
-    #: vocabulary rather than a second one, because a published parameter is a
-    #: published parameter whichever execution model reads it.
+    #: of these, and its step settings are validated against the operation's
+    #: contract_definition (JSON Schema) before anything is dispatched. Not the
+    #: CLI parameter vocabulary: an operation's settings are hierarchical, so
+    #: the contract is a schema rather than a parameter list (backlog 939).
     #:
     #: Empty until an application publishes them. Which operations an
     #: application approves is its own answer, and an empty tuple means it has
     #: not given one -- never that it approves everything.
-    workflow_operations: tuple[ApplicationCommand, ...] = field(default=())
+    workflow_operations: tuple[ApplicationOperation, ...] = field(default=())
 
     def command(self, name: str) -> ApplicationCommand | None:
         """The command of that name, or None where this application has none."""
@@ -486,25 +506,55 @@ def _from_registration(
             if isinstance(one, dict)
         ),
         commands=_commands(cli, ctx, name),
-        workflow_operations=_operations(registration, ctx, name),
+        workflow_operations=_operations(registration, name),
     )
 
 
 def _operations(
     registration: dict[str, Any],
-    ctx: Any,
     application: str,
-) -> tuple[ApplicationCommand, ...]:
+) -> tuple[ApplicationOperation, ...]:
     """The operations an application approves for workflow invocation.
 
     Absent means none approved, which is the safe reading: an application that
     has published nothing has not approved everything.
+
+    Each operation's contract is checked here, once, when the registration is
+    read: a definition that is not JSON Schema 2020-12, or a sample that does
+    not satisfy it, stops the load rather than surfacing at a workflow's first
+    step.
+
+    Raises:
+        ConfigError: An operation with no name, one still publishing the
+            retired ``parameters`` list, or one whose contract is refused.
     """
-    return tuple(
-        _command(one, ctx, application)
-        for one in (_plain(item) for item in (registration.get("workflow_operations") or []))
-        if isinstance(one, dict)
-    )
+    operations: list[ApplicationOperation] = []
+    for one in (_plain(item) for item in (registration.get("workflow_operations") or [])):
+        if not isinstance(one, dict):
+            continue
+        name = str(one.get("name") or "")
+        if not name:
+            raise ConfigError(
+                f"Application '{application}' publishes a workflow operation with no name."
+            )
+        label = f"{application}.{name}"
+        if "parameters" in one:
+            # Refused rather than ignored: a parameter list left beside a
+            # contract would read as a second statement of the same thing.
+            raise ConfigError(
+                f"Operation '{label}' publishes a parameters list. A workflow "
+                "operation publishes contract_definition and contract_sample."
+            )
+        definition = one.get("contract_definition")
+        sample = one.get("contract_sample")
+        check_contract(definition, sample, label)
+        operations.append(ApplicationOperation(
+            name=name,
+            description=str(one.get("description") or ""),
+            contract_definition=definition,
+            contract_sample=sample,
+        ))
+    return tuple(operations)
 
 
 def _from_declaration(

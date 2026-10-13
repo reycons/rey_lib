@@ -21,21 +21,26 @@ from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Mapping
 
-from rey_lib.config.applications import (
-    Application,
-    ApplicationCommand,
-    ApplicationCommandParameter,
-)
+from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.workflow import WorkflowRun, hydrate_workflow, run_workflow
 
 __all__ = ["prepared", "run_hydrated"]
 
 #: Engine vocabulary, which no application publishes.
-_ENGINE_KEYS = frozenset({"implementation", "apply_only", "enabled", "name"})
+_ENGINE_KEYS = frozenset({"implementation", "apply_only", "always_run", "enabled", "name"})
+
+#: The application a fixture belongs to when it names none.
+_DEFAULT_OWNER = "fixture_app"
 
 
 def prepared(workflow: dict[str, Any], ctx: Any = None) -> tuple[dict[str, Any], Any]:
     """Return the workflow with implementations bound, and a ctx publishing them.
+
+    Each implementation is published with a contract (backlog 939) declaring
+    exactly the top-level settings the fixture configures for it, any value
+    allowed: the weakest publication under which the fixture is legal. Several
+    processes binding one implementation publish it once, declaring every
+    setting any of them configures.
 
     Args:
         workflow: The fixture definition.
@@ -45,30 +50,40 @@ def prepared(workflow: dict[str, Any], ctx: Any = None) -> tuple[dict[str, Any],
         The prepared workflow and the context to run it in.
     """
     prepared_workflow = deepcopy(workflow)
-    owner = str(prepared_workflow.get("app") or "fixture_app")
+    owner = str(prepared_workflow.get("app") or _DEFAULT_OWNER)
     prepared_workflow["app"] = owner
 
     processes = prepared_workflow.get("processes") or {}
-    operations: list[ApplicationCommand] = []
+    settings: dict[str, set[str]] = {}
     for process, declared in processes.items():
         declared = declared if isinstance(declared, dict) else {}
         declared.setdefault("implementation", process)
         processes[process] = declared
-        operations.append(
-            ApplicationCommand(
-                name=str(declared["implementation"]),
-                parameters=tuple(
-                    ApplicationCommandParameter(name=name)
-                    for name in _configured(prepared_workflow, process, declared)
-                ),
-            )
+        settings.setdefault(str(declared["implementation"]), set()).update(
+            _configured(prepared_workflow, process, declared)
         )
     prepared_workflow["processes"] = processes
 
-    application = Application(name=owner, workflow_operations=tuple(operations))
+    operations = tuple(
+        ApplicationOperation(
+            name=name,
+            contract_definition={
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {one: {} for one in sorted(names)},
+                "additionalProperties": False,
+            },
+            contract_sample={},
+        )
+        for name, names in settings.items()
+    )
+    application = Application(name=owner, workflow_operations=operations)
     if ctx is None:
         return prepared_workflow, SimpleNamespace(applications=(application,))
-    setattr(ctx, "applications", (application,))
+    try:
+        setattr(ctx, "applications", (application,))
+    except AttributeError:
+        object.__setattr__(ctx, "applications", (application,))
     return prepared_workflow, ctx
 
 
@@ -76,26 +91,12 @@ def _configured(
     workflow: Mapping[str, Any],
     process: str,
     declared: Mapping[str, Any],
-) -> list[str]:
-    """Every setting this process is configured with, defaults and steps."""
-    names: set[str] = set(_keys(declared))
+) -> set[str]:
+    """Every top-level setting this process is configured with, defaults and steps."""
+    names = {key for key in declared if key not in _ENGINE_KEYS}
     for step in workflow.get("steps") or []:
         if isinstance(step, dict) and step.get("process") == process:
-            names.update(_keys(step.get("config") or {}))
-    return sorted(names)
-
-
-def _keys(config: Mapping[str, Any], prefix: str = "") -> list[str]:
-    """Configured keys, nested ones written as ``parent.child``."""
-    names: list[str] = []
-    for key, value in config.items():
-        if not prefix and key in _ENGINE_KEYS:
-            continue
-        name = f"{prefix}{key}"
-        if isinstance(value, Mapping):
-            names.extend(_keys(value, prefix=f"{name}."))
-        else:
-            names.append(name)
+            names.update(key for key in (step.get("config") or {}) if key not in _ENGINE_KEYS)
     return names
 
 

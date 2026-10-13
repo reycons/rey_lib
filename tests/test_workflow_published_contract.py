@@ -14,16 +14,12 @@ from typing import Any
 import pytest
 
 from rey_lib.config.config_namespace import Namespace
-from rey_lib.config.applications import (
-    Application,
-    ApplicationCommand,
-    ApplicationCommandParameter,
-)
+from rey_lib.config.applications import Application, ApplicationOperation
 from tests.support.workflow_publication import run_hydrated
 from rey_lib.workflow import StepResult, WorkflowError
 
 
-def published(*operations: ApplicationCommand) -> SimpleNamespace:
+def published(*operations: ApplicationOperation) -> SimpleNamespace:
     """A context whose application publishes these operations."""
     return SimpleNamespace(
         applications=(
@@ -32,15 +28,33 @@ def published(*operations: ApplicationCommand) -> SimpleNamespace:
     )
 
 
-def operation(name: str, **parameters: bool) -> ApplicationCommand:
-    """One published operation whose parameters are name -> required."""
-    return ApplicationCommand(
+def contract(properties: dict[str, Any], required: list[str] | None = None, **extra: Any) -> dict[str, Any]:
+    """A closed JSON Schema 2020-12 contract of these settings."""
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": properties,
+        "required": list(required or ()),
+        "additionalProperties": False,
+        **extra,
+    }
+
+
+def operation(name: str, **settings: bool) -> ApplicationOperation:
+    """One published operation whose settings are name -> required, any value."""
+    return ApplicationOperation(
         name=name,
-        parameters=tuple(
-            ApplicationCommandParameter(name=parameter, required=required)
-            for parameter, required in parameters.items()
+        contract_definition=contract(
+            {setting: {} for setting in settings},
+            [setting for setting, required in settings.items() if required],
         ),
+        contract_sample={},
     )
+
+
+def operation_with(name: str, definition: dict[str, Any]) -> ApplicationOperation:
+    """One published operation with this contract_definition."""
+    return ApplicationOperation(name=name, contract_definition=definition, contract_sample={})
 
 
 def workflow(processes: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -144,25 +158,31 @@ class TestTheContractIsPublished:
 
 
 class TestValidationPrecedesDispatch:
-    """An implementation never receives configuration it did not declare."""
+    """An implementation never receives settings its contract refuses (backlog 939)."""
 
-    def test_undeclared_configuration_is_refused(self, run_log) -> None:
-        """A typo becoming a setting nobody applied is what this prevents."""
+    def test_an_unsupported_key_is_tolerated_and_named(self, run_log, caplog) -> None:
+        """A key the contract does not define is not refused, but it is said.
+
+        Unsupported settings are not part of the canonical contract and are never
+        generated from it; existing configuration may still carry them (user,
+        2026-10-13), so the run goes on and the warning names the key.
+        """
         calls: list[Any] = []
-        with pytest.raises(WorkflowError, match="'typo'"):
-            run_hydrated(
-                published(operation("load", source=False)),
-                run_log,
-                workflow({"ingest": {"implementation": "load", "typo": 1}},
-                         [{"id": "s", "process": "ingest"}]),
-                catalog(calls),
-            )
+        run = run_hydrated(
+            published(operation("load", source=False)),
+            run_log,
+            workflow({"ingest": {"implementation": "load", "typo": 1}},
+                     [{"id": "s", "process": "ingest"}]),
+            catalog(calls),
+        )
 
-        assert calls == []
+        assert run.status == "success"
+        assert len(calls) == 1
+        assert "'typo' was unexpected" in caplog.text
 
-    def test_a_missing_required_parameter_is_refused(self, run_log) -> None:
+    def test_a_missing_required_setting_is_refused(self, run_log) -> None:
         calls: list[Any] = []
-        with pytest.raises(WorkflowError, match="missing required 'source'"):
+        with pytest.raises(WorkflowError, match="'source' is a required property"):
             run_hydrated(
                 published(operation("load", source=True)),
                 run_log,
@@ -173,129 +193,111 @@ class TestValidationPrecedesDispatch:
 
         assert calls == []
 
-    def test_a_nested_setting_is_named_by_its_path(self, run_log) -> None:
+    def test_a_wrong_type_is_refused_with_its_path(self, run_log) -> None:
+        """The refusal names the exact path, which is what a reader has to fix."""
+        calls: list[Any] = []
+        definition = contract({"target": contract({"connection": {"type": "string"}}, ["connection"])})
+        with pytest.raises(WorkflowError, match=r"target\.connection: 5 is not of type 'string'"):
+            run_hydrated(
+                published(operation_with("load", definition)),
+                run_log,
+                workflow({"ingest": {"implementation": "load", "target": {"connection": 5}}},
+                         [{"id": "s", "process": "ingest"}]),
+                catalog(calls),
+            )
+
+        assert calls == []
+
+    def test_a_value_outside_the_allowed_set_is_refused(self, run_log) -> None:
+        definition = contract({"output": {"type": "string", "enum": ["clear", "redacted"]}})
+        with pytest.raises(WorkflowError, match="'opaque' is not one of"):
+            run_hydrated(
+                published(operation_with("load", definition)),
+                run_log,
+                workflow({"ingest": {"implementation": "load", "output": "opaque"}},
+                         [{"id": "s", "process": "ingest"}]),
+                catalog([]),
+            )
+
+    def test_settings_matching_no_variant_are_refused(self, run_log) -> None:
+        """A dispatcher's operation value chooses its variant."""
+        definition = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"operation": {"enum": ["move", "delete"]}},
+            "required": ["operation"],
+            "oneOf": [
+                {"properties": {"operation": {"const": "move"}, "to": {"type": "string"}},
+                 "required": ["operation", "to"], "additionalProperties": False},
+                {"properties": {"operation": {"const": "delete"}},
+                 "required": ["operation"], "additionalProperties": False},
+            ],
+        }
+        with pytest.raises(WorkflowError, match="is not valid under any of the given schemas"):
+            run_hydrated(
+                published(operation_with("load", definition)),
+                run_log,
+                workflow({"ingest": {"implementation": "load", "operation": "move"}},
+                         [{"id": "s", "process": "ingest"}]),
+                catalog([]),
+            )
+
+    def test_a_nested_setting_is_reached_through_its_mapping(self, run_log) -> None:
         """target.connection is one setting whose value sits in a mapping."""
         calls: list[Any] = []
+        definition = contract({"target": contract({"connection": {"type": "string"}}, ["connection"])}, ["target"])
         run = run_hydrated(
-            published(ApplicationCommand(
-                name="load",
-                parameters=(ApplicationCommandParameter(
-                    name="target.connection", required=True),),
-            )),
+            published(operation_with("load", definition)),
             run_log,
-            workflow(
-                {"ingest": {"implementation": "load",
-                            "target": {"connection": "rey_apps"}}},
-                [{"id": "s", "process": "ingest"}],
-            ),
+            workflow({"ingest": {"implementation": "load", "target": {"connection": "rey_apps"}}},
+                     [{"id": "s", "process": "ingest"}]),
             catalog(calls),
         )
 
         assert run.status == "success"
         assert calls[0][1]["target"]["connection"] == "rey_apps"
 
-    def test_a_published_block_accepts_its_subtree(self, run_log) -> None:
-        """An application that publishes a block has declared the block.
-
-        Several handlers take a whole mapping and hand it to an application
-        boundary. Requiring every leaf would make the contract a copy of one
-        installation's current configuration, which is the drift publication
-        exists to remove.
-        """
+    def test_an_open_block_accepts_its_subtree(self, run_log) -> None:
+        """A contract that declares a block without its interior accepts the interior."""
         calls: list[Any] = []
         run = run_hydrated(
             published(operation("load", file_selection=True)),
             run_log,
-            workflow(
-                {"ingest": {"implementation": "load", "file_selection": {
-                    "procedure": "get_files", "source_field": "path",
-                }}},
-                [{"id": "s", "process": "ingest"}],
-            ),
-            catalog(calls),
-        )
-
-        assert run.status == "success"
-        assert calls[0][1]["file_selection"]["procedure"] == "get_files"
-
-    def test_a_required_block_is_satisfied_by_its_contents(self, run_log) -> None:
-        """Supplying the leaves is supplying the block."""
-        calls: list[Any] = []
-        run = run_hydrated(
-            published(operation("load", target=True)),
-            run_log,
             workflow({"ingest": {"implementation": "load",
-                                 "target": {"connection": "rey_apps"}}},
+                                 "file_selection": {"operation": "get_files", "source_field": "path"}}},
                      [{"id": "s", "process": "ingest"}]),
             catalog(calls),
         )
 
         assert run.status == "success"
+        assert calls[0][1]["file_selection"]["operation"] == "get_files"
 
-    def test_a_sibling_of_a_published_block_is_still_refused(
-        self, run_log
-    ) -> None:
-        """Declaring one block does not open the whole configuration.
-
-        The refusal names the exact path rather than the block, which is what a
-        reader has to go and fix.
-        """
-        with pytest.raises(WorkflowError, match=r"file_selections\.a"):
-            run_hydrated(
-                published(operation("load", file_selection=False)),
-                run_log,
-                workflow({"ingest": {"implementation": "load",
-                                     "file_selections": {"a": 1}}},
-                         [{"id": "s", "process": "ingest"}]),
-                catalog([]),
-            )
-
-    def test_a_resolved_configuration_is_walked_to_its_leaves(
-        self, run_log
-    ) -> None:
+    def test_a_resolved_configuration_is_validated_as_plain_data(self, run_log) -> None:
         """A loaded configuration nests Namespace objects, not dicts.
 
-        A Namespace is not a Mapping, so walking the structure directly reads
-        every nested block as one leaf -- `target` where the contract declares
-        `target.connection` -- and refuses configuration that is correct. These
-        assertions use the shape the configuration loader actually delivers,
-        which is what the dict-based ones could not show.
+        The settings go through the one namespace-to-plain-data conversion first,
+        so a Namespace block is validated as the mapping it is.
         """
-        calls: list[Any] = []
+        definition = contract({"target": contract({"connection": {"type": "string"}}, ["connection"])}, ["target"])
         run = run_hydrated(
-            published(ApplicationCommand(
-                name="load",
-                parameters=(ApplicationCommandParameter(
-                    name="target.connection", required=True),),
-            )),
+            published(operation_with("load", definition)),
             run_log,
-            workflow(
-                {"ingest": {"implementation": "load",
-                            "target": Namespace({"connection": "rey_apps"})}},
-                [{"id": "s", "process": "ingest"}],
-            ),
-            catalog(calls),
+            workflow({"ingest": {"implementation": "load", "target": Namespace({"connection": "rey_apps"})}},
+                     [{"id": "s", "process": "ingest"}]),
+            catalog([]),
         )
 
         assert run.status == "success"
 
-    def test_a_nested_namespace_still_refuses_what_is_undeclared(
-        self, run_log
-    ) -> None:
+    def test_a_nested_namespace_still_refuses_a_violation(self, run_log) -> None:
         """Reaching the leaves must not become accepting everything."""
-        with pytest.raises(WorkflowError, match=r"target\.typo"):
+        definition = contract({"target": contract({"connection": {"type": "string"}}, ["connection"])}, ["target"])
+        with pytest.raises(WorkflowError, match="'connection' is a required property"):
             run_hydrated(
-                published(ApplicationCommand(
-                    name="load",
-                    parameters=(ApplicationCommandParameter(
-                        name="target.connection"),),
-                )),
+                published(operation_with("load", definition)),
                 run_log,
-                workflow(
-                    {"ingest": {"implementation": "load",
-                                "target": Namespace({"typo": "rey_apps"})}},
-                    [{"id": "s", "process": "ingest"}],
-                ),
+                workflow({"ingest": {"implementation": "load", "target": Namespace({"typo": "rey_apps"})}},
+                         [{"id": "s", "process": "ingest"}]),
                 catalog([]),
             )
 
