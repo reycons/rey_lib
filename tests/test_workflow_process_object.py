@@ -13,9 +13,8 @@ from typing import Any
 import pytest
 
 from rey_lib.config.applications import Application, ApplicationOperation
-from rey_lib.workflow import WorkflowError
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import WorkflowError, WorkflowStep
 
 _SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 

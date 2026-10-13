@@ -46,9 +46,8 @@ from rey_lib.logs import (
     monotonic_ms,
 )
 from rey_lib.logs.run_log import RunLog
-from rey_lib.workflow.engine import RunContext, WorkflowError
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import StepOutcome, WorkflowStep
+from rey_lib.workflow.workflow_step import RunContext, StepOutcome, WorkflowError, WorkflowStep
 
 __all__ = ["Workflow", "WorkflowRun"]
 
@@ -186,6 +185,9 @@ class Workflow:
             do not satisfy its contract (recorded as run evidence first).
         """
         name = self.name
+        # Every invocation starts clean: no step reports an earlier run's state.
+        for one in self.steps:
+            one.reset()
         # Being switched off is a governed outcome, reported as a refused run.
         if self.enabled is False:
             return self._refused(ctx, run_log, apply=apply, metadata=metadata)
@@ -222,9 +224,9 @@ class Workflow:
                     "workflow '%s' step '%s' skipped: an earlier step failed.",
                     name, one.id,
                 )
-                run.outcomes.append(StepOutcome(
+                run.outcomes.append(one.settle(StepOutcome(
                     one.id, one.label, one.process_name, "skipped", "earlier step failed",
-                ))
+                )))
                 continue
 
             if not apply and one.apply_only:
@@ -399,9 +401,9 @@ class Workflow:
             failed_step_sequence=sequence,
             process=one.process_name,
         )
-        run.outcomes.append(
+        run.outcomes.append(one.settle(
             StepOutcome(one.id, one.label, one.process_name, "failed", error=message)
-        )
+        ))
         run.status = "failed"
         log_run_complete(run_log,
             "failed",
@@ -438,9 +440,9 @@ class Workflow:
                              duration_ms=monotonic_ms(step_started))
             finally:
                 run_log.exit()
-            run.outcomes.append(
+            run.outcomes.append(one.settle(
                 StepOutcome(one.id, one.label, one.process_name, "skipped", "dry-run")
-            )
+            ))
             _logger.info("workflow '%s' step '%s' skipped (dry-run).", self.name, one.id)
         finally:
             clear_step()

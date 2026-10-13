@@ -24,8 +24,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from rey_lib.config.applications import Application
-from rey_lib.workflow.engine import WorkflowError
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import WorkflowError, WorkflowStep
 
 if TYPE_CHECKING:
     from rey_lib.workflow.workflow import Workflow

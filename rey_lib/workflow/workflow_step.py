@@ -24,6 +24,7 @@ WorkflowStep    A bound, configured, executable operation instance.
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -41,11 +42,33 @@ from rey_lib.logs import (
     monotonic_ms,
 )
 from rey_lib.logs.run_log import RunLog
-from rey_lib.workflow.engine import RunContext, WorkflowError
 
-__all__ = ["ProcessHandler", "StepOutcome", "WorkflowStep"]
+__all__ = ["ProcessHandler", "RunContext", "StepOutcome", "WorkflowError", "WorkflowStep"]
 
 _logger = AppLogger(__name__)
+
+
+class WorkflowError(AppError):
+    """Raised for workflow-level problems (e.g. an unknown step name)."""
+
+
+@dataclass
+class RunContext:
+    """Shared, mutable context passed to every step handler.
+
+    Attributes
+    ----------
+    apply : bool
+        False for dry-run (apply_only steps are skipped); True to run them.
+    data : dict
+        Cross-step values (handlers read/write, e.g. commit hashes, paths).
+    metadata : dict
+        Recorded run metadata (the engine records status + step results here).
+    """
+
+    apply:    bool            = False
+    data:     dict[str, Any]  = field(default_factory=dict)
+    metadata: dict[str, Any]  = field(default_factory=dict)
 
 # A process handler: (ctx, run_log, effective_config, run_context) -> result-or-None.
 # The result may be any object exposing ``status``/``detail``; None means "ok".
@@ -144,11 +167,28 @@ class WorkflowStep:
         self.implementation = _approved_implementation(
             application, approved, operation_name, id
         )
-        self.settings = dict(settings)
+        # Deep-copied: a handler mutating a nested setting must not reach the
+        # mapping hydration passed in, or any other holder of it.
+        self.settings: dict[str, Any] = deepcopy(dict(settings))
         self.apply_only = apply_only
         self.always_run = always_run
         self.outcome: Optional[StepOutcome] = None
         self.failure_record_id: Any = None
+
+    def reset(self) -> None:
+        """Clear the state of an earlier invocation; called at the start of every run."""
+        self.outcome = None
+        self.failure_record_id = None
+
+    def settle(self, outcome: StepOutcome) -> StepOutcome:
+        """Hold an outcome the Workflow decided without executing the step; return it.
+
+        A step skipped (dry run, earlier failure) or refused before execution is
+        settled here, so its state is never left over from an earlier run.
+        """
+        self.outcome = outcome
+        self.failure_record_id = None
+        return outcome
 
     def execute(
         self,

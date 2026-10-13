@@ -23,10 +23,10 @@ from tests.support.workflow_publication import prepared
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import current_step
-from rey_lib.workflow import RunContext, WorkflowError, run_workflow
+from rey_lib.workflow import run_workflow
 from rey_lib.workflow import coordinator
 from rey_lib.workflow import workflow_step
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import RunContext, WorkflowError, WorkflowStep
 
 #: Fields that identify a run, a write or a source location rather than the step.
 _VOLATILE = frozenset({
@@ -267,6 +267,39 @@ def test_the_implementation_receives_the_steps_own_settings(tmp_path: Path) -> N
 
     assert seen == [{"source": "a"}]
     assert seen[0] is step.settings
+
+
+def test_nested_settings_are_isolated_from_the_caller_and_other_steps(tmp_path: Path) -> None:
+    def handler(_ctx: Any, _run_log: Any, settings: dict[str, Any], _run: RunContext) -> None:
+        settings["source"]["names"].append("changed")
+
+    accepts = _operation("p1", {
+        "$schema": _SCHEMA, "type": "object", "properties": {"source": {}},
+        "additionalProperties": False,
+    })
+    given = {"source": {"names": ["a"]}}
+    first = _step(handler, application=_application(accepts), settings=given)
+    second = _step(handler, application=_application(accepts), settings=given)
+
+    _execute(first, _log(tmp_path))
+
+    assert given == {"source": {"names": ["a"]}}
+    assert second.settings == {"source": {"names": ["a"]}}
+
+
+def test_reset_clears_and_settle_holds_an_outcome_decided_without_execution(
+    tmp_path: Path,
+) -> None:
+    step = _step(_returns_failed)
+    _execute(step, _log(tmp_path))
+    assert step.failure_record_id is not None
+
+    step.reset()
+    assert (step.outcome, step.failure_record_id) == (None, None)
+
+    skipped = workflow_step.StepOutcome("s1", "One", "p1", "skipped", "dry-run")
+    assert step.settle(skipped) is skipped
+    assert (step.outcome, step.failure_record_id) == (skipped, None)
 
 
 def test_success_settles_status_detail_and_artifacts(tmp_path: Path) -> None:

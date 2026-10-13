@@ -20,10 +20,12 @@ from tests.conftest import make_db_run_log, start_test_run
 from tests.support.workflow_publication import prepared
 
 from rey_lib.config.applications import Application, ApplicationOperation
-from rey_lib.workflow import RunContext, WorkflowError, run_workflow
+from rey_lib.workflow import run_workflow
+from rey_lib.workflow.coordinator import _deep_merge
+from rey_lib.workflow.engine import WorkflowError as LegacyWorkflowError
 from rey_lib.workflow.workflow import Workflow, WorkflowRun
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import RunContext, WorkflowError, WorkflowStep
 
 _ENGINE_KEYS = frozenset({"implementation", "apply_only", "always_run", "enabled", "name"})
 #: Fields that identify a run, a moment or a source location rather than behaviour.
@@ -81,7 +83,8 @@ def _build(workflow: dict[str, Any], application: Application,
     steps = []
     for ordinal, step in enumerate(workflow["steps"], start=1):
         declared = dict(processes.get(step["process"]) or {})
-        merged = {**declared, **(step.get("config") or {})}
+        # Composed as the legacy engine composes: nested mappings merge.
+        merged = _deep_merge(declared, dict(step.get("config") or {}))
         steps.append(WorkflowStep(
             id=step["id"],
             process_name=step["process"],
@@ -186,7 +189,7 @@ def test_selection_and_dry_run_match_run_workflow(selection: dict[str, Any],
 def test_selection_refusals_match_run_workflow(selection: dict[str, Any], message: str,
                                                tmp_path: Path) -> None:
     legacy_wf, legacy_ctx = prepared(_fixture(), SimpleNamespace())
-    with pytest.raises(WorkflowError) as legacy:
+    with pytest.raises(LegacyWorkflowError) as legacy:
         run_workflow(legacy_ctx, _log(tmp_path / "legacy"), legacy_wf,
                      _recording([]), **selection)
     new_wf, new_ctx = prepared(_fixture(), SimpleNamespace())
@@ -202,7 +205,7 @@ def test_an_ambiguous_identifier_matches_run_workflow(tmp_path: Path) -> None:
     workflow = _fixture()
     workflow["steps"][1]["label"] = "One"
     legacy_wf, legacy_ctx = prepared(workflow, SimpleNamespace())
-    with pytest.raises(WorkflowError) as legacy:
+    with pytest.raises(LegacyWorkflowError) as legacy:
         run_workflow(legacy_ctx, _log(tmp_path / "legacy"), legacy_wf, _recording([]),
                      step="One")
     new_wf, new_ctx = prepared(workflow, SimpleNamespace())
@@ -275,7 +278,7 @@ def test_a_contract_refusal_matches_run_workflow(apply: bool, tmp_path: Path) ->
     if not apply:
         workflow["processes"]["p1"]["apply_only"] = True
     legacy_log, legacy_calls = _log(tmp_path / "legacy"), []
-    with pytest.raises(WorkflowError) as legacy:
+    with pytest.raises(LegacyWorkflowError) as legacy:
         run_workflow(legacy_ctx, legacy_log, workflow, _recording(legacy_calls), apply=apply)
 
     workflow, new_ctx = _requiring_source()
@@ -406,7 +409,7 @@ def test_run_does_not_alter_the_steps_settings(tmp_path: Path) -> None:
     assert step.settings == {"source": {"name": "a"}}
 
 
-def test_a_skipped_step_holds_no_outcome_of_its_own(tmp_path: Path) -> None:
+def test_a_skipped_step_holds_the_outcome_it_was_settled_with(tmp_path: Path) -> None:
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]))
 
@@ -414,5 +417,29 @@ def test_a_skipped_step_holds_no_outcome_of_its_own(tmp_path: Path) -> None:
 
     skipped = next(o for o in run.outcomes if o.id == "s2")
     assert (skipped.status, skipped.detail) == ("skipped", "dry-run")
-    assert graph.steps[1].outcome is None
-    assert graph.steps[0].outcome is not None
+    assert graph.steps[1].outcome is skipped
+    assert [one.outcome for one in graph.steps] == run.outcomes
+
+
+def test_no_step_reports_an_earlier_run_after_a_second_run(tmp_path: Path) -> None:
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]))
+
+    graph.run(ctx, _log(tmp_path / "first"))
+    assert graph.steps[1].outcome.status == "ok"
+    second = graph.run(ctx, _log(tmp_path / "second"), step="s1", apply=False)
+
+    assert graph.steps[0].outcome is second.outcomes[0]
+    assert [one.outcome for one in graph.steps[1:]] == [None, None, None]
+
+
+def test_an_earlier_failure_skip_is_settled_on_the_step(tmp_path: Path) -> None:
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([], {"p1": _failed("broke")}))
+
+    run = graph.run(ctx, _log(tmp_path))
+
+    assert graph.steps[0].failure_record_id is not None
+    assert [(one.outcome.status, one.outcome.detail) for one in graph.steps[1:]] == [
+        ("skipped", "earlier step failed")] * 3
+    assert [one.outcome for one in graph.steps] == run.outcomes
