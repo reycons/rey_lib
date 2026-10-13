@@ -3,7 +3,7 @@ The workflow runner's standard command-line controls, defined once.
 
 Step selection belongs to the shared engine: ``run_workflow`` takes ``step``,
 ``from_step`` and ``to_step`` and resolves them against the workflow's ordered
-steps (``Workflow.select``), including every refusal. What an
+steps (``coordinator._select_steps``), including every refusal. What an
 application cannot do on its own is accept them: its parser rejects an unknown
 option before the engine ever sees it. So the command interface for those
 controls lives here, beside the engine that gives them meaning, and an

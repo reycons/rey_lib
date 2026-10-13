@@ -2,11 +2,11 @@
 
 A workflow is a named, ordered series of internal function calls owned by one
 app (SGC_rey_workflow_internal_function_call_model). This coordinator is the
-shared mechanic every Rey app uses: it executes a canonical ``Workflow``
-(rey_lib.workflow.model) -- the steps the workflow selects, in ordinal order,
-each with the configuration its process gives it -- and dispatches each step to
-the app-provided handler registry. Selection, defaults, overrides and tokens
-are the workflow objects'; execution, logging and evidence are this module's.
+shared mechanic every Rey app uses: it reads a resolved workflow
+(``tokens`` / ``processes`` / ``steps``), resolves workflow-local tokens, builds
+effective per-step config (process defaults deep-merged with the step's
+override), and dispatches each step to the app-provided process-handler
+registry.
 
 It owns no app domain logic. It calls only handlers the app registered by
 process name (never arbitrary Python from YAML), dispatches by ``process`` (never
@@ -45,12 +45,14 @@ from rey_lib.logs import (
     monotonic_ms,
 )
 from rey_lib.workflow.engine import RunContext, WorkflowError
-from rey_lib.workflow.hydration import _get
-from rey_lib.workflow.model import Workflow
 
 __all__ = ["StepOutcome", "WorkflowRun", "run_workflow", "ProcessHandler"]
 
 _logger = AppLogger(__name__)
+
+# Workflow configuration this engine no longer honours. Declaring one is a hard
+# error, never a silently ignored key (SGC_Log_Run_Rollback).
+_RETIRED_WORKFLOW_KEYS = ("restore_mappings",)
 
 # A process handler: (ctx, run_log, effective_config, run_context) -> result-or-None.
 # The result may be any object exposing ``status``/``detail``; None means "ok".
@@ -187,10 +189,9 @@ def _pre_execution_failure(
 
 def run_workflow(
     ctx: Any, run_log,
-    workflow: Workflow,
+    workflow: Any,
     registry: Mapping[str, ProcessHandler],
     *,
-    application: str,
     apply: bool = True,
     only: Optional[str] = None,
     step: Optional[str] = None,
@@ -208,15 +209,12 @@ def run_workflow(
     ----------
     ctx : Any
         Resolved application context (the handlers' domain input).
-    workflow : Workflow
-        The canonical workflow. Nothing else is accepted: a resolved
-        configuration entry is hydrated with ``hydrate_workflow`` first.
+    workflow : Any
+        Resolved workflow exposing ``name`` and optional ``tokens``,
+        ``processes`` (name -> default config), and ``steps`` (each with
+        ``id``, ``label``, ``process``, optional ``config``).
     registry : Mapping[str, ProcessHandler]
-        App-owned ``operation name -> handler``. YAML may only call these names.
-    application : str
-        The application whose registry this is. This coordinator executes only
-        that application's processes; a process belonging to another is
-        refused. The limitation is the coordinator's, not the workflow's.
+        App-owned ``process name -> handler``. YAML may only call these names.
     apply : bool
         False for dry-run; a step whose effective config sets ``apply_only``
         true is skipped. Dry-run is expressed by ``apply=False`` — this SGC adds
@@ -248,34 +246,63 @@ def run_workflow(
     Raises
     ------
     WorkflowError
-        On anything but a canonical Workflow, an unregistered
-        handler, a process of another application, or an invalid/unresolvable
-        step selection — always fail closed, never guess. A malformed definition
-        is refused earlier, when it is hydrated (retired keys included).
+        On a malformed workflow (a step missing ``id``/``process``, an undefined
+        process, or an unregistered handler) or an invalid/unresolvable step
+        selection — always fail closed, never guess.
     """
-    if not isinstance(workflow, Workflow):
-        raise WorkflowError(
-            "run_workflow executes a canonical Workflow; hydrate the configuration "
-            f"entry with hydrate_workflow (got {type(workflow).__name__})."
-        )
-    name = workflow.name
+    name = str(_get(workflow, "name", "") or "")
     # Being switched off is a governed outcome, not a fault: it is reported as
     # a run with a terminal status like any other result, so the caller exits
     # non-zero without a traceback. Absent means enabled; only an explicit
-    # false refuses, so a definition that omits the key is unaffected. A
-    # disabled workflow is hydrated as identity only, so it is never rejected
-    # for some unrelated defect in steps it will not run.
-    if not workflow.enabled:
+    # false refuses, so a definition that omits the key is unaffected. This is
+    # decided before the definition is parsed, so a disabled workflow is never
+    # rejected for some unrelated defect in steps it will not run.
+    if _get(workflow, "enabled", True) is False:
         return _refused_disabled_workflow(ctx, run_log, name, apply=apply, metadata=metadata)
-    tokens = workflow.resolved_tokens()
+    tokens = _resolve_tokens(_get(workflow, "tokens"))
+    processes = _to_mapping(_get(workflow, "processes"))
+    owner = str(_get(workflow, "app", "") or "")
     # Read once, and refused here rather than at the first step: a context
     # without applications is a boundary failure, not a workflow defect.
     applications = _require_applications(ctx, name)
+    steps = _as_list(_get(workflow, "steps"))
+
+    # Extract and structurally validate every step's identity up front so step
+    # selection can resolve deterministically against the ordered list.
+    step_views: list[tuple[str, str, str]] = []
+    for index, step_def in enumerate(steps):
+        step_id = str(_get(step_def, "id", "") or "")
+        if not step_id:
+            raise WorkflowError(
+                f"workflow '{name}': step {index} is missing required 'id'."
+            )
+        label = str(_get(step_def, "label", "") or step_id)
+        process = str(_get(step_def, "process", "") or "")
+        if not process:
+            raise WorkflowError(
+                f"workflow '{name}': step '{step_id}' is missing required 'process'."
+            )
+        step_views.append((step_id, label, process))
+
+    # Configuration this engine no longer honours is a hard error, never a
+    # silently ignored key: leaving it parseable implies it is still supported
+    # and invites new code to depend on it. Rollback is manifest-driven and
+    # selects source_file_mutation records, so folder-based restore mappings
+    # have no consumer (SGC_Log_Run_Rollback).
+    for retired in _RETIRED_WORKFLOW_KEYS:
+        if _get(workflow, retired) is not None:
+            raise WorkflowError(
+                f"workflow '{name}' declares retired key '{retired}'. Rollback "
+                "is manifest-driven; remove this key from the workflow "
+                "definition."
+            )
 
     # ``only`` is the legacy single-step-by-id parameter; treat it as ``step``.
     if only is not None and step is None:
         step = only
-    selected = workflow.select(step=step, from_step=from_step, to_step=to_step)
+    selected = _select_steps(
+        step_views, name, step=step, from_step=from_step, to_step=to_step
+    )
 
     run_ctx = RunContext(apply=apply, metadata=dict(metadata or {}), data={"ctx": ctx})
     run = WorkflowRun(name=name, status="success", context=run_ctx)
@@ -313,14 +340,25 @@ def run_workflow(
     # reason normal execution stopped, and a later always_run failure records
     # itself without replacing it.
     first_failure: dict[str, Any] | None = None
-    for workflow_process, workflow_step in workflow.ordered_steps():
-        if workflow_step.ordinal not in selected:
+    for index, step_def in enumerate(steps):
+        if index not in selected:
             continue
-        step_id, label, process = (
-            workflow_step.key, workflow_step.label, workflow_process.name
-        )
-        owner = workflow_process.application
-        implementation = workflow_process.operation
+        step_id, label, process = step_views[index]
+        if process not in processes:
+            raise _pre_execution_failure(
+                ctx,
+                run_log, run,
+                step_id=step_id,
+                label=label,
+                process=process,
+                sequence=sequence + 1,
+                message=(
+                    f"workflow '{name}': step '{step_id}' calls undefined process "
+                    f"'{process}'. Define it under workflow.processes."
+                ),
+            )
+        declared = _to_mapping(processes.get(process))
+        implementation = str(declared.get("implementation") or "")
         if not implementation:
             raise _pre_execution_failure(
                 ctx,
@@ -352,26 +390,6 @@ def run_workflow(
                 ),
             )
 
-        # The limitation is this coordinator's: it was handed one
-        # application's registry and dispatches in-process, so it executes only
-        # that application's processes. The workflow itself may hold processes
-        # of several.
-        if owner != application:
-            raise _pre_execution_failure(
-                ctx,
-                run_log, run,
-                step_id=step_id,
-                label=label,
-                process=process,
-                sequence=sequence + 1,
-                message=(
-                    f"workflow '{name}': process '{process}' belongs to "
-                    f"'{owner}'; this coordinator was invoked for "
-                    f"'{application}' and executes only that application's "
-                    "processes."
-                ),
-            )
-
         handler = registry.get(implementation)
         if handler is None:
             # Published but not approved for invocation. The catalog is the
@@ -392,15 +410,17 @@ def run_workflow(
                 ),
             )
 
-        # The engine's own vocabulary is read from the process defaults with
-        # the step's overrides applied, and is not passed down: apply_only says
-        # how the engine treats a step, not configuration the application asked
-        # for.
-        apply_only = workflow_process.apply_only(workflow_step)
+        # The engine's own vocabulary is read from the merged declaration and
+        # then removed. apply_only says how the engine treats a step; it is not
+        # configuration the application asked for, and passing it down would
+        # make every published contract declare it.
+        merged = _deep_merge(_to_mapping(declared),
+                             _to_mapping(_get(step_def, "config")))
+        apply_only = bool(merged.get("apply_only"))
         # Eligible after an earlier step failed, and nothing more: the step keeps
         # its declared position, and every other reason it might not run still
         # applies.
-        always_run = workflow_process.always_run(workflow_step)
+        always_run = bool(merged.get("always_run"))
 
         # A prior failure makes ordinary steps ineligible. always_run steps stay
         # eligible and keep their declared position -- nothing is reordered and
@@ -414,7 +434,7 @@ def run_workflow(
                 StepOutcome(step_id, label, process, "skipped", "earlier step failed")
             )
             continue
-        effective = workflow_process.effective(workflow_step, tokens)
+        effective = _expand_config(_declared_config(merged), tokens)
 
         # Validation precedes dispatch, so an implementation never receives
         # configuration its published contract did not declare.
@@ -553,9 +573,92 @@ def run_workflow(
     return run
 
 
+def _select_steps(
+    step_views: list[tuple[str, str, str]],
+    name: str,
+    *,
+    step: Optional[str],
+    from_step: Optional[str],
+    to_step: Optional[str],
+) -> set[int]:
+    """Resolve the set of step indices to execute (fail closed).
+
+    ``step`` selects one step; ``from_step`` runs to the end; ``to_step`` runs
+    from the start; ``from_step`` + ``to_step`` is the inclusive ordered range.
+    ``step`` cannot combine with a range, and a reversed range fails closed. With
+    no selector, every step runs.
+    """
+    total = len(step_views)
+    if step is not None and (from_step is not None or to_step is not None):
+        raise WorkflowError(
+            f"workflow '{name}': 'step' cannot be combined with 'from_step'/'to_step'."
+        )
+    if step is None and from_step is None and to_step is None:
+        return set(range(total))
+
+    if step is not None:
+        return {_resolve_step_index(step_views, name, step)}
+
+    start = _resolve_step_index(step_views, name, from_step) if from_step is not None else 0
+    end = _resolve_step_index(step_views, name, to_step) if to_step is not None else total - 1
+    if start > end:
+        raise WorkflowError(
+            f"workflow '{name}': from_step '{from_step}' resolves after to_step "
+            f"'{to_step}' (empty range)."
+        )
+    return set(range(start, end + 1))
+
+
+def _resolve_step_index(
+    step_views: list[tuple[str, str, str]], name: str, identifier: str
+) -> int:
+    """Return the one step index matching ``identifier`` by id, label, or process.
+
+    Fails closed: raises on no match, and on an ambiguous match (more than one
+    step). No fuzzy matching.
+    """
+    matches = [
+        index
+        for index, view in enumerate(step_views)
+        if identifier in view  # view == (id, label, process)
+    ]
+    if not matches:
+        raise WorkflowError(
+            f"workflow '{name}': no step matches identifier '{identifier}'."
+        )
+    if len(matches) > 1:
+        raise WorkflowError(
+            f"workflow '{name}': step identifier '{identifier}' is ambiguous "
+            f"(matches {len(matches)} steps)."
+        )
+    return matches[0]
+
+
 # ---------------------------------------------------------------------------
 # Published contract
 # ---------------------------------------------------------------------------
+
+#: The key a process binds to a published operation. Declarative membership: a
+#: name, resolved through the application's catalog, and never a callable
+#: reference or an import path.
+_IMPLEMENTATION = "implementation"
+
+#: Engine vocabulary a process may carry, which is not part of any
+#: application's published parameter contract.
+_ENGINE_KEYS = frozenset({_IMPLEMENTATION, "apply_only", "always_run", "enabled", "name"})
+
+
+def _declared_config(declared: Mapping[str, Any]) -> dict[str, Any]:
+    """The process defaults, without the engine's own vocabulary.
+
+    ``implementation``, ``apply_only`` and ``always_run`` say how the engine
+    treats a step. They are not configuration the application asked for, and
+    passing them down would make every published contract declare them.
+    """
+    return {
+        key: value for key, value in declared.items() if key not in _ENGINE_KEYS
+    }
+
 
 def _require_applications(ctx: Any, workflow: str) -> tuple[Any, ...]:
     """The canonical applications, or a refusal naming the invariant.
@@ -645,3 +748,98 @@ def _contract_refusal(
         f"contract of implementation '{implementation}': "
         + "; ".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# Token resolution and effective config
+# ---------------------------------------------------------------------------
+
+def _resolve_tokens(tokens_cfg: Any) -> dict[str, str]:
+    """Resolve workflow-local tokens, allowing one token to reference another.
+
+    Global path tokens (``{data}``, ``{llmcontracts}``, ...) and runtime
+    placeholders (``{engine}``, ``{database}``, ...) are left intact for the
+    downstream ctx path resolver / render step — only workflow-local token
+    names are substituted here.
+    """
+    raw = {str(k): str(v) for k, v in _to_mapping(tokens_cfg).items()}
+    resolved = dict(raw)
+    for _ in range(len(raw) + 1):
+        changed = False
+        for key, value in list(resolved.items()):
+            expanded = _expand_str(value, resolved)
+            if expanded != value:
+                resolved[key] = expanded
+                changed = True
+        if not changed:
+            break
+    return resolved
+
+
+def _expand_str(text: str, tokens: Mapping[str, str]) -> str:
+    """Substitute ``{name}`` for each workflow-local token; leave others intact."""
+    for key, value in tokens.items():
+        placeholder = "{" + key + "}"
+        if placeholder in text:
+            text = text.replace(placeholder, value)
+    return text
+
+
+def _expand_config(value: Any, tokens: Mapping[str, str]) -> Any:
+    """Recursively expand workflow-local tokens in config string values."""
+    if isinstance(value, str):
+        return _expand_str(value, tokens)
+    if isinstance(value, dict):
+        return {key: _expand_config(item, tokens) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_config(item, tokens) for item in value]
+    return value
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Return base merged with override; nested dicts merge, else override wins."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Mapping/attribute access helpers (accept dict- or Namespace-like inputs)
+# ---------------------------------------------------------------------------
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Return obj[key] / obj.key, or default."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _to_mapping(obj: Any) -> dict[str, Any]:
+    """Return a plain dict view of a dict- or Namespace-like object."""
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return dict(obj)
+    if hasattr(obj, "items"):
+        try:
+            return dict(obj.items())
+        except Exception:  # noqa: BLE001 — fall through to attribute view
+            pass
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+    return {}
+
+
+def _as_list(obj: Any) -> list[Any]:
+    """Coerce a value to a list (None -> [])."""
+    if obj is None:
+        return []
+    if isinstance(obj, list):
+        return obj
+    return [obj]

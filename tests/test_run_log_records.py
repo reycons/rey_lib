@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support.workflow_publication import prepared, run_hydrated
+from tests.support.workflow_publication import prepared
 
 from tests.conftest import make_db_run_log, start_test_run
 
@@ -441,7 +441,7 @@ def test_new_event_helpers_emit_approved_record_types(tmp_path: Path) -> None:
 
 def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
     """run_workflow emits RUN_START, per-step STEP_START/STEP_END, RUN_COMPLETE, RUN_SUMMARY."""
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -459,7 +459,7 @@ def test_workflow_runner_emits_run_log_records(tmp_path: Path) -> None:
         return None
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"p1": handler, "p2": handler})
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler, "p2": handler})
     assert result.status == "success"
 
     records = _read(Path(run_log.path()))
@@ -491,7 +491,7 @@ def test_workflow_declaring_the_retired_restore_key_is_rejected(run_log,
     tmp_path: Path,
 ) -> None:
     """Rollback is manifest-driven; the retired key fails closed on both paths."""
-    from rey_lib.workflow import WorkflowError
+    from rey_lib.workflow import WorkflowError, run_workflow
 
     workflow = {
         "name": "wf",
@@ -509,14 +509,14 @@ def test_workflow_declaring_the_retired_restore_key_is_rejected(run_log,
     ):
         with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
             _wf, _ctx = prepared(workflow, ctx)
-            run_hydrated(_ctx, run_log, _wf, {"p1": lambda *_: None})
+            run_workflow(_ctx, run_log, _wf, {"p1": lambda *_: None})
 
 
 
 def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> None:
     """Workflow coordinator binds step context for handler execution and clears it."""
     from rey_lib.logs import current_step
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -532,7 +532,7 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
         seen_steps.append(current_step() or {})
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"p1": handler})
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "success"
     assert seen_steps == [{
@@ -547,6 +547,7 @@ def test_workflow_step_context_is_active_only_during_handler(tmp_path: Path) -> 
 def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> None:
     """Evidence emitted while a handler runs descends from its STEP_START record."""
     from rey_lib.logs import log_run_record
+    from rey_lib.workflow import run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -562,7 +563,7 @@ def test_workflow_step_owns_handler_and_lifecycle_evidence(tmp_path: Path) -> No
         log_run_record(run_log, "ROW_COUNT", count_name="created", count=2)
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"p1": handler})
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "success"
     records = _read(Path(run_log.path()))
@@ -584,7 +585,7 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
     """A step failure is reported as a WorkflowError, its cause kept; STEP_FAILURE is
     what completion references."""
     from rey_lib.logs import current_step
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -600,7 +601,7 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
 
     _wf, _ctx = prepared(workflow, ctx)
     with caplog.at_level("ERROR"):
-        result = run_hydrated(_ctx, run_log, _wf, {"p1": handler})
+        result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "failed"
     from rey_lib.workflow.engine import WorkflowError
@@ -632,7 +633,7 @@ def test_workflow_failure_emits_canonical_error_and_referenced_completion(
 def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> None:
     """FILE_OPERATION inherits workflow step context without changing file utilities."""
     from rey_lib.files.file_utils import write_file
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -647,7 +648,7 @@ def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> 
         write_file(tmp_path / "ctx.json", {"ok": True}, "JSON")
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"p1": handler})
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "success"
     records = _read(Path(run_log.path()))
@@ -661,7 +662,7 @@ def test_workflow_file_operation_inherits_bound_step_context(tmp_path: Path) -> 
 def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -> None:
     """A handler result with status=failed also produces STEP_FAILURE evidence."""
     from rey_lib.logs import current_step
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -676,7 +677,7 @@ def test_workflow_failed_status_outcome_emits_failure_evidence(tmp_path: Path) -
         return SimpleNamespace(status="failed", detail="validation failed")
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"p1": handler})
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
 
     assert result.status == "failed"
     records = _read(Path(run_log.path()))
@@ -846,6 +847,7 @@ def test_get_run_section_and_file_reference(tmp_path: Path) -> None:
 def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
     """A real workflow fixture emits one complete declaration-driven manifest."""
     from rey_lib.logs import log_file_operation
+    from rey_lib.workflow import run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -866,7 +868,7 @@ def test_workflow_completion_appends_artifact_manifest(tmp_path: Path) -> None:
         "name": "wf", "processes": {"p1": {}},
         "steps": [{"id": "s1", "label": "One", "process": "p1"}],
     }, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"p1": handler})
+    result = run_workflow(_ctx, run_log, _wf, {"p1": handler})
     assert result.status == "success"
 
     records = _read(Path(run_log.path()))
@@ -1063,7 +1065,7 @@ def test_always_run_step_completes_before_the_run_does(tmp_path: Path) -> None:
     its STEP_START/STEP_END land before RUN_COMPLETE -- and its records are
     therefore inside the RESULTS_SUMMARY and LLM_PACKAGE that follow.
     """
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -1084,7 +1086,7 @@ def test_always_run_step_completes_before_the_run_does(tmp_path: Path) -> None:
         return None
 
     _wf, _ctx = prepared(workflow, ctx)
-    result = run_hydrated(_ctx, run_log, _wf, {"boom": boom, "last": last})
+    result = run_workflow(_ctx, run_log, _wf, {"boom": boom, "last": last})
     assert result.status == "failed"
 
     types = [r["record_type"] for r in _read(Path(run_log.path()))]
@@ -1105,7 +1107,7 @@ def test_always_run_step_completes_before_the_run_does(tmp_path: Path) -> None:
 
 def test_the_run_reports_the_first_failure_not_the_always_run_one(tmp_path: Path) -> None:
     """RUN_COMPLETE names the step that stopped normal execution."""
-    from rey_lib.workflow import RunContext
+    from rey_lib.workflow import RunContext, run_workflow
 
     ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
     start_test_run(ctx)
@@ -1126,7 +1128,7 @@ def test_the_run_reports_the_first_failure_not_the_always_run_one(tmp_path: Path
         raise RuntimeError("second")
 
     _wf, _ctx = prepared(workflow, ctx)
-    run_hydrated(_ctx, run_log, _wf, {"boom": boom, "last": also_boom})
+    run_workflow(_ctx, run_log, _wf, {"boom": boom, "last": also_boom})
 
     records = _read(Path(run_log.path()))
     complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")

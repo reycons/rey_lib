@@ -195,11 +195,9 @@ class TestTypeScript:
 class TestTheBenchmarkSubject:
     """Asserted here because it is the argument for the column's name."""
 
-    def test_run_workflow_raises_a_class_once_and_a_factory_five(
+    def test_run_workflow_raises_a_class_three_times_and_a_factory_five(
         self,
     ) -> None:
-        """The step-identity and retired-key raises moved to the hydration
-        boundary (backlog 917); the coordinator refuses only a non-Workflow."""
         path = (Path(__file__).resolve().parents[1]
                 / "rey_lib/workflow/coordinator.py")
 
@@ -209,6 +207,6 @@ class TestTheBenchmarkSubject:
             if r.owner_qualified_name == "run_workflow"
         ]
 
-        assert len(found) == 6
-        assert found.count("WorkflowError") == 1
+        assert len(found) == 8
+        assert found.count("WorkflowError") == 3
         assert found.count("_pre_execution_failure") == 5

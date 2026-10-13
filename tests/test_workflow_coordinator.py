@@ -14,11 +14,11 @@ from typing import Any
 
 import pytest
 
-from tests.support.workflow_publication import prepared, run_hydrated
+from tests.support.workflow_publication import prepared
 
 from tests.conftest import make_run_log, start_test_run
 
-from rey_lib.workflow import RunContext, StepResult, WorkflowError
+from rey_lib.workflow import RunContext, StepResult, WorkflowError, run_workflow
 
 
 def _recorder() -> tuple[list[tuple[str, dict[str, Any]]], Any]:
@@ -61,7 +61,7 @@ def test_dispatch_by_process_name_reused_across_steps(run_log) -> None:
     }
 
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, {"git_commit": git_commit, "export": export})
+    run = run_workflow(_ctx, run_log, _wf, {"git_commit": git_commit, "export": export})
 
     assert run.status == "success"
     assert [o.process for o in run.outcomes] == ["export", "git_commit", "git_commit"]
@@ -85,7 +85,7 @@ def test_dispatch_ignores_labels(run_log) -> None:
         ],
     }
     _wf, _ctx = prepared(workflow, None)
-    run_hydrated(_ctx, run_log, _wf, {"p": handler})
+    run_workflow(_ctx, run_log, _wf, {"p": handler})
     assert len(hits) == 2
 
 
@@ -108,7 +108,7 @@ def test_effective_config_merges_step_over_process(run_log) -> None:
                    "config": {"b": 9, "nested": {"y": 20, "z": 30}}}],
     }
     _wf, _ctx = prepared(workflow, None)
-    run_hydrated(_ctx, run_log, _wf, {"p": handler})
+    run_workflow(_ctx, run_log, _wf, {"p": handler})
     assert seen == {"a": 1, "b": 9, "nested": {"x": 1, "y": 20, "z": 30}}
 
 
@@ -127,7 +127,7 @@ def test_workflow_tokens_resolve_into_process_config(run_log) -> None:
         "steps": [{"id": "s", "label": "S", "process": "p"}],
     }
     _wf, _ctx = prepared(workflow, None)
-    run_hydrated(_ctx, run_log, _wf, {"p": handler})
+    run_workflow(_ctx, run_log, _wf, {"p": handler})
     # Local {ddl_root} expanded; global {data} preserved for the ctx path resolver.
     assert seen["output_root"] == "{data}/rey_db_admin/database_ddl"
     assert seen["repo_root"] == "{data}/rey_db_admin/database_ddl"
@@ -153,7 +153,7 @@ def test_dry_run_skips_apply_only_process(run_log) -> None:
                   {"id": "recreate", "label": "R", "process": "recreate"}],
     }
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, {"lint": handler, "recreate": handler},
+    run = run_workflow(_ctx, run_log, _wf, {"lint": handler, "recreate": handler},
                        apply=False)
     assert [o.status for o in run.outcomes] == ["ok", "skipped"]
     assert ran == ["lint"]
@@ -175,7 +175,7 @@ def test_dry_run_skips_apply_only_from_step_override(run_log) -> None:
                    "config": {"apply_only": True}}],
     }
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, {"export": handler}, apply=False)
+    run = run_workflow(_ctx, run_log, _wf, {"export": handler}, apply=False)
     assert [o.status for o in run.outcomes] == ["ok", "skipped"]
     assert ran == ["export"]
 
@@ -191,7 +191,7 @@ def test_single_step_only_runs_matching_id(run_log) -> None:
     }
     registry = {"a": lambda *_: ran.append("a"), "b": lambda *_: ran.append("b")}
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, registry, only="sb")
+    run = run_workflow(_ctx, run_log, _wf, registry, only="sb")
     assert ran == ["b"]
     assert [o.id for o in run.outcomes] == ["sb"]
 
@@ -206,7 +206,7 @@ def test_step_id_required(run_log) -> None:
                 "steps": [{"label": "S", "process": "p"}]}
     with pytest.raises(WorkflowError, match="missing required 'id'"):
         _wf, _ctx = prepared(workflow, None)
-        run_hydrated(_ctx, run_log, _wf, {"p": lambda *_: None})
+        run_workflow(_ctx, run_log, _wf, {"p": lambda *_: None})
 
 
 def test_undefined_process_fails_closed(run_log) -> None:
@@ -215,7 +215,7 @@ def test_undefined_process_fails_closed(run_log) -> None:
                 "steps": [{"id": "s", "label": "S", "process": "missing"}]}
     with pytest.raises(WorkflowError, match="undefined process"):
         _wf, _ctx = prepared(workflow, None)
-        run_hydrated(_ctx, run_log, _wf, {"p": lambda *_: None})
+        run_workflow(_ctx, run_log, _wf, {"p": lambda *_: None})
 
 
 def test_process_without_registered_handler_fails_closed(run_log) -> None:
@@ -229,7 +229,7 @@ def test_process_without_registered_handler_fails_closed(run_log) -> None:
                 "steps": [{"id": "s", "label": "S", "process": "p"}]}
     with pytest.raises(WorkflowError, match="approved implementation catalog"):
         _wf, _ctx = prepared(workflow, None)
-        run_hydrated(_ctx, run_log, _wf, {})
+        run_workflow(_ctx, run_log, _wf, {})
 
 
 def test_handler_error_stops_run_fail_closed(run_log) -> None:
@@ -256,7 +256,7 @@ def test_handler_error_stops_run_fail_closed(run_log) -> None:
                   {"id": "s2", "label": "2", "process": "after"}],
     }
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, {"boom": boom, "after": after})
+    run = run_workflow(_ctx, run_log, _wf, {"boom": boom, "after": after})
     assert run.status == "failed"
     failed = next(o for o in run.outcomes if o.status == "failed")
     assert failed.id == "s1"
@@ -288,7 +288,7 @@ def test_retired_restore_mappings_key_is_rejected(run_log) -> None:
 
     with pytest.raises(WorkflowError, match="retired key 'restore_mappings'"):
         _wf, _ctx = prepared(workflow, None)
-        run_hydrated(_ctx, run_log, _wf, {"noop": lambda *_: None})
+        run_workflow(_ctx, run_log, _wf, {"noop": lambda *_: None})
 
 
 def test_retired_key_is_rejected_before_any_step_runs(run_log) -> None:
@@ -303,7 +303,7 @@ def test_retired_key_is_rejected_before_any_step_runs(run_log) -> None:
 
     with pytest.raises(WorkflowError, match="retired key"):
         _wf, _ctx = prepared(workflow, None)
-        run_hydrated(_ctx, run_log, _wf, {"noop": handler})
+        run_workflow(_ctx, run_log, _wf, {"noop": handler})
 
     assert calls == []
 
@@ -317,7 +317,7 @@ def test_workflow_without_the_retired_key_runs_normally(run_log) -> None:
     }
 
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, {"noop": handler})
+    run = run_workflow(_ctx, run_log, _wf, {"noop": handler})
 
     assert run.status == "success"
     assert len(calls) == 1
@@ -341,7 +341,7 @@ def test_disabled_workflow_is_refused_without_raising(run_log) -> None:
         calls.append("ran")
 
     _wf, _ctx = prepared(workflow, None)
-    run = run_hydrated(_ctx, run_log, _wf, {"p": handler})
+    run = run_workflow(_ctx, run_log, _wf, {"p": handler})
 
     assert run.status == "refused"
     assert run.status != "success"
@@ -359,7 +359,7 @@ def test_a_disabled_workflow_is_refused_before_its_definition_is_parsed(run_log)
     }
 
     _wf, _ctx = prepared(workflow, None)
-    assert run_hydrated(_ctx, run_log, _wf, {}).status == "refused"
+    assert run_workflow(_ctx, run_log, _wf, {}).status == "refused"
 
 
 def test_a_workflow_without_an_enabled_key_still_runs(run_log) -> None:
@@ -375,10 +375,10 @@ def test_a_workflow_without_an_enabled_key_still_runs(run_log) -> None:
         "steps": [{"id": "s", "process": "p"}],
     }
     _wf, _ctx = prepared(workflow, None)
-    assert run_hydrated(_ctx, run_log, _wf, {"p": handler}).status == "success"
+    assert run_workflow(_ctx, run_log, _wf, {"p": handler}).status == "success"
     assert calls == ["ran"]
     _wf, _ctx = prepared({**workflow, "enabled": True}, None)
-    assert run_hydrated(_ctx, run_log, _wf, {"p": handler}
+    assert run_workflow(_ctx, run_log, _wf, {"p": handler}
     ).status == "success"
 
 
@@ -429,7 +429,7 @@ def test_missing_handler_writes_failure_evidence_before_raising(
 
     with pytest.raises(WorkflowError, match="approved implementation catalog"):
         _wf, _ctx = prepared(workflow, ctx)
-        run_hydrated(_ctx, run_log, _wf, {})
+        run_workflow(_ctx, run_log, _wf, {})
 
     records = _run_log_records(tmp_path)
     types = [record.get("record_type") for record in records]
@@ -451,26 +451,21 @@ def test_missing_handler_writes_failure_evidence_before_raising(
     assert failure["error_message"]["process"] == "prepare_rule_set_inputs"
 
 
-def test_undefined_process_is_refused_at_hydration_before_any_run(run_log,
+def test_undefined_process_writes_failure_evidence_before_raising(run_log, 
     tmp_path: Any,
 ) -> None:
-    """A step belongs to its process, so one naming no process cannot be hydrated.
-
-    No live definition has one (measured 2026-10-12, backlog 917), so the
-    refusal moved from a run-time failure to the hydration boundary: nothing
-    starts and no run record is written.
-    """
     ctx = _log_ctx(tmp_path)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     workflow = {"name": "w", "processes": {}, "steps": [{"id": "s", "process": "nope"}]}
 
     with pytest.raises(WorkflowError, match="undefined process"):
         _wf, _ctx = prepared(workflow, ctx)
-        run_hydrated(_ctx, run_log, _wf, {"nope": lambda *a: None})
+        run_workflow(_ctx, run_log, _wf, {"nope": lambda *a: None})
 
-    from pathlib import Path
-
-    assert not sorted(Path(tmp_path).glob("*.jsonl")), "no run was started"
+    complete = next(
+        r for r in _run_log_records(tmp_path) if r.get("record_type") == "RUN_COMPLETE"
+    )
+    assert complete["status"] == "failed"
 
 
 def test_disabled_workflow_is_recorded_through_the_normal_run_path(run_log, 
@@ -481,7 +476,7 @@ def test_disabled_workflow_is_recorded_through_the_normal_run_path(run_log,
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
 
     _wf, _ctx = prepared({"name": "w", "enabled": False, "processes": {}, "steps": []}, ctx)
-    run = run_hydrated(_ctx, run_log, _wf,
+    run = run_workflow(_ctx, run_log, _wf,
         {},
     )
 
@@ -531,7 +526,7 @@ def test_always_run_step_runs_after_an_earlier_failure(run_log) -> None:
     ran: list[str] = []
     _wf, _ctx = prepared(_three_step(always_run=True), None)
 
-    run = run_hydrated(_ctx, run_log, _wf, {
+    run = run_workflow(_ctx, run_log, _wf, {
         "boom": _boom(), "middle": _records(ran, "s2"), "last": _records(ran, "s3"),
     })
 
@@ -547,7 +542,7 @@ def test_without_always_run_the_later_step_is_skipped(run_log) -> None:
     ran: list[str] = []
     _wf, _ctx = prepared(_three_step(always_run=False), None)
 
-    run = run_hydrated(_ctx, run_log, _wf, {
+    run = run_workflow(_ctx, run_log, _wf, {
         "boom": _boom(), "middle": _records(ran, "s2"), "last": _records(ran, "s3"),
     })
 
@@ -567,7 +562,7 @@ def test_always_run_changes_nothing_when_no_step_fails(run_log) -> None:
     }
     _wf, _ctx = prepared(workflow, None)
 
-    run = run_hydrated(_ctx, run_log, _wf, {
+    run = run_workflow(_ctx, run_log, _wf, {
         "first": _records(ran, "s1"), "last": _records(ran, "s2"),
     })
 
@@ -583,7 +578,7 @@ def test_a_failing_always_run_step_does_not_replace_the_first_failure(run_log) -
     """
     _wf, _ctx = prepared(_three_step(always_run=True), None)
 
-    run = run_hydrated(_ctx, run_log, _wf, {
+    run = run_workflow(_ctx, run_log, _wf, {
         "boom": _boom("first"), "middle": _records([], "s2"),
         "last": _boom("second"),
     })
@@ -611,7 +606,7 @@ def test_always_run_does_not_bypass_apply_only_in_dry_run(run_log) -> None:
     }
     _wf, _ctx = prepared(workflow, None)
 
-    run = run_hydrated(_ctx, run_log, _wf,
+    run = run_workflow(_ctx, run_log, _wf,
                        {"boom": _boom(), "last": _records(ran, "s2")}, apply=False)
 
     assert run.status == "failed"

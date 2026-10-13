@@ -22,9 +22,8 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from rey_lib.config.applications import Application, ApplicationOperation
-from rey_lib.workflow import WorkflowRun, hydrate_workflow, run_workflow
 
-__all__ = ["prepared", "run_hydrated"]
+__all__ = ["prepared"]
 
 #: Engine vocabulary, which no application publishes.
 _ENGINE_KEYS = frozenset({"implementation", "apply_only", "always_run", "enabled", "name"})
@@ -99,20 +98,3 @@ def _configured(
             names.update(key for key in (step.get("config") or {}) if key not in _ENGINE_KEYS)
     return names
 
-
-def run_hydrated(
-    ctx: Any,
-    run_log: Any,
-    workflow: Mapping[str, Any],
-    registry: Mapping[str, Any],
-    **kwargs: Any,
-) -> WorkflowRun:
-    """Hydrate a fixture definition and run it as its own application.
-
-    The coordinator executes only a canonical Workflow, so a fixture written as
-    a definition goes through the one hydration boundary first -- exactly what
-    an application does with its configuration entry.
-    """
-    hydrated = hydrate_workflow(workflow, installation="fixture_installation")
-    return run_workflow(ctx, run_log, hydrated, registry,
-                        application=str(workflow.get("app") or ""), **kwargs)

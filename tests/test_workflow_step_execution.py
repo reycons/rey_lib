@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from tests.support.workflow_publication import prepared, run_hydrated
+from tests.support.workflow_publication import prepared
 
-from rey_lib.workflow import RunContext, WorkflowError
+from rey_lib.workflow import RunContext, WorkflowError, run_workflow
 
 
 def _registry(process_names: list[str], calls: list[str]) -> dict[str, Any]:
@@ -45,7 +45,7 @@ def _run(run_log, **kwargs: Any) -> tuple[Any, list[str]]:
     calls: list[str] = []
     registry = _registry(["p1", "p2", "p3", "p4"], calls)
     _wf, _ctx = prepared(_workflow(), None)
-    run = run_hydrated(_ctx, run_log, _wf, registry, **kwargs)
+    run = run_workflow(_ctx, run_log, _wf, registry, **kwargs)
     return run, calls
 
 
@@ -139,7 +139,7 @@ def test_ambiguous_identifier_fails_closed(run_log) -> None:
     }
     with pytest.raises(WorkflowError):
         _wf, _ctx = prepared(workflow, None)
-        run_hydrated(_ctx, run_log, _wf, registry, step="shared")  # matches b and c
+        run_workflow(_ctx, run_log, _wf, registry, step="shared")  # matches b and c
 
 
 def test_step_combined_with_range_fails_closed(run_log) -> None:

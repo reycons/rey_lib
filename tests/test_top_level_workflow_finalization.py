@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from tests.support.workflow_publication import prepared, run_hydrated
+from tests.support.workflow_publication import prepared
 
 from tests.conftest import start_test_run
 
@@ -29,6 +29,7 @@ from rey_lib.logs import (
     log_artifact_reference,
 )
 from rey_lib.run_lifecycle import run_app_operation
+from rey_lib.workflow import run_workflow
 
 
 def _ctx(tmp_path: Path) -> SimpleNamespace:
@@ -89,7 +90,7 @@ def _run_top_level_workflow(run_log, tmp_path: Path, ctx: SimpleNamespace) -> No
     def operation_body() -> int:
         # The coordinator completes and finalizes the standalone workflow run.
         _wf, _ctx = prepared(workflow, ctx)
-        run_hydrated(_ctx, run_log, _wf, {"excel_conversion": handler})
+        run_workflow(_ctx, run_log, _wf, {"excel_conversion": handler})
         return 0
 
     # run_app_operation appends the application-level RUN_COMPLETE afterwards.
