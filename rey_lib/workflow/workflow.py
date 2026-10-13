@@ -12,7 +12,8 @@ hydrates, merges, propagates or reconstructs configuration.
 ``run`` owns workflow execution: selection, ordering, dispatch, dry-run
 boundaries, failure progression, ``always_run`` eligibility, first-failure
 retention, run-level evidence, finalization and the aggregate WorkflowRun. Each
-eligible step executes itself (WorkflowStep.execute).
+eligible step is run by its owning WorkflowProcess (WorkflowProcess.run_step),
+the instantiated Application; the Workflow never invokes an implementation.
 
 Built beside the recovered procedural engine (backlog 949), whose
 ``run_workflow`` is the behavioural reference; nothing here imports it.
@@ -242,8 +243,10 @@ class Workflow:
                 continue
 
             try:
-                outcome = one.execute(
-                    ctx, run_log, run_ctx, sequence=sequence + 1, workflow_name=name,
+                # Through the step's own process: the instantiated Application
+                # runs its operation. The Workflow never invokes an implementation.
+                outcome = one.process.run_step(
+                    one, ctx, run_log, run_ctx, sequence=sequence + 1, workflow_name=name,
                 )
             except WorkflowError as refusal:
                 # The step's settings do not satisfy its contract; nothing was

@@ -443,3 +443,60 @@ def test_an_earlier_failure_skip_is_settled_on_the_step(tmp_path: Path) -> None:
     assert [(one.outcome.status, one.outcome.detail) for one in graph.steps[1:]] == [
         ("skipped", "earlier step failed")] * 3
     assert [one.outcome for one in graph.steps] == run.outcomes
+
+
+# --- execution follows the object hierarchy ----------------------------------
+
+
+def test_every_executable_step_is_run_through_its_owning_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]))
+    dispatched: list[tuple[str, str]] = []
+    original = WorkflowProcess.run_step
+
+    def spy(self: WorkflowProcess, step: WorkflowStep, *args: Any, **kwargs: Any) -> Any:
+        dispatched.append((self.name, step.id))
+        assert step.process is self
+        return original(self, step, *args, **kwargs)
+
+    monkeypatch.setattr(WorkflowProcess, "run_step", spy)
+    run = graph.run(ctx, _log(tmp_path), apply=False)
+
+    # s2 is apply_only: the Workflow skips it in a dry run and never dispatches it.
+    assert dispatched == [("fixture_app", "s1"), ("fixture_app", "s3"),
+                          ("fixture_app", "s4")]
+    assert [o.status for o in run.outcomes] == ["ok", "skipped", "ok", "ok"]
+
+
+def test_the_workflow_never_invokes_an_implementation() -> None:
+    import ast
+    import rey_lib.workflow.workflow as module
+
+    tree = ast.parse(Path(str(module.__file__)).read_text(encoding="utf-8"))
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+
+    assert "implementation" not in attributes
+    assert "execute" not in attributes
+    assert "run_step" in attributes
+
+
+def test_the_handler_receives_the_callers_ctx_unchanged(tmp_path: Path) -> None:
+    # #950 item 2 is unresolved: nothing composes or propagates configuration
+    # into the context; the process passes the caller's ctx through as given.
+    seen: list[Any] = []
+    application = _application("load")
+    step = WorkflowStep(id="s1", process_name="load", label="s1", ordinal=1,
+                        application=application, operation_name="load",
+                        approved={"load": lambda ctx, *_args: seen.append(ctx)},
+                        settings={})
+    process = WorkflowProcess(name="app", ordinal=1, application=application,
+                              config={"app": {"marker": "process"}}, steps=[step])
+    ctx = SimpleNamespace(marker="caller")
+
+    Workflow(name="wf", enabled=True, tokens={"root": "/data"}, config=None,
+             processes=[process]).run(ctx, _log(tmp_path))
+
+    assert seen == [ctx]
+    assert vars(ctx) == {"marker": "caller", "workflow_name": "wf"}

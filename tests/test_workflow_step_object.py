@@ -1,9 +1,10 @@
 """Tests for WorkflowStep, the instantiated ApplicationOperation (backlog 952).
 
 Binding happens once, at construction, against the application's published
-operations and its approved implementation catalog. ``execute`` validates the
-step's own settings, writes STEP_START / STEP_END, invokes the implementation,
-and settles the step's own outcome. The parity tests run the same recording
+operations and its approved implementation catalog. Its owning process's
+``run_step`` reviews the step's settings, writes STEP_START / STEP_END, invokes
+the step's implementation and settles the step's outcome; these tests run each
+step through it. The parity tests run the same recording
 handlers through the recovered ``run_workflow`` (backlog 949) and compare the
 step evidence and its order.
 """
@@ -25,7 +26,9 @@ from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import current_step
 from rey_lib.workflow import run_workflow
 from rey_lib.workflow import coordinator
+from rey_lib.workflow import workflow_process
 from rey_lib.workflow import workflow_step
+from rey_lib.workflow.workflow_process import WorkflowProcess
 from rey_lib.workflow.workflow_step import RunContext, WorkflowError, WorkflowStep
 
 #: Fields that identify a run, a write or a source location rather than the step.
@@ -107,10 +110,14 @@ def _step_records(run_log: Any) -> list[dict[str, Any]]:
 
 
 def _execute(step: WorkflowStep, run_log: Any) -> Any:
-    """Execute ``step`` as sequence 1 of workflow wf, inside a workflow-level scope."""
+    """Run ``step`` through its owning process, as sequence 1 of workflow wf."""
+    process = step.process or WorkflowProcess(
+        name="fixture_app", ordinal=1, config=None, steps=[step],
+        application=Application(name="fixture_app", workflow_operations=(step.operation,)),
+    )
     run_log.set_nest_level("workflow")
-    return step.execute(SimpleNamespace(), run_log, RunContext(apply=True),
-                        sequence=1, workflow_name="wf")
+    return process.run_step(step, SimpleNamespace(), run_log, RunContext(apply=True),
+                            sequence=1, workflow_name="wf")
 
 
 def _record_order(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[str]:
@@ -393,7 +400,7 @@ def test_evidence_order_matches_run_workflow(
     _legacy(handler, tmp_path / "legacy")
     legacy = list(legacy_order)
 
-    new_order = _record_order(monkeypatch, workflow_step)
+    new_order = _record_order(monkeypatch, workflow_process)
     _execute(_step(handler), _log(tmp_path / "new"))
 
     assert legacy == expected
