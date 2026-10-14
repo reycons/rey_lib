@@ -22,6 +22,11 @@ The existing logging is consumed exactly as it is.
 Built beside the recovered procedural engine (backlog 949), whose
 ``run_workflow`` is the behavioural reference; nothing here imports it.
 
+Hydration (backlog 963) follows the HTTP operations': each canonical object
+hydrates itself from its control.workflow_flat_vw rows. Hydration builds the
+graph and nothing else -- no step is released or executed and no Run is
+created.
+
 Public API
 ----------
 Workflow       The orchestrator.
@@ -30,9 +35,13 @@ Workflow       The orchestrator.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from rey_lib.config.applications import Application
+from rey_lib.config.config_namespace import Namespace
+from rey_lib.config.config_paths import resolve_config_paths
 from rey_lib.config.config_utils import record_config_file_references
+from rey_lib.config.inventory import to_plain_data
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import (
     AppLogger,
@@ -140,6 +149,80 @@ class Workflow:
         )
         for process in self.processes:
             process.workflow = self
+
+    @classmethod
+    def hydrate(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        applications: Iterable[Application],
+        approved: Mapping[str, Mapping[str, Callable[..., Any]]],
+        control: Any,
+    ) -> "Workflow":
+        """The workflow its governed rows state, fully hydrated (backlog 963).
+
+        ``rows`` are this workflow's rows of control.workflow_flat_vw, one per
+        step. Their configuration is resolved once, through the context build's
+        own resolution (``config_paths.resolve_config_paths``) against the
+        workflow's declared ``paths``; run-time placeholders survive as they do
+        there. Each process is then hydrated with its Application and that
+        Application's approved implementation catalog. Nothing is executed or
+        released, and no Run is created.
+
+        Raises:
+            AppError: When the rows are empty, the workflow is disabled, a
+                process names an Application that is not present, or any
+                object of the graph is refused.
+        """
+        if not rows:
+            raise AppError("a workflow was hydrated from no rows.")
+        first = rows[0]
+        name = str(first.get("workflow_name") or "")
+        # As HttpOperation.hydrate refuses a disabled job: a disabled workflow
+        # is never offered as a hydrated runnable workflow.
+        if not first.get("workflow_enabled"):
+            raise AppError(f"workflow '{name}' is disabled.")
+        config = first.get("workflow_config")
+        tree = Namespace({
+            "config": config,
+            "rows": [
+                {"process_config": row.get("process_config"),
+                 "step_settings": row.get("step_settings")}
+                for row in rows
+            ],
+        })
+        resolve_config_paths(tree, (config or {}).get("paths") or [])
+        resolved = to_plain_data(tree)
+        rows = [
+            {**row, **resolved_row} for row, resolved_row in zip(rows, resolved["rows"])
+        ]
+
+        grouped: dict[Any, list[Mapping[str, Any]]] = {}
+        for row in rows:
+            if row.get("workflow_process_id") is not None:
+                grouped.setdefault(row["workflow_process_id"], []).append(row)
+        by_name = {application.name: application for application in applications}
+        processes = []
+        for process_rows in grouped.values():
+            application_name = str(process_rows[0].get("application_name") or "")
+            application = by_name.get(application_name)
+            if application is None:
+                raise AppError(
+                    f"workflow '{name}': process '{process_rows[0].get('process_name')}' "
+                    f"instantiates application '{application_name}', which is not present."
+                )
+            processes.append(WorkflowProcess.hydrate(
+                process_rows, application=application,
+                approved=approved.get(application_name) or {},
+            ))
+        return cls(
+            name=name,
+            enabled=bool(first.get("workflow_enabled")),
+            tokens=None,
+            config=resolved["config"],
+            processes=sorted(processes, key=lambda process: process.ordinal),
+            control=control,
+        )
 
     def run(
         self,

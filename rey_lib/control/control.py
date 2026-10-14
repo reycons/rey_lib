@@ -1346,6 +1346,21 @@ class Control:
             }, required=required) or [])
         ]
 
+    def workflow(self, installation: str, workflow_name: Optional[str] = None,
+                 required: bool = True) -> list[dict[str, Any]]:
+        """One installation's workflow definitions, one row per step (backlog 963).
+
+        Each row is one workflow step as control.workflow_flat_vw shapes it, in
+        execution order. The view owns that assembly; nothing here re-derives
+        it. ``workflow_name`` None answers every workflow of the installation.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_workflow", {
+                "installation": str(installation),
+                "workflow_name": None if workflow_name is None else str(workflow_name),
+            }, required=required) or [])
+        ]
+
     def ai_engine_profiles(self, required: bool = True) -> list[dict[str, Any]]:
         """Every engine profile the estate offers.
 

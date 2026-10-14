@@ -67,6 +67,12 @@ __all__ = ["Run"]
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
 SKIPPED = "SKIPPED"
+#: A step that receives a Run record but is never released for execution,
+#: because a run-time release rule prevents it (backlog 964). Distinct from
+#: SKIPPED: the step was not released, not released and then skipped.
+NOT_RUN = "NOT RUN"
+#: The reason recorded for a NOT RUN step.
+NOT_RELEASED = "not released"
 
 
 class Run:
@@ -418,6 +424,46 @@ class Run:
             finally:
                 clear_step()
         self.finish(SKIPPED)
+
+    def not_released(
+        self,
+        *,
+        step: Any,
+        run_log: Any,
+        sequence: int,
+        workflow_name: str = "",
+    ) -> None:
+        """Record a WorkflowStep that was never released, then finish ``NOT RUN``.
+
+        For a step a run-time release rule held back (backlog 964): it gets a
+        Run record, but it is not executed and not skipped. The reason, "not
+        released", is recorded in this Run's log the way a skipped step's is --
+        STEP_START, then STEP_END with the status and the reason -- and the
+        manifest holds ``NOT RUN``.
+        """
+        self.detail = NOT_RELEASED
+        step_name = step.label or step.id
+        bind_step(
+            step_id=step.id,
+            step_name=step_name,
+            step_sequence=sequence,
+            workflow_name=workflow_name,
+        )
+        step_started = time.monotonic()
+        try:
+            log_step_start(
+                run_log, step_name, sequence, step_type=step.process_name,
+                step_id=step.id,
+            )
+            run_log.enter()
+            try:
+                log_step_end(run_log, step_name, "not run", message=NOT_RELEASED,
+                             duration_ms=monotonic_ms(step_started))
+            finally:
+                run_log.exit()
+        finally:
+            clear_step()
+        self.finish(NOT_RUN)
 
     # -- completion ---------------------------------------------------------
 

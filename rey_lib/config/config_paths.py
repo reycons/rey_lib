@@ -98,6 +98,37 @@ def _build_path_resolver(
 # Public API
 # ---------------------------------------------------------------------------
 
+def resolve_config_paths(
+    tree: Namespace,
+    declared_paths: Any,
+    runtime_tokens: dict[str, str] | None = None,
+) -> PathResolver:
+    """Resolve a configuration tree's path references in place (backlog 963).
+
+    The public access point to the resolution the context build applies: the
+    declared ``paths`` list becomes a :class:`PathResolver`, and every logical
+    ``{name}`` reference in ``tree`` is substituted from it, exactly as
+    ``ContextBuilder`` does for a context. Nothing is added: run-time
+    placeholders survive as they do there.
+
+    Args:
+        tree: The configuration to resolve, mutated in place.
+        declared_paths: The ``paths:`` list of ``{name, path}`` entries.
+        runtime_tokens: Values available to path templates, as the context
+            build supplies them; None supplies none.
+
+    Returns:
+        The resolver built from ``declared_paths``.
+
+    Raises:
+        ConfigError: As the context build raises, for a path key left with an
+            unresolved token or a conflicting scoped token.
+    """
+    resolver = _build_path_resolver(declared_paths, runtime_tokens)
+    _apply_path_resolver(tree, resolver)
+    return resolver
+
+
 def _is_path_key(key: str) -> bool:
     """Return True only for keys explicitly declared as filesystem paths."""
     return key in _PATH_KEYS

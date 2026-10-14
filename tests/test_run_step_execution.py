@@ -245,6 +245,44 @@ def test_an_earlier_failure_skip_writes_no_step_record(tmp_path: Path) -> None:
     assert (child.status, child.detail) == ("SKIPPED", "earlier step failed")
 
 
+# --- not run (backlog 964) -------------------------------------------------------
+
+
+def test_not_run_is_its_own_terminal_status() -> None:
+    assert run_module.NOT_RUN == "NOT RUN"
+    assert run_module.NOT_RUN not in {
+        run_module.SUCCEEDED, run_module.FAILED, run_module.SKIPPED, "ABORTED",
+    }
+    assert (run_module.SUCCEEDED, run_module.FAILED, run_module.SKIPPED) == (
+        "SUCCEEDED", "FAILED", "SKIPPED")
+
+
+def test_a_run_finished_not_run_persists_not_run() -> None:
+    control = RecordingControl()
+    child = _child(control, parent_run(control))
+
+    child.finish(run_module.NOT_RUN)
+
+    assert (child.status, control.finished[child.run_id]) == ("NOT RUN", "NOT RUN")
+
+
+def test_a_not_released_step_logs_its_reason_and_finishes_not_run(tmp_path: Path) -> None:
+    control = RecordingControl()
+    run_log = _log(tmp_path)
+    child = _child(control, parent_run(control))
+    run_log.set_nest_level("workflow_step")
+
+    child.not_released(step=_step(_raises), run_log=run_log, sequence=3, workflow_name="wf")
+
+    assert [r["record_type"] for r in _read(run_log)] == ["STEP_START", "STEP_END"]
+    end = _read(run_log)[1]
+    assert (end["status"], end["message"], end["step_sequence"]) == (
+        "not run", "not released", 3)
+    assert (child.status, child.detail) == ("NOT RUN", "not released")
+    assert control.finished[child.run_id] == "NOT RUN"
+    assert current_step() is None
+
+
 # --- parity with the recovered run_workflow --------------------------------------
 
 

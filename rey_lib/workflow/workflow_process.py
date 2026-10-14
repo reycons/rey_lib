@@ -25,7 +25,7 @@ WorkflowProcess    A configured Application instance and its steps.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 from rey_lib.config.applications import Application
 from rey_lib.errors.error_utils import AppError
@@ -116,3 +116,34 @@ class WorkflowProcess:
         for step in self.steps:
             step.process = self
         self.workflow: Optional["Workflow"] = None
+
+    @classmethod
+    def hydrate(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        application: Application,
+        approved: Mapping[str, Callable[..., Any]],
+    ) -> "WorkflowProcess":
+        """The process its governed rows state, with its steps (backlog 963).
+
+        ``rows`` are this process's rows of control.workflow_flat_vw, their
+        configuration already resolved by the workflow's hydration. A process
+        without steps is one row with no step columns, and has no steps.
+
+        Raises:
+            AppError: When the rows are empty, or a step or the process is refused.
+        """
+        if not rows:
+            raise AppError("a workflow process was hydrated from no rows.")
+        first = rows[0]
+        return cls(
+            name=str(first.get("process_name") or ""),
+            ordinal=int(first["process_ordinal"]),
+            application=application,
+            config=first.get("process_config"),
+            steps=[
+                WorkflowStep.hydrate(row, application=application, approved=approved)
+                for row in rows if row.get("workflow_step_id") is not None
+            ],
+        )

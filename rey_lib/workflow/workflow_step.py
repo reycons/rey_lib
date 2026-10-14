@@ -120,6 +120,34 @@ class WorkflowStep:
         self.always_run = always_run
         self.process: Optional["WorkflowProcess"] = None
 
+    @classmethod
+    def hydrate(
+        cls,
+        row: Mapping[str, Any],
+        *,
+        application: Application,
+        approved: Mapping[str, Callable[..., Any]],
+    ) -> "WorkflowStep":
+        """The step one governed row states (backlog 963).
+
+        Takes the row as control.workflow_flat_vw shapes it, with its
+        ``step_settings`` already resolved by the workflow's hydration; those
+        are the operation's settings only.
+
+        BLOCKED (backlog 963): ``apply_only`` and ``always_run`` are this
+        step's orchestration properties, and their governed storage location is
+        not yet defined. They are not read from the operation settings and never
+        filled from this constructor's defaults, so no step is hydrated until
+        their source is defined.
+
+        Raises:
+            AppError: Always, naming the step, until that source is defined.
+        """
+        raise AppError(
+            f"step '{row.get('workflow_step_name')}': apply_only and always_run have no "
+            "defined governed source (backlog 963)."
+        )
+
     def contract_refusal(self, workflow_name: str) -> str:
         """Why this step's settings do not satisfy its operation's contract, or ''.
 
