@@ -42,7 +42,8 @@ from rey_lib.config.config_namespace import Namespace
 from rey_lib.config.config_paths import resolve_config_paths
 from rey_lib.config.config_utils import record_config_file_references
 from rey_lib.config.inventory import to_plain_data
-from rey_lib.errors.error_utils import AppError
+from rey_lib.config.bootstrap import open_shared_control
+from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.logs import (
     AppLogger,
     bind_run,
@@ -82,9 +83,9 @@ class Workflow:
         The Control the child Runs are created through (``Run.start``).
     processes : tuple[WorkflowProcess, ...]
         The workflow's processes, as hydration gives them.
-    steps : tuple[WorkflowStep, ...]
-        The active steps of every process, in workflow-wide ordinal order; a
-        completed step is removed.
+    steps : dict[str, WorkflowStep]
+        The active steps of every process, keyed by ``WorkflowStep.id``, in
+        workflow-wide ordinal order; a completed step is removed.
     """
 
     def __init__(
@@ -144,9 +145,9 @@ class Workflow:
                 )
             seen[step.ordinal] = step.id
         # The declared workflow-wide order: control.workflow_step.ordinal.
-        self.steps: tuple[WorkflowStep, ...] = tuple(
-            sorted(steps, key=lambda one: one.ordinal)
-        )
+        self.steps: dict[str, WorkflowStep] = {
+            one.id: one for one in sorted(steps, key=lambda one: one.ordinal)
+        }
         for process in self.processes:
             process.workflow = self
 
@@ -224,6 +225,41 @@ class Workflow:
             control=control,
         )
 
+    @classmethod
+    def from_governed(cls, ctx: Any, workflow_name: str) -> "Workflow":
+        """The named workflow of this installation, hydrated from its governed rows.
+
+        As an HTTP operation is established: the runtime's one Control reads the
+        installation's rows, and :meth:`hydrate` builds the graph from them with
+        the installation's Applications and the implementations each approves.
+        Nothing is executed or released, and no Run is created.
+
+        Raises:
+            ConfigError: If the runtime has no control database, or the
+                installation has no such workflow.
+        """
+        control = open_shared_control(ctx).shared_control
+        if control is None:
+            raise ConfigError(
+                f"Workflow: this runtime has no control database to read workflow "
+                f"'{workflow_name}' from."
+            )
+        rows = control.workflow(ctx.installation.name, workflow_name)
+        if not rows:
+            raise ConfigError(
+                f"Workflow: installation '{ctx.installation.name}' has no workflow "
+                f"'{workflow_name}'."
+            )
+        return cls.hydrate(
+            rows,
+            applications=ctx.applications,
+            approved={
+                application.name: application.approved_implementations
+                for application in ctx.applications
+            },
+            control=control,
+        )
+
     def run(
         self,
         parent_run: Run,
@@ -281,7 +317,7 @@ class Workflow:
         if self.enabled is False:
             return self._refused(parent_run, ctx, run_log, apply=apply)
 
-        steps = list(self.steps)
+        steps = list(self.steps.values())
         selected = self._select(steps, step=step, from_step=from_step, to_step=to_step)
 
         # The parent Run is the execution context its children work in.
@@ -378,7 +414,7 @@ class Workflow:
 
     def _consume(self, one: WorkflowStep) -> None:
         """Remove a completed step from the Workflow's and its process's active steps."""
-        self.steps = tuple(each for each in self.steps if each is not one)
+        self.steps = {key: each for key, each in self.steps.items() if each is not one}
         process = one.process
         if process is not None:
             process.steps = tuple(each for each in process.steps if each is not one)

@@ -20,7 +20,7 @@ or resolve differently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from rey_lib.config.operation_contract import check_contract
 from rey_lib.config.registration import REGISTRATION_GROUP, discover_registrations
@@ -357,6 +357,17 @@ class Application:
     #: application approves is its own answer, and an empty tuple means it has
     #: not given one -- never that it approves everything.
     workflow_operations: tuple[ApplicationOperation, ...] = field(default=())
+    #: The implementations this application approves for its workflow
+    #: operations, operation name -> callable (backlog 963).
+    #:
+    #: The other half of binding: a workflow step binds to one of
+    #: :attr:`workflow_operations` and to the implementation published here.
+    #: Taken from the registration's ``approved_implementations`` as the
+    #: finished mapping the application itself built; nothing here imports an
+    #: application module. Empty until an application publishes it.
+    approved_implementations: Mapping[str, Callable[..., Any]] = field(
+        default_factory=dict, hash=False,
+    )
 
     def command(self, name: str) -> ApplicationCommand | None:
         """The command of that name, or None where this application has none."""
@@ -531,6 +542,9 @@ def _from_registration(
         parameter_groups=_parameter_groups(cli, parameters, name),
         commands=_commands(cli, ctx, name),
         workflow_operations=_operations(registration, name),
+        # From the REGISTRATION, as the operations are: the finished mapping
+        # the application built from its own implementations.
+        approved_implementations=dict(registration.get("approved_implementations") or {}),
     )
 
 

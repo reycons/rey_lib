@@ -449,7 +449,7 @@ def test_completed_steps_are_removed_from_the_workflow_and_its_processes(
 
     graph.run(parent_run(control), ctx, _log(tmp_path))
 
-    assert graph.steps == ()
+    assert graph.steps == {}
     assert graph.processes[0].steps == ()
 
 
@@ -460,7 +460,7 @@ def test_a_step_not_selected_stays_and_a_released_one_is_consumed(tmp_path: Path
 
     graph.run(parent_run(control), ctx, _log(tmp_path), step="s3")
 
-    assert [one.id for one in graph.steps] == ["s1", "s2", "s4"]
+    assert [one.id for one in graph.steps.values()] == ["s1", "s2", "s4"]
     assert [one.id for one in graph.processes[0].steps] == ["s1", "s2", "s4"]
 
 

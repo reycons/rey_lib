@@ -88,6 +88,22 @@ class TestConstruction:
     def test_an_absent_collection_is_not_an_error(self) -> None:
         assert build_applications(SimpleNamespace()) == ()
 
+    def test_the_approved_implementations_are_the_registrations(self) -> None:
+        def handler(*_args: Any) -> None:
+            return None
+
+        apps = [{"name": "loader", "app_path": "/apps/loader"}]
+        registrations = {"loader": {
+            "name": "loader", "cli": {}, "approved_implementations": {"load": handler},
+        }}
+
+        built = build_applications(ctx(apps), registrations=registrations)
+
+        assert built[0].approved_implementations == {"load": handler}
+
+    def test_an_application_publishing_none_approves_none(self) -> None:
+        assert build([declaration()])[0].approved_implementations == {}
+
     def test_an_application_without_a_name_is_refused(self) -> None:
         with pytest.raises(ConfigError):
             build([{"app_path": "/x"}])

@@ -132,20 +132,38 @@ class WorkflowStep:
 
         Takes the row as control.workflow_flat_vw shapes it, with its
         ``step_settings`` already resolved by the workflow's hydration; those
-        are the operation's settings only.
+        are the operation's settings only and are passed through unchanged.
 
-        BLOCKED (backlog 963): ``apply_only`` and ``always_run`` are this
-        step's orchestration properties, and their governed storage location is
-        not yet defined. They are not read from the operation settings and never
-        filled from this constructor's defaults, so no step is hydrated until
-        their source is defined.
+        ``apply_only`` and ``always_run`` are this step's orchestration
+        properties, read from
+        ``row.workflow_config.execution.steps[row.workflow_step_name]``. Both
+        must be booleans; a missing or invalid value is refused, never filled
+        from this constructor's defaults.
 
         Raises:
-            AppError: Always, naming the step, until that source is defined.
+            AppError: Naming the step, when either control is missing or not a
+                boolean, or when the constructor refuses the binding.
         """
-        raise AppError(
-            f"step '{row.get('workflow_step_name')}': apply_only and always_run have no "
-            "defined governed source (backlog 963)."
+        step_id = str(row.get("workflow_step_name") or "")
+        execution = (row.get("workflow_config") or {}).get("execution") or {}
+        controls = (execution.get("steps") or {}).get(step_id) or {}
+        for name in ("apply_only", "always_run"):
+            if not isinstance(controls.get(name), bool):
+                raise AppError(
+                    f"step '{step_id}': workflow_config.execution.steps states no "
+                    f"boolean '{name}' for it."
+                )
+        return cls(
+            id=step_id,
+            process_name=str(row.get("configured_process_name") or ""),
+            label=str(row.get("step_label") or ""),
+            ordinal=int(row["step_ordinal"]),
+            application=application,
+            operation_name=str(row.get("application_operation_name") or ""),
+            approved=approved,
+            settings=row.get("step_settings") or {},
+            apply_only=controls["apply_only"],
+            always_run=controls["always_run"],
         )
 
     def contract_refusal(self, workflow_name: str) -> str:
