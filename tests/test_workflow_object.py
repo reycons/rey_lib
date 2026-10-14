@@ -1,10 +1,13 @@
-"""Tests for Workflow, the orchestrator of a hydrated graph (backlog 956).
+"""Tests for Workflow, the orchestrator of a hydrated graph (backlog 950).
 
-The parity tests run one fixture through the recovered ``run_workflow`` (backlog
-949) and through a Workflow graph built from the same fixture, with the same
-recording handlers, and compare outcomes, call order and run-log records. The
-local builder stands in for the workflow hydrator: it composes each step's
-settings once, at construction, so the objects only run.
+``Workflow.run(parent_run, ...)`` releases each eligible step, checking its
+contract first, assigns its sequence and indent, and creates one child Run for
+it under the parent Run (a skipped step gets one too). The child Run executes
+the step and finishes itself; the completed step is removed from the active
+steps, and ``run`` returns the parent Run. The parity tests run one fixture
+through the recovered ``run_workflow`` (backlog 949) and through a Workflow
+graph built from it, with the same recording handlers, and compare call order,
+step outcomes (child Run statuses) and the run-log records.
 """
 
 from __future__ import annotations
@@ -18,14 +21,18 @@ import pytest
 
 from tests.conftest import make_db_run_log, start_test_run
 from tests.support.workflow_publication import prepared
+from tests.support.workflow_runs import RecordingControl, parent_run
 
 from rey_lib.config.applications import Application, ApplicationOperation
+from rey_lib.errors.error_utils import AppError
+from rey_lib.run import Run
 from rey_lib.workflow import run_workflow
+from rey_lib.workflow import workflow as workflow_module
 from rey_lib.workflow.coordinator import _deep_merge
 from rey_lib.workflow.engine import WorkflowError as LegacyWorkflowError
-from rey_lib.workflow.workflow import Workflow, WorkflowRun
+from rey_lib.workflow.workflow import Workflow
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import RunContext, WorkflowError, WorkflowStep
+from rey_lib.workflow.workflow_step import WorkflowStep
 
 _ENGINE_KEYS = frozenset({"implementation", "apply_only", "always_run", "enabled", "name"})
 #: Fields that identify a run, a moment or a source location rather than behaviour.
@@ -33,6 +40,8 @@ _VOLATILE = frozenset({"run_id", "run_timestamp", "timestamp", "duration_ms", "f
 _VOLATILE_ERROR = frozenset({"failure_record_id", "sanitized_traceback", "traceback_summary"})
 #: The records whose content is compared; every other record is compared by type.
 _COMPARED = frozenset({"RUN_START", "RUN_COMPLETE", "STEP_START", "STEP_END", "STEP_FAILURE"})
+#: A legacy outcome status and the child Run's terminal status that stands for it.
+_STATUS = {"ok": "SUCCEEDED", "skipped": "SKIPPED", "failed": "FAILED"}
 _SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 
 
@@ -59,8 +68,7 @@ def _recording(calls: list[str], behaviour: dict[str, Callable[[], Any]] | None 
     behaviour = behaviour or {}
 
     def make(name: str) -> Any:
-        def handler(_ctx: Any, _run_log: Any, _settings: dict[str, Any],
-                    _run: RunContext) -> Any:
+        def handler(_ctx: Any, _run_log: Any, _settings: dict[str, Any], _run: Any) -> Any:
             calls.append(name)
             return behaviour[name]() if name in behaviour else None
         return handler
@@ -76,8 +84,8 @@ def _log(tmp_path: Path) -> Any:
                            path=str(tmp_path / "app.jsonl"))
 
 
-def _build(workflow: dict[str, Any], application: Application,
-           approved: dict[str, Any]) -> Workflow:
+def _build(workflow: dict[str, Any], application: Application, approved: dict[str, Any],
+           control: Any) -> Workflow:
     """The graph the hydrator would create: settings composed once, here."""
     processes = workflow.get("processes") or {}
     steps = []
@@ -100,30 +108,30 @@ def _build(workflow: dict[str, Any], application: Application,
     process = WorkflowProcess(name=application.name, ordinal=1, application=application,
                               config=None, steps=steps)
     return Workflow(name=workflow["name"], enabled=workflow.get("enabled", True),
-                    tokens=None, config=None, processes=[process])
+                    tokens=None, config=None, processes=[process], control=control)
 
 
 def _both(tmp_path: Path, workflow: dict[str, Any], *,
-          behaviour: dict[str, Callable[[], Any]] | None = None,
-          ctx: Any = None, **selection: Any) -> tuple[Any, Any]:
-    """Run ``workflow`` on both paths; return (legacy, new) as (run, calls, run_log)."""
+          behaviour: dict[str, Callable[[], Any]] | None = None, **selection: Any
+          ) -> tuple[Any, Any]:
+    """Run ``workflow`` on both paths.
+
+    Returns (legacy run, legacy calls, legacy log) and (parent Run, new calls,
+    new log, control).
+    """
     legacy_calls: list[str] = []
     legacy_log = _log(tmp_path / "legacy")
-    legacy_wf, legacy_ctx = prepared(workflow, ctx if ctx is not None else SimpleNamespace())
+    legacy_wf, legacy_ctx = prepared(workflow, SimpleNamespace())
     legacy_run = run_workflow(legacy_ctx, legacy_log, legacy_wf,
                               _recording(legacy_calls, behaviour), **selection)
 
     new_calls: list[str] = []
     new_log = _log(tmp_path / "new")
-    new_wf, new_ctx = prepared(workflow, ctx if ctx is not None else SimpleNamespace())
-    graph = _build(new_wf, new_ctx.applications[0], _recording(new_calls, behaviour))
-    new_run = graph.run(new_ctx, new_log, **selection)
-    return (legacy_run, legacy_calls, legacy_log), (new_run, new_calls, new_log)
-
-
-def _outcomes(run: Any) -> list[tuple[Any, ...]]:
-    """The outcomes as plain tuples, whichever engine produced them."""
-    return [(o.id, o.label, o.process, o.status, o.detail, o.error) for o in run.outcomes]
+    control = RecordingControl()
+    new_wf, new_ctx = prepared(workflow, SimpleNamespace())
+    graph = _build(new_wf, new_ctx.applications[0], _recording(new_calls, behaviour), control)
+    returned = graph.run(parent_run(control), new_ctx, new_log, **selection)
+    return (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control)
 
 
 def _records(run_log: Any) -> list[Any]:
@@ -148,12 +156,13 @@ def _records(run_log: Any) -> list[Any]:
 
 
 def _assert_parity(legacy: Any, new: Any) -> None:
-    """Same status, outcomes, call order and run-log records on both paths."""
-    (legacy_run, legacy_calls, legacy_log), (new_run, new_calls, new_log) = legacy, new
-    assert isinstance(new_run, WorkflowRun)
-    assert new_run.status == legacy_run.status
-    assert _outcomes(new_run) == _outcomes(legacy_run)
+    """Same call order, step outcomes and run-log records on both paths."""
+    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control) = legacy, new
+    assert isinstance(returned, Run)
     assert new_calls == legacy_calls
+    assert [(row["subject_id"], row["status"]) for row in control.children(returned)] == [
+        (outcome.id, _STATUS[outcome.status]) for outcome in legacy_run.outcomes
+    ]
     assert _records(new_log) == _records(legacy_log)
 
 
@@ -192,13 +201,15 @@ def test_selection_refusals_match_run_workflow(selection: dict[str, Any], messag
     with pytest.raises(LegacyWorkflowError) as legacy:
         run_workflow(legacy_ctx, _log(tmp_path / "legacy"), legacy_wf,
                      _recording([]), **selection)
+    control = RecordingControl()
     new_wf, new_ctx = prepared(_fixture(), SimpleNamespace())
-    graph = _build(new_wf, new_ctx.applications[0], _recording([]))
-    with pytest.raises(WorkflowError) as new:
-        graph.run(new_ctx, _log(tmp_path / "new"), **selection)
+    graph = _build(new_wf, new_ctx.applications[0], _recording([]), control)
+    with pytest.raises(AppError) as new:
+        graph.run(parent_run(control), new_ctx, _log(tmp_path / "new"), **selection)
 
     assert message in str(new.value)
     assert str(new.value) == str(legacy.value)
+    assert control.rows == []
 
 
 def test_an_ambiguous_identifier_matches_run_workflow(tmp_path: Path) -> None:
@@ -208,10 +219,11 @@ def test_an_ambiguous_identifier_matches_run_workflow(tmp_path: Path) -> None:
     with pytest.raises(LegacyWorkflowError) as legacy:
         run_workflow(legacy_ctx, _log(tmp_path / "legacy"), legacy_wf, _recording([]),
                      step="One")
+    control = RecordingControl()
     new_wf, new_ctx = prepared(workflow, SimpleNamespace())
-    with pytest.raises(WorkflowError) as new:
-        _build(new_wf, new_ctx.applications[0], _recording([])).run(
-            new_ctx, _log(tmp_path / "new"), step="One")
+    with pytest.raises(AppError) as new:
+        _build(new_wf, new_ctx.applications[0], _recording([]), control).run(
+            parent_run(control), new_ctx, _log(tmp_path / "new"), step="One")
 
     assert "ambiguous" in str(new.value)
     assert str(new.value) == str(legacy.value)
@@ -273,7 +285,8 @@ def _requiring_source() -> tuple[dict[str, Any], SimpleNamespace]:
 
 
 @pytest.mark.parametrize("apply", [True, False], ids=["apply", "dry_run"])
-def test_a_contract_refusal_matches_run_workflow(apply: bool, tmp_path: Path) -> None:
+def test_the_contract_is_checked_before_release_like_run_workflow(apply: bool,
+                                                                   tmp_path: Path) -> None:
     workflow, legacy_ctx = _requiring_source()
     if not apply:
         workflow["processes"]["p1"]["apply_only"] = True
@@ -284,14 +297,16 @@ def test_a_contract_refusal_matches_run_workflow(apply: bool, tmp_path: Path) ->
     workflow, new_ctx = _requiring_source()
     if not apply:
         workflow["processes"]["p1"]["apply_only"] = True
-    new_log, new_calls = _log(tmp_path / "new"), []
-    graph = _build(workflow, new_ctx.applications[0], _recording(new_calls))
-    with pytest.raises(WorkflowError) as new:
-        graph.run(new_ctx, new_log, apply=apply)
+    new_log, new_calls, control = _log(tmp_path / "new"), [], RecordingControl()
+    graph = _build(workflow, new_ctx.applications[0], _recording(new_calls), control)
+    with pytest.raises(AppError) as new:
+        graph.run(parent_run(control), new_ctx, new_log, apply=apply)
 
     assert str(new.value) == str(legacy.value)
     assert new_calls == legacy_calls == []
     assert _records(new_log) == _records(legacy_log)
+    # Refused before release: no child Run was created.
+    assert control.rows == []
 
 
 def test_a_disabled_workflow_is_a_refused_run_like_run_workflow(tmp_path: Path) -> None:
@@ -301,8 +316,164 @@ def test_a_disabled_workflow_is_a_refused_run_like_run_workflow(tmp_path: Path) 
     legacy, new = _both(tmp_path, workflow)
 
     _assert_parity(legacy, new)
-    assert new[0].status == "refused"
     assert new[1] == []
+
+
+# --- child Runs, sequence and indent -----------------------------------------
+
+
+def test_every_released_step_gets_one_child_run_under_the_parent(tmp_path: Path) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+    parent = parent_run(control, run_id=42)
+
+    returned = graph.run(parent, ctx, _log(tmp_path), apply=False)
+
+    assert returned is parent
+    children = control.children(parent)
+    assert [(c["subject_type"], c["subject_id"], c["subject_name"], c["app_name"], c["status"])
+            for c in children] == [
+        ("step", "s1", "One", "fixture_app", "SUCCEEDED"),
+        ("step", "s2", "Two", "fixture_app", "SKIPPED"),
+        ("step", "s3", "Three", "fixture_app", "SUCCEEDED"),
+        ("step", "s4", "Four", "fixture_app", "SUCCEEDED"),
+    ]
+    assert all(c["parent_run_id"] == 42 for c in children)
+    assert len({c["run_id"] for c in children}) == 4
+
+
+def test_a_step_skipped_after_an_earlier_failure_gets_a_skipped_child_run(
+    tmp_path: Path,
+) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([], {"p1": _failed("broke")}), control)
+    parent = parent_run(control)
+
+    graph.run(parent, ctx, _log(tmp_path))
+
+    assert [c["status"] for c in control.children(parent)] == [
+        "FAILED", "SKIPPED", "SKIPPED", "SKIPPED"]
+
+
+def test_the_workflow_assigns_sequence_and_the_step_indent_level(tmp_path: Path) -> None:
+    control = RecordingControl()
+    run_log = _log(tmp_path)
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+
+    graph.run(parent_run(control), ctx, run_log, apply=False)
+
+    lines = Path(run_log.path()).read_text(encoding="utf-8").splitlines()
+    starts = [json.loads(line) for line in lines]
+    starts = [r for r in starts if r["record_type"] == "STEP_START"]
+    assert [(r["step_id"], r["step_sequence"]) for r in starts] == [
+        ("s1", 1), ("s2", 2), ("s3", 3), ("s4", 4)]
+    assert {r["nest_level"] for r in starts} == {5}
+
+
+def test_a_child_runs_settings_are_its_steps_resolved_settings(tmp_path: Path) -> None:
+    control = RecordingControl()
+    application = Application(name="app", workflow_operations=(ApplicationOperation(
+        name="load", contract_definition={"$schema": _SCHEMA, "type": "object",
+                                          "properties": {"source": {}}}),))
+    step = WorkflowStep(id="s1", process_name="load", label="Load", ordinal=1,
+                        application=application, operation_name="load",
+                        approved={"load": lambda *_a: None}, settings={"source": "a"})
+    process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
+                              steps=[step])
+
+    Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process],
+             control=control).run(parent_run(control), SimpleNamespace(), _log(tmp_path))
+
+    assert control.rows[0]["settings"] == {"source": "a"}
+
+
+# --- execution context and cross-step data ------------------------------------
+
+
+def test_the_handler_receives_its_child_run_and_steps_share_the_parents_data(
+    tmp_path: Path,
+) -> None:
+    control = RecordingControl()
+    seen: list[Any] = []
+
+    def export(_ctx: Any, _log: Any, _settings: dict[str, Any], run: Any) -> None:
+        run.data["object_files"] = ["a.sql"]
+        run.metadata["engine"] = "postgres"
+        seen.append(run)
+
+    def lint(_ctx: Any, _log: Any, _settings: dict[str, Any], run: Any) -> None:
+        seen.append((run, run.data.get("object_files"), run.metadata.get("engine"),
+                     run.metadata.get("workflow"), run.apply))
+
+    application = Application(name="db", workflow_operations=tuple(
+        ApplicationOperation(name=one, contract_definition={"$schema": _SCHEMA,
+                                                             "type": "object"})
+        for one in ("export", "lint")))
+    steps = [
+        WorkflowStep(id="export", process_name="export", label="export", ordinal=1,
+                     application=application, operation_name="export",
+                     approved={"export": export}, settings={}),
+        WorkflowStep(id="lint", process_name="lint", label="lint", ordinal=2,
+                     application=application, operation_name="lint",
+                     approved={"lint": lint}, settings={}),
+    ]
+    process = WorkflowProcess(name="db", ordinal=1, application=application, config=None,
+                              steps=steps)
+    parent = parent_run(control)
+
+    Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process],
+             control=control).run(parent, SimpleNamespace(), _log(tmp_path),
+                                  metadata={"workflow": "wf"})
+
+    first, (second, files, engine, workflow_name, apply) = seen
+    assert isinstance(first, Run) and isinstance(second, Run)
+    assert first is not second and first is not parent
+    assert first.parent_run_id == second.parent_run_id == parent.run_id
+    assert (files, engine, workflow_name, apply) == (["a.sql"], "postgres", "wf", True)
+    assert parent.data["object_files"] == ["a.sql"]
+    assert parent.metadata["engine"] == "postgres"
+
+
+# --- single use ----------------------------------------------------------------
+
+
+def test_completed_steps_are_removed_from_the_workflow_and_its_processes(
+    tmp_path: Path,
+) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+
+    graph.run(parent_run(control), ctx, _log(tmp_path))
+
+    assert graph.steps == ()
+    assert graph.processes[0].steps == ()
+
+
+def test_a_step_not_selected_stays_and_a_released_one_is_consumed(tmp_path: Path) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+
+    graph.run(parent_run(control), ctx, _log(tmp_path), step="s3")
+
+    assert [one.id for one in graph.steps] == ["s1", "s2", "s4"]
+    assert [one.id for one in graph.processes[0].steps] == ["s1", "s2", "s4"]
+
+
+def test_a_second_run_after_consumption_is_refused(tmp_path: Path) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+    graph.run(parent_run(control), ctx, _log(tmp_path / "first"))
+    created = len(control.rows)
+
+    with pytest.raises(AppError, match="single-use"):
+        graph.run(parent_run(control), ctx, _log(tmp_path / "second"))
+    assert len(control.rows) == created
 
 
 # --- the object ----------------------------------------------------------------
@@ -326,59 +497,50 @@ def _step(application: Application, operation: str, step_id: str, ordinal: int,
 
 def test_steps_run_in_workflow_wide_ordinal_order_across_processes(tmp_path: Path) -> None:
     calls: list[str] = []
+    control = RecordingControl()
     a, b = _application("load", name="a"), _application("check", name="b")
     first = WorkflowProcess(name="a", ordinal=1, application=a, config=None, steps=[
         _step(a, "load", "s1", 1, calls), _step(a, "load", "s3", 3, calls)])
     second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
         _step(b, "check", "s2", 2, calls)])
+    parent = parent_run(control)
 
-    run = Workflow(name="wf", enabled=True, tokens=None, config=None,
-                   processes=[first, second]).run(SimpleNamespace(), _log(tmp_path))
+    Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[first, second],
+             control=control).run(parent, SimpleNamespace(), _log(tmp_path))
 
-    assert run.status == "success"
     assert calls == ["a.load", "b.check", "a.load"]
-    assert [o.id for o in run.outcomes] == ["s1", "s2", "s3"]
+    assert [(c["subject_id"], c["app_name"]) for c in control.children(parent)] == [
+        ("s1", "a"), ("s2", "b"), ("s3", "a")]
 
 
-def test_it_holds_tokens_and_config_as_given_and_owns_its_processes() -> None:
+def test_it_holds_tokens_config_and_control_and_owns_its_processes() -> None:
     application = _application("load")
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[_step(application, "load", "s1", 1, [])])
     tokens, config = {"root": "/data"}, {"paths": [{"name": "data", "path": "{root}"}]}
+    control = RecordingControl()
 
     workflow = Workflow(name="wf", enabled=True, tokens=tokens, config=config,
-                        processes=[process])
+                        processes=[process], control=control)
     tokens["root"] = "/elsewhere"
     config["paths"].append({"name": "x", "path": "y"})
 
     assert workflow.tokens == {"root": "/data"}
     assert workflow.config == {"paths": [{"name": "data", "path": "{root}"}]}
+    assert workflow.control is control
     assert process.workflow is workflow
-    assert workflow.processes == (process,)
-
-
-def test_null_tokens_and_config_stay_null_and_empty_stays_empty() -> None:
-    application = _application("load")
-
-    absent = Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[
-        WorkflowProcess(name="app", ordinal=1, application=application, config=None,
-                        steps=[])])
-    empty = Workflow(name="wf", enabled=True, tokens={}, config={}, processes=[
-        WorkflowProcess(name="app", ordinal=1, application=application, config=None,
-                        steps=[])])
-
-    assert (absent.tokens, absent.config) == (None, None)
-    assert (empty.tokens, empty.config) == ({}, {})
 
 
 def test_a_process_of_another_workflow_is_refused() -> None:
     application = _application("load")
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[])
-    Workflow(name="first", enabled=True, tokens=None, config=None, processes=[process])
+    Workflow(name="first", enabled=True, tokens=None, config=None, processes=[process],
+             control=None)
 
-    with pytest.raises(WorkflowError, match="already belongs to workflow 'first'"):
-        Workflow(name="second", enabled=True, tokens=None, config=None, processes=[process])
+    with pytest.raises(AppError, match="already belongs to workflow 'first'"):
+        Workflow(name="second", enabled=True, tokens=None, config=None,
+                 processes=[process], control=None)
 
 
 def test_a_shared_ordinal_is_refused() -> None:
@@ -387,116 +549,10 @@ def test_a_shared_ordinal_is_refused() -> None:
                               steps=[_step(application, "load", "s1", 1, []),
                                      _step(application, "load", "s2", 1, [])])
 
-    with pytest.raises(WorkflowError, match="share ordinal 1"):
-        Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process])
+    with pytest.raises(AppError, match="share ordinal 1"):
+        Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process],
+                 control=None)
 
 
-def test_run_does_not_alter_the_steps_settings(tmp_path: Path) -> None:
-    application = Application(name="app", workflow_operations=(ApplicationOperation(
-        name="load", contract_definition={"$schema": _SCHEMA, "type": "object",
-                                          "properties": {"source": {}}}),))
-    step = WorkflowStep(id="s1", process_name="load", label="s1", ordinal=1,
-                        application=application, operation_name="load",
-                        approved={"load": lambda *_args: None},
-                        settings={"source": {"name": "a"}})
-    workflow = Workflow(name="wf", enabled=True, tokens={"root": "/data"}, config=None,
-                        processes=[WorkflowProcess(name="app", ordinal=1,
-                                                   application=application, config={"x": 1},
-                                                   steps=[step])])
-
-    workflow.run(SimpleNamespace(), _log(tmp_path))
-
-    assert step.settings == {"source": {"name": "a"}}
-
-
-def test_a_skipped_step_holds_the_outcome_it_was_settled_with(tmp_path: Path) -> None:
-    wf, ctx = prepared(_fixture(), SimpleNamespace())
-    graph = _build(wf, ctx.applications[0], _recording([]))
-
-    run = graph.run(ctx, _log(tmp_path), apply=False)
-
-    skipped = next(o for o in run.outcomes if o.id == "s2")
-    assert (skipped.status, skipped.detail) == ("skipped", "dry-run")
-    assert graph.steps[1].outcome is skipped
-    assert [one.outcome for one in graph.steps] == run.outcomes
-
-
-def test_no_step_reports_an_earlier_run_after_a_second_run(tmp_path: Path) -> None:
-    wf, ctx = prepared(_fixture(), SimpleNamespace())
-    graph = _build(wf, ctx.applications[0], _recording([]))
-
-    graph.run(ctx, _log(tmp_path / "first"))
-    assert graph.steps[1].outcome.status == "ok"
-    second = graph.run(ctx, _log(tmp_path / "second"), step="s1", apply=False)
-
-    assert graph.steps[0].outcome is second.outcomes[0]
-    assert [one.outcome for one in graph.steps[1:]] == [None, None, None]
-
-
-def test_an_earlier_failure_skip_is_settled_on_the_step(tmp_path: Path) -> None:
-    wf, ctx = prepared(_fixture(), SimpleNamespace())
-    graph = _build(wf, ctx.applications[0], _recording([], {"p1": _failed("broke")}))
-
-    run = graph.run(ctx, _log(tmp_path))
-
-    assert graph.steps[0].failure_record_id is not None
-    assert [(one.outcome.status, one.outcome.detail) for one in graph.steps[1:]] == [
-        ("skipped", "earlier step failed")] * 3
-    assert [one.outcome for one in graph.steps] == run.outcomes
-
-
-# --- execution follows the object hierarchy ----------------------------------
-
-
-def test_every_executable_step_is_run_through_its_owning_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    wf, ctx = prepared(_fixture(), SimpleNamespace())
-    graph = _build(wf, ctx.applications[0], _recording([]))
-    dispatched: list[tuple[str, str]] = []
-    original = WorkflowProcess.run_step
-
-    def spy(self: WorkflowProcess, step: WorkflowStep, *args: Any, **kwargs: Any) -> Any:
-        dispatched.append((self.name, step.id))
-        assert step.process is self
-        return original(self, step, *args, **kwargs)
-
-    monkeypatch.setattr(WorkflowProcess, "run_step", spy)
-    run = graph.run(ctx, _log(tmp_path), apply=False)
-
-    # s2 is apply_only: the Workflow skips it in a dry run and never dispatches it.
-    assert dispatched == [("fixture_app", "s1"), ("fixture_app", "s3"),
-                          ("fixture_app", "s4")]
-    assert [o.status for o in run.outcomes] == ["ok", "skipped", "ok", "ok"]
-
-
-def test_the_workflow_never_invokes_an_implementation() -> None:
-    import ast
-    import rey_lib.workflow.workflow as module
-
-    tree = ast.parse(Path(str(module.__file__)).read_text(encoding="utf-8"))
-    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-
-    assert "implementation" not in attributes
-    assert "execute" not in attributes
-    assert "run_step" in attributes
-
-
-def test_the_handler_receives_the_callers_ctx_unchanged(tmp_path: Path) -> None:
-    # #950 item 2 is unresolved: nothing composes or propagates configuration
-    # into the context; the process passes the caller's ctx through as given.
-    seen: list[Any] = []
-    application = _application("load")
-    step = WorkflowStep(id="s1", process_name="load", label="s1", ordinal=1,
-                        application=application, operation_name="load",
-                        approved={"load": lambda ctx, *_args: seen.append(ctx)},
-                        settings={})
-    process = WorkflowProcess(name="app", ordinal=1, application=application,
-                              config={"app": {"marker": "process"}}, steps=[step])
-    ctx = SimpleNamespace(marker="caller")
-
-    Workflow(name="wf", enabled=True, tokens={"root": "/data"}, config=None,
-             processes=[process]).run(ctx, _log(tmp_path))
-
-    assert seen == [ctx]
-    assert vars(ctx) == {"marker": "caller", "workflow_name": "wf"}
+def test_the_superseded_workflow_result_does_not_exist() -> None:
+    assert not hasattr(workflow_module, "WorkflowRun")

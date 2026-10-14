@@ -1,4 +1,4 @@
-"""Tests for WorkflowProcess, the instantiated Application (backlog 954).
+"""Tests for WorkflowProcess, the configured Application (backlog 950).
 
 A process holds the existing Application, its own configuration as governed,
 and its ordered WorkflowStep children, each already bound by hydration. It
@@ -8,17 +8,14 @@ processes share configuration.
 
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from tests.conftest import make_run_log
-
 from rey_lib.config.applications import Application, ApplicationOperation
+from rey_lib.errors.error_utils import AppError
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import RunContext, WorkflowError, WorkflowStep
+from rey_lib.workflow.workflow_step import WorkflowStep
 
 _SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 
@@ -89,7 +86,7 @@ def test_a_step_of_another_application_is_refused() -> None:
     application = Application(name="app", workflow_operations=(_operation("a"),))
     elsewhere = Application(name="elsewhere", workflow_operations=(_operation("a"),))
 
-    with pytest.raises(WorkflowError, match="does not publish"):
+    with pytest.raises(AppError, match="does not publish"):
         WorkflowProcess(
             name="app", ordinal=1, application=application, config=None,
             steps=[_step(elsewhere, "a", "s1", 1)],
@@ -121,30 +118,17 @@ def test_a_step_of_another_process_is_refused_at_construction() -> None:
     WorkflowProcess(name="first", ordinal=1, application=application, config=None,
                     steps=[step])
 
-    with pytest.raises(WorkflowError, match="already belongs to process 'first'"):
+    with pytest.raises(AppError, match="already belongs to process 'first'"):
         WorkflowProcess(name="second", ordinal=2, application=application, config=None,
                         steps=[step])
 
 
-def test_run_step_refuses_a_step_that_is_not_its_own(tmp_path: Path) -> None:
-    calls: list[str] = []
-    application = Application(name="app", workflow_operations=(_operation("a"),))
-    mine = WorkflowProcess(name="mine", ordinal=1, application=application, config=None,
-                           steps=[_step(application, "a", "s1", 1)])
-    foreign = _step(application, "a", "s2", 2)
-    foreign.implementation = lambda *_args: calls.append("called")
-    WorkflowProcess(name="theirs", ordinal=2, application=application, config=None,
-                    steps=[foreign])
-
-    with pytest.raises(WorkflowError, match="is not one of its steps"):
-        mine.run_step(foreign, SimpleNamespace(), make_run_log(tmp_path),
-                      RunContext(apply=True), sequence=1, workflow_name="wf")
-    assert calls == []
-    assert foreign.outcome is None
+def test_the_process_does_not_route_execution() -> None:
+    assert not hasattr(WorkflowProcess, "run_step")
 
 
 def test_a_process_without_a_name_is_refused() -> None:
     application = Application(name="app")
 
-    with pytest.raises(WorkflowError, match="missing required 'name'"):
+    with pytest.raises(AppError, match="missing required 'name'"):
         WorkflowProcess(name="", ordinal=1, application=application, config=None, steps=[])

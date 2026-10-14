@@ -1,10 +1,12 @@
 """The workflow objects own their code: no dependency on the legacy engine.
 
-Backlog 956/957/958, rule replacement_objects_do_not_depend_on_the_legacy_code.
-Two proofs. SOURCE: the modules' own import statements name nothing in
+Backlog 950, rule replacement_objects_do_not_depend_on_the_legacy_code. Two
+proofs. SOURCE: the modules' own import statements (the three workflow objects
+and the canonical Run that executes their steps) name nothing in
 ``rey_lib.workflow.coordinator`` or ``rey_lib.workflow.engine`` and nothing
 through the package ``rey_lib.workflow``. RUNTIME: in a fresh interpreter with
-both legacy modules made unimportable, a Workflow is built and run to success.
+both legacy modules made unimportable, a Workflow is built and run to success
+under a parent Run.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+import rey_lib.run.run as run_module
 import rey_lib.workflow.workflow as workflow_module
 import rey_lib.workflow.workflow_process as process_module
 import rey_lib.workflow.workflow_step as step_module
@@ -31,6 +34,7 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
     from types import SimpleNamespace
 
     from tests.conftest import make_run_log
+    from tests.support.workflow_runs import RecordingControl, parent_run
     from rey_lib.config.applications import Application, ApplicationOperation
     from rey_lib.workflow.workflow import Workflow
     from rey_lib.workflow.workflow_process import WorkflowProcess
@@ -48,11 +52,14 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
                         settings={})
     process = WorkflowProcess(name="app", ordinal=1, application=application,
                               config=None, steps=[step])
+    control = RecordingControl()
     workflow = Workflow(name="wf", enabled=True, tokens=None, config=None,
-                        processes=[process])
-    run = workflow.run(SimpleNamespace(), make_run_log(sys.argv[1]))
-    assert run.status == "success", run.status
+                        processes=[process], control=control)
+    parent = parent_run(control)
+    returned = workflow.run(parent, SimpleNamespace(), make_run_log(sys.argv[1]))
+    assert returned is parent
     assert calls == ["load"], calls
+    assert [c["status"] for c in control.children(parent)] == ["SUCCEEDED"]
     assert all(sys.modules.get(name) is None for name in sys.argv[2:]), "legacy loaded"
     print("ran without legacy")
 """)
@@ -70,8 +77,8 @@ def _imported(module: object) -> list[str]:
     return names
 
 
-@pytest.mark.parametrize("module", [step_module, process_module, workflow_module],
-                         ids=["workflow_step", "workflow_process", "workflow"])
+@pytest.mark.parametrize("module", [step_module, process_module, workflow_module, run_module],
+                         ids=["workflow_step", "workflow_process", "workflow", "run"])
 def test_the_module_imports_nothing_from_the_legacy_engine(module: object) -> None:
     imported = _imported(module)
 

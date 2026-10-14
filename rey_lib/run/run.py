@@ -33,13 +33,40 @@ Layering
 not reach the DB adapter directly, and ``rey_lib.logs`` must not reach up into
 it. So the manifest is reached through ``Control`` -- the same chain every other
 control operation uses -- and nothing in the logging layer imports this module.
+
+Execution of a workflow step (backlog 950)
+------------------------------------------
+A Workflow creates one child Run for every WorkflowStep it releases, under the
+parent Run it was given. The child Run is the step's execution instance: it
+executes the step's bound operation (:meth:`execute`), or records the step as
+skipped (:meth:`skip`), and finishes its own lifecycle with ``SUCCEEDED``,
+``FAILED`` or ``SKIPPED``. It is the execution context the operation's handler
+receives -- ``apply``, ``data`` and ``metadata`` -- and a child Run works in its
+parent's ``data`` and ``metadata``, so what one step writes a later step under
+the same parent reads.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
+from rey_lib.errors.error_utils import AppError, build_safe_error_payload
+from rey_lib.logs import (
+    bind_step,
+    clear_step,
+    log_step_end,
+    log_step_failure,
+    log_step_start,
+    monotonic_ms,
+)
+
 __all__ = ["Run"]
+
+#: The terminal statuses of a step's child Run.
+SUCCEEDED = "SUCCEEDED"
+FAILED = "FAILED"
+SKIPPED = "SKIPPED"
 
 
 class Run:
@@ -95,6 +122,19 @@ class Run:
         self.status = status
         self.started_at = started_at
         self.finished_at = finished_at
+        #: The execution context a step's handler receives (backlog 950).
+        #: False is a dry run. A child Run started with ``parent`` works in its
+        #: parent's ``data`` and ``metadata``: what one step writes, a later
+        #: step under the same parent reads.
+        self.apply: bool = False
+        self.data: dict[str, Any] = {}
+        self.metadata: dict[str, Any] = {}
+        #: A step execution's outcome, besides its terminal ``status``.
+        self.detail: str = ""
+        self.error: Optional[str] = None
+        self.artifacts: list[Any] = []
+        #: The STEP_FAILURE record id when the step failed in execution.
+        self.failure_record_id: Any = None
 
     def __repr__(self) -> str:
         """Identify the run by id, subject and status."""
@@ -114,6 +154,7 @@ class Run:
         app_name: str = "",
         parent_run_id: Optional[int] = None,
         settings: Optional[dict[str, Any]] = None,
+        parent: Optional["Run"] = None,
     ) -> "Run":
         """Record a starting run and return it, carrying the id it was given.
 
@@ -143,6 +184,10 @@ class Run:
             The parent run for a child execution.
         settings : dict | None
             The launch request as configured.
+        parent : Run | None
+            The parent Run of a child execution. The child records
+            ``parent.run_id`` as its ``parent_run_id``, and works in the
+            parent's ``apply``, ``data`` and ``metadata``.
 
         Returns
         -------
@@ -154,6 +199,8 @@ class Run:
         DatabaseError
             If the run could not be recorded, and therefore has no identity.
         """
+        if parent is not None:
+            parent_run_id = parent.run_id
         run_id = control.create_run_manifest(
             subject_type=subject_type,
             subject_id=subject_id,
@@ -163,7 +210,7 @@ class Run:
             settings=settings,
             required=True,
         )
-        return cls(
+        run = cls(
             run_id=int(run_id),
             control=control,
             subject_type=subject_type,
@@ -173,6 +220,13 @@ class Run:
             parent_run_id=parent_run_id,
             settings=settings,
         )
+        if parent is not None:
+            # The same objects, not copies: working data and metadata written
+            # by one child are what a later child of the same parent reads.
+            run.apply = parent.apply
+            run.data = parent.data
+            run.metadata = parent.metadata
+        return run
 
     # -- reconstruction -----------------------------------------------------
 
@@ -214,6 +268,157 @@ class Run:
             finished_at=_text(row.get("finished_at")),
         )
 
+    # -- step execution (backlog 950) ---------------------------------------
+
+    def execute(
+        self,
+        step: Any,
+        ctx: Any,
+        run_log: Any,
+        *,
+        sequence: int,
+        workflow_name: str,
+    ) -> None:
+        """Execute a released WorkflowStep's bound operation, then finish this Run.
+
+        The canonical execution boundary of an application operation: the
+        step's approved implementation is called with this Run as its execution
+        context; any exception it raises is caught here, reported through
+        AppError, recorded as STEP_FAILURE and STEP_END failed, and finishes
+        this Run ``FAILED``. It does not escape. A returned result's status
+        finishes it ``FAILED`` (``failed``), ``SKIPPED`` (``skipped``) or
+        ``SUCCEEDED``. The indent level is the Workflow's, set before this is
+        called; the step records go through the existing logging unchanged.
+
+        Parameters
+        ----------
+        step : WorkflowStep
+            The released step: its implementation, settings, id and label.
+        ctx : Any
+            Resolved application context, the implementation's domain input.
+        run_log : Any
+            The run log the step records are written through.
+        sequence : int
+            The step's sequence, assigned by the Workflow.
+        workflow_name : str
+            The workflow running the step, for records and messages.
+        """
+        step_name = step.label or step.id
+        bind_step(
+            step_id=step.id,
+            step_name=step_name,
+            step_sequence=sequence,
+            workflow_name=workflow_name,
+        )
+        # One monotonic mark, read again at whichever STEP_END the step reaches.
+        step_started = time.monotonic()
+        status = SUCCEEDED
+        try:
+            log_step_start(
+                run_log, step_name, sequence, step_type=step.process_name, step_id=step.id
+            )
+            # Handler, lifecycle, file and result evidence sits beneath STEP_START.
+            run_log.enter()
+            try:
+                try:
+                    result = step.implementation(ctx, run_log, step.settings, self)
+                except Exception as exc:  # noqa: BLE001 — canonical execution boundary
+                    error_payload = build_safe_error_payload(
+                        exc,
+                        message=f"workflow '{workflow_name}' step '{step.id}' failed",
+                        failed_step_id=step.id,
+                        failed_step_name=step_name,
+                        failed_step_sequence=sequence,
+                    )
+                    failure_message = str(error_payload["message"])
+                    # Handled -- recorded, and settled as a failed Run rather
+                    # than raised -- so reported here (rule 79).
+                    error = exc if isinstance(exc, AppError) else AppError(
+                        f"workflow '{workflow_name}' step '{step.id}' failed")
+                    if error is not exc:
+                        error.__cause__ = exc
+                    error.report(
+                        f"workflow '{workflow_name}' step '{step.id}'", source=__name__
+                    )
+                    self.failure_record_id = log_step_failure(run_log, **error_payload)
+                    log_step_end(run_log, step_name, "failed", message=failure_message,
+                                 duration_ms=monotonic_ms(step_started))
+                    self.error = failure_message
+                    status = FAILED
+                else:
+                    returned = (
+                        str(getattr(result, "status", "ok")) if result is not None else "ok"
+                    )
+                    self.detail = (
+                        str(getattr(result, "detail", "")) if result is not None else ""
+                    )
+                    self.artifacts = (
+                        list(getattr(result, "artifacts", []) or [])
+                        if result is not None else []
+                    )
+                    log_step_end(run_log, step_name, returned, message=self.detail,
+                                 duration_ms=monotonic_ms(step_started))
+                    if returned == "failed":
+                        failure_message = self.detail or f"workflow step '{step.id}' failed."
+                        self.failure_record_id = log_step_failure(run_log,
+                            failed_step_id=step.id,
+                            failed_step_name=step_name,
+                            message=failure_message,
+                            error_type="WorkflowStepFailed",
+                            error_message=failure_message,
+                            sanitized_exception=failure_message,
+                            failed_step_sequence=sequence,
+                        )
+                        status = FAILED
+                    elif returned == "skipped":
+                        status = SKIPPED
+            finally:
+                # The depth entered beneath STEP_START is left again.
+                run_log.exit()
+        finally:
+            clear_step()
+        self.finish(status)
+
+    def skip(
+        self,
+        detail: str,
+        *,
+        step: Any = None,
+        run_log: Any = None,
+        sequence: Optional[int] = None,
+        workflow_name: str = "",
+    ) -> None:
+        """Record a released WorkflowStep as skipped, then finish this Run ``SKIPPED``.
+
+        A step skipped with a sequence (a dry run) writes STEP_START and STEP_END
+        skipped through the existing logging; one skipped without (an earlier
+        step failed) writes no step record, as the legacy engine did.
+        """
+        self.detail = detail
+        if run_log is not None and step is not None and sequence is not None:
+            step_name = step.label or step.id
+            bind_step(
+                step_id=step.id,
+                step_name=step_name,
+                step_sequence=sequence,
+                workflow_name=workflow_name,
+            )
+            step_started = time.monotonic()
+            try:
+                log_step_start(
+                    run_log, step_name, sequence, step_type=step.process_name,
+                    step_id=step.id,
+                )
+                run_log.enter()
+                try:
+                    log_step_end(run_log, step_name, "skipped", message=detail,
+                                 duration_ms=monotonic_ms(step_started))
+                finally:
+                    run_log.exit()
+            finally:
+                clear_step()
+        self.finish(SKIPPED)
+
     # -- completion ---------------------------------------------------------
 
     def finish(self, status: str, finished_at: Optional[str] = None) -> None:
@@ -225,7 +430,8 @@ class Run:
         Parameters
         ----------
         status : str
-            The terminal status, e.g. ``SUCCEEDED``, ``FAILED``, ``ABORTED``.
+            The terminal status, e.g. ``SUCCEEDED``, ``FAILED``, ``SKIPPED``,
+            ``ABORTED``.
         finished_at : str | None
             When it ended; the database stamps the current time when omitted.
         """
