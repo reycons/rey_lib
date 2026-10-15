@@ -139,14 +139,18 @@ def test_a_child_run_works_in_its_parents_apply_data_and_metadata() -> None:
 def test_the_handler_receives_the_child_run_as_its_execution_context(tmp_path: Path) -> None:
     seen: list[Any] = []
 
-    def handler(_ctx: Any, _run_log: Any, settings: dict[str, Any], run: Any) -> None:
-        seen.append((run, settings, run.apply, run.data, run.metadata))
+    def handler(_ctx: Any, _run_log: Any, settings: dict[str, Any], run: Any,
+                step: Any) -> None:
+        seen.append((run, settings, run.apply, run.data, run.metadata, step))
 
-    child = _execute(_step(handler, settings={"source": "a"}), _log(tmp_path))
+    released = _step(handler, settings={"source": "a"})
+    child = _execute(released, _log(tmp_path))
 
-    run, settings, apply, data, metadata = seen[0]
+    run, settings, apply, data, metadata, step = seen[0]
     assert run is child
     assert settings == {"source": "a"}
+    # The canonical step itself: its parent process holds the application config.
+    assert step is released
     assert (apply, data, metadata) == (child.apply, child.data, child.metadata)
 
 

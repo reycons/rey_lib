@@ -7,15 +7,17 @@ Control it creates child Runs through. The workflow hydrator creates that whole
 graph in one pass; by the time ``run`` is called every object is fully hydrated,
 and nothing here hydrates, merges, propagates or reconstructs configuration.
 
-``run(parent_run, ...)`` owns orchestration. Every hydrated step is waiting; for
-each, in workflow-wide ordinal order, the Workflow decides whether it can run
-(selection, dry run, earlier failure, ``always_run``), checks its contract
-before releasing it, sets its indent level, assigns its ``step_sequence`` and
-creates one child Run for it under the parent Run -- a skipped step gets one
-too. The child Run executes the step's bound operation, or records it skipped,
-and finishes its own lifecycle. A completed step is removed from the
-Workflow's and its process's active steps: steps are single-use, so a second
-``run`` once they are consumed is refused. ``run`` returns the parent Run.
+``run(parent_run, ...)`` owns orchestration (backlog 964). It creates the
+Workflow Run under ``parent_run`` -- App Run -> Workflow Run -> Step Runs. For
+each hydrated step, in workflow-wide ordinal order, the Workflow decides whether
+it is released (selection, dry run, earlier failure, ``always_run``) and sets
+its indent level. A released step runs itself: it checks its own contract,
+creates its own Step Run under the Workflow Run and executes through it. A step
+a terminal run-time rule holds back gets a Step Run the Workflow creates,
+finished NOT RUN. ``step_sequence`` is the step's ordinal. A completed step is
+removed from the Workflow's and its process's active steps: steps are
+single-use, so a second ``run`` once they are consumed is refused. ``run``
+finishes and returns the Workflow Run.
 
 The existing logging is consumed exactly as it is.
 
@@ -34,6 +36,8 @@ Workflow       The orchestrator.
 
 from __future__ import annotations
 
+import threading
+
 from copy import deepcopy
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -48,22 +52,21 @@ from rey_lib.logs import (
     AppLogger,
     bind_run,
     clear_run,
-    finalize_run_log,
     log_run_complete,
     log_run_start,
     log_step_failure,
 )
 from rey_lib.logs.run_log import RunLog
-from rey_lib.run.run import FAILED, Run
+from rey_lib.run.run import FAILED, SUCCEEDED, Run
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import WorkflowStep
+from rey_lib.workflow.workflow_step import _STEP_SUBJECT, WorkflowStep
 
 __all__ = ["Workflow"]
 
 _logger = AppLogger(__name__)
 
-#: The subject type of a step's child Run.
-_STEP_SUBJECT = "step"
+#: The subject type of a Workflow's own Run, as a workflow launch records it.
+_WORKFLOW_SUBJECT = "workflow"
 
 
 class Workflow:
@@ -150,6 +153,9 @@ class Workflow:
         }
         for process in self.processes:
             process.workflow = self
+        # One act at a time: an operation, and the snapshot answering it (the
+        # same contract as Source, Transform and Target).
+        self._acting = threading.RLock()
 
     @classmethod
     def hydrate(
@@ -226,29 +232,46 @@ class Workflow:
         )
 
     @classmethod
-    def from_governed(cls, ctx: Any, workflow_name: str) -> "Workflow":
-        """The named workflow of this installation, hydrated from its governed rows.
+    def from_governed(
+        cls,
+        ctx: Any,
+        workflow_name: Optional[str] = None,
+        *,
+        workflow_id: Any = None,
+    ) -> "Workflow":
+        """One workflow of this installation, hydrated from its governed rows.
 
-        As an HTTP operation is established: the runtime's one Control reads the
+        Named by its name or by its control.workflow id -- exactly one. As an
+        HTTP operation is established: the runtime's one Control reads the
         installation's rows, and :meth:`hydrate` builds the graph from them with
         the installation's Applications and the implementations each approves.
-        Nothing is executed or released, and no Run is created.
+        By id, the installation-wide read supplies the rows and those of that
+        workflow are kept. Nothing is executed or released, and no Run is created.
 
         Raises:
-            ConfigError: If the runtime has no control database, or the
-                installation has no such workflow.
+            ConfigError: If neither or both identities are given, the runtime has
+                no control database, or the installation has no such workflow.
         """
+        if (workflow_name is None) == (workflow_id is None):
+            raise ConfigError("Workflow: name the workflow by its name or its id, exactly one.")
+        named = f"'{workflow_name}'" if workflow_id is None else f"id {workflow_id}"
         control = open_shared_control(ctx).shared_control
         if control is None:
             raise ConfigError(
                 f"Workflow: this runtime has no control database to read workflow "
-                f"'{workflow_name}' from."
+                f"{named} from."
             )
-        rows = control.workflow(ctx.installation.name, workflow_name)
+        if workflow_id is None:
+            rows = control.workflow(ctx.installation.name, workflow_name)
+        else:
+            rows = [
+                row for row in control.workflow(ctx.installation.name)
+                if str(row.get("workflow_id")) == str(workflow_id)
+            ]
         if not rows:
             raise ConfigError(
                 f"Workflow: installation '{ctx.installation.name}' has no workflow "
-                f"'{workflow_name}'."
+                f"{named}."
             )
         return cls.hydrate(
             rows,
@@ -259,6 +282,39 @@ class Workflow:
             },
             control=control,
         )
+
+    # -- its snapshot --------------------------------------------------------
+
+    def act(self) -> Any:
+        """The lock one act is taken under: an operation, and the snapshot answering it."""
+        return self._acting
+
+    def projection(self, ctx: Any) -> dict[str, Any]:
+        """What this Workflow shows: one snapshot of the hydrated graph.
+
+        Read from the objects already built -- nothing is re-read, re-resolved
+        or rehydrated -- and built from copies, so the snapshot is never a path
+        into its state.
+
+        Args:
+            ctx: The runtime context. Unused: nothing is read.
+        """
+        with self._acting:
+            return {
+                "name": self.name,
+                "enabled": self.enabled,
+                "steps": [
+                    {
+                        "ordinal": step.ordinal,
+                        "id": step.id,
+                        "process_name": step.process_name,
+                        "operation": step.operation.name,
+                        "apply_only": step.apply_only,
+                        "always_run": step.always_run,
+                    }
+                    for step in self.steps.values()
+                ],
+            }
 
     def run(
         self,
@@ -277,19 +333,19 @@ class Workflow:
         Parameters
         ----------
         parent_run : Run
-            The run the steps' child Runs are created under, and that is returned.
+            The run the Workflow Run is created under (the App Run).
         ctx : Any
             Resolved application context, passed unchanged to every step.
         run_log : RunLog
             The run log the workflow and its steps write through.
         apply : bool
-            False for dry-run: a step with ``apply_only`` is skipped.
+            False for dry-run: a step with ``apply_only`` is not released (NOT RUN).
         step : str | None
             Run exactly the one step matching this identifier.
         from_step, to_step : str | None
             Run the inclusive ordered range between them.
         metadata : dict | None
-            Run metadata seeded into the parent Run's ``metadata``.
+            Run metadata seeded into the Workflow Run's ``metadata``.
 
         Identifiers resolve against each step's ``id``, ``label`` or
         ``process_name``; no match or more than one fails closed.
@@ -297,7 +353,7 @@ class Workflow:
         Returns
         -------
         Run
-            The parent Run.
+            The Workflow Run, finished.
 
         Raises
         ------
@@ -320,10 +376,20 @@ class Workflow:
         steps = list(self.steps.values())
         selected = self._select(steps, step=step, from_step=from_step, to_step=to_step)
 
-        # The parent Run is the execution context its children work in.
-        parent_run.apply = apply
-        parent_run.metadata.update(metadata or {})
-        parent_run.data["ctx"] = ctx
+        # The Workflow's own Run, a child of the run it was handed (backlog 964):
+        # App Run -> Workflow Run -> Step Runs. It is the execution context the
+        # Step Runs work in.
+        workflow_run = Run.start(
+            self.control,
+            subject_type=_WORKFLOW_SUBJECT,
+            subject_id=name,
+            subject_name=name,
+            app_name=parent_run.app_name,
+            parent=parent_run,
+        )
+        workflow_run.apply = apply
+        workflow_run.metadata.update(metadata or {})
+        workflow_run.data["ctx"] = ctx
 
         try:
             ctx.workflow_name = name
@@ -338,42 +404,36 @@ class Workflow:
         record_config_file_references(ctx, run_log)
         run_log.enter_phase("steps")
 
-        sequence = 0
         # The first failure, captured once: the reason ordinary steps stopped.
         # A later always_run failure records itself without replacing it.
         first_failure: dict[str, Any] | None = None
         for index, one in enumerate(steps):
             if index not in selected:
                 continue
-            # A prior failure makes ordinary steps ineligible; always_run steps
-            # keep their declared position.
-            if first_failure is not None and not one.always_run:
-                _logger.info(
-                    "workflow '%s' step '%s' skipped: an earlier step failed.",
-                    name, one.id,
+            # The step's indent level: workflow-step semantic level 5.
+            run_log.set_nest_level("workflow_step")
+            # A terminal run-time rule holds the step back: an earlier failure
+            # (unless always_run), or apply_only in a dry run. It is never
+            # released; the Workflow records it NOT RUN under its own Run.
+            if (first_failure is not None and not one.always_run) or (
+                not apply and one.apply_only
+            ):
+                _logger.info("workflow '%s' step '%s' not released.", name, one.id)
+                self._child_run(workflow_run, one).not_released(
+                    step=one, run_log=run_log, sequence=one.ordinal, workflow_name=name,
                 )
-                self._child_run(parent_run, one).skip("earlier step failed")
                 self._consume(one)
                 continue
 
-            # The contract is part of the release decision: a step whose settings
-            # do not satisfy it is never released and gets no child Run.
-            refusal = one.contract_refusal(name)
-            if refusal:
+            # Released: the step checks its own contract, creates its own Run and
+            # executes through it. A refusal raises before any Step Run exists.
+            try:
+                child = one.run(control=self.control, parent_run=workflow_run, ctx=ctx,
+                                run_log=run_log, workflow_name=name)
+            except AppError as refusal:
                 raise self._pre_execution_failure(
-                    ctx, run_log, one, sequence=sequence + 1, message=refusal,
-                )
-
-            sequence += 1
-            # The step's indent level: workflow-step semantic level 5.
-            run_log.set_nest_level("workflow_step")
-            child = self._child_run(parent_run, one)
-            if not apply and one.apply_only:
-                child.skip("dry-run", step=one, run_log=run_log, sequence=sequence,
-                           workflow_name=name)
-                _logger.info("workflow '%s' step '%s' skipped (dry-run).", name, one.id)
-            else:
-                child.execute(one, ctx, run_log, sequence=sequence, workflow_name=name)
+                    workflow_run, run_log, one, message=str(refusal),
+                ) from refusal
             self._consume(one)
             if child.status == FAILED and first_failure is None:
                 failure_message = (
@@ -393,15 +453,15 @@ class Workflow:
             log_run_complete(run_log, "success")
         else:
             log_run_complete(run_log, "failed", **first_failure)
-        _finalize(ctx, run_log)
+        _finalize(workflow_run, SUCCEEDED if first_failure is None else FAILED)
         run_log.enter_phase("close")
         clear_run()
-        return parent_run
+        return workflow_run
 
     # -- child Runs and consumption -------------------------------------------
 
     def _child_run(self, parent_run: Run, one: WorkflowStep) -> Run:
-        """Create the child Run of one released step, under the parent Run."""
+        """Create the Run of a step that is not released, under the Workflow Run."""
         return Run.start(
             self.control,
             subject_type=_STEP_SUBJECT,
@@ -483,8 +543,8 @@ class Workflow:
     def _refused(self, parent_run: Run, ctx: Any, run_log: RunLog, *, apply: bool) -> Run:
         """Record a disabled workflow as a refused run and return the parent Run.
 
-        A RUN_START, a terminal RUN_COMPLETE and a finalized run; no step is
-        released.
+        A RUN_START and a terminal RUN_COMPLETE; no Workflow Run is created and no
+        step is released. The run log is finalized by the app's common shutdown.
         """
         name = self.name
         message = (
@@ -500,25 +560,25 @@ class Workflow:
         bind_run(run_log)
         _logger.warning("%s", message)
         log_run_complete(run_log, "refused", message=message)
-        _finalize(ctx, run_log)
         clear_run()
         return parent_run
 
     def _pre_execution_failure(
         self,
-        ctx: Any,
+        workflow_run: Run,
         run_log: RunLog,
         one: WorkflowStep,
         *,
-        sequence: int,
         message: str,
     ) -> AppError:
-        """Record a step refused before release as run evidence, then hand it back.
+        """Record a released step's contract refusal as run evidence, then hand it back.
 
-        Written through the same records an in-step failure uses; the run is
-        finalized and unbound, and the caller raises the returned error. Not
-        reported here: it propagates, and the AppError boundary reports it once.
+        Written through the same records an in-step failure uses; the Workflow Run
+        is finished FAILED and unbound, and the caller raises the returned error.
+        Not reported here: it propagates, and the AppError boundary reports it once.
         """
+        # Run-level evidence: written at the workflow's level, which the Workflow resets.
+        run_log.set_nest_level("workflow")
         failure_id = log_step_failure(run_log,
             failed_step_id=one.id,
             failed_step_name=one.label or one.id,
@@ -526,7 +586,7 @@ class Workflow:
             error_type="WorkflowError",
             error_message=message,
             sanitized_exception=message,
-            failed_step_sequence=sequence,
+            failed_step_sequence=one.ordinal,
             process=one.process_name,
         )
         log_run_complete(run_log,
@@ -537,29 +597,14 @@ class Workflow:
             failed_step_name=one.label or one.id,
             failure_message=message,
         )
-        _finalize(ctx, run_log)
+        _finalize(workflow_run, FAILED)
         clear_run()
         return AppError(message)
 
 
-def _finalize(ctx: Any, run_log: RunLog) -> None:
-    """Finalize the run log unless a parent pipeline owns finalization.
+def _finalize(workflow_run: Run, status: str) -> None:
+    """Finish the Workflow Run, ending the Workflow's own chain.
 
-    A pipeline step's ctx carries pipeline run identity in ``ctx.runtime``; the
-    pipeline then owns the single run-level finalization. With no JSONL file
-    there is nothing to finalize from.
+    The run log is not finalized here: that belongs to the app's common shutdown.
     """
-    if _get(getattr(ctx, "runtime", None), "pipeline_run_id"):
-        return
-    if run_log.path() is None:
-        return
-    finalize_run_log(run_log, ai=getattr(ctx, "shared_ai", None))
-
-
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """Return obj[key] / obj.key, or default."""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+    workflow_run.finish(status)

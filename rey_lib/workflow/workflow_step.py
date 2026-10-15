@@ -29,6 +29,7 @@ from rey_lib.config.inventory import to_plain_data
 from rey_lib.config.operation_contract import contract_review
 from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import AppLogger
+from rey_lib.run.run import Run
 
 if TYPE_CHECKING:
     from rey_lib.workflow.workflow_process import WorkflowProcess
@@ -36,6 +37,9 @@ if TYPE_CHECKING:
 __all__ = ["WorkflowStep"]
 
 _logger = AppLogger(__name__)
+
+#: The subject type of a step's child Run.
+_STEP_SUBJECT = "step"
 
 
 class WorkflowStep:
@@ -193,6 +197,33 @@ class WorkflowStep:
             f"contract of implementation '{self.operation.name}': "
             + "; ".join(violations)
         )
+
+    def run(self, *, control: Any, parent_run: Run, ctx: Any, run_log: Any,
+            workflow_name: str) -> Run:
+        """Run this released step through its own child Run, and return that Run.
+
+        In the released step's order (backlog 964/965): check its contract, create
+        its child Run under ``parent_run``, execute through that Run. A refused
+        contract raises before any Run exists. ``control`` is the releasing
+        Workflow's; the step does not find or keep it.
+
+        Raises:
+            AppError: When the step's settings do not satisfy its contract.
+        """
+        refusal = self.contract_refusal(workflow_name)
+        if refusal:
+            raise AppError(refusal)
+        child = Run.start(
+            control,
+            subject_type=_STEP_SUBJECT,
+            subject_id=self.id,
+            subject_name=self.label,
+            app_name=self.process.application.name if self.process is not None else "",
+            settings=self.settings,
+            parent=parent_run,
+        )
+        child.execute(self, ctx, run_log, sequence=self.ordinal, workflow_name=workflow_name)
+        return child
 
 
 def _published_operation(

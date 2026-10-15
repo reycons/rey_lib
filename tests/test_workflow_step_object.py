@@ -8,9 +8,16 @@ operation's contract; it holds no execution state -- its child Run executes it.
 
 from __future__ import annotations
 
+import json
+
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from tests.conftest import make_db_run_log, start_test_run
+from tests.support.workflow_runs import RecordingControl, parent_run
 
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.errors.error_utils import AppError
@@ -142,6 +149,48 @@ def test_the_superseded_types_do_not_exist(name: str) -> None:
     assert not hasattr(workflow_step, name)
 
 
-@pytest.mark.parametrize("name", ["execute", "run", "reset", "settle", "outcome"])
+@pytest.mark.parametrize("name", ["execute", "reset", "settle", "outcome"])
 def test_the_step_holds_no_execution_api_or_state(name: str) -> None:
+    """The released step runs itself (``run``, backlog 964) but holds no execution state."""
     assert not hasattr(_step(), name)
+
+
+# --- Running a released step (backlog 964) -----------------------------------
+
+
+def _log(tmp_path: Path) -> Any:
+    """A run log for a launched-looking run, ids minted."""
+    ctx = SimpleNamespace(log_file=str(tmp_path / "app.jsonl"))
+    start_test_run(ctx)
+    return make_db_run_log(tmp_path, run_id=ctx.run_id, run_timestamp=str(ctx.run_timestamp),
+                           path=str(tmp_path / "app.jsonl"))
+
+
+def test_a_refused_contract_raises_before_any_run_exists(tmp_path: Path) -> None:
+    control = RecordingControl()
+    step = _step(application=_application(_operation("p1", {
+        "$schema": _SCHEMA, "type": "object",
+        "properties": {"source": {"type": "string"}}, "required": ["source"],
+    })))
+
+    with pytest.raises(AppError, match="do not satisfy the contract"):
+        step.run(control=control, parent_run=parent_run(control), ctx=SimpleNamespace(),
+                 run_log=_log(tmp_path), workflow_name="wf")
+
+    assert control.rows == []
+
+
+def test_a_released_step_runs_under_its_own_child_run(tmp_path: Path) -> None:
+    control = RecordingControl()
+    parent = parent_run(control, run_id=42)
+    run_log = _log(tmp_path)
+
+    child = _step().run(control=control, parent_run=parent, ctx=SimpleNamespace(),
+                        run_log=run_log, workflow_name="wf")
+
+    assert [(c["subject_type"], c["subject_id"], c["parent_run_id"], c["status"])
+            for c in control.children(parent)] == [("step", "s1", 42, "SUCCEEDED")]
+    assert child.run_id == control.rows[0]["run_id"]
+    starts = [json.loads(line) for line in
+              Path(run_log.path()).read_text(encoding="utf-8").splitlines()]
+    assert [r["step_sequence"] for r in starts if r["record_type"] == "STEP_START"] == [1]

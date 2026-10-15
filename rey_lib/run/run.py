@@ -289,7 +289,8 @@ class Run:
 
         The canonical execution boundary of an application operation: the
         step's approved implementation is called with this Run as its execution
-        context; any exception it raises is caught here, reported through
+        context and with the step itself, whose parent process holds the
+        application configuration; any exception it raises is caught here, reported through
         AppError, recorded as STEP_FAILURE and STEP_END failed, and finishes
         this Run ``FAILED``. It does not escape. A returned result's status
         finishes it ``FAILED`` (``failed``), ``SKIPPED`` (``skipped``) or
@@ -327,7 +328,10 @@ class Run:
             run_log.enter()
             try:
                 try:
-                    result = step.implementation(ctx, run_log, step.settings, self)
+                    # The canonical step itself goes too: what its operation needs
+                    # of its application's configuration is its parent process's
+                    # (step.process.config), already hydrated (backlog 947).
+                    result = step.implementation(ctx, run_log, step.settings, self, step)
                 except Exception as exc:  # noqa: BLE001 — canonical execution boundary
                     error_payload = build_safe_error_payload(
                         exc,

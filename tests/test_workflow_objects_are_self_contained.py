@@ -57,9 +57,9 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
                         processes=[process], control=control)
     parent = parent_run(control)
     returned = workflow.run(parent, SimpleNamespace(), make_run_log(sys.argv[1]))
-    assert returned is parent
+    assert returned.parent_run_id == parent.run_id
     assert calls == ["load"], calls
-    assert [c["status"] for c in control.children(parent)] == ["SUCCEEDED"]
+    assert [c["status"] for c in control.children(returned)] == ["SUCCEEDED"]
     assert all(sys.modules.get(name) is None for name in sys.argv[2:]), "legacy loaded"
     print("ran without legacy")
 """)
