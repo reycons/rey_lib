@@ -815,3 +815,37 @@ def test_observer_failure_releases_lock_and_allows_another_direction(
     assert result.status == "SUCCEEDED"
     assert calls[-1] == "p2"
     assert graph.state == "IDLE"
+
+
+@pytest.mark.parametrize("earlier_failure", [False, True], ids=["dry_run", "earlier_failure"])
+def test_non_release_replaces_previous_step_outcome_and_notifies_projection(
+    tmp_path: Path, earlier_failure: bool,
+) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    calls: list[str] = []
+    behaviour = {"p1": _failed("broke")} if earlier_failure else {}
+    graph = _build(wf, ctx.applications[0], _recording(calls, behaviour), control)
+    _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s2")
+    previous = graph.steps["s2"].current_run
+    assert graph.steps["s2"].state == "SUCCEEDED"
+    calls.clear()
+    seen = []
+
+    class Watching:
+        def changed(self, workflow: Workflow) -> None:
+            seen.extend(step for process in workflow.projection(ctx)["processes"]
+                        for step in process["steps"] if step["id"] == "s2")
+
+    graph.observe(Watching())
+    log = _log(tmp_path / "second")
+    result = _run(graph, parent_run(control, log=log), ctx, apply=earlier_failure)
+    step = graph.steps["s2"]
+    assert "p2" not in calls
+    assert step.current_run is not previous
+    assert step.current_run.parent_run_id == result.run_id
+    assert step.current_run.status == step.state == "NOT RUN"
+    assert step.current_run.detail == "not released"
+    assert ("s2", "not run", "not released") in _step_ends(log)
+    assert any(item["state"] == "NOT RUN" and item["run_id"] == step.current_run.run_id
+               for item in seen)

@@ -250,6 +250,27 @@ class WorkflowStep:
         self._become(child.status)
         return child
 
+    def not_released(self, *, control: Any, parent_run: Run, workflow_name: str) -> Run:
+        """Record terminal non-release and retain its Run as this Step's outcome.
+
+        Workflow decides eligibility. This Step owns its Run association and
+        state; the existing Run records the unchanged non-release evidence.
+        No operation or operation-contract check is performed.
+        """
+        child = Run.start(
+            control,
+            subject_type=_STEP_SUBJECT,
+            subject_id=self.id,
+            subject_name=self.label,
+            app_name=self.process.application.name if self.process is not None else "",
+            settings=self.settings,
+            parent=parent_run,
+        )
+        self.current_run = child
+        child.not_released(step=self, sequence=self.ordinal, workflow_name=workflow_name)
+        self._become(child.status)
+        return child
+
     def _become(self, state: str) -> None:
         """Take ``state``, and tell the observer this step changed."""
         self.state = state

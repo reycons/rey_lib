@@ -61,7 +61,7 @@ from rey_lib.logs import (
 )
 from rey_lib.run.run import FAILED, SUCCEEDED, Run
 from rey_lib.workflow.workflow_process import WorkflowProcess
-from rey_lib.workflow.workflow_step import RUNNING, _STEP_SUBJECT, WorkflowStep
+from rey_lib.workflow.workflow_step import RUNNING, WorkflowStep
 
 __all__ = ["Workflow"]
 
@@ -500,13 +500,13 @@ class Workflow:
             run_log.set_nest_level("workflow_step")
             # A terminal run-time rule holds the step back: an earlier failure
             # (unless always_run), or apply_only in a dry run. It is never
-            # released; the Workflow records it NOT RUN under its own Run.
+            # released; the Step records its NOT RUN transition under the Workflow Run.
             if (first_failure is not None and not one.always_run) or (
                 not apply and one.apply_only
             ):
                 _logger.info("workflow '%s' step '%s' not released.", name, one.id)
-                self._child_run(workflow_run, one).not_released(
-                    step=one, sequence=one.ordinal, workflow_name=name,
+                one.not_released(
+                    control=self.control, parent_run=workflow_run, workflow_name=name,
                 )
                 continue
 
@@ -542,20 +542,6 @@ class Workflow:
         run_log.enter_phase("close")
         clear_run()
         return workflow_run
-
-    # -- child Runs -----------------------------------------------------------
-
-    def _child_run(self, parent_run: Run, one: WorkflowStep) -> Run:
-        """Create the Run of a step that is not released, under the Workflow Run."""
-        return Run.start(
-            self.control,
-            subject_type=_STEP_SUBJECT,
-            subject_id=one.id,
-            subject_name=one.label,
-            app_name=one.process.application.name if one.process is not None else "",
-            settings=one.settings,
-            parent=parent_run,
-        )
 
     # -- selection ------------------------------------------------------------
 
