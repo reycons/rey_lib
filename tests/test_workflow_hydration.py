@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from rey_lib.config.config_paths import (
 from rey_lib.config.inventory import to_plain_data
 from rey_lib.control.control import Control
 from rey_lib.errors.error_utils import AppError
+from rey_lib.workflow import workflow as workflow_module
 from rey_lib.workflow.workflow import Workflow
 from rey_lib.workflow.workflow_process import WorkflowProcess
 from rey_lib.workflow.workflow_step import WorkflowStep
@@ -202,6 +204,35 @@ def _hydrate(rows: list[dict[str, Any]]) -> tuple[Workflow, RecordingControl]:
     control = RecordingControl()
     return (Workflow.hydrate(rows, applications=[_application()], approved=_APPROVED,
                              control=control), control)
+
+
+class TestTheWorkflowHoldsItsApplicationRun:
+    """The creating application passes its Application Run id; the Workflow holds it."""
+
+    def test_hydration_holds_the_run_id_it_is_given(self) -> None:
+        workflow = Workflow.hydrate(_rows(), applications=[_application()],
+                                    approved=_APPROVED, control=RecordingControl(),
+                                    run_id=4711)
+
+        assert workflow.run_id == 4711
+
+    def test_a_workflow_no_application_created_holds_none(self) -> None:
+        assert _hydrate(_rows())[0].run_id is None
+
+    def test_from_governed_hands_the_run_id_to_hydration(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handed: dict[str, Any] = {}
+        monkeypatch.setattr(workflow_module, "open_shared_control",
+                            lambda ctx: SimpleNamespace(shared_control=SimpleNamespace(
+                                workflow=lambda installation, name=None: _rows())))
+        monkeypatch.setattr(Workflow, "hydrate", classmethod(
+            lambda cls, rows, **kwargs: handed.update(kwargs) or "hydrated"))
+        ctx = SimpleNamespace(installation=SimpleNamespace(name="admin"), applications=())
+
+        Workflow.from_governed(ctx, "wf", run_id=4711)
+
+        assert handed["run_id"] == 4711
 
 
 class TestTheCanonicalObjectsHydrateThemselves:

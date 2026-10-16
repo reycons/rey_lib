@@ -96,6 +96,9 @@ class Workflow:
         ``RUNNING`` while ``direct`` executes, else ``IDLE``.
     released : WorkflowStep | None
         The step this Workflow last released -- the one running while it directs.
+    run_id : int | None
+        The Application Run of the application that created this Workflow: its
+        link to its live application execution. None where no application did.
     """
 
     def __init__(
@@ -108,6 +111,7 @@ class Workflow:
         control: Any,
         runtime: Any = None,
         log: Any = None,
+        run_id: Optional[int] = None,
     ) -> None:
         """Hold the workflow's governed state and take ownership of its processes.
 
@@ -127,6 +131,9 @@ class Workflow:
         log : RunLog | None
             The Workflow's log. Its wrapper Run writes through it, and each Step
             Run through the wrapper Run's.
+        run_id : int | None
+            The Application Run id of the application creating this Workflow,
+            as that application passes it.
 
         Raises
         ------
@@ -144,6 +151,7 @@ class Workflow:
         self.control = control
         self.runtime = runtime
         self.log = log
+        self.run_id = run_id
         for process in processes:
             if process.workflow is not None:
                 raise AppError(
@@ -189,6 +197,7 @@ class Workflow:
         control: Any,
         runtime: Any = None,
         log: Any = None,
+        run_id: Optional[int] = None,
     ) -> "Workflow":
         """The workflow its governed rows state, fully hydrated (backlog 963).
 
@@ -254,6 +263,7 @@ class Workflow:
             control=control,
             runtime=runtime,
             log=log,
+            run_id=run_id,
         )
 
     @classmethod
@@ -264,6 +274,7 @@ class Workflow:
         *,
         workflow_id: Any = None,
         log: Any = None,
+        run_id: Optional[int] = None,
     ) -> "Workflow":
         """One workflow of this installation, hydrated from its governed rows.
 
@@ -274,7 +285,8 @@ class Workflow:
         By id, the installation-wide read supplies the rows and those of that
         workflow are kept. Nothing is executed or released, and no Run is created.
         The Workflow holds ``ctx`` as its runtime and ``log`` as its own log, so it
-        is self-contained.
+        is self-contained, and ``run_id`` -- the Application Run id the creating
+        application passes -- as its link to that live application execution.
 
         Raises:
             ConfigError: If neither or both identities are given, the runtime has
@@ -311,6 +323,7 @@ class Workflow:
             control=control,
             runtime=ctx,
             log=log,
+            run_id=run_id,
         )
 
     # -- its snapshot --------------------------------------------------------
