@@ -420,6 +420,7 @@ class TestOneRunIsOneLog:
 # Adoption is a move
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("assembled_logging")
 class TestAdoptionIsAMove:
     """A field the run log took over does not stay readable on the context.
 

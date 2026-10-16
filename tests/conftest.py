@@ -340,6 +340,22 @@ def run_log(tmp_path: Path) -> RunLog:
 
 
 @pytest.fixture
+def assembled_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the real build_ctx_for_app leaves for the run log (backlog 839).
+
+    A test that stubs build_ctx_for_app, or opens a run log directly, skips the
+    logging writer its configuration assembles, and open_run_log refuses. This
+    is that writer: a database output with no Control.
+    """
+    from rey_lib.logs.app_logger import AppLogger
+
+    monkeypatch.setattr(AppLogger, "_writer",
+                        LogWriter("db", database=DatabaseLogWriter(control=None)))
+    monkeypatch.setattr(AppLogger, "_builder",
+                        LogRecordBuilder(run_id=1, run_timestamp="20260822_000000"))
+
+
+@pytest.fixture
 def recorded_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let the launch boundary start a run without a control database.
 

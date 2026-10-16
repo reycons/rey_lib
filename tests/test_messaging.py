@@ -109,6 +109,7 @@ def test_email_dry_run_lifecycle_writes_archive(tmp_path: Path) -> None:
 
 def test_a_delivery_failure_is_one_error_plus_one_warning_audit_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    assembled_logging: None,
 ) -> None:
     """The audit records the failure at WARNING; AppError reports it once at ERROR (rule 79)."""
     from types import SimpleNamespace

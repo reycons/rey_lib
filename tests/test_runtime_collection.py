@@ -148,6 +148,7 @@ class TestCollection:
         assert failures and "broken" in failures[0]
 
 
+@pytest.mark.usefixtures("assembled_logging")
 class TestTheBootstrapLifecycle:
     """The boundary every standard launch gets."""
 
@@ -255,6 +256,7 @@ class TestAppsDoNotTearDownConnections:
         assert offenders == []
 
 
+@pytest.mark.usefixtures("assembled_logging")
 class TestExitCodesAreNotFailures:
     """Entry points end with sys.exit(code), which unwinds as an exception."""
 
