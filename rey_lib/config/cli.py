@@ -244,13 +244,14 @@ def load_ctx_snapshot(ctx_file: str) -> "Namespace":
 
     Raises
     ------
-    RuntimeError
+    ConfigError
         If the file is missing, malformed, has an unsupported schema version, or
         carries no ``config_path`` to resolve relative references against.
     """
     import json
 
     from rey_lib.config.context_builder import ContextBuilder
+    from rey_lib.errors.error_utils import ConfigError
 
     path = Path(ctx_file).expanduser().resolve()
     try:
