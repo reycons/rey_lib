@@ -108,7 +108,10 @@ def _workflow() -> Workflow:
 
 
 def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
-    assert _workflow().projection(object()) == {
+    projection = _workflow().projection(object())
+    actions = projection.pop("actions")
+    assert set(actions) == {"workflow", "process:1", "step:1", "step:2"}
+    assert projection == {
         "name": "code_index",
         "enabled": True,
         "state": "IDLE",
@@ -147,3 +150,15 @@ def test_one_act_at_a_time() -> None:
     with workflow.act():
         # Re-entrant, as the transport takes the projection inside the act.
         assert workflow.projection(object())["name"] == "code_index"
+
+
+def test_workflow_supplies_existing_commands_for_every_display_subject() -> None:
+    actions = _workflow().projection(object())["actions"]
+    assert actions["workflow"] == [{"id": "workflow_run", "command": {"command": "direct"}}]
+    for subject, name in [("process:1", "p"), ("step:1", "s1"), ("step:2", "s2")]:
+        assert actions[subject] == [
+            {"id": "workflow_run", "command": {"command": "direct"}},
+            {"id": "workflow_run_to", "command": {"command": "direct", "to_step": name}},
+            {"id": "workflow_run_from", "command": {"command": "direct", "from_step": name}},
+            {"id": "workflow_run_only", "command": {"command": "direct", "step": name}},
+        ]

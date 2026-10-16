@@ -339,6 +339,28 @@ class Workflow:
         for observer in list(self._observers):
             observer.changed(self)
 
+    def actions(self) -> dict[str, list[dict[str, Any]]]:
+        """The existing display subjects and their exact direction commands."""
+        def commands(name: Optional[str] = None) -> list[dict[str, Any]]:
+            offered = [{"id": "workflow_run", "command": {"command": "direct"}}]
+            if name is not None:
+                offered.extend(
+                    {"id": action, "command": {"command": "direct", selector: name}}
+                    for action, selector in (
+                        ("workflow_run_to", "to_step"),
+                        ("workflow_run_from", "from_step"),
+                        ("workflow_run_only", "step"),
+                    )
+                )
+            return offered
+
+        return {
+            "workflow": commands(),
+            **{f"process:{process.ordinal}": commands(process.name)
+               for process in self.processes},
+            **{f"step:{step.ordinal}": commands(step.id) for step in self.steps.values()},
+        }
+
     def projection(self, ctx: Any) -> dict[str, Any]:
         """What this Workflow shows: one snapshot of the hydrated graph.
 
@@ -354,6 +376,7 @@ class Workflow:
             return {
                 "name": self.name,
                 "enabled": self.enabled,
+                "actions": self.actions(),
                 "state": self.state,
                 # The step this Workflow released, and the Run that step created.
                 "released": None if self.released is None else {
