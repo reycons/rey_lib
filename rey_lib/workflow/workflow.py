@@ -445,8 +445,10 @@ class Workflow:
             return self._direct(self.runtime, apply=apply, step=step,
                              from_step=from_step, to_step=to_step, metadata=metadata)
         finally:
-            self._become(IDLE)
-            self._running.release()
+            try:
+                self._become(IDLE)
+            finally:
+                self._running.release()
 
     def _direct(
         self,

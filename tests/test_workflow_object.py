@@ -786,3 +786,34 @@ def test_the_projection_states_the_released_step_and_its_run(tmp_path: Path) -> 
     assert [one["step"] for one in running][0] == "s3"
     assert running[-1] == {"step": "s4", "run_id": graph.steps["s4"].current_run.run_id}
     assert graph.projection(ctx)["released"]["step"] == "s4"
+
+
+@pytest.mark.parametrize("failing_state", ["RUNNING", "IDLE"])
+def test_observer_failure_releases_lock_and_allows_another_direction(
+    tmp_path: Path, failing_state: str,
+) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    calls: list[str] = []
+    graph = _build(wf, ctx.applications[0], _recording(calls), control)
+    failure = RuntimeError("observer failed")
+
+    class FailOnce:
+        failed = False
+
+        def changed(self, workflow: Workflow) -> None:
+            if workflow.state == failing_state and not self.failed:
+                self.failed = True
+                raise failure
+
+    graph.observe(FailOnce())
+    with pytest.raises(RuntimeError) as raised:
+        _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
+    assert raised.value is failure
+    assert graph.state == "IDLE"
+    assert calls == ([] if failing_state == "RUNNING" else ["p1"])
+
+    result = _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s2")
+    assert result.status == "SUCCEEDED"
+    assert calls[-1] == "p2"
+    assert graph.state == "IDLE"
