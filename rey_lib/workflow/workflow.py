@@ -51,7 +51,7 @@ from rey_lib.config.config_paths import resolve_config_paths
 from rey_lib.config.config_utils import record_config_file_references
 from rey_lib.config.inventory import to_plain_data
 from rey_lib.config.bootstrap import open_shared_control
-from rey_lib.errors.error_utils import AppError, ConfigError
+from rey_lib.errors.error_utils import AppError, ConfigError, build_safe_error_payload
 from rey_lib.logs import (
     AppLogger,
     bind_run,
@@ -567,7 +567,10 @@ class Workflow:
                                 apply=apply, data=data, metadata=shared_metadata, ctx=ctx,
                                 workflow_name=name)
             except AppError as refusal:
-                raise self._pre_execution_failure(one, message=str(refusal)) from refusal
+                # The step's own refusal propagates unchanged; the Workflow only
+                # records the consequence for its direction.
+                self._pre_execution_failure(one, refusal)
+                raise
             if child.status == FAILED and first_failure is None:
                 failure_message = (
                     child.error or child.detail or f"workflow step '{one.id}' failed."
@@ -689,38 +692,32 @@ class Workflow:
         log_run_complete(run_log, "refused", message=message)
         clear_run()
 
-    def _pre_execution_failure(
-        self,
-        one: WorkflowStep,
-        *,
-        message: str,
-    ) -> AppError:
-        """Record a released step's contract refusal as run evidence, then hand it back.
+    def _pre_execution_failure(self, one: WorkflowStep, error: AppError) -> None:
+        """Record a released step's contract refusal as this direction's failure.
 
-        Written through the same records an in-step failure uses; the log is
-        unbound, and the caller raises the returned error. Not reported here: it
-        propagates, and the AppError boundary reports it once.
+        The evidence is the originating error's own, through the canonical
+        evidence path (``build_safe_error_payload``) an in-step failure uses in
+        Run.execute; nothing here relabels or recreates it. The caller re-raises
+        that same error. Not reported here: it propagates, and the AppError
+        boundary reports it once.
         """
         # Run-level evidence: written at the workflow's level, which the Workflow resets.
         run_log = self.log
         run_log.set_nest_level("workflow")
-        failure_id = log_step_failure(run_log,
+        payload = build_safe_error_payload(
+            error,
             failed_step_id=one.id,
             failed_step_name=one.label or one.id,
-            message=message,
-            error_type="WorkflowError",
-            error_message=message,
-            sanitized_exception=message,
             failed_step_sequence=one.ordinal,
             process=one.process_name,
         )
+        failure_id = log_step_failure(run_log, **payload)
         log_run_complete(run_log,
             "failed",
-            message=message,
+            message=payload["message"],
             failure_record_id=failure_id,
             failed_step_id=one.id,
             failed_step_name=one.label or one.id,
-            failure_message=message,
+            failure_message=payload["message"],
         )
         clear_run()
-        return AppError(message)

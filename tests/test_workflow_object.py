@@ -358,23 +358,35 @@ def _requiring_source() -> tuple[dict[str, Any], SimpleNamespace]:
 
 def test_a_released_steps_contract_refusal_creates_no_step_run(tmp_path: Path) -> None:
     """The released step checks its own contract (backlog 964) and refuses before
-    its Run exists; the Workflow records the refusal. No Run of any kind is created."""
-    workflow, legacy_ctx = _requiring_source()
-    legacy_log, legacy_calls = _log(tmp_path / "legacy"), []
-    with pytest.raises(LegacyWorkflowError) as legacy:
-        run_workflow(legacy_ctx, legacy_log, workflow, _recording(legacy_calls))
+    its Run exists; the Workflow records the refusal. No Run of any kind is created.
 
-    workflow, new_ctx = _requiring_source()
-    new_log, new_calls, control = _log(tmp_path / "new"), [], RecordingControl()
-    graph = _build(workflow, new_ctx.applications[0], _recording(new_calls), control)
-    with pytest.raises(AppError) as new:
-        _run(graph, parent_run(control, log=new_log), new_ctx)
+    The refusal propagates as the step's own AppError (#1006): not relabelled,
+    not replaced, and recorded through the canonical evidence path."""
+    workflow, ctx = _requiring_source()
+    run_log, calls, control = _log(tmp_path), [], RecordingControl()
+    graph = _build(workflow, ctx.applications[0], _recording(calls), control)
+    with pytest.raises(AppError) as raised:
+        _run(graph, parent_run(control, log=run_log), ctx)
 
-    assert str(new.value) == str(legacy.value)
-    assert new_calls == legacy_calls == []
-    assert _records(new_log) == _through_run_complete(_records(legacy_log))
+    error = raised.value
+    # The step's own refusal: raised in WorkflowStep.run, not a replacement chained to it.
+    assert type(error) is AppError and error.__cause__ is None
+    assert str(error) == graph.steps["s1"].contract_refusal("wf")
+    assert raised.traceback[-1].name == "run"
+    assert calls == []
     # No Step Run was created, and there is no Workflow Run.
     assert control.rows == []
+
+    records = [json.loads(line) for line in
+               Path(run_log.path()).read_text(encoding="utf-8").splitlines()]
+    failure = next(r for r in records if r["record_type"] == "STEP_FAILURE")
+    complete = next(r for r in records if r["record_type"] == "RUN_COMPLETE")
+    evidence = failure["error_message"]
+    # The error's own type and traceback, not Workflow-made "WorkflowError" evidence.
+    assert evidence["error_type"] == "AppError"
+    assert evidence.get("sanitized_traceback")
+    assert complete["status"] == "failed"
+    assert complete["failure_record_id"] == evidence["failure_record_id"]
 
 
 def test_an_unreleased_step_is_never_contract_checked(tmp_path: Path) -> None:
