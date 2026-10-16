@@ -1132,7 +1132,7 @@ def get_reader(
     elif fmt == "XLSX":
         yield from _xlsx_reader(infile, row_filter=row_filter)
     elif fmt in KEYED_FILE_TYPES:
-        yield from _jsonl_reader(infile, row_filter=row_filter)
+        yield from _jsonl_reader(infile, encoding=encoding, row_filter=row_filter)
     else:
         raise ConfigError(f"Unsupported file_type '{file_type}'.")
 
@@ -1968,6 +1968,7 @@ def _display_path(path: Path, environment_root: Path | None) -> str:
 
 def _jsonl_reader(
     infile: Path,
+    encoding: str,
     row_filter: Optional[Callable[[dict[str, str]], bool]],
 ) -> Generator[dict[str, Any], None, None]:
     """Yield one row per JSONL record, in physical file order.
@@ -1987,6 +1988,7 @@ def _jsonl_reader(
 
     Args:
         infile: Source file to read.
+        encoding: Text encoding the file is decoded with, as declared.
         row_filter: Optional predicate. Rows for which it returns False are
             skipped, matching every other reader here.
 
@@ -2000,7 +2002,7 @@ def _jsonl_reader(
     """
     from rey_lib.files.jsonl import read_jsonl_file
 
-    for record in read_jsonl_file(infile):
+    for record in read_jsonl_file(infile, encoding=encoding):
         row = dict(record.record)
         if row_filter is None or row_filter(row):
             yield row

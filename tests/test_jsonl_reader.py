@@ -178,7 +178,7 @@ def test_unreadable_file_raises_shared_error(
 
     path = _write(tmp_path, '{"a": 1}')
 
-    def deny_read(_path: Path):
+    def deny_read(_path: Path, **_kwargs: object):
         raise PermissionError("permission denied")
 
     monkeypatch.setattr(jsonl_module, "open_text_file", deny_read)

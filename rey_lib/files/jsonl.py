@@ -101,6 +101,7 @@ def read_jsonl_file(
     *,
     filters: Mapping[str, Any] | None = None,
     fields: Sequence[str] | None = None,
+    encoding: str = "utf-8",
 ) -> list[JsonlRecord]:
     """
     Read a JSONL file strictly, in physical file order.
@@ -124,6 +125,8 @@ def read_jsonl_file(
         Top-level field names to project, in the requested order. A requested
         field the record does not have is omitted rather than inserted as null.
         Omitted entirely, the complete parsed object is returned.
+    encoding : str
+        Text encoding the file is decoded with.
 
     Returns
     -------
@@ -143,7 +146,7 @@ def read_jsonl_file(
     projection = _validated_fields(fields)
 
     records: list[JsonlRecord] = []
-    for line_number, parsed in _iter_jsonl_objects(file_path):
+    for line_number, parsed in _iter_jsonl_objects(file_path, encoding=encoding):
         if not _matches(parsed, selected):
             continue
         records.append(
@@ -200,10 +203,12 @@ def search_jsonl_file(
     return results
 
 
-def _iter_jsonl_objects(file_path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+def _iter_jsonl_objects(
+    file_path: Path, *, encoding: str = "utf-8"
+) -> Iterator[tuple[int, dict[str, Any]]]:
     """Yield strict JSON objects with their physical one-based line numbers."""
     try:
-        with open_text_file(file_path) as handle:
+        with open_text_file(file_path, encoding=encoding) as handle:
             # Iterating the handle streams the file, so the complete raw
             # content is never held in memory at once.
             for line_number, line in enumerate(handle, start=1):
