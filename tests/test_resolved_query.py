@@ -150,3 +150,67 @@ def test_it_never_imports_the_file_manifest() -> None:
     ]
 
     assert not [name for name in imported if name.startswith("rey_lib.files")]
+
+
+def _installation(*connections: tuple[str, str]) -> SimpleNamespace:
+    """An installation whose configured connections are these (name, provider) pairs."""
+    return SimpleNamespace(connections=[
+        SimpleNamespace(name=name, provider=provider) for name, provider in connections
+    ])
+
+
+class TestHeldForASurface:
+    """Held on a page runtime and shown by a Data Workbench (backlogs 981, 982)."""
+
+    def test_the_projection_is_what_it_was_resolved_to(self) -> None:
+        resolved = ResolvedQuery.for_database_object(
+            "orders", "the orders statement", "the orders definition", "w", "s",
+        )
+
+        assert resolved.projection(_installation(("w", "postgres"))) == {
+            "display_name": resolved.display_name,
+            "statement": "the orders statement",
+            "ddl": "the orders definition",
+            "readings": ["query", "ddl"],
+            "name": "orders",
+            "schema_name": "s",
+            "connections": ["w"],
+        }
+
+    def test_only_the_readings_present_are_offered(self) -> None:
+        resolved = ResolvedQuery.for_database_object("f", "", "the f definition", "w")
+
+        assert resolved.projection(_installation(("w", "postgres")))["readings"] == ["ddl"]
+
+    def test_its_connection_leads_the_configured_database_connections(self) -> None:
+        installation = _installation(
+            ("a", "postgres"), ("files", "duckdb"), ("w", "postgres"), ("api", "http"),
+        )
+        resolved = ResolvedQuery.for_declared("the rows for [:current_value]", 1)
+        resolved = ResolvedQuery(
+            resolved.display_name, resolved.statement, connection_map="w",
+        )
+
+        assert resolved.projection(installation)["connections"] == ["w", "files", "a"]
+
+    def test_a_connection_that_is_not_configured_is_refused(self) -> None:
+        resolved = ResolvedQuery.for_declared("the rows for [:current_value]", 1)
+
+        with pytest.raises(ConfigError, match="nothing to run on"):
+            resolved.projection(_installation(("w", "postgres")))
+
+    def test_the_projection_reads_nothing(self, bindings) -> None:
+        resolved = ResolvedQuery.for_run(SimpleNamespace(), "41")
+        bindings.clear()
+
+        resolved.projection(_installation(("rey_apps", "postgres")))
+
+        assert bindings == []
+
+    def test_one_act_is_taken_under_its_own_lock(self) -> None:
+        one = ResolvedQuery("x", "select 1", "w")
+        other = ResolvedQuery("x", "select 1", "w")
+
+        with one.act():
+            assert one.act() is one.act()
+        assert one.act() is not other.act()

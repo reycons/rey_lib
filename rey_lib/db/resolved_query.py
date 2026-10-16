@@ -23,10 +23,11 @@ characters compose SQL.
 
 from __future__ import annotations
 
+import threading
 from decimal import Decimal
 from typing import Any, Final, Optional
 
-from rey_lib.db.connection import shared_connection
+from rey_lib.db.connection import is_database_connection, shared_connection
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
 from rey_lib.db.procedure_map import get_procedure_map, resolve_sql_binding
 from rey_lib.errors.error_utils import ConfigError
@@ -62,7 +63,8 @@ class ResolvedQuery:
     """
 
     __slots__ = (
-        "connection_map", "ddl", "display_name", "name", "schema_name", "statement",
+        "_acting", "connection_map", "ddl", "display_name", "name", "schema_name",
+        "statement",
     )
 
     def __init__(
@@ -80,6 +82,48 @@ class ResolvedQuery:
         self.ddl = ddl
         self.name = name
         self.schema_name = schema_name
+        # The lock one act is taken under, for a query held on a page runtime
+        # and read from more than one request (backlogs 981, 982).
+        self._acting = threading.RLock()
+
+    # -- held for a surface ------------------------------------------------------
+
+    def act(self) -> Any:
+        """The lock one act is taken under: an operation, and the snapshot answering it."""
+        return self._acting
+
+    def projection(self, ctx: Any) -> dict[str, Any]:
+        """What this query shows: the representations it was resolved to.
+
+        Read from this object -- nothing is resolved again -- with one thing
+        from the installation beside it: the configured database connections a
+        reader may run the statement on, the one it runs on first.
+
+        Args:
+            ctx: The installation context whose connections are listed.
+
+        Returns:
+            display_name, statement, ddl, readings (which of statement and ddl
+            are present, in that order), name, schema_name and connections.
+
+        Raises:
+            ConfigError: When the connection this statement runs on is not
+                configured, so it has nothing to run on.
+        """
+        with self._acting:
+            return {
+                "display_name": self.display_name,
+                "statement": self.statement,
+                "ddl": self.ddl,
+                "readings": [
+                    reading for reading, present in (
+                        ("query", self.statement), ("ddl", self.ddl),
+                    ) if present
+                ],
+                "name": self.name,
+                "schema_name": self.schema_name,
+                "connections": _connections_led_by(ctx, self.connection_map),
+            }
 
     # -- configured statements -------------------------------------------------
 
@@ -208,6 +252,37 @@ class ResolvedQuery:
             name=identity.name,
             schema_name=identity.schema,
         )
+
+
+def _connections_led_by(ctx: Any, connection: str) -> list[str]:
+    """Every configured database connection, the one named first.
+
+    File-reading (DuckDB) connections before the others, as the query surface
+    has always listed them, and then the statement's own moved to the front:
+    it reads a database object, which a file-reading connection cannot see.
+
+    Raises:
+        ConfigError: When ``connection`` is not one of them.
+    """
+    file_reading: list[str] = []
+    others: list[str] = []
+    for configured in list(getattr(ctx, "connections", None) or []):
+        if not is_database_connection(configured):
+            continue
+        name = str(getattr(configured, "name", "") or "").strip()
+        if not name or name in file_reading or name in others:
+            continue
+        if str(getattr(configured, "provider", "") or "").lower() == "duckdb":
+            file_reading.append(name)
+        else:
+            others.append(name)
+    names = file_reading + others
+    if connection not in names:
+        raise ConfigError(
+            f"No connection named '{connection}' is configured, so the statement "
+            "has nothing to run on."
+        )
+    return [connection] + [name for name in names if name != connection]
 
 
 def _bound(ctx: Any, binding_name: str, filters: dict[str, str]) -> str:
