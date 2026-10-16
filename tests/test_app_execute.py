@@ -25,10 +25,13 @@ def test_run_is_literally_app_execute() -> None:
 
 
 def test_there_is_one_implementation_not_two() -> None:
-    # Only AppExecute is defined; Run is a name bound to it, never a class of its own.
+    # Only AppExecute is a public class; Run is a name bound to it, never a class of
+    # its own. The private classes are AppExecute's launch and attach handles.
     tree = ast.parse(Path(run_module.__file__).read_text(encoding="utf-8"))
     classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
-    assert classes == ["AppExecute"]
+    assert [name for name in classes if not name.startswith("_")] == ["AppExecute"]
+    assert sorted(name for name in classes if name.startswith("_")) == [
+        "_AttachedApp", "_LaunchedApp"]
 
 
 def test_a_run_started_through_the_alias_is_an_app_execute_with_the_hierarchy() -> None:
@@ -44,7 +47,8 @@ def test_a_run_started_through_the_alias_is_an_app_execute_with_the_hierarchy() 
 
 
 def test_anyio_is_reached_only_through_the_rey_wrapper() -> None:
-    # No rey_lib module imports AnyIO directly; the Rey async wrapper is the only door.
+    # The Rey async wrapper, rey_lib/run/async_runtime.py, is the only module that
+    # imports AnyIO.
     root = Path(rey_lib.__file__).parent
     direct = []
     for path in root.rglob("*.py"):
@@ -56,4 +60,4 @@ def test_anyio_is_reached_only_through_the_rey_wrapper() -> None:
             )
             if any(name == "anyio" or name.startswith("anyio.") for name in names):
                 direct.append(str(path.relative_to(root)))
-    assert direct == []
+    assert sorted(set(direct)) == ["run/async_runtime.py"]
