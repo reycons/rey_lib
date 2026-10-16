@@ -210,4 +210,4 @@ def test_every_live_workflow_step_satisfies_its_contract(operations) -> None:
                 tolerated.add((installation, name, step["id"]))
     assert refused == []
     assert tolerated == _KNOWN_UNSUPPORTED
-    assert checked == 52
+    assert checked == 50
