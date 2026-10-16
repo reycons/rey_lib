@@ -7,20 +7,21 @@ Control it creates child Runs through. The workflow hydrator creates that whole
 graph in one pass; by the time ``direct`` is called every object is fully hydrated,
 and nothing here hydrates, merges, propagates or reconstructs configuration.
 
-``direct(step, from_step, to_step)`` directs the steps (backlog 964). It creates
-its own wrapper Run -- Workflow Run -> Step Runs -- which writes through the
-Workflow's log, as each Step Run writes through the wrapper Run's. For
-each hydrated step, in workflow-wide ordinal order, the Workflow decides whether
-it is released (selection, dry run, earlier failure, ``always_run``) and sets
-its indent level. A released step runs itself: it checks its own contract,
-creates its own Step Run under the Workflow Run and executes through it. A step
-a terminal run-time rule holds back gets a Step Run the Workflow creates,
-finished NOT RUN. ``step_sequence`` is the step's ordinal. Running a step
-changes the step's own state; it stays in the graph, so the Workflow is
+``direct(step, from_step, to_step)`` directs the steps (backlog 964). There is
+no Workflow Run: each Step Run is a child of the Application Run that created
+this Workflow (``run_id``) and writes through the Workflow's log. For each
+hydrated step, in workflow-wide ordinal order, the Workflow decides whether it
+is released (selection, dry run, earlier failure, ``always_run``) and sets its
+indent level, and hands the step this direction's execution values -- its
+``apply``, and the working ``data`` and ``metadata`` its steps share. A released
+step runs itself: it checks its own contract, creates its own Step Run and
+executes through it. A step a terminal run-time rule holds back creates its own
+Step Run, finished NOT RUN. ``step_sequence`` is the step's ordinal. Running a
+step changes the step's own state; it stays in the graph, so the Workflow is
 reusable and a later ``direct`` releases its steps again. The Workflow is RUNNING
 while ``direct`` executes, and refuses a second ``direct`` until it returns. It tells
-its observers each time it or one of its steps changes. ``direct`` finishes and
-returns the Workflow Run.
+its observers each time it or one of its steps changes. ``direct`` returns the
+direction's outcome.
 
 The existing logging is consumed exactly as it is.
 
@@ -59,7 +60,7 @@ from rey_lib.logs import (
     log_run_start,
     log_step_failure,
 )
-from rey_lib.run.run import FAILED, SUCCEEDED, Run
+from rey_lib.run.run import FAILED, SUCCEEDED
 from rey_lib.workflow.workflow_process import WorkflowProcess
 from rey_lib.workflow.workflow_step import RUNNING, WorkflowStep
 
@@ -67,8 +68,6 @@ __all__ = ["Workflow"]
 
 _logger = AppLogger(__name__)
 
-#: The subject type of a Workflow's own Run, as a workflow launch records it.
-_WORKFLOW_SUBJECT = "workflow"
 
 #: A Workflow's state when no ``direct`` is executing.
 IDLE = "IDLE"
@@ -129,8 +128,8 @@ class Workflow:
             The runtime this Workflow was hydrated from: the context every step
             executes in.
         log : RunLog | None
-            The Workflow's log. Its wrapper Run writes through it, and each Step
-            Run through the wrapper Run's.
+            The Workflow's log: the creating application's run log, which each
+            Step Run writes through.
         run_id : int | None
             The Application Run id of the application creating this Workflow,
             as that application passes it.
@@ -448,14 +447,15 @@ class Workflow:
         *,
         apply: bool = True,
         metadata: Optional[dict[str, Any]] = None,
-    ) -> Optional[Run]:
+    ) -> Optional[str]:
         """Direct the eligible steps: all, one, or an inclusive range of them.
 
         The Workflow decides eligibility and releases each eligible step in
         order; it executes none. A released WorkflowStep runs itself through its
-        own Run. The Workflow creates its own wrapper Run, which writes through
-        the Workflow's log; each Step Run writes through the wrapper Run's. Every
-        step executes in this Workflow's ``runtime``.
+        own Run, a child of the Application Run (``run_id``) that writes through
+        the Workflow's log. The Workflow hands each step this direction's
+        ``apply``, ``data`` and ``metadata``, created fresh for every direction.
+        Every step executes in this Workflow's ``runtime``.
 
         Parameters
         ----------
@@ -468,16 +468,17 @@ class Workflow:
             Run the inclusive ordered range between them. A process name starts
             at its first step, or ends at its last.
         metadata : dict | None
-            Run metadata seeded into the Workflow Run's ``metadata``.
+            Seeded into this direction's ``metadata``, which its Step Runs share.
 
         Identifiers resolve against each step's ``id``, ``label`` or
         ``process_name``; no match or more than one fails closed.
 
         Returns
         -------
-        Run | None
-            The Workflow Run, finished; None for a disabled Workflow, which is
-            recorded as refused and creates no Run.
+        str | None
+            The direction's outcome: ``SUCCEEDED``, or ``FAILED`` when a released
+            step failed; None for a disabled Workflow, which is recorded as
+            refused and releases nothing.
 
         Raises
         ------
@@ -507,7 +508,7 @@ class Workflow:
         from_step: Optional[str],
         to_step: Optional[str],
         metadata: Optional[dict[str, Any]],
-    ) -> Optional[Run]:
+    ) -> Optional[str]:
         """The release itself, while this Workflow is RUNNING (see :meth:`direct`)."""
         name = self.name
         # Being switched off is a governed outcome, reported as a refused run.
@@ -517,20 +518,12 @@ class Workflow:
         steps = list(self.steps.values())
         selected = self._select(steps, step=step, from_step=from_step, to_step=to_step)
 
-        # The Workflow's own wrapper Run (backlog 964): Workflow Run -> Step Runs.
-        # It writes through the Workflow's log, and is the execution context the
-        # Step Runs work in.
-        workflow_run = Run.start(
-            self.control,
-            subject_type=_WORKFLOW_SUBJECT,
-            subject_id=name,
-            subject_name=name,
-        )
-        workflow_run.log = self.log
-        run_log = workflow_run.log
-        workflow_run.apply = apply
-        workflow_run.metadata.update(metadata or {})
-        workflow_run.data["ctx"] = ctx
+        # This direction's execution values, handed to each step it releases or
+        # holds back: what one step writes in ``data`` or ``metadata``, a later
+        # step of the same direction reads. Fresh for every direction.
+        run_log = self.log
+        data: dict[str, Any] = {}
+        shared_metadata: dict[str, Any] = dict(metadata or {})
 
         try:
             ctx.workflow_name = name
@@ -555,13 +548,14 @@ class Workflow:
             run_log.set_nest_level("workflow_step")
             # A terminal run-time rule holds the step back: an earlier failure
             # (unless always_run), or apply_only in a dry run. It is never
-            # released; the Step records its NOT RUN transition under the Workflow Run.
+            # released; the Step records its NOT RUN transition through its own Run.
             if (first_failure is not None and not one.always_run) or (
                 not apply and one.apply_only
             ):
                 _logger.info("workflow '%s' step '%s' not released.", name, one.id)
                 one.not_released(
-                    control=self.control, parent_run=workflow_run, workflow_name=name,
+                    control=self.control, parent_run_id=self.run_id, log=run_log,
+                    apply=apply, data=data, metadata=shared_metadata, workflow_name=name,
                 )
                 continue
 
@@ -569,12 +563,11 @@ class Workflow:
             # Released: the step checks its own contract, creates its own Run and
             # executes through it. A refusal raises before any Step Run exists.
             try:
-                child = one.run(control=self.control, parent_run=workflow_run, ctx=ctx,
+                child = one.run(control=self.control, parent_run_id=self.run_id, log=run_log,
+                                apply=apply, data=data, metadata=shared_metadata, ctx=ctx,
                                 workflow_name=name)
             except AppError as refusal:
-                raise self._pre_execution_failure(
-                    workflow_run, one, message=str(refusal),
-                ) from refusal
+                raise self._pre_execution_failure(one, message=str(refusal)) from refusal
             if child.status == FAILED and first_failure is None:
                 failure_message = (
                     child.error or child.detail or f"workflow step '{one.id}' failed."
@@ -593,10 +586,9 @@ class Workflow:
             log_run_complete(run_log, "success")
         else:
             log_run_complete(run_log, "failed", **first_failure)
-        _finalize(workflow_run, SUCCEEDED if first_failure is None else FAILED)
         run_log.enter_phase("close")
         clear_run()
-        return workflow_run
+        return SUCCEEDED if first_failure is None else FAILED
 
     # -- selection ------------------------------------------------------------
 
@@ -678,8 +670,7 @@ class Workflow:
     def _refused(self, ctx: Any, *, apply: bool) -> None:
         """Record a disabled workflow as a refused run, through the Workflow's log.
 
-        A RUN_START and a terminal RUN_COMPLETE; no Workflow Run is created and no
-        step is released. The run log is finalized by the app's common shutdown.
+        A RUN_START and a terminal RUN_COMPLETE; no step is released. The run log is finalized by the app's common shutdown.
         """
         name = self.name
         message = (
@@ -700,19 +691,18 @@ class Workflow:
 
     def _pre_execution_failure(
         self,
-        workflow_run: Run,
         one: WorkflowStep,
         *,
         message: str,
     ) -> AppError:
         """Record a released step's contract refusal as run evidence, then hand it back.
 
-        Written through the same records an in-step failure uses; the Workflow Run
-        is finished FAILED and unbound, and the caller raises the returned error.
-        Not reported here: it propagates, and the AppError boundary reports it once.
+        Written through the same records an in-step failure uses; the log is
+        unbound, and the caller raises the returned error. Not reported here: it
+        propagates, and the AppError boundary reports it once.
         """
         # Run-level evidence: written at the workflow's level, which the Workflow resets.
-        run_log = workflow_run.log
+        run_log = self.log
         run_log.set_nest_level("workflow")
         failure_id = log_step_failure(run_log,
             failed_step_id=one.id,
@@ -732,14 +722,5 @@ class Workflow:
             failed_step_name=one.label or one.id,
             failure_message=message,
         )
-        _finalize(workflow_run, FAILED)
         clear_run()
         return AppError(message)
-
-
-def _finalize(workflow_run: Run, status: str) -> None:
-    """Finish the Workflow Run, ending the Workflow's own chain.
-
-    The run log is not finalized here: that belongs to the app's common shutdown.
-    """
-    workflow_run.finish(status)

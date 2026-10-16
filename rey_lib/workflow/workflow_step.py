@@ -219,15 +219,27 @@ class WorkflowStep:
         """
         self._observer = observer
 
-    def run(self, *, control: Any, parent_run: Run, ctx: Any, workflow_name: str) -> Run:
-        """Run this released step through its own child Run, and return that Run.
+    def run(
+        self,
+        *,
+        control: Any,
+        parent_run_id: Optional[int],
+        log: Any,
+        apply: bool,
+        data: dict[str, Any],
+        metadata: dict[str, Any],
+        ctx: Any,
+        workflow_name: str,
+    ) -> Run:
+        """Run this released step through its own Run, and return that Run.
 
         In the released step's order (backlog 964/965): check its contract, create
-        its child Run under ``parent_run``, become RUNNING, execute through that
-        Run, then take the Run's outcome as its state. A refused contract raises
-        before any Run exists and leaves the state unchanged. ``control`` is the
-        releasing Workflow's; the step does not find or keep it. The Step Run
-        writes through its parent's log.
+        its Run as a child of ``parent_run_id`` (the Application Run), become
+        RUNNING, execute through that Run, then take the Run's outcome as its
+        state. A refused contract raises before any Run exists and leaves the
+        state unchanged. ``control`` and the execution values -- ``log``,
+        ``apply``, and the ``data`` and ``metadata`` the direction's steps share --
+        are the releasing Workflow's; the step does not find or keep them.
 
         Raises:
             AppError: When the step's settings do not satisfy its contract.
@@ -235,27 +247,51 @@ class WorkflowStep:
         refusal = self.contract_refusal(workflow_name)
         if refusal:
             raise AppError(refusal)
-        child = Run.start(
-            control,
-            subject_type=_STEP_SUBJECT,
-            subject_id=self.id,
-            subject_name=self.label,
-            app_name=self.process.application.name if self.process is not None else "",
-            settings=self.settings,
-            parent=parent_run,
-        )
-        self.current_run = child
+        child = self._start_run(control, parent_run_id, log=log, apply=apply,
+                                data=data, metadata=metadata)
         self._become(RUNNING)
         child.execute(self, ctx, sequence=self.ordinal, workflow_name=workflow_name)
         self._become(child.status)
         return child
 
-    def not_released(self, *, control: Any, parent_run: Run, workflow_name: str) -> Run:
+    def not_released(
+        self,
+        *,
+        control: Any,
+        parent_run_id: Optional[int],
+        log: Any,
+        apply: bool,
+        data: dict[str, Any],
+        metadata: dict[str, Any],
+        workflow_name: str,
+    ) -> Run:
         """Record terminal non-release and retain its Run as this Step's outcome.
 
         Workflow decides eligibility. This Step owns its Run association and
         state; the existing Run records the unchanged non-release evidence.
         No operation or operation-contract check is performed.
+        """
+        child = self._start_run(control, parent_run_id, log=log, apply=apply,
+                                data=data, metadata=metadata)
+        child.not_released(step=self, sequence=self.ordinal, workflow_name=workflow_name)
+        self._become(child.status)
+        return child
+
+    def _start_run(
+        self,
+        control: Any,
+        parent_run_id: Optional[int],
+        *,
+        log: Any,
+        apply: bool,
+        data: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> Run:
+        """Create this step's own Run, a child of ``parent_run_id``, and keep it.
+
+        The Run works in the execution values it is given: the same ``data`` and
+        ``metadata`` objects, not copies, so what one step writes a later step of
+        the same direction reads.
         """
         child = Run.start(
             control,
@@ -264,11 +300,13 @@ class WorkflowStep:
             subject_name=self.label,
             app_name=self.process.application.name if self.process is not None else "",
             settings=self.settings,
-            parent=parent_run,
+            parent_run_id=parent_run_id,
         )
+        child.log = log
+        child.apply = apply
+        child.data = data
+        child.metadata = metadata
         self.current_run = child
-        child.not_released(step=self, sequence=self.ordinal, workflow_name=workflow_name)
-        self._become(child.status)
         return child
 
     def _become(self, state: str) -> None:

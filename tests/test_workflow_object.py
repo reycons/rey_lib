@@ -117,8 +117,9 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
 
 
 def _run(graph: Workflow, parent: Any, ctx: Any, **selection: Any) -> Any:
-    """Direct ``graph`` as hydration would hold it: with ``parent``'s log, in ``ctx``."""
-    graph.log, graph.runtime = parent.log, ctx
+    """Direct ``graph`` as hydration would hold it: with ``parent``'s log and run id
+    -- the creating Application Run's -- in ``ctx``."""
+    graph.log, graph.runtime, graph.run_id = parent.log, ctx, parent.run_id
     return graph.direct(**selection)
 
 
@@ -127,8 +128,8 @@ def _both(tmp_path: Path, workflow: dict[str, Any], *,
           ) -> tuple[Any, Any]:
     """Run ``workflow`` on both paths.
 
-    Returns (legacy run, legacy calls, legacy log) and (parent Run, new calls,
-    new log, control).
+    Returns (legacy run, legacy calls, legacy log) and (outcome, new calls,
+    new log, control, Application Run).
     """
     legacy_calls: list[str] = []
     legacy_log = _log(tmp_path / "legacy")
@@ -141,8 +142,10 @@ def _both(tmp_path: Path, workflow: dict[str, Any], *,
     control = RecordingControl()
     new_wf, new_ctx = prepared(workflow, SimpleNamespace())
     graph = _build(new_wf, new_ctx.applications[0], _recording(new_calls, behaviour), control)
-    returned = _run(graph, parent_run(control, log=new_log), new_ctx, **selection)
-    return (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control)
+    application_run = parent_run(control, log=new_log)
+    returned = _run(graph, application_run, new_ctx, **selection)
+    return ((legacy_run, legacy_calls, legacy_log),
+            (returned, new_calls, new_log, control, application_run))
 
 
 def _records(run_log: Any) -> list[Any]:
@@ -169,10 +172,13 @@ def _records(run_log: Any) -> list[Any]:
 
 def _assert_parity(legacy: Any, new: Any) -> None:
     """Same call order, step outcomes and run-log records on both paths."""
-    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control) = legacy, new
-    assert isinstance(returned, Run)
+    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control,
+                                             application_run) = legacy, new
+    assert returned in ("SUCCEEDED", "FAILED")
+    # Only Step Runs are created, each a child of the Application Run.
+    assert [row["subject_type"] for row in control.rows] == ["step"] * len(control.rows)
     assert new_calls == legacy_calls
-    assert [(row["subject_id"], row["status"]) for row in control.children(returned)] == [
+    assert [(row["subject_id"], row["status"]) for row in control.children(application_run)] == [
         (outcome.id, _STATUS[outcome.status]) for outcome in legacy_run.outcomes
     ]
     assert _records(new_log) == _through_run_complete(_records(legacy_log))
@@ -229,11 +235,12 @@ def test_a_dry_run_does_not_release_apply_only_steps(selection: dict[str, Any],
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording(calls), control)
 
-    returned = _run(graph, parent_run(control, log=run_log), ctx, apply=False, **selection)
+    application_run = parent_run(control, log=run_log)
+    _run(graph, application_run, ctx, apply=False, **selection)
 
     assert "p2" not in calls
     assert ("s2", "NOT RUN") in [(c["subject_id"], c["status"])
-                                 for c in control.children(returned)]
+                                 for c in control.children(application_run)]
     assert ("s2", "not run", "not released") in _step_ends(run_log)
 
 
@@ -283,9 +290,9 @@ def test_an_ambiguous_identifier_matches_run_workflow(tmp_path: Path) -> None:
 
 
 def _statuses(new: Any) -> list[tuple[str, str]]:
-    """(step id, terminal status) of every Step Run under the returned Workflow Run."""
-    returned, _calls, _log, control = new
-    return [(c["subject_id"], c["status"]) for c in control.children(returned)]
+    """(step id, terminal status) of every Step Run under the Application Run."""
+    _returned, _calls, _log, control, application_run = new
+    return [(c["subject_id"], c["status"]) for c in control.children(application_run)]
 
 
 def test_a_failure_holds_ordinary_steps_back_and_always_run_still_runs(tmp_path: Path) -> None:
@@ -316,7 +323,7 @@ def test_the_first_failure_is_retained_when_an_always_run_step_also_fails(
     complete = next(r for r in _records(new[2])
                     if isinstance(r, dict) and r["record_type"] == "RUN_COMPLETE")
     assert complete["failed_step_id"] == "s1"
-    assert new[3].finished[new[0].run_id] == "FAILED"
+    assert new[0] == "FAILED"
 
 
 def test_a_raised_failure_holds_the_rest_back(tmp_path: Path) -> None:
@@ -351,7 +358,7 @@ def _requiring_source() -> tuple[dict[str, Any], SimpleNamespace]:
 
 def test_a_released_steps_contract_refusal_creates_no_step_run(tmp_path: Path) -> None:
     """The released step checks its own contract (backlog 964) and refuses before
-    its Run exists; the Workflow records the refusal and finishes its Run FAILED."""
+    its Run exists; the Workflow records the refusal. No Run of any kind is created."""
     workflow, legacy_ctx = _requiring_source()
     legacy_log, legacy_calls = _log(tmp_path / "legacy"), []
     with pytest.raises(LegacyWorkflowError) as legacy:
@@ -366,9 +373,8 @@ def test_a_released_steps_contract_refusal_creates_no_step_run(tmp_path: Path) -
     assert str(new.value) == str(legacy.value)
     assert new_calls == legacy_calls == []
     assert _records(new_log) == _through_run_complete(_records(legacy_log))
-    # Only the Workflow Run exists, finished FAILED: no Step Run was created.
-    assert [(row["subject_type"], control.finished[row["run_id"]])
-            for row in control.rows] == [("workflow", "FAILED")]
+    # No Step Run was created, and there is no Workflow Run.
+    assert control.rows == []
 
 
 def test_an_unreleased_step_is_never_contract_checked(tmp_path: Path) -> None:
@@ -378,20 +384,21 @@ def test_an_unreleased_step_is_never_contract_checked(tmp_path: Path) -> None:
     control = RecordingControl()
     graph = _build(workflow, ctx.applications[0], _recording([]), control)
 
-    returned = _run(graph, parent_run(control, log=_log(tmp_path)), ctx, apply=False)
+    application_run = parent_run(control, log=_log(tmp_path))
+    _run(graph, application_run, ctx, apply=False)
 
     assert ("s1", "NOT RUN") in [(c["subject_id"], c["status"])
-                                 for c in control.children(returned)]
+                                 for c in control.children(application_run)]
 
 
 def test_a_disabled_workflow_is_a_refused_run_like_run_workflow(tmp_path: Path) -> None:
     workflow = _fixture()
     workflow["enabled"] = False
 
-    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control) = _both(
+    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control, _app) = _both(
         tmp_path, workflow)
 
-    # Refused: no wrapper Run is created, nothing is released, the records match.
+    # Refused: no Run is created, nothing is released, the records match.
     assert returned is None and control.rows == []
     assert new_calls == legacy_calls == []
     assert _records(new_log) == _through_run_complete(_records(legacy_log))
@@ -400,10 +407,10 @@ def test_a_disabled_workflow_is_a_refused_run_like_run_workflow(tmp_path: Path) 
 # --- child Runs, sequence and indent -----------------------------------------
 
 
-def test_the_workflow_creates_its_wrapper_run_which_holds_every_step_run(
+def test_the_only_runs_are_step_runs_under_the_application_run(
     tmp_path: Path,
 ) -> None:
-    """The Workflow is the parent: its wrapper Run -> Step Runs (backlog 964)."""
+    """Application Run -> Step Runs (backlog 1003): the Workflow creates no Run."""
     control = RecordingControl()
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
@@ -411,11 +418,11 @@ def test_the_workflow_creates_its_wrapper_run_which_holds_every_step_run(
 
     returned = _run(graph, parent, ctx, apply=False)
 
-    assert returned.parent_run_id is None
-    assert (returned.subject_type, returned.subject_id, returned.status) == (
-        "workflow", "wf", "SUCCEEDED")
-    assert control.children(parent) == []
-    children = control.children(returned)
+    assert returned == "SUCCEEDED"
+    # Every Run recorded is a Step Run, and every one is a child of the Application Run.
+    assert [row["subject_type"] for row in control.rows] == ["step"] * 4
+    children = control.children(parent)
+    assert len(children) == len(control.rows)
     assert [(c["subject_type"], c["subject_id"], c["subject_name"], c["app_name"], c["status"])
             for c in children] == [
         ("step", "s1", "One", "fixture_app", "SUCCEEDED"),
@@ -431,11 +438,12 @@ def test_a_step_held_back_by_an_earlier_failure_is_not_run(tmp_path: Path) -> No
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([], {"p1": _failed("broke")}), control)
 
-    returned = _run(graph, parent_run(control, log=_log(tmp_path)), ctx)
+    application_run = parent_run(control, log=_log(tmp_path))
+    returned = _run(graph, application_run, ctx)
 
-    assert [c["status"] for c in control.children(returned)] == [
+    assert [c["status"] for c in control.children(application_run)] == [
         "FAILED", "NOT RUN", "NOT RUN", "NOT RUN"]
-    assert returned.status == "FAILED"
+    assert returned == "FAILED"
 
 
 def test_a_step_sequence_is_its_ordinal_within_a_selection(tmp_path: Path) -> None:
@@ -482,14 +490,14 @@ def test_a_child_runs_settings_are_its_steps_resolved_settings(tmp_path: Path) -
              control=control, runtime=SimpleNamespace(),
              log=_log(tmp_path)).direct()
 
-    # rows[0] is the Workflow Run; the Step Run follows it.
-    assert control.rows[1]["settings"] == {"source": "a"}
+    # The Step Run is the only Run.
+    assert [row["settings"] for row in control.rows] == [{"source": "a"}]
 
 
 # --- execution context and cross-step data ------------------------------------
 
 
-def test_the_handler_receives_its_child_run_and_steps_share_the_parents_data(
+def test_the_handler_receives_its_run_and_steps_share_the_directions_data(
     tmp_path: Path,
 ) -> None:
     control = RecordingControl()
@@ -520,19 +528,28 @@ def test_the_handler_receives_its_child_run_and_steps_share_the_parents_data(
                               steps=steps)
     parent = parent_run(control, log=_log(tmp_path))
 
-    workflow_run = Workflow(name="wf", enabled=True, config=None,
-                            processes=[process], control=control,
-                            runtime=SimpleNamespace(), log=parent.log).direct(
-        metadata={"workflow": "wf"})
+    workflow = Workflow(name="wf", enabled=True, config=None,
+                        processes=[process], control=control,
+                        runtime=SimpleNamespace(), log=parent.log, run_id=parent.run_id)
+    outcome = workflow.direct(metadata={"workflow": "wf"})
 
     first, (second, files, engine, workflow_name, apply) = seen
-    assert isinstance(first, Run) and isinstance(second, Run)
-    assert first is not second and first is not workflow_run
-    # The Step Runs are children of the Workflow Run and share its working state.
-    assert first.parent_run_id == second.parent_run_id == workflow_run.run_id
+    assert outcome == "SUCCEEDED"
+    assert isinstance(first, Run) and isinstance(second, Run) and first is not second
+    # The Step Runs are children of the Application Run, and share the direction's
+    # working data and metadata -- not the Application Run's, which is untouched.
+    assert first.parent_run_id == second.parent_run_id == parent.run_id
     assert (files, engine, workflow_name, apply) == (["a.sql"], "postgres", "wf", True)
-    assert workflow_run.data["object_files"] == ["a.sql"]
-    assert workflow_run.metadata["engine"] == "postgres"
+    assert first.data is second.data and first.metadata is second.metadata
+    assert parent.data == {} and parent.metadata == {}
+    assert [row["subject_type"] for row in control.rows] == ["step", "step"]
+
+    seen.clear()
+    workflow.direct(step="lint")
+
+    # A later direction starts with fresh data and metadata.
+    (_third, files, engine, workflow_name, _apply), = seen
+    assert (files, engine, workflow_name) == (None, None, None)
 
 
 # --- reusable, stateful, observable ---------------------------------------------
@@ -569,11 +586,12 @@ def test_a_released_step_holds_its_runs_outcome_and_an_unreleased_one_its_state(
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
 
-    returned = _run(graph, parent_run(control, log=_log(tmp_path)), ctx, step="s3")
+    application_run = parent_run(control, log=_log(tmp_path))
+    _run(graph, application_run, ctx, step="s3")
 
     assert {key: one.state for key, one in graph.steps.items()} == {
         "s1": "PENDING", "s2": "PENDING", "s3": "SUCCEEDED", "s4": "PENDING"}
-    assert graph.steps["s3"].current_run.parent_run_id == returned.run_id
+    assert graph.steps["s3"].current_run.parent_run_id == application_run.run_id
     assert graph.state == "IDLE"
 
 
@@ -684,12 +702,12 @@ def test_steps_run_in_workflow_wide_ordinal_order_across_processes(tmp_path: Pat
         _step(b, "check", "s2", 2, calls)])
     parent = parent_run(control, log=_log(tmp_path))
 
-    workflow_run = Workflow(name="wf", enabled=True, config=None,
-                            processes=[first, second], control=control,
-                            runtime=SimpleNamespace(), log=parent.log).direct()
+    Workflow(name="wf", enabled=True, config=None,
+             processes=[first, second], control=control,
+             runtime=SimpleNamespace(), log=parent.log, run_id=parent.run_id).direct()
 
     assert calls == ["a.load", "b.check", "a.load"]
-    assert [(c["subject_id"], c["app_name"]) for c in control.children(workflow_run)] == [
+    assert [(c["subject_id"], c["app_name"]) for c in control.children(parent)] == [
         ("s1", "a"), ("s2", "b"), ("s3", "a")]
 
 
@@ -758,10 +776,10 @@ def test_a_process_name_selects_its_own_steps_in_release_order(
                         runtime=SimpleNamespace(),
                         log=_log(tmp_path))
 
-    workflow_run = workflow.direct(**selection)
+    workflow.direct(**selection)
 
-    assert [c["subject_id"] for c in control.children(workflow_run)
-            if c["status"] == "SUCCEEDED"] == expected
+    assert [row["subject_id"] for row in control.rows
+            if control.finished[row["run_id"]] == "SUCCEEDED"] == expected
 
 
 
@@ -812,7 +830,7 @@ def test_observer_failure_releases_lock_and_allows_another_direction(
     assert calls == ([] if failing_state == "RUNNING" else ["p1"])
 
     result = _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s2")
-    assert result.status == "SUCCEEDED"
+    assert result == "SUCCEEDED"
     assert calls[-1] == "p2"
     assert graph.state == "IDLE"
 
@@ -839,11 +857,12 @@ def test_non_release_replaces_previous_step_outcome_and_notifies_projection(
 
     graph.observe(Watching())
     log = _log(tmp_path / "second")
-    result = _run(graph, parent_run(control, log=log), ctx, apply=earlier_failure)
+    application_run = parent_run(control, log=log)
+    _run(graph, application_run, ctx, apply=earlier_failure)
     step = graph.steps["s2"]
     assert "p2" not in calls
     assert step.current_run is not previous
-    assert step.current_run.parent_run_id == result.run_id
+    assert step.current_run.parent_run_id == application_run.run_id
     assert step.current_run.status == step.state == "NOT RUN"
     assert step.current_run.detail == "not released"
     assert ("s2", "not run", "not released") in _step_ends(log)

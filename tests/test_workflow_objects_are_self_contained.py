@@ -53,13 +53,13 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
     process = WorkflowProcess(name="app", ordinal=1, application=application,
                               config=None, steps=[step])
     control = RecordingControl()
+    application_run = parent_run(control, run_id=42)
     workflow = Workflow(name="wf", enabled=True, config=None,
                         processes=[process], control=control, runtime=SimpleNamespace(),
-                        log=make_run_log(sys.argv[1]))
-    returned = workflow.direct()
-    assert returned.parent_run_id is None
+                        log=make_run_log(sys.argv[1]), run_id=application_run.run_id)
+    assert workflow.direct() == "SUCCEEDED"
     assert calls == ["load"], calls
-    assert [c["status"] for c in control.children(returned)] == ["SUCCEEDED"]
+    assert [c["status"] for c in control.children(application_run)] == ["SUCCEEDED"]
     assert all(sys.modules.get(name) is None for name in sys.argv[2:]), "legacy loaded"
     print("ran without legacy")
 """)

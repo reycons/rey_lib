@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from rey_lib.run import Run
 
-__all__ = ["RecordingControl", "parent_run"]
+__all__ = ["RecordingControl", "execution_values", "parent_run"]
 
 
 class RecordingControl:
@@ -46,7 +46,17 @@ class RecordingControl:
 
 
 def parent_run(control: Any, run_id: int = 1, log: Any = None) -> Run:
-    """The launch's parent Run, as bootstrap would hold it, with its run log."""
+    """The Application Run, as bootstrap would hold it, with its run log."""
     run = Run(run_id=run_id, control=control, subject_type="workflow", subject_id="wf")
     run.log = log
     return run
+
+
+def execution_values(parent: Run, apply: bool = True) -> dict[str, Any]:
+    """The execution values a Workflow hands a step it directs, under ``parent``.
+
+    The Application Run's id and log, the direction's ``apply``, and fresh
+    ``data`` and ``metadata`` -- as one ``direct`` creates them.
+    """
+    return {"parent_run_id": parent.run_id, "log": parent.log, "apply": apply,
+            "data": {}, "metadata": {}}

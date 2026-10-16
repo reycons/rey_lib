@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from tests.conftest import make_db_run_log, start_test_run
-from tests.support.workflow_runs import RecordingControl, parent_run
+from tests.support.workflow_runs import RecordingControl, execution_values, parent_run
 
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.errors.error_utils import AppError
@@ -174,7 +174,7 @@ def test_a_refused_contract_raises_before_any_run_exists(tmp_path: Path) -> None
     })))
 
     with pytest.raises(AppError, match="do not satisfy the contract"):
-        step.run(control=control, parent_run=parent_run(control, log=_log(tmp_path)),
+        step.run(control=control, **execution_values(parent_run(control, log=_log(tmp_path))),
                  ctx=SimpleNamespace(), workflow_name="wf")
 
     assert control.rows == []
@@ -185,7 +185,7 @@ def test_a_released_step_runs_under_its_own_child_run(tmp_path: Path) -> None:
     run_log = _log(tmp_path)
     parent = parent_run(control, run_id=42, log=run_log)
 
-    child = _step().run(control=control, parent_run=parent, ctx=SimpleNamespace(),
+    child = _step().run(control=control, **execution_values(parent), ctx=SimpleNamespace(),
                         workflow_name="wf")
 
     assert [(c["subject_type"], c["subject_id"], c["parent_run_id"], c["status"])
@@ -211,7 +211,7 @@ def test_a_released_step_is_running_while_its_run_executes_then_holds_its_outcom
     step.observe(Observer())
     assert step.state == "PENDING" and step.current_run is None
 
-    child = step.run(control=control, parent_run=parent_run(control, log=_log(tmp_path)),
+    child = step.run(control=control, **execution_values(parent_run(control, log=_log(tmp_path))),
                      ctx=SimpleNamespace(), workflow_name="wf")
 
     assert seen == ["RUNNING", "SUCCEEDED"]
