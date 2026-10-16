@@ -96,8 +96,6 @@ _ALIASES = {
 #: The unsupported keys live configuration is known to carry, tolerated (user,
 #: 2026-10-13): no reader reads them and no contract publishes them.
 _KNOWN_UNSUPPORTED = {
-    ("local", "inventory_and_prepare_files_loader", "profile_csv_record_types"),
-    ("wolff_popper", "inventory_and_prepare_files_loader", "profile_csv_record_types"),
     ("wolff_popper", "inventory_and_prepare_files", "prepare_analysis_inputs"),
 }
 
