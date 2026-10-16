@@ -599,6 +599,12 @@ class _LaunchedApp:
     ) -> None:
         self._io = async_runtime
         self.state = STARTING
+        #: Each lifecycle point reached, with its monotonic time: launch, process
+        #: started, accepting, attached, token accepted/refused, hello, connected,
+        #: command sent, event, stdout closed, exit observed. Read when a launch has
+        #: to be explained.
+        self.trace: list[tuple[float, str]] = []
+        self._mark("launch")
         #: The launched application's own Application Run id, from its hello.
         self.run_id: Optional[int] = None
         self.exit_code: Optional[int] = None
@@ -612,6 +618,7 @@ class _LaunchedApp:
         child_env = {**os.environ, **dict(env or {}),
                      _ADDRESS_ENV: str(port), _TOKEN_ENV: self._token}
         self._process = self._loop.call(self._open, list(command), cwd, child_env)
+        self._mark("process started")
         self._loop.start(self._accept, listener)
         self._loop.start(async_runtime.read_chunks, self._process, self._output.put)
         self._exited = self._loop.start(self._wait)
@@ -622,23 +629,31 @@ class _LaunchedApp:
 
     async def _accept(self, listener: Any) -> None:
         """Accept the application's attachment, check its token, then relay its events."""
+        self._mark("accepting")
         channel = await self._io.accept_one(listener)
+        self._mark("attached")
         await listener.aclose()
         hello = await channel.receive()
         if not hello or hello.get("token") != self._token:
+            self._mark("token refused")
             await channel.close()
             self._connected.put(False)
             return
+        self._mark("token accepted, hello received")
         self._channel = channel
         self.run_id = hello.get("hello")
         self.state = CONNECTED
+        self._mark("connected")
         self._connected.put(True)
         while (message := await channel.receive()) is not None:
+            self._mark("event")
             self._events.put(message)
+        self._mark("channel closed")
         self._events.put(None)
 
     async def _wait(self) -> None:
         self.exit_code = await self._process.wait()
+        self._mark(f"exit observed ({self.exit_code})")
         if self.state != STOPPED:
             self.state = EXITED
         self._output.put(None)
@@ -659,6 +674,7 @@ class _LaunchedApp:
         if self._channel is None:
             raise StateError("the launched application has not attached yet.")
         self._loop.call(self._channel.send, message)
+        self._mark("command sent")
 
     def events(self, timeout: Optional[float] = None) -> Iterator[dict[str, Any]]:
         """The application's events, in order, until its channel closes."""
@@ -692,6 +708,9 @@ class _LaunchedApp:
         """Wait for the application to end, and answer its exit code."""
         self._exited.result(timeout=timeout)
         return self.exit_code
+
+    def _mark(self, point: str) -> None:
+        self.trace.append((time.monotonic(), point))
 
     def close(self) -> None:
         """Stop the application if it still runs, and release the loop."""

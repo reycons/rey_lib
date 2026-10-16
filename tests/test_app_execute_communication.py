@@ -72,6 +72,8 @@ def test_commands_go_in_and_events_and_stdout_come_out() -> None:
         assert app.state == EXITED
         assert "".join(app.output(timeout=WAIT)) == "child started\nchild finishing\n"
     finally:
+        # Shown with a failure: how far the launch got, and when.
+        print("trace:", app.trace)
         app.close()
 
 
@@ -86,6 +88,8 @@ def test_stop_ends_an_application_that_is_still_running() -> None:
         assert app.wait(timeout=WAIT) is not None
         assert app.state == STOPPED
     finally:
+        # Shown with a failure: how far the launch got, and when.
+        print("trace:", app.trace)
         app.close()
 
 
@@ -102,6 +106,8 @@ def test_an_attachment_with_the_wrong_token_is_refused() -> None:
         # Refused, the child sees its channel close and ends on its own.
         assert app.wait(timeout=WAIT) == 3
     finally:
+        # Shown with a failure: how far the launch got, and when.
+        print("trace:", app.trace)
         app.close()
 
 
