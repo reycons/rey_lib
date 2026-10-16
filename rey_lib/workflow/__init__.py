@@ -22,21 +22,13 @@ _EXPORTS = {
     "run_workflow": "rey_lib.workflow.coordinator",
     "RunContext": "rey_lib.workflow.engine",
     "StepResult": "rey_lib.workflow.engine",
-    "StepSpec": "rey_lib.workflow.engine",
     "WorkflowError": "rey_lib.workflow.engine",
-    "WorkflowResult": "rey_lib.workflow.engine",
-    "build_steps": "rey_lib.workflow.engine",
-    "run_steps": "rey_lib.workflow.engine",
 }
 
 __all__ = [
     "RunContext",
-    "StepSpec",
     "StepResult",
-    "WorkflowResult",
     "WorkflowError",
-    "build_steps",
-    "run_steps",
     "ProcessHandler",
     "StepOutcome",
     "WorkflowRun",
