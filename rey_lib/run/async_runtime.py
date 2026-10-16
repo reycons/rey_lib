@@ -19,6 +19,7 @@ connect_local   Connect to a localhost TCP listener.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 from concurrent.futures import Future
@@ -103,10 +104,16 @@ async def open_process(
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> Process:
-    """Start ``command`` with its stdout piped; stdin closed, stderr inherited."""
+    """Start ``command`` with its output piped: stderr joined to stdout, unbuffered.
+
+    As the Console's existing launcher starts an application: an application's
+    log lines are on stderr, and a Python child block-buffers a piped stdout, so
+    both are taken together and line by line. stdin is closed.
+    """
     return await anyio.open_process(
-        list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=None,
-        cwd=cwd, env=dict(env) if env is not None else None,
+        list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, cwd=cwd,
+        env={**dict(env if env is not None else os.environ), "PYTHONUNBUFFERED": "1"},
     )
 
 

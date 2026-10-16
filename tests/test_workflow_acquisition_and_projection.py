@@ -112,6 +112,7 @@ def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
         "name": "code_index",
         "enabled": True,
         "state": "IDLE",
+        "released": None,
         "processes": [
             {
                 "ordinal": 1,

@@ -765,3 +765,24 @@ def test_a_process_name_selects_its_own_steps_in_release_order(
     assert [c["subject_id"] for c in control.children(workflow_run)
             if c["status"] == "SUCCEEDED"] == expected
 
+
+
+def test_the_projection_states_the_released_step_and_its_run(tmp_path: Path) -> None:
+    """The Workflow owns release, so it states which step it released, and that step's Run."""
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+    assert graph.projection(ctx)["released"] is None
+    seen: list[Any] = []
+
+    class _Watching:
+        def changed(self, workflow: Workflow) -> None:
+            seen.append(workflow.projection(ctx)["released"])
+
+    graph.observe(_Watching())
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx, from_step="s3")
+
+    running = [one for one in seen if one is not None]
+    assert [one["step"] for one in running][0] == "s3"
+    assert running[-1] == {"step": "s4", "run_id": graph.steps["s4"].current_run.run_id}
+    assert graph.projection(ctx)["released"]["step"] == "s4"

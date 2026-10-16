@@ -96,6 +96,8 @@ class Workflow:
         workflow-wide ordinal order.
     state : str
         ``RUNNING`` while ``direct`` executes, else ``IDLE``.
+    released : WorkflowStep | None
+        The step this Workflow last released -- the one running while it directs.
     """
 
     def __init__(
@@ -171,6 +173,8 @@ class Workflow:
         for process in self.processes:
             process.workflow = self
         self.state = IDLE
+        #: The step this Workflow last released, None before it has released one.
+        self.released: Optional[WorkflowStep] = None
         # Told when this Workflow or one of its steps changes.
         self._observers: list[Any] = []
         for one in self.steps.values():
@@ -358,6 +362,12 @@ class Workflow:
                 "name": self.name,
                 "enabled": self.enabled,
                 "state": self.state,
+                # The step this Workflow released, and the Run that step created.
+                "released": None if self.released is None else {
+                    "step": self.released.id,
+                    "run_id": (self.released.current_run.run_id
+                               if self.released.current_run is not None else None),
+                },
                 "processes": [
                     {
                         "ordinal": process.ordinal,
@@ -505,6 +515,7 @@ class Workflow:
                 )
                 continue
 
+            self.released = one
             # Released: the step checks its own contract, creates its own Run and
             # executes through it. A refusal raises before any Step Run exists.
             try:

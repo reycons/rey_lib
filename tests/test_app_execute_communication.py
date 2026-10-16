@@ -77,6 +77,20 @@ def test_commands_go_in_and_events_and_stdout_come_out() -> None:
         app.close()
 
 
+def test_the_applications_stderr_arrives_as_output_too() -> None:
+    # An application's log lines are on stderr; the launcher takes them with stdout,
+    # as the Console's existing launcher does.
+    app = _launch("import sys\nprint('to stdout', flush=True)\n"
+                  "print('a log line', file=sys.stderr, flush=True)\n")
+    try:
+        assert app.wait(timeout=WAIT) == 0
+        text = "".join(app.output(timeout=WAIT))
+        assert "to stdout" in text and "a log line" in text
+    finally:
+        print("trace:", app.trace)
+        app.close()
+
+
 def test_stop_ends_an_application_that_is_still_running() -> None:
     app = _launch(SLEEPER)
     try:
