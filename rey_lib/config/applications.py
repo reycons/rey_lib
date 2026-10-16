@@ -20,6 +20,7 @@ or resolve differently.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from rey_lib.config.operation_contract import check_contract
@@ -267,6 +268,43 @@ class ApplicationCommand:
     mode_groups: tuple[ApplicationModeGroup, ...] = ()
     parameter_groups: tuple[ApplicationParameterGroup, ...] = ()
 
+    def arguments(self, inputs: Mapping[str, Any]) -> list[str]:
+        """This command's published command-line form of its semantic inputs.
+
+        A published parameter's input is keyed by its name with ``-`` read as
+        ``_`` (``workflow_id`` for ``workflow-id``). In published order: a
+        positional parameter gives its value; ``True`` gives ``--name``; a false
+        or empty value gives nothing; any other value gives ``--name value``.
+
+        Raises:
+            ConfigError: When an input names no parameter this command
+                publishes, or a required parameter has no value.
+        """
+        by_input = {one.name.replace("-", "_"): one for one in self.parameters}
+        unpublished = sorted(set(inputs) - set(by_input))
+        if unpublished:
+            raise ConfigError(
+                f"command '{self.name}' publishes no parameter for "
+                f"{', '.join(unpublished)}."
+            )
+        arguments: list[str] = []
+        for key, parameter in by_input.items():
+            value = inputs.get(key)
+            given = value is True or (bool(value) and str(value).lower() != "false")
+            if not given:
+                if parameter.required:
+                    raise ConfigError(
+                        f"command '{self.name}' requires '{parameter.name}'."
+                    )
+                continue
+            if parameter.positional:
+                arguments.append(str(value))
+            elif value is True or str(value).lower() == "true":
+                arguments.append(f"--{parameter.name}")
+            else:
+                arguments += [f"--{parameter.name}", str(value)]
+        return arguments
+
 
 @dataclass(frozen=True)
 class ApplicationOperation:
@@ -372,6 +410,39 @@ class Application:
     def command(self, name: str) -> ApplicationCommand | None:
         """The command of that name, or None where this application has none."""
         return next((one for one in self.commands if one.name == name), None)
+
+    def command_line(
+        self, ctx: Any, operation: str, inputs: Mapping[str, Any],
+    ) -> list[str]:
+        """The executable invocation of one published operation, from this configuration.
+
+        The configured Python and this application's entry point; the
+        installation's configuration when it takes the shared parameters; then
+        the operation and its arguments, converted from ``inputs`` by the
+        operation itself (:meth:`ApplicationCommand.arguments`).
+
+        Raises:
+            ConfigError: When this application publishes no such operation, the
+                runtime names no Python executable, or a shared-parameter
+                application has no configuration path.
+        """
+        command = self.command(operation)
+        if command is None:
+            raise ConfigError(
+                f"application '{self.name}' publishes no operation '{operation}'."
+            )
+        runtime = getattr(ctx, "runtime", None)
+        python = getattr(getattr(runtime, "python", None), "executable", None)
+        if not python:
+            raise ConfigError("ctx.runtime.python.executable is required.")
+        line = [str(Path(str(python)).expanduser()),
+                str(Path(self.app_path).expanduser() / self.entry_point)]
+        if self.shared_parameters:
+            config_path = getattr(ctx, "config_path", None)
+            if not config_path:
+                raise ConfigError("config_path is required.")
+            line += ["--config-path", str(Path(str(config_path)).expanduser())]
+        return line + [command.name, *command.arguments(inputs)]
 
     @property
     def command_names(self) -> tuple[str, ...]:

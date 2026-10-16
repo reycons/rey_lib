@@ -1,0 +1,104 @@
+"""An Application operation launched from its semantic inputs (backlog 993).
+
+The Application builds the invocation of one of its published operations from
+its own configuration, the operation converts its semantic inputs into its
+published command-line form, and AppExecute launches it. A caller names the
+operation and gives semantic inputs; it never spells an executable, a flag or a
+parameter.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from rey_lib.config.applications import (
+    Application,
+    ApplicationCommand,
+    ApplicationCommandParameter,
+)
+from rey_lib.errors.error_utils import ConfigError
+from rey_lib.run.run import AppExecute
+
+PYTHON = "/venv/bin/python"
+CONFIG = "/installations/local/install"
+
+SERVE = ApplicationCommand(name="serve", parameters=(
+    ApplicationCommandParameter(name="workflow-id", required=True),
+))
+FLAGS = ApplicationCommand(name="index", parameters=(
+    ApplicationCommandParameter(name="target", positional=True),
+    ApplicationCommandParameter(name="dry-run"),
+    ApplicationCommandParameter(name="limit"),
+))
+
+
+def _application(shared: bool = True) -> Application:
+    return Application(name="workflow_app", app_path="/apps/workflow_app",
+                       entry_point="main.py", shared_parameters=shared,
+                       commands=(SERVE, FLAGS))
+
+
+def _ctx(*applications: Application, config_path: Any = CONFIG) -> SimpleNamespace:
+    return SimpleNamespace(
+        runtime=SimpleNamespace(python=SimpleNamespace(executable=PYTHON)),
+        config_path=config_path, applications=applications)
+
+
+def test_a_semantic_input_becomes_the_published_parameter() -> None:
+    assert SERVE.arguments({"workflow_id": 15}) == ["--workflow-id", "15"]
+
+
+def test_flags_positionals_and_empty_values_take_their_published_form() -> None:
+    assert FLAGS.arguments({"target": "repo", "dry_run": True, "limit": ""}) == [
+        "repo", "--dry-run"]
+    assert FLAGS.arguments({"dry_run": "false", "limit": 5}) == ["--limit", "5"]
+
+
+def test_a_missing_required_or_unpublished_input_is_refused() -> None:
+    with pytest.raises(ConfigError, match="requires 'workflow-id'"):
+        SERVE.arguments({})
+    with pytest.raises(ConfigError, match="publishes no parameter for workflow_name"):
+        SERVE.arguments({"workflow_id": 15, "workflow_name": "x"})
+
+
+def test_the_application_builds_its_invocation_from_its_configuration() -> None:
+    # The line the Console's legacy build_app_command built for the same call.
+    assert _application().command_line(_ctx(), "serve", {"workflow_id": 15}) == [
+        PYTHON, "/apps/workflow_app/main.py", "--config-path", CONFIG,
+        "serve", "--workflow-id", "15"]
+    assert _application(shared=False).command_line(_ctx(), "serve", {"workflow_id": 15}) == [
+        PYTHON, "/apps/workflow_app/main.py", "serve", "--workflow-id", "15"]
+
+
+def test_an_unpublished_operation_or_missing_runtime_is_refused() -> None:
+    with pytest.raises(ConfigError, match="publishes no operation 'run'"):
+        _application().command_line(_ctx(), "run", {})
+    with pytest.raises(ConfigError, match="config_path is required"):
+        _application().command_line(_ctx(config_path=None), "serve", {"workflow_id": 1})
+    with pytest.raises(ConfigError, match="python.executable is required"):
+        _application().command_line(SimpleNamespace(config_path=CONFIG), "serve",
+                                    {"workflow_id": 1})
+
+
+def test_launch_operation_launches_the_applications_own_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[list[str]] = []
+    monkeypatch.setattr(AppExecute, "launch", classmethod(
+        lambda cls, command, **_: launched.append(list(command)) or "handle"))
+    other = Application(name="rey_loader", commands=(SERVE,))
+
+    handle = AppExecute.launch_operation(_ctx(other, _application()), "workflow_app", "serve",
+                                         {"workflow_id": 15})
+
+    assert handle == "handle"
+    assert launched == [[PYTHON, "/apps/workflow_app/main.py", "--config-path", CONFIG,
+                         "serve", "--workflow-id", "15"]]
+
+
+def test_launch_operation_refuses_an_unconfigured_application() -> None:
+    with pytest.raises(ConfigError, match="'workflow_app' is not configured"):
+        AppExecute.launch_operation(_ctx(), "workflow_app", "serve", {"workflow_id": 15})

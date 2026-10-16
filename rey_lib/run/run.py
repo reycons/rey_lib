@@ -61,7 +61,7 @@ import secrets
 import time
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
-from rey_lib.errors.error_utils import AppError, StateError, build_safe_error_payload
+from rey_lib.errors.error_utils import AppError, ConfigError, StateError, build_safe_error_payload
 from rey_lib.run import async_runtime
 from rey_lib.logs import (
     bind_step,
@@ -276,6 +276,32 @@ class AppExecute:
             env: Added to this process's environment for it.
         """
         return _LaunchedApp(command, cwd=cwd, env=env)
+
+    @classmethod
+    def launch_operation(
+        cls,
+        ctx: Any,
+        application: str,
+        operation: str,
+        inputs: Mapping[str, Any],
+    ) -> "_LaunchedApp":
+        """Launch one published operation of a configured application (see :meth:`launch`).
+
+        The application builds its own invocation from its configuration and
+        the operation's semantic ``inputs``
+        (``Application.command_line``); this launches it.
+
+        Raises:
+            ConfigError: When ``ctx`` configures no such application, or the
+                application refuses the operation or its inputs.
+        """
+        configured = next(
+            (one for one in getattr(ctx, "applications", None) or () if one.name == application),
+            None,
+        )
+        if configured is None:
+            raise ConfigError(f"application '{application}' is not configured.")
+        return cls.launch(configured.command_line(ctx, operation, inputs))
 
     @classmethod
     def attach(cls, run: "AppExecute") -> "_AttachedApp":
