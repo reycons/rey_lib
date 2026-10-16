@@ -151,7 +151,7 @@ def test_the_superseded_types_do_not_exist(name: str) -> None:
 
 @pytest.mark.parametrize("name", ["execute", "reset", "settle", "outcome"])
 def test_the_step_holds_no_execution_api_or_state(name: str) -> None:
-    """The released step runs itself (``run``, backlog 964) but holds no execution state."""
+    """The released step runs itself (``run``, backlog 964); its state is ``state``."""
     assert not hasattr(_step(), name)
 
 
@@ -174,19 +174,19 @@ def test_a_refused_contract_raises_before_any_run_exists(tmp_path: Path) -> None
     })))
 
     with pytest.raises(AppError, match="do not satisfy the contract"):
-        step.run(control=control, parent_run=parent_run(control), ctx=SimpleNamespace(),
-                 run_log=_log(tmp_path), workflow_name="wf")
+        step.run(control=control, parent_run=parent_run(control, log=_log(tmp_path)),
+                 ctx=SimpleNamespace(), workflow_name="wf")
 
     assert control.rows == []
 
 
 def test_a_released_step_runs_under_its_own_child_run(tmp_path: Path) -> None:
     control = RecordingControl()
-    parent = parent_run(control, run_id=42)
     run_log = _log(tmp_path)
+    parent = parent_run(control, run_id=42, log=run_log)
 
     child = _step().run(control=control, parent_run=parent, ctx=SimpleNamespace(),
-                        run_log=run_log, workflow_name="wf")
+                        workflow_name="wf")
 
     assert [(c["subject_type"], c["subject_id"], c["parent_run_id"], c["status"])
             for c in control.children(parent)] == [("step", "s1", 42, "SUCCEEDED")]
@@ -194,3 +194,25 @@ def test_a_released_step_runs_under_its_own_child_run(tmp_path: Path) -> None:
     starts = [json.loads(line) for line in
               Path(run_log.path()).read_text(encoding="utf-8").splitlines()]
     assert [r["step_sequence"] for r in starts if r["record_type"] == "STEP_START"] == [1]
+
+
+def test_a_released_step_is_running_while_its_run_executes_then_holds_its_outcome(
+    tmp_path: Path,
+) -> None:
+    control = RecordingControl()
+    seen: list[str] = []
+    step = _step()
+
+    class Observer:
+        def step_changed(self, changed: Any) -> None:
+            assert changed is step
+            seen.append(changed.state)
+
+    step.observe(Observer())
+    assert step.state == "PENDING" and step.current_run is None
+
+    child = step.run(control=control, parent_run=parent_run(control, log=_log(tmp_path)),
+                     ctx=SimpleNamespace(), workflow_name="wf")
+
+    assert seen == ["RUNNING", "SUCCEEDED"]
+    assert step.state == "SUCCEEDED" and step.current_run is child

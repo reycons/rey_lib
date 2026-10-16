@@ -9,7 +9,7 @@ with different configuration.
 
 It does not route execution: the Workflow decides when a step can run and
 creates its child Run, and the child Run executes the step's operation. A
-completed step is removed from ``steps`` by the Workflow.
+step that has run stays in ``steps``; its own state says how it ran.
 
 It owns population state, not catalog discovery. The workflow hydrator
 materialises the graph from the governed rows and the approved implementation
@@ -52,8 +52,7 @@ class WorkflowProcess:
         This instance's application configuration as governed; None where the
         governed value is null, kept distinct from an empty mapping.
     steps : tuple[WorkflowStep, ...]
-        The process's active steps, in the order hydration gives them; a
-        completed step is removed.
+        The process's steps, in the order hydration gives them.
     workflow : Workflow | None
         The Workflow this process belongs to; set by that Workflow when it is
         constructed, None before.

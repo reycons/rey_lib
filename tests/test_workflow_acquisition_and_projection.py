@@ -90,7 +90,7 @@ def test_exactly_one_identity_is_required(args: tuple, kwargs: dict) -> None:
 
 def _workflow() -> Workflow:
     """A hydrated-shaped graph: two steps of one process."""
-    application = Application(name="app", workflow_operations=(
+    application = Application(name="app", icon="app.app", workflow_operations=(
         ApplicationOperation(name="load", contract_definition={}),
         ApplicationOperation(name="check", contract_definition={}),
     ))
@@ -107,15 +107,26 @@ def _workflow() -> Workflow:
                     processes=[process], control=object())
 
 
-def test_the_projection_is_the_hydrated_graph_and_reads_nothing() -> None:
+def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
     assert _workflow().projection(object()) == {
         "name": "code_index",
         "enabled": True,
-        "steps": [
-            {"ordinal": 1, "id": "s1", "process_name": "p", "operation": "load",
-             "apply_only": True, "always_run": False},
-            {"ordinal": 2, "id": "s2", "process_name": "p", "operation": "check",
-             "apply_only": False, "always_run": False},
+        "state": "IDLE",
+        "processes": [
+            {
+                "ordinal": 1,
+                "name": "p",
+                "application": "app",
+                "application_icon": "app.app",
+                "steps": [
+                    {"ordinal": 1, "id": "s1", "operation": "load",
+                     "apply_only": True, "always_run": False,
+                     "state": "PENDING", "run_id": None},
+                    {"ordinal": 2, "id": "s2", "operation": "check",
+                     "apply_only": False, "always_run": False,
+                     "state": "PENDING", "run_id": None},
+                ],
+            },
         ],
     }
 
@@ -123,9 +134,10 @@ def test_the_projection_is_the_hydrated_graph_and_reads_nothing() -> None:
 def test_the_projection_is_a_copy_not_a_path_into_the_workflow() -> None:
     workflow = _workflow()
     projection = workflow.projection(object())
-    projection["steps"].clear()
+    projection["processes"][0]["steps"].clear()
+    projection["processes"].clear()
 
-    assert len(workflow.projection(object())["steps"]) == 2
+    assert len(workflow.projection(object())["processes"][0]["steps"]) == 2
 
 
 def test_one_act_at_a_time() -> None:

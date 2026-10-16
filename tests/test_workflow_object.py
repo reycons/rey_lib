@@ -1,10 +1,10 @@
 """Tests for Workflow, the orchestrator of a hydrated graph (backlog 950).
 
-``Workflow.run(parent_run, ...)`` releases each eligible step, checking its
+``Workflow.direct(step, from_step, to_step)`` releases each eligible step, checking its
 contract first, assigns its sequence and indent, and creates one child Run for
 it under the parent Run (a skipped step gets one too). The child Run executes
-the step and finishes itself; the completed step is removed from the active
-steps, and ``run`` returns the parent Run. The parity tests run one fixture
+the step and finishes itself; the step stays in the graph and holds that Run's
+outcome as its state, and ``run`` returns the Workflow Run. The parity tests run one fixture
 through the recovered ``run_workflow`` (backlog 949) and through a Workflow
 graph built from it, with the same recording handlers, and compare call order,
 step outcomes (child Run statuses) and the run-log records.
@@ -116,6 +116,12 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
                     tokens=None, config=None, processes=[process], control=control)
 
 
+def _run(graph: Workflow, parent: Any, ctx: Any, **selection: Any) -> Any:
+    """Direct ``graph`` as hydration would hold it: with ``parent``'s log, in ``ctx``."""
+    graph.log, graph.runtime = parent.log, ctx
+    return graph.direct(**selection)
+
+
 def _both(tmp_path: Path, workflow: dict[str, Any], *,
           behaviour: dict[str, Callable[[], Any]] | None = None, **selection: Any
           ) -> tuple[Any, Any]:
@@ -135,7 +141,7 @@ def _both(tmp_path: Path, workflow: dict[str, Any], *,
     control = RecordingControl()
     new_wf, new_ctx = prepared(workflow, SimpleNamespace())
     graph = _build(new_wf, new_ctx.applications[0], _recording(new_calls, behaviour), control)
-    returned = graph.run(parent_run(control), new_ctx, new_log, **selection)
+    returned = _run(graph, parent_run(control, log=new_log), new_ctx, **selection)
     return (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control)
 
 
@@ -223,7 +229,7 @@ def test_a_dry_run_does_not_release_apply_only_steps(selection: dict[str, Any],
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording(calls), control)
 
-    returned = graph.run(parent_run(control), ctx, run_log, apply=False, **selection)
+    returned = _run(graph, parent_run(control, log=run_log), ctx, apply=False, **selection)
 
     assert "p2" not in calls
     assert ("s2", "NOT RUN") in [(c["subject_id"], c["status"])
@@ -246,7 +252,7 @@ def test_selection_refusals_match_run_workflow(selection: dict[str, Any], messag
     new_wf, new_ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(new_wf, new_ctx.applications[0], _recording([]), control)
     with pytest.raises(AppError) as new:
-        graph.run(parent_run(control), new_ctx, _log(tmp_path / "new"), **selection)
+        _run(graph, parent_run(control, log=_log(tmp_path / "new")), new_ctx, **selection)
 
     assert message in str(new.value)
     assert str(new.value) == str(legacy.value)
@@ -263,8 +269,8 @@ def test_an_ambiguous_identifier_matches_run_workflow(tmp_path: Path) -> None:
     control = RecordingControl()
     new_wf, new_ctx = prepared(workflow, SimpleNamespace())
     with pytest.raises(AppError) as new:
-        _build(new_wf, new_ctx.applications[0], _recording([]), control).run(
-            parent_run(control), new_ctx, _log(tmp_path / "new"), step="One")
+        _run(_build(new_wf, new_ctx.applications[0], _recording([]), control),
+             parent_run(control, log=_log(tmp_path / "new")), new_ctx, step="One")
 
     assert "ambiguous" in str(new.value)
     assert str(new.value) == str(legacy.value)
@@ -355,7 +361,7 @@ def test_a_released_steps_contract_refusal_creates_no_step_run(tmp_path: Path) -
     new_log, new_calls, control = _log(tmp_path / "new"), [], RecordingControl()
     graph = _build(workflow, new_ctx.applications[0], _recording(new_calls), control)
     with pytest.raises(AppError) as new:
-        graph.run(parent_run(control), new_ctx, new_log)
+        _run(graph, parent_run(control, log=new_log), new_ctx)
 
     assert str(new.value) == str(legacy.value)
     assert new_calls == legacy_calls == []
@@ -372,7 +378,7 @@ def test_an_unreleased_step_is_never_contract_checked(tmp_path: Path) -> None:
     control = RecordingControl()
     graph = _build(workflow, ctx.applications[0], _recording([]), control)
 
-    returned = graph.run(parent_run(control), ctx, _log(tmp_path), apply=False)
+    returned = _run(graph, parent_run(control, log=_log(tmp_path)), ctx, apply=False)
 
     assert ("s1", "NOT RUN") in [(c["subject_id"], c["status"])
                                  for c in control.children(returned)]
@@ -382,29 +388,33 @@ def test_a_disabled_workflow_is_a_refused_run_like_run_workflow(tmp_path: Path) 
     workflow = _fixture()
     workflow["enabled"] = False
 
-    legacy, new = _both(tmp_path, workflow)
+    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control) = _both(
+        tmp_path, workflow)
 
-    _assert_parity(legacy, new)
-    assert new[1] == []
+    # Refused: no wrapper Run is created, nothing is released, the records match.
+    assert returned is None and control.rows == []
+    assert new_calls == legacy_calls == []
+    assert _records(new_log) == _through_run_complete(_records(legacy_log))
 
 
 # --- child Runs, sequence and indent -----------------------------------------
 
 
-def test_the_workflow_run_is_a_child_of_the_parent_and_holds_every_step_run(
+def test_the_workflow_creates_its_wrapper_run_which_holds_every_step_run(
     tmp_path: Path,
 ) -> None:
-    """App Run -> Workflow Run -> Step Runs (backlog 964)."""
+    """The Workflow is the parent: its wrapper Run -> Step Runs (backlog 964)."""
     control = RecordingControl()
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
-    parent = parent_run(control, run_id=42)
+    parent = parent_run(control, run_id=42, log=_log(tmp_path))
 
-    returned = graph.run(parent, ctx, _log(tmp_path), apply=False)
+    returned = _run(graph, parent, ctx, apply=False)
 
-    assert returned is not parent and returned.parent_run_id == 42
-    assert [(c["subject_type"], c["subject_id"], c["status"])
-            for c in control.children(parent)] == [("workflow", "wf", "SUCCEEDED")]
+    assert returned.parent_run_id is None
+    assert (returned.subject_type, returned.subject_id, returned.status) == (
+        "workflow", "wf", "SUCCEEDED")
+    assert control.children(parent) == []
     children = control.children(returned)
     assert [(c["subject_type"], c["subject_id"], c["subject_name"], c["app_name"], c["status"])
             for c in children] == [
@@ -421,7 +431,7 @@ def test_a_step_held_back_by_an_earlier_failure_is_not_run(tmp_path: Path) -> No
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([], {"p1": _failed("broke")}), control)
 
-    returned = graph.run(parent_run(control), ctx, _log(tmp_path))
+    returned = _run(graph, parent_run(control, log=_log(tmp_path)), ctx)
 
     assert [c["status"] for c in control.children(returned)] == [
         "FAILED", "NOT RUN", "NOT RUN", "NOT RUN"]
@@ -433,7 +443,7 @@ def test_a_step_sequence_is_its_ordinal_within_a_selection(tmp_path: Path) -> No
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
 
-    graph.run(parent_run(control), ctx, run_log, from_step="s3")
+    _run(graph, parent_run(control, log=run_log), ctx, from_step="s3")
 
     starts = [json.loads(line) for line in
               Path(run_log.path()).read_text(encoding="utf-8").splitlines()]
@@ -447,7 +457,7 @@ def test_the_workflow_assigns_sequence_and_the_step_indent_level(tmp_path: Path)
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
 
-    graph.run(parent_run(control), ctx, run_log, apply=False)
+    _run(graph, parent_run(control, log=run_log), ctx, apply=False)
 
     lines = Path(run_log.path()).read_text(encoding="utf-8").splitlines()
     starts = [json.loads(line) for line in lines]
@@ -469,7 +479,8 @@ def test_a_child_runs_settings_are_its_steps_resolved_settings(tmp_path: Path) -
                               steps=[step])
 
     Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process],
-             control=control).run(parent_run(control), SimpleNamespace(), _log(tmp_path))
+             control=control, runtime=SimpleNamespace(),
+             log=_log(tmp_path)).direct()
 
     # rows[0] is the Workflow Run; the Step Run follows it.
     assert control.rows[1]["settings"] == {"source": "a"}
@@ -507,11 +518,12 @@ def test_the_handler_receives_its_child_run_and_steps_share_the_parents_data(
     ]
     process = WorkflowProcess(name="db", ordinal=1, application=application, config=None,
                               steps=steps)
-    parent = parent_run(control)
+    parent = parent_run(control, log=_log(tmp_path))
 
     workflow_run = Workflow(name="wf", enabled=True, tokens=None, config=None,
-                            processes=[process], control=control).run(
-        parent, SimpleNamespace(), _log(tmp_path), metadata={"workflow": "wf"})
+                            processes=[process], control=control,
+                            runtime=SimpleNamespace(), log=parent.log).direct(
+        metadata={"workflow": "wf"})
 
     first, (second, files, engine, workflow_name, apply) = seen
     assert isinstance(first, Run) and isinstance(second, Run)
@@ -523,43 +535,124 @@ def test_the_handler_receives_its_child_run_and_steps_share_the_parents_data(
     assert workflow_run.metadata["engine"] == "postgres"
 
 
-# --- single use ----------------------------------------------------------------
+# --- reusable, stateful, observable ---------------------------------------------
 
 
-def test_completed_steps_are_removed_from_the_workflow_and_its_processes(
+class _Watching:
+    """An observer of a Workflow: what it and its steps were when each change was told."""
+
+    def __init__(self, graph: Workflow) -> None:
+        self.graph = graph
+        self.seen: list[tuple[str, tuple[str, ...]]] = []
+        graph.observe(self)
+
+    def changed(self, workflow: Workflow) -> None:
+        assert workflow is self.graph
+        self.seen.append((workflow.state, tuple(one.state for one in workflow.steps.values())))
+
+
+def test_steps_stay_in_the_workflow_and_its_processes_after_a_run(tmp_path: Path) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx)
+
+    assert list(graph.steps) == ["s1", "s2", "s3", "s4"]
+    assert [one.id for one in graph.processes[0].steps] == ["s1", "s2", "s3", "s4"]
+
+
+def test_a_released_step_holds_its_runs_outcome_and_an_unreleased_one_its_state(
     tmp_path: Path,
 ) -> None:
     control = RecordingControl()
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
 
-    graph.run(parent_run(control), ctx, _log(tmp_path))
+    returned = _run(graph, parent_run(control, log=_log(tmp_path)), ctx, step="s3")
 
-    assert graph.steps == {}
-    assert graph.processes[0].steps == ()
+    assert {key: one.state for key, one in graph.steps.items()} == {
+        "s1": "PENDING", "s2": "PENDING", "s3": "SUCCEEDED", "s4": "PENDING"}
+    assert graph.steps["s3"].current_run.parent_run_id == returned.run_id
+    assert graph.state == "IDLE"
 
 
-def test_a_step_not_selected_stays_and_a_released_one_is_consumed(tmp_path: Path) -> None:
+def test_the_workflow_is_reusable(tmp_path: Path) -> None:
+    calls: list[str] = []
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording(calls), control)
+    _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
+    first = graph.steps["s1"].current_run
+
+    _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s1")
+
+    assert calls == ["p1", "p1"]
+    assert graph.steps["s1"].current_run is not first
+    assert graph.steps["s1"].state == "SUCCEEDED"
+
+
+def test_each_step_is_running_while_its_run_executes_and_the_observer_is_told(
+    tmp_path: Path,
+) -> None:
     control = RecordingControl()
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
+    watching = _Watching(graph)
 
-    graph.run(parent_run(control), ctx, _log(tmp_path), step="s3")
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx, from_step="s3")
 
-    assert [one.id for one in graph.steps.values()] == ["s1", "s2", "s4"]
-    assert [one.id for one in graph.processes[0].steps] == ["s1", "s2", "s4"]
+    assert watching.seen == [
+        ("RUNNING", ("PENDING", "PENDING", "PENDING", "PENDING")),
+        ("RUNNING", ("PENDING", "PENDING", "RUNNING", "PENDING")),
+        ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "PENDING")),
+        ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "RUNNING")),
+        ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "SUCCEEDED")),
+        ("IDLE", ("PENDING", "PENDING", "SUCCEEDED", "SUCCEEDED")),
+    ]
 
 
-def test_a_second_run_after_consumption_is_refused(tmp_path: Path) -> None:
+def test_a_failed_step_holds_failed(tmp_path: Path) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0],
+                   _recording([], {"p1": lambda: SimpleNamespace(status="failed")}), control)
+
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx, step="s1")
+
+    assert graph.steps["s1"].state == "FAILED"
+
+
+def test_a_run_while_running_is_refused(tmp_path: Path) -> None:
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    refused: list[str] = []
+    graph: Workflow
+
+    def again() -> None:
+        with pytest.raises(AppError, match="already running") as raised:
+            _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx)
+        refused.append(str(raised.value))
+
+    graph = _build(wf, ctx.applications[0], _recording([], {"p1": again}), control)
+    _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
+
+    assert len(refused) == 1
+    assert graph.state == "IDLE"
+
+
+def test_the_projection_carries_each_steps_state_and_run(tmp_path: Path) -> None:
     control = RecordingControl()
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(wf, ctx.applications[0], _recording([]), control)
-    graph.run(parent_run(control), ctx, _log(tmp_path / "first"))
-    created = len(control.rows)
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx, step="s1")
 
-    with pytest.raises(AppError, match="single-use"):
-        graph.run(parent_run(control), ctx, _log(tmp_path / "second"))
-    assert len(control.rows) == created
+    steps = graph.projection(ctx)["processes"][0]["steps"]
+
+    assert [(one["id"], one["state"]) for one in steps] == [
+        ("s1", "SUCCEEDED"), ("s2", "PENDING"), ("s3", "PENDING"), ("s4", "PENDING")]
+    assert steps[0]["run_id"] == graph.steps["s1"].current_run.run_id
+    assert steps[1]["run_id"] is None
 
 
 # --- the object ----------------------------------------------------------------
@@ -589,11 +682,11 @@ def test_steps_run_in_workflow_wide_ordinal_order_across_processes(tmp_path: Pat
         _step(a, "load", "s1", 1, calls), _step(a, "load", "s3", 3, calls)])
     second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
         _step(b, "check", "s2", 2, calls)])
-    parent = parent_run(control)
+    parent = parent_run(control, log=_log(tmp_path))
 
     workflow_run = Workflow(name="wf", enabled=True, tokens=None, config=None,
-                            processes=[first, second], control=control).run(
-        parent, SimpleNamespace(), _log(tmp_path))
+                            processes=[first, second], control=control,
+                            runtime=SimpleNamespace(), log=parent.log).direct()
 
     assert calls == ["a.load", "b.check", "a.load"]
     assert [(c["subject_id"], c["app_name"]) for c in control.children(workflow_run)] == [
@@ -643,3 +736,32 @@ def test_a_shared_ordinal_is_refused() -> None:
 
 def test_the_superseded_workflow_result_does_not_exist() -> None:
     assert not hasattr(workflow_module, "WorkflowRun")
+
+
+@pytest.mark.parametrize(("selection", "expected"), [
+    ({"step": "a"}, ["s1", "s2", "s3"]),
+    ({"from_step": "b"}, ["s2", "s3"]),
+    ({"to_step": "a"}, ["s1", "s2", "s3"]),
+    ({"to_step": "b"}, ["s1", "s2"]),
+    ({"step": "s2"}, ["s2"]),
+])
+def test_a_process_name_selects_its_own_steps_in_release_order(
+    tmp_path: Path, selection: dict[str, str], expected: list[str],
+) -> None:
+    """A process action reaches the Workflow as intent; the Workflow resolves it."""
+    control = RecordingControl()
+    a, b = _application("load", name="a"), _application("check", name="b")
+    first = WorkflowProcess(name="a", ordinal=1, application=a, config=None, steps=[
+        _step(a, "load", "s1", 1, []), _step(a, "load", "s3", 3, [])])
+    second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
+        _step(b, "check", "s2", 2, [])])
+    workflow = Workflow(name="wf", enabled=True, tokens=None, config=None,
+                        processes=[first, second], control=control,
+                        runtime=SimpleNamespace(),
+                        log=_log(tmp_path))
+
+    workflow_run = workflow.direct(**selection)
+
+    assert [c["subject_id"] for c in control.children(workflow_run)
+            if c["status"] == "SUCCEEDED"] == expected
+

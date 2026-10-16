@@ -8,7 +8,7 @@ a run and exposes them as one shape.
 """
 
 from rey_lib.run.identity import establish_run_identity
-from rey_lib.run.run import Run
+from rey_lib.run.run import AppExecute, Run
 from rey_lib.run.state import (
     SUPPORTED_STATES,
     current_step,
@@ -26,6 +26,7 @@ from rey_lib.run.state import (
 
 __all__ = [
     "SUPPORTED_STATES",
+    "AppExecute",
     "Run",
     "establish_run_identity",
     "current_step",

@@ -6,10 +6,12 @@ its application publishes and to the implementation the application's approved
 catalog holds for it, with its resolved settings (already composed by
 hydration) and its declarations (``apply_only``, ``always_run``).
 
-It is single-use and holds no execution state. The Workflow checks its contract
-and decides when it can run, then creates a child Run for it; that Run executes
-the step's bound operation and owns the outcome. A completed step is removed
-from its Workflow's and process's active steps.
+It owns its own state: PENDING until it first runs, RUNNING while its Run
+executes, then that Run's outcome. The Workflow decides when it is released; the
+released step creates its own Run, calls it, and takes its state from the Run's
+outcome when the Run returns. Running a step changes its state; the step stays
+in its Workflow's graph, and a later release changes its state again. It tells
+its one observer, its Workflow, each time its state changes.
 
 Built beside the recovered procedural engine (backlog 949); nothing here imports
 it.
@@ -41,6 +43,11 @@ _logger = AppLogger(__name__)
 #: The subject type of a step's child Run.
 _STEP_SUBJECT = "step"
 
+#: A step's state before it has run.
+PENDING = "PENDING"
+#: A step's state while its Run executes.
+RUNNING = "RUNNING"
+
 
 class WorkflowStep:
     """One ApplicationOperation instantiated in a workflow, with its own settings.
@@ -68,6 +75,10 @@ class WorkflowStep:
     process : WorkflowProcess | None
         The WorkflowProcess that owns this step; set by that process when it is
         constructed, None before.
+    state : str
+        ``PENDING``, ``RUNNING`` while its Run executes, then that Run's status.
+    current_run : Run | None
+        The Run this step last created, None before it first runs.
     """
 
     def __init__(
@@ -123,6 +134,9 @@ class WorkflowStep:
         self.apply_only = apply_only
         self.always_run = always_run
         self.process: Optional["WorkflowProcess"] = None
+        self.state = PENDING
+        self.current_run: Optional[Run] = None
+        self._observer: Any = None
 
     @classmethod
     def hydrate(
@@ -198,14 +212,22 @@ class WorkflowStep:
             + "; ".join(violations)
         )
 
-    def run(self, *, control: Any, parent_run: Run, ctx: Any, run_log: Any,
-            workflow_name: str) -> Run:
+    def observe(self, observer: Any) -> None:
+        """Be the one object told when this step's state changes (its Workflow).
+
+        The observer's ``step_changed(step)`` is called after each change.
+        """
+        self._observer = observer
+
+    def run(self, *, control: Any, parent_run: Run, ctx: Any, workflow_name: str) -> Run:
         """Run this released step through its own child Run, and return that Run.
 
         In the released step's order (backlog 964/965): check its contract, create
-        its child Run under ``parent_run``, execute through that Run. A refused
-        contract raises before any Run exists. ``control`` is the releasing
-        Workflow's; the step does not find or keep it.
+        its child Run under ``parent_run``, become RUNNING, execute through that
+        Run, then take the Run's outcome as its state. A refused contract raises
+        before any Run exists and leaves the state unchanged. ``control`` is the
+        releasing Workflow's; the step does not find or keep it. The Step Run
+        writes through its parent's log.
 
         Raises:
             AppError: When the step's settings do not satisfy its contract.
@@ -222,8 +244,17 @@ class WorkflowStep:
             settings=self.settings,
             parent=parent_run,
         )
-        child.execute(self, ctx, run_log, sequence=self.ordinal, workflow_name=workflow_name)
+        self.current_run = child
+        self._become(RUNNING)
+        child.execute(self, ctx, sequence=self.ordinal, workflow_name=workflow_name)
+        self._become(child.status)
         return child
+
+    def _become(self, state: str) -> None:
+        """Take ``state``, and tell the observer this step changed."""
+        self.state = state
+        if self._observer is not None:
+            self._observer.step_changed(self)
 
 
 def _published_operation(

@@ -89,7 +89,8 @@ def _execute(step: WorkflowStep, run_log: Any, *, control: RecordingControl | No
     parent = parent or parent_run(control)
     child = _child(control, parent)
     run_log.set_nest_level("workflow_step")
-    child.execute(step, SimpleNamespace(), run_log, sequence=1, workflow_name="wf")
+    child.log = run_log
+    child.execute(step, SimpleNamespace(), sequence=1, workflow_name="wf")
     return child
 
 
@@ -229,7 +230,8 @@ def test_a_dry_run_skip_records_the_step_and_finishes_skipped(tmp_path: Path) ->
     child = _child(control, parent_run(control))
     run_log.set_nest_level("workflow_step")
 
-    child.skip("dry-run", step=_step(_raises), run_log=run_log, sequence=2, workflow_name="wf")
+    child.log = run_log
+    child.skip("dry-run", step=_step(_raises), sequence=2, workflow_name="wf")
 
     types = [r["record_type"] for r in _read(run_log)]
     assert types == ["STEP_START", "STEP_END"]
@@ -276,7 +278,8 @@ def test_a_not_released_step_logs_its_reason_and_finishes_not_run(tmp_path: Path
     child = _child(control, parent_run(control))
     run_log.set_nest_level("workflow_step")
 
-    child.not_released(step=_step(_raises), run_log=run_log, sequence=3, workflow_name="wf")
+    child.log = run_log
+    child.not_released(step=_step(_raises), sequence=3, workflow_name="wf")
 
     assert [r["record_type"] for r in _read(run_log)] == ["STEP_START", "STEP_END"]
     end = _read(run_log)[1]

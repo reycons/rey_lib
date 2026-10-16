@@ -1,5 +1,12 @@
 """
-The Run: one identity, created by recording it.
+AppExecute: the one implementation of a run -- one identity, created by recording it.
+
+AppExecute is the single implementation and canonical owner of a run's identity,
+start, state, execution, logging and finish (user, 2026-10-16; backlog
+console.workflow_map). ``Run`` is a temporary compatibility alias for it --
+``Run = AppExecute``, literally, not a wrapper or a second implementation -- so
+every existing caller of ``Run.start``, ``Run.open``, ``execute`` and the rest is
+unchanged. "Run" below names the same object in its compatibility vocabulary.
 
 A Run exists because a row exists. ``Run.start`` inserts into
 ``control.run_manifest``, the database generates ``run_manifest_id``, and that
@@ -61,7 +68,7 @@ from rey_lib.logs import (
     monotonic_ms,
 )
 
-__all__ = ["Run"]
+__all__ = ["AppExecute", "Run"]
 
 #: The terminal statuses of a step's child Run.
 SUCCEEDED = "SUCCEEDED"
@@ -75,7 +82,7 @@ NOT_RUN = "NOT RUN"
 NOT_RELEASED = "not released"
 
 
-class Run:
+class AppExecute:
     """One execution, identified by the manifest row that records it."""
 
     def __init__(
@@ -135,6 +142,9 @@ class Run:
         self.apply: bool = False
         self.data: dict[str, Any] = {}
         self.metadata: dict[str, Any] = {}
+        #: The RunLog this run's records are written through. A child Run
+        #: started with ``parent`` writes through its parent's.
+        self.log: Any = None
         #: A step execution's outcome, besides its terminal ``status``.
         self.detail: str = ""
         self.error: Optional[str] = None
@@ -160,8 +170,8 @@ class Run:
         app_name: str = "",
         parent_run_id: Optional[int] = None,
         settings: Optional[dict[str, Any]] = None,
-        parent: Optional["Run"] = None,
-    ) -> "Run":
+        parent: Optional["AppExecute"] = None,
+    ) -> "AppExecute":
         """Record a starting run and return it, carrying the id it was given.
 
         Recording is what creates the identity, so this is the first thing a
@@ -232,12 +242,13 @@ class Run:
             run.apply = parent.apply
             run.data = parent.data
             run.metadata = parent.metadata
+            run.log = parent.log
         return run
 
     # -- reconstruction -----------------------------------------------------
 
     @classmethod
-    def open(cls, control: Any, run_id: int) -> Optional["Run"]:
+    def open(cls, control: Any, run_id: int) -> Optional["AppExecute"]:
         """Return the durable Run for ``run_id``, or None if it was never recorded.
 
         No process, no log path and no evidence: the row is the whole answer.
@@ -280,7 +291,6 @@ class Run:
         self,
         step: Any,
         ctx: Any,
-        run_log: Any,
         *,
         sequence: int,
         workflow_name: str,
@@ -303,13 +313,12 @@ class Run:
             The released step: its implementation, settings, id and label.
         ctx : Any
             Resolved application context, the implementation's domain input.
-        run_log : Any
-            The run log the step records are written through.
         sequence : int
             The step's sequence, assigned by the Workflow.
         workflow_name : str
             The workflow running the step, for records and messages.
         """
+        run_log = self.log
         step_name = step.label or step.id
         bind_step(
             step_id=step.id,
@@ -394,7 +403,6 @@ class Run:
         detail: str,
         *,
         step: Any = None,
-        run_log: Any = None,
         sequence: Optional[int] = None,
         workflow_name: str = "",
     ) -> None:
@@ -405,6 +413,7 @@ class Run:
         step failed) writes no step record, as the legacy engine did.
         """
         self.detail = detail
+        run_log = self.log
         if run_log is not None and step is not None and sequence is not None:
             step_name = step.label or step.id
             bind_step(
@@ -433,7 +442,6 @@ class Run:
         self,
         *,
         step: Any,
-        run_log: Any,
         sequence: int,
         workflow_name: str = "",
     ) -> None:
@@ -446,6 +454,7 @@ class Run:
         manifest holds ``NOT RUN``.
         """
         self.detail = NOT_RELEASED
+        run_log = self.log
         step_name = step.label or step.id
         bind_step(
             step_id=step.id,
@@ -515,6 +524,12 @@ class Run:
             "started_at":    self.started_at,
             "finished_at":   self.finished_at,
         }
+
+
+#: The compatibility vocabulary (user, 2026-10-16): the same class under its
+#: existing name, so existing callers are unchanged. Removed once callers move to
+#: the final public name.
+Run = AppExecute
 
 
 def _text(value: Any) -> str:

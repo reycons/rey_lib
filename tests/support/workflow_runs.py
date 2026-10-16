@@ -45,6 +45,8 @@ class RecordingControl:
         ]
 
 
-def parent_run(control: Any, run_id: int = 1) -> Run:
-    """The launch's parent Run, as bootstrap would hold it."""
-    return Run(run_id=run_id, control=control, subject_type="workflow", subject_id="wf")
+def parent_run(control: Any, run_id: int = 1, log: Any = None) -> Run:
+    """The launch's parent Run, as bootstrap would hold it, with its run log."""
+    run = Run(run_id=run_id, control=control, subject_type="workflow", subject_id="wf")
+    run.log = log
+    return run

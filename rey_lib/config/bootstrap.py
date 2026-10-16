@@ -976,6 +976,11 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     ctx = build_ctx_for_app(*args, **kwargs)
     run_log = open_run_log(ctx, phase_started=phase_started)
     register_runtime_object(ctx, run_log)
+    # The run this process started writes through the run log opened for it;
+    # a child Run started under it writes through the same one.
+    started = getattr(ctx, "run", None)
+    if started is not None:
+        started.log = run_log
 
     # Optional: present only when this installation configures AI. Absent is an
     # ordinary state, and no consumer may construct one lazily instead.

@@ -54,10 +54,10 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
                               config=None, steps=[step])
     control = RecordingControl()
     workflow = Workflow(name="wf", enabled=True, tokens=None, config=None,
-                        processes=[process], control=control)
-    parent = parent_run(control)
-    returned = workflow.run(parent, SimpleNamespace(), make_run_log(sys.argv[1]))
-    assert returned.parent_run_id == parent.run_id
+                        processes=[process], control=control, runtime=SimpleNamespace(),
+                        log=make_run_log(sys.argv[1]))
+    returned = workflow.direct()
+    assert returned.parent_run_id is None
     assert calls == ["load"], calls
     assert [c["status"] for c in control.children(returned)] == ["SUCCEEDED"]
     assert all(sys.modules.get(name) is None for name in sys.argv[2:]), "legacy loaded"
