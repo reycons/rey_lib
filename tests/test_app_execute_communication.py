@@ -15,6 +15,7 @@ import pytest
 
 from rey_lib.errors.error_utils import StateError
 from rey_lib.run import AppExecute
+from rey_lib.run import run as run_module
 from rey_lib.run.run import CONNECTED, EXITED, STOPPED
 
 #: How long any one wait in these tests may take.
@@ -33,7 +34,7 @@ CHILD = textwrap.dedent("""
     for command in channel.commands():
         if command.get("command") == "echo":
             channel.emit({"event": "echoed", "value": command.get("value")})
-        if command.get("command") == "finish":
+        if command.get("command") in ("finish", "close"):
             break
     print("child finishing", flush=True)
     channel.close()
@@ -105,6 +106,59 @@ def test_stop_ends_an_application_that_is_still_running() -> None:
         # Shown with a failure: how far the launch got, and when.
         print("trace:", app.trace)
         app.close()
+
+
+def _sent(app) -> int:
+    """How many commands the launcher sent, by its own trace."""
+    return sum(1 for _, point in app.trace if point == "command sent")
+
+
+def test_close_asks_a_running_application_to_close_and_it_ends_on_its_own() -> None:
+    app = _launch(CHILD)
+    assert app.connected(timeout=WAIT)
+    assert next(app.events(timeout=WAIT)) == {"event": "ready"}
+
+    app.close()
+
+    # Asked once; it ended itself within the grace, so it was never stopped.
+    assert _sent(app) == 1
+    assert (app.exit_code, app.state) == (3, EXITED)
+    # What it wrote before and while closing still arrives.
+    assert "".join(app.output(timeout=WAIT)) == "child started\nchild finishing\n"
+
+
+def test_close_does_not_ask_an_application_that_has_already_ended() -> None:
+    app = _launch(CHILD)
+    assert app.connected(timeout=WAIT)
+    app.send({"command": "finish"})
+    assert app.wait(timeout=WAIT) == 3
+
+    app.close()
+
+    assert _sent(app) == 1 and app.state == EXITED
+
+
+def test_close_stops_an_application_that_never_attached() -> None:
+    app = _launch("import time\ntime.sleep(600)\n")
+
+    app.close()
+
+    assert _sent(app) == 0
+    assert app.run_id is None and app.state == STOPPED
+
+
+def test_close_stops_an_application_that_ignores_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(run_module, "_CLOSE_GRACE_SECONDS", 0.5)
+    app = _launch(SLEEPER)
+    assert app.connected(timeout=WAIT)
+
+    app.close()
+
+    # Asked, given its grace, then stopped.
+    assert _sent(app) == 1
+    assert app.state == STOPPED and app.exit_code is not None
 
 
 def test_an_attachment_with_the_wrong_token_is_refused() -> None:

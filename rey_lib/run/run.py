@@ -601,6 +601,9 @@ class AppExecute:
 _ADDRESS_ENV = "REY_APP_EXECUTE_PORT"
 _TOKEN_ENV = "REY_APP_EXECUTE_TOKEN"
 
+#: How long an application asked to close has to end on its own before it is stopped.
+_CLOSE_GRACE_SECONDS = 10.0
+
 #: A launched execution's lifecycle: the launch and its connection, not the Run.
 STARTING = "STARTING"
 CONNECTED = "CONNECTED"
@@ -739,7 +742,20 @@ class _LaunchedApp:
         self.trace.append((time.monotonic(), point))
 
     def close(self) -> None:
-        """Stop the application if it still runs, and release the loop."""
+        """End the application, then release the loop.
+
+        An application that has attached and is still running is asked to close
+        (``{"command": "close"}``) and given ``_CLOSE_GRACE_SECONDS`` to end on its
+        own; one that has not ended by then, or never attached, is stopped. One
+        that has already ended is not asked.
+        """
+        if self.run_id is not None and self.exit_code is None:
+            self.send({"command": "close"})
+            try:
+                self.wait(timeout=_CLOSE_GRACE_SECONDS)
+            except TimeoutError:
+                # It did not end when asked; it is stopped below.
+                pass
         self.stop()
         if self.exit_code is None:
             self.wait()
