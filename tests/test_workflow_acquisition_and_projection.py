@@ -109,6 +109,7 @@ def _workflow() -> Workflow:
 
 def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
     projection = _workflow().projection(object())
+    projection.pop("relationships")
     actions = projection.pop("actions")
     assert set(actions) == {"workflow", "process:1", "step:1", "step:2"}
     assert projection == {
@@ -162,3 +163,12 @@ def test_workflow_supplies_existing_commands_for_every_display_subject() -> None
             {"id": "workflow_run_from", "command": {"command": "direct", "from_step": name}},
             {"id": "workflow_run_only", "command": {"command": "direct", "step": name}},
         ]
+
+
+def test_relationships_project_hierarchy_and_execution_order() -> None:
+    assert _workflow().projection(object())["relationships"] == [
+        {"source": "workflow", "target": "process:1", "kind": "contains"},
+        {"source": "process:1", "target": "step:1", "kind": "contains"},
+        {"source": "process:1", "target": "step:2", "kind": "contains"},
+        {"source": "step:1", "target": "step:2", "kind": "precedes"},
+    ]

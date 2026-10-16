@@ -849,3 +849,21 @@ def test_non_release_replaces_previous_step_outcome_and_notifies_projection(
     assert ("s2", "not run", "not released") in _step_ends(log)
     assert any(item["state"] == "NOT RUN" and item["run_id"] == step.current_run.run_id
                for item in seen)
+
+
+def test_relationships_follow_execution_order_across_interleaved_processes() -> None:
+    application = _application("load")
+    first = WorkflowProcess(name="a", ordinal=1, application=application, config=None,
+                            steps=[_step(application, "load", "s3", 3, []),
+                                   _step(application, "load", "s1", 1, [])])
+    second = WorkflowProcess(name="b", ordinal=2, application=application, config=None,
+                             steps=[_step(application, "load", "s2", 2, [])])
+    workflow = Workflow(name="wf", enabled=True, config=None,
+                        processes=[first, second], control=None)
+    relationships = workflow.projection(None)["relationships"]
+    assert [edge for edge in relationships if edge["kind"] == "precedes"] == [
+        {"source": "step:1", "target": "step:2", "kind": "precedes"},
+        {"source": "step:2", "target": "step:3", "kind": "precedes"},
+    ]
+    assert {"source": "process:1", "target": "step:3", "kind": "contains"} in relationships
+    assert {"source": "process:2", "target": "step:2", "kind": "contains"} in relationships

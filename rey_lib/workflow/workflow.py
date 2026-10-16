@@ -374,6 +374,24 @@ class Workflow:
             **{f"step:{step.ordinal}": commands(step.id) for step in self.steps.values()},
         }
 
+    def relationships(self) -> list[dict[str, str]]:
+        """Display the held hierarchy and the same ordinal chain direct walks."""
+        relationships = []
+        for process in self.processes:
+            parent = f"process:{process.ordinal}"
+            relationships.append({"source": "workflow", "target": parent, "kind": "contains"})
+            relationships.extend(
+                {"source": parent, "target": f"step:{step.ordinal}", "kind": "contains"}
+                for step in process.steps
+            )
+        steps = list(self.steps.values())
+        relationships.extend(
+            {"source": f"step:{before.ordinal}", "target": f"step:{after.ordinal}",
+             "kind": "precedes"}
+            for before, after in zip(steps, steps[1:])
+        )
+        return relationships
+
     def projection(self, ctx: Any) -> dict[str, Any]:
         """What this Workflow shows: one snapshot of the hydrated graph.
 
@@ -390,6 +408,7 @@ class Workflow:
                 "name": self.name,
                 "enabled": self.enabled,
                 "actions": self.actions(),
+                "relationships": self.relationships(),
                 "state": self.state,
                 # The step this Workflow released, and the Run that step created.
                 "released": None if self.released is None else {
