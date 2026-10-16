@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.errors.error_utils import redact_text
 from rey_lib.logs import AppLogger
 from rey_lib.messaging.models import Message
 
@@ -28,7 +29,9 @@ def audit_payload(message: Message, event_type: str, error: str = "") -> dict[st
         "message_generation_mode": request.generation_mode,
         "message_approval_status": message.approval.status,
         "message_dry_run": request.dry_run,
-        "message_error": error or message.error,
+        # The router fills this from str(exc); error_utils owns masking that
+        # text, so it is redacted by the same rules the error path applies.
+        "message_error": redact_text(error or message.error),
     }
 
 
