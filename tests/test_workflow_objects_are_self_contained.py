@@ -53,7 +53,7 @@ _RUN_WITHOUT_LEGACY = textwrap.dedent("""
     process = WorkflowProcess(name="app", ordinal=1, application=application,
                               config=None, steps=[step])
     control = RecordingControl()
-    workflow = Workflow(name="wf", enabled=True, tokens=None, config=None,
+    workflow = Workflow(name="wf", enabled=True, config=None,
                         processes=[process], control=control, runtime=SimpleNamespace(),
                         log=make_run_log(sys.argv[1]))
     returned = workflow.direct()

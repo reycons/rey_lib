@@ -103,7 +103,7 @@ def _workflow() -> Workflow:
     ]
     process = WorkflowProcess(name="p", ordinal=1, application=application, config=None,
                               steps=steps)
-    return Workflow(name="code_index", enabled=True, tokens=None, config=None,
+    return Workflow(name="code_index", enabled=True, config=None,
                     processes=[process], control=object())
 
 

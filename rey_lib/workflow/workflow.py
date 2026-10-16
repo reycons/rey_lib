@@ -1,7 +1,7 @@
 """Workflow -- the orchestrator of a fully hydrated workflow graph.
 
 The root of the workflow object model (backlog 950). A Workflow holds its
-governed workflow-level state -- ``tokens`` and ``config`` -- its
+governed workflow-level configuration, its
 WorkflowProcess children, each grouping its WorkflowStep children, and the
 Control it creates child Runs through. The workflow hydrator creates that whole
 graph in one pass; by the time ``direct`` is called every object is fully hydrated,
@@ -83,8 +83,6 @@ class Workflow:
         The workflow's governed name.
     enabled : bool
         False refuses every run; it is reported as a refused run.
-    tokens : dict | None
-        The workflow's tokens as governed; None kept distinct from empty.
     config : dict | None
         The workflow's configuration as governed (control.workflow.config).
     control : Any
@@ -105,7 +103,6 @@ class Workflow:
         *,
         name: str,
         enabled: bool,
-        tokens: Optional[Mapping[str, Any]],
         config: Optional[Mapping[str, Any]],
         processes: Sequence[WorkflowProcess],
         control: Any,
@@ -118,8 +115,8 @@ class Workflow:
         ----------
         name, enabled
             The workflow's governed identity and switch.
-        tokens, config : Mapping[str, Any] | None
-            The workflow's governed tokens and configuration. Copied.
+        config : Mapping[str, Any] | None
+            The workflow's governed configuration. Copied.
         processes : Sequence[WorkflowProcess]
             The workflow's processes, each already hydrated with its steps.
         control : Any
@@ -141,9 +138,6 @@ class Workflow:
             raise AppError("a workflow is missing required 'name'.")
         self.name = name
         self.enabled = enabled
-        self.tokens: Optional[dict[str, Any]] = (
-            None if tokens is None else deepcopy(dict(tokens))
-        )
         self.config: Optional[dict[str, Any]] = (
             None if config is None else deepcopy(dict(config))
         )
@@ -255,7 +249,6 @@ class Workflow:
         return cls(
             name=name,
             enabled=bool(first.get("workflow_enabled")),
-            tokens=None,
             config=resolved["config"],
             processes=sorted(processes, key=lambda process: process.ordinal),
             control=control,

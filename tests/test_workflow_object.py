@@ -113,7 +113,7 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
     process = WorkflowProcess(name=application.name, ordinal=1, application=application,
                               config=None, steps=steps)
     return Workflow(name=workflow["name"], enabled=workflow.get("enabled", True),
-                    tokens=None, config=None, processes=[process], control=control)
+                    config=None, processes=[process], control=control)
 
 
 def _run(graph: Workflow, parent: Any, ctx: Any, **selection: Any) -> Any:
@@ -478,7 +478,7 @@ def test_a_child_runs_settings_are_its_steps_resolved_settings(tmp_path: Path) -
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[step])
 
-    Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process],
+    Workflow(name="wf", enabled=True, config=None, processes=[process],
              control=control, runtime=SimpleNamespace(),
              log=_log(tmp_path)).direct()
 
@@ -520,7 +520,7 @@ def test_the_handler_receives_its_child_run_and_steps_share_the_parents_data(
                               steps=steps)
     parent = parent_run(control, log=_log(tmp_path))
 
-    workflow_run = Workflow(name="wf", enabled=True, tokens=None, config=None,
+    workflow_run = Workflow(name="wf", enabled=True, config=None,
                             processes=[process], control=control,
                             runtime=SimpleNamespace(), log=parent.log).direct(
         metadata={"workflow": "wf"})
@@ -684,7 +684,7 @@ def test_steps_run_in_workflow_wide_ordinal_order_across_processes(tmp_path: Pat
         _step(b, "check", "s2", 2, calls)])
     parent = parent_run(control, log=_log(tmp_path))
 
-    workflow_run = Workflow(name="wf", enabled=True, tokens=None, config=None,
+    workflow_run = Workflow(name="wf", enabled=True, config=None,
                             processes=[first, second], control=control,
                             runtime=SimpleNamespace(), log=parent.log).direct()
 
@@ -693,19 +693,17 @@ def test_steps_run_in_workflow_wide_ordinal_order_across_processes(tmp_path: Pat
         ("s1", "a"), ("s2", "b"), ("s3", "a")]
 
 
-def test_it_holds_tokens_config_and_control_and_owns_its_processes() -> None:
+def test_it_holds_config_and_control_and_owns_its_processes() -> None:
     application = _application("load")
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[_step(application, "load", "s1", 1, [])])
-    tokens, config = {"root": "/data"}, {"paths": [{"name": "data", "path": "{root}"}]}
+    config = {"paths": [{"name": "data", "path": "{root}"}]}
     control = RecordingControl()
 
-    workflow = Workflow(name="wf", enabled=True, tokens=tokens, config=config,
+    workflow = Workflow(name="wf", enabled=True, config=config,
                         processes=[process], control=control)
-    tokens["root"] = "/elsewhere"
     config["paths"].append({"name": "x", "path": "y"})
 
-    assert workflow.tokens == {"root": "/data"}
     assert workflow.config == {"paths": [{"name": "data", "path": "{root}"}]}
     assert workflow.control is control
     assert process.workflow is workflow
@@ -715,11 +713,11 @@ def test_a_process_of_another_workflow_is_refused() -> None:
     application = _application("load")
     process = WorkflowProcess(name="app", ordinal=1, application=application, config=None,
                               steps=[])
-    Workflow(name="first", enabled=True, tokens=None, config=None, processes=[process],
+    Workflow(name="first", enabled=True, config=None, processes=[process],
              control=None)
 
     with pytest.raises(AppError, match="already belongs to workflow 'first'"):
-        Workflow(name="second", enabled=True, tokens=None, config=None,
+        Workflow(name="second", enabled=True, config=None,
                  processes=[process], control=None)
 
 
@@ -730,7 +728,7 @@ def test_a_shared_ordinal_is_refused() -> None:
                                      _step(application, "load", "s2", 1, [])])
 
     with pytest.raises(AppError, match="share ordinal 1"):
-        Workflow(name="wf", enabled=True, tokens=None, config=None, processes=[process],
+        Workflow(name="wf", enabled=True, config=None, processes=[process],
                  control=None)
 
 
@@ -755,7 +753,7 @@ def test_a_process_name_selects_its_own_steps_in_release_order(
         _step(a, "load", "s1", 1, []), _step(a, "load", "s3", 3, [])])
     second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
         _step(b, "check", "s2", 2, [])])
-    workflow = Workflow(name="wf", enabled=True, tokens=None, config=None,
+    workflow = Workflow(name="wf", enabled=True, config=None,
                         processes=[first, second], control=control,
                         runtime=SimpleNamespace(),
                         log=_log(tmp_path))
