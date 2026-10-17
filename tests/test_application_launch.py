@@ -2,7 +2,7 @@
 
 The Application builds the invocation of one of its published operations from
 its own configuration, the operation converts its semantic inputs into its
-published command-line form, and AppExecute launches it. A caller names the
+published command-line form, and LaunchedApp launches it. A caller names the
 operation and gives semantic inputs; it never spells an executable, a flag or a
 parameter.
 """
@@ -20,7 +20,7 @@ from rey_lib.config.applications import (
     ApplicationCommandParameter,
 )
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.run.run import AppExecute
+from rey_lib.run.app_channel import LaunchedApp
 
 PYTHON = "/venv/bin/python"
 CONFIG = "/installations/local/install"
@@ -87,12 +87,12 @@ def test_launch_operation_launches_the_applications_own_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     launched: list[list[str]] = []
-    monkeypatch.setattr(AppExecute, "launch", classmethod(
+    monkeypatch.setattr(LaunchedApp, "launch", classmethod(
         lambda cls, command, **_: launched.append(list(command)) or "handle"))
     other = Application(name="rey_loader", commands=(SERVE,))
 
-    handle = AppExecute.launch_operation(_ctx(other, _application()), "workflow_app", "serve",
-                                         {"workflow_id": 15})
+    handle = LaunchedApp.launch_operation(_ctx(other, _application()), "workflow_app", "serve",
+                                          {"workflow_id": 15})
 
     assert handle == "handle"
     assert launched == [[PYTHON, "/apps/workflow_app/main.py", "--config-path", CONFIG,
@@ -101,4 +101,4 @@ def test_launch_operation_launches_the_applications_own_invocation(
 
 def test_launch_operation_refuses_an_unconfigured_application() -> None:
     with pytest.raises(ConfigError, match="'workflow_app' is not configured"):
-        AppExecute.launch_operation(_ctx(), "workflow_app", "serve", {"workflow_id": 15})
+        LaunchedApp.launch_operation(_ctx(), "workflow_app", "serve", {"workflow_id": 15})

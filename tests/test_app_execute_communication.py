@@ -1,7 +1,7 @@
-"""AppExecute's execution and communication capability (backlog console.workflow_map).
+"""The application channel's execution and communication (backlog console.workflow_map, 1042).
 
-A real child process is launched through ``AppExecute.launch``; it attaches with
-``AppExecute.attach`` and its own Application Run id. Commands go in, events and
+A real child process is launched through ``LaunchedApp.launch``; it attaches with
+``AttachedApp.attach`` and its own Application Run id. Commands go in, events and
 stdout come out, over a localhost channel opened with a one-time token -- AnyIO
 underneath, reached only through ``rey_lib.run.async_runtime``.
 """
@@ -14,21 +14,21 @@ import textwrap
 import pytest
 
 from rey_lib.errors.error_utils import StateError
-from rey_lib.run import AppExecute
-from rey_lib.run import run as run_module
-from rey_lib.run.run import CONNECTED, EXITED, STOPPED
+from rey_lib.run import app_channel
+from rey_lib.run.app_channel import CONNECTED, EXITED, STOPPED, AttachedApp, LaunchedApp
 
 #: How long any one wait in these tests may take.
 WAIT = 20.0
 
-#: A child application: it owns run 77, attaches, and answers what it is sent.
+#: A child application: it owns run 77, attaches with its id, and answers what it is sent.
 CHILD = textwrap.dedent("""
     import sys
     from rey_lib.run import AppExecute
+    from rey_lib.run.app_channel import AttachedApp
 
     application_run = AppExecute(run_id=77, control=None, subject_type="app",
                                  subject_id="child")
-    channel = AppExecute.attach(application_run)
+    channel = AttachedApp.attach(application_run.run_id)
     print("child started", flush=True)
     channel.emit({"event": "ready"})
     for command in channel.commands():
@@ -44,16 +44,16 @@ CHILD = textwrap.dedent("""
 #: A child that never finishes on its own.
 SLEEPER = textwrap.dedent("""
     import time
-    from rey_lib.run import AppExecute
+    from rey_lib.run.app_channel import AttachedApp
 
-    channel = AppExecute.attach(AppExecute(run_id=5, control=None))
+    channel = AttachedApp.attach(5)
     channel.emit({"event": "ready"})
     time.sleep(600)
 """)
 
 
 def _launch(code: str):
-    return AppExecute.launch([sys.executable, "-c", code])
+    return LaunchedApp.launch([sys.executable, "-c", code])
 
 
 def test_commands_go_in_and_events_and_stdout_come_out() -> None:
@@ -150,7 +150,7 @@ def test_close_stops_an_application_that_never_attached() -> None:
 def test_close_stops_an_application_that_ignores_the_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(run_module, "_CLOSE_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(app_channel, "_CLOSE_GRACE_SECONDS", 0.5)
     app = _launch(SLEEPER)
     assert app.connected(timeout=WAIT)
 
@@ -183,5 +183,5 @@ def test_attaching_outside_a_launch_is_refused(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("REY_APP_EXECUTE_PORT", raising=False)
     monkeypatch.delenv("REY_APP_EXECUTE_TOKEN", raising=False)
 
-    with pytest.raises(StateError, match="not launched through AppExecute.launch"):
-        AppExecute.attach(AppExecute(run_id=1, control=None))
+    with pytest.raises(StateError, match="not launched through LaunchedApp.launch"):
+        AttachedApp.attach(1)

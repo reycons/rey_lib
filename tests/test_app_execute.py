@@ -25,13 +25,26 @@ def test_run_is_literally_app_execute() -> None:
 
 
 def test_there_is_one_implementation_not_two() -> None:
-    # Only AppExecute is a public class; Run is a name bound to it, never a class of
-    # its own. The private classes are AppExecute's launch and attach handles.
+    # AppExecute is the only class in the run module; Run is a name bound to it,
+    # never a class of its own.
     tree = ast.parse(Path(run_module.__file__).read_text(encoding="utf-8"))
     classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
-    assert [name for name in classes if not name.startswith("_")] == ["AppExecute"]
-    assert sorted(name for name in classes if name.startswith("_")) == [
-        "_AttachedApp", "_LaunchedApp"]
+    assert classes == ["AppExecute"]
+
+
+def test_the_app_channel_is_not_the_runs() -> None:
+    # Backlog 1042: the shared app communication -- the two ends of the channel --
+    # is its own, and an application reaches it without going through the Run.
+    from rey_lib.run import app_channel
+
+    tree = ast.parse(Path(app_channel.__file__).read_text(encoding="utf-8"))
+    classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+    assert classes == ["LaunchedApp", "AttachedApp"]
+    for entry in ("launch", "launch_operation", "attach"):
+        assert not hasattr(AppExecute, entry), f"AppExecute still offers {entry}"
+    assert callable(app_channel.LaunchedApp.launch)
+    assert callable(app_channel.LaunchedApp.launch_operation)
+    assert callable(app_channel.AttachedApp.attach)
 
 
 def test_a_run_started_through_the_alias_is_an_app_execute_with_the_hierarchy() -> None:
