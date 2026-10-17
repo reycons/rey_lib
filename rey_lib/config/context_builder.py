@@ -230,17 +230,38 @@ class ContextBuilder:
             The built resolver, or None when the configuration declared no
             canonical ``paths:`` list and nothing was transported either.
         """
+        # Which of these locations file access may reach is this installation's
+        # security.allowed_roots, and it configures the resolver in both forms
+        # the path state arrives in (backlog 1066).
+        allowed = _allowed_root_names(ctx)
         if self._resolved_paths is not None:
             # Already-resolved state: the values are the answer, so there is
             # nothing to expand and no token to expand it with.
             return PathResolver({
                 name: Path(value) for name, value in self._resolved_paths.items()
-            })
+            }, allowed)
 
         declared = getattr(ctx, "paths", None)
         if not isinstance(declared, list):
             return None
-        return _build_path_resolver(declared, self._runtime_path_tokens)
+        return _build_path_resolver(declared, self._runtime_path_tokens, allowed)
+
+
+def _allowed_root_names(ctx: Any) -> tuple[str, ...]:
+    """The permitted root names this installation's security block states.
+
+    Read as the Console read it before PathResolver owned the rule: a mapping's
+    key or a namespace's attribute; nothing stated is no names, which the
+    resolver takes as its default set.
+    """
+    security = getattr(ctx, "security", None)
+    if security is None:
+        return ()
+    if isinstance(security, dict):
+        names = security.get("allowed_roots") or []
+    else:
+        names = getattr(security, "allowed_roots", None) or []
+    return tuple(str(name) for name in names)
 
 
 def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:

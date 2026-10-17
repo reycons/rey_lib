@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from rey_lib.config.config_namespace import Namespace
 from rey_lib.errors.error_utils import ConfigError
@@ -39,16 +39,32 @@ _RUNTIME_PATH_PLACEHOLDERS = frozenset(
     {"operation", "timestamp", "run_id", "source_subfolder"}
 )
 
+#: The named locations file access may reach when an installation states no
+#: ``security.allowed_roots`` (or states none), as the Console has always applied.
+_DEFAULT_ALLOWED_ROOTS = ("root", "apps", "configs", "data", "logs", "state")
+
+
 class PathResolver:
     """Resolved named paths from the installation config ``paths:`` list.
 
     Attached to ``ctx.paths`` after loading a ``config.yaml``.
     Call ``ctx.paths.resolve("name")`` to get the physical ``Path``.
+
+    It also owns which of those locations the installation's file access may
+    reach (backlog 1066): ``security.allowed_roots`` names them and configures
+    this object; :meth:`authorize` is the one check that a location sits
+    beneath one of them.
     """
 
-    def __init__(self, paths: dict[str, Path]) -> None:
+    def __init__(
+        self, paths: dict[str, Path], allowed_roots: Iterable[Any] | None = None,
+    ) -> None:
         self._paths = dict(paths)
         self._runtime_tokens: dict[str, str] = {}
+        # The permitted root NAMES. None stated, or an empty list, is the
+        # default set -- the rule the Console applied before this owned it.
+        self._allowed = tuple(str(name) for name in (allowed_roots or ())) \
+            or _DEFAULT_ALLOWED_ROOTS
 
     def resolve(self, name: str) -> Path:
         """Return the resolved ``Path`` for the given logical name."""
@@ -56,17 +72,65 @@ class PathResolver:
             raise ConfigError(f"Unknown path name: {name!r}")
         return self._paths[name]
 
+    def allowed_roots(self) -> list[Path]:
+        """The locations file access may reach, resolved.
+
+        Each permitted name resolves as a named path; a name this installation
+        does not configure is taken as a literal location, as it always was.
+        """
+        roots: list[Path] = []
+        for name in self._allowed:
+            try:
+                roots.append(self.resolve(name).expanduser().resolve())
+            except ConfigError:
+                roots.append(Path(name).expanduser().resolve())
+        return roots
+
+    def authorize(self, raw_path: Any) -> Path:
+        """One location, resolved, if it sits beneath a permitted root.
+
+        A relative location is taken beneath ``root``; the result is resolved
+        and must sit beneath one of :meth:`allowed_roots`.
+
+        Raises:
+            ConfigError: when it does not, or a relative location is given and
+                this installation configures no ``root``.
+        """
+        path = Path(str(raw_path)).expanduser()
+        if not path.is_absolute():
+            if "root" not in self._paths:
+                raise ConfigError("Required path is not configured: root")
+            path = self._paths["root"].expanduser() / path
+        path = path.resolve()
+
+        for root in self.allowed_roots():
+            try:
+                path.relative_to(root.resolve())
+                return path
+            except ValueError:
+                continue
+        raise ConfigError(f"Path is outside allowed roots: {path}")
+
+    def with_path(self, name: str, path: Path) -> "PathResolver":
+        """The same resolver with one more named path, its permitted roots kept.
+
+        Nothing else carries over, exactly as the rebuild it replaces did.
+        """
+        return PathResolver({**self._paths, str(name): path}, self._allowed)
+
     def __repr__(self) -> str:
         return f"PathResolver({list(self._paths)})"
 
 def _build_path_resolver(
     raw_paths: Any,
     tokens: dict[str, str] | None = None,
+    allowed_roots: Iterable[Any] | None = None,
 ) -> PathResolver:
     """Process a ``paths:`` list into a ``PathResolver``.
 
     Each entry must have ``name`` and ``path`` keys.  Values may reference
-    earlier-resolved names with ``{name}`` placeholders.
+    earlier-resolved names with ``{name}`` placeholders. ``allowed_roots`` names
+    the permitted locations (``security.allowed_roots``); None is the default.
     """
     runtime_tokens = dict(tokens or {})
     resolved_strs: dict[str, str] = dict(runtime_tokens)
@@ -89,7 +153,7 @@ def _build_path_resolver(
         resolved_strs[name] = str(path)
         resolved_paths[name] = path
 
-    resolver = PathResolver(resolved_paths)
+    resolver = PathResolver(resolved_paths, allowed_roots)
     resolver._runtime_tokens = runtime_tokens
     return resolver
 
