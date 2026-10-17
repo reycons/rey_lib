@@ -35,6 +35,7 @@ class AIEventKind(str, Enum):
     USAGE_UPDATED = "usage_updated"
     EXECUTION_COMPLETED = "execution_completed"
     EXECUTION_FAILED = "execution_failed"
+    EXECUTION_CANCELLED = "execution_cancelled"
 
 
 @dataclass(frozen=True)
@@ -120,3 +121,9 @@ class AIEvent:
     @staticmethod
     def failed(execution_id: str, error: str) -> "AIEvent":
         return AIEvent(kind=AIEventKind.EXECUTION_FAILED, execution_id=execution_id, error=error)
+
+    @staticmethod
+    def cancelled(execution_id: str) -> "AIEvent":
+        """The work was withdrawn (backlog 1039): an outcome of its own, neither
+        a completion nor a failure."""
+        return AIEvent(kind=AIEventKind.EXECUTION_CANCELLED, execution_id=execution_id)

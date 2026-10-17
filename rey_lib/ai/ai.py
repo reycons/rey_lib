@@ -38,6 +38,7 @@ from rey_lib.ai.content import AIContentKind
 from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.credentials import CredentialResolver
 from rey_lib.ai.errors import (
+    AICancelled,
     AIConfigurationError,
     AIError,
     AIExecutionError,
@@ -174,6 +175,10 @@ class AI:
         # rehydration and executed here, within the lifetime of the application
         # session that holds this AI.
         self._tasks: dict[str, AITask] = {}
+        # Each running execution's withdrawal, by task id (backlog 1039): a
+        # Pydantic AI CancellationToken, fresh per execution and held only while
+        # it runs. Typed loosely so Pydantic AI stays an execution-time import.
+        self._running: dict[str, Any] = {}
 
     # -- what is available -------------------------------------------------
 
@@ -450,6 +455,8 @@ class AI:
             AIProviderError: when the engine refused or could not be reached.
             AIConfigurationError: when the engine or the run cannot be set up,
                 or a tool's capability is bound to nothing.
+            AICancelled: when :meth:`cancel_task` withdrew the work; the task
+                has recorded cancelled (backlog 1039).
         """
         import asyncio
         import uuid
@@ -458,9 +465,11 @@ class AI:
         import pydantic_ai
         from pydantic_ai import (
             Agent,
+            CancellationToken,
             ModelRetry,
             NativeOutput,
             PromptedOutput,
+            RunCancelled,
             StructuredDict,
             UsageLimits,
         )
@@ -517,6 +526,10 @@ class AI:
         task.started()
         tell(AIEvent.started(execution_id))
         started = datetime.now(timezone.utc)
+        # Fresh for this execution: a cancelled token cancels any later run it
+        # is given. Held only while this execution runs, whatever ends it.
+        token = CancellationToken()
+        self._running[task.id] = token
         try:
             model = self._model(task.model_identifier, task.base_url, task.credential_ref)
             output_type: Any = str
@@ -573,8 +586,17 @@ class AI:
                 # Streamed only for an observer: without one the run is exactly
                 # the unstreamed request it always was.
                 event_stream_handler=relay if observe is not None else None,
+                cancellation_token=token,
             )
             output = self._parse_task_output(task, schema, run.output)
+        except RunCancelled as withdrawn:
+            # A withdrawal, not a fault: the task records it as its own outcome
+            # and nothing is reported at ERROR. A synchronous tool call already
+            # in progress is not interrupted; its owner finishes it and the
+            # result is discarded.
+            task.cancelled()
+            tell(AIEvent.cancelled(execution_id))
+            raise AICancelled(f"AI task '{key}' was cancelled.", cause=withdrawn) from withdrawn
         except UserError as error:
             failure: AIError = AIConfigurationError(
                 f"AI task '{task.task_key or '(default)'}' could not be run.", cause=error,
@@ -617,6 +639,11 @@ class AI:
             task.answered(result)
             tell(AIEvent.completed(execution_id, result))
             return result
+        finally:
+            # Only this execution's own token: another execution of the same
+            # task may already hold the id.
+            if self._running.get(task.id) is token:
+                del self._running[task.id]
         task.failed(str(failure))
         tell(AIEvent.failed(execution_id, str(failure)))
         raise failure from failure.cause
@@ -732,6 +759,26 @@ class AI:
         ended addresses no task -- and is not a failure here.
         """
         return self._tasks.get(str(task_id or ""))
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Withdraw the running execution of one task (backlog 1039).
+
+        Signals that execution's token; ``execute_task`` then records the task
+        cancelled and raises ``AICancelled``. Callable from any thread. An id
+        with nothing running -- idle, finished or unknown -- is an ordinary
+        ``False`` and changes nothing; a cancel racing the end of a run leaves
+        that run's own outcome. A synchronous tool call already in progress is
+        not interrupted: its owner finishes it and the result is discarded.
+
+        Returns:
+            Whether a running execution was signalled.
+        """
+        token = self._running.get(str(task_id or ""))
+        if token is None:
+            return False
+        logger.debug("cancelling AI task %s", task_id)
+        token.cancel()
+        return True
 
     def rehydrate_task(
         self, control: Any, task_id: str, changes: Mapping[str, Any],
