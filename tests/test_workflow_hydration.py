@@ -352,6 +352,15 @@ def _with_data_source(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _with_analysis_config(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``rows`` whose governed process config also declares one analysis config."""
+    for row in rows:
+        row["process_config"]["analysis_configs"] = [
+            {"name": "infer", "contract": "infer_contract", "llm_execution_profile": "p"},
+        ]
+    return rows
+
+
 class TestTheProcessOwnsItsDataSources:
     """A data source is governed process configuration: the WorkflowProcess answers it (#1043)."""
 
@@ -383,6 +392,21 @@ class TestTheProcessOwnsItsDataSources:
     def test_a_process_declaring_none_refuses_every_name(self) -> None:
         with pytest.raises(AppError, match="declares no data source 'proposals'"):
             _hydrate(_rows())[0].processes[0].data_source("proposals")
+
+    def test_an_analysis_config_is_answered_through_the_same_lookup(self) -> None:
+        workflow = _hydrate(_with_analysis_config(_with_data_source(_rows())))[0]
+        process = workflow.processes[0]
+
+        analysis = process.analysis_config("infer")
+        assert (analysis.name, analysis.contract) == ("infer", "infer_contract")
+        for step in workflow.steps.values():
+            assert step.process.analysis_config("infer").name == "infer"
+        with pytest.raises(AppError, match="process 'fixture_app' declares no analysis config 'x'"):
+            process.analysis_config("x")
+
+    def test_a_process_declaring_no_analysis_config_refuses_every_name(self) -> None:
+        with pytest.raises(AppError, match="declares no analysis config 'infer'"):
+            _hydrate(_rows())[0].processes[0].analysis_config("infer")
 
     def test_the_workflow_does_not_answer_data_sources(self) -> None:
         """One owner: no Workflow-level data source, forwarding or otherwise."""

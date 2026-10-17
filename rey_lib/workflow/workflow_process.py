@@ -128,10 +128,32 @@ class WorkflowProcess:
         Raises:
             AppError: When this process declares no data source of that name.
         """
-        for entry in (self.config or {}).get("data_sources") or []:
+        return self._named("data_sources", name, "data source")
+
+    def analysis_config(self, name: str) -> Namespace:
+        """One of this process's analysis configs, by name (backlog 1005).
+
+        An analysis config is part of the process's governed configuration
+        (``config.analysis_configs``), held here as the Workflow's hydration
+        resolved it. A step asks its own process; nothing reads the runtime
+        context for one.
+
+        Raises:
+            AppError: When this process declares no analysis config of that name.
+        """
+        return self._named("analysis_configs", name, "analysis config")
+
+    def _named(self, section: str, name: str, kind: str) -> Namespace:
+        """The entry named ``name`` in this process's hydrated ``config[section]``.
+
+        The one lookup every named entry of the process's configuration is read
+        through, so no two answers drift. Attribute-readable; nothing is copied
+        from anywhere but this process's own configuration.
+        """
+        for entry in (self.config or {}).get(section) or []:
             if isinstance(entry, Mapping) and entry.get("name") == name:
                 return Namespace(dict(entry))
-        raise AppError(f"process '{self.name}' declares no data source '{name}'.")
+        raise AppError(f"process '{self.name}' declares no {kind} '{name}'.")
 
     @classmethod
     def hydrate(
