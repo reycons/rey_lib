@@ -104,8 +104,8 @@ class ContextBuilder:
         self._install_identity_onto(ctx)
 
         # Applications last of the collections: a parameter may resolve its
-        # choices from workflows, pipelines or tools, and those are on ctx by
-        # now. Built here rather than read later so the resolution happens once
+        # choices from tools, connections or data sources, and those are on ctx
+        # by now. Built here rather than read later so the resolution happens once
         # -- the declaration under `apps` is the input and is never written to.
         object.__setattr__(ctx, "applications", build_applications(ctx))
 

@@ -98,10 +98,11 @@ def extract_dependencies(raw_value: Any) -> list[str]:
 def layer_for_source(source_file: Path | str, config_dir: Path | str) -> str:
     """Classify the precedence layer for a config source file.
 
-    Conservative best-effort classification used only for explainability. The
-    root ``config.yaml`` and installation-level files map to ``installation``;
-    files under a ``workflows`` folder map to ``workflow``. Unknown/synthetic
-    sources should be recorded as ``runtime`` by the caller instead.
+    Conservative best-effort classification used only for explainability. Every
+    config file -- the root ``config.yaml`` and every included file -- maps to
+    ``installation`` (workflow YAML is no longer loaded, backlog 1011).
+    Unknown/synthetic sources should be recorded as ``runtime`` by the caller
+    instead.
 
     Parameters
     ----------
@@ -115,14 +116,6 @@ def layer_for_source(source_file: Path | str, config_dir: Path | str) -> str:
     str
         The classified layer name.
     """
-    try:
-        rel = Path(source_file).resolve().relative_to(Path(config_dir).resolve())
-    except ValueError:
-        # Source is outside the config directory — treat as installation-level.
-        return "installation"
-    parts = [part.lower() for part in rel.parts]
-    if "workflows" in parts:
-        return "workflow"
     return "installation"
 
 
@@ -152,7 +145,7 @@ class ConfigMetadata:
 
         Nested dicts recurse by key. The top-level ``paths`` list is recorded as
         individual name tokens (``paths.<name>``). Other lists of named dicts
-        recurse by item name (e.g. ``workflows.<name>...``); plain lists are
+        recurse by item name (e.g. ``connections.<name>...``); plain lists are
         recorded as a single opaque value.
 
         Parameters

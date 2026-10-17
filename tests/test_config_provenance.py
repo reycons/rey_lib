@@ -35,7 +35,7 @@ def _write(path: Path, text: str) -> Path:
 
 @pytest.fixture()
 def install_root(tmp_path: Path) -> Path:
-    """A minimal installation with path tokens and a workflow file."""
+    """A minimal installation with path tokens and an included data-source file."""
     configs = tmp_path / "installations" / "local" / "configs" / "v01"
     configs.mkdir(parents=True)
 
@@ -57,14 +57,11 @@ paths:
     path: "{{root}}/logs"
 """)
 
-    _write(configs / "workflows" / "rey_db_admin.yaml", """\
-workflows:
-  - name: postgres_version_lint_comment
-    app: rey_db_admin
-    description: DDL versioning workflow
-    steps:
-      - name: export
-        process: export_database_ddl
+    _write(configs / "sources" / "rey_db_admin.yaml", """\
+data_sources:
+  - name: postgres_ddl_export
+    description: DDL export source
+    file_pattern: "*.sql"
 """)
 
     return configs
@@ -118,32 +115,32 @@ def test_relevant_file_listing(install_root: Path) -> None:
     ctx = build_ctx_from_path(install_root / "config.yaml")
 
     files = get_config_source_files(
-        ctx, prefix="workflows.postgres_version_lint_comment"
+        ctx, prefix="data_sources.postgres_ddl_export"
     )
     assert files
     assert any("rey_db_admin" in f for f in files)
 
-    # Workflow values are classified under the workflow layer.
+    # An included file's values are classified under the installation layer.
     meta = get_config_metadata(
-        ctx, "workflows.postgres_version_lint_comment.description"
+        ctx, "data_sources.postgres_ddl_export.description"
     )
     assert meta is not None
-    assert meta.layer == "workflow"
+    assert meta.layer == "installation"
 
 
 def test_source_map_reports_files_and_sections(install_root: Path) -> None:
     """get_config_source_map returns each file with the sections it contributed."""
     ctx = build_ctx_from_path(install_root / "config.yaml")
 
-    wf = "postgres_version_lint_comment"
-    source_map = get_config_source_map(ctx, prefix=f"workflows.{wf}")
+    source = "postgres_ddl_export"
+    source_map = get_config_source_map(ctx, prefix=f"data_sources.{source}")
     assert source_map, "expected at least one contributing file"
 
-    wf_file = next(f for f in source_map if f.endswith("rey_db_admin.yaml"))
-    info = source_map[wf_file]
-    assert info["layer"] == "workflow"
-    # The workflow file fed the workflow's name/description/steps sections.
-    assert "steps" in info["sections"]
+    source_file = next(f for f in source_map if f.endswith("rey_db_admin.yaml"))
+    info = source_map[source_file]
+    assert info["layer"] == "installation"
+    # The included file fed the source's description and file_pattern sections.
+    assert "file_pattern" in info["sections"]
     assert "description" in info["sections"]
 
 

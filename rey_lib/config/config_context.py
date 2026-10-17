@@ -44,7 +44,6 @@ _logger = AppLogger(__name__)
 # file name or extension (SGC_Rey_Config_Utils_Run_Log_Config_File_Recording).
 _LAYER_ROLE = {
     "installation": "Installation",
-    "workflow": "Workflow",
     "runtime": "Runtime",
 }
 
@@ -88,7 +87,7 @@ def build_ctx_from_path(
         When ``True`` build an explicit installation-wide context: every
         ``*.yaml`` under the config directory is deep-merged regardless of the
         app-scoped include list or ``default_behavior``.  Used by
-        installation-wide consumers (console diagnostics, workflow inventory)
+        installation-wide consumers (console diagnostics)
         that must see every app's resolved configuration.  ``app_name`` still
         records the requesting app's identity.  Defaults to ``False``.
 
@@ -160,7 +159,7 @@ def build_ctx_from_path(
     for folder in include_folders:
         folder_files = _yaml_files_in_folder(folder, config_path)
         for yaml_file in folder_files:
-            file_raw = _stamp_workflow_ownership(_load_yaml(yaml_file))
+            file_raw = _load_yaml(yaml_file)
             raw = _deep_merge(raw, file_raw)
             metadata.record_tree(
                 file_raw,
@@ -240,46 +239,6 @@ def _resolve_include_folders(
     if default == "full_folder":
         return [config_path.parent]
     return []
-
-def _stamp_workflow_ownership(file_raw: dict[str, Any]) -> dict[str, Any]:
-    """Stamp each workflow with its file-root ``app`` owner before merging.
-
-    Workflow YAML files declare the owning app once at the file root and list
-    their workflows without a per-item ``app``.  The deep-merge concatenates
-    ``workflows`` lists across files and collapses the scalar root ``app`` to a
-    single value, which would erase per-file ownership.  Copying the root
-    ``app`` onto every workflow item (list or mapping shape) before the merge
-    keeps ownership on each resolved workflow, so consumers can filter by
-    ``workflow.app`` without depending on which file merged last.
-
-    Parameters
-    ----------
-    file_raw : dict[str, Any]
-        Parsed contents of a single YAML file about to be merged.
-
-    Returns
-    -------
-    dict[str, Any]
-        The same mapping, with workflow items stamped in place when the file
-        declares a root ``app`` and a ``workflows`` block.
-    """
-    # Only workflow-owning files carry a root app and a workflows block.
-    app = file_raw.get("app")
-    workflows = file_raw.get("workflows")
-    if not isinstance(app, str) or not app:
-        return file_raw
-
-    if isinstance(workflows, list):
-        items = workflows
-    elif isinstance(workflows, dict):
-        items = list(workflows.values())
-    else:
-        return file_raw
-
-    for workflow in items:
-        if isinstance(workflow, dict) and not workflow.get("app"):
-            workflow["app"] = app
-    return file_raw
 
 def _role_for_layer(layer: str) -> str:
     """Return the configuration role for a provenance layer, defaulting cleanly."""

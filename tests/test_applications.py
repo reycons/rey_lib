@@ -263,12 +263,12 @@ class TestDeclaredChoices:
 
     def _built(self, source: str, **collections: Any) -> Application:
         return build([declaration(parameters=[
-            {"name": "workflow", "value_type": "choice",
+            {"name": "source", "value_type": "choice",
              "possible_values_from": source},
         ])], **collections)[0]
 
     def test_choices_are_resolved_from_the_named_collection(self) -> None:
-        built = self._built("workflows", workflows=[
+        built = self._built("data_sources", data_sources=[
             {"name": "beta"}, {"name": "alpha"},
         ])
 
@@ -294,7 +294,7 @@ class TestDeclaredChoices:
         # Applications are built after the collections they read. Being asked
         # before that is the build order being wrong, not an empty answer.
         with pytest.raises(ConfigError) as raised:
-            self._built("workflows")
+            self._built("data_sources")
 
         assert "built after" in str(raised.value)
 
@@ -316,21 +316,21 @@ class TestResolvedOnce:
         # possible_values_from is consumed. A consumer sees values and has
         # nothing to resolve a second time, or differently.
         built = build([declaration(parameters=[
-            {"name": "workflow", "possible_values_from": "workflows"},
-        ])], workflows=[{"name": "alpha"}])[0]
+            {"name": "source", "possible_values_from": "data_sources"},
+        ])], data_sources=[{"name": "alpha"}])[0]
 
         assert not hasattr(built.parameters[0], "possible_values_from")
 
     def test_changing_the_source_afterwards_changes_nothing(self) -> None:
         # The proof that resolution happened once. Two agreeing reads would
         # not have shown this.
-        workflows = [{"name": "alpha"}]
+        sources = [{"name": "alpha"}]
         entry = declaration(parameters=[
-            {"name": "workflow", "possible_values_from": "workflows"},
+            {"name": "source", "possible_values_from": "data_sources"},
         ])
-        built = build([entry], workflows=workflows)[0]
+        built = build([entry], data_sources=sources)[0]
 
-        workflows.append({"name": "beta"})
+        sources.append({"name": "beta"})
 
         assert built.parameters[0].possible_values == ("alpha",)
 
@@ -338,9 +338,9 @@ class TestResolvedOnce:
         # ctx.apps is the input. The old enrichment wrote resolved values into
         # the entry it was given; nothing here writes to anything.
         entry = declaration(parameters=[
-            {"name": "workflow", "possible_values_from": "workflows"},
+            {"name": "source", "possible_values_from": "data_sources"},
         ])
-        build([entry], workflows=[{"name": "alpha"}])
+        build([entry], data_sources=[{"name": "alpha"}])
 
         assert "possible_values" not in entry["cli"]["parameters"][0]
 
@@ -545,7 +545,7 @@ class TestEveryChoiceCollectionIsPresent:
         from rey_lib.config.applications import with_choice_collections
 
         assert with_choice_collections({}) == {
-            "connections": [], "data_sources": [], "tools": {}, "workflows": [],
+            "connections": [], "data_sources": [], "tools": {},
         }
 
     def test_a_declared_collection_is_never_touched(self) -> None:
@@ -571,4 +571,5 @@ class TestEveryChoiceCollectionIsPresent:
             runtime_path_tokens={},
         ).build()
 
-        assert (ctx.data_sources, ctx.workflows, ctx.connections) == ([], [], [])
+        assert (ctx.data_sources, ctx.connections) == ([], [])
+        assert not hasattr(ctx, "workflows")

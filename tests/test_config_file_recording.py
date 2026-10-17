@@ -46,7 +46,7 @@ def _ctx_with_metadata(tmp_path: Path, metadata: ConfigMetadata) -> SimpleNamesp
 
 
 def _two_layer_metadata() -> ConfigMetadata:
-    """Installation config plus a workflow file that overrides one value."""
+    """Installation config plus a runtime file that overrides one value."""
     metadata = ConfigMetadata()
     metadata.record_tree(
         {"paths": [{"name": "data", "path": "/d"}], "logging": {"level": "INFO"}},
@@ -54,9 +54,9 @@ def _two_layer_metadata() -> ConfigMetadata:
         layer="installation",
     )
     metadata.record_tree(
-        {"logging": {"level": "DEBUG"}, "workflows": [{"name": "wf", "enabled": True}]},
-        source_file="/cfg/workflows/wf.yaml",
-        layer="workflow",
+        {"logging": {"level": "DEBUG"}, "connections": [{"name": "db", "enabled": True}]},
+        source_file="/cfg/runtime/overrides.yaml",
+        layer="runtime",
     )
     return metadata
 
@@ -68,17 +68,17 @@ def test_effective_context_emits_config_records(tmp_path: Path) -> None:
     record_config_file_references(ctx, run_log)
     refs = _config_refs(Path(run_log.path()))
     paths = {record["path"] for record in refs}
-    assert paths == {"/cfg/config.yaml", "/cfg/workflows/wf.yaml"}
+    assert paths == {"/cfg/config.yaml", "/cfg/runtime/overrides.yaml"}
     by_path = {record["path"]: record for record in refs}
     install = by_path["/cfg/config.yaml"]
-    workflow = by_path["/cfg/workflows/wf.yaml"]
+    runtime = by_path["/cfg/runtime/overrides.yaml"]
     assert install["config_name"] == "config.yaml"
     assert install["config_type"] == "installation"
     assert install["source"] == "config_provenance"
     assert install["exists"] is False
     assert install["safe_to_preview"] is True
-    assert workflow["config_name"] == "wf.yaml"
-    assert workflow["config_type"] == "workflow"
+    assert runtime["config_name"] == "overrides.yaml"
+    assert runtime["config_type"] == "runtime"
 
 
 def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
@@ -99,18 +99,18 @@ def test_duplicate_config_files_emitted_once(tmp_path: Path) -> None:
 def test_role_comes_from_provenance_not_filename(tmp_path: Path) -> None:
     """The role tracks the provenance layer, not the file name."""
     metadata = ConfigMetadata()
-    # A file literally named config.yaml but contributed at the workflow layer.
+    # A file literally named config.yaml but contributed at the runtime layer.
     metadata.record_tree(
-        {"workflows": [{"name": "wf", "enabled": True}]},
-        source_file="/cfg/workflows/config.yaml",
-        layer="workflow",
+        {"connections": [{"name": "db", "enabled": True}]},
+        source_file="/cfg/runtime/config.yaml",
+        layer="runtime",
     )
     ctx = _ctx_with_metadata(tmp_path, metadata)
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     record = _config_refs(Path(run_log.path()))[0]
-    assert record["file_role"] == "Workflow"
-    assert record["configuration_layer"] == "workflow"
+    assert record["file_role"] == "Runtime"
+    assert record["configuration_layer"] == "runtime"
 
 
 def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) -> None:
@@ -119,13 +119,13 @@ def test_variable_provenance_and_overrides_associated_with_file(tmp_path: Path) 
     run_log = make_run_log(tmp_path, path=getattr(ctx, "run_log_path", None) or getattr(ctx, "log_file", None))
     record_config_file_references(ctx, run_log)
     refs = {record["path"]: record for record in _config_refs(Path(run_log.path()))}
-    workflow_ref = refs["/cfg/workflows/wf.yaml"]
-    # The workflow file overrode logging.level from the installation layer.
-    assert workflow_ref["overrides"] == ["logging.level"]
-    assert "workflows" in workflow_ref["variables_contributed"]
-    # load_order reflects merge order: installation first, workflow second.
+    runtime_ref = refs["/cfg/runtime/overrides.yaml"]
+    # The runtime file overrode logging.level from the installation layer.
+    assert runtime_ref["overrides"] == ["logging.level"]
+    assert "connections" in runtime_ref["variables_contributed"]
+    # load_order reflects merge order: installation first, runtime second.
     assert refs["/cfg/config.yaml"]["load_order"] == 0
-    assert workflow_ref["load_order"] == 1
+    assert runtime_ref["load_order"] == 1
 
 
 def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
@@ -137,9 +137,9 @@ def test_log_inspector_config_files_populated(tmp_path: Path) -> None:
     config_files = sections["files"]["config_files"]
     assert config_files["count"] == 2
     roles = {entry["file_role"] for entry in config_files["files"]}
-    assert roles == {"Installation", "Workflow"}
+    assert roles == {"Installation", "Runtime"}
     assert {entry["config_type"] for entry in config_files["files"]} == {
-        "installation", "workflow",
+        "installation", "runtime",
     }
 
 

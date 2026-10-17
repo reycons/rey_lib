@@ -1,8 +1,8 @@
 """Applications, as the runtime objects the estate's other collections already are.
 
-``ctx.workflows`` and ``ctx.pipelines`` are canonical collections: configuration
-declares them, the load resolves them once, and every consumer projects what it
-needs from the result. Applications were the exception -- each reader re-entered
+``ctx.tools``, ``ctx.connections`` and ``ctx.data_sources`` are canonical
+collections: configuration declares them, the load resolves them once, and every
+consumer projects what it needs from the result. Applications were the exception -- each reader re-entered
 the registry, re-normalized whatever shape it found, and re-resolved dynamic
 choices on every call, against one application named in a branch.
 
@@ -45,10 +45,8 @@ __all__ = [
 #: implemented is a configuration fault worth seeing at load, not an empty
 #: dropdown discovered later. Each entry earns its place when a declaration
 #: actually needs it, and each says how a member becomes a value -- the answer
-#: the Console's enrichment already gave for workflows, kept rather than
-#: reinvented.
+#: the Console's enrichment already gave, kept rather than reinvented.
 _CHOICE_SOURCES: dict[str, str] = {
-    "workflows": "workflows",
     "tools": "tools",
     "connections": "connections",
     # Every connection that is a database (backlog 673). ``connections`` keeps
@@ -482,7 +480,7 @@ def build_applications(
         return ()
     if not isinstance(declared, (list, tuple)):
         raise ConfigError(
-            "Config section 'apps' must be a canonical list, as 'workflows' is; "
+            "Config section 'apps' must be a canonical list; "
             f"found {type(declared).__name__}."
         )
     # Discovery answers before any Application is built, so a duplicate claim
@@ -1030,8 +1028,8 @@ def _member_names(members: Any) -> tuple[str, ...]:
     """A collection's members, as the values a choice offers.
 
     The member's own name, sorted -- the projection the Console's enrichment
-    already used for workflows, kept so the generic resolver answers what the
-    one it replaces answered.
+    already used, kept so the generic resolver answers what the one it replaces
+    answered.
     """
     named = [
         str(member.get("name") or "")

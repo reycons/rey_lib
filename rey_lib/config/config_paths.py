@@ -122,7 +122,7 @@ def resolve_config_paths(
 
     Raises:
         ConfigError: As the context build raises, for a path key left with an
-            unresolved token or a conflicting scoped token.
+            unresolved token.
     """
     resolver = _build_path_resolver(declared_paths, runtime_tokens)
     _apply_path_resolver(tree, resolver)
@@ -195,8 +195,6 @@ def _apply_path_resolver(obj: Any, resolver: PathResolver) -> None:
         name: str(resolver.resolve(name)) for name in resolver._paths
     })
     _walk_logical_refs(obj, resolver_strs)
-    _resolve_scoped_tokens(obj, "workflows", resolver_strs)
-    _walk_logical_refs(obj, resolver_strs)
     _validate_no_unresolved_path_tokens(obj)
 
 def _walk_logical_refs(obj: Any, resolver_strs: dict[str, str]) -> None:
@@ -216,133 +214,6 @@ def _walk_logical_refs(obj: Any, resolver_strs: dict[str, str]) -> None:
     elif isinstance(obj, list):
         for item in obj:
             _walk_logical_refs(item, resolver_strs)
-
-
-def _resolve_scoped_tokens(
-    obj: Any, section: str, global_tokens: dict[str, str]
-) -> None:
-    """Resolve entry-local tokens within each item in ``section``.
-
-    Workflows and pipelines share this implementation. Each entry receives only
-    the global tokens plus its own resolved local tokens, so scopes never leak
-    between entries.
-    """
-    entries = _child(obj, section)
-    for entry in _scoped_items(entries):
-        tokens = _child(entry, "tokens")
-        token_map = _resolve_local_tokens(tokens, global_tokens, section)
-        if token_map:
-            combined = dict(global_tokens)
-            combined.update(token_map)
-            _walk_scoped_refs(entry, combined)
-
-
-def _scoped_items(entries: Any) -> list[Any]:
-    if entries is None:
-        return []
-    if isinstance(entries, Namespace):
-        return [item for _, item in entries.items()]
-    if isinstance(entries, dict):
-        return list(entries.values())
-    if isinstance(entries, list):
-        return list(entries)
-    return []
-
-
-def _resolve_local_tokens(
-    tokens: Any, global_tokens: dict[str, str], section: str
-) -> dict[str, str]:
-    raw = _mapping_items(tokens)
-    if not raw:
-        return {}
-
-    for key in raw:
-        if key in global_tokens:
-            raise ConfigError(
-                f"Scoped token '{key}' in {section} conflicts with installation path token '{key}'."
-            )
-
-    authored = {key: str(value) for key, value in raw.items()}
-    resolved: dict[str, str] = {}
-    resolving: list[str] = []
-
-    def resolve(key: str) -> str:
-        if key in resolved:
-            return resolved[key]
-        if key in resolving:
-            cycle = " -> ".join([*resolving[resolving.index(key):], key])
-            raise ConfigError(
-                f"Circular scoped token reference in {section}: {cycle}."
-            )
-
-        resolving.append(key)
-        value = authored[key]
-        for dependency in sorted(_tokens_in(value)):
-            if dependency in authored:
-                replacement = resolve(dependency)
-            elif dependency in global_tokens:
-                replacement = str(global_tokens[dependency])
-            elif dependency in _RUNTIME_PATH_PLACEHOLDERS:
-                continue
-            else:
-                raise ConfigError(
-                    f"Scoped token '{key}' in {section} references unknown token(s): {dependency}."
-                )
-            value = value.replace("{" + dependency + "}", replacement)
-        resolving.pop()
-        resolved[key] = value
-        return value
-
-    for key in authored:
-        resolve(key)
-
-    return resolved
-
-
-def _walk_scoped_refs(obj: Any, tokens: dict[str, str], parent_key: str = "") -> None:
-    if isinstance(obj, Namespace):
-        for key in obj.keys():
-            value = object.__getattribute__(obj, key)
-            resolved = _resolve_token_value(value, tokens, key)
-            if resolved is not value:
-                object.__setattr__(obj, key, resolved)
-            else:
-                _walk_scoped_refs(value, tokens, key)
-    elif isinstance(obj, dict):
-        for key, value in obj.items():
-            resolved = _resolve_token_value(value, tokens, str(key))
-            if resolved is not value:
-                obj[key] = resolved
-            else:
-                _walk_scoped_refs(value, tokens, str(key))
-    elif isinstance(obj, list):
-        for index, item in enumerate(obj):
-            resolved = _resolve_token_value(item, tokens, parent_key)
-            if resolved is not item:
-                obj[index] = resolved
-            else:
-                _walk_scoped_refs(item, tokens, parent_key)
-
-
-def _resolve_token_value(value: Any, tokens: dict[str, str], key: str) -> Any:
-    raw = str(value) if isinstance(value, Path) else value
-    if not isinstance(raw, str) or "{" not in raw:
-        return value
-
-    substituted = _substitute_known_tokens(raw, tokens)
-    if substituted == raw:
-        return value
-
-    if _is_path_key(key):
-        unresolved = _unresolved_path_tokens(substituted)
-        if unresolved:
-            names = ", ".join(sorted(unresolved))
-            raise ConfigError(
-                f"Path config key '{key}' contains unresolved token(s): {names}."
-            )
-        return Path(substituted).expanduser()
-
-    return substituted
 
 
 def _validate_no_unresolved_path_tokens(obj: Any, parent_key: str = "") -> None:
@@ -366,28 +237,6 @@ def _validate_path_value(key: str, value: Any) -> None:
             return
         names = ", ".join(sorted(unresolved))
         raise ConfigError(f"Path config key '{key}' contains unresolved token(s): {names}.")
-
-
-def _mapping_items(obj: Any) -> dict[str, Any]:
-    if isinstance(obj, Namespace):
-        return {str(key): value for key, value in obj.items()}
-    if isinstance(obj, dict):
-        return {str(key): value for key, value in obj.items()}
-    return {}
-
-
-def _child(obj: Any, key: str) -> Any:
-    if isinstance(obj, Namespace):
-        return getattr(obj, key, None)
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return None
-
-
-def _substitute_known_tokens(text: str, tokens: dict[str, str]) -> str:
-    for key, value in tokens.items():
-        text = text.replace("{" + key + "}", str(value))
-    return text
 
 
 def _tokens_in(text: str) -> set[str]:
