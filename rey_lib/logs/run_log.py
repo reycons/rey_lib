@@ -19,9 +19,9 @@ they are deleted.
 
 Mutable, not snapshot
 ---------------------
-``workflow``, ``pipeline``, lineage and the current step are set *during* a run,
-not at construction. They are held here and changed through ``bind_workflow``,
-``bind_pipeline``, ``bind_step`` and the nesting methods, so there is one
+``workflow``, lineage and the current step are set *during* a run, not at
+construction. They are held here and changed through ``bind_workflow``,
+``bind_step`` and the nesting methods, so there is one
 mutation path rather than a context that anything can write to.
 
 Sequencing is unchanged
@@ -289,11 +289,6 @@ class RunLog:
         return self._workflow
 
     @property
-    def pipeline(self) -> Optional[str]:
-        """The pipeline currently executing, if any."""
-        return self._pipeline
-
-    @property
     def lineage(self) -> dict[str, str]:
         """A copy of the current lineage; mutate through bind_lineage."""
         return dict(self._lineage)
@@ -303,10 +298,6 @@ class RunLog:
     def bind_workflow(self, name: Optional[str]) -> None:
         """Set the workflow every later record is written under."""
         self._workflow = str(name) if name else None
-
-    def bind_pipeline(self, name: Optional[str]) -> None:
-        """Set the pipeline every later record is written under."""
-        self._pipeline = str(name) if name else None
 
     def bind_step(self, step_name: Optional[str] = None,
                   pipeline_step_name: Optional[str] = None) -> None:

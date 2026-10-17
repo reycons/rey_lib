@@ -109,10 +109,6 @@ _APP_DEFS: dict[str, dict] = {
         "subfolders": ["analysis_configs", "data_sources", "llm_configs", "contracts", "schemas"],
         "extra_files": [],
     },
-    "pipeline_coordinator": {
-        "subfolders": ["pipelines"],
-        "extra_files": ["app_registry.yaml"],
-    },
     "rey_console": {
         "subfolders": [],
         "extra_files": [],
@@ -350,7 +346,6 @@ Creates (folder contract):
         <app_name>/app.yaml
         <app_name>/<subfolder>/
         rey_loader/diagnostics/default.yaml
-        pipeline_coordinator/app_registry.yaml
 
     Args:
         config_root: Path to the config root, e.g. installations/ccc/configs/v01.
@@ -403,7 +398,7 @@ Creates (folder contract):
             diag_default = app_path / "diagnostics" / "default.yaml"
             _ensure_yaml(diag_default, _diagnostics_default_yaml(), result, force=force)
 
-        # Extra placeholder files (e.g. pipeline_coordinator/app_registry.yaml).
+        # Extra placeholder files an app declares.
         for ef in app_def["extra_files"]:
             _ensure_yaml(
                 app_path / ef,

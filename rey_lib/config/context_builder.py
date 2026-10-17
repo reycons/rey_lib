@@ -246,8 +246,7 @@ class ContextBuilder:
 def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:
     """Apply the remaining supported compatibility aliases.
 
-    Database and LLM aliases remain structural bridges. Pipelines have one
-    canonical top-level list and reject the retired nested representation.
+    Database and LLM aliases remain structural bridges.
     """
     result = deepcopy(raw)
 
@@ -261,18 +260,6 @@ def _apply_compatibility_aliases(raw: dict[str, Any]) -> dict[str, Any]:
         current_key="llm_profiles",
         canonical_key="llm",
     )
-    pipeline_coordinator = result.get("pipeline_coordinator")
-    if (
-        isinstance(pipeline_coordinator, dict)
-        and "pipelines" in pipeline_coordinator
-    ):
-        raise ConfigError(
-            "Config section 'pipeline_coordinator.pipelines' is retired; "
-            "declare the canonical top-level 'pipelines' list instead."
-        )
-    pipelines = result.get("pipelines")
-    if pipelines is not None and not isinstance(pipelines, list):
-        raise ConfigError("Config section 'pipelines' must be a canonical list.")
 
     return result
 

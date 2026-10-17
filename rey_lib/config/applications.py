@@ -49,7 +49,6 @@ __all__ = [
 #: reinvented.
 _CHOICE_SOURCES: dict[str, str] = {
     "workflows": "workflows",
-    "pipelines": "pipelines",
     "tools": "tools",
     "connections": "connections",
     # Every connection that is a database (backlog 673). ``connections`` keeps
@@ -483,8 +482,8 @@ def build_applications(
         return ()
     if not isinstance(declared, (list, tuple)):
         raise ConfigError(
-            "Config section 'apps' must be a canonical list, as 'workflows' and "
-            f"'pipelines' are; found {type(declared).__name__}."
+            "Config section 'apps' must be a canonical list, as 'workflows' is; "
+            f"found {type(declared).__name__}."
         )
     # Discovery answers before any Application is built, so a duplicate claim
     # stops the run rather than producing objects that would have to be undone.

@@ -545,8 +545,7 @@ class TestEveryChoiceCollectionIsPresent:
         from rey_lib.config.applications import with_choice_collections
 
         assert with_choice_collections({}) == {
-            "connections": [], "data_sources": [], "pipelines": [], "tools": {},
-            "workflows": [],
+            "connections": [], "data_sources": [], "tools": {}, "workflows": [],
         }
 
     def test_a_declared_collection_is_never_touched(self) -> None:
@@ -572,6 +571,4 @@ class TestEveryChoiceCollectionIsPresent:
             runtime_path_tokens={},
         ).build()
 
-        assert (ctx.data_sources, ctx.pipelines, ctx.workflows, ctx.connections) == (
-            [], [], [], [],
-        )
+        assert (ctx.data_sources, ctx.workflows, ctx.connections) == ([], [], [])

@@ -46,7 +46,7 @@ class TestScaffoldConfigRoot:
         result = scaffold_config_root(cr)
 
         assert result.success
-        for app in ["ftp_sync", "rey_loader", "rey_analyzer", "pipeline_coordinator", "rey_console", "file_operator"]:
+        for app in ["ftp_sync", "rey_loader", "rey_analyzer", "rey_console", "file_operator"]:
             assert (cr / app).is_dir(), f"missing: {app}"
             assert (cr / app / "app.yaml").exists(), f"missing app.yaml: {app}"
 
@@ -73,7 +73,6 @@ class TestScaffoldConfigRoot:
         assert (cr / "rey_analyzer" / "analysis_configs").is_dir()
         assert (cr / "rey_analyzer" / "llm_configs").is_dir()
         assert (cr / "rey_analyzer" / "contracts").is_dir()
-        assert (cr / "pipeline_coordinator" / "pipelines").is_dir()
         assert (cr / "file_operator" / "redact").is_dir()
 
     def test_creates_diagnostics_default_yaml(self, tmp_path):
@@ -83,11 +82,6 @@ class TestScaffoldConfigRoot:
         assert diag.exists()
         data = yaml.safe_load(diag.read_text())
         assert "diagnostics" in data
-
-    def test_creates_app_registry_for_pipeline_coordinator(self, tmp_path):
-        cr = tmp_path / "v01"
-        scaffold_config_root(cr)
-        assert (cr / "pipeline_coordinator" / "app_registry.yaml").exists()
 
     def test_creates_gitkeep_in_empty_subfolders(self, tmp_path):
         cr = tmp_path / "v01"

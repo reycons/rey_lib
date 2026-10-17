@@ -31,41 +31,6 @@ paths:
     return config_dir
 
 
-def test_ctx_file_args_apply_child_app_log_context(tmp_path: Path) -> None:
-    """Pipeline child ctx snapshots inherit CLI app identity and log path."""
-    ctx_file = tmp_path / "ctx.json"
-    log_file = tmp_path / "pipeline.jsonl"
-    ctx_file.write_text(
-        json.dumps({
-            "ctx_schema_version": "1.0",
-            "ctx": {
-                "app_name": "pipeline_coordinator",
-                # The installation the transported state came from. A real
-                # snapshot always carries it, because every context the builder
-                # finishes records its own config_path; the child needs it to
-                # resolve against the same installation as its parent.
-                "config_path": str(tmp_path / "config.yaml"),
-                "paths": {"state": str(tmp_path / "state")},
-            },
-        }),
-        encoding="utf-8",
-    )
-    args = SimpleNamespace(
-        ctx_file=str(ctx_file),
-        config_path=None,
-        log_file=str(log_file),
-        pipeline_name="daily",
-    )
-
-    ctx = build_ctx_from_args(args, app_name="rey_loader")
-
-    assert ctx.app_name == "rey_loader"
-    assert ctx.pipeline_name == "daily"
-    assert ctx.log_file == str(log_file.resolve())
-    assert ctx.jsonl_path == str(log_file.resolve())
-    assert ctx.run_log_path == str(log_file.resolve())
-
-
 def test_db_connections_alias_to_connections(tmp_path: Path) -> None:
     config_dir = _root(tmp_path)
     _write(config_dir / "shared" / "db.yaml", """\
@@ -122,62 +87,6 @@ llm_profiles:
 
     assert ctx.llm_profiles[0].name == "local"
     assert ctx.llm[0].name == "local"
-
-
-def test_pipeline_coordinator_pipeline_collection_is_rejected(tmp_path: Path) -> None:
-    config_dir = _root(tmp_path)
-    _write(config_dir / "pipelines" / "legacy.yaml", """\
-pipeline_coordinator:
-  pipelines:
-    file_onboarder:
-      enabled: true
-""")
-
-    with pytest.raises(ConfigError, match="pipeline_coordinator.pipelines.*retired"):
-        build_ctx_from_path(config_dir / "config.yaml")
-
-
-def test_top_level_pipelines_remain_the_only_pipeline_collection(tmp_path: Path) -> None:
-    config_dir = _root(tmp_path)
-    _write(config_dir / "pipelines" / "logical.yaml", """\
-pipelines:
-  - name: file_onboarder
-    enabled: true
-""")
-
-    ctx = build_ctx_from_path(config_dir / "config.yaml")
-
-    assert ctx.pipelines[0].name == "file_onboarder"
-    assert ctx.pipelines[0].enabled is True
-    assert not hasattr(ctx, "pipeline_coordinator")
-
-
-def test_top_level_pipeline_mapping_is_rejected(tmp_path: Path) -> None:
-    config_dir = _root(tmp_path)
-    _write(config_dir / "pipelines" / "legacy.yaml", """\
-pipelines:
-  file_onboarder:
-    enabled: true
-""")
-
-    with pytest.raises(ConfigError, match="pipelines.*canonical list"):
-        build_ctx_from_path(config_dir / "config.yaml")
-
-
-def test_conflicting_duplicate_pipelines_fail_closed(tmp_path: Path) -> None:
-    config_dir = _root(tmp_path)
-    _write(config_dir / "pipelines" / "conflict.yaml", """\
-pipeline_coordinator:
-  pipelines:
-    file_onboarder:
-      enabled: true
-pipelines:
-  file_onboarder:
-    enabled: false
-""")
-
-    with pytest.raises(ConfigError, match="pipeline_coordinator.pipelines.*retired"):
-        build_ctx_from_path(config_dir / "config.yaml")
 
 
 def test_conflicting_duplicate_named_list_entries_fail_closed(tmp_path: Path) -> None:

@@ -62,14 +62,6 @@ class TestItOwnsTheTransitions:
         assert "workflow_name" not in before
         assert after["workflow_name"] == "transform_load"
 
-    def test_binding_a_pipeline_changes_later_records(self, tmp_path: Path) -> None:
-        run_log = make_db_run_log(tmp_path)
-        run_log.bind_pipeline("daily")
-
-        run_log.append("ROW_COUNT", count_name="a", count=1)
-
-        assert _rows(run_log)[0]["pipeline_name"] == "daily"
-
     def test_lineage_is_bound_and_stamped(self, tmp_path: Path) -> None:
         run_log = make_db_run_log(tmp_path)
         run_log.bind_lineage(parent_run_id="R-parent", subject_type="workflow")

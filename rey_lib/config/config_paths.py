@@ -25,7 +25,7 @@ _PATH_KEYS = frozenset({
     "app_path", "artifacts_path", "config_path",
     "converted_path", "env_file", "failed_path",
     "inbox_path", "jsonl_path", "jsonl_root", "output_root",
-    "pipeline_log_dir", "processing_path", "raw_output_path",
+    "processing_path", "raw_output_path",
     "readable_root", "records_path", "rejected_path", "repo_root",
     "results_path", "script_path", "sql_path", "success_path", "venv_path",
     "working_dir",
@@ -196,7 +196,6 @@ def _apply_path_resolver(obj: Any, resolver: PathResolver) -> None:
     })
     _walk_logical_refs(obj, resolver_strs)
     _resolve_scoped_tokens(obj, "workflows", resolver_strs)
-    _resolve_scoped_tokens(obj, "pipelines", resolver_strs)
     _walk_logical_refs(obj, resolver_strs)
     _validate_no_unresolved_path_tokens(obj)
 

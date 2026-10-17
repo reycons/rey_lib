@@ -7,7 +7,7 @@ declarations that are otherwise duplicated across every Rey app.
 Public API
 ----------
   preparse_config_args()              Pre-parse --config-path/--config-dir and call load_dotenv.
-  add_config_args(parser)             Add shared config/pipeline args to a parser.
+  add_config_args(parser)             Add shared config args to a parser.
   apply_env_overrides(items)          Write --set KEY=VALUE pairs into os.environ.
   build_ctx_from_args(args, app_name) Build ctx from parsed args and app identity.
 """
@@ -30,7 +30,6 @@ __all__ = [
     "add_config_args",
     "apply_env_overrides",
     "build_ctx_from_args",
-    "load_ctx_snapshot",
 ]
 
 #: Where an operator's ``--log-level`` is recorded on the context.
@@ -102,7 +101,7 @@ def _root_config_in(config_dir: Path) -> Optional[Path]:
 
 
 def add_config_args(parser: argparse.ArgumentParser) -> None:
-    """Add shared config/environment/pipeline args to a parser.
+    """Add shared config/environment args to a parser.
 
     Parameters
     ----------
@@ -149,10 +148,6 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
-    # ---------------------------------------------------------------------
-    # Pipeline coordinator arguments
-    # ---------------------------------------------------------------------
-
     parser.add_argument(
         "--run-id",
         dest="run_id",
@@ -165,34 +160,6 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
     )
 
     parser.add_argument(
-        "--pipeline-name",
-        dest="pipeline_name",
-        default=None,
-        help="Pipeline name provided by the pipeline coordinator.",
-    )
-
-    parser.add_argument(
-        "--pipeline-run-id",
-        dest="pipeline_run_id",
-        default=None,
-        help="Unique pipeline run identifier.",
-    )
-
-    parser.add_argument(
-        "--pipeline-step-name",
-        dest="pipeline_step_name",
-        default=None,
-        help="Pipeline step name.",
-    )
-
-    parser.add_argument(
-        "--pipeline-step-id",
-        dest="pipeline_step_id",
-        default=None,
-        help="Optional unique pipeline step identifier.",
-    )
-
-    parser.add_argument(
         "--log-level",
         dest="log_level",
         default=None,
@@ -202,90 +169,6 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
             "run only."
         ),
     )
-
-    parser.add_argument(
-        "--log-file",
-        dest="log_file",
-        default=None,
-        help="Shared pipeline JSONL log file path.",
-    )
-
-    parser.add_argument(
-        "--ctx-file",
-        dest="ctx_file",
-        default=None,
-        help="Path to a pipeline step ctx snapshot (JSON). Mutually exclusive with --config-path.",
-    )
-
-
-def load_ctx_snapshot(ctx_file: str) -> "Namespace":
-    """Build the child context from transported pipeline state.
-
-    Transport, not construction. This reads the snapshot the coordinator wrote,
-    checks the schema version it declares, and hands the plain state to
-    :class:`~rey_lib.config.context_builder.ContextBuilder` -- the one authority
-    that finishes a context.
-
-    It used to assemble a context itself, and the two builders drifted: this one
-    constructed its own ``PathResolver`` and ran none of the rest, so every
-    pipeline child received ``ctx.applications`` as repr strings rather than
-    ``Application`` objects and nothing compared them.
-
-    Parameters
-    ----------
-    ctx_file : str
-        Path to the ctx snapshot JSON file written by the pipeline coordinator.
-
-    Returns
-    -------
-    Namespace
-        The completed child context, built by the same sequence that builds one
-        from installation files.
-
-    Raises
-    ------
-    ConfigError
-        If the file is missing, malformed, has an unsupported schema version, or
-        carries no ``config_path`` to resolve relative references against.
-    """
-    import json
-
-    from rey_lib.config.context_builder import ContextBuilder
-    from rey_lib.errors.error_utils import ConfigError
-
-    path = Path(ctx_file).expanduser().resolve()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ConfigError(f"Cannot load ctx snapshot {ctx_file!r}: {exc}") from exc
-
-    version = data.get("ctx_schema_version")
-    if version != "1.0":
-        raise ConfigError(f"Unsupported ctx snapshot version: {version!r}")
-
-    ctx_data: dict = data["ctx"]
-
-    # The installation this state came from. Carried rather than rediscovered:
-    # a child resolving its own config file could pick a different one from the
-    # parent's, which is the divergence this whole seam exists to remove.
-    config_path_raw = ctx_data.get("config_path")
-    if not config_path_raw:
-        raise ConfigError(
-            f"Ctx snapshot {ctx_file!r} names no config_path, so the installation it "
-            "came from cannot be established. The coordinator writes this; a snapshot "
-            "without it was not written by a complete context."
-        )
-    config_path = Path(str(config_path_raw)).expanduser()
-
-    return ContextBuilder(
-        ctx_data,
-        config_dir=config_path.parent,
-        config_path=config_path,
-        runtime_path_tokens={},
-        resolved_paths={
-            name: str(value) for name, value in (ctx_data.get("paths") or {}).items()
-        },
-    ).build()
 
 
 def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
@@ -316,31 +199,7 @@ def build_ctx_from_args(args: argparse.Namespace, app_name: str) -> "Namespace":
     from rey_lib.config.config_utils import build_ctx_from_path
     from rey_lib.errors.error_utils import ConfigError
 
-    ctx_file = getattr(args, "ctx_file", None)
     config_path = getattr(args, "config_path", None)
-
-    if ctx_file and config_path:
-        raise ConfigError("--ctx-file and --config-path are mutually exclusive")
-
-    if ctx_file:
-        try:
-            ctx = load_ctx_snapshot(ctx_file)
-        except (ConfigError, OSError) as exc:
-            raise SystemExit(f"FATAL: failed to load config - {exc}") from exc
-        object.__setattr__(ctx, "app_name", app_name)
-        log_file = getattr(args, "log_file", None)
-        if log_file:
-            resolved_log_file = str(Path(log_file).expanduser().resolve())
-            object.__setattr__(ctx, "log_file", resolved_log_file)
-            object.__setattr__(ctx, "jsonl_path", resolved_log_file)
-            object.__setattr__(ctx, "run_log_path", resolved_log_file)
-        _apply_log_level(ctx, args)
-        _apply_connection_aliases(ctx, args)
-        pipeline_name = getattr(args, "pipeline_name", None)
-        if pipeline_name:
-            object.__setattr__(ctx, "pipeline_name", pipeline_name)
-        _adopt_run_id(ctx, args)
-        return ctx
 
     if not config_path:
         raise SystemExit("--config-path is required.")
