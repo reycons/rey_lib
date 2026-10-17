@@ -403,6 +403,11 @@ class AI:
         its key, its label and whether it is composed before it runs. What an
         application session serving this AI sends its presentation, as a Workflow
         projects itself for workflow_app: the AI states it, nobody re-derives it.
+
+        With them, the enabled engines and the instructions a task's choices may
+        name (backlog 1047, D2): what may be chosen, so a presentation offers
+        overrides without reading configuration itself. Each in the governed
+        reads' own order.
         """
         return {
             "tasks": [
@@ -413,6 +418,21 @@ class AI:
                 }
                 for row in control.ai_configuration(installation)
                 if str(row.get("row_type")) == "task" and row.get("is_enabled") is not False
+            ],
+            "engines": [
+                {
+                    "profile_key": str(row.get("profile_key") or ""),
+                    "model_identifier": str(row.get("model_identifier") or ""),
+                }
+                for row in control.ai_engine_profiles()
+                if row.get("is_enabled") is not False
+            ],
+            "instructions": [
+                {
+                    "instruction_key": str(row.get("instruction_key") or ""),
+                    "kind": str(row.get("kind") or ""),
+                }
+                for row in control.ai_instructions()
             ],
         }
 
@@ -731,9 +751,10 @@ class AI:
     # -- the session's tasks (backlog 1037) --------------------------------
 
     #: What an edit may change besides the choices: which task, and what the
-    #: caller sends and addresses. Never the identity, which an edit carries.
+    #: caller sends and addresses. Never the identity, which an edit carries,
+    #: and never the output requirement, which is a choice (backlog 1047, D4).
     _TASK_FACTS = (
-        "task_key", "input", "output", "subject", "subject_id", "subject_kind", "origin_id",
+        "task_key", "input", "subject", "subject_id", "subject_kind", "origin_id",
     )
 
     def hydrate_task(self, control: Any, installation: str, **facts: Any) -> AITask:

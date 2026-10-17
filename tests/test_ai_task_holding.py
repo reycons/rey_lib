@@ -17,6 +17,7 @@ from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIRequestError, AISelectionError
 from rey_lib.ai.registry import AIRegistry
+from rey_lib.ai.requests import AIOutputKind, AIOutputSpec
 from rey_lib.ai.task import AITask
 
 CONFIGURATION = [
@@ -176,6 +177,52 @@ class TestRehydration:
         ai.rehydrate_task(control, first.id, {"profile_key": "anthropic"})
 
         assert control.configuration == CONFIGURATION
+
+
+class TestOutputIsAChoice:
+    """Backlog 1047, D4: hydration derives the output; a stated one is a choice."""
+
+    def test_hydration_derives_markdown_for_a_task_without_a_contract(self) -> None:
+        task = _ai().hydrate_task(_Control(), "local")
+
+        assert task.instruction_key == "__none__"
+        assert (task.output.kind, task.output.media_type) == (AIOutputKind.TEXT, "text/markdown")
+        assert "output" not in task.choices
+
+    def test_hydration_derives_plain_text_for_a_contract_backed_task(self) -> None:
+        task = _ai().hydrate_task(_Control(), "local", task_key="search_index")
+
+        assert (task.output.kind, task.output.media_type) == (AIOutputKind.TEXT, "")
+
+    def test_a_derived_output_follows_an_edit_to_another_kind_of_task(self) -> None:
+        ai, control = _ai(), _Control()
+        first = ai.hydrate_task(control, "local")
+
+        second = ai.rehydrate_task(control, first.id, {"task_key": "search_index"})
+
+        assert first.output.media_type == "text/markdown"
+        assert second.output.media_type == ""
+        assert "output" not in second.choices
+
+    def test_a_stated_output_survives_an_unrelated_edit(self) -> None:
+        ai, control = _ai(), _Control()
+        first = ai.hydrate_task(control, "local", task_key="search_index",
+                                output=AIOutputSpec.markdown())
+
+        second = ai.rehydrate_task(control, first.id, {"temperature": 0.4})
+
+        assert second.output.media_type == "text/markdown"
+        assert second.choices["output"] == AIOutputSpec.markdown()
+
+    def test_clearing_a_stated_output_hands_it_back_to_hydration(self) -> None:
+        ai, control = _ai(), _Control()
+        first = ai.hydrate_task(control, "local", task_key="search_index",
+                                output=AIOutputSpec.markdown())
+
+        second = ai.rehydrate_task(control, first.id, {"output": None})
+
+        assert second.output.media_type == ""
+        assert "output" not in second.choices
 
 
 class TestRefusals:

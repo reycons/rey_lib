@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar, Mapping, Sequence
 
-from rey_lib.ai.content import AIInput
+from rey_lib.ai.content import AIContentKind, AIInput
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputSpec
@@ -88,8 +88,11 @@ class AITask:
     CANCELLED: ClassVar[str] = "cancelled"
 
     #: The overrides a caller may choose, by their hydration argument names.
+    #: ``output`` is one (backlog 1047, D4): stated, it is kept across edits;
+    #: unstated, hydration derives it again at every rehydration.
     CHOICES: ClassVar[tuple[str, ...]] = (
         "profile_key", "instruction_key", "temperature", "representation", "connection",
+        "output",
     )
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -218,6 +221,13 @@ class AITask:
         -- a non-empty text, a temperature that is not ``None`` -- are recorded
         as the task's ``choices``; an empty one is no choice.
 
+        The output requirement, when the caller states none, is hydration's to
+        decide from what the governed instruction is (backlog 1047, D4): a
+        contract's body defines its own textual answer, so a contract-backed task
+        asks plain text with no media type; any other task asks Markdown. No
+        structured output is inferred -- no governed configuration states a
+        shape.
+
         ``configuration`` is the installation's control.f_ai_configuration_get
         rows: the group row is the default scope and each task row one task, its
         inheritance already resolved by ai.ai_vw. ``engines`` and
@@ -262,11 +272,18 @@ class AITask:
                       None)
         )
         timeout = engine.get("timeout_seconds")
+        kind = AIInstructionKind(str(instruction.get("kind") or "none"))
+        required = output if output is not None else (
+            AIOutputSpec.text() if kind is AIInstructionKind.CONTRACT
+            else AIOutputSpec.markdown()
+        )
         identity = {"id": str(task_id)} if str(task_id or "").strip() else {}
+        # What the caller stated, before anything was derived: a derived value
+        # recorded here would come back as a choice nobody made.
         given = {
             "profile_key": profile_key, "instruction_key": instruction_key,
             "temperature": temperature, "representation": representation,
-            "connection": connection,
+            "connection": connection, "output": output,
         }
         return cls(
             **identity,
@@ -284,7 +301,7 @@ class AITask:
             access_allowed=tuple(str(one) for one in (engine.get("access_allowed") or ())),
             access_default=str(engine.get("access_default") or ""),
             instruction_key=str(instruction.get("instruction_key") or ""),
-            instruction_kind=AIInstructionKind(str(instruction.get("kind") or "none")),
+            instruction_kind=kind,
             contract_key=str(instruction.get("contract_key") or ""),
             contract_version=str(instruction.get("contract_version") or ""),
             contract_body=str(instruction.get("body") or ""),
@@ -292,7 +309,7 @@ class AITask:
             representation=chosen(representation, "representation"),
             connection=chosen(connection, "connection_name"),
             input=input if input is not None else AIInput(),
-            output=output if output is not None else AIOutputSpec(),
+            output=required,
             subject=subject, subject_id=subject_id,
             subject_kind=subject_kind, origin_id=origin_id,
             # The task's own row only: tools are offered per task, and the
@@ -361,6 +378,50 @@ class AITask:
                 "carries no body, so nothing could be sent for it."
             )
         return instruction
+
+    # -- what it shows ------------------------------------------------------
+
+    def projection(self) -> dict[str, Any]:
+        """This task as plain data, for whatever displays it (backlog 1047, D1).
+
+        Its identity, which governed task it is, the caller's choices and what
+        was asked, its lifecycle, and its answer as AI stated it -- text or
+        value with the media type, never rendered. Engine credentials and the
+        contract body stay out: they are execution facts, not display.
+        """
+        answer = self.answer
+        return {
+            "id": self.id,
+            "task_key": self.task_key,
+            "label": self.label,
+            "composed_first": self.composed_first,
+            "profile_key": self.profile_key,
+            "instruction_key": self.instruction_key,
+            "temperature": self.temperature,
+            "representation": self.representation,
+            "connection": self.connection,
+            # A chosen output is shown by what it means -- its media type --
+            # never as the requirement object itself.
+            "choices": {
+                name: (value.media_type if name == "output" else value)
+                for name, value in self.choices.items()
+            },
+            "prompt": "\n\n".join(
+                str(part.value) for part in self.input.content
+                if part.kind is AIContentKind.TEXT
+            ),
+            "media_type": self.output.media_type,
+            "subject": self.subject,
+            "subject_id": self.subject_id,
+            "subject_kind": self.subject_kind,
+            "origin_id": self.origin_id,
+            "status": self.status,
+            "error": self.error,
+            "run_id": self.run_id,
+            "answer": None if answer is None else {
+                "text": answer.text, "value": answer.value, "media_type": answer.media_type,
+            },
+        }
 
     # -- the lifecycle -----------------------------------------------------
 

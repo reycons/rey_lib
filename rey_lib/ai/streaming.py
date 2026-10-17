@@ -59,6 +59,31 @@ class AIEvent:
     error: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def projection(self) -> dict[str, Any]:
+        """This event as plain data, for whatever relays it (backlog 1047, D1).
+
+        The kind and the fields that kind carries; a completed event's result as
+        AI stated it -- text or value with the media type, never rendered.
+        """
+        call, outcome, result = self.tool_call, self.tool_result, self.result
+        return {
+            "kind": self.kind.value,
+            "execution_id": self.execution_id,
+            "text": self.text,
+            "value": self.value,
+            "error": self.error,
+            "tool_call": None if call is None else {
+                "id": call.id, "name": call.name, "arguments": dict(call.arguments),
+            },
+            "tool_result": None if outcome is None else {
+                "call_id": outcome.call_id, "value": outcome.value,
+                "failed": outcome.failed, "message": outcome.message,
+            },
+            "result": None if result is None else {
+                "text": result.text, "value": result.value, "media_type": result.media_type,
+            },
+        }
+
     @staticmethod
     def started(execution_id: str) -> "AIEvent":
         return AIEvent(kind=AIEventKind.EXECUTION_STARTED, execution_id=execution_id)
