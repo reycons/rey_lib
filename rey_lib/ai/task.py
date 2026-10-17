@@ -32,6 +32,7 @@ from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputSpec
+from rey_lib.ai.tools import AITool
 from rey_lib.logs.app_logger import AppLogger
 
 logger = AppLogger(__name__)
@@ -68,6 +69,9 @@ class AITask:
         subject_id, subject_kind, origin_id: How the caller addresses this
             unit of work's subject and where it began. Opaque: carried and
             preserved, never interpreted.
+        tools: The governed tools this task offers (backlog 1023) -- facts
+            only. What carries each out is bound by the runtime at execution,
+            never by hydration.
         status, answer, error, run_id: The lifecycle. Read-only to callers and
             changed only by this task's transitions.
     """
@@ -111,6 +115,8 @@ class AITask:
     subject_id: str = ""
     subject_kind: str = ""
     origin_id: str = ""
+
+    tools: tuple[AITool, ...] = ()
 
     status: str = field(default=IDLE, init=False)
     answer: Any = field(default=None, init=False)
@@ -257,6 +263,18 @@ class AITask:
             output=output if output is not None else AIOutputSpec(),
             subject=subject, subject_id=subject_id,
             subject_kind=subject_kind, origin_id=origin_id,
+            # The task's own row only: tools are offered per task, and the
+            # group row and an unconfigured task offer none.
+            tools=tuple(
+                AITool(
+                    name=str(one.get("tool_key") or ""),
+                    description=str(one.get("description") or ""),
+                    input_schema=dict(one.get("input_schema") or {}),
+                    replay_safe=bool(one.get("replay_safe")),
+                    capability_key=str(one.get("capability_key") or ""),
+                )
+                for one in ((row or {}).get("tools") or ())
+            ),
         )
 
     @staticmethod

@@ -31,7 +31,7 @@ retry, tool, validation and normalization code is not here, and no
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 
 from rey_lib.ai.capabilities import AICapabilitySet
 from rey_lib.ai.content import AIContentKind
@@ -65,7 +65,7 @@ from rey_lib.ai.sessions import AISession
 from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.task import AITask
-from rey_lib.ai.tools import AITool
+from rey_lib.ai.tools import AITool, AIToolSet, Operation
 from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
 from rey_lib.logs.app_logger import AppLogger
 
@@ -378,11 +378,16 @@ class AI:
         """Resolve this request and run it, reporting canonical events."""
         return self._executor.stream(self.resolve(request, session_id=session_id))
 
-    def execute_task(self, task: AITask) -> AIResult:
+    def execute_task(
+        self, task: AITask, operations: Mapping[str, Operation] | None = None,
+    ) -> AIResult:
         """Perform one hydrated unit of work through Pydantic AI (backlog 1020).
 
         The task's choices are settled; this builds its model, runs it once and
-        records the outcome through the task's own transitions. Synchronous:
+        records the outcome through the task's own transitions. The task's
+        governed tools are bound here to ``operations`` -- the runtime's
+        ``capability_key -> operation`` mapping -- as this execution's
+        ``AIToolSet`` (backlog 1023); hydration never supplies them. Synchronous:
         every caller runs on a thread without an event loop, and from inside a
         running loop this refuses rather than starting one of its own.
 
@@ -399,14 +404,22 @@ class AI:
                 usage limit stops the run.
             AIOutputError: when the output never satisfied its contract.
             AIProviderError: when the engine refused or could not be reached.
-            AIConfigurationError: when the engine or the run cannot be set up.
+            AIConfigurationError: when the engine or the run cannot be set up,
+                or a tool's capability is bound to nothing.
         """
         import asyncio
         import uuid
         from datetime import datetime, timezone
 
         import pydantic_ai
-        from pydantic_ai import Agent, ModelRetry, NativeOutput, PromptedOutput, StructuredDict
+        from pydantic_ai import (
+            Agent,
+            ModelRetry,
+            NativeOutput,
+            PromptedOutput,
+            StructuredDict,
+            UsageLimits,
+        )
         from pydantic_ai.exceptions import (
             ModelAPIError,
             UnexpectedModelBehavior,
@@ -442,11 +455,16 @@ class AI:
                     if model.profile.get("supports_json_schema_output")
                     else PromptedOutput(shaped)
                 )
+            toolset = AIToolSet(task.tools, operations or {})
             agent = Agent(
                 model,
                 output_type=output_type,
                 instructions=task.contract_body or None,
-                retries={"output": self._policy.validation_correction.max_corrections},
+                tools=toolset.pydantic_tools(),
+                retries={
+                    "output": self._policy.validation_correction.max_corrections,
+                    "tools": self._policy.tool_correction.max_corrections,
+                },
             )
 
             @agent.output_validator
@@ -471,7 +489,10 @@ class AI:
                 task.task_key or "(default)", task.model_identifier,
                 task.instruction_key or "(none)", type(output_type).__name__,
             )
-            run = agent.run_sync(prompt, model_settings=settings or None)
+            run = agent.run_sync(
+                prompt, model_settings=settings or None,
+                usage_limits=UsageLimits(request_limit=self._policy.budget.max_turns),
+            )
             output = self._parse_task_output(task, schema, run.output)
         except UserError as error:
             failure: AIError = AIConfigurationError(
