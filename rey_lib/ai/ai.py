@@ -387,6 +387,26 @@ class AI:
         """Resolve this request and run it, reporting canonical events."""
         return self._executor.stream(self.resolve(request, session_id=session_id))
 
+    def projection(self, control: Any, installation: str) -> dict[str, Any]:
+        """What this AI offers an installation, as plain data (backlog 1041).
+
+        The tasks its governed configuration offers, in configured order, each as
+        its key, its label and whether it is composed before it runs. What an
+        application session serving this AI sends its presentation, as a Workflow
+        projects itself for workflow_app: the AI states it, nobody re-derives it.
+        """
+        return {
+            "tasks": [
+                {
+                    "task_key": str(row.get("task_key") or ""),
+                    "label": str(row.get("task_label") or row.get("task_key") or ""),
+                    "composed_first": bool(row.get("composed_first") or False),
+                }
+                for row in control.ai_configuration(installation)
+                if str(row.get("row_type")) == "task" and row.get("is_enabled") is not False
+            ],
+        }
+
     def execute_task(
         self, task: AITask, operations: Mapping[str, Operation] | None = None,
     ) -> AIResult:
