@@ -215,13 +215,13 @@ def test_the_module_builds_no_installation_aggregate() -> None:
     assert classes == []
 
 
-def test_the_module_exports_its_two_responsibilities_and_no_others() -> None:
+def test_the_module_exports_its_one_responsibility_and_no_other() -> None:
     """__all__ is the surface, and it is the whole surface.
 
     A helper that grows a caller outside this module is a decision, not a
-    detail: it either belongs to one of these two responsibilities or it
-    belongs somewhere else.
+    detail: it either belongs to this responsibility or it belongs somewhere
+    else.
     """
     from rey_lib.config import inventory
 
-    assert inventory.__all__ == ["resolve_workflow_run_action", "to_plain_data"]
+    assert inventory.__all__ == ["to_plain_data"]

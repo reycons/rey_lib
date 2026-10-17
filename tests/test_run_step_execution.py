@@ -3,9 +3,8 @@
 The child Run is the step's execution instance: it executes the step's bound
 operation with itself as the handler's execution context, handles the execution
 error through AppError, and finishes its own lifecycle SUCCEEDED / FAILED /
-SKIPPED. A child works in its parent's apply / data / metadata. The parity tests
-run the same handlers through the recovered ``run_workflow`` (backlog 949) and
-compare the step evidence and its order; the logging is consumed unchanged.
+SKIPPED. A child works in its parent's apply / data / metadata, and records its
+step evidence in order; the logging is consumed unchanged.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from typing import Any
 import pytest
 
 from tests.conftest import make_db_run_log, start_test_run
-from tests.support.workflow_publication import prepared
 from tests.support.workflow_runs import RecordingControl, parent_run
 
 from rey_lib.config.applications import Application, ApplicationOperation
@@ -26,13 +24,8 @@ from rey_lib.errors.error_utils import AppError
 from rey_lib.logs import current_step
 from rey_lib.run import Run
 from rey_lib.run import run as run_module
-from rey_lib.workflow import coordinator, run_workflow
 from rey_lib.workflow.workflow_step import WorkflowStep
 
-_VOLATILE = frozenset({
-    "run_id", "run_log_id", "run_timestamp", "timestamp", "parent_run_log_id", "duration_ms",
-})
-_VOLATILE_ERROR = frozenset({"failure_record_id", "sanitized_traceback", "traceback_summary"})
 _SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 
 
@@ -59,22 +52,6 @@ def _read(run_log: Any) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
-def _step_records(run_log: Any) -> list[dict[str, Any]]:
-    """The STEP_* records, without the fields that identify run, write or source."""
-    stable = []
-    for record in _read(run_log):
-        if not record["record_type"].startswith("STEP_"):
-            continue
-        record = {key: value for key, value in record.items() if key not in _VOLATILE}
-        if isinstance(record.get("error_message"), dict):
-            record["error_message"] = {
-                key: value for key, value in record["error_message"].items()
-                if key not in _VOLATILE_ERROR
-            }
-        stable.append(record)
-    return stable
 
 
 def _child(control: RecordingControl, parent: Run) -> Run:
@@ -290,7 +267,7 @@ def test_a_not_released_step_logs_its_reason_and_finishes_not_run(tmp_path: Path
     assert current_step() is None
 
 
-# --- parity with the recovered run_workflow --------------------------------------
+# --- evidence order ---------------------------------------------------------------
 
 
 def _record_order(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[str]:
@@ -314,40 +291,15 @@ def _record_order(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[str]:
     return order
 
 
-def _legacy(handler: Any, tmp_path: Path) -> Any:
-    run_log = _log(tmp_path)
-    workflow = {"name": "wf", "processes": {"p1": {}},
-                "steps": [{"id": "s1", "label": "One", "process": "p1"}]}
-    _wf, _ctx = prepared(workflow, SimpleNamespace())
-    run_workflow(_ctx, run_log, _wf, {"p1": handler})
-    return run_log
-
-
 @pytest.mark.parametrize("handler, expected", [
     (_raises, ["log_step_start", "report", "log_step_failure", "log_step_end"]),
     (_returns_failed, ["log_step_start", "log_step_end", "log_step_failure"]),
     (lambda *_args: None, ["log_step_start", "log_step_end"]),
 ], ids=["raised", "returned_failed", "ok"])
-def test_evidence_order_matches_run_workflow(
+def test_step_evidence_is_recorded_in_order(
     handler: Any, expected: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    legacy_order = _record_order(monkeypatch, coordinator)
-    _legacy(handler, tmp_path / "legacy")
-    legacy = list(legacy_order)
+    order = _record_order(monkeypatch, run_module)
+    _execute(_step(handler), _log(tmp_path))
 
-    new_order = _record_order(monkeypatch, run_module)
-    _execute(_step(handler), _log(tmp_path / "new"))
-
-    assert legacy == expected
-    assert new_order == expected
-
-
-@pytest.mark.parametrize("handler", [_raises, _returns_failed, lambda *_args: None],
-                         ids=["raised", "returned_failed", "ok"])
-def test_step_records_match_run_workflow(handler: Any, tmp_path: Path) -> None:
-    legacy = _legacy(handler, tmp_path / "legacy")
-    new = _log(tmp_path / "new")
-    new.set_nest_level("workflow")
-    _execute(_step(handler), new)
-
-    assert _step_records(new) == _step_records(legacy)
+    assert order == expected

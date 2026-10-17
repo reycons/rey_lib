@@ -4,10 +4,9 @@
 contract first, assigns its sequence and indent, and creates one child Run for
 it under the parent Run (a skipped step gets one too). The child Run executes
 the step and finishes itself; the step stays in the graph and holds that Run's
-outcome as its state, and ``run`` returns the Workflow Run. The parity tests run one fixture
-through the recovered ``run_workflow`` (backlog 949) and through a Workflow
-graph built from it, with the same recording handlers, and compare call order,
-step outcomes (child Run statuses) and the run-log records.
+outcome as its state, and ``run`` returns the Workflow Run. The tests direct a
+graph built from one fixture with recording handlers and assert call order, step
+outcomes (child Run statuses) and the run-log records.
 """
 
 from __future__ import annotations
@@ -26,10 +25,7 @@ from tests.support.workflow_runs import RecordingControl, parent_run
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.errors.error_utils import AppError
 from rey_lib.run import Run
-from rey_lib.workflow import run_workflow
 from rey_lib.workflow import workflow as workflow_module
-from rey_lib.workflow.coordinator import _deep_merge
-from rey_lib.workflow.engine import WorkflowError as LegacyWorkflowError
 from rey_lib.workflow.workflow import Workflow
 from rey_lib.workflow.workflow_process import WorkflowProcess
 from rey_lib.workflow.workflow_step import WorkflowStep
@@ -38,14 +34,11 @@ _ENGINE_KEYS = frozenset({"implementation", "apply_only", "always_run", "enabled
 #: Fields that identify a run, a moment or a source location rather than behaviour.
 _VOLATILE = frozenset({"run_id", "run_timestamp", "timestamp", "duration_ms", "failure_record_id"})
 _VOLATILE_ERROR = frozenset({"failure_record_id", "sanitized_traceback", "traceback_summary"})
-#: Where the contract departs from the legacy engine on purpose (backlog 964): a
-#: step's sequence is its ordinal, not a counter over the selection. Asserted on
-#: its own, left out of the parity comparison.
+#: A step's sequence is its ordinal, not a counter over the selection (backlog
+#: 964). Asserted on its own, left out of the record comparison.
 _ORDINAL_SEQUENCE = frozenset({"step_sequence", "failed_step_sequence"})
 #: The records whose content is compared; every other record is compared by type.
 _COMPARED = frozenset({"RUN_START", "RUN_COMPLETE", "STEP_START", "STEP_END", "STEP_FAILURE"})
-#: A legacy outcome status and the child Run's terminal status that stands for it.
-_STATUS = {"ok": "SUCCEEDED", "skipped": "SKIPPED", "failed": "FAILED"}
 _SCHEMA = "https://json-schema.org/draft/2020-12/schema"
 
 
@@ -96,8 +89,6 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
     steps = []
     for ordinal, step in enumerate(workflow["steps"], start=1):
         declared = dict(processes.get(step["process"]) or {})
-        # Composed as the legacy engine composes: nested mappings merge.
-        merged = _deep_merge(declared, dict(step.get("config") or {}))
         steps.append(WorkflowStep(
             id=step["id"],
             process_name=step["process"],
@@ -106,9 +97,9 @@ def _build(workflow: dict[str, Any], application: Application, approved: dict[st
             application=application,
             operation_name=str(declared.get("implementation") or step["process"]),
             approved=approved,
-            settings={key: value for key, value in merged.items() if key not in _ENGINE_KEYS},
-            apply_only=bool(merged.get("apply_only")),
-            always_run=bool(merged.get("always_run")),
+            settings={key: value for key, value in declared.items() if key not in _ENGINE_KEYS},
+            apply_only=bool(declared.get("apply_only")),
+            always_run=bool(declared.get("always_run")),
         ))
     process = WorkflowProcess(name=application.name, ordinal=1, application=application,
                               config=None, steps=steps)
@@ -123,29 +114,21 @@ def _run(graph: Workflow, parent: Any, ctx: Any, **selection: Any) -> Any:
     return graph.direct(**selection)
 
 
-def _both(tmp_path: Path, workflow: dict[str, Any], *,
-          behaviour: dict[str, Callable[[], Any]] | None = None, **selection: Any
-          ) -> tuple[Any, Any]:
-    """Run ``workflow`` on both paths.
+def _direct(tmp_path: Path, workflow: dict[str, Any], *,
+            behaviour: dict[str, Callable[[], Any]] | None = None, **selection: Any
+            ) -> tuple[Any, list[str], Any, Any, Any]:
+    """Direct ``workflow`` as a graph under an Application Run.
 
-    Returns (legacy run, legacy calls, legacy log) and (outcome, new calls,
-    new log, control, Application Run).
+    Returns (outcome, calls, log, control, Application Run).
     """
-    legacy_calls: list[str] = []
-    legacy_log = _log(tmp_path / "legacy")
-    legacy_wf, legacy_ctx = prepared(workflow, SimpleNamespace())
-    legacy_run = run_workflow(legacy_ctx, legacy_log, legacy_wf,
-                              _recording(legacy_calls, behaviour), **selection)
-
-    new_calls: list[str] = []
-    new_log = _log(tmp_path / "new")
+    calls: list[str] = []
+    run_log = _log(tmp_path)
     control = RecordingControl()
-    new_wf, new_ctx = prepared(workflow, SimpleNamespace())
-    graph = _build(new_wf, new_ctx.applications[0], _recording(new_calls, behaviour), control)
-    application_run = parent_run(control, log=new_log)
-    returned = _run(graph, application_run, new_ctx, **selection)
-    return ((legacy_run, legacy_calls, legacy_log),
-            (returned, new_calls, new_log, control, application_run))
+    wf, ctx = prepared(workflow, SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording(calls, behaviour), control)
+    application_run = parent_run(control, log=run_log)
+    returned = _run(graph, application_run, ctx, **selection)
+    return returned, calls, run_log, control, application_run
 
 
 def _records(run_log: Any) -> list[Any]:
@@ -170,51 +153,36 @@ def _records(run_log: Any) -> list[Any]:
     return stable
 
 
-def _assert_parity(legacy: Any, new: Any) -> None:
-    """Same call order, step outcomes and run-log records on both paths."""
-    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control,
-                                             application_run) = legacy, new
-    assert returned in ("SUCCEEDED", "FAILED")
-    # Only Step Runs are created, each a child of the Application Run.
-    assert [row["subject_type"] for row in control.rows] == ["step"] * len(control.rows)
-    assert new_calls == legacy_calls
-    assert [(row["subject_id"], row["status"]) for row in control.children(application_run)] == [
-        (outcome.id, _STATUS[outcome.status]) for outcome in legacy_run.outcomes
-    ]
-    assert _records(new_log) == _through_run_complete(_records(legacy_log))
-
-
-def _through_run_complete(records: list[Any]) -> list[Any]:
-    """The records up to and including RUN_COMPLETE.
-
-    The legacy engine finalizes the run log itself (RESULTS_SUMMARY onward); the
-    Workflow leaves that to the app's common shutdown (backlog 964).
-    """
-    for index, record in enumerate(records):
-        if isinstance(record, dict) and record["record_type"] == "RUN_COMPLETE":
-            return records[:index + 1]
-    return records
-
-
 def _failed(detail: str) -> Callable[[], Any]:
     return lambda: SimpleNamespace(status="failed", detail=detail)
 
 
-# --- parity: selection, ordering, dry-run -----------------------------------
+# --- selection, ordering, dry-run -------------------------------------------
 
 
-@pytest.mark.parametrize("selection", [
-    {},
-    {"step": "s3"},
-    {"step": "Three"},
-    {"step": "p3"},
-    {"from_step": "s2"},
-    {"to_step": "s3"},
-    {"from_step": "s2", "to_step": "s3"},
+@pytest.mark.parametrize("selection, released", [
+    ({}, ["s1", "s2", "s3", "s4"]),
+    ({"step": "s3"}, ["s3"]),
+    ({"step": "Three"}, ["s3"]),
+    ({"step": "p3"}, ["s3"]),
+    ({"from_step": "s2"}, ["s2", "s3", "s4"]),
+    ({"to_step": "s3"}, ["s1", "s2", "s3"]),
+    ({"from_step": "s2", "to_step": "s3"}, ["s2", "s3"]),
 ], ids=["full", "step_by_id", "step_by_label", "step_by_process", "from_step",
         "to_step", "range"])
-def test_selection_matches_run_workflow(selection: dict[str, Any], tmp_path: Path) -> None:
-    _assert_parity(*_both(tmp_path, _fixture(), **selection))
+def test_the_selection_releases_its_steps_in_order(selection: dict[str, Any],
+                                                   released: list[str],
+                                                   tmp_path: Path) -> None:
+    returned, calls, _log, control, application_run = _direct(tmp_path, _fixture(),
+                                                              **selection)
+
+    assert returned == "SUCCEEDED"
+    # Only Step Runs are created, each a child of the Application Run.
+    assert [row["subject_type"] for row in control.rows] == ["step"] * len(control.rows)
+    assert calls == ["p" + step[1:] for step in released]
+    assert [(row["subject_id"], row["status"]) for row in control.children(application_run)] == [
+        (step, "SUCCEEDED") for step in released
+    ]
 
 
 def _step_ends(run_log: Any) -> list[tuple[str, str, str]]:
@@ -249,44 +217,34 @@ def test_a_dry_run_does_not_release_apply_only_steps(selection: dict[str, Any],
     ({"step": "s1", "from_step": "s2"}, "'step' cannot be combined"),
     ({"from_step": "s3", "to_step": "s1"}, "empty range"),
 ], ids=["unknown", "step_and_range", "reversed"])
-def test_selection_refusals_match_run_workflow(selection: dict[str, Any], message: str,
-                                               tmp_path: Path) -> None:
-    legacy_wf, legacy_ctx = prepared(_fixture(), SimpleNamespace())
-    with pytest.raises(LegacyWorkflowError) as legacy:
-        run_workflow(legacy_ctx, _log(tmp_path / "legacy"), legacy_wf,
-                     _recording([]), **selection)
+def test_a_bad_selection_is_refused(selection: dict[str, Any], message: str,
+                                    tmp_path: Path) -> None:
     control = RecordingControl()
     new_wf, new_ctx = prepared(_fixture(), SimpleNamespace())
     graph = _build(new_wf, new_ctx.applications[0], _recording([]), control)
     with pytest.raises(AppError) as new:
-        _run(graph, parent_run(control, log=_log(tmp_path / "new")), new_ctx, **selection)
+        _run(graph, parent_run(control, log=_log(tmp_path)), new_ctx, **selection)
 
     assert message in str(new.value)
-    assert str(new.value) == str(legacy.value)
     assert control.rows == []
 
 
-def test_an_ambiguous_identifier_matches_run_workflow(tmp_path: Path) -> None:
+def test_an_ambiguous_identifier_is_refused(tmp_path: Path) -> None:
     workflow = _fixture()
     workflow["steps"][1]["label"] = "One"
-    legacy_wf, legacy_ctx = prepared(workflow, SimpleNamespace())
-    with pytest.raises(LegacyWorkflowError) as legacy:
-        run_workflow(legacy_ctx, _log(tmp_path / "legacy"), legacy_wf, _recording([]),
-                     step="One")
     control = RecordingControl()
     new_wf, new_ctx = prepared(workflow, SimpleNamespace())
     with pytest.raises(AppError) as new:
         _run(_build(new_wf, new_ctx.applications[0], _recording([]), control),
-             parent_run(control, log=_log(tmp_path / "new")), new_ctx, step="One")
+             parent_run(control, log=_log(tmp_path)), new_ctx, step="One")
 
     assert "ambiguous" in str(new.value)
-    assert str(new.value) == str(legacy.value)
+    assert control.rows == []
 
 
 # --- failure progression --------------------------------------------------------
 #
-# The same steps run as on the legacy engine; a step an earlier failure holds back
-# is NOT RUN under its own Run (backlog 964), where the legacy engine skipped it.
+# A step an earlier failure holds back is NOT RUN under its own Run (backlog 964).
 
 
 def _statuses(new: Any) -> list[tuple[str, str]]:
@@ -299,9 +257,9 @@ def test_a_failure_holds_ordinary_steps_back_and_always_run_still_runs(tmp_path:
     workflow = _fixture()
     workflow["processes"] = {"p1": {}, "p2": {}, "p3": {"always_run": True}, "p4": {}}
 
-    legacy, new = _both(tmp_path, workflow, behaviour={"p1": _failed("p1 broke")})
+    new = _direct(tmp_path, workflow, behaviour={"p1": _failed("p1 broke")})
 
-    assert new[1] == legacy[1] == ["p1", "p3"]
+    assert new[1] == ["p1", "p3"]
     assert _statuses(new) == [("s1", "FAILED"), ("s2", "NOT RUN"), ("s3", "SUCCEEDED"),
                               ("s4", "NOT RUN")]
     assert ("s2", "not run", "not released") in _step_ends(new[2])
@@ -313,11 +271,11 @@ def test_the_first_failure_is_retained_when_an_always_run_step_also_fails(
     workflow = _fixture()
     workflow["processes"] = {"p1": {}, "p2": {}, "p3": {"always_run": True}, "p4": {}}
 
-    legacy, new = _both(tmp_path, workflow, behaviour={
+    new = _direct(tmp_path, workflow, behaviour={
         "p1": _failed("first"), "p3": _failed("second"),
     })
 
-    assert new[1] == legacy[1]
+    assert new[1] == ["p1", "p3"]
     assert _statuses(new) == [("s1", "FAILED"), ("s2", "NOT RUN"), ("s3", "FAILED"),
                               ("s4", "NOT RUN")]
     complete = next(r for r in _records(new[2])
@@ -330,14 +288,14 @@ def test_a_raised_failure_holds_the_rest_back(tmp_path: Path) -> None:
     def boom() -> Any:
         raise RuntimeError("load failed")
 
-    legacy, new = _both(tmp_path, _fixture(), behaviour={"p2": boom})
+    new = _direct(tmp_path, _fixture(), behaviour={"p2": boom})
 
-    assert new[1] == legacy[1] == ["p1", "p2"]
+    assert new[1] == ["p1", "p2"]
     assert _statuses(new) == [("s1", "SUCCEEDED"), ("s2", "FAILED"), ("s3", "NOT RUN"),
                               ("s4", "NOT RUN")]
 
 
-# --- parity: refusals that settle the run ------------------------------------
+# --- refusals that settle the run --------------------------------------------
 
 
 def _requiring_source() -> tuple[dict[str, Any], SimpleNamespace]:
@@ -403,17 +361,15 @@ def test_an_unreleased_step_is_never_contract_checked(tmp_path: Path) -> None:
                                  for c in control.children(application_run)]
 
 
-def test_a_disabled_workflow_is_a_refused_run_like_run_workflow(tmp_path: Path) -> None:
+def test_a_disabled_workflow_is_a_refused_run(tmp_path: Path) -> None:
     workflow = _fixture()
     workflow["enabled"] = False
 
-    (legacy_run, legacy_calls, legacy_log), (returned, new_calls, new_log, control, _app) = _both(
-        tmp_path, workflow)
+    returned, calls, _log, control, _app = _direct(tmp_path, workflow)
 
-    # Refused: no Run is created, nothing is released, the records match.
+    # Refused: no Run is created and nothing is released.
     assert returned is None and control.rows == []
-    assert new_calls == legacy_calls == []
-    assert _records(new_log) == _through_run_complete(_records(legacy_log))
+    assert calls == []
 
 
 # --- child Runs, sequence and indent -----------------------------------------

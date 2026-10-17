@@ -7,8 +7,8 @@ callable steps. Domain apps own the step handlers, registry, and definitions.
 
 The exports below resolve on first access rather than at import, so importing
 one submodule -- rey_lib.workflow.workflow, .workflow_process, .workflow_step --
-loads no other (backlog 950: the workflow objects run with the legacy
-coordinator and engine unavailable). Every name is exported exactly as before.
+loads no other (backlog 950). The legacy coordinator and its exports were
+retired with the legacy workflow system (backlog 1011).
 """
 
 from importlib import import_module
@@ -16,10 +16,6 @@ from typing import Any
 
 #: Each exported name and the module that owns it.
 _EXPORTS = {
-    "ProcessHandler": "rey_lib.workflow.coordinator",
-    "StepOutcome": "rey_lib.workflow.coordinator",
-    "WorkflowRun": "rey_lib.workflow.coordinator",
-    "run_workflow": "rey_lib.workflow.coordinator",
     "RunContext": "rey_lib.workflow.engine",
     "StepResult": "rey_lib.workflow.engine",
     "WorkflowError": "rey_lib.workflow.engine",
@@ -29,10 +25,6 @@ __all__ = [
     "RunContext",
     "StepResult",
     "WorkflowError",
-    "ProcessHandler",
-    "StepOutcome",
-    "WorkflowRun",
-    "run_workflow",
 ]
 
 

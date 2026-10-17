@@ -190,23 +190,3 @@ class TestTypeScript:
 
         assert [(s[1], s[5]) for s in found] == [(False, False), (False, False)]
         assert [s[2] for s in found] == ["name_chain", "construction"]
-
-
-class TestTheBenchmarkSubject:
-    """Asserted here because it is the argument for the column's name."""
-
-    def test_run_workflow_raises_a_class_three_times_and_a_factory_five(
-        self,
-    ) -> None:
-        path = (Path(__file__).resolve().parents[1]
-                / "rey_lib/workflow/coordinator.py")
-
-        found = [
-            r.callee_chain
-            for r in extract_raise_sites(path, "Python", path.name)
-            if r.owner_qualified_name == "run_workflow"
-        ]
-
-        assert len(found) == 8
-        assert found.count("WorkflowError") == 3
-        assert found.count("_pre_execution_failure") == 5

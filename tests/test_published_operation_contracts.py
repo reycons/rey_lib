@@ -5,68 +5,18 @@ consume the settings. These assert, over what is actually installed:
 
 - every published operation has exactly one contract, which loads;
 - canonical names only: no reader alias, legacy shape or retired key;
-- keyed maps stay maps, and a dispatcher's variants stay one operation;
-- every live workflow step satisfies its operation's contract, tolerating only
-  the unsupported keys existing configuration is known to carry.
+- keyed maps stay maps, and a dispatcher's variants stay one operation.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from rey_lib.config.applications import _operations
-from rey_lib.config.config_context import _stamp_workflow_ownership
-from rey_lib.config.config_loader import _deep_merge as _merge_files
-from rey_lib.config.config_loader import _load_yaml, _yaml_files_in_folder
-from rey_lib.config.inventory import to_plain_data
-from rey_lib.config.operation_contract import contract_review
 from rey_lib.config.registration import discover_registrations
-from rey_lib.workflow.coordinator import (
-    _declared_config,
-    _deep_merge,
-    _expand_config,
-    _get,
-    _resolve_tokens,
-    _to_mapping,
-)
-
-_INSTALLATIONS = Path("/workspaces/installations")
-
-#: Every installation's workflow folders, as each installation declares them.
-#: Pipeline folders are included: a pipeline-local workflow (rey_analyzer's
-#: generate_* workflows) is a workflow like any other.
-_WORKFLOW_FOLDERS = (
-    ("local", _INSTALLATIONS / "local" / "work" / "workflows"),
-    ("local", _INSTALLATIONS / "local" / "work" / "pipelines"),
-    ("wolff_popper", _INSTALLATIONS / "wolff_popper" / "config" / "work" / "workflows"),
-    ("wolff_popper", _INSTALLATIONS / "wolff_popper" / "config" / "work" / "pipelines"),
-    ("admin", _INSTALLATIONS / "admin" / "work" / "workflows"),
-)
-
-
-def _merged_entries(folder: Path) -> list[dict[str, Any]]:
-    """The resolved workflow entries of one folder, merged as the config load does."""
-    raw: dict[str, Any] = {}
-    for one in _yaml_files_in_folder(folder, folder / "none"):
-        raw = _merge_files(raw, _stamp_workflow_ownership(_load_yaml(one)))
-    return [entry for entry in raw.get("workflows") or [] if isinstance(entry, dict)]
-
-
-def _live_entries() -> list[tuple[str, dict[str, Any]]]:
-    """Every live workflow entry, with its installation."""
-    found = [
-        (installation, entry)
-        for installation, root in _WORKFLOW_FOLDERS if root.is_dir()
-        for child in sorted(root.iterdir()) if child.is_dir()
-        for entry in _merged_entries(child)
-    ]
-    if not found:
-        pytest.skip("no installation workflow definitions are present")
-    return found
 
 #: The operations each application publishes, as traced (backlog 932).
 _PUBLISHED = {
@@ -92,13 +42,6 @@ _ALIASES = {
     ("rey_loader", "inventory_source_files"): {"file_pattern"},
     ("rey_loader", "sql_operation"): {"values", "routine_name"},
 }
-
-#: The unsupported keys live configuration is known to carry, tolerated (user,
-#: 2026-10-13): no reader reads them and no contract publishes them.
-_KNOWN_UNSUPPORTED = {
-    ("wolff_popper", "inventory_and_prepare_files", "prepare_analysis_inputs"),
-}
-
 
 @pytest.fixture(scope="module")
 def operations() -> dict[tuple[str, str], Any]:
@@ -181,31 +124,3 @@ def test_a_dispatchers_variants_stay_one_operation(operations) -> None:
 def test_every_sample_is_plain_json(operations) -> None:
     for op in operations.values():
         assert json.loads(json.dumps(op.contract_sample)) == op.contract_sample
-
-
-def test_every_live_workflow_step_satisfies_its_contract(operations) -> None:
-    refused: list[str] = []
-    tolerated: set[tuple[str, str, str]] = set()
-    checked = 0
-    for installation, entry in _live_entries():
-        if entry.get("enabled", True) is False:
-            continue
-        name = entry["name"]
-        tokens = _resolve_tokens(_get(entry, "tokens"))
-        processes = _to_mapping(_get(entry, "processes"))
-        for step in entry.get("steps") or []:
-            declared = _to_mapping(processes.get(step.get("process")))
-            op = operations.get((entry.get("app"), str(declared.get("implementation") or "")))
-            if op is None:
-                continue
-            checked += 1
-            merged = _deep_merge(declared, _to_mapping(_get(step, "config")))
-            effective = _expand_config(_declared_config(merged), tokens)
-            unsupported, violations = contract_review(
-                op.contract_definition, to_plain_data(effective))
-            refused += [f"{installation}/{name}/{step['id']}: {one}" for one in violations]
-            if unsupported:
-                tolerated.add((installation, name, step["id"]))
-    assert refused == []
-    assert tolerated == _KNOWN_UNSUPPORTED
-    assert checked == 50
