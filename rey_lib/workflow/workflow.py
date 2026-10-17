@@ -657,8 +657,10 @@ class Workflow:
         from the start; both is the inclusive ordered range. ``step`` cannot
         combine with a range, and a reversed range fails closed. With no
         selector, every step runs. An identifier naming one of this Workflow's
-        processes stands for that process's steps: ``step`` runs all of them,
-        ``from_step`` starts at its first, ``to_step`` ends at its last.
+        processes selects by membership with ``step`` -- exactly the steps that
+        process holds, in release order, never a step of another process between
+        them -- and is a range endpoint with ``from_step`` (its first step) and
+        ``to_step`` (its last), where the range is positional (backlog 1044).
         """
         name = self.name
         total = len(steps)
@@ -670,8 +672,10 @@ class Workflow:
             return set(range(total))
 
         if step is not None:
-            first, last = self._resolve_span(steps, step)
-            return set(range(first, last + 1))
+            for process in self.processes:
+                if process.name == step and process.steps:
+                    return {index for index, one in enumerate(steps) if one.process is process}
+            return {self._resolve_index(steps, step)}
 
         start = self._resolve_span(steps, from_step)[0] if from_step is not None else 0
         end = self._resolve_span(steps, to_step)[1] if to_step is not None else total - 1
@@ -683,10 +687,11 @@ class Workflow:
         return set(range(start, end + 1))
 
     def _resolve_span(self, steps: list[WorkflowStep], identifier: str) -> tuple[int, int]:
-        """The first and last step index ``identifier`` stands for.
+        """The first and last step index ``identifier`` stands for, as a range endpoint.
 
         One of this Workflow's processes, by name: its first and last step in
-        release order. Otherwise the one step it matches.
+        release order. Otherwise the one step it matches. A range concern only:
+        it does not define a process's membership (see :meth:`_select`).
         """
         for process in self.processes:
             if process.name == identifier and process.steps:

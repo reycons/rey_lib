@@ -725,7 +725,12 @@ def test_the_superseded_workflow_result_does_not_exist() -> None:
 
 
 @pytest.mark.parametrize(("selection", "expected"), [
-    ({"step": "a"}, ["s1", "s2", "s3"]),
+    # Membership: a process selects exactly the steps it holds, never b's s2
+    # lying between them (backlog 1044).
+    ({"step": "a"}, ["s1", "s3"]),
+    ({"step": "b"}, ["s2"]),
+    # Range: positional, so an explicit step-to-step range spans every step.
+    ({"from_step": "s1", "to_step": "s3"}, ["s1", "s2", "s3"]),
     ({"from_step": "b"}, ["s2", "s3"]),
     ({"to_step": "a"}, ["s1", "s2", "s3"]),
     ({"to_step": "b"}, ["s1", "s2"]),
