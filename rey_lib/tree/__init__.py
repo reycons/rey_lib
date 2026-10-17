@@ -1,0 +1,54 @@
+"""The tree's non-presentation mechanics (backlog 1036, 1054).
+
+Shared by every consumer of the tree -- the Console, which presents it, and an AI
+inspection run in ai_app -- so there is one implementation of each:
+
+    TreeProjection   one reader's held records; its lifetime is the consumer's
+    TreeTraversal    route a node to its source, read, cap, admit
+    persisted        tree.tree_vw, the persisted tree's data object
+    sources          the declared non-persisted source names
+    inspection       what a model may see of a node, and how far it may expand
+
+Not a tree model: what a node means, what it can do and how it is drawn are not
+here.
+"""
+
+from __future__ import annotations
+
+from rey_lib.tree.inspection import EXPANSION_LIMIT, INSPECTED_FIELDS, inspected
+from rey_lib.tree.persisted import (
+    TREE_CONNECTION,
+    TREE_SCHEMA,
+    TREE_VIEW_NAME,
+    TreeDataObject,
+    TreeDataRow,
+)
+from rey_lib.tree.projection import TreeProjection
+from rey_lib.tree.sources import (
+    APPLICATION_SOURCE,
+    DATABASE_SOURCE,
+    DECLARED_SOURCES,
+    FOLDER_SOURCE,
+    JSONL_SOURCE,
+    TOOL_SOURCE,
+)
+from rey_lib.tree.traversal import TreeTraversal
+
+__all__ = [
+    "APPLICATION_SOURCE",
+    "DATABASE_SOURCE",
+    "DECLARED_SOURCES",
+    "EXPANSION_LIMIT",
+    "FOLDER_SOURCE",
+    "INSPECTED_FIELDS",
+    "JSONL_SOURCE",
+    "TOOL_SOURCE",
+    "TREE_CONNECTION",
+    "TREE_SCHEMA",
+    "TREE_VIEW_NAME",
+    "TreeDataObject",
+    "TreeDataRow",
+    "TreeProjection",
+    "TreeTraversal",
+    "inspected",
+]
