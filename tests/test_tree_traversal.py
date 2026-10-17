@@ -14,13 +14,20 @@ from typing import Any
 
 import pytest
 
-from rey_lib.errors.error_utils import ConfigError
+from rey_lib.errors.error_utils import AppError, ConfigError
 from rey_lib.tree import (
     EXPANSION_LIMIT,
     INSPECTED_FIELDS,
+    TREE_CONNECTION,
+    TREE_SCHEMA,
+    TREE_VIEW_NAME,
+    TreeDataObject,
     TreeProjection,
     TreeTraversal,
+    expand,
     inspected,
+    persisted_tree,
+    subject,
 )
 from rey_lib.tree.sources import DATABASE_SOURCE, FOLDER_SOURCE
 
@@ -177,3 +184,80 @@ class TestInspected:
 
     def test_the_ceiling_is_the_admitted_initial_one(self) -> None:
         assert EXPANSION_LIMIT == 50
+
+
+SUBJECT = {"node_key": "1:1", "parent_node_key": None, "label": "fidelity",
+           "node_type": "hierarchy_feed", "has_children": True, "subject_type": "feed",
+           "subject_id": "7", "tree_group_id": 2, "tree_root_id": 39, "secret": "x"}
+
+
+def _inspection(count: int = 3) -> tuple[TreeTraversal, TreeProjection]:
+    projection = TreeProjection()
+    projection.seed([SUBJECT])
+    return TreeTraversal(_Persisted(count=count), {}), projection
+
+
+class TestExpand:
+    """The inspection rules moved from the Console's tree_expand_runner (backlog 1055)."""
+
+    def test_a_shown_node_expands_into_its_inspected_children(self) -> None:
+        traversal, projection = _inspection()
+
+        answered = expand(object(), traversal, projection, "1:1")
+
+        assert answered["truncated"] is False
+        assert [c["node_key"] for c in answered["children"]] == ["1:1:0", "1:1:1", "1:1:2"]
+        assert all(set(c) == set(INSPECTED_FIELDS) for c in answered["children"])
+
+    def test_what_was_returned_can_be_expanded_next_and_nothing_else(self) -> None:
+        traversal, projection = _inspection(count=EXPANSION_LIMIT + 5)
+
+        answered = expand(object(), traversal, projection, "1:1")
+
+        assert answered["truncated"] is True
+        assert len(answered["children"]) == EXPANSION_LIMIT
+        assert projection.record(f"1:1:{EXPANSION_LIMIT - 1}") is not None
+        with pytest.raises(AppError, match="has not been shown"):
+            expand(object(), traversal, projection, f"1:1:{EXPANSION_LIMIT}")
+
+    def test_an_unshown_key_is_refused(self) -> None:
+        traversal, projection = _inspection()
+
+        with pytest.raises(AppError, match="has not been shown in this inspection"):
+            expand(object(), traversal, projection, "9:9")
+
+    def test_a_node_without_children_is_refused(self) -> None:
+        traversal, projection = _inspection()
+        expand(object(), traversal, projection, "1:1")
+
+        with pytest.raises(AppError, match="has no children"):
+            expand(object(), traversal, projection, "1:1:0")
+
+    def test_no_node_named_is_refused(self) -> None:
+        traversal, projection = _inspection()
+
+        with pytest.raises(AppError, match="node_key is required"):
+            expand(object(), traversal, projection, "")
+
+    def test_a_declared_source_not_readable_here_is_refused(self) -> None:
+        projection = TreeProjection()
+        projection.seed([{**SUBJECT, "tree_object_key": DATABASE_SOURCE}])
+
+        with pytest.raises(ConfigError, match="cannot be read here"):
+            expand(object(), TreeTraversal(_Persisted(), {}), projection, "1:1")
+
+
+class TestSubject:
+    def test_the_subject_discloses_only_the_inspected_fields(self) -> None:
+        text = subject(SUBJECT)
+
+        assert "label: fidelity" in text and "has_children: True" in text
+        assert "secret" not in text and "tree_root_id" not in text
+
+
+def test_persisted_tree_is_the_one_statement_of_the_tree_views_identity() -> None:
+    tree = persisted_tree()
+
+    assert isinstance(tree, TreeDataObject)
+    assert (tree.identity.connection, tree.identity.schema, tree.identity.name) == (
+        TREE_CONNECTION, TREE_SCHEMA, TREE_VIEW_NAME)

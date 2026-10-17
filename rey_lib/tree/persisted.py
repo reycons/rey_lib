@@ -34,10 +34,11 @@ from typing import Any, Mapping
 from rey_lib.errors.error_utils import ConfigError
 
 from rey_lib.db.connection import shared_connection
-from rey_lib.db.database_objects import DatabaseView
+from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseView
 from rey_lib.db.database_query import DatabaseQuery
 
 __all__ = [
+    "persisted_tree",
     "TreeDataObject",
     "TreeDataRow",
     "TREE_CONNECTION",
@@ -287,4 +288,21 @@ class TreeDataObject(DatabaseView):
             "         sort_text    NULLS LAST,\n"
             f"         node_key     NULLS FIRST{bound}"
         ), params
+
+
+def persisted_tree() -> TreeDataObject:
+    """The persisted tree's data object, stated once (backlog 1055, D3).
+
+    The canonical statement of which view the persisted tree is and where it is
+    reached: every consumer that reads persisted children asks for this rather
+    than composing the identity itself.
+    """
+    return TreeDataObject(
+        identity=DatabaseObjectIdentity(
+            connection=TREE_CONNECTION,
+            catalog="rey_apps",
+            schema=TREE_SCHEMA,
+            name=TREE_VIEW_NAME,
+        ),
+    )
 

@@ -15,13 +15,20 @@ here.
 
 from __future__ import annotations
 
-from rey_lib.tree.inspection import EXPANSION_LIMIT, INSPECTED_FIELDS, inspected
+from rey_lib.tree.inspection import (
+    EXPANSION_LIMIT,
+    INSPECTED_FIELDS,
+    expand,
+    inspected,
+    subject,
+)
 from rey_lib.tree.persisted import (
     TREE_CONNECTION,
     TREE_SCHEMA,
     TREE_VIEW_NAME,
     TreeDataObject,
     TreeDataRow,
+    persisted_tree,
 )
 from rey_lib.tree.projection import TreeProjection
 from rey_lib.tree.sources import (
@@ -50,5 +57,8 @@ __all__ = [
     "TreeDataRow",
     "TreeProjection",
     "TreeTraversal",
+    "expand",
     "inspected",
+    "persisted_tree",
+    "subject",
 ]
