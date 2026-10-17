@@ -481,18 +481,18 @@ def _build_parser() -> argparse.ArgumentParser:
 def _print_result(result: FolderMakerResult) -> None:
     """Print a human-readable summary of *result* to stdout/stderr."""
     if result.created:
-        print(f"\nCreated ({len(result.created)}):")
+        sys.stdout.write(f"\nCreated ({len(result.created)}):" + "\n")
         for p in result.created:
-            print(f"  + {p}")
+            sys.stdout.write(f"  + {p}" + "\n")
     if result.existed:
-        print(f"\nAlready existed ({len(result.existed)}):")
+        sys.stdout.write(f"\nAlready existed ({len(result.existed)}):" + "\n")
         for p in result.existed:
-            print(f"  = {p}")
+            sys.stdout.write(f"  = {p}" + "\n")
     # Command output: each failure was reported where it was caught (rule 79).
     if result.errors:
-        print(f"\nErrors ({len(result.errors)}):")
+        sys.stdout.write(f"\nErrors ({len(result.errors)}):" + "\n")
         for e in result.errors:
-            print(f"  ! {e}")
+            sys.stdout.write(f"  ! {e}" + "\n")
 
 
 def main() -> None:

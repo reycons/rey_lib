@@ -275,11 +275,12 @@ def test_the_logging_rule_forbids_the_logging_api_not_program_output() -> None:
 
 
 def test_cli_output_in_folder_maker_prints_its_report_and_reports_errors_where_caught() -> None:
-    """_print_result prints its whole report; each failure is an AppError (rule 79).
+    """_print_result writes its whole report; each failure is an AppError (rule 79).
 
     The created/existed/errors sections are the tool's product and stay on
-    stdout. Each failure was reported through AppError.report where it was
-    caught, so the printed section is not a second ERROR path.
+    stdout, written explicitly (rule stdout_is_written_explicitly, #1053). Each
+    failure was reported through AppError.report where it was caught, so the
+    written section is not a second ERROR path.
     """
     import inspect
 
@@ -287,7 +288,8 @@ def test_cli_output_in_folder_maker_prints_its_report_and_reports_errors_where_c
 
     source = inspect.getsource(folder_maker._print_result)
 
-    assert source.count("print(") == 6
+    assert source.count("sys.stdout.write(") == 6
+    assert " print(" not in source
     assert "file=sys.stderr" not in source
     assert "_logger.error(" not in source
     for catcher in (folder_maker._ensure_dir, folder_maker._ensure_gitkeep,
