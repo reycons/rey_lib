@@ -340,9 +340,9 @@ class TestTheCanonicalObjectsHydrateThemselves:
 
 
 def _with_data_source(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``rows`` whose governed workflow config declares one workflow-scoped data source."""
+    """``rows`` whose governed process config declares one data source."""
     for row in rows:
-        row["workflow_config"]["data_sources"] = [{
+        row["process_config"]["data_sources"] = [{
             "name": "proposals", "enabled": True, "file_pattern": "*.analysis.json",
             "analysis_config": "infer", "paths": {
                 "inbox_path": "{run_root}/Analysis/Inbox",
@@ -352,30 +352,41 @@ def _with_data_source(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-class TestTheWorkflowOwnsItsDataSources:
-    """A data source is workflow-scoped: governed in the Workflow, hydrated with it (#1032)."""
+class TestTheProcessOwnsItsDataSources:
+    """A data source is governed process configuration: the WorkflowProcess answers it (#1043)."""
 
     def test_it_is_answered_by_name_and_read_by_attribute(self) -> None:
-        source = _hydrate(_with_data_source(_rows()))[0].data_source("proposals")
+        process = _hydrate(_with_data_source(_rows()))[0].processes[0]
+        source = process.data_source("proposals")
 
         assert (source.name, source.file_pattern, source.analysis_config) == (
             "proposals", "*.analysis.json", "infer")
 
     def test_its_paths_are_the_workflows_paths_with_run_time_placeholders_kept(self) -> None:
-        source = _hydrate(_with_data_source(_rows()))[0].data_source("proposals")
+        source = _hydrate(_with_data_source(_rows()))[0].processes[0].data_source("proposals")
 
         assert source.paths.inbox_path == "/installations/rey/data/runs/{run_id}/Analysis/Inbox"
         assert source.paths.results_path == "/installations/rey/data/results"
 
-    def test_an_undeclared_name_is_refused(self) -> None:
+    def test_each_step_reaches_it_through_its_own_process(self) -> None:
         workflow = _hydrate(_with_data_source(_rows()))[0]
 
-        with pytest.raises(AppError, match="declares no data source 'other'"):
-            workflow.data_source("other")
+        for step in workflow.steps.values():
+            assert step.process.data_source("proposals").name == "proposals"
 
-    def test_a_workflow_declaring_none_refuses_every_name(self) -> None:
+    def test_an_undeclared_name_is_refused(self) -> None:
+        process = _hydrate(_with_data_source(_rows()))[0].processes[0]
+
+        with pytest.raises(AppError, match="process 'fixture_app' declares no data source 'other'"):
+            process.data_source("other")
+
+    def test_a_process_declaring_none_refuses_every_name(self) -> None:
         with pytest.raises(AppError, match="declares no data source 'proposals'"):
-            _hydrate(_rows())[0].data_source("proposals")
+            _hydrate(_rows())[0].processes[0].data_source("proposals")
+
+    def test_the_workflow_does_not_answer_data_sources(self) -> None:
+        """One owner: no Workflow-level data source, forwarding or otherwise."""
+        assert not hasattr(Workflow, "data_source")
 
 
 class TestNoParallelHydrationModel:

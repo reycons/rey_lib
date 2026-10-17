@@ -28,6 +28,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 from rey_lib.config.applications import Application
+from rey_lib.config.config_namespace import Namespace
 from rey_lib.errors.error_utils import AppError
 from rey_lib.workflow.workflow_step import WorkflowStep
 
@@ -115,6 +116,22 @@ class WorkflowProcess:
         for step in self.steps:
             step.process = self
         self.workflow: Optional["Workflow"] = None
+
+    def data_source(self, name: str) -> Namespace:
+        """One of this process's data sources, by name (backlogs 1032, 1043).
+
+        A data source is part of the process's governed configuration
+        (``config.data_sources``), held here as the Workflow's hydration
+        resolved it, so its paths are the workflow's paths. A step asks its own
+        process; nothing reads the configuration or the runtime context for one.
+
+        Raises:
+            AppError: When this process declares no data source of that name.
+        """
+        for entry in (self.config or {}).get("data_sources") or []:
+            if isinstance(entry, Mapping) and entry.get("name") == name:
+                return Namespace(dict(entry))
+        raise AppError(f"process '{self.name}' declares no data source '{name}'.")
 
     @classmethod
     def hydrate(

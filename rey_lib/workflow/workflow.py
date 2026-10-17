@@ -329,25 +329,6 @@ class Workflow:
             run_id=run_id,
         )
 
-    # -- its data sources ----------------------------------------------------
-
-    def data_source(self, name: str) -> Namespace:
-        """One of this workflow's data sources, by name (backlog 1032).
-
-        A data source an analysis reads is workflow-scoped: it is governed in
-        this workflow's configuration (``data_sources``) and resolved with the
-        rest of it when the Workflow is hydrated, so its paths are this
-        workflow's paths. Callers ask the Workflow for it; none reads the
-        configuration or the runtime context for one.
-
-        Raises:
-            AppError: When this workflow declares no data source of that name.
-        """
-        for entry in (self.config or {}).get("data_sources") or []:
-            if isinstance(entry, Mapping) and entry.get("name") == name:
-                return Namespace(dict(entry))
-        raise AppError(f"workflow '{self.name}' declares no data source '{name}'.")
-
     # -- its snapshot --------------------------------------------------------
 
     def act(self) -> Any:
