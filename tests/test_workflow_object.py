@@ -878,13 +878,25 @@ def test_direction_projects_pending_active_and_completed_paths_and_resets(tmp_pa
 
     assert any(edge_state(edges, "step:1", "step:2") == "PENDING" for edges in snapshots)
     assert any(edge_state(edges, "step:1", "step:2") == "RUNNING" for edges in snapshots)
-    assert all(edge["state"] == "SUCCEEDED" for edge in graph.relationships())
+    assert all(edge["state"] == "SUCCEEDED" for edge in graph.relationships()
+               if edge["kind"] == "precedes")
+    assert edge_state(graph.relationships(), "workflow", "process:1") == "SUCCEEDED"
+    assert edge_state(graph.relationships(), "process:1", "step:1") == "SUCCEEDED"
+    assert all("state" not in edge for edges in snapshots for edge in edges
+               if edge["kind"] == "contains" and edge["source"] == "process:1"
+               and edge["target"] != "step:1")
 
     snapshots.clear()
-    _run(graph, application_run, ctx, step="s3")
-    assert any(edge_state(edges, "process:1", "step:3") == "PENDING" for edges in snapshots)
+    _run(graph, application_run, ctx, step="s2")
+    for state in ("PENDING", "RUNNING", "SUCCEEDED"):
+        assert any(edge_state(edges, "workflow", "process:1") == state
+                   and edge_state(edges, "process:1", "step:2") == state
+                   for edges in snapshots)
     final = graph.relationships()
-    assert edge_state(final, "process:1", "step:3") == "SUCCEEDED"
+    assert {(edge["source"], edge["target"]) for edge in final if "state" in edge} == {
+        ("workflow", "process:1"), ("process:1", "step:2"),
+    }
+    assert edge_state(final, "process:1", "step:2") == "SUCCEEDED"
     assert edge_state(final, "process:1", "step:1") is None
     assert edge_state(final, "step:2", "step:3") is None
     assert edge_state(final, "step:3", "step:4") is None
@@ -901,9 +913,10 @@ def test_paths_never_mark_nonreleased_steps_completed(tmp_path: Path, apply: boo
     _run(graph, parent_run(control, log=_log(tmp_path)), ctx, apply=apply)
     edges = {(edge["source"], edge["target"]): edge.get("state")
              for edge in graph.relationships()}
-    assert edges[("process:1", "step:2")] == "NOT RUN"
+    assert edges[("step:1", "step:2")] == "NOT RUN"
     assert edges[("step:2", "step:3")] == "NOT RUN"
-    assert edges[("process:1", "step:4")] == "SUCCEEDED"
+    assert edges[("process:1", "step:4")] is None
+    assert graph.steps["s4"].state == "SUCCEEDED"
     if fails:
-        assert edges[("process:1", "step:1")] == "FAILED"
+        assert graph.steps["s1"].state == "FAILED"
         assert edges[("workflow", "process:1")] == "FAILED"

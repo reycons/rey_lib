@@ -414,31 +414,26 @@ class Workflow:
             for before, after in zip(steps, steps[1:])
         )
         selected = {f"step:{step.ordinal}": step for step in self._direction_steps}
-        processes = {f"process:{process.ordinal}": process for process in self.processes}
+        entry = self._direction_steps[0] if self._direction_steps else None
+        entry_links = set()
+        if entry is not None and entry.process is not None:
+            parent = f"process:{entry.process.ordinal}"
+            entry_links = {("workflow", parent), (parent, f"step:{entry.ordinal}")}
         for relationship in relationships:
+            if relationship["kind"] != "precedes":
+                if (relationship["source"], relationship["target"]) in entry_links:
+                    relationship["state"] = self._path_state(entry)
+                continue
             source, target = relationship["source"], relationship["target"]
-            if target in selected:
-                if relationship["kind"] == "contains":
-                    relationship["state"] = self._path_state((selected[target],))
-                elif source in selected:
-                    # An unexecuted predecessor is not a traversed execution edge.
-                    before = self._path_state((selected[source],))
-                    relationship["state"] = (before if before == "NOT RUN"
-                                             else self._path_state((selected[target],)))
-            elif source == "workflow" and target in processes:
-                children = tuple(step for step in processes[target].steps
-                                 if step in self._direction_steps)
-                if children:
-                    relationship["state"] = self._path_state(children)
+            if source in selected and target in selected:
+                before = self._path_state(selected[source])
+                relationship["state"] = (before if before == "NOT RUN"
+                                         else self._path_state(selected[target]))
         return relationships
 
-    def _path_state(self, steps: Sequence[WorkflowStep]) -> str:
-        """The current direction's path state, from its Steps' own transitions."""
-        states = {step.state if step in self._observed_steps else "PENDING" for step in steps}
-        for state in (RUNNING, FAILED, "PENDING", "NOT RUN", "SKIPPED", SUCCEEDED):
-            if state in states:
-                return state
-        return "PENDING"
+    def _path_state(self, step: WorkflowStep) -> str:
+        """A release-path endpoint's state in this direction, owned by its Step."""
+        return step.state if step in self._observed_steps else "PENDING"
 
     def projection(self, ctx: Any) -> dict[str, Any]:
         """What this Workflow shows: one snapshot of the hydrated graph.
