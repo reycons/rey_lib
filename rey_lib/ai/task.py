@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Mapping, Sequence
 
 from rey_lib.ai.content import AIInput
 from rey_lib.ai.errors import AIConfigurationError
 from rey_lib.ai.instructions import AIInstructionKind
 from rey_lib.ai.requests import AIOutputSpec
+from rey_lib.logs.app_logger import AppLogger
+
+logger = AppLogger(__name__)
 
 __all__ = ["AITask"]
 
@@ -120,6 +123,186 @@ class AITask:
             raise AIConfigurationError(
                 f"AI task '{self.task_key or '(default)'}' names no engine."
             )
+
+    # -- hydration (backlog 1022) -------------------------------------------
+
+    @classmethod
+    def from_governed(
+        cls,
+        control: Any,
+        installation: str,
+        task_key: str = "",
+        *,
+        profile_key: str = "",
+        instruction_key: str = "",
+        temperature: float | None = None,
+        input: AIInput | None = None,  # noqa: A002 -- the fact's own name
+        output: AIOutputSpec | None = None,
+        subject: str = "",
+        subject_id: str = "",
+        subject_kind: str = "",
+        origin_id: str = "",
+    ) -> "AITask":
+        """One unit of work, hydrated from this installation's governed rows.
+
+        As a Workflow or an HTTP operation is established: the runtime's Control
+        reads the rows, and :meth:`hydrate` builds the task from them. Takes the
+        Control rather than a context, because nothing in this subsystem holds a
+        context. Reads once; a changed configuration is a new hydration.
+
+        Raises:
+            AIConfigurationError: as :meth:`hydrate` does.
+        """
+        logger.debug("hydrating AI task %s for installation %s",
+                     task_key or "(default)", installation)
+        return cls.hydrate(
+            control.ai_configuration(installation),
+            control.ai_engine_profiles(),
+            control.ai_instructions(),
+            installation=installation, task_key=task_key,
+            profile_key=profile_key, instruction_key=instruction_key,
+            temperature=temperature, input=input, output=output,
+            subject=subject, subject_id=subject_id, subject_kind=subject_kind,
+            origin_id=origin_id,
+        )
+
+    @classmethod
+    def hydrate(
+        cls,
+        configuration: Sequence[Mapping[str, Any]],
+        engines: Sequence[Mapping[str, Any]],
+        instructions: Sequence[Mapping[str, Any]],
+        *,
+        installation: str,
+        task_key: str = "",
+        profile_key: str = "",
+        instruction_key: str = "",
+        temperature: float | None = None,
+        input: AIInput | None = None,  # noqa: A002 -- the fact's own name
+        output: AIOutputSpec | None = None,
+        subject: str = "",
+        subject_id: str = "",
+        subject_kind: str = "",
+        origin_id: str = "",
+    ) -> "AITask":
+        """The unit of work the governed rows state, with the caller's choices.
+
+        ``configuration`` is the installation's control.f_ai_configuration_get
+        rows: the group row is the default scope and each task row one task, its
+        inheritance already resolved by ai.ai_vw. ``engines`` and
+        ``instructions`` are the estate's engine and instruction rows.
+
+        Precedence, for every choice: the caller's override, then the task's
+        row, then the group's. An override is an input here and never an edit
+        afterwards: a different choice is a different hydration. A task key no
+        row configures takes the default scope, as it always has.
+
+        Raises:
+            AIConfigurationError: when the task is disabled, or names an engine
+                or instruction that is not configured or not usable.
+        """
+        key = str(task_key or "").strip()
+        group = next(
+            (row for row in configuration if str(row.get("row_type")) == "group"), {},
+        )
+        row = next(
+            (one for one in configuration
+             if str(one.get("row_type")) == "task" and str(one.get("task_key")) == key),
+            None,
+        ) if key else None
+        if row is not None and row.get("is_enabled") is False:
+            raise AIConfigurationError(f"AI task '{key}' is disabled.")
+        scope = row if row is not None else group
+
+        def chosen(override: Any, column: str) -> str:
+            """The override, else the task's row, else the group's."""
+            return str(
+                override or (row or {}).get(column) or group.get(column) or ""
+            ).strip()
+
+        engine = cls._engine(engines, chosen(profile_key, "profile_key"), key)
+        instruction = cls._instruction(
+            instructions, chosen(instruction_key, "instruction_key"), key,
+        )
+        stated = (
+            temperature if temperature is not None
+            else next((value for value in ((row or {}).get("temperature"),
+                                          group.get("temperature")) if value is not None),
+                      None)
+        )
+        timeout = engine.get("timeout_seconds")
+        return cls(
+            task_key=key,
+            installation=str(installation or ""),
+            label=str(scope.get("task_label") or scope.get("label") or ""),
+            # The row's own column, never inherited: ai.ai_vw coalesces nothing
+            # for it, so a silent scope is false.
+            composed_first=bool(scope.get("composed_first") or False),
+            profile_key=str(engine.get("profile_key") or ""),
+            model_identifier=str(engine.get("model_identifier") or ""),
+            base_url=str(engine.get("base_url") or ""),
+            credential_ref=str(engine.get("credential_ref") or ""),
+            timeout_seconds=None if timeout is None else float(timeout),
+            access_allowed=tuple(str(one) for one in (engine.get("access_allowed") or ())),
+            access_default=str(engine.get("access_default") or ""),
+            instruction_key=str(instruction.get("instruction_key") or ""),
+            instruction_kind=AIInstructionKind(str(instruction.get("kind") or "none")),
+            contract_key=str(instruction.get("contract_key") or ""),
+            contract_version=str(instruction.get("contract_version") or ""),
+            contract_body=str(instruction.get("body") or ""),
+            temperature=None if stated is None else float(stated),
+            representation=chosen("", "representation"),
+            connection=chosen("", "connection_name"),
+            input=input if input is not None else AIInput(),
+            output=output if output is not None else AIOutputSpec(),
+            subject=subject, subject_id=subject_id,
+            subject_kind=subject_kind, origin_id=origin_id,
+        )
+
+    @staticmethod
+    def _engine(
+        engines: Sequence[Mapping[str, Any]], profile_key: str, task_key: str,
+    ) -> Mapping[str, Any]:
+        """The configured, enabled engine this task chose."""
+        where = f"AI task '{task_key or '(default)'}'"
+        if not profile_key:
+            raise AIConfigurationError(f"{where} chooses no engine.")
+        engine = next(
+            (one for one in engines if str(one.get("profile_key")) == profile_key), None,
+        )
+        if engine is None:
+            raise AIConfigurationError(
+                f"{where} chooses engine '{profile_key}', which is not configured."
+            )
+        if engine.get("is_enabled") is False:
+            raise AIConfigurationError(
+                f"{where} chooses engine '{profile_key}', which is disabled."
+            )
+        return engine
+
+    @staticmethod
+    def _instruction(
+        instructions: Sequence[Mapping[str, Any]], instruction_key: str, task_key: str,
+    ) -> Mapping[str, Any]:
+        """The instruction this task chose, or none when it chose none."""
+        if not instruction_key:
+            return {}
+        where = f"AI task '{task_key or '(default)'}'"
+        instruction = next(
+            (one for one in instructions
+             if str(one.get("instruction_key")) == instruction_key), None,
+        )
+        if instruction is None:
+            raise AIConfigurationError(
+                f"{where} chooses instruction '{instruction_key}', which is not configured."
+            )
+        if str(instruction.get("kind")) == AIInstructionKind.CONTRACT.value \
+                and not instruction.get("body"):
+            raise AIConfigurationError(
+                f"{where} chooses instruction '{instruction_key}', a contract that "
+                "carries no body, so nothing could be sent for it."
+            )
+        return instruction
 
     # -- the lifecycle -----------------------------------------------------
 
