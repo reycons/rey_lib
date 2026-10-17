@@ -81,11 +81,20 @@ class SQLGenerator:
             The generated SQL text, as the contract returns it.
 
         Raises:
-            AIRequestError: when there is nothing to generate from.
+            AIRequestError: when there is nothing to generate from, or the
+                connection is not one a language model may use.
             AIError: as AI.execute_task raises.
         """
         if not str(sql_with_instruction_block or "").strip():
             raise AIRequestError("SQL generation needs the reader's SQL and request.")
+        # The catalog is read on the model's behalf, so the connection's own
+        # declaration that a language model may use it applies; AI holds those
+        # names (backlog 1049, D-a).
+        if connection not in self._ai.connections():
+            raise AIRequestError(
+                f"Connection '{connection}' is not one a language model may use, "
+                "so no SQL is generated against it."
+            )
         task = AITask.from_governed(
             self._control, self._installation, self.TASK_KEY,
             input=AIInput.prompt(sql_with_instruction_block),

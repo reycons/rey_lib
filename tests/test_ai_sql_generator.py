@@ -131,7 +131,9 @@ def nothing_executes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _generator(engine: _Engine, monkeypatch: pytest.MonkeyPatch,
                control: _Control | None = None) -> tuple[SQLGenerator, list[tuple]]:
-    ai = AI(registry=AIRegistry())
+    # Composed as bootstrap composes it: with the connections whose own
+    # declaration lets a language model use them (backlog 1049, D-a).
+    ai = AI(registry=AIRegistry(), connections=("warehouse",))
     built: list[tuple] = []
 
     def model(*engine_facts: Any) -> FunctionModel:
@@ -202,6 +204,17 @@ class TestRefusals:
 
         with pytest.raises(AIRequestError):
             generator.generate("  ", connection="warehouse", conn="open-conn")
+
+    def test_a_connection_a_model_may_not_use_is_refused_before_any_call(
+        self, monkeypatch: pytest.MonkeyPatch, catalog: list,
+    ) -> None:
+        engine = _Engine()
+        generator, _ = _generator(engine, monkeypatch)
+
+        with pytest.raises(AIRequestError, match="'payroll' is not one a language model"):
+            generator.generate(REQUEST, connection="payroll", conn="open-conn")
+        assert engine.seen == []
+        assert catalog == []
 
     def test_a_tool_whose_capability_it_does_not_bind_is_refused(
         self, monkeypatch: pytest.MonkeyPatch, catalog: list,
