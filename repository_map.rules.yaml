@@ -60,7 +60,6 @@ architecture_rules:
       - "rey_messaging*"
       - "ftp_sync*"
       - "rey_db_admin*"
-      - "pipeline_coordinator*"
     scope_path_globs:
       - "rey_lib/*"
     edge_kinds:

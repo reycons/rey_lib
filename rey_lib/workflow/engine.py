@@ -1,16 +1,16 @@
 """
-Shared workflow types: the error, the run context a step handler receives, and a
-step's result.
+Shared workflow types: the run context a step handler receives, and a step's
+result.
 
 What remains of the in-process step engine (backlog 920): its build_steps /
-run_steps / StepSpec / WorkflowResult had no production consumer and were removed.
-These three are still read by step handlers and the legacy coordinator.
+run_steps / StepSpec / WorkflowResult had no production consumer and were removed,
+and WorkflowError went with the legacy coordinator (backlog 1014). These two are
+read by every application's step handlers.
 
 Public API
 ----------
 RunContext      Shared, mutable context threaded through every step.
 StepResult      One step's outcome.
-WorkflowError   A workflow-level error.
 """
 
 from __future__ import annotations
@@ -18,17 +18,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from rey_lib.errors.error_utils import AppError
-
 __all__ = [
     "RunContext",
     "StepResult",
-    "WorkflowError",
 ]
-
-
-class WorkflowError(AppError):
-    """Raised for engine-level problems (e.g. an unknown step name)."""
 
 
 @dataclass

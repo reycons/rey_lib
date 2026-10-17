@@ -303,7 +303,6 @@ class TestEveryEntryPointAdoptedTheBoundary:
         "rey_messaging/rey_messaging/cli.py",
         "rey_db_admin/main.py",
         "ftp_sync/main.py",
-        "pipeline_coordinator/pipeline_coordinator/cli.py",
         "rey_console/rey_console/cli.py",
     )
 

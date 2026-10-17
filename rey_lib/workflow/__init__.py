@@ -18,13 +18,11 @@ from typing import Any
 _EXPORTS = {
     "RunContext": "rey_lib.workflow.engine",
     "StepResult": "rey_lib.workflow.engine",
-    "WorkflowError": "rey_lib.workflow.engine",
 }
 
 __all__ = [
     "RunContext",
     "StepResult",
-    "WorkflowError",
 ]
 
 

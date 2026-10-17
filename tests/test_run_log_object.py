@@ -51,17 +51,6 @@ class TestItTakesNoContext:
 class TestItOwnsTheTransitions:
     """State that changes during a run changes through RunLog."""
 
-    def test_binding_a_workflow_changes_later_records(self, tmp_path: Path) -> None:
-        run_log = make_db_run_log(tmp_path)
-        run_log.append("ROW_COUNT", count_name="before", count=1)
-
-        run_log.bind_workflow("transform_load")
-        run_log.append("ROW_COUNT", count_name="after", count=2)
-
-        before, after = _rows(run_log)
-        assert "workflow_name" not in before
-        assert after["workflow_name"] == "transform_load"
-
     def test_lineage_is_bound_and_stamped(self, tmp_path: Path) -> None:
         run_log = make_db_run_log(tmp_path)
         run_log.bind_lineage(parent_run_id="R-parent", subject_type="workflow")
