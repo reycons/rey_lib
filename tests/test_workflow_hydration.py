@@ -339,6 +339,45 @@ class TestTheCanonicalObjectsHydrateThemselves:
                              control=RecordingControl())
 
 
+def _with_data_source(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``rows`` whose governed workflow config declares one workflow-scoped data source."""
+    for row in rows:
+        row["workflow_config"]["data_sources"] = [{
+            "name": "proposals", "enabled": True, "file_pattern": "*.analysis.json",
+            "analysis_config": "infer", "paths": {
+                "inbox_path": "{run_root}/Analysis/Inbox",
+                "results_path": "{data}/results",
+            },
+        }]
+    return rows
+
+
+class TestTheWorkflowOwnsItsDataSources:
+    """A data source is workflow-scoped: governed in the Workflow, hydrated with it (#1032)."""
+
+    def test_it_is_answered_by_name_and_read_by_attribute(self) -> None:
+        source = _hydrate(_with_data_source(_rows()))[0].data_source("proposals")
+
+        assert (source.name, source.file_pattern, source.analysis_config) == (
+            "proposals", "*.analysis.json", "infer")
+
+    def test_its_paths_are_the_workflows_paths_with_run_time_placeholders_kept(self) -> None:
+        source = _hydrate(_with_data_source(_rows()))[0].data_source("proposals")
+
+        assert source.paths.inbox_path == "/installations/rey/data/runs/{run_id}/Analysis/Inbox"
+        assert source.paths.results_path == "/installations/rey/data/results"
+
+    def test_an_undeclared_name_is_refused(self) -> None:
+        workflow = _hydrate(_with_data_source(_rows()))[0]
+
+        with pytest.raises(AppError, match="declares no data source 'other'"):
+            workflow.data_source("other")
+
+    def test_a_workflow_declaring_none_refuses_every_name(self) -> None:
+        with pytest.raises(AppError, match="declares no data source 'proposals'"):
+            _hydrate(_rows())[0].data_source("proposals")
+
+
 class TestNoParallelHydrationModel:
     def test_there_is_no_workflow_source(self) -> None:
         import rey_lib.workflow.workflow as workflow_module
