@@ -65,7 +65,7 @@ from rey_lib.ai.sessions import AISession
 from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.task import AITask
-from rey_lib.ai.tools import AITool, AIToolSet, Operation
+from rey_lib.ai.tools import AITool, AIToolCall, AIToolResult, AIToolSet, Operation
 from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
 from rey_lib.logs.app_logger import AppLogger
 
@@ -412,9 +412,20 @@ class AI:
         }
 
     def execute_task(
-        self, task: AITask, operations: Mapping[str, Operation] | None = None,
+        self,
+        task: AITask,
+        operations: Mapping[str, Operation] | None = None,
+        observe: Callable[[AIEvent], None] | None = None,
     ) -> AIResult:
         """Perform one hydrated unit of work through Pydantic AI (backlog 1020).
+
+        With ``observe``, the run is streamed and each canonical ``AIEvent`` is
+        handed to it as it happens (backlog 1038): started, content as the model
+        produces it, each tool call requested and its result, then completed or
+        failed. Pydantic AI's own events stop here. The observer only relays: its
+        first failure is reported once and it is detached for the rest of this
+        execution, which continues -- a consumer of the events cannot decide the
+        task's outcome.
 
         The task's choices are settled; this builds its model, runs it once and
         records the outcome through the task's own transitions. The task's
@@ -476,7 +487,35 @@ class AI:
             else None
         )
 
+        key = task.task_key or "(default)"
+        execution_id = uuid.uuid4().hex
+        observer = observe
+
+        def tell(event: AIEvent) -> None:
+            """Hand one event to the observer, which cannot decide the outcome."""
+            nonlocal observer
+            if observer is None:
+                return
+            try:
+                observer(event)
+            except Exception as exc:  # noqa: BLE001 — canonical execution boundary
+                # The observer is external behaviour (backlog 1038, as 1045):
+                # converted to its AppError and reported once. Detached first, so
+                # nothing further -- not even word that it broke -- reaches it.
+                observer = None
+                error = AIExecutionError(f"AI task '{key}': event observer failed", cause=exc)
+                error.__cause__ = exc
+                error.report(f"AI task '{key}' event notification", source=__name__)
+
+        async def relay(_context: Any, events: Any) -> None:
+            """Pydantic AI's events for this run, told as canonical AIEvents."""
+            async for event in events:
+                translated = self._translated(execution_id, event)
+                if translated is not None:
+                    tell(translated)
+
         task.started()
+        tell(AIEvent.started(execution_id))
         started = datetime.now(timezone.utc)
         try:
             model = self._model(task.model_identifier, task.base_url, task.credential_ref)
@@ -531,6 +570,9 @@ class AI:
             run = agent.run_sync(
                 prompt, model_settings=settings or None,
                 usage_limits=UsageLimits(request_limit=self._policy.budget.max_turns),
+                # Streamed only for an observer: without one the run is exactly
+                # the unstreamed request it always was.
+                event_stream_handler=relay if observe is not None else None,
             )
             output = self._parse_task_output(task, schema, run.output)
         except UserError as error:
@@ -553,12 +595,13 @@ class AI:
             )
         except AIError as error:
             task.failed(str(error))
+            tell(AIEvent.failed(execution_id, str(error)))
             raise
         else:
             result = AIResult(
                 output=output,
                 execution=AIExecutionInfo(
-                    execution_id=uuid.uuid4().hex,
+                    execution_id=execution_id,
                     profile_id=task.profile_key,
                     model=task.model_identifier,
                     instruction_id=task.instruction_key,
@@ -572,9 +615,57 @@ class AI:
                 ),
             )
             task.answered(result)
+            tell(AIEvent.completed(execution_id, result))
             return result
         task.failed(str(failure))
+        tell(AIEvent.failed(execution_id, str(failure)))
         raise failure from failure.cause
+
+    @staticmethod
+    def _translated(execution_id: str, event: Any) -> AIEvent | None:
+        """One Pydantic AI run event as the canonical AIEvent, or nothing.
+
+        Text the model produces, each function tool call and each result. A
+        result is failed when the owner refused the call (``ToolFailed``) or it
+        was sent back for correction (``ModelRetry``), with that message.
+        Anything else -- part boundaries, the final-result marker -- tells an
+        observer nothing it does not learn from these.
+        """
+        from pydantic_ai.messages import (  # noqa: PLC0415 -- AI's dependency only
+            FunctionToolCallEvent,
+            FunctionToolResultEvent,
+            PartDeltaEvent,
+            PartStartEvent,
+            RetryPromptPart,
+            TextPart,
+            TextPartDelta,
+        )
+
+        if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+            return AIEvent.content(execution_id, event.part.content) \
+                if event.part.content else None
+        if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+            return AIEvent.content(execution_id, event.delta.content_delta) \
+                if event.delta.content_delta else None
+        if isinstance(event, FunctionToolCallEvent):
+            return AIEvent.tool_requested(execution_id, AIToolCall(
+                id=event.part.tool_call_id, name=event.part.tool_name,
+                arguments=event.part.args_as_dict(),
+            ))
+        if isinstance(event, FunctionToolResultEvent):
+            part = event.part
+            if isinstance(part, RetryPromptPart):
+                return AIEvent.tool_accepted(execution_id, AIToolResult(
+                    call_id=part.tool_call_id, failed=True, message=str(part.content),
+                ))
+            failed = getattr(part, "outcome", "") == "failed"
+            return AIEvent.tool_accepted(execution_id, AIToolResult(
+                call_id=part.tool_call_id,
+                value=None if failed else part.content,
+                failed=failed,
+                message=str(part.content) if failed else "",
+            ))
+        return None
 
     def _parse_task_output(
         self, task: AITask, schema: dict[str, Any] | None, answer: Any,
