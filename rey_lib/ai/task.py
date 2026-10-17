@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, ClassVar, Mapping, Sequence
 
 from rey_lib.ai.content import AIInput
@@ -72,6 +73,10 @@ class AITask:
         tools: The governed tools this task offers (backlog 1023) -- facts
             only. What carries each out is bound by the runtime at execution,
             never by hydration.
+        choices: The overrides the caller hydrated this task with, as given
+            and unresolved (backlog 1037): what a rehydration keeps, so a
+            governed value nobody chose is never carried forward as though it
+            had been.
         status, answer, error, run_id: The lifecycle. Read-only to callers and
             changed only by this task's transitions.
     """
@@ -81,6 +86,11 @@ class AITask:
     COMPLETED: ClassVar[str] = "completed"
     FAILED: ClassVar[str] = "failed"
     CANCELLED: ClassVar[str] = "cancelled"
+
+    #: The overrides a caller may choose, by their hydration argument names.
+    CHOICES: ClassVar[tuple[str, ...]] = (
+        "profile_key", "instruction_key", "temperature", "representation", "connection",
+    )
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
@@ -118,6 +128,8 @@ class AITask:
 
     tools: tuple[AITool, ...] = ()
 
+    choices: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
     status: str = field(default=IDLE, init=False)
     answer: Any = field(default=None, init=False)
     error: str = field(default="", init=False)
@@ -142,12 +154,15 @@ class AITask:
         profile_key: str = "",
         instruction_key: str = "",
         temperature: float | None = None,
+        representation: str = "",
+        connection: str = "",
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
         output: AIOutputSpec | None = None,
         subject: str = "",
         subject_id: str = "",
         subject_kind: str = "",
         origin_id: str = "",
+        task_id: str = "",
     ) -> "AITask":
         """One unit of work, hydrated from this installation's governed rows.
 
@@ -167,9 +182,10 @@ class AITask:
             control.ai_instructions(),
             installation=installation, task_key=task_key,
             profile_key=profile_key, instruction_key=instruction_key,
-            temperature=temperature, input=input, output=output,
+            temperature=temperature, representation=representation,
+            connection=connection, input=input, output=output,
             subject=subject, subject_id=subject_id, subject_kind=subject_kind,
-            origin_id=origin_id,
+            origin_id=origin_id, task_id=task_id,
         )
 
     @classmethod
@@ -184,14 +200,23 @@ class AITask:
         profile_key: str = "",
         instruction_key: str = "",
         temperature: float | None = None,
+        representation: str = "",
+        connection: str = "",
         input: AIInput | None = None,  # noqa: A002 -- the fact's own name
         output: AIOutputSpec | None = None,
         subject: str = "",
         subject_id: str = "",
         subject_kind: str = "",
         origin_id: str = "",
+        task_id: str = "",
     ) -> "AITask":
         """The unit of work the governed rows state, with the caller's choices.
+
+        ``task_id`` is not a choice: it is the runtime identity a rehydration
+        carries, so the replacement task stands where the one it replaces stood
+        (backlog 1037). Empty mints a new identity. The overrides actually given
+        -- a non-empty text, a temperature that is not ``None`` -- are recorded
+        as the task's ``choices``; an empty one is no choice.
 
         ``configuration`` is the installation's control.f_ai_configuration_get
         rows: the group row is the default scope and each task row one task, its
@@ -237,7 +262,14 @@ class AITask:
                       None)
         )
         timeout = engine.get("timeout_seconds")
+        identity = {"id": str(task_id)} if str(task_id or "").strip() else {}
+        given = {
+            "profile_key": profile_key, "instruction_key": instruction_key,
+            "temperature": temperature, "representation": representation,
+            "connection": connection,
+        }
         return cls(
+            **identity,
             task_key=key,
             installation=str(installation or ""),
             label=str(scope.get("task_label") or scope.get("label") or ""),
@@ -257,8 +289,8 @@ class AITask:
             contract_version=str(instruction.get("contract_version") or ""),
             contract_body=str(instruction.get("body") or ""),
             temperature=None if stated is None else float(stated),
-            representation=chosen("", "representation"),
-            connection=chosen("", "connection_name"),
+            representation=chosen(representation, "representation"),
+            connection=chosen(connection, "connection_name"),
             input=input if input is not None else AIInput(),
             output=output if output is not None else AIOutputSpec(),
             subject=subject, subject_id=subject_id,
@@ -279,6 +311,10 @@ class AITask:
                 )
                 for one in ((row or {}).get("tools") or ())
             ),
+            choices=MappingProxyType({
+                name: value for name, value in given.items()
+                if value is not None and not (isinstance(value, str) and not value.strip())
+            }),
         )
 
     @staticmethod

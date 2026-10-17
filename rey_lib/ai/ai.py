@@ -170,6 +170,10 @@ class AI:
         # them would be a second answer to what a reader is composing, and a
         # second one per open panel.
         self._objects: dict[str, AIObject] = {}
+        # The session's AITasks by id (backlog 1037): composed, edited by
+        # rehydration and executed here, within the lifetime of the application
+        # session that holds this AI.
+        self._tasks: dict[str, AITask] = {}
 
     # -- what is available -------------------------------------------------
 
@@ -605,6 +609,80 @@ class AI:
                 f"AI task '{task.task_key or '(default)'}' carries nothing to send."
             )
         return prompt
+
+    # -- the session's tasks (backlog 1037) --------------------------------
+
+    #: What an edit may change besides the choices: which task, and what the
+    #: caller sends and addresses. Never the identity, which an edit carries.
+    _TASK_FACTS = (
+        "task_key", "input", "output", "subject", "subject_id", "subject_kind", "origin_id",
+    )
+
+    def hydrate_task(self, control: Any, installation: str, **facts: Any) -> AITask:
+        """Compose one unit of work for this session, and hold it, idle.
+
+        ``facts`` are which task (``task_key``), its choices (``AITask.CHOICES``)
+        and the caller's runtime facts, as ``AITask.from_governed`` takes them;
+        the identity is minted, never given.
+
+        Raises:
+            AIRequestError: when a fact is named that a task does not take.
+            AIConfigurationError: as ``AITask.from_governed`` does.
+        """
+        self._refuse_unknown(facts)
+        task = AITask.from_governed(control, installation, **facts)
+        self._tasks[task.id] = task
+        return task
+
+    def task(self, task_id: str) -> AITask | None:
+        """The task one id addresses in this session, or nothing.
+
+        Nothing is an ordinary answer -- an id from a session that has since
+        ended addresses no task -- and is not a failure here.
+        """
+        return self._tasks.get(str(task_id or ""))
+
+    def rehydrate_task(
+        self, control: Any, task_id: str, changes: Mapping[str, Any],
+    ) -> AITask:
+        """Edit a held task by replacing it: a new idle task under the same id.
+
+        ``changes`` updates the task's stored choices -- an empty value clears
+        one back to the governed value -- and may replace its runtime facts.
+        Hydration then resolves the whole task again from the governed rows and
+        the resulting choices, so a value nobody chose follows configuration.
+        The governed configuration itself is never changed.
+
+        Raises:
+            AISelectionError: when this session holds no task under ``task_id``.
+            AIRequestError: when the task is running, or a change names
+                something a task does not take.
+            AIConfigurationError: as ``AITask.from_governed`` does.
+        """
+        current = self.task(task_id)
+        if current is None:
+            raise AISelectionError(f"This session holds no AI task '{task_id}'.")
+        if current.status == AITask.RUNNING:
+            raise AIRequestError(
+                f"AI task '{current.id}' is running and cannot be edited until it ends."
+            )
+        self._refuse_unknown(changes)
+        choices = {
+            **current.choices,
+            **{name: value for name, value in changes.items() if name in AITask.CHOICES},
+        }
+        facts = {name: changes.get(name, getattr(current, name)) for name in self._TASK_FACTS}
+        task = AITask.from_governed(
+            control, current.installation, task_id=current.id, **facts, **choices,
+        )
+        self._tasks[task.id] = task
+        return task
+
+    def _refuse_unknown(self, given: Mapping[str, Any]) -> None:
+        """Refuse a name that is neither a task's choice nor its runtime fact."""
+        unknown = sorted(set(given) - set(AITask.CHOICES) - set(self._TASK_FACTS))
+        if unknown:
+            raise AIRequestError(f"An AI task takes no {', '.join(unknown)}.")
 
     # -- composed asks -----------------------------------------------------
 
