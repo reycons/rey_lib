@@ -140,10 +140,8 @@ def ai_from_ctx(
         AIConfigurationError: when configuration is missing, or names a provider
             no factory can build.
     """
-    factories = (
-        adapters if adapters is not None
-        else default_adapters(credentials_from_ctx(ctx))
-    )
+    credentials = credentials_from_ctx(ctx)
+    factories = adapters if adapters is not None else default_adapters(credentials)
     built: list[AIProvider] = []
     for configuration in configured:
         factory = factories.get(configuration.provider)
@@ -169,6 +167,9 @@ def ai_from_ctx(
         # model may be given is the connection's own declaration and the
         # database layer's to read; this library is told the answer.
         connections=connections,
+        # The same resolver the adapters hold: AI builds its Pydantic AI models
+        # with it (backlog 1019), reading the environment only at that moment.
+        credentials=credentials,
     )
 
 

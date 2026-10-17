@@ -21,6 +21,11 @@ dependencies = [
     # registration loads and every step's settings before dispatch (backlog 939).
     "jsonschema>=4.18",
     "markdown-it-py>=4.0.0",
+    # AI's model layer (backlog 1019, ai.redesign): an implementation dependency of
+    # rey_lib.ai only, never imported elsewhere. Only the provider extras the
+    # governed engines use: anthropic, openai (also Ollama's OpenAI-compatible
+    # endpoint) and google.
+    "pydantic-ai-slim[anthropic,openai,google]==2.57.0",
     "pyyaml>=6.0.2",
     "python-dotenv>=1.0.1",
     "sqlalchemy>=2.0.0,<3.0.0",

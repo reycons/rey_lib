@@ -194,9 +194,13 @@ def test_no_provider_sdk_is_imported_above_the_adapter_boundary() -> None:
     everywhere above it. An external agent framework is forbidden everywhere,
     including in an adapter, because adopting one there would still put its
     execution model under the boundary.
+
+    Pydantic AI is the exception by decision (backlog 1019, ai.redesign): it is
+    AI's approved implementation dependency, so it is permitted inside this
+    subsystem -- and only here, which the next test holds.
     """
     sdks = ("openai", "anthropic", "google")
-    frameworks = ("litellm", "pydantic_ai", "agents")
+    frameworks = ("litellm", "agents")
     offenders: list[str] = []
     for path in sorted(AI.rglob("*.py")):
         if "__pycache__" in path.parts:
@@ -215,6 +219,26 @@ def test_no_provider_sdk_is_imported_above_the_adapter_boundary() -> None:
                     offenders.append(f"{path.name}:{node.lineno} imports {name}")
 
     assert not offenders, "external model leaked inward: " + "; ".join(offenders)
+
+
+def test_pydantic_ai_is_imported_only_inside_the_subsystem() -> None:
+    """Pydantic AI is AI's implementation dependency, never a competing architecture.
+
+    Anything outside ``rey_lib/ai`` that imported it would be a second model or
+    tool layer beside AI (backlog 1019, ai.redesign).
+    """
+    importing = re.compile(r"^\s*(?:from|import)\s+pydantic_ai\b", re.M)
+    offenders: list[str] = []
+    for path in REPO.rglob("*.py"):
+        parts = set(path.parts)
+        if ".venv" in parts or "__pycache__" in parts or "node_modules" in parts:
+            continue
+        if AI in path.parents or path.name.startswith("test_"):
+            continue
+        if importing.search(path.read_text(encoding="utf-8", errors="ignore")):
+            offenders.append(str(path.relative_to(REPO)))
+
+    assert not offenders, "pydantic_ai imported outside rey_lib/ai: " + ", ".join(offenders)
 
 
 class TestAConnectionIsAName:

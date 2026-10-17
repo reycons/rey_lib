@@ -31,11 +31,12 @@ retry, tool, validation and normalization code is not here, and no
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 from rey_lib.ai.capabilities import AICapabilitySet
 from rey_lib.ai.contracts import ContractResolver
-from rey_lib.ai.errors import AISelectionError
+from rey_lib.ai.credentials import CredentialResolver
+from rey_lib.ai.errors import AIConfigurationError, AISelectionError
 from rey_lib.ai.execution import AIExecutor
 from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 from rey_lib.ai.output import OutputParser
@@ -51,6 +52,9 @@ from rey_lib.ai.streaming import AIEvent
 from rey_lib.ai.tools import AITool
 from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
 from rey_lib.logs.app_logger import AppLogger
+
+if TYPE_CHECKING:
+    from pydantic_ai.models import Model
 
 logger = AppLogger(__name__)
 
@@ -93,6 +97,8 @@ class AI:
             retry, replay safety, fallback and the two correction budgets.
         executor: Supplied only where a caller needs to substitute the execution
             owner. Absent, one is built from the parts above.
+        credentials: How a configured credential reference becomes its value at
+            the moment a model is built. Holds no secret and no context.
     """
 
     def __init__(
@@ -105,8 +111,10 @@ class AI:
         policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
         executor: AIExecutor | None = None,
         connections: Iterable[str] = (),
+        credentials: CredentialResolver | None = None,
     ) -> None:
         self._registry = registry
+        self._credentials = credentials or CredentialResolver()
         # Which connections a task here may query through, as **names**.
         #
         # Whether a connection may be used by a language model is the
@@ -409,6 +417,42 @@ class AI:
         return AISession(self, session_id=session_id)
 
     # -- internals ---------------------------------------------------------
+
+    def _model(
+        self, model_identifier: str, base_url: str = "", credential_ref: str = "",
+    ) -> Model:
+        """The Pydantic AI model for one engine's configuration.
+
+        Pydantic AI interprets ``<provider>:<model>`` and chooses the model and
+        provider it names; this supplies only where the engine is reached and
+        the credential, resolved now and handed straight to the provider. No
+        provider or model naming is interpreted here.
+
+        Raises:
+            AIConfigurationError: when Pydantic AI cannot build a model from this
+                configuration, or the credential reference cannot be resolved.
+        """
+        # Imported here, not at module level: Pydantic AI is needed only when a
+        # model is built, and every application that composes an AI imports this.
+        from pydantic_ai.exceptions import UserError
+        from pydantic_ai.models import infer_model
+        from pydantic_ai.providers import infer_provider_class
+
+        api_key = self._credentials(credential_ref) or None
+
+        def reached(provider_name: str) -> Any:
+            """The provider Pydantic AI named, reached at this engine's base URL."""
+            return infer_provider_class(provider_name)(
+                base_url=base_url or None, api_key=api_key,
+            )
+
+        logger.debug("building the model for engine %s", model_identifier)
+        try:
+            return infer_model(model_identifier, provider_factory=reached)
+        except (UserError, ValueError, TypeError) as error:
+            raise AIConfigurationError(
+                f"The engine '{model_identifier}' does not resolve to a model."
+            ) from error
 
     def _profile_for(
         self, profile_id: str, task: AISettingsTask | None = None,
