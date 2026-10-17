@@ -176,6 +176,10 @@ class Workflow:
         self.state = IDLE
         #: The step this Workflow last released, None before it has released one.
         self.released: Optional[WorkflowStep] = None
+        # This direction's route and the Steps that have reported a transition.
+        # Outcomes stay on the Steps; no previous direction is inferred from them.
+        self._direction_steps: tuple[WorkflowStep, ...] = ()
+        self._observed_steps: set[WorkflowStep] = set()
         # Told when this Workflow or one of its steps changes.
         self._observers: list[Any] = []
         for one in self.steps.values():
@@ -339,7 +343,8 @@ class Workflow:
 
     def step_changed(self, step: WorkflowStep) -> None:
         """One of this Workflow's steps changed its state: so has this Workflow."""
-        del step
+        if step in self._direction_steps:
+            self._observed_steps.add(step)
         self._changed()
 
     def _become(self, state: str) -> None:
@@ -389,7 +394,32 @@ class Workflow:
              "kind": "precedes"}
             for before, after in zip(steps, steps[1:])
         )
+        selected = {f"step:{step.ordinal}": step for step in self._direction_steps}
+        processes = {f"process:{process.ordinal}": process for process in self.processes}
+        for relationship in relationships:
+            source, target = relationship["source"], relationship["target"]
+            if target in selected:
+                if relationship["kind"] == "contains":
+                    relationship["state"] = self._path_state((selected[target],))
+                elif source in selected:
+                    # An unexecuted predecessor is not a traversed execution edge.
+                    before = self._path_state((selected[source],))
+                    relationship["state"] = (before if before == "NOT RUN"
+                                             else self._path_state((selected[target],)))
+            elif source == "workflow" and target in processes:
+                children = tuple(step for step in processes[target].steps
+                                 if step in self._direction_steps)
+                if children:
+                    relationship["state"] = self._path_state(children)
         return relationships
+
+    def _path_state(self, steps: Sequence[WorkflowStep]) -> str:
+        """The current direction's path state, from its Steps' own transitions."""
+        states = {step.state if step in self._observed_steps else "PENDING" for step in steps}
+        for state in (RUNNING, FAILED, "PENDING", "NOT RUN", "SKIPPED", SUCCEEDED):
+            if state in states:
+                return state
+        return "PENDING"
 
     def projection(self, ctx: Any) -> dict[str, Any]:
         """What this Workflow shows: one snapshot of the hydrated graph.
@@ -490,6 +520,8 @@ class Workflow:
         if not self._running.acquire(blocking=False):
             raise AppError(f"workflow '{self.name}' is already running.")
         try:
+            self._direction_steps = ()
+            self._observed_steps.clear()
             self._become(RUNNING)
             return self._direct(self.runtime, apply=apply, step=step,
                              from_step=from_step, to_step=to_step, metadata=metadata)
@@ -517,6 +549,8 @@ class Workflow:
 
         steps = list(self.steps.values())
         selected = self._select(steps, step=step, from_step=from_step, to_step=to_step)
+        self._direction_steps = tuple(one for index, one in enumerate(steps) if index in selected)
+        self._changed()
 
         # This direction's execution values, handed to each step it releases or
         # holds back: what one step writes in ``data`` or ``metadata``, a later

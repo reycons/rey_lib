@@ -590,6 +590,8 @@ def test_each_step_is_running_while_its_run_executes_and_the_observer_is_told(
 
     assert watching.seen == [
         ("RUNNING", ("PENDING", "PENDING", "PENDING", "PENDING")),
+        # The selected route is published before its first Step is released.
+        ("RUNNING", ("PENDING", "PENDING", "PENDING", "PENDING")),
         ("RUNNING", ("PENDING", "PENDING", "RUNNING", "PENDING")),
         ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "PENDING")),
         ("RUNNING", ("PENDING", "PENDING", "SUCCEEDED", "RUNNING")),
@@ -854,3 +856,54 @@ def test_relationships_follow_execution_order_across_interleaved_processes() -> 
     ]
     assert {"source": "process:1", "target": "step:3", "kind": "contains"} in relationships
     assert {"source": "process:2", "target": "step:2", "kind": "contains"} in relationships
+
+
+def test_direction_projects_pending_active_and_completed_paths_and_resets(tmp_path: Path) -> None:
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    control = RecordingControl()
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+    snapshots: list[list[dict[str, str]]] = []
+
+    class Watching:
+        def changed(self, workflow: Workflow) -> None:
+            snapshots.append(workflow.relationships())
+
+    graph.observe(Watching())
+    application_run = parent_run(control, log=_log(tmp_path))
+    _run(graph, application_run, ctx)
+
+    def edge_state(edges: list[dict[str, str]], source: str, target: str) -> Any:
+        return next(edge.get("state") for edge in edges
+                    if edge["source"] == source and edge["target"] == target)
+
+    assert any(edge_state(edges, "step:1", "step:2") == "PENDING" for edges in snapshots)
+    assert any(edge_state(edges, "step:1", "step:2") == "RUNNING" for edges in snapshots)
+    assert all(edge["state"] == "SUCCEEDED" for edge in graph.relationships())
+
+    snapshots.clear()
+    _run(graph, application_run, ctx, step="s3")
+    assert any(edge_state(edges, "process:1", "step:3") == "PENDING" for edges in snapshots)
+    final = graph.relationships()
+    assert edge_state(final, "process:1", "step:3") == "SUCCEEDED"
+    assert edge_state(final, "process:1", "step:1") is None
+    assert edge_state(final, "step:2", "step:3") is None
+    assert edge_state(final, "step:3", "step:4") is None
+
+
+@pytest.mark.parametrize("apply,fails", [(False, False), (True, True)])
+def test_paths_never_mark_nonreleased_steps_completed(tmp_path: Path, apply: bool, fails: bool) -> None:
+    wf = _fixture()
+    wf["processes"]["p4"]["always_run"] = True
+    wf, ctx = prepared(wf, SimpleNamespace())
+    control = RecordingControl()
+    graph = _build(wf, ctx.applications[0],
+                   _recording([], {"p1": _failed("failed")} if fails else {}), control)
+    _run(graph, parent_run(control, log=_log(tmp_path)), ctx, apply=apply)
+    edges = {(edge["source"], edge["target"]): edge.get("state")
+             for edge in graph.relationships()}
+    assert edges[("process:1", "step:2")] == "NOT RUN"
+    assert edges[("step:2", "step:3")] == "NOT RUN"
+    assert edges[("process:1", "step:4")] == "SUCCEEDED"
+    if fails:
+        assert edges[("process:1", "step:1")] == "FAILED"
+        assert edges[("workflow", "process:1")] == "FAILED"
