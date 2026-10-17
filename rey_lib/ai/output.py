@@ -17,7 +17,7 @@ import json
 from typing import Any
 
 from rey_lib.ai.errors import AIOutputError
-from rey_lib.ai.requests import AIOutputKind, ResolvedAIRequest
+from rey_lib.ai.requests import AIOutputKind, AIOutputSpec, ResolvedAIRequest
 from rey_lib.ai.results import AIOutput
 
 __all__ = ["OutputParser"]
@@ -37,13 +37,26 @@ class OutputParser:
 
     def parse(self, request: ResolvedAIRequest, text: str, value: Any = None) -> AIOutput:
         """The output, in the form the request required."""
-        if not request.output.is_structured():
+        return self.parse_output(request.output, request.schema, text, value)
+
+    def parse_output(
+        self,
+        output: AIOutputSpec,
+        schema: dict[str, Any] | None,
+        text: str,
+        value: Any = None,
+    ) -> AIOutput:
+        """The output, in the form this requirement and schema demand.
+
+        The one validation path, whatever carries the requirement: a resolved
+        request today, an AITask's output and schema (backlog 1020).
+        """
+        if not output.is_structured():
             return AIOutput.of_text(text)
 
         parsed = value if value is not None else self._decode(text)
-        schema = request.schema
 
-        if request.output.kind is AIOutputKind.SCHEMA and schema is None:
+        if output.kind is AIOutputKind.SCHEMA and schema is None:
             raise AIOutputError(
                 "A schema output was requested and no schema was supplied."
             )

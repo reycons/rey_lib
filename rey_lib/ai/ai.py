@@ -34,21 +34,37 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 from rey_lib.ai.capabilities import AICapabilitySet
+from rey_lib.ai.content import AIContentKind
 from rey_lib.ai.contracts import ContractResolver
 from rey_lib.ai.credentials import CredentialResolver
-from rey_lib.ai.errors import AIConfigurationError, AISelectionError
+from rey_lib.ai.errors import (
+    AIConfigurationError,
+    AIError,
+    AIExecutionError,
+    AIOutputError,
+    AIProviderError,
+    AIRequestError,
+    AISelectionError,
+)
 from rey_lib.ai.execution import AIExecutor
 from rey_lib.ai.instructions import AIInstruction, AIInstructionKind
 from rey_lib.ai.output import OutputParser
 from rey_lib.ai.profiles import AIProfile
 from rey_lib.ai.registry import AIRegistry
-from rey_lib.ai.requests import AIRequest, AIRequestOptions, ResolvedAIRequest
-from rey_lib.ai.results import AIResult
+from rey_lib.ai.requests import AIOutputKind, AIRequest, AIRequestOptions, ResolvedAIRequest
+from rey_lib.ai.results import (
+    AIExecutionInfo,
+    AIFinishReason,
+    AIOutput,
+    AIResult,
+    AIUsage,
+)
 from rey_lib.ai.policies import DEFAULT_EXECUTION_POLICY, AIExecutionPolicy
 from rey_lib.ai.objects import AIObject
 from rey_lib.ai.sessions import AISession
 from rey_lib.ai.settings import AISettings, AISettingsTask
 from rey_lib.ai.streaming import AIEvent
+from rey_lib.ai.task import AITask
 from rey_lib.ai.tools import AITool
 from rey_lib.ai.turn_strategy import ToolMechanism, resolve_tool_mechanism
 from rey_lib.logs.app_logger import AppLogger
@@ -129,6 +145,9 @@ class AI:
         # for the mechanism it chooses, which it can only do against the
         # posture this runtime was built with.
         self._policy = policy
+        # The validator for a task this runtime executes through Pydantic AI
+        # (backlog 1020): OutputParser stays the owner of validation.
+        self._parser = parser or OutputParser()
         self._executor = executor or AIExecutor(
             registry=registry,
             contracts=contracts,
@@ -358,6 +377,178 @@ class AI:
     def stream(self, request: AIRequest, *, session_id: str = "") -> Iterator[AIEvent]:
         """Resolve this request and run it, reporting canonical events."""
         return self._executor.stream(self.resolve(request, session_id=session_id))
+
+    def execute_task(self, task: AITask) -> AIResult:
+        """Perform one hydrated unit of work through Pydantic AI (backlog 1020).
+
+        The task's choices are settled; this builds its model, runs it once and
+        records the outcome through the task's own transitions. Synchronous:
+        every caller runs on a thread without an event loop, and from inside a
+        running loop this refuses rather than starting one of its own.
+
+        Structured output asks Pydantic AI for the model's native JSON-schema
+        output where the model's own profile supports it, prompted output
+        otherwise, and never tool-call output -- tools are not this slice's, and
+        a profile's tool flag is not a promise a local engine keeps. Whatever
+        comes back, ``OutputParser`` validates it, and a failure is handed back
+        to the model as a correction within this runtime's allowance.
+
+        Raises:
+            AIRequestError: when the task carries input other than text.
+            AIExecutionError: when called inside a running event loop, or a
+                usage limit stops the run.
+            AIOutputError: when the output never satisfied its contract.
+            AIProviderError: when the engine refused or could not be reached.
+            AIConfigurationError: when the engine or the run cannot be set up.
+        """
+        import asyncio
+        import uuid
+        from datetime import datetime, timezone
+
+        import pydantic_ai
+        from pydantic_ai import Agent, ModelRetry, NativeOutput, PromptedOutput, StructuredDict
+        from pydantic_ai.exceptions import (
+            ModelAPIError,
+            UnexpectedModelBehavior,
+            UsageLimitExceeded,
+            UserError,
+        )
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise AIExecutionError(
+                f"AI task '{task.task_key or '(default)'}' was asked to run inside a "
+                "running event loop; execute it from a thread that has none."
+            )
+        prompt = self._prompt_of(task)
+        schema = (
+            task.output.schema if task.output.schema is not None
+            else task.output_schema if task.output.kind is AIOutputKind.CONTRACT
+            else None
+        )
+
+        task.started()
+        started = datetime.now(timezone.utc)
+        try:
+            model = self._model(task.model_identifier, task.base_url, task.credential_ref)
+            output_type: Any = str
+            if task.output.is_structured() and schema is not None:
+                shaped = StructuredDict(schema, name="answer")
+                output_type = (
+                    NativeOutput(shaped)
+                    if model.profile.get("supports_json_schema_output")
+                    else PromptedOutput(shaped)
+                )
+            agent = Agent(
+                model,
+                output_type=output_type,
+                instructions=task.contract_body or None,
+                retries={"output": self._policy.validation_correction.max_corrections},
+            )
+
+            @agent.output_validator
+            def _satisfies(answer: Any) -> Any:
+                """Rey's validation, the model told what was wrong when it fails."""
+                try:
+                    self._parse_task_output(task, schema, answer)
+                except AIOutputError as invalid:
+                    raise ModelRetry(str(invalid)) from invalid
+                return answer
+
+            settings: dict[str, Any] = {}
+            if task.temperature is not None:
+                settings["temperature"] = task.temperature
+            if task.timeout_seconds is not None:
+                settings["timeout"] = task.timeout_seconds
+            # Pydantic AI's first-run banner goes to stderr only; it is kept off
+            # entirely so no Rey process ever carries it.
+            pydantic_ai.BANNER_ENABLED = False
+            logger.debug(
+                "executing AI task %s on %s (instruction %s, output %s)",
+                task.task_key or "(default)", task.model_identifier,
+                task.instruction_key or "(none)", type(output_type).__name__,
+            )
+            run = agent.run_sync(prompt, model_settings=settings or None)
+            output = self._parse_task_output(task, schema, run.output)
+        except UserError as error:
+            failure: AIError = AIConfigurationError(
+                f"AI task '{task.task_key or '(default)'}' could not be run.", cause=error,
+            )
+        except UsageLimitExceeded as error:
+            failure = AIExecutionError(
+                f"AI task '{task.task_key or '(default)'}' reached a usage limit.", cause=error,
+            )
+        except UnexpectedModelBehavior as error:
+            failure = AIOutputError(
+                f"AI task '{task.task_key or '(default)'}' produced no output that "
+                "satisfies its contract.", cause=error,
+            )
+        except ModelAPIError as error:
+            failure = AIProviderError(
+                f"The engine for AI task '{task.task_key or '(default)'}' refused or "
+                "could not be reached.", cause=error,
+            )
+        except AIError as error:
+            task.failed(str(error))
+            raise
+        else:
+            result = AIResult(
+                output=output,
+                execution=AIExecutionInfo(
+                    execution_id=uuid.uuid4().hex,
+                    profile_id=task.profile_key,
+                    model=task.model_identifier,
+                    instruction_id=task.instruction_key,
+                    started_at=started.isoformat(),
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    finish_reason=AIFinishReason.COMPLETED,
+                ),
+                usage=AIUsage(
+                    input_tokens=int(run.usage.input_tokens or 0),
+                    output_tokens=int(run.usage.output_tokens or 0),
+                ),
+            )
+            task.answered(result)
+            return result
+        task.failed(str(failure))
+        raise failure from failure.cause
+
+    def _parse_task_output(
+        self, task: AITask, schema: dict[str, Any] | None, answer: Any,
+    ) -> AIOutput:
+        """The task's output, validated by OutputParser in the form it asked for."""
+        if isinstance(answer, str):
+            parsed = self._parser.parse_output(task.output, schema, answer)
+        else:
+            parsed = self._parser.parse_output(task.output, schema, "", dict(answer))
+        if task.output.media_type:
+            return replace(parsed, media_type=task.output.media_type)
+        return parsed
+
+    @staticmethod
+    def _prompt_of(task: AITask) -> str:
+        """What is sent: the subject, then the task's text, as one prompt.
+
+        Both, because both were asked: a prompt about a subject is not a prompt
+        instead of one. Text only in this slice; anything else is refused.
+        """
+        if task.input.messages or any(
+            part.kind is not AIContentKind.TEXT for part in task.input.content
+        ):
+            raise AIRequestError(
+                f"AI task '{task.task_key or '(default)'}' carries input other than "
+                "text, which this execution does not send."
+            )
+        parts = [task.subject, *(str(part.value) for part in task.input.content)]
+        prompt = "\n\n".join(part for part in parts if part.strip())
+        if not prompt:
+            raise AIRequestError(
+                f"AI task '{task.task_key or '(default)'}' carries nothing to send."
+            )
+        return prompt
 
     # -- composed asks -----------------------------------------------------
 
