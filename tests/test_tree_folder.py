@@ -22,7 +22,13 @@ import pytest
 
 from rey_lib.config.config_paths import PathResolver
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.tree import FOLDER_SOURCE, FileDataObject, folder_children, rey_lib_sources
+from rey_lib.tree import (
+    DATABASE_SOURCE,
+    FOLDER_SOURCE,
+    FileDataObject,
+    folder_children,
+    rey_lib_sources,
+)
 
 
 class _Ctx:
@@ -261,5 +267,7 @@ def test_refresh_is_offered_at_the_configured_root_only(asked) -> None:
 def test_rey_lib_implements_the_folder_source() -> None:
     sources = rey_lib_sources()
 
-    assert set(sources) == {FOLDER_SOURCE}
+    # The exact set: a source rey_lib starts implementing must be added here on
+    # purpose, never appear unnoticed (folder #1056, database #1057).
+    assert set(sources) == {FOLDER_SOURCE, DATABASE_SOURCE}
     assert isinstance(sources[FOLDER_SOURCE], FileDataObject)

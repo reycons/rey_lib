@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.folder import FileDataObject, folder_children
 from rey_lib.tree.inspection import (
     EXPANSION_LIMIT,
@@ -53,13 +54,14 @@ def rey_lib_sources() -> dict[str, Any]:
     names no source itself. A declared source not here is one this process
     cannot read, and the traversal refuses it.
     """
-    return {FOLDER_SOURCE: FileDataObject()}
+    return {FOLDER_SOURCE: FileDataObject(), DATABASE_SOURCE: DatabaseDataObject()}
 
 
 __all__ = [
     "APPLICATION_SOURCE",
     "DATABASE_SOURCE",
     "DECLARED_SOURCES",
+    "DatabaseDataObject",
     "EXPANSION_LIMIT",
     "FOLDER_SOURCE",
     "FileDataObject",
