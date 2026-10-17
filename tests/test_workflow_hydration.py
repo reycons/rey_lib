@@ -408,6 +408,23 @@ class TestTheProcessOwnsItsDataSources:
         with pytest.raises(AppError, match="declares no analysis config 'infer'"):
             _hydrate(_rows())[0].processes[0].analysis_config("infer")
 
+    def test_a_config_section_is_exactly_the_named_mapping_it_holds(self) -> None:
+        rows = _rows()
+        for row in rows:
+            row["process_config"]["runtime"] = {"max_files_per_run": 7}
+            row["process_config"]["listed"] = [{"name": "x"}]
+        process = _hydrate(rows)[0].processes[0]
+
+        runtime = process.config_section("runtime")
+        assert runtime.max_files_per_run == 7
+        assert not hasattr(runtime, "stop_on_error")  # nothing defaulted
+        with pytest.raises(AppError, match="declares no configuration section 'listed'"):
+            process.config_section("listed")  # a list is not a mapping section
+
+    def test_a_process_declaring_no_section_refuses_its_name(self) -> None:
+        with pytest.raises(AppError, match="declares no configuration section 'runtime'"):
+            _hydrate(_rows())[0].processes[0].config_section("runtime")
+
     def test_the_workflow_does_not_answer_data_sources(self) -> None:
         """One owner: no Workflow-level data source, forwarding or otherwise."""
         assert not hasattr(Workflow, "data_source")

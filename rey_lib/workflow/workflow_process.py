@@ -143,6 +143,20 @@ class WorkflowProcess:
         """
         return self._named("analysis_configs", name, "analysis config")
 
+    def config_section(self, name: str) -> Namespace:
+        """The named mapping section of this process's hydrated configuration (#1005).
+
+        Exactly the mapping already held in ``config[name]``, attribute-readable:
+        nothing merged, defaulted or interpreted, and read from nowhere else.
+
+        Raises:
+            AppError: When this process's configuration has no mapping of that name.
+        """
+        section = (self.config or {}).get(name)
+        if not isinstance(section, Mapping):
+            raise AppError(f"process '{self.name}' declares no configuration section '{name}'.")
+        return Namespace(dict(section))
+
     def _named(self, section: str, name: str, kind: str) -> Namespace:
         """The entry named ``name`` in this process's hydrated ``config[section]``.
 
