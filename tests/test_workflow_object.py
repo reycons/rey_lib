@@ -12,6 +12,7 @@ outcomes (child Run statuses) and the run-log records.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -24,6 +25,7 @@ from tests.support.workflow_runs import RecordingControl, parent_run
 
 from rey_lib.config.applications import Application, ApplicationOperation
 from rey_lib.errors.error_utils import AppError
+from rey_lib.logs import current_run
 from rey_lib.run import Run
 from rey_lib.workflow import workflow as workflow_module
 from rey_lib.workflow.workflow import Workflow
@@ -779,10 +781,16 @@ def test_the_projection_states_the_released_step_and_its_run(tmp_path: Path) -> 
     assert graph.projection(ctx)["released"]["step"] == "s4"
 
 
+def _errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """The ERROR records captured: what AppError.report wrote (rule 79)."""
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
 @pytest.mark.parametrize("failing_state", ["RUNNING", "IDLE"])
-def test_observer_failure_releases_lock_and_allows_another_direction(
-    tmp_path: Path, failing_state: str,
+def test_a_failing_workflow_observer_is_reported_and_does_not_decide_the_direction(
+    tmp_path: Path, failing_state: str, caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """A display observer is told; it cannot fail the direction (#1045)."""
     control = RecordingControl()
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     calls: list[str] = []
@@ -798,16 +806,85 @@ def test_observer_failure_releases_lock_and_allows_another_direction(
                 raise failure
 
     graph.observe(FailOnce())
-    with pytest.raises(RuntimeError) as raised:
-        _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
-    assert raised.value is failure
-    assert graph.state == "IDLE"
-    assert calls == ([] if failing_state == "RUNNING" else ["p1"])
+    with caplog.at_level(logging.ERROR):
+        result = _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
 
+    assert result == "SUCCEEDED"
+    assert calls == ["p1"]
+    assert graph.state == "IDLE"
+    errors = _errors(caplog)
+    assert len(errors) == 1
+    assert errors[0].exc_info[1].__cause__ is failure
+
+    # The lock was released: another direction runs.
     result = _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s2")
     assert result == "SUCCEEDED"
     assert calls[-1] == "p2"
     assert graph.state == "IDLE"
+
+
+def test_an_observer_failing_as_a_step_starts_does_not_stop_the_step(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Step still executes and Step and Run finish through their own owners (#1045)."""
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    calls: list[str] = []
+    graph = _build(wf, ctx.applications[0], _recording(calls), control)
+    failure = RuntimeError("observer failed")
+
+    class FailWhenAStepRuns:
+        failed = False
+
+        def changed(self, workflow: Workflow) -> None:
+            running = any(one.state == "RUNNING" for one in workflow.steps.values())
+            if running and not self.failed:
+                self.failed = True
+                raise failure
+
+    graph.observe(FailWhenAStepRuns())
+    run_log = _log(tmp_path)
+    with caplog.at_level(logging.ERROR):
+        result = _run(graph, parent_run(control, log=run_log), ctx, step="s1")
+
+    step = graph.steps["s1"]
+    assert result == "SUCCEEDED"
+    assert calls == ["p1"]
+    assert step.state == "SUCCEEDED"
+    assert control.finished[step.current_run.run_id] == "SUCCEEDED"
+    types = [json.loads(line)["record_type"]
+             for line in Path(run_log.path()).read_text(encoding="utf-8").splitlines()]
+    assert "STEP_START" in types and "STEP_END" in types
+    assert "STEP_FAILURE" not in types
+    assert current_run() is None
+    errors = _errors(caplog)
+    assert len(errors) == 1
+    assert errors[0].exc_info[1].__cause__ is failure
+
+
+def test_a_failure_escaping_a_released_step_leaves_no_run_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run-log binding is one scope: undone on every exit, not only the normal one."""
+    control = RecordingControl()
+    wf, ctx = prepared(_fixture(), SimpleNamespace())
+    graph = _build(wf, ctx.applications[0], _recording([]), control)
+    failure = RuntimeError("escaped")
+
+    def escaping(self: WorkflowStep, **_values: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(WorkflowStep, "run", escaping)
+    with pytest.raises(RuntimeError) as raised:
+        _run(graph, parent_run(control, log=_log(tmp_path / "first")), ctx, step="s1")
+
+    assert raised.value is failure
+    assert current_run() is None
+    assert graph.state == "IDLE"
+
+    monkeypatch.undo()
+    result = _run(graph, parent_run(control, log=_log(tmp_path / "second")), ctx, step="s2")
+    assert result == "SUCCEEDED"
 
 
 @pytest.mark.parametrize("earlier_failure", [False, True], ids=["dry_run", "earlier_failure"])

@@ -372,8 +372,23 @@ class Workflow:
         self._changed()
 
     def _changed(self) -> None:
+        """Tell every display observer this Workflow changed (backlog 1045).
+
+        The boundary where the Workflow calls external display behaviour: an
+        observer cannot decide whether the domain execution succeeds. Each
+        observer's failure is converted to its AppError, reported once (rule 79),
+        and the next observer is still told; the Workflow, its Steps and their
+        Runs continue by their own lifecycle. Nothing else is caught here.
+        """
         for observer in list(self._observers):
-            observer.changed(self)
+            try:
+                observer.changed(self)
+            except Exception as exc:  # noqa: BLE001 — canonical notification boundary
+                error = exc if isinstance(exc, AppError) else AppError(
+                    f"workflow '{self.name}': display observer failed")
+                if error is not exc:
+                    error.__cause__ = exc
+                error.report(f"workflow '{self.name}' observer notification", source=__name__)
 
     def actions(self) -> dict[str, list[dict[str, Any]]]:
         """The existing display subjects and their exact direction commands."""
@@ -581,65 +596,68 @@ class Workflow:
         # Workflow semantic base -> level 4 (SGC_Rey_Log_Nest_Level_Hierarchy_Correction).
         run_log.set_nest_level("workflow")
         log_run_start(run_log, workflow=name, apply=apply)
-        # Bound so file_utils records file operations through it; cleared at every exit.
+        # Bound so file_utils records file operations through it. One scope, one
+        # clear_run(): whatever leaves this direction, the binding is undone (#1045).
         bind_run(run_log)
-        record_config_file_references(ctx, run_log)
-        run_log.enter_phase("steps")
+        try:
+            record_config_file_references(ctx, run_log)
+            run_log.enter_phase("steps")
 
-        # The first failure, captured once: the reason ordinary steps stopped.
-        # A later always_run failure records itself without replacing it.
-        first_failure: dict[str, Any] | None = None
-        for index, one in enumerate(steps):
-            if index not in selected:
-                continue
-            # The step's indent level: workflow-step semantic level 5.
-            run_log.set_nest_level("workflow_step")
-            # A terminal run-time rule holds the step back: an earlier failure
-            # (unless always_run), or apply_only in a dry run. It is never
-            # released; the Step records its NOT RUN transition through its own Run.
-            if (first_failure is not None and not one.always_run) or (
-                not apply and one.apply_only
-            ):
-                _logger.info("workflow '%s' step '%s' not released.", name, one.id)
-                one.not_released(
-                    control=self.control, parent_run_id=self.run_id, log=run_log,
-                    apply=apply, data=data, metadata=shared_metadata, workflow_name=name,
-                )
-                continue
+            # The first failure, captured once: the reason ordinary steps stopped.
+            # A later always_run failure records itself without replacing it.
+            first_failure: dict[str, Any] | None = None
+            for index, one in enumerate(steps):
+                if index not in selected:
+                    continue
+                # The step's indent level: workflow-step semantic level 5.
+                run_log.set_nest_level("workflow_step")
+                # A terminal run-time rule holds the step back: an earlier failure
+                # (unless always_run), or apply_only in a dry run. It is never
+                # released; the Step records its NOT RUN transition through its own Run.
+                if (first_failure is not None and not one.always_run) or (
+                    not apply and one.apply_only
+                ):
+                    _logger.info("workflow '%s' step '%s' not released.", name, one.id)
+                    one.not_released(
+                        control=self.control, parent_run_id=self.run_id, log=run_log,
+                        apply=apply, data=data, metadata=shared_metadata, workflow_name=name,
+                    )
+                    continue
 
-            self.released = one
-            # Released: the step checks its own contract, creates its own Run and
-            # executes through it. A refusal raises before any Step Run exists.
-            try:
-                child = one.run(control=self.control, parent_run_id=self.run_id, log=run_log,
-                                apply=apply, data=data, metadata=shared_metadata, ctx=ctx,
-                                workflow_name=name)
-            except AppError as refusal:
-                # The step's own refusal propagates unchanged; the Workflow only
-                # records the consequence for its direction.
-                self._pre_execution_failure(one, refusal)
-                raise
-            if child.status == FAILED and first_failure is None:
-                failure_message = (
-                    child.error or child.detail or f"workflow step '{one.id}' failed."
-                )
-                first_failure = {
-                    "message": failure_message,
-                    "failure_record_id": child.failure_record_id,
-                    "failed_step_id": one.id,
-                    "failed_step_name": one.label,
-                    "failure_message": failure_message,
-                }
+                self.released = one
+                # Released: the step checks its own contract, creates its own Run and
+                # executes through it. A refusal raises before any Step Run exists.
+                try:
+                    child = one.run(control=self.control, parent_run_id=self.run_id, log=run_log,
+                                    apply=apply, data=data, metadata=shared_metadata, ctx=ctx,
+                                    workflow_name=name)
+                except AppError as refusal:
+                    # The step's own refusal propagates unchanged; the Workflow only
+                    # records the consequence for its direction.
+                    self._pre_execution_failure(one, refusal)
+                    raise
+                if child.status == FAILED and first_failure is None:
+                    failure_message = (
+                        child.error or child.detail or f"workflow step '{one.id}' failed."
+                    )
+                    first_failure = {
+                        "message": failure_message,
+                        "failure_record_id": child.failure_record_id,
+                        "failed_step_id": one.id,
+                        "failed_step_name": one.label,
+                        "failure_message": failure_message,
+                    }
 
-        # One completion, after the whole declared order has been walked.
-        run_log.set_nest_level("workflow")
-        if first_failure is None:
-            log_run_complete(run_log, "success")
-        else:
-            log_run_complete(run_log, "failed", **first_failure)
-        run_log.enter_phase("close")
-        clear_run()
-        return SUCCEEDED if first_failure is None else FAILED
+            # One completion, after the whole declared order has been walked.
+            run_log.set_nest_level("workflow")
+            if first_failure is None:
+                log_run_complete(run_log, "success")
+            else:
+                log_run_complete(run_log, "failed", **first_failure)
+            run_log.enter_phase("close")
+            return SUCCEEDED if first_failure is None else FAILED
+        finally:
+            clear_run()
 
     # -- selection ------------------------------------------------------------
 
@@ -741,9 +759,11 @@ class Workflow:
         run_log.set_nest_level("workflow")
         log_run_start(run_log, workflow=name, apply=apply)
         bind_run(run_log)
-        _logger.warning("%s", message)
-        log_run_complete(run_log, "refused", message=message)
-        clear_run()
+        try:
+            _logger.warning("%s", message)
+            log_run_complete(run_log, "refused", message=message)
+        finally:
+            clear_run()
 
     def _pre_execution_failure(self, one: WorkflowStep, error: AppError) -> None:
         """Record a released step's contract refusal as this direction's failure.
@@ -773,4 +793,3 @@ class Workflow:
             failed_step_name=one.label or one.id,
             failure_message=payload["message"],
         )
-        clear_run()
