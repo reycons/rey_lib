@@ -15,6 +15,9 @@ here.
 
 from __future__ import annotations
 
+from typing import Any
+
+from rey_lib.tree.folder import FileDataObject, folder_children
 from rey_lib.tree.inspection import (
     EXPANSION_LIMIT,
     INSPECTED_FIELDS,
@@ -41,12 +44,25 @@ from rey_lib.tree.sources import (
 )
 from rey_lib.tree.traversal import TreeTraversal
 
+
+def rey_lib_sources() -> dict[str, Any]:
+    """The declared tree sources rey_lib implements, by name (backlog 1056, D3).
+
+    The one statement of which sources have crossed into rey_lib: a consumer
+    that reads the tree outside the Console builds its traversal from these and
+    names no source itself. A declared source not here is one this process
+    cannot read, and the traversal refuses it.
+    """
+    return {FOLDER_SOURCE: FileDataObject()}
+
+
 __all__ = [
     "APPLICATION_SOURCE",
     "DATABASE_SOURCE",
     "DECLARED_SOURCES",
     "EXPANSION_LIMIT",
     "FOLDER_SOURCE",
+    "FileDataObject",
     "INSPECTED_FIELDS",
     "JSONL_SOURCE",
     "TOOL_SOURCE",
@@ -58,7 +74,9 @@ __all__ = [
     "TreeProjection",
     "TreeTraversal",
     "expand",
+    "folder_children",
     "inspected",
     "persisted_tree",
+    "rey_lib_sources",
     "subject",
 ]

@@ -88,6 +88,36 @@ class TestAuthorize:
             resolver.authorize("a.txt")
 
 
+class TestAuthorizeBeneath:
+    """Moved from the Console's file_explorer._authorized_path (backlog 1056)."""
+
+    def test_a_location_beneath_its_root_is_authorized(self, estate: dict[str, Path]) -> None:
+        (estate["data"] / "sub").mkdir()
+
+        assert _resolver(estate).authorize_beneath(str(estate["data"]), "sub") == (
+            estate["data"] / "sub").resolve()
+
+    def test_the_root_itself_is_authorized_when_nothing_is_asked_beneath(
+        self, estate: dict[str, Path],
+    ) -> None:
+        assert _resolver(estate).authorize_beneath(str(estate["data"]), "") == (
+            estate["data"].resolve())
+
+    def test_an_absolute_location_is_refused(self, estate: dict[str, Path]) -> None:
+        with pytest.raises(ConfigError, match="relative to the exploration root"):
+            _resolver(estate).authorize_beneath(str(estate["data"]), str(estate["logs"]))
+
+    def test_leaving_the_root_is_refused(self, estate: dict[str, Path]) -> None:
+        with pytest.raises(ConfigError, match="outside the exploration root: ../logs"):
+            _resolver(estate).authorize_beneath(str(estate["data"]), "../logs")
+
+    def test_a_contained_location_outside_the_allowed_roots_is_refused(
+        self, estate: dict[str, Path],
+    ) -> None:
+        with pytest.raises(ConfigError, match="outside allowed roots"):
+            _resolver(estate, ["data"]).authorize_beneath(str(estate["logs"]), "")
+
+
 class TestWithPath:
     def test_adding_a_path_keeps_the_permitted_roots(self, estate: dict[str, Path]) -> None:
         resolver = _resolver(estate, ["data"])

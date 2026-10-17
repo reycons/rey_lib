@@ -111,6 +111,34 @@ class PathResolver:
                 continue
         raise ConfigError(f"Path is outside allowed roots: {path}")
 
+    def authorize_beneath(self, root: str, relative_path: str) -> Path:
+        """One location relative to a configured root, contained and authorized.
+
+        Moved from the Console's file_explorer._authorized_path (backlog 1056),
+        every check unchanged: an absolute or anchored relative location is
+        refused, the candidate is resolved beneath the root and must still sit
+        beneath it, and then the installation's allowed-root gate applies -- the
+        configured root is necessary but not sufficient.
+
+        Raises:
+            ConfigError: when any of those refuses the location.
+        """
+        base = Path(root).expanduser().resolve()
+
+        candidate = Path(relative_path)
+        if candidate.is_absolute() or candidate.anchor:
+            raise ConfigError("Explorer locations must be relative to the exploration root.")
+
+        resolved = (base / candidate).resolve() if relative_path else base
+        try:
+            resolved.relative_to(base)
+        except ValueError as exc:
+            raise ConfigError(f"Path is outside the exploration root: {relative_path}") from exc
+
+        # The configured root is necessary but not sufficient: the installation's
+        # existing allowed-root boundary is enforced on every expansion as well.
+        return self.authorize(str(resolved))
+
     def with_path(self, name: str, path: Path) -> "PathResolver":
         """The same resolver with one more named path, its permitted roots kept.
 
