@@ -118,6 +118,49 @@ class TestAuthorizeBeneath:
             _resolver(estate, ["data"]).authorize_beneath(str(estate["logs"]), "")
 
 
+class TestAuthorizeConfiguredFile:
+    """Moved from the Console's file_resolution._configured_file / _resolved_root
+    (backlog 1058). A configured root may arrive as a token -- a row a SQL
+    projection emits never passes through the tree's own expansion -- and only a
+    WHOLE token, only through the installation's own resolver, is resolved."""
+
+    def test_a_whole_token_resolves_through_the_installation(
+        self, estate: dict[str, Path],
+    ) -> None:
+        (estate["data"] / "f.csv").write_text("a\n", encoding="utf-8")
+
+        assert _resolver(estate).authorize_configured_file("{data}", "f.csv") == (
+            estate["data"] / "f.csv").resolve()
+
+    def test_a_root_that_is_already_a_place_is_untouched(
+        self, estate: dict[str, Path],
+    ) -> None:
+        (estate["data"] / "f.csv").write_text("a\n", encoding="utf-8")
+
+        assert _resolver(estate).authorize_configured_file(
+            str(estate["data"]), "f.csv") == (estate["data"] / "f.csv").resolve()
+
+    def test_a_partial_token_is_not_expanded(self, estate: dict[str, Path]) -> None:
+        """Nothing builds a path out of parts: '{data}/sub' is no token."""
+        with pytest.raises(ConfigError) as refused:
+            _resolver(estate).authorize_configured_file("{data}/sub", "f.csv")
+
+        assert "is not declared" not in str(refused.value)
+
+    def test_an_undeclared_token_is_reported_not_defaulted(
+        self, estate: dict[str, Path],
+    ) -> None:
+        """A guessed root works on one machine."""
+        with pytest.raises(ConfigError, match="token '{nowhere}' is not declared"):
+            _resolver(estate).authorize_configured_file("{nowhere}", "f.csv")
+
+    def test_what_is_not_a_file_is_refused(self, estate: dict[str, Path]) -> None:
+        (estate["data"] / "sub").mkdir()
+
+        with pytest.raises(ConfigError, match="Path is not a file"):
+            _resolver(estate).authorize_configured_file("{data}", "sub")
+
+
 class TestWithPath:
     def test_adding_a_path_keeps_the_permitted_roots(self, estate: dict[str, Path]) -> None:
         resolver = _resolver(estate, ["data"])

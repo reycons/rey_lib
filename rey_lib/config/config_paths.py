@@ -139,6 +139,33 @@ class PathResolver:
         # existing allowed-root boundary is enforced on every expansion as well.
         return self.authorize(str(resolved))
 
+    def authorize_configured_file(self, root: str, relative_path: str) -> Path:
+        """One file beneath a configured root, authorized (backlog 1058).
+
+        Moved from the Console's file_resolution._configured_file and
+        _resolved_root. The root may arrive as a configured path token: a row a
+        SQL projection emits never passes through the tree's own expansion, so
+        a WHOLE token (``{name}``) is resolved here through this resolver --
+        nothing builds a path out of parts, and a root that is already a place
+        is untouched. Then the location is authorized beneath it and must be a
+        file.
+
+        Raises:
+            ConfigError: when the token is not declared, the location is refused,
+                or what it names is not a file.
+        """
+        if isinstance(root, str) and root.startswith("{") and root.endswith("}"):
+            try:
+                root = str(self.resolve(root[1:-1]))
+            except ConfigError as exc:
+                raise ConfigError(
+                    f"installation path token '{root}' is not declared: {exc}"
+                ) from exc
+        path = self.authorize_beneath(root, relative_path)
+        if not path.is_file():
+            raise ConfigError(f"Path is not a file: {path}")
+        return path
+
     def with_path(self, name: str, path: Path) -> "PathResolver":
         """The same resolver with one more named path, its permitted roots kept.
 

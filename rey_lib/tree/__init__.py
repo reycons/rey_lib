@@ -19,6 +19,7 @@ from typing import Any
 
 from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.folder import FileDataObject, folder_children
+from rey_lib.tree.jsonl import JsonlDataObject
 from rey_lib.tree.inspection import (
     EXPANSION_LIMIT,
     INSPECTED_FIELDS,
@@ -54,7 +55,11 @@ def rey_lib_sources() -> dict[str, Any]:
     names no source itself. A declared source not here is one this process
     cannot read, and the traversal refuses it.
     """
-    return {FOLDER_SOURCE: FileDataObject(), DATABASE_SOURCE: DatabaseDataObject()}
+    return {
+        FOLDER_SOURCE: FileDataObject(),
+        DATABASE_SOURCE: DatabaseDataObject(),
+        JSONL_SOURCE: JsonlDataObject(),
+    }
 
 
 __all__ = [
@@ -67,6 +72,7 @@ __all__ = [
     "FileDataObject",
     "INSPECTED_FIELDS",
     "JSONL_SOURCE",
+    "JsonlDataObject",
     "TOOL_SOURCE",
     "TREE_CONNECTION",
     "TREE_SCHEMA",
