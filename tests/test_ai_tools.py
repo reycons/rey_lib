@@ -72,7 +72,7 @@ class _Owner:
         self._answer = answer
         self._refuses = refuses
 
-    def __call__(self, arguments: dict[str, Any]) -> Any:
+    def __call__(self, arguments: dict[str, Any], tool: AITool) -> Any:
         self.calls.append(arguments)
         if self._refuses:
             raise AppError(self._refuses)

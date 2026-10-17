@@ -115,6 +115,10 @@ class AI:
             owner. Absent, one is built from the parts above.
         credentials: How a configured credential reference becomes its value at
             the moment a model is built. Holds no secret and no context.
+        connection_operations: Per connection name, the operations runtime
+            composition bound for it (``capability_key -> operation``), so a
+            task's governed connection selects how its tools reach their owners
+            (backlog 741). Callables only: no connection is held here.
     """
 
     def __init__(
@@ -128,9 +132,14 @@ class AI:
         executor: AIExecutor | None = None,
         connections: Iterable[str] = (),
         credentials: CredentialResolver | None = None,
+        connection_operations: Mapping[str, Mapping[str, Operation]] | None = None,
     ) -> None:
         self._registry = registry
         self._credentials = credentials or CredentialResolver()
+        self._connection_operations = {
+            str(name): dict(operations)
+            for name, operations in (connection_operations or {}).items()
+        }
         # Which connections a task here may query through, as **names**.
         #
         # Whether a connection may be used by a language model is the
@@ -455,7 +464,13 @@ class AI:
                     if model.profile.get("supports_json_schema_output")
                     else PromptedOutput(shaped)
                 )
-            toolset = AIToolSet(task.tools, operations or {})
+            # What the task's governed connection was composed with, then what
+            # this caller binds: the connection selects, the caller may add.
+            bound = {
+                **self._connection_operations.get(task.connection, {}),
+                **(operations or {}),
+            }
+            toolset = AIToolSet(task.tools, bound)
             agent = Agent(
                 model,
                 output_type=output_type,

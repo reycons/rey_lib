@@ -27,8 +27,10 @@ logger = AppLogger(__name__)
 __all__ = ["AITool", "AIToolCall", "AIToolResult", "AIToolSet"]
 
 #: The operation a runtime binds to a capability_key: it receives the validated
-#: arguments and answers by calling the canonical owner. Never implemented here.
-Operation = Callable[[dict[str, Any]], Any]
+#: arguments and the tool being called -- whose governed facts, such as
+#: ``result_row_limit``, state how it may operate -- and answers by calling the
+#: canonical owner. Never implemented here.
+Operation = Callable[[dict[str, Any], "AITool"], Any]
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,8 @@ class AITool:
     whether the same arguments may run more than once in one execution
     (``replay_safe``), and ``capability_key`` -- the binding identity a runtime
     maps to the operation that reaches the canonical owner. It translates a call
-    and owns no domain behaviour.
+    and owns no domain behaviour. ``result_row_limit`` is how many rows one
+    answer may hold, for a tool that returns rows (backlog 741).
     """
 
     name: str
@@ -48,6 +51,7 @@ class AITool:
     metadata: dict[str, Any] = field(default_factory=dict)
     replay_safe: bool = False
     capability_key: str = ""
+    result_row_limit: int | None = None
 
     def validated(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         """The arguments, checked against this tool's schema.
@@ -83,7 +87,7 @@ class AITool:
         """Validate, then hand the call to the operation that reaches the owner."""
         validated = self.validated(arguments)
         logger.debug("AI tool %s calling capability %s", self.name, self.capability_key)
-        return operation(validated)
+        return operation(validated, self)
 
 
 @dataclass(frozen=True)

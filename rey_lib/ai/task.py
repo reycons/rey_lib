@@ -272,6 +272,10 @@ class AITask:
                     input_schema=dict(one.get("input_schema") or {}),
                     replay_safe=bool(one.get("replay_safe")),
                     capability_key=str(one.get("capability_key") or ""),
+                    result_row_limit=(
+                        None if one.get("result_row_limit") is None
+                        else int(one["result_row_limit"])
+                    ),
                 )
                 for one in ((row or {}).get("tools") or ())
             ),

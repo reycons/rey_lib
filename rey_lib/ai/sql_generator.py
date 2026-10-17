@@ -104,11 +104,11 @@ class SQLGenerator:
         """
         from rey_lib.db.database_objects import DatabaseSchema  # noqa: PLC0415
 
-        def schemas(arguments: dict[str, Any]) -> list[str]:
+        def schemas(arguments: dict[str, Any], tool: Any) -> list[str]:
             """The connection's schemas, by name."""
             return [one.schema for one in DatabaseSchema.list(conn, connection, adapter)]
 
-        def schema(arguments: dict[str, Any]) -> dict[str, Any]:
+        def schema(arguments: dict[str, Any], tool: Any) -> dict[str, Any]:
             """One schema's tables and views, with their columns."""
             read = DatabaseSchema.read(conn, connection, "", str(arguments["schema"]), adapter)
 

@@ -53,6 +53,7 @@ from rey_lib.ai.providers.base import AIProvider
 from rey_lib.ai.providers.configuration import ConfiguredProvider
 from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.settings import AISettings, AISettingsTask
+from rey_lib.ai.tools import Operation
 from rey_lib.config.env_reference import declaration_map
 
 __all__ = [
@@ -115,6 +116,7 @@ def ai_from_ctx(
     policy: AIExecutionPolicy = DEFAULT_EXECUTION_POLICY,
     configured: tuple[ConfiguredProvider, ...] = (),
     connections: Iterable[str] = (),
+    connection_operations: Mapping[str, Mapping[str, Operation]] | None = None,
 ) -> AI:
     """Build one runtime's ``AI`` from installation context, then let ctx go.
 
@@ -170,6 +172,9 @@ def ai_from_ctx(
         # The same resolver the adapters hold: AI builds its Pydantic AI models
         # with it (backlog 1019), reading the environment only at that moment.
         credentials=credentials,
+        # Composed by the runtime beside the connections it offers (backlog
+        # 741); handed over as callables, never as connections.
+        connection_operations=connection_operations,
     )
 
 

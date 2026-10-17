@@ -437,6 +437,53 @@ def _ai_connections(ctx: Any) -> tuple[str, ...]:
     return permitted
 
 
+def _ai_query_operations(
+    ctx: Any, permitted: tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    """Per offered connection, the query operation a governed AI tool binds (backlog 741).
+
+    Composition only. The connection is the database layer's, acquired here
+    where the runtime is composed; execution is DatabaseQuery's; how many rows an
+    answer may hold is the calling tool's governed ``result_row_limit``, passed
+    straight through, and whether a result stands at that limit is read from the
+    same value. Nothing else is decided here, and the AI receives only the
+    callable -- never the connection.
+    """
+    from rey_lib.db.database_query import DatabaseQuery, json_value  # noqa: PLC0415
+
+    built = build_connections(ctx)
+
+    def query_on(connection: Any) -> Any:
+        def query(arguments: dict[str, Any], tool: Any) -> dict[str, Any]:
+            limit = tool.result_row_limit
+            if not limit:
+                raise ConfigError(
+                    f"AI tool '{tool.name}' states no result_row_limit, which a "
+                    "query needs to say how many rows one answer may hold."
+                )
+            results = DatabaseQuery(str(arguments["sql"])).run(
+                connection.handle(), limit=limit,
+            )
+            return {
+                "results": [
+                    {
+                        "columns": list(result.columns),
+                        "rows": [json_value(row) for row in result.rows],
+                        "row_count": result.row_count,
+                        "at_row_limit": len(result.rows) >= limit,
+                    }
+                    for result in results
+                ],
+                "row_limit": limit,
+            }
+        return query
+
+    return {
+        name: {"database.query": query_on(built[name])}
+        for name in permitted if name in built
+    }
+
+
 def open_shared_ai(ctx: Namespace) -> Namespace:
     """Make a resolved context into a runtime by giving it its one AI.
 
@@ -496,12 +543,14 @@ def open_shared_ai(ctx: Namespace) -> Namespace:
         engines = _ai_engines(rows)
         profiles = _ai_profiles(engines, rows)
         instructions = _ai_instructions(ctx)
+        offered = _ai_connections(ctx)
         ctx.shared_ai = ai_from_ctx(
             ctx,
             profiles=profiles,
             instructions=instructions,
             configured=engines,
-            connections=_ai_connections(ctx),
+            connections=offered,
+            connection_operations=_ai_query_operations(ctx, offered),
             settings=_ai_settings(
                 ctx, profiles=profiles, instructions=instructions,
             ),
