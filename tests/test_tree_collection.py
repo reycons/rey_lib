@@ -146,6 +146,19 @@ def test_the_feeder_reads_but_holds_nothing(monkeypatch: pytest.MonkeyPatch) -> 
 # -- tools -------------------------------------------------------------------
 
 
+def test_a_member_s_published_node_type_is_its_own() -> None:
+    """Backlog 1098: ai_app's node is its own node type; every other stays an application."""
+    members = [
+        {"id": "ai_app", "label": "AI", "node_type": "ai_application", "application_id": "ai_app"},
+        {"id": "rey_loader", "label": "Loader", "node_type": "", "application_id": "rey_loader"},
+    ]
+
+    made = CollectionDataObject().children(object(), APPLICATION_ROOT, members)
+
+    assert [(record["label"], record["node_type"]) for record in made] == [
+        ("AI", "ai_application"), ("Loader", "application")]
+
+
 def test_tools_are_one_more_collection_and_not_one_more_object() -> None:
     """Same object, same two methods, told a different name to read."""
     made = CollectionDataObject().children(object(), TOOL_ROOT, TOOLS)
@@ -189,6 +202,19 @@ class TestTheTreeProjects:
         ))
 
         assert [row["id"] for row in rows] == ["alpha", "beta"]
+
+    def test_the_published_node_type_is_projected_unchanged(self) -> None:
+        declared = [{"name": "alpha", "app_path": "/apps/alpha", "entry_point": "main.py",
+                     "cli": {}}]
+        published = {**_published(declared)["alpha"], "node_type": "ai_application"}
+        alpha = build_applications(SimpleNamespace(apps=declared),
+                                   registrations={"alpha": published})[0]
+
+        rows = collection.configured_applications(SimpleNamespace(
+            applications=(alpha, _application("beta")),
+        ))
+
+        assert [row["node_type"] for row in rows] == ["ai_application", ""]
 
     def test_a_context_without_applications_is_a_fault(self) -> None:
         # Not an empty installation: applications are built by the config load,

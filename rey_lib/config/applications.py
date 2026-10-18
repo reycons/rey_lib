@@ -369,6 +369,10 @@ class Application:
     #: The panel kind this application is drawn by, published by the
     #: distribution beside its icon. Empty means the general application panel.
     panel: str = ""
+    #: The tree node type this application's node is, published by the
+    #: distribution beside its icon and panel (backlog 1098): which governed
+    #: node actions its node offers. Empty means the ordinary application node.
+    node_type: str = ""
     #: The application's own parameters, declared under ``cli.parameters``.
     #:
     #: Not every application has commands. Several declare parameters at this
@@ -603,6 +607,10 @@ def _from_registration(
         # From the REGISTRATION, as the icon is: which panel draws it is the
         # distribution's fact about itself.
         panel=str(registration.get("panel") or ""),
+        # From the REGISTRATION, as the panel is: which node type its tree node
+        # is -- and so which governed actions that node offers -- is the
+        # distribution's fact about itself (backlog 1098).
+        node_type=str(registration.get("node_type") or ""),
         # From the installation entry, not the registration: how loud this
         # application runs here is this installation's decision.
         log_level=str(entry.get("log_level") or ""),

@@ -70,6 +70,9 @@ def configured_applications(ctx: Any) -> list[dict[str, Any]]:
             # What an application is addressed by. Which action that identity
             # is for is tree.node_type_action's answer, not this reader's.
             "application_id": row.name,
+            # Published by the application, as its icon is (backlog 1098):
+            # which node type its node is. Carried, never chosen here.
+            "node_type": row.node_type,
         }
         for row in _ctx_applications(ctx)
     ]
@@ -199,7 +202,9 @@ class CollectionDataObject:
         """
         return {
             "row_type": "node",
-            "node_type": _MEMBER_TYPE[collection],
+            # What the member published, or what its collection's members are:
+            # a published node type is the member's own (backlog 1098).
+            "node_type": str(entry.get("node_type") or "") or _MEMBER_TYPE[collection],
             "label": str(entry.get("label") or entry.get("id") or ""),
             # What the member published, or the mark its collection is known
             # by. The fallback is the SEMANTIC icon rather than nothing: an
