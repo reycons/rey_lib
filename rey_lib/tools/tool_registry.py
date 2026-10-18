@@ -1,8 +1,12 @@
 """
-Tool and editor registry loader.
+Tool and editor registry.
 
-Loads tool definitions from a YAML config file. The UI renders actions
+Interprets the installation's loaded tool configuration. The UI renders actions
 from the registry — never from hardcoded tool names or editor assumptions.
+
+Configuration I/O loads tool configuration; this registry interprets it and
+reads no configuration file of its own (backlog 1093): the context's ``tools``
+block is the canonical loaded state.
 """
 
 from __future__ import annotations
@@ -12,10 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rey_lib.config.config_utils import parse_yaml
-from rey_lib.files.file_utils import read_text_file
+from rey_lib.config.inventory import to_plain_data
 
-__all__ = ["ToolEntry", "ToolRegistry", "load_tool_registry"]
+__all__ = ["ToolEntry", "ToolRegistry"]
 
 # Supported runtime token placeholders in launch arg templates.
 _TOKEN_FILE_PATH = "{file_path}"
@@ -89,11 +92,47 @@ class ToolEntry:
 
 
 class ToolRegistry:
-    """Registry of configured tools and editors loaded from YAML configuration."""
+    """Registry of the configured tools and editors, interpreted from loaded configuration."""
 
     def __init__(self, tools: list[ToolEntry]) -> None:
         """Initialize with a list of parsed tool entries."""
         self._tools = tools
+
+    @classmethod
+    def from_configuration(cls, tools: Any) -> "ToolRegistry":
+        """The registry the loaded ``tools`` configuration block states.
+
+        ``tools`` is the block as configuration I/O loaded it -- ``ctx.tools``.
+        Absent configuration is an empty registry, so callers can treat it as
+        "no tools configured" rather than an error.
+
+        Expected shape::
+
+            editors:
+              - name: vscode
+                ...
+
+        A mapping whose ``editors``, ``tools`` and ``llm_test_launchers``
+        sections are lists of entries; a flat list of entries is also accepted.
+        """
+        tools_block = to_plain_data(tools) if tools is not None else {}
+        entries_raw: list[Any] = []
+
+        if isinstance(tools_block, dict):
+            # Collect all known sections: editors, tools, llm_test_launchers.
+            for key in ("editors", "tools", "llm_test_launchers"):
+                section = tools_block.get(key)
+                if isinstance(section, list):
+                    entries_raw.extend(section)
+        elif isinstance(tools_block, list):
+            # A flat list of entries.
+            entries_raw = tools_block
+
+        return cls([
+            _parse_tool_entry(entry)
+            for entry in entries_raw
+            if isinstance(entry, dict)
+        ])
 
     def all_tools(self) -> list[ToolEntry]:
         """Return all enabled tools regardless of PATH availability."""
@@ -114,51 +153,6 @@ class ToolRegistry:
     def to_list(self) -> list[dict[str, Any]]:
         """Return a JSON-safe list of all enabled tools with availability status."""
         return [t.to_dict() for t in self.all_tools()]
-
-
-def load_tool_registry(config_path: Path) -> ToolRegistry:
-    """Load a ToolRegistry from a tools.yaml file.
-
-    Returns an empty registry when the file does not exist, so callers
-    can treat a missing config as "no tools configured" rather than an error.
-
-    Expected YAML shape::
-
-        tools:
-          editors:
-            - name: vscode
-              ...
-
-    The top-level key is ``tools``; its value is a dict with an ``editors``
-    (or ``tools``) list. A flat top-level list is also accepted.
-    """
-    if not config_path.exists():
-        return ToolRegistry([])
-
-    data = parse_yaml(read_text_file(config_path)) or {}
-
-    if not isinstance(data, dict):
-        return ToolRegistry([])
-
-    tools_block = data.get("tools") or {}
-    entries_raw: list[Any] = []
-
-    if isinstance(tools_block, dict):
-        # Collect all known sections: editors, tools, llm_test_launchers.
-        for key in ("editors", "tools", "llm_test_launchers"):
-            section = tools_block.get(key)
-            if isinstance(section, list):
-                entries_raw.extend(section)
-    elif isinstance(tools_block, list):
-        # Flat list under the top-level ``tools`` key.
-        entries_raw = tools_block
-
-    tools = [
-        _parse_tool_entry(entry)
-        for entry in entries_raw
-        if isinstance(entry, dict)
-    ]
-    return ToolRegistry(tools)
 
 
 def _parse_tool_entry(raw: dict[str, Any]) -> ToolEntry:
