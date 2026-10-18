@@ -73,6 +73,15 @@ _KNOWN_DRIFT: set[tuple[str, str, str, str]] = {
     ('rey_messaging', 'shared', 'log-level', 'parser'),
     ('rey_messaging', 'shared', 'run-id', 'parser'),
     ('rey_repository_map', 'commands', 'check-bindings', 'parser'),
+    # workflow_app and ai_app share the estate-wide drift of the three shared
+    # flags rey_lib's parser adds (#1027); the declarations are fixed across
+    # every application together under #945.
+    ('ai_app', 'shared', 'connection-alias', 'parser'),
+    ('ai_app', 'shared', 'log-level', 'parser'),
+    ('ai_app', 'shared', 'run-id', 'parser'),
+    ('workflow_app', 'shared', 'connection-alias', 'parser'),
+    ('workflow_app', 'shared', 'log-level', 'parser'),
+    ('workflow_app', 'shared', 'run-id', 'parser'),
 }
 
 #: The positional parameter whose values are an application's commands.
