@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import queue
 import secrets
+import threading
 import time
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
@@ -272,6 +273,8 @@ class AttachedApp:
         self._loop = async_runtime.Loop()
         self._channel = self._loop.call(async_runtime.connect_local, int(port))
         self._loop.call(self._channel.send, {"hello": run_id, "token": token})
+        # One sender at a time: an application may emit from more than one thread.
+        self._sending = threading.Lock()
 
     def commands(self) -> Iterator[dict[str, Any]]:
         """The launcher's commands, in order, until it closes the channel."""
@@ -279,8 +282,12 @@ class AttachedApp:
             yield message
 
     def emit(self, message: Mapping[str, Any]) -> None:
-        """Send one plain message -- state or an event -- to the launcher."""
-        self._loop.call(self._channel.send, message)
+        """Send one plain message -- state or an event -- to the launcher.
+
+        Safe from any thread: messages sent at once go one after another, each whole.
+        """
+        with self._sending:
+            self._loop.call(self._channel.send, message)
 
     def close(self) -> None:
         """Close the channel and release the loop."""

@@ -185,3 +185,38 @@ def test_attaching_outside_a_launch_is_refused(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(StateError, match="not launched through LaunchedApp.launch"):
         AttachedApp.attach(1)
+
+
+#: A child that emits from several threads at once, then ends.
+EMITTERS = textwrap.dedent("""
+    import threading
+    from rey_lib.run.app_channel import AttachedApp
+
+    channel = AttachedApp.attach(9)
+    def emit_from(thread):
+        for index in range(50):
+            channel.emit({"thread": thread, "index": index, "padding": "x" * 4096})
+    threads = [threading.Thread(target=emit_from, args=(one,)) for one in range(4)]
+    for one in threads:
+        one.start()
+    for one in threads:
+        one.join()
+    channel.emit({"event": "done"})
+    channel.close()
+""")
+
+
+def test_messages_emitted_from_several_threads_at_once_each_arrive_whole() -> None:
+    app = _launch(EMITTERS)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        received = []
+        while (message := next(events)) != {"event": "done"}:
+            received.append((message["thread"], message["index"]))
+        assert sorted(received) == [(thread, index) for thread in range(4) for index in range(50)]
+        assert app.wait(timeout=WAIT) == 0
+    finally:
+        # Shown with a failure: how far the launch got, and when.
+        print("trace:", app.trace)
+        app.close()
