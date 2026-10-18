@@ -404,10 +404,20 @@ class Workflow:
                 for step in process.steps
             )
         steps = list(self.steps.values())
+        adjacent = set(zip(steps, steps[1:]))
         relationships.extend(
             {"source": f"step:{before.ordinal}", "target": f"step:{after.ordinal}",
              "kind": "precedes"}
             for before, after in zip(steps, steps[1:])
+        )
+        # This direction's route: a selected pair that is not already adjacent
+        # (1 -> 3 past an unselected 2) is joined by its own precedes (#1050).
+        route = self._direction_steps
+        relationships.extend(
+            {"source": f"step:{before.ordinal}", "target": f"step:{after.ordinal}",
+             "kind": "precedes"}
+            for before, after in zip(route, route[1:])
+            if (before, after) not in adjacent
         )
         selected = {f"step:{step.ordinal}": step for step in self._direction_steps}
         entry = self._direction_steps[0] if self._direction_steps else None

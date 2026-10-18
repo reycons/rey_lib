@@ -940,6 +940,37 @@ def test_relationships_follow_execution_order_across_interleaved_processes() -> 
     assert {"source": "process:2", "target": "step:2", "kind": "contains"} in relationships
 
 
+def test_a_selected_process_projects_its_own_route_past_another_processes_step(
+    tmp_path: Path,
+) -> None:
+    """Process a owns steps 1 and 3, b owns 2: directing a projects 1 -> 3 (#1050)."""
+    calls: list[str] = []
+    control = RecordingControl()
+    a, b = _application("load", name="a"), _application("check", name="b")
+    first = WorkflowProcess(name="a", ordinal=1, application=a, config=None, steps=[
+        _step(a, "load", "s1", 1, calls), _step(a, "load", "s3", 3, calls)])
+    second = WorkflowProcess(name="b", ordinal=2, application=b, config=None, steps=[
+        _step(b, "check", "s2", 2, calls)])
+    parent = parent_run(control, log=_log(tmp_path))
+    workflow = Workflow(name="wf", enabled=True, config=None,
+                        processes=[first, second], control=control,
+                        runtime=SimpleNamespace(), log=parent.log, run_id=parent.run_id)
+    before = workflow.relationships()
+
+    workflow.direct(step="a")
+
+    assert calls == ["a.load", "a.load"]
+    edges = {(edge["source"], edge["target"]): edge for edge in workflow.relationships()}
+    assert edges[("step:1", "step:3")] == {
+        "source": "step:1", "target": "step:3", "kind": "precedes", "state": "SUCCEEDED"}
+    assert "state" not in edges[("step:1", "step:2")]
+    assert "state" not in edges[("step:2", "step:3")]
+    # Nothing else changes: the structure is as it was, with the route added.
+    shape = [(edge["source"], edge["target"], edge["kind"]) for edge in before]
+    assert [(edge["source"], edge["target"], edge["kind"])
+            for edge in workflow.relationships()] == [*shape, ("step:1", "step:3", "precedes")]
+
+
 def test_direction_projects_pending_active_and_completed_paths_and_resets(tmp_path: Path) -> None:
     wf, ctx = prepared(_fixture(), SimpleNamespace())
     control = RecordingControl()
