@@ -23,9 +23,11 @@ import pytest
 from rey_lib.config.config_paths import PathResolver
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.tree import (
+    APPLICATION_SOURCE,
     DATABASE_SOURCE,
     FOLDER_SOURCE,
     JSONL_SOURCE,
+    TOOL_SOURCE,
     FileDataObject,
     folder_children,
     rey_lib_sources,
@@ -269,6 +271,9 @@ def test_rey_lib_implements_the_folder_source() -> None:
     sources = rey_lib_sources()
 
     # The exact set: a source rey_lib starts implementing must be added here on
-    # purpose, never appear unnoticed (folder #1056, database #1057, jsonl #1058).
-    assert set(sources) == {FOLDER_SOURCE, DATABASE_SOURCE, JSONL_SOURCE}
+    # purpose, never appear unnoticed (folder #1056, database #1057, jsonl #1058,
+    # applications and tools #1059).
+    assert set(sources) == {
+        FOLDER_SOURCE, DATABASE_SOURCE, JSONL_SOURCE, APPLICATION_SOURCE, TOOL_SOURCE,
+    }
     assert isinstance(sources[FOLDER_SOURCE], FileDataObject)

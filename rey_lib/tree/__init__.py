@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rey_lib.tree.collection import CollectionDataObject
 from rey_lib.tree.database import DatabaseDataObject
 from rey_lib.tree.folder import FileDataObject, folder_children
 from rey_lib.tree.jsonl import JsonlDataObject
@@ -55,15 +56,21 @@ def rey_lib_sources() -> dict[str, Any]:
     names no source itself. A declared source not here is one this process
     cannot read, and the traversal refuses it.
     """
+    collections = CollectionDataObject()
     return {
         FOLDER_SOURCE: FileDataObject(),
         DATABASE_SOURCE: DatabaseDataObject(),
         JSONL_SOURCE: JsonlDataObject(),
+        # One object under two names: which collection to read is the
+        # configuration's (backlog 1059).
+        APPLICATION_SOURCE: collections,
+        TOOL_SOURCE: collections,
     }
 
 
 __all__ = [
     "APPLICATION_SOURCE",
+    "CollectionDataObject",
     "DATABASE_SOURCE",
     "DECLARED_SOURCES",
     "DatabaseDataObject",
