@@ -10,8 +10,7 @@ only, and the result records have one home.
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -19,7 +18,7 @@ from typing import Any
 import pytest
 
 from rey_lib.db import database_query as module
-from rey_lib.db.database_query import DatabaseQuery, PageResult, StatementResult, json_value
+from rey_lib.db.database_query import DatabaseQuery, PageResult, StatementResult
 from rey_lib.errors.error_utils import DatabaseError, UnsupportedDatabaseCapabilityError
 
 
@@ -166,35 +165,11 @@ def test_the_result_records_have_one_home() -> None:
     from rey_lib.db import db_adapter
 
     assert set(module.__all__) == {
-        "DatabaseQuery", "PageResult", "StatementResult", "json_value",
+        "DatabaseQuery", "PageResult", "StatementResult",
     }
     assert db_adapter.__all__ == ["DBAdapter"]
     source = Path(db_adapter.__file__).read_text(encoding="utf-8")
     assert "class PageResult" not in source and "class StatementResult" not in source
-
-
-def test_json_value_makes_a_result_value_json_safe() -> None:
-    """The one normalization, used by the SQL card and the AI query tool (backlog 732)."""
-    assert json_value({"n": 1, "f": 1.5, "s": "x", "b": True, "none": None}) == {
-        "n": 1, "f": 1.5, "s": "x", "b": True, "none": None,
-    }
-    assert json_value(date(2026, 1, 2)) == "2026-01-02"
-    assert json_value(datetime(2026, 1, 2, 3, 4, 5)) == "2026-01-02T03:04:05"
-    assert json_value({1: [date(2026, 1, 2), (Decimal("1.50"),)]}) == {
-        "1": ["2026-01-02", ["1.50"]],
-    }
-    assert json_value(MappingProxyType({"k": Decimal("2")})) == {"k": "2"}
-
-
-def test_json_value_has_one_implementation() -> None:
-    root = Path(module.__file__).resolve().parents[3]
-    defined = [
-        path for path in root.glob("rey_*/rey_*/**/*.py")
-        if "def _json_value(" in path.read_text(encoding="utf-8")
-        or "def json_value(" in path.read_text(encoding="utf-8")
-    ]
-
-    assert [path.name for path in defined] == ["database_query.py"]
 
 
 class _Reader:
@@ -304,7 +279,16 @@ class TestTheLiveQuery:
         assert (query.pageable, query.rows_per_page, query.current_page) == (False, 10, 2)
         assert query.params == {"a": 1}
         with pytest.raises(DatabaseError, match="no live property"):
-            query.update(connection=None)
+            query.update(params={})
+
+    def test_a_new_connection_is_applied_and_moves_nothing_else(self) -> None:
+        first, second = _Connection(), _Connection()
+        query = DatabaseQuery("SELECT 1", connection=first, current_page=3)
+
+        query.update(connection=second)
+
+        assert query.connection is second and query.current_page == 3
+        assert first.closed is False and first.handed == [] and second.handed == []
 
     def test_replacing_the_statement_clears_its_parameters_and_keeps_the_page(self) -> None:
         query = DatabaseQuery("SELECT :a", {"a": 1}, current_page=3)
@@ -341,7 +325,8 @@ class TestTheLiveQuery:
         assert answer == {
             "pageable": True,
             "columns": [{"name": "a"}, {"name": "doc", "kind": "document"}],
-            "rows": [{"a": "2026-01-02", "doc": {}}],
+            # The provider's own values: making them JSON-safe is the sending boundary's.
+            "rows": [{"a": date(2026, 1, 2), "doc": {}}],
             "total_row_count": None, "offset": 20, "limit": 10, "next_offset": 30,
         }
         assert connection.closed is False

@@ -449,7 +449,8 @@ def _ai_query_operations(
     same value. Nothing else is decided here, and the AI receives only the
     callable -- never the connection.
     """
-    from rey_lib.db.database_query import DatabaseQuery, json_value  # noqa: PLC0415
+    from rey_lib.db.database_query import DatabaseQuery  # noqa: PLC0415
+    from rey_lib.files.json import json_value  # noqa: PLC0415
 
     built = build_connections(ctx)
 

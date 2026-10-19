@@ -220,3 +220,32 @@ def test_messages_emitted_from_several_threads_at_once_each_arrive_whole() -> No
         # Shown with a failure: how far the launch got, and when.
         print("trace:", app.trace)
         app.close()
+
+
+#: A child that emits values JSON cannot carry as they are.
+VALUES = textwrap.dedent("""
+    from datetime import date, datetime
+    from decimal import Decimal
+    from rey_lib.run.app_channel import AttachedApp
+
+    channel = AttachedApp.attach(8)
+    channel.emit({"event": "values", "rows": [
+        {"d": date(2026, 1, 2), "t": datetime(2026, 1, 2, 3, 4, 5), "n": Decimal("1.50")},
+    ], "nested": {"k": (Decimal("2"), None)}})
+    channel.close()
+""")
+
+
+def test_an_emitted_message_arrives_json_safe_and_otherwise_as_sent() -> None:
+    app = _launch(VALUES)
+    try:
+        assert app.connected(timeout=WAIT)
+        assert next(app.events(timeout=WAIT)) == {
+            "event": "values",
+            "rows": [{"d": "2026-01-02", "t": "2026-01-02T03:04:05", "n": "1.50"}],
+            "nested": {"k": ["2", None]},
+        }
+        assert app.wait(timeout=WAIT) == 0
+    finally:
+        print("trace:", app.trace)
+        app.close()

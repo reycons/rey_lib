@@ -9,13 +9,18 @@ pin defects the module actually had.
 from __future__ import annotations
 
 import tempfile
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
+from rey_lib.files import json as json_module
 from rey_lib.files import primitive_file_io
 from rey_lib.files.json import (
     JsonReadError,
+    json_value,
     parse_json_text,
     read_json_file,
     render_json,
@@ -296,3 +301,33 @@ def test_every_mode_round_trips_through_a_file(tmp_path: Path, mode: str) -> Non
     write_json_file(target, value, mode=mode)  # type: ignore[arg-type]
 
     assert read_json_file(target, expect=dict) == value
+
+
+# ---------------------------------------------------------------------------
+# A value as JSON can carry it
+# ---------------------------------------------------------------------------
+
+def test_json_value_makes_a_result_value_json_safe() -> None:
+    """The one normalization, invoked by each boundary that sends a value on."""
+    assert json_value({"n": 1, "f": 1.5, "s": "x", "b": True, "none": None}) == {
+        "n": 1, "f": 1.5, "s": "x", "b": True, "none": None,
+    }
+    assert json_value(date(2026, 1, 2)) == "2026-01-02"
+    assert json_value(datetime(2026, 1, 2, 3, 4, 5)) == "2026-01-02T03:04:05"
+    assert json_value({1: [date(2026, 1, 2), (Decimal("1.50"),)]}) == {
+        "1": ["2026-01-02", ["1.50"]],
+    }
+    assert json_value(MappingProxyType({"k": Decimal("2")})) == {"k": "2"}
+
+
+def test_json_value_has_one_implementation() -> None:
+    root = Path(json_module.__file__).resolve().parents[3]
+    defined = [
+        path for path in root.glob("rey_*/rey_*/**/*.py")
+        if "def _json_value(" in path.read_text(encoding="utf-8")
+        or "def json_value(" in path.read_text(encoding="utf-8")
+    ]
+
+    assert [path.relative_to(root).as_posix() for path in defined] == [
+        "rey_lib/rey_lib/files/json.py",
+    ]

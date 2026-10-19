@@ -31,6 +31,8 @@ never silently unable to record something it holds.
 from __future__ import annotations
 
 import json as _json
+from collections.abc import Mapping
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -41,6 +43,7 @@ from rey_lib.files.primitive_file_io import atomic_write_text
 __all__ = [
     "JsonReadError",
     "RenderMode",
+    "json_value",
     "looks_like_json",
     "parse_json_text",
     "read_json_file",
@@ -127,6 +130,23 @@ def render_json(value: Any, *, mode: RenderMode = "compact") -> str:
             f"{', '.join(sorted(_RENDER_MODES))}."
         )
     return _json.dumps(value, default=str, **_RENDER_MODES[mode])
+
+
+def json_value(value: Any) -> Any:
+    """One result value as JSON can carry it.
+
+    Scalars as they are, a date or a timestamp in ISO form, a mapping or a
+    sequence value by value, and anything else as its text.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_value(item) for item in value]
+    return str(value)
 
 
 def looks_like_json(text: str) -> bool:

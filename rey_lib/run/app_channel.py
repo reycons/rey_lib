@@ -8,6 +8,7 @@ The shared app communication every application uses alike -- workflow_app, ai_ap
     LaunchedApp   the launcher's end: launch / launch_operation, the child process,
                   the channel, the application's events and stdout, send, close
     AttachedApp   the application's end: attach(run_id), commands in, emit out
+                  (its values made JSON-safe)
 
 It carries plain messages and owns no application's behaviour or state. The
 application's Run is not part of it: an application attaches with its Application
@@ -25,6 +26,7 @@ import time
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from rey_lib.errors.error_utils import ConfigError, StateError
+from rey_lib.files.json import json_value
 from rey_lib.run import async_runtime
 
 __all__ = [
@@ -284,10 +286,15 @@ class AttachedApp:
     def emit(self, message: Mapping[str, Any]) -> None:
         """Send one plain message -- state or an event -- to the launcher.
 
+        Its values are made JSON-safe on the way out (``json_value``): a date in
+        ISO form, a mapping or a sequence value by value, anything else as its
+        text. The message keeps its structure and meaning; nothing in it is
+        interpreted.
+
         Safe from any thread: messages sent at once go one after another, each whole.
         """
         with self._sending:
-            self._loop.call(self._channel.send, message)
+            self._loop.call(self._channel.send, json_value(message))
 
     def close(self) -> None:
         """Close the channel and release the loop."""

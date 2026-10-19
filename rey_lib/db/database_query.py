@@ -16,8 +16,9 @@ caller as raised. Parameters are valid only where they can be bound: ``run``,
 ``page`` and ``read`` refuse them rather than drop them.
 
 ``StatementResult`` and ``PageResult`` are the one shape of those answers. The
-providers build them; every caller reads them from here. ``json_value`` is the
-one way a value in them is made JSON-safe, for every caller that sends one on.
+providers build them; every caller reads them from here. Their values are the
+providers' own: making one JSON-safe is ``rey_lib.files.json.json_value``'s,
+invoked by whichever boundary sends it on.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ import threading
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -36,14 +36,15 @@ from rey_lib.errors.error_utils import DatabaseError
 if TYPE_CHECKING:
     from rey_lib.db.connection import Connection
 
-__all__ = ["DatabaseQuery", "PageResult", "StatementResult", "json_value"]
+__all__ = ["DatabaseQuery", "PageResult", "StatementResult"]
 
 #: The most rows one result of a run holds when the query is executed without paging.
 RESULT_ROW_LIMIT = 1_000
 
 #: The live properties a reader may change through ``DatabaseQuery.update``.
 _LIVE_PROPERTIES = frozenset({
-    "statement", "pageable", "rows_per_page", "current_page", "order_by", "filters",
+    "statement", "connection", "pageable", "rows_per_page", "current_page", "order_by",
+    "filters",
 })
 
 
@@ -190,7 +191,9 @@ class DatabaseQuery:
 
         Replacing the statement replaces the text as written, so its parameters
         go with it. Nothing else changes implicitly: a new statement does not
-        move the page.
+        move the page, and neither does a new ``connection`` -- the shared
+        Connection its host supplies, still a reference this query never
+        creates or closes. A caller that means the page to move says so.
 
         Raises:
             DatabaseError: If a change names anything but a live property.
@@ -250,7 +253,7 @@ class DatabaseQuery:
                 return {
                     "pageable": True,
                     "columns": _columns(page.columns, page.column_kinds),
-                    "rows": [json_value(row) for row in page.rows],
+                    "rows": list(page.rows),
                     "total_row_count": page.total_row_count,
                     "offset": page.offset,
                     "limit": page.limit,
@@ -264,7 +267,7 @@ class DatabaseQuery:
                 "results": [
                     {
                         "columns": _columns(result.columns, result.column_kinds),
-                        "rows": [json_value(row) for row in result.rows],
+                        "rows": list(result.rows),
                         "row_count": result.row_count,
                         "at_row_limit": len(result.rows) >= RESULT_ROW_LIMIT,
                     }
@@ -387,20 +390,3 @@ def _sql_literal(value: Optional[Any]) -> str:
     if isinstance(value, (int, float, Decimal)):
         return str(value)
     return "'" + str(value).replace("'", "''") + "'"
-
-
-def json_value(value: Any) -> Any:
-    """One result value as JSON can carry it.
-
-    Scalars as they are, a date or a timestamp in ISO form, a mapping or a
-    sequence value by value, and anything else as its text.
-    """
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, Mapping):
-        return {str(key): json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_value(item) for item in value]
-    return str(value)
