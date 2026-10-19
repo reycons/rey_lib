@@ -22,14 +22,29 @@ one way a value in them is made JSON-safe, for every caller that sends one on.
 
 from __future__ import annotations
 
+import re
+import threading
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Optional
 
 from rey_lib.errors.error_utils import DatabaseError
 
+if TYPE_CHECKING:
+    from rey_lib.db.connection import Connection
+
 __all__ = ["DatabaseQuery", "PageResult", "StatementResult", "json_value"]
+
+#: The most rows one result of a run holds when the query is executed without paging.
+RESULT_ROW_LIMIT = 1_000
+
+#: The live properties a reader may change through ``DatabaseQuery.update``.
+_LIVE_PROPERTIES = frozenset({
+    "statement", "pageable", "rows_per_page", "current_page", "order_by", "filters",
+})
 
 
 @dataclass(frozen=True)
@@ -112,18 +127,153 @@ class StatementResult:
     column_kinds: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass
 class DatabaseQuery:
-    """A caller's SQL, run in one of the four ways a caller needs.
+    """A caller's SQL, run in one of the four ways a caller needs -- and, held
+    live by the application hosting a reader's query, the query itself.
 
     ``rows`` binds ``params`` by name, never interpolated, and passes them
     through as the caller gave them. ``run``, ``page`` and ``read`` execute the
     text exactly as supplied, which binds nothing: they refuse a query carrying
     parameters rather than run it without them.
+
+    THE LIVE QUERY. Bound to a shared ``connection`` -- a reference the host
+    supplies; this object never creates, duplicates or closes it -- the query
+    owns its reading state (``pageable``, ``rows_per_page``, ``current_page``,
+    ``order_by``, ``filters``), changes it through ``update``, shows it through
+    ``projection`` and acts on it through ``execute``. Paging and running stay
+    the provider's, beneath ``page`` and ``run``.
     """
 
     statement: str
     params: Mapping[str, Any] = field(default_factory=dict)
+    #: The shared Connection this query runs on: a reference, never owned here.
+    connection: Optional["Connection"] = field(default=None, compare=False, repr=False)
+    #: Whether ``execute`` reads one page of the result, or runs the query.
+    pageable: bool = True
+    #: How many rows one page holds.
+    rows_per_page: int = 50
+    #: Which page ``execute`` reads, from 0.
+    current_page: int = 0
+    #: The ordering a page applies, as column/direction mappings.
+    order_by: list[dict[str, Any]] = field(default_factory=list)
+    #: The filters a page applies, as column/operator/value mappings.
+    filters: list[dict[str, Any]] = field(default_factory=list)
+    # One act at a time: an update, or an execution and the answer it gives.
+    _acting: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False, compare=False,
+    )
+
+    # -- the live query -------------------------------------------------------
+
+    def act(self) -> Any:
+        """The lock one act is taken under: an update, or an execution."""
+        return self._acting
+
+    def text(self) -> str:
+        """The statement with its parameters written in, as a reader sees it.
+
+        Each ``:name`` the parameters name is replaced by the SQL literal that
+        stands for its value, so no value's characters compose SQL. Text that
+        names no parameter is returned as written.
+        """
+        written = self.statement
+        for name, value in self.params.items():
+            literal = _sql_literal(value)
+            written = re.sub(
+                rf"(?<![:\w]):{re.escape(str(name))}\b", lambda _match: literal, written,
+            )
+        return written
+
+    def update(self, **changes: Any) -> None:
+        """Change the query's live properties, and only those.
+
+        Replacing the statement replaces the text as written, so its parameters
+        go with it. Nothing else changes implicitly: a new statement does not
+        move the page.
+
+        Raises:
+            DatabaseError: If a change names anything but a live property.
+        """
+        unknown = sorted(set(changes) - _LIVE_PROPERTIES)
+        if unknown:
+            raise DatabaseError(f"DatabaseQuery has no live property {unknown}.")
+        with self._acting:
+            for name, value in changes.items():
+                setattr(self, name, value)
+            if "statement" in changes:
+                self.params = {}
+
+    def projection(self) -> dict[str, Any]:
+        """What this query shows: its text and its reading state. Runs nothing."""
+        with self._acting:
+            return {
+                "statement": self.text(),
+                "pageable": self.pageable,
+                "rows_per_page": self.rows_per_page,
+                "current_page": self.current_page,
+                "order_by": list(self.order_by),
+                "filters": list(self.filters),
+                "connection": self.connection.name if self.connection is not None else None,
+            }
+
+    def execute(self) -> dict[str, Any]:
+        """Execute this query as its own state says, on its connection.
+
+        ``pageable`` reads page ``current_page`` of ``rows_per_page`` rows; a
+        provider that cannot page this text says so by raising, and that answer
+        reaches the caller. Otherwise the query is run, each result holding at
+        most ``RESULT_ROW_LIMIT`` rows.
+
+        Raises:
+            DatabaseError: If the query is bound to no connection, has no
+                statement, or execution fails.
+            UnsupportedDatabaseCapabilityError: If paging was asked for and the
+                provider cannot page this text.
+        """
+        with self._acting:
+            if self.connection is None:
+                raise DatabaseError("DatabaseQuery is bound to no connection.")
+            written = self.text()
+            if not written.strip():
+                raise DatabaseError("DatabaseQuery has no statement to execute.")
+            handle = self.connection.handle()
+            as_written = DatabaseQuery(written)
+            if self.pageable:
+                page = as_written.page(
+                    handle,
+                    offset=int(self.current_page) * int(self.rows_per_page),
+                    limit=int(self.rows_per_page),
+                    order_by=list(self.order_by) or None,
+                    filters=list(self.filters) or None,
+                )
+                return {
+                    "pageable": True,
+                    "columns": _columns(page.columns, page.column_kinds),
+                    "rows": [json_value(row) for row in page.rows],
+                    "total_row_count": page.total_row_count,
+                    "offset": page.offset,
+                    "limit": page.limit,
+                    "next_offset": page.next_offset,
+                    **({"max_page_size": page.max_page_size}
+                       if page.max_page_size is not None else {}),
+                }
+            results = as_written.run(handle, limit=RESULT_ROW_LIMIT)
+            return {
+                "pageable": False,
+                "results": [
+                    {
+                        "columns": _columns(result.columns, result.column_kinds),
+                        "rows": [json_value(row) for row in result.rows],
+                        "row_count": result.row_count,
+                        "at_row_limit": len(result.rows) >= RESULT_ROW_LIMIT,
+                    }
+                    for result in results
+                ],
+                "row_limit": RESULT_ROW_LIMIT,
+            }
+
+    # -- the four ways to run -------------------------------------------------
 
     def rows(self, conn: Any, adapter: Any = None) -> tuple[dict[str, Any], ...]:
         """Run the statement on ``conn`` and return its rows, in the order returned.
@@ -214,6 +364,29 @@ def _adapter(adapter: Any) -> Any:
 
         adapter = DBAdapter()
     return adapter
+
+
+def _columns(names: list[str], kinds: Mapping[str, str]) -> list[dict[str, Any]]:
+    """A result's columns, each by name with the kind its provider stated."""
+    return [{"name": name, **({"kind": kinds[name]} if name in kinds else {})}
+            for name in names]
+
+
+def _sql_literal(value: Optional[Any]) -> str:
+    """Any value as the SQL literal that stands for it.
+
+    A number as itself, absence as NULL, a boolean as TRUE/FALSE, and
+    everything else as quoted text with its quotes doubled. A value that looks
+    like SQL is text like any other -- rendered, never spliced, so it can close
+    no literal and open no statement of its own.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float, Decimal)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def json_value(value: Any) -> Any:

@@ -24,11 +24,11 @@ characters compose SQL.
 from __future__ import annotations
 
 import threading
-from decimal import Decimal
-from typing import Any, Final, Optional
+from typing import Any, Final
 
 from rey_lib.db.connection import is_database_connection, shared_connection
 from rey_lib.db.database_objects import DatabaseObjectIdentity, DatabaseTable
+from rey_lib.db.database_query import DatabaseQuery
 from rey_lib.db.procedure_map import get_procedure_map, resolve_sql_binding
 from rey_lib.errors.error_utils import ConfigError
 
@@ -45,7 +45,7 @@ _FILE_VIEW: Final = "file_view"
 #: What a declared statement calls the node's own value. One name, so a
 #: declaration is written against the contract rather than against whichever
 #: node type happens to use it.
-_CURRENT_VALUE: Final = ":current_value"
+_CURRENT_VALUE: Final = "current_value"
 
 
 class ResolvedQuery:
@@ -141,7 +141,7 @@ class ResolvedQuery:
             raise ConfigError(f"A run is named by its identity; {run_id!r} is not one.") from exc
         return cls(
             display_name=f"Run {run}",
-            statement=_bound(ctx, _RUN_VIEW, {":run_id": str(run), ":run_log_id": "NULL"}),
+            statement=_bound(ctx, _RUN_VIEW, {"run_id": run, "run_log_id": None}),
             connection_map=_USER_MAP,
         )
 
@@ -158,9 +158,7 @@ class ResolvedQuery:
             raise ConfigError("A feed is named by its identity.")
         return cls(
             display_name=feed,
-            statement=_bound(
-                ctx, _FILE_VIEW, {":feed": _sql_text(feed), ":file_manifest_id": "NULL"},
-            ),
+            statement=_bound(ctx, _FILE_VIEW, {"feed": feed, "file_manifest_id": None}),
             connection_map=_USER_MAP,
         )
 
@@ -184,7 +182,7 @@ class ResolvedQuery:
             # The value is the only thing known about the subject, so it is
             # what the surface calls it.
             display_name=str(current_value or ""),
-            statement=template.replace(_CURRENT_VALUE, _sql_literal(current_value)),
+            statement=DatabaseQuery(template, {_CURRENT_VALUE: current_value}).text(),
             connection_map=_USER_MAP,
         )
 
@@ -285,36 +283,12 @@ def _connections_led_by(ctx: Any, connection: str) -> list[str]:
     return [connection] + [name for name in names if name != connection]
 
 
-def _bound(ctx: Any, binding_name: str, filters: dict[str, str]) -> str:
-    """One configured statement, its filters written in as already-rendered literals.
+def _bound(ctx: Any, binding_name: str, filters: dict[str, Any]) -> str:
+    """One configured statement, its filters written in as SQL literals.
 
-    The filter a subject does not use says so in SQL (``NULL``) rather than
-    being left dangling.
+    The writing is the query's own (``DatabaseQuery.text``). A filter a subject
+    does not use is given as None, which the statement reads as ``NULL`` rather
+    than leaving it dangling.
     """
     binding = resolve_sql_binding(get_procedure_map(ctx, _USER_MAP), _USER_MAP, binding_name)
-    statement = str(binding["sql"])
-    for placeholder, value in filters.items():
-        statement = statement.replace(placeholder, value)
-    return statement
-
-
-def _sql_text(value: str) -> str:
-    """One value as a SQL text literal."""
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _sql_literal(value: Optional[Any]) -> str:
-    """Any node value as the SQL literal that stands for it.
-
-    A number as itself, absence as NULL, a boolean as TRUE/FALSE, and
-    everything else as quoted text with its quotes doubled. A value that looks
-    like SQL is text like any other -- rendered, never spliced, so it can close
-    no literal and open no statement of its own.
-    """
-    if value is None:
-        return "NULL"
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, (int, float, Decimal)):
-        return str(value)
-    return _sql_text(str(value))
+    return DatabaseQuery(str(binding["sql"]), filters).text()

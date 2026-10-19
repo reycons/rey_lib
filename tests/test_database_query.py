@@ -65,19 +65,22 @@ def test_no_rows_is_an_empty_tuple(answer: Any) -> None:
     assert DatabaseQuery("SELECT 1").rows(object(), _Adapter(answer)) == ()
 
 
-def test_it_is_frozen_and_each_query_has_its_own_parameters() -> None:
+def test_each_query_has_its_own_parameters_and_reading_state() -> None:
     first, second = DatabaseQuery("SELECT 1"), DatabaseQuery("SELECT 1")
 
     assert first.params is not second.params
-    with pytest.raises(AttributeError):
-        first.statement = "SELECT 2"  # type: ignore[misc]
+    assert first.order_by is not second.order_by
+    assert first.filters is not second.filters
 
 
-def test_it_offers_rows_run_page_and_read_only_and_holds_no_sql() -> None:
+def test_it_offers_the_four_ways_to_run_and_the_live_query_and_holds_no_sql() -> None:
     public = {name for name in vars(DatabaseQuery) if not name.startswith("_")}
     code = Path(module.__file__).read_text(encoding="utf-8").split('"""', 2)[2]
 
-    assert public - {"statement", "params"} == {"rows", "run", "page", "read"}
+    assert public - {
+        "statement", "params", "connection", "pageable", "rows_per_page", "current_page",
+        "order_by", "filters",
+    } == {"rows", "run", "page", "read", "act", "text", "update", "projection", "execute"}
     for sql in ("SELECT", "INSERT", "UPDATE", "DELETE"):
         assert sql not in code, sql
 
@@ -255,3 +258,134 @@ class TestRead:
         assert (empty.columns, empty.rows) == (["a", "b"], [])
         assert one.rows == [{"a": 1, "b": "x"}]
         assert every.rows == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
+
+
+class _Connection:
+    """A shared Connection stand-in: one handle, never opened or closed by the query."""
+
+    def __init__(self) -> None:
+        self.name, self.handed = "rey apps", []
+        self.closed = False
+
+    def handle(self) -> object:
+        handle = object()
+        self.handed.append(handle)
+        return handle
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestTheLiveQuery:
+    """The query held live: its reading state, changed by update, acted on by execute."""
+
+    def test_it_reads_as_the_card_does_until_told_otherwise(self) -> None:
+        query = DatabaseQuery("SELECT 1")
+
+        assert (query.pageable, query.rows_per_page, query.current_page) == (True, 50, 0)
+        assert (query.order_by, query.filters, query.connection) == ([], [], None)
+
+    def test_text_writes_each_parameter_in_as_its_literal(self) -> None:
+        query = DatabaseQuery(
+            "SELECT * FROM t WHERE a = :a AND b = :b AND c = :c AND d = :d AND x::text = :e",
+            {"a": 3, "b": "it's", "c": None, "d": True, "e": "x"},
+        )
+
+        assert query.text() == (
+            "SELECT * FROM t WHERE a = 3 AND b = 'it''s' AND c = NULL AND d = TRUE "
+            "AND x::text = 'x'"
+        )
+        assert DatabaseQuery("SELECT :ab", {"a": 1}).text() == "SELECT :ab"
+
+    def test_update_changes_live_properties_only(self) -> None:
+        query = DatabaseQuery("SELECT :a", {"a": 1})
+
+        query.update(pageable=False, rows_per_page=10, current_page=2)
+        assert (query.pageable, query.rows_per_page, query.current_page) == (False, 10, 2)
+        assert query.params == {"a": 1}
+        with pytest.raises(DatabaseError, match="no live property"):
+            query.update(connection=None)
+
+    def test_replacing_the_statement_clears_its_parameters_and_keeps_the_page(self) -> None:
+        query = DatabaseQuery("SELECT :a", {"a": 1}, current_page=3)
+
+        query.update(statement="SELECT 2")
+
+        assert (query.statement, query.params, query.current_page) == ("SELECT 2", {}, 3)
+
+    def test_projection_shows_its_text_and_state_and_runs_nothing(self) -> None:
+        connection = _Connection()
+        query = DatabaseQuery("SELECT :a", {"a": 1}, connection=connection)
+
+        assert query.projection() == {
+            "statement": "SELECT 1", "pageable": True, "rows_per_page": 50,
+            "current_page": 0, "order_by": [], "filters": [], "connection": "rey apps",
+        }
+        assert connection.handed == []
+
+    def test_execute_pages_from_its_own_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        page = PageResult(columns=["a", "doc"], rows=[{"a": date(2026, 1, 2), "doc": {}}],
+                          total_row_count=None, offset=20, limit=10, next_offset=30,
+                          column_kinds={"doc": "document"})
+        executor, connection = _Executor(page=page), _Connection()
+        monkeypatch.setattr(module, "_adapter", lambda _adapter: executor)
+        order_by = [{"column": "a", "direction": "desc"}]
+        query = DatabaseQuery("SELECT :a", {"a": 1}, connection=connection,
+                              rows_per_page=10, current_page=2, order_by=order_by)
+
+        answer = query.execute()
+
+        assert executor.asked == [("execute_page", connection.handed[0], "SELECT 1", {
+            "offset": 20, "limit": 10, "order_by": order_by, "filters": None,
+        })]
+        assert answer == {
+            "pageable": True,
+            "columns": [{"name": "a"}, {"name": "doc", "kind": "document"}],
+            "rows": [{"a": "2026-01-02", "doc": {}}],
+            "total_row_count": None, "offset": 20, "limit": 10, "next_offset": 30,
+        }
+        assert connection.closed is False
+
+    def test_a_provider_that_cannot_page_says_so_to_the_caller(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        declined = UnsupportedDatabaseCapabilityError("cannot page")
+        executor = _Executor(raises=declined)
+        monkeypatch.setattr(module, "_adapter", lambda _adapter: executor)
+
+        with pytest.raises(UnsupportedDatabaseCapabilityError):
+            DatabaseQuery("CALL p()", connection=_Connection()).execute()
+        assert [asked[0] for asked in executor.asked] == ["execute_page"]
+
+    def test_execute_runs_when_not_pageable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        results = [StatementResult(columns=["a"], rows=[{"a": 1}], row_count=1),
+                   StatementResult(columns=[], rows=[])]
+        executor = _Executor(results=results)
+        monkeypatch.setattr(module, "_adapter", lambda _adapter: executor)
+
+        answer = DatabaseQuery("SELECT 1; CALL p()", connection=_Connection(),
+                               pageable=False).execute()
+
+        assert executor.asked[0][0] == "execute_statements"
+        assert executor.asked[0][3] == {"limit": module.RESULT_ROW_LIMIT}
+        assert answer == {
+            "pageable": False,
+            "results": [
+                {"columns": [{"name": "a"}], "rows": [{"a": 1}], "row_count": 1,
+                 "at_row_limit": False},
+                {"columns": [], "rows": [], "row_count": None, "at_row_limit": False},
+            ],
+            "row_limit": 1_000,
+        }
+
+    @pytest.mark.parametrize("query, refusal", [
+        (DatabaseQuery("SELECT 1"), "bound to no connection"),
+        (DatabaseQuery("  "), "no statement"),
+    ])
+    def test_execute_refuses_without_a_connection_or_a_statement(
+        self, query: DatabaseQuery, refusal: str,
+    ) -> None:
+        if refusal == "no statement":
+            query.connection = _Connection()  # type: ignore[assignment]
+        with pytest.raises(DatabaseError, match=refusal):
+            query.execute()
