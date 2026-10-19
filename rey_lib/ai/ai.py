@@ -30,6 +30,7 @@ retry, tool, validation and normalization code is not here, and no
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 
@@ -178,7 +179,11 @@ class AI:
         # Each running execution's withdrawal, by task id (backlog 1039): a
         # Pydantic AI CancellationToken, fresh per execution and held only while
         # it runs. Typed loosely so Pydantic AI stays an execution-time import.
+        # One execution per task id at a time (#1018 D-2): the threads executing
+        # tasks and cancel_task read and write it under this lock, which guards
+        # only the check, the registration and the release -- never a run.
         self._running: dict[str, Any] = {}
+        self._running_lock = threading.Lock()
 
     # -- what is available -------------------------------------------------
 
@@ -468,7 +473,8 @@ class AI:
         to the model as a correction within this runtime's allowance.
 
         Raises:
-            AIRequestError: when the task carries input other than text.
+            AIRequestError: when the task carries input other than text, or is
+                already running -- refused before anything about it changes.
             AIExecutionError: when called inside a running event loop, or a
                 usage limit stops the run.
             AIOutputError: when the output never satisfied its contract.
@@ -543,13 +549,16 @@ class AI:
                 if translated is not None:
                     tell(translated)
 
-        task.started()
-        tell(AIEvent.started(execution_id))
-        started = datetime.now(timezone.utc)
         # Fresh for this execution: a cancelled token cancels any later run it
         # is given. Held only while this execution runs, whatever ends it.
         token = CancellationToken()
-        self._running[task.id] = token
+        with self._running_lock:
+            if task.id in self._running:
+                raise AIRequestError(f"AI task '{task.id}' is already running.")
+            self._running[task.id] = token
+        task.started()
+        tell(AIEvent.started(execution_id))
+        started = datetime.now(timezone.utc)
         try:
             model = self._model(task.model_identifier, task.base_url, task.credential_ref)
             output_type: Any = str
@@ -660,9 +669,7 @@ class AI:
             tell(AIEvent.completed(execution_id, result))
             return result
         finally:
-            # Only this execution's own token: another execution of the same
-            # task may already hold the id.
-            if self._running.get(task.id) is token:
+            with self._running_lock:
                 del self._running[task.id]
         task.failed(str(failure))
         tell(AIEvent.failed(execution_id, str(failure)))
@@ -794,7 +801,8 @@ class AI:
         Returns:
             Whether a running execution was signalled.
         """
-        token = self._running.get(str(task_id or ""))
+        with self._running_lock:
+            token = self._running.get(str(task_id or ""))
         if token is None:
             return False
         logger.debug("cancelling AI task %s", task_id)

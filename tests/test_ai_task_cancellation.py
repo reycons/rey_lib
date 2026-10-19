@@ -20,7 +20,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from rey_lib.ai.ai import AI
 from rey_lib.ai.content import AIInput
-from rey_lib.ai.errors import AICancelled, AIProviderError
+from rey_lib.ai.errors import AICancelled, AIProviderError, AIRequestError
 from rey_lib.ai.registry import AIRegistry
 from rey_lib.ai.streaming import AIEvent, AIEventKind
 from rey_lib.ai.task import AITask
@@ -156,6 +156,43 @@ class TestFreshTokenPerExecution:
 
         assert task.status == AITask.COMPLETED
         assert result.output.text == "first "
+
+
+class TestOneExecutionAtATime:
+    """AI owns the running state: a running task is not executed twice (#1018 D-2)."""
+
+    def test_a_second_execution_of_a_running_task_is_refused_and_the_first_goes_on(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        under_way, release = threading.Event(), threading.Event()
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+            yield "waiting "
+            under_way.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            yield "done"
+
+        ai, task = _ai(FunctionModel(stream_function=stream), monkeypatch), _task()
+        first: list[Any] = []
+        running = threading.Thread(
+            target=lambda: first.append(ai.execute_task(task, observe=lambda event: None)),
+            daemon=True,
+        )
+        running.start()
+        assert under_way.wait(5)
+        told: list[AIEvent] = []
+
+        with pytest.raises(AIRequestError, match="already running"):
+            ai.execute_task(task, observe=told.append)
+
+        assert told == []
+        assert task.status == AITask.RUNNING
+        release.set()
+        running.join(5)
+        assert task.status == AITask.COMPLETED
+        assert first[0].output.text == "waiting done"
+        assert ai.cancel_task(task.id) is False
 
 
 class TestFailureIsStillFailure:
