@@ -36,6 +36,8 @@ __all__ = [
     "ApplicationModeGroup",
     "ApplicationOperation",
     "ApplicationParameterGroup",
+    "INVOCATION_HOSTED",
+    "INVOCATION_RUN",
     "JSON_VALUE_TYPE",
     "build_applications",
 ]
@@ -44,6 +46,14 @@ __all__ = [
 #: (#1143). Transported as one canonical JSON argument; what the structure means
 #: is the receiving application's to validate.
 JSON_VALUE_TYPE = "json"
+
+#: How a command may be invoked (#1166): ``run`` -- an ordinary command the
+#: execution service and the application runner start; ``hosted`` -- it needs
+#: the attached app channel of ``LaunchedApp.launch``, so the runner does not
+#: offer it. Declared per command; absent means ``run``.
+INVOCATION_RUN = "run"
+INVOCATION_HOSTED = "hosted"
+_INVOCATIONS = frozenset({INVOCATION_RUN, INVOCATION_HOSTED})
 
 #: Where a parameter's choices may be resolved from, and how each collection
 #: becomes option values.
@@ -271,6 +281,8 @@ class ApplicationCommand:
     parameters: tuple[ApplicationCommandParameter, ...] = ()
     mode_groups: tuple[ApplicationModeGroup, ...] = ()
     parameter_groups: tuple[ApplicationParameterGroup, ...] = ()
+    #: How it is invoked: ``run`` or ``hosted`` (``INVOCATION_*``, #1166).
+    invocation: str = INVOCATION_RUN
 
     def arguments(self, inputs: Mapping[str, Any]) -> list[str]:
         """This command's published command-line form of its semantic inputs.
@@ -798,10 +810,86 @@ def _commands(
     # The command word is chosen, not filled in: it is what the others belong
     # to, so it is not one of them.
     takes = tuple(one for one in declared if one is not carrier)
+    # Each value may state how its command is invoked (#1166), as a listed
+    # command does: the same ApplicationCommand whichever syntax declared it.
+    invoked = _value_invocations(cli, application)
     return tuple(
-        ApplicationCommand(name=value, parameters=takes)
+        ApplicationCommand(name=value, parameters=takes,
+                           invocation=invoked.get(value, INVOCATION_RUN))
         for value in carrier.possible_values
     )
+
+
+def _value_invocations(cli: dict[str, Any], application: str) -> dict[str, str]:
+    """Each stated command value's invocation, from the carrier as declared (#1166)."""
+    for one in (_plain(item) for item in (cli.get("parameters") or [])):
+        if isinstance(one, dict) and _is_command_carrier(one):
+            return dict(
+                _possible_value(value, application, one)
+                for value in (one.get("possible_values") or [])
+            )
+    return {}
+
+
+def _is_command_carrier(entry: dict[str, Any]) -> bool:
+    """Whether a parameter declaration is the positional one carrying the commands."""
+    return bool(entry.get("positional")) and entry.get("name") == _COMMAND_PARAMETER
+
+
+def _invocation(value: Any, application: str, where: str) -> str:
+    """A declared invocation, ``run`` when absent.
+
+    Raises:
+        ConfigError: When it is anything but ``run`` or ``hosted``.
+    """
+    if value is None:
+        return INVOCATION_RUN
+    if value not in _INVOCATIONS:
+        raise ConfigError(
+            f"Application '{application}' {where} declares invocation {value!r}; "
+            f"one of {sorted(_INVOCATIONS)}."
+        )
+    return str(value)
+
+
+def _possible_value(
+    value: Any, application: str, entry: dict[str, Any],
+) -> tuple[str, str]:
+    """One stated possible value, as its name and its invocation (#1166).
+
+    A value is stated as itself (its name, invoked ``run``) or as an object
+    ``{name, invocation?}``. Only the command carrier's values may state an
+    invocation -- on any other parameter it would mean nothing -- and an object
+    with any other shape is refused rather than interpreted.
+
+    Raises:
+        ConfigError: When an object value has no name, an unknown key, an
+            invocation outside ``run`` / ``hosted``, or an invocation on a
+            parameter that does not carry commands.
+    """
+    parameter = entry.get("name")
+    if not isinstance(value, dict):
+        if isinstance(value, (list, tuple, set)):
+            raise ConfigError(
+                f"Application '{application}' parameter '{parameter}' states a "
+                "possible value that is neither a value nor a {name, invocation} object."
+            )
+        return str(value), INVOCATION_RUN
+    unknown = sorted(set(value) - {"name", "invocation"})
+    name = value.get("name")
+    if unknown or not isinstance(name, str) or not name:
+        raise ConfigError(
+            f"Application '{application}' parameter '{parameter}' states a possible "
+            "value object that is not {name, invocation?}"
+            + (f" (unknown {unknown})" if unknown else " (it needs a name)") + "."
+        )
+    if "invocation" in value and not _is_command_carrier(entry):
+        raise ConfigError(
+            f"Application '{application}' parameter '{parameter}' states an "
+            "invocation on a value that is not a command."
+        )
+    return name, _invocation(value.get("invocation"), application,
+                             f"command value '{name}'")
 
 
 def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCommand:
@@ -824,6 +912,7 @@ def _command(entry: dict[str, Any], ctx: Any, application: str) -> ApplicationCo
         parameters=parameters,
         mode_groups=groups,
         parameter_groups=_parameter_groups(entry, parameters, application, name),
+        invocation=_invocation(entry.get("invocation"), application, f"command '{name}'"),
     )
 
 
@@ -1044,7 +1133,12 @@ def _choices(entry: dict[str, Any], ctx: Any, application: str) -> tuple[str, ..
     """
     named = str(entry.get("possible_values_from") or "").strip()
     if not named:
-        return tuple(str(value) for value in (entry.get("possible_values") or []))
+        # A stated value is itself or a {name, invocation?} object (#1166); the
+        # choices are the names either way.
+        return tuple(
+            _possible_value(value, application, entry)[0]
+            for value in (entry.get("possible_values") or [])
+        )
     registry = _REGISTRY_CHOICES.get(named)
     if registry is not None:
         return tuple(sorted(registry(ctx)))

@@ -186,6 +186,61 @@ class TestParameterGroups:
             )])
 
 
+class TestCommandInvocation:
+    """How a command may be invoked, declared in either syntax (#1166)."""
+
+    def test_a_listed_command_states_its_invocation_and_defaults_to_run(self) -> None:
+        built = build([declaration(commands=[
+            {"name": "load"}, {"name": "serve", "invocation": "hosted"},
+        ])])[0]
+
+        assert built.command("load").invocation == "run"
+        assert built.command("serve").invocation == "hosted"
+
+    def test_a_carrier_value_states_it_as_a_name_invocation_object(self) -> None:
+        # Both forms in one list, normalized to the same ApplicationCommand.
+        built = build([declaration(parameters=[
+            {"name": "command", "positional": True,
+             "possible_values": ["load", {"name": "sql"},
+                                 {"name": "serve", "invocation": "hosted"}]},
+            {"name": "source"},
+        ])])[0]
+
+        assert built.command_names == ("load", "sql", "serve")
+        assert [built.command(name).invocation for name in built.command_names] == [
+            "run", "run", "hosted"]
+        assert [p.name for p in built.command("serve").parameters] == ["source"]
+
+    @pytest.mark.parametrize("value", [
+        {"invocation": "hosted"},                                # no name
+        {"name": ""},
+        {"name": "serve", "invocation": "hosted", "hidden": True},  # unknown key
+        {"name": "serve", "invocation": "launched"},             # not run / hosted
+        ["serve"],
+    ])
+    def test_a_malformed_value_is_refused(self, value: Any) -> None:
+        with pytest.raises(ConfigError):
+            build([declaration(parameters=[
+                {"name": "command", "positional": True, "possible_values": ["load", value]},
+            ])])
+
+    def test_an_invocation_outside_run_or_hosted_is_refused_on_a_listed_command(self) -> None:
+        with pytest.raises(ConfigError, match="invocation 'launched'"):
+            build([declaration(commands=[{"name": "serve", "invocation": "launched"}])])
+
+    def test_only_command_values_may_state_an_invocation(self) -> None:
+        with pytest.raises(ConfigError, match="not a command"):
+            build([declaration(parameters=[
+                {"name": "mode", "possible_values": [{"name": "fast", "invocation": "hosted"}]},
+            ])])
+
+    def test_a_named_object_on_any_parameter_is_its_name(self) -> None:
+        built = build([declaration(parameters=[
+            {"name": "mode", "possible_values": ["one", {"name": "two"}]},
+        ])])[0]
+        assert built.parameters[0].possible_values == ("one", "two")
+
+
 class TestCommandNames:
     """Two declarations for what an application offers, stated once."""
 
