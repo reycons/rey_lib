@@ -117,6 +117,7 @@ def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
         "enabled": True,
         "state": "IDLE",
         "released": None,
+        "focus": None,
         "processes": [
             {
                 "ordinal": 1,
@@ -172,3 +173,96 @@ def test_relationships_project_hierarchy_and_execution_order() -> None:
         {"source": "process:1", "target": "step:2", "kind": "contains"},
         {"source": "step:1", "target": "step:2", "kind": "precedes"},
     ]
+
+
+CHILD_ROWS = [
+    {"workflow_id": 15, "workflow_name": "code_index", "workflow_process_id": 150,
+     "workflow_step_id": 1501, "workflow_step_name": "a"},
+    {"workflow_id": 15, "workflow_name": "code_index", "workflow_process_id": 150,
+     "workflow_step_id": 1502, "workflow_step_name": "b"},
+    {"workflow_id": 14, "workflow_name": "other", "workflow_process_id": 140,
+     "workflow_step_id": 1401, "workflow_step_name": "c"},
+]
+
+
+def _acquire_focused(
+    monkeypatch: pytest.MonkeyPatch, **kwargs: Any,
+) -> tuple[list[Any], list[dict]]:
+    """from_governed by a child id: what hydrated, and the focus the Workflow was asked for."""
+    control = _Control(CHILD_ROWS)
+    hydrated: list[Any] = []
+    focused: list[dict] = []
+    monkeypatch.setattr(workflow_module, "open_shared_control",
+                        lambda ctx: SimpleNamespace(shared_control=control))
+    monkeypatch.setattr(Workflow, "hydrate", classmethod(
+        lambda cls, given, **_: hydrated.append(list(given)) or SimpleNamespace(
+            focus=lambda **child: focused.append(child))))
+    ctx = SimpleNamespace(installation=SimpleNamespace(name="admin"), applications=())
+    Workflow.from_governed(ctx, **kwargs)
+    return hydrated, focused
+
+
+class TestAProcessOrStepNamesItsWorkflow:
+    """The governed read places a child in its workflow; nothing else restates it (1126)."""
+
+    def test_a_process_id_hydrates_the_workflow_holding_it_and_focuses_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        hydrated, focused = _acquire_focused(monkeypatch, workflow_process_id=150)
+
+        assert [row["workflow_step_name"] for row in hydrated[0]] == ["a", "b"]
+        assert focused == [{"workflow_process_id": 150, "workflow_step_id": None}]
+
+    def test_a_step_id_hydrates_the_workflow_holding_it_and_focuses_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        hydrated, focused = _acquire_focused(monkeypatch, workflow_step_id="1401")
+
+        assert [row["workflow_step_name"] for row in hydrated[0]] == ["c"]
+        assert focused == [{"workflow_process_id": None, "workflow_step_id": "1401"}]
+
+    def test_an_unknown_child_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(ConfigError, match="has no workflow step id 9"):
+            _acquire_focused(monkeypatch, workflow_step_id=9)
+
+    @pytest.mark.parametrize("kwargs", [
+        {"workflow_id": 15, "workflow_process_id": 150},
+        {"workflow_process_id": 150, "workflow_step_id": 1501},
+    ], ids=["workflow-and-process", "process-and-step"])
+    def test_two_identities_are_refused_not_ranked(self, kwargs: dict) -> None:
+        with pytest.raises(ConfigError, match="exactly one"):
+            Workflow.from_governed(SimpleNamespace(), **kwargs)
+
+
+def _focusable() -> Workflow:
+    """The same graph, its process and steps carrying governed ids."""
+    workflow = _workflow()
+    (process,) = workflow.processes
+    process.governed_id = 150
+    for governed, step in zip((1501, 1502), process.steps):
+        step.governed_id = governed
+    return workflow
+
+
+class TestTheWorkflowIsOpenedAtOneOfItsParts:
+    def test_a_focused_step_projects_its_process_and_its_id(self) -> None:
+        workflow = _focusable()
+
+        workflow.focus(workflow_step_id=1502)
+
+        assert workflow.projection(None)["focus"] == {"process": 1, "step": "s2"}
+
+    def test_a_focused_process_projects_no_step(self) -> None:
+        workflow = _focusable()
+
+        workflow.focus(workflow_process_id="150")
+
+        assert workflow.projection(None)["focus"] == {"process": 1, "step": None}
+
+    def test_a_part_it_does_not_hold_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="holds no step 9"):
+            _focusable().focus(workflow_step_id=9)
+
+    def test_focus_names_exactly_one_part(self) -> None:
+        with pytest.raises(ConfigError, match="exactly one"):
+            _focusable().focus(workflow_process_id=150, workflow_step_id=1501)

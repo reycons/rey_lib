@@ -79,6 +79,9 @@ class WorkflowStep:
         ``PENDING``, ``RUNNING`` while its Run executes, then that Run's status.
     current_run : Run | None
         The Run this step last created, None before it first runs.
+    governed_id : Any
+        The governed row this step was hydrated from (control.workflow_step id),
+        None for a step built otherwise (backlog 1126).
     """
 
     def __init__(
@@ -94,6 +97,7 @@ class WorkflowStep:
         settings: Mapping[str, Any],
         apply_only: bool = False,
         always_run: bool = False,
+        governed_id: Any = None,
     ) -> None:
         """Bind the step to its published operation and approved implementation.
 
@@ -111,6 +115,8 @@ class WorkflowStep:
             The step's composed settings for this operation instance.
         apply_only, always_run : bool
             Engine flags, held for the Workflow.
+        governed_id : Any
+            The governed row it was hydrated from, where it was.
 
         Raises
         ------
@@ -121,6 +127,7 @@ class WorkflowStep:
         if not id:
             raise AppError("a workflow step is missing required 'id'.")
         self.id = id
+        self.governed_id = governed_id
         self.process_name = process_name
         self.label = label or id
         self.ordinal = ordinal
@@ -182,6 +189,7 @@ class WorkflowStep:
             settings=row.get("step_settings") or {},
             apply_only=controls["apply_only"],
             always_run=controls["always_run"],
+            governed_id=row.get("workflow_step_id"),
         )
 
     def contract_refusal(self, workflow_name: str) -> str:

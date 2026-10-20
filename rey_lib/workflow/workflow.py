@@ -176,6 +176,10 @@ class Workflow:
         self.state = IDLE
         #: The step this Workflow last released, None before it has released one.
         self.released: Optional[WorkflowStep] = None
+        #: The held process, and step, this Workflow is opened at (backlog 1126):
+        #: owner state naming one of its own parts, None where it is opened whole.
+        self.focused_process: Optional[WorkflowProcess] = None
+        self.focused_step: Optional[WorkflowStep] = None
         # This direction's route and the Steps that have reported a transition.
         # Outcomes stay on the Steps; no previous direction is inferred from them.
         self._direction_steps: tuple[WorkflowStep, ...] = ()
@@ -276,47 +280,64 @@ class Workflow:
         workflow_name: Optional[str] = None,
         *,
         workflow_id: Any = None,
+        workflow_process_id: Any = None,
+        workflow_step_id: Any = None,
         log: Any = None,
         run_id: Optional[int] = None,
     ) -> "Workflow":
         """One workflow of this installation, hydrated from its governed rows.
 
-        Named by its name or by its control.workflow id -- exactly one. As an
-        HTTP operation is established: the runtime's one Control reads the
+        Named by exactly one identity: its name, its control.workflow id, or the
+        governed id of one of its processes or steps (backlog 1126). As an HTTP
+        operation is established: the runtime's one Control reads the
         installation's rows, and :meth:`hydrate` builds the graph from them with
         the installation's Applications and the implementations each approves.
-        By id, the installation-wide read supplies the rows and those of that
-        workflow are kept. Nothing is executed or released, and no Run is created.
-        The Workflow holds ``ctx`` as its runtime and ``log`` as its own log, so it
-        is self-contained, and ``run_id`` -- the Application Run id the creating
-        application passes -- as its link to that live application execution.
+        By an id, the installation-wide read supplies the rows and those of that
+        workflow are kept -- for a process or step id, the workflow those very rows
+        place it in -- and a Workflow named by a process or step is focused on it.
+        Nothing is executed or released, and no Run is created. The Workflow holds
+        ``ctx`` as its runtime and ``log`` as its own log, so it is self-contained,
+        and ``run_id`` -- the Application Run id the creating application passes --
+        as its link to that live application execution.
 
         Raises:
-            ConfigError: If neither or both identities are given, the runtime has
-                no control database, or the installation has no such workflow.
+            ConfigError: If no identity, or more than one, is given, the runtime
+                has no control database, or the installation has no such workflow,
+                process or step.
         """
-        if (workflow_name is None) == (workflow_id is None):
-            raise ConfigError("Workflow: name the workflow by its name or its id, exactly one.")
-        named = f"'{workflow_name}'" if workflow_id is None else f"id {workflow_id}"
+        identities = {
+            "name": workflow_name, "id": workflow_id,
+            "process id": workflow_process_id, "step id": workflow_step_id,
+        }
+        given = [(kind, value) for kind, value in identities.items() if value is not None]
+        if len(given) != 1:
+            raise ConfigError(
+                "Workflow: name the workflow by exactly one of its name, its id, or the "
+                "id of one of its processes or steps."
+            )
+        kind, value = given[0]
+        named = f"'{value}'" if kind == "name" else f"{kind} {value}"
         control = open_shared_control(ctx).shared_control
         if control is None:
             raise ConfigError(
                 f"Workflow: this runtime has no control database to read workflow "
                 f"{named} from."
             )
-        if workflow_id is None:
+        if workflow_name is not None:
             rows = control.workflow(ctx.installation.name, workflow_name)
         else:
-            rows = [
-                row for row in control.workflow(ctx.installation.name)
-                if str(row.get("workflow_id")) == str(workflow_id)
-            ]
+            column = {"id": "workflow_id", "process id": "workflow_process_id",
+                      "step id": "workflow_step_id"}[kind]
+            every = control.workflow(ctx.installation.name)
+            owning = {str(row.get("workflow_id")) for row in every
+                      if str(row.get(column)) == str(value)}
+            rows = [row for row in every if str(row.get("workflow_id")) in owning]
         if not rows:
             raise ConfigError(
                 f"Workflow: installation '{ctx.installation.name}' has no workflow "
                 f"{named}."
             )
-        return cls.hydrate(
+        workflow = cls.hydrate(
             rows,
             applications=ctx.applications,
             approved={
@@ -328,6 +349,44 @@ class Workflow:
             log=log,
             run_id=run_id,
         )
+        if workflow_process_id is not None or workflow_step_id is not None:
+            workflow.focus(
+                workflow_process_id=workflow_process_id, workflow_step_id=workflow_step_id,
+            )
+        return workflow
+
+    def focus(self, *, workflow_process_id: Any = None, workflow_step_id: Any = None) -> None:
+        """Open this Workflow at one of its own processes or steps (backlog 1126).
+
+        Owner state naming a held part, never a new object: the process or step is
+        found among this Workflow's own by its governed id. Focusing a step also
+        focuses the process holding it.
+
+        Raises:
+            ConfigError: If not exactly one id is given, or this Workflow holds no
+                process or step with it.
+        """
+        if (workflow_process_id is None) == (workflow_step_id is None):
+            raise ConfigError(
+                f"workflow '{self.name}': focus exactly one process or step."
+            )
+        with self._acting:
+            if workflow_step_id is not None:
+                step = next((one for one in self.steps.values()
+                             if str(one.governed_id) == str(workflow_step_id)), None)
+                if step is None:
+                    raise ConfigError(
+                        f"workflow '{self.name}' holds no step {workflow_step_id}."
+                    )
+                self.focused_step, self.focused_process = step, step.process
+                return
+            process = next((one for one in self.processes
+                            if str(one.governed_id) == str(workflow_process_id)), None)
+            if process is None:
+                raise ConfigError(
+                    f"workflow '{self.name}' holds no process {workflow_process_id}."
+                )
+            self.focused_process, self.focused_step = process, None
 
     # -- its snapshot --------------------------------------------------------
 
@@ -464,6 +523,11 @@ class Workflow:
                     "step": self.released.id,
                     "run_id": (self.released.current_run.run_id
                                if self.released.current_run is not None else None),
+                },
+                # The part this Workflow is opened at (backlog 1126), None when whole.
+                "focus": None if self.focused_process is None else {
+                    "process": self.focused_process.ordinal,
+                    "step": None if self.focused_step is None else self.focused_step.id,
                 },
                 "processes": [
                     {

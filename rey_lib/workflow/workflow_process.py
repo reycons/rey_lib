@@ -57,6 +57,9 @@ class WorkflowProcess:
     workflow : Workflow | None
         The Workflow this process belongs to; set by that Workflow when it is
         constructed, None before.
+    governed_id : Any
+        The governed row this process was hydrated from (control.workflow_process
+        id), None for a process built otherwise (backlog 1126).
     """
 
     def __init__(
@@ -67,6 +70,7 @@ class WorkflowProcess:
         application: Application,
         config: Optional[Mapping[str, Any]],
         steps: Sequence[WorkflowStep],
+        governed_id: Any = None,
     ) -> None:
         """Hold the Application instance, its configuration and its steps.
 
@@ -74,6 +78,8 @@ class WorkflowProcess:
         ----------
         name, ordinal
             The process's governed identity and position.
+        governed_id : Any
+            The governed row it was hydrated from, where it was.
         application : Application
             The Application this process instantiates.
         config : Mapping[str, Any] | None
@@ -93,6 +99,7 @@ class WorkflowProcess:
             raise AppError("a workflow process is missing required 'name'.")
         self.name = name
         self.ordinal = ordinal
+        self.governed_id = governed_id
         self.application = application
         self.config: Optional[dict[str, Any]] = (
             None if config is None else deepcopy(dict(config))
@@ -192,6 +199,7 @@ class WorkflowProcess:
         return cls(
             name=str(first.get("process_name") or ""),
             ordinal=int(first["process_ordinal"]),
+            governed_id=first.get("workflow_process_id"),
             application=application,
             config=first.get("process_config"),
             steps=[

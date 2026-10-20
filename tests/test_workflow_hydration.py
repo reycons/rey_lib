@@ -451,3 +451,14 @@ class TestNoParallelHydrationModel:
         assert "resolve_config_paths" in names
         assert not names & {"_apply_path_resolver", "_build_path_resolver",
                             "_resolve_tokens", "_expand_config", "_deep_merge"}
+
+
+class TestHydrationKeepsTheGovernedRowIds:
+    """A process and a step remember the governed row they came from (backlog 1126)."""
+
+    def test_process_and_steps_carry_their_row_ids(self) -> None:
+        workflow, _ = _hydrate(_rows())
+
+        (process,) = workflow.processes
+        assert process.governed_id == 10
+        assert [step.governed_id for step in process.steps] == [101, 102]
