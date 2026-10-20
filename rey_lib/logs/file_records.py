@@ -174,6 +174,43 @@ def record_file_operation(operation: str, *, source_path: str = "",
         )
 
 
+def record_file_write(path: Path | str, *, run_log: Any = None, state_ctx: Any = None,
+                      app: str = "", pipeline: str | None = None, reason: str = "") -> None:
+    """Record that ``path`` was written, as one run operation (#1133).
+
+    The one decision of which run a written file is recorded against: the
+    caller's explicit ``run_log`` -- with the file-operation state record
+    beside it, under ``state_ctx`` -- or else the run currently bound. A File
+    writes itself and records nothing; an orchestration that wants its
+    successful write recorded calls this after it. A recording that fails is
+    reported and never breaks the write it describes.
+
+    Args:
+        path: The file written.
+        run_log: The run the write belongs to, where the caller holds one.
+        state_ctx: The context whose file-operation state log is appended to.
+        app: App name stamped on the record.
+        pipeline: Pipeline name stamped on the record.
+        reason: Reason label stamped on the record.
+    """
+    from rey_lib.errors.error_utils import AppError  # noqa: PLC0415 -- import cycle
+    from rey_lib.files.file_utils import log_file_operation as log_file_state  # noqa: PLC0415 -- import cycle
+
+    target = Path(path)
+    if run_log is None:
+        record_file_operation("write", target_path=str(target))
+        return
+    try:
+        log_file_state(
+            state_ctx, run_log, app=app, pipeline=pipeline, source=target,
+            destination=target, action="create", reason=reason, original_source=target,
+        )
+    except (OSError, ValueError, AppError) as exc:
+        AppLogger(__name__).warning(
+            "Could not write file creation record for '%s': %s", target.name, exc
+        )
+
+
 def _file_evidence_metadata(path: str) -> dict[str, Any]:
     """Return direct metadata for a referenced path without reading content."""
     if not path:

@@ -21,8 +21,8 @@ from rey_lib.files.file_utils import (
     move_file,
     read_bytes_file,
     read_text_file,
-    write_file,
 )
+from rey_lib.files.data_file import DataFile
 from rey_lib.logs import (
     bind_correlation,
     bind_run,
@@ -32,6 +32,7 @@ from rey_lib.logs import (
     clear_step,
     current_run,
     record_file_operation,
+    record_file_write,
 )
 
 
@@ -58,9 +59,16 @@ def bound_run(tmp_path: Path):
         clear_run()
 
 
+def _write_json(path: Path, value: dict) -> Path:
+    """Write a JSON document as the migrated callers do, and record the write (#1133)."""
+    DataFile.for_path(path, file_type="JSON").write(value, sort_keys=False, atomic=False, trailing_newline=False)
+    record_file_write(path)
+    return path
+
+
 def test_write_records_file_operation(bound_run: Path, tmp_path: Path) -> None:
-    """write_file records a FILE_OPERATION (write) to the bound run log."""
-    write_file(tmp_path / "out.json", {"a": 1}, "JSON")
+    """A recorded write is a FILE_OPERATION (write) on the bound run log."""
+    _write_json(tmp_path / "out.json", {"a": 1})
     ops = _ops(bound_run)
     assert any(o["operation"] == "write" and o["target_path"].endswith("out.json") for o in ops)
 
@@ -94,7 +102,7 @@ def test_file_operation_inherits_bound_step_context(bound_run: Path, tmp_path: P
     bind_step(step_id="export_before", step_name="Export before", step_sequence=1)
     bind_correlation("corr-file-1")
     try:
-        write_file(tmp_path / "ctx.json", {"ok": True}, "JSON")
+        _write_json(tmp_path / "ctx.json", {"ok": True})
     finally:
         clear_correlation()
         clear_step()
@@ -124,11 +132,20 @@ def test_delete_records_file_operation(bound_run: Path, tmp_path: Path) -> None:
     assert any(o["operation"] == "delete" for o in _ops(bound_run))
 
 
+def test_a_file_write_records_nothing_by_itself(bound_run: Path, tmp_path: Path) -> None:
+    """Writing is the File's; recording it is the caller's choice (#1133)."""
+    DataFile.for_path(tmp_path / "quiet.json", file_type="JSON").write({"a": 1})
+
+    # A run log nothing was recorded to does not exist yet.
+    assert not Path(bound_run.path()).exists() or not any(
+        o["operation"] == "write" for o in _ops(bound_run))
+
+
 def test_no_run_bound_records_nothing(tmp_path: Path) -> None:
     """With no run bound, file operations record nothing."""
     clear_run()
     assert current_run() is None
-    write_file(tmp_path / "x.json", {"a": 1}, "JSON")
+    _write_json(tmp_path / "x.json", {"a": 1})
     move_file(_touch(tmp_path / "m.txt"), tmp_path / "dst")
     # No run log file is created by recording.
     assert not list(tmp_path.glob("run_log.*.jsonl"))
@@ -195,7 +212,7 @@ def test_recording_is_fail_safe(tmp_path: Path, monkeypatch) -> None:
                           run_id="r1"))
     try:
         # The write itself must still succeed even though recording cannot.
-        result = write_file(tmp_path / "safe.json", {"ok": True}, "JSON")
+        result = _write_json(tmp_path / "safe.json", {"ok": True})
         assert result.exists()
         # And a direct record call is also swallowed.
         record_file_operation("write", target_path="/x")

@@ -32,8 +32,10 @@ from rey_lib.files import (
     export_db_root,
     export_object_file_path,
     export_relative_posix,
-    write_file,
 )
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
+from rey_lib.logs import record_file_write
 
 __all__ = ["DatabaseDdlExport"]
 
@@ -126,7 +128,8 @@ class DatabaseDdlExport:
             file_path = export_object_file_path(
                 db_root, entry["schema"], entry["object_type"], entry["file_name"],
             )
-            write_file(file_path, ddl.rstrip() + "\n", "TEXT")
+            File.for_path(file_path).write_text(ddl.rstrip() + "\n")
+            record_file_write(file_path)
             desired_files.add(str(file_path.resolve()))
             ordered_ddls.append((entry, ddl.rstrip(), str(file_path)))
 
@@ -139,8 +142,11 @@ class DatabaseDdlExport:
         # leaving the manifest, build.sql, and unselected files unchanged.
         removed: list[Any] = []
         if not validate_only and not filtered:
-            write_file(build_manifest_path, build_manifest, "JSON")
-            write_file(build_sql_path, _build_sql(db_root, ordered_ddls), "TEXT")
+            DataFile.for_path(build_manifest_path, file_type="JSON").write(
+                build_manifest, sort_keys=False, atomic=False, trailing_newline=False)
+            record_file_write(build_manifest_path)
+            File.for_path(build_sql_path).write_text(_build_sql(db_root, ordered_ddls))
+            record_file_write(build_sql_path)
             desired_files.add(str(build_manifest_path.resolve()))
             desired_files.add(str(build_sql_path.resolve()))
             if cleanup_stale:

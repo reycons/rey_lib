@@ -1,9 +1,9 @@
 """
 Generic file I/O utilities.
 
-Output path construction, file listing and the writers not yet split by
-format. Reading a file's records is the file's own (#1133: each DataFile reads
-its format). This module never imports application-specific modules.
+Output path construction, file listing and the file-operation state log.
+Reading and writing a file are the file's own (#1133: File.write_text, and each
+DataFile reads and writes its format). This module never imports application-specific modules.
 
 Public API
 ----------
@@ -11,8 +11,6 @@ input_files(folder, pattern)
     Return sorted list of files matching a glob pattern.
 converted_output_path(base_dir, filename_pattern, substitutions)
     Construct an output path by substituting tokens into a filename pattern.
-write_file(outfile, content, file_type)
-    Write content to a file and log the creation to the file-operation state.
 move_file(src, dest_dir)
     Move a file to a destination directory, creating dest_dir if needed.    
 """
@@ -55,7 +53,6 @@ __all__ = [
     "preview_file_for_display",
     "converted_output_path",
     "run_artifact_path",
-    "write_file",
     "append_jsonl",
     "delete_file",
     "export_db_root",
@@ -995,108 +992,6 @@ def file_type_for_suffix(suffix: str) -> str:
     return File.type_for_suffix(suffix)
 
 
-def write_file(
-    outfile: Path,
-    content: Any,
-    file_type: str = "CSV",
-    *,
-    sort_keys: bool = False,
-    csv_minimal_quoting: bool = False,
-    state_ctx: Any = None,
-    run_log: Any = None,
-    app: str = "",
-    pipeline: "str | None" = None,
-    reason: str = "",
-) -> Path:
-    """
-    Write content to a file and log the creation to the file-operation state.
-
-    Parameters
-    ----------
-    outfile : Path
-        Destination file path. Parent directories are created if needed.
-    content : Any
-        Content to write. ``list[dict]`` for CSV/XLSX; ``str`` for TEXT;
-        any JSON-serialisable value for JSON.
-    file_type : str
-        Output format — 'CSV', 'XLSX', 'TEXT', or 'JSON'. Case-insensitive.
-    sort_keys : bool
-        For JSON output, sort object keys for deterministic files (e.g. state
-        files). Ignored for other formats.
-    csv_minimal_quoting : bool
-        For CSV output, use standard QUOTE_MINIMAL quoting (safely quotes fields
-        that contain the delimiter or quotes) instead of the default verbatim
-        QUOTE_NONE. Ignored for other formats.
-    run_log : Any
-        The run log the file-operation record is written through. When absent
-        the operation is recorded against the ambient bound run instead.
-    state_ctx : Any
-        Optional context with ``config_root``. When provided, a creation
-        record is appended to the file-operation state log after the file is written.
-    app : str
-        App name stamped on the state record.
-    pipeline : str | None
-        Pipeline name stamped on the state record.
-    reason : str
-        Reason label stamped on the state record.
-
-    Returns
-    -------
-    Path
-        Absolute path of the written file.
-
-    Raises
-    ------
-    ValueError
-        If file_type is unsupported or content is empty for tabular formats.
-    """
-    outfile = Path(outfile)
-    fmt = file_type.upper()
-
-    if fmt in ("CSV", "XLSX"):
-        if not content:
-            from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
-            raise DataStructureError("write_file called with empty rows list.")
-        if fmt == "CSV":
-            # Imported here, not at module scope: rey_lib.files.csv imports
-            # read_text_file from this module, so a top-level import closes a cycle.
-            from rey_lib.files.csv import write_delimited_rows
-
-            write_delimited_rows(outfile, content, minimal_quoting=csv_minimal_quoting)
-        else:
-            _xlsx_writer(outfile, content)
-    elif fmt == "TEXT":
-        primitive_file_io.write_text(outfile, str(content))
-    elif fmt == "JSON":
-        primitive_file_io.write_text(
-            outfile,
-            json.dumps(content, default=str, indent=2, sort_keys=sort_keys),
-        )
-    else:
-        raise ConfigError(f"Unsupported file_type '{file_type}'. Must be CSV, XLSX, TEXT, or JSON.")
-
-    if run_log is not None:
-        try:
-            log_file_operation(
-                state_ctx,
-                run_log,
-                app=app,
-                pipeline=pipeline,
-                source=outfile,
-                destination=outfile,
-                action="create",
-                reason=reason,
-                original_source=outfile,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("Could not write file creation record for '%s': %s", outfile.name, exc)
-
-    # Record against the ambient run only when no explicit run context handled it.
-    if run_log is None:
-        record_file_operation("write", target_path=str(outfile))
-    return outfile.resolve()
-
-
 def append_jsonl(path: Path | str, record: dict[str, Any]) -> Path:
     """
     Append one record as a JSON line to a JSONL file.
@@ -1716,21 +1611,3 @@ def _display_path(path: Path, environment_root: Path | None) -> str:
         except ValueError:
             pass
     return str(resolved)
-
-
-# ---------------------------------------------------------------------------
-# Private — XLSX writer
-# ---------------------------------------------------------------------------
-
-
-
-
-def _xlsx_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
-    """Write rows to an XLSX file. pandas imported on demand."""
-    import pandas as pd  # noqa: PLC0415
-
-    outfile = Path(outfile)
-    outfile.parent.mkdir(parents=True, exist_ok=True)
-
-    pd.DataFrame(rows).to_excel(outfile, index=False)
-    _logger.debug("Wrote %d row(s) to %s", len(rows), outfile.name)

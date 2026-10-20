@@ -112,10 +112,21 @@ class DelimitedHeaderFile(DataFile):
         records and adds nothing. The header and its order come from the first
         record's keys, which is what that writer already reads them from --
         the same order ``declares_structure`` promises on the way in.
+
+        A ``minimal_quoting`` format setting asks for standard quoting of
+        fields that need it, instead of writing every value verbatim.
+
+        Raises:
+            DataStructureError: When there are no rows: with no first record
+                there is no header to write.
         """
         from rey_lib.files.csv import write_delimited_rows
 
-        write_delimited_rows(self.path, rows)
+        if not rows:
+            raise DataStructureError(f"Cannot write {self!r}: there are no rows.")
+        write_delimited_rows(
+            self.path, rows, minimal_quoting=bool(self.settings.get("minimal_quoting")),
+        )
         _logger.debug("Wrote %d row(s) to %r", len(rows), self)
         return len(rows)
 

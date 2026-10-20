@@ -59,6 +59,7 @@ from rey_lib.logs.file_records import (
     log_input_discovered,
     log_input_file_reference,
     record_file_operation,
+    record_file_write,
 )
 from rey_lib.logs.record_enrichment import (
     EXECUTION_RECORD_TYPES,
@@ -128,6 +129,7 @@ __all__ = [
     "log_config_file_manifest",
     "log_file_operation",
     "record_file_operation",
+    "record_file_write",
     "log_sql_execution",
     "log_row_count",
     "log_validation_result",

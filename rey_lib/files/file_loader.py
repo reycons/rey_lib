@@ -47,6 +47,7 @@ from rey_lib.logs.log_utils import (
     log_row_count,
     log_step_failure,
     log_validation_result,
+    record_file_write,
 )
 from rey_lib.logs.app_logger import AppLogger
 from rey_lib.data.errors import DataStructureError
@@ -68,7 +69,6 @@ from rey_lib.files.file_utils import (
     pattern_to_glob,
     move_file,
     copy_file,
-    write_file,
 )
 from rey_lib.data.column_transform import ColumnTransform
 from rey_lib.data.errors import TransformError
@@ -762,10 +762,9 @@ def _transform_one_file(
             return False
 
         output_path = _build_output_path(data_source.paths, transform_cfg, file_path, ctx=ctx)
-        write_file(
+        DataFile.for_path(output_path, file_type="CSV").write(rows)
+        record_file_write(
             output_path,
-            rows,
-            file_type="CSV",
             state_ctx=ctx,
             run_log=run_log,
             app=getattr(ctx, "app_name", "") if ctx is not None else "",

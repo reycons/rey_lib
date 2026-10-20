@@ -28,6 +28,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Final, Mapping
 
+from rey_lib.files import primitive_file_io
 from rey_lib.files.file_utils import bounded_text_preview
 
 __all__ = ["DEFAULT_ENCODING", "SECRET_NAME_PATTERNS", "File", "file_format"]
@@ -319,6 +320,21 @@ class File:
             "content": "",
             "blocked_reason": refused,
         }
+
+    def write_text(self, text: str) -> Path:
+        """Replace this file's content with ``text`` (#1133).
+
+        Ordinary text, written as UTF-8 in place, its parent directory made
+        where missing. Structured content is a DataFile's ``write``; recording
+        the write as a run operation is the caller's, through rey_lib.logs.
+
+        Args:
+            text: The file's new content.
+
+        Returns:
+            The path written.
+        """
+        return primitive_file_io.write_text(self.path, text)
 
     def display_refusal(self, content: bytes | None = None) -> str:
         """Why this file must not be shown as text, or empty when it may be (#1133).

@@ -26,7 +26,8 @@ from typing import Any
 
 from rey_lib.errors.error_utils import FtpDownloadError, StateError
 from rey_lib.files.json import JsonReadError, read_json_file
-from rey_lib.files.file_utils import write_file
+from rey_lib.files.data_file import DataFile
+from rey_lib.logs import record_file_write
 from rey_lib.logs.app_logger import AppLogger
 from rey_lib.errors.error_utils import ConfigError
 
@@ -158,7 +159,9 @@ def save_state(ctx: Any, conn: Any, state: dict[str, str]) -> None:
     log.enter("save_state")
     state_file: Path = get_state_file_path(ctx, conn)
     try:
-        write_file(state_file, state, "JSON", sort_keys=True)
+        DataFile.for_path(state_file, file_type="JSON").write(
+            state, sort_keys=True, atomic=False, trailing_newline=False)
+        record_file_write(state_file)
         log.info("Saved state: %d entry/entries to '%s'", len(state), state_file)
     except OSError as exc:
         raise StateError(f"Cannot write state file '{state_file}'.") from exc
@@ -467,7 +470,9 @@ def abandon_to_failed_file(
     existing = load_failed_files(failed_file)
     existing.append(entry)
     try:
-        write_file(failed_file, existing, "JSON", sort_keys=True)
+        DataFile.for_path(failed_file, file_type="JSON").write(
+            existing, sort_keys=True, atomic=False, trailing_newline=False)
+        record_file_write(failed_file)
     except OSError as exc:
         raise StateError(f"Cannot write failed file '{failed_file}'.") from exc
 

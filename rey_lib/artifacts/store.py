@@ -19,8 +19,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from rey_lib.files.file_utils import run_artifact_path, write_file
-from rey_lib.logs import log_artifact_reference
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file_utils import run_artifact_path
+from rey_lib.logs import log_artifact_reference, record_file_write
 
 __all__ = ["ArtifactStore", "LocalArtifactStore"]
 
@@ -127,7 +128,9 @@ class LocalArtifactStore(ArtifactStore):
         """
         safe_stage = stage_id.replace("/", "_").replace("\\", "_")
         path = run_artifact_path(self._base_dir, safe_stage, run_timestamp, "json")
-        write_file(path, data, "JSON")
+        DataFile.for_path(path, file_type="JSON").write(
+            data, sort_keys=False, atomic=False, trailing_newline=False)
+        record_file_write(path)
 
         # The stage-result JSON is a produced, operator-inspectable output, so record
         # it as a files/artifacts entry on the run log when a run context is present.

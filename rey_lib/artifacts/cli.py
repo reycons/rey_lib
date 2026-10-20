@@ -24,8 +24,9 @@ from pathlib import Path
 
 from rey_lib.artifacts.api import artifact_config_from_ctx, process_artifact
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files.file_utils import read_text_file, write_file
-from rey_lib.logs import AppLogger
+from rey_lib.files.file import File
+from rey_lib.files.file_utils import read_text_file
+from rey_lib.logs import AppLogger, record_file_write
 
 _logger = AppLogger(__name__)
 
@@ -68,9 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     result = process_artifact(content, args.artifact_type, config)
 
     if args.in_place and args.file != "-":
-        write_file(Path(args.file), result, file_type="TEXT", reason="format_artifact")
+        File.for_path(Path(args.file)).write_text(result)
+        record_file_write(Path(args.file), reason="format_artifact")
     elif args.output:
-        write_file(Path(args.output), result, file_type="TEXT", reason="format_artifact")
+        File.for_path(Path(args.output)).write_text(result)
+        record_file_write(Path(args.output), reason="format_artifact")
     else:
         sys.stdout.write(result)
     return 0
