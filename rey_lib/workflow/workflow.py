@@ -100,6 +100,11 @@ class Workflow:
         link to its live application execution. None where no application did.
     """
 
+    #: What kind of presentation a Workflow's state requires (#1137, #1138): a
+    #: semantic presentation type, carried in its projection. Which concrete
+    #: Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE = "workflow"
+
     def __init__(
         self,
         *,
@@ -513,6 +518,7 @@ class Workflow:
         """
         with self._acting:
             return {
+                "panel_type": self.PANEL_TYPE,
                 "name": self.name,
                 "enabled": self.enabled,
                 "actions": self.actions(),

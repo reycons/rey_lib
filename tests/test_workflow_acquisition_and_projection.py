@@ -113,6 +113,7 @@ def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
     actions = projection.pop("actions")
     assert set(actions) == {"workflow", "process:1", "step:1", "step:2"}
     assert projection == {
+        "panel_type": "workflow",
         "name": "code_index",
         "enabled": True,
         "state": "IDLE",
