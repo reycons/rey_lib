@@ -24,15 +24,27 @@ import importlib
 import pkgutil
 import re
 
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Final, Mapping
 
-from rey_lib.files.file_utils import blocked_display_reason, bounded_text_preview
+from rey_lib.files.file_utils import bounded_text_preview
 
-__all__ = ["DEFAULT_ENCODING", "File", "file_format"]
+__all__ = ["DEFAULT_ENCODING", "SECRET_NAME_PATTERNS", "File", "file_format"]
 
 #: What the loader already defaults to, kept so nothing changes by moving.
 DEFAULT_ENCODING = "utf-8-sig"
+
+#: Filenames whose contents a File never shows as text: secret-like by name.
+SECRET_NAME_PATTERNS: Final[tuple[str, ...]] = (
+    ".env",
+    "*.env",
+    "*.pem",
+    "*.key",
+    "*secret*",
+    "*credential*",
+    "*credentials*",
+)
 
 #: Filename suffix -> the file_type token that names the format.
 #:
@@ -275,9 +287,9 @@ class File:
     def text(self, max_bytes: int) -> dict[str, Any]:
         """This file's text, for LOOKING AT, bounded and display-safe.
 
-        Not format-dependent, so every File answers it. Display safety is
-        rey_lib's one policy (``blocked_display_reason``); a refused file
-        carries no content and says why.
+        Not format-dependent, so every File answers it. Whether it may be shown
+        at all is this File's own ``display_refusal``; a refused file carries no
+        content and says why. The bounded read is the primitive IO's.
 
         Args:
             max_bytes: How much of the file at most.
@@ -286,11 +298,11 @@ class File:
             ``name``, ``size_bytes``, ``truncated``, ``content`` and
             ``blocked_reason`` (empty when the text may be shown).
         """
-        refused = blocked_display_reason(self.path)
+        refused = self.display_refusal()
         if not refused:
             preview = bounded_text_preview(self.path, max_bytes, encoding=self.encoding)
-            refused = blocked_display_reason(
-                self.path, preview["content"].encode(self.encoding, "ignore"),
+            refused = self.display_refusal(
+                preview["content"].encode(self.encoding, "ignore"),
             )
             if not refused:
                 return {
@@ -307,6 +319,29 @@ class File:
             "content": "",
             "blocked_reason": refused,
         }
+
+    def display_refusal(self, content: bytes | None = None) -> str:
+        """Why this file must not be shown as text, or empty when it may be (#1133).
+
+        The file's own representation safety, the one rule there is: a
+        secret-like name is refused by name, and binary content once its
+        leading bytes are known. Whether a caller may reach the path at all is
+        not this -- that is the installation's PathResolver.
+
+        Args:
+            content: Leading bytes of the file when already read. Binary
+                detection is skipped when none are given.
+
+        Returns:
+            The refusal message, or an empty string when the text may be shown.
+        """
+        lowered = self.path.name.lower()
+        for pattern in SECRET_NAME_PATTERNS:
+            if fnmatch(lowered, pattern.lower()):
+                return "Sensitive file preview is blocked."
+        if content is not None and b"\x00" in content[:4096]:
+            return "Binary file preview is not supported."
+        return ""
 
     def __repr__(self) -> str:
         """Name the kind of file and the file, for a failure that has to be read."""

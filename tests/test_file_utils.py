@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from rey_lib.encryption import sha256_bytes, sha256_file
+from rey_lib.files.file import File
 from rey_lib.files.file_utils import (
     bounded_text_preview,
-    blocked_display_reason,
     capture_path_variables,
     discover_inbox_files,
     find_named_files,
@@ -478,24 +478,24 @@ def test_visible_children_propagates_unreadable_directory(tmp_path: Path) -> Non
     [".env", "prod.env", "server.pem", "signing.key", "app.secret.yaml",
      "db.credential.json", "aws.credentials"],
 )
-def test_blocked_display_reason_refuses_secret_like_names(tmp_path: Path, name: str) -> None:
-    """Secret-like filenames are refused by the single display-policy owner."""
-    assert blocked_display_reason(tmp_path / name) == "Sensitive file preview is blocked."
+def test_a_file_refuses_to_show_a_secret_like_name(tmp_path: Path, name: str) -> None:
+    """Secret-like filenames are refused by the File itself (#1133)."""
+    assert File(tmp_path / name).display_refusal() == "Sensitive file preview is blocked."
 
 
-def test_blocked_display_reason_refuses_binary_content(tmp_path: Path) -> None:
+def test_a_file_refuses_to_show_binary_content(tmp_path: Path) -> None:
     """Null bytes in the leading window refuse display."""
-    assert blocked_display_reason(tmp_path / "a.log", b"ok\x00binary") == (
-        "Binary file preview is not supported."
-    )
+    log = File(tmp_path / "a.log")
+    assert log.display_refusal(b"ok\x00binary") == "Binary file preview is not supported."
     # Beyond the inspected window the file is not treated as binary.
-    assert blocked_display_reason(tmp_path / "a.log", b"x" * 5000 + b"\x00") == ""
+    assert log.display_refusal(b"x" * 5000 + b"\x00") == ""
 
 
-def test_blocked_display_reason_allows_ordinary_text(tmp_path: Path) -> None:
+def test_a_file_shows_ordinary_text(tmp_path: Path) -> None:
     """An ordinary text file is allowed, with or without bytes supplied."""
-    assert blocked_display_reason(tmp_path / "report.sql") == ""
-    assert blocked_display_reason(tmp_path / "report.sql", b"SELECT 1;\n") == ""
+    report = File(tmp_path / "report.sql")
+    assert report.display_refusal() == ""
+    assert report.display_refusal(b"SELECT 1;\n") == ""
 
 
 def test_preview_for_display_consumes_the_same_policy_owner(tmp_path: Path) -> None:

@@ -442,8 +442,11 @@ def preview_file_for_display(
     is under an approved Rey root and is not secret-like or binary. It performs no
     run-log interpretation.
     """
+    from rey_lib.files.file import File
+
     path = _resolve_under_approved_roots(raw_path, approved_roots)
-    blocked = _blocked_display_file(path)
+    shown = File(path)
+    blocked = shown.display_refusal()
     stat = path.stat()
     base = {
         "name": path.name,
@@ -463,7 +466,7 @@ def preview_file_for_display(
         }
 
     data = path.read_bytes()
-    binary = blocked_display_reason(path, data)
+    binary = shown.display_refusal(data)
     if binary:
         return {
             **base,
@@ -523,16 +526,6 @@ def discover_inbox_files(source_cfg: Any) -> list[Path]:
     return input_files(inbox, pattern)
 
 
-_RELEVANT_SECRET_PATTERNS = (
-    ".env",
-    "*.env",
-    "*.pem",
-    "*.key",
-    "*secret*",
-    "*credential*",
-    "*credentials*",
-)
-
 _RELEVANT_FILE_ROLES = {
     "workflow_definition",
     "pipeline_definition",
@@ -570,7 +563,9 @@ def list_relevant_files(
         return []
 
     includes = _coerce_str_list(spec.get("include")) or ["*"]
-    excludes = _coerce_str_list(spec.get("exclude")) + list(_RELEVANT_SECRET_PATTERNS)
+    from rey_lib.files.file import SECRET_NAME_PATTERNS
+
+    excludes = _coerce_str_list(spec.get("exclude")) + list(SECRET_NAME_PATTERNS)
     roles = {
         str(role): _coerce_str_list(patterns)
         for role, patterns in _mapping_items(spec.get("roles"))
@@ -727,38 +722,14 @@ def _resolve_under_approved_roots(
 
 
 def blocked_display_reason(path: Path | str, data: bytes | None = None) -> str:
-    """Return why one file must not be displayed, or empty when it may be.
+    """Compatibility delegate for Console imports (backlog 1131): ``File.display_refusal``.
 
-    The single owner of Rey display-safety policy: secret-like filenames are
-    refused by name, and binary content is refused once bytes are available.
-    Every console file-display boundary consumes this helper so the policy is
-    implemented exactly once.
-
-    Parameters
-    ----------
-    path : Path | str
-        The file being considered for display.
-    data : bytes | None
-        Leading file bytes when already read. Binary detection is skipped when
-        no bytes are supplied.
-
-    Returns
-    -------
-    str
-        The refusal message, or an empty string when display is allowed.
+    Whether a file may be shown as text is the File's own rule (#1133); this
+    owns none of it.
     """
-    lowered = Path(path).name.lower()
-    for pattern in _RELEVANT_SECRET_PATTERNS:
-        if fnmatch(lowered, pattern.lower()):
-            return "Sensitive file preview is blocked."
-    if data is not None and b"\x00" in data[:4096]:
-        return "Binary file preview is not supported."
-    return ""
+    from rey_lib.files.file import File
 
-
-def _blocked_display_file(path: Path) -> str:
-    """Return a block reason for secret-like files, or empty when allowed."""
-    return blocked_display_reason(path)
+    return File(Path(path)).display_refusal(data)
 
 
 def _relevant_file_spec(metadata: dict[str, Any] | None) -> dict[str, Any]:

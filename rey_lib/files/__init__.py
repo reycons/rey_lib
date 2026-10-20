@@ -1,5 +1,4 @@
 from rey_lib.files.file_utils import (
-    blocked_display_reason,
     bounded_text_preview,
     discover_inbox_files,
     find_named_files,
@@ -125,7 +124,6 @@ __all__ = [
     "FileSanitizationResult",
     "compose_sanitization_policy",
     "sanitize_file",
-    "blocked_display_reason",
     "bounded_text_preview",
     "find_named_files",
     "folder_children",
