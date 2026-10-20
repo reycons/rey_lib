@@ -1394,6 +1394,23 @@ class Control:
         }, required=True) or []
         return dict(rows[0]) if rows else None
 
+    def get_datafile_registry(self, datafile_type: str, file_path: str,
+                              required: bool = True) -> Optional[dict[str, Any]]:
+        """This installation's governed defaults for a DataFile type, or None.
+
+        The one runtime read of the DataFile registry (backlog #1159):
+        ``datafile_type``, ``default_sql`` -- its ``{file_path}`` already
+        resolved to ``file_path`` by the routine -- and ``connection_name``.
+        None is the answer "this type has no default". The installation is not
+        passed: the binding reads it off :attr:`installation_id`. The type is
+        the one the DataFile states; nothing here classifies a file.
+        """
+        rows = self._call_rows("get_datafile_registry", {
+            "datafile_type": str(datafile_type),
+            "file_path": str(file_path),
+        }, required=required) or []
+        return dict(rows[0]) if rows else None
+
     def data_profile_for_key(self, data_profile_key: str,
                              required: bool = True) -> Optional[int]:
         """The profile this group already has, or None.
