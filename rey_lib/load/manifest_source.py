@@ -17,7 +17,8 @@ here. It is neither a bag of rows nor a place a Loader assembles objects by
 hand; it is the adapter from persisted state into executable objects, and each
 object it returns keeps its own defaults, validation and execution semantics.
 
-    data_file()        the existing DataFile, via data_file_for
+    file()             the governed File at the working path, via File.for_path
+    data_file()        that File as a DataFile, via DataFile.for_path
     data_profile()     the existing DataProfile and its field objects
     column_transform() the existing ColumnTransform
 
@@ -60,7 +61,8 @@ from typing import Any, Mapping, Optional, Protocol, Sequence
 from rey_lib.data.column_transform import ColumnTransform, TransformPersistence
 from rey_lib.data.data_profile import DataProfile, FieldProfile, ProfileField
 from rey_lib.data.errors import DataStructureError
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.logs import AppLogger
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.errors.error_utils import StateError
@@ -598,7 +600,20 @@ class ManifestSource:
     # -- the existing objects, populated ------------------------------------
 
     def data_file(self, **settings: Any) -> DataFile:
-        """The existing DataFile for the working path.
+        """The governed file at the working path, as a DataFile (#1133).
+
+        ``file()``, refused by name when the file has no record semantics.
+
+        Raises:
+            ConfigError: When the file is not a DataFile.
+        """
+        opened = self.file(**settings)
+        if not isinstance(opened, DataFile):
+            raise ConfigError(DataFile.refusal_for(opened, self.layout or ""))
+        return opened
+
+    def file(self, **settings: Any) -> File:
+        """The governed File for the working path.
 
         **The declared layout WINS over the suffix**, exactly as a configured
         load's declared ``file_type`` does -- ``ConfiguredLoad.data_file_for``
@@ -629,7 +644,7 @@ class ManifestSource:
         # was opened at, and the classification and base_path its rows carry.
         # Which state that is was the caller's selection, made before create().
         manifest_path = self.file_facts.get("manifest_path")
-        return data_file_for(
+        return File.for_path(
             Path(self.path), file_type=self.layout or "",
             file_manifest_id=self.file_manifest_id,
             file_mutation_id=self.file_mutation_id,

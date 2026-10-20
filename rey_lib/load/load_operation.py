@@ -67,7 +67,8 @@ from rey_lib.db.database_objects import (
 from rey_lib.db.procedure_map import execute_sql_text
 from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
-from rey_lib.files.data_file import data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_loader import (
     build_secrets,
@@ -211,7 +212,7 @@ def _route_file(
             Transform(
                 values={"route": str(destination), "operation": str(move.to)},
                 selected="move",
-            ).resolve(ctx).apply(data_file_for(source_path))
+            ).resolve(ctx).apply(File.for_path(source_path))
         except (ConfigError, FileRoutingError, OSError) as exc:
             # Handled -- the next movement still runs -- so reported here (rule 79).
             error = exc if isinstance(exc, AppError) else FileRoutingError(
@@ -744,7 +745,7 @@ def load_query_to_file(
     Returns:
         Rows written.
     """
-    target = data_file_for(out_file)
+    target = DataFile.for_path(out_file)
     source = QuerySource(
         shared_connection(ctx, source_connection).handle(),
         statement,

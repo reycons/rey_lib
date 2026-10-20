@@ -34,7 +34,7 @@ from typing import Any, Callable, Mapping
 
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files import file_routing
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.file import File
 from rey_lib.files.file_utils import move_file
 from rey_lib.files.file_routing import (
     CollisionPolicy,
@@ -93,7 +93,7 @@ class FileTransform(ABC):
 
     #: The file's latest state within this apply, where the kind moved it
     #: before failing; None when the input is still its state.
-    _current: DataFile | None = None
+    _current: File | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Refuse a kind that would bypass the common execution path."""
@@ -105,7 +105,7 @@ class FileTransform(ABC):
                 "through the one failure path (backlog 624)."
             )
 
-    def apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def apply(self, data_file: File) -> tuple[File, ...]:
         """Run this kind's operation on exactly this file; on a terminal
         failure of the file, move its original to kickouts, record the
         failure, and raise again.
@@ -126,7 +126,7 @@ class FileTransform(ABC):
             # from where it now is.
             state = self._current or data_file
             original_path = state.original_path or str(state.path)
-            original = data_file_for(Path(original_path), **{
+            original = File.for_path(Path(original_path), **{
                 **state.governed_facts(),
                 "file_mutation_id": (
                     state.original_mutation_id
@@ -147,7 +147,7 @@ class FileTransform(ABC):
             self._record_failure(data_file, error)
             raise
 
-    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+    def _record_failure(self, data_file: File, error: BaseException) -> None:
         """Record this kind's own failure of this file. Nothing by default.
 
         Called by :meth:`apply` after the kickout attempt and before the error
@@ -160,7 +160,7 @@ class FileTransform(ABC):
         """
 
     @abstractmethod
-    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: File) -> tuple[File, ...]:
         """Operate on exactly this governed file, and return what it leaves.
 
         Args:
@@ -290,7 +290,7 @@ class MoveTransform(FileTransform):
             )
         self._route = declared or _KICKOUTS_ROUTE
 
-    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: File) -> tuple[File, ...]:
         """Move the file, and return it at its new path.
 
         Raises:
@@ -326,7 +326,7 @@ class MoveTransform(FileTransform):
             facts["original_path"] = str(resulting_path)
             facts["original_mutation_id"] = file_mutation_id
         return (
-            data_file_for(
+            File.for_path(
                 resulting_path,
                 file_type=data_file.file_type,
                 **facts,
@@ -334,7 +334,7 @@ class MoveTransform(FileTransform):
             ),
         )
 
-    def _plain_move(self, data_file: DataFile) -> DataFile:
+    def _plain_move(self, data_file: File) -> File:
         """Move a file nothing governs to the route, with run-log evidence.
 
         No role, no governed roots and no mutation: the destination is where
@@ -364,9 +364,9 @@ class MoveTransform(FileTransform):
             pipeline=getattr(self._ctx, "pipeline_name", None),
             reason=self._operation or str(destination),
         )
-        return data_file_for(moved, file_type=data_file.file_type, **data_file.settings)
+        return File.for_path(moved, file_type=data_file.file_type, **data_file.settings)
 
-    def plan(self, data_file: DataFile) -> Path:
+    def plan(self, data_file: File) -> Path:
         """Where :meth:`apply` would put this file, changing nothing.
 
         Routing's own dry run: every validation a move makes -- governed roots,
@@ -381,7 +381,7 @@ class MoveTransform(FileTransform):
             return (Path(self._route) / (self._name or Path(data_file.path).name)).resolve()
         return self._route_file(data_file, dry_run=True)[0]
 
-    def _route_file(self, data_file: DataFile, *, dry_run: bool) -> tuple[Path, int | None]:
+    def _route_file(self, data_file: File, *, dry_run: bool) -> tuple[Path, int | None]:
         """Hand this file to routing, and say where it is and what recorded it.
 
         One move; routing distinguishes PERSISTENCE beneath it. A governed file
@@ -437,7 +437,7 @@ class MoveTransform(FileTransform):
             )
         return operation
 
-    def _routing_context(self, data_file: DataFile) -> FileRoutingContext:
+    def _routing_context(self, data_file: File) -> FileRoutingContext:
         """The routing primitive's operation-scoped context for this move."""
         application_name = str(getattr(self._ctx, "app_name", "") or "").strip()
         if not application_name:
@@ -473,7 +473,7 @@ class MoveTransform(FileTransform):
         )
 
 
-def _route_for(route: str, data_file: DataFile) -> str:
+def _route_for(route: str, data_file: File) -> str:
     """The route with ``<base_path>`` and ``<inbox>`` resolved from the file.
 
     Raises:

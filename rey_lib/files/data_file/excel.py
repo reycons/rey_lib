@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.data.errors import DataStructureError
-from rey_lib.files.data_file import data_file
+from rey_lib.files.file import file_format
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.logs import AppLogger
 
@@ -153,7 +153,7 @@ class ExcelDataFile(DataFile):
         ]
 
 
-@data_file("XLS")
+@file_format("XLS")
 class XlsFile(ExcelDataFile):
     """A legacy binary Excel workbook."""
 
@@ -163,7 +163,7 @@ class XlsFile(ExcelDataFile):
         return "XLS"
 
 
-@data_file("XLSX")
+@file_format("XLSX")
 class XlsxFile(ExcelDataFile):
     """An Office Open XML Excel workbook."""
 
@@ -173,7 +173,7 @@ class XlsxFile(ExcelDataFile):
         return "XLSX"
 
 
-@data_file("XLSB")
+@file_format("XLSB")
 class XlsbFile(ExcelDataFile):
     """A binary Excel workbook."""
 
@@ -183,7 +183,7 @@ class XlsbFile(ExcelDataFile):
         return "XLSB"
 
 
-@data_file("XLSM")
+@file_format("XLSM")
 class XlsmFile(ExcelDataFile):
     """A macro-enabled Office Open XML Excel workbook."""
 

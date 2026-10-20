@@ -43,7 +43,7 @@ from rey_lib.load.layouts.delimited import (
 )
 from rey_lib.load.manifest_source import ManifestSource
 from rey_lib.load.profile_errors import ProfilingError
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.data_file import DataFile
 from rey_lib.load.file_transform import FileTransform, file_transform
 from rey_lib.load.transform import Transform
 from rey_lib.logs import (
@@ -785,7 +785,7 @@ class ProfileTransform(FileTransform):
             profiler_version=self._profiler_version,
         )
         return (
-            data_file_for(
+            DataFile.for_path(
                 data_file.path, file_type=data_file.file_type,
                 **{**data_file.governed_facts(), "file_mutation_id": mutation_id},
                 **data_file.settings,

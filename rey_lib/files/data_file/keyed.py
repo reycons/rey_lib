@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from rey_lib.files import file_utils
-from rey_lib.files.data_file import data_file
+from rey_lib.files.file import file_format
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file.base import DataFile, RecordShape
 from rey_lib.logs import AppLogger
@@ -200,7 +200,7 @@ class KeyedFile(DataFile):
             )
 
 
-@data_file("JSONL", "NDJSON")
+@file_format("JSONL", "NDJSON")
 class JsonlFile(KeyedFile):
     """One JSON object per line, each naming its own fields."""
 
@@ -240,7 +240,7 @@ class JsonlFile(KeyedFile):
         return len(records)
 
 
-@data_file("JSON")
+@file_format("JSON")
 class JsonFile(KeyedFile):
     """One JSON document holding a table's rows.
 

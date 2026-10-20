@@ -23,17 +23,9 @@ from pathlib import Path
 import pytest
 
 from rey_lib.data.errors import DataStructureError
-from rey_lib.files.data_file import (
-    DataFile,
-    UntypedFile,
-    data_file_for,
-    registered_formats,
-)
-from rey_lib.files.file_utils import (
-    _SUFFIX_FILE_TYPES,
-    file_type_for_suffix,
-    get_reader,
-)
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File, file_format
+from rey_lib.files.file_utils import get_reader
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -53,15 +45,22 @@ def _csv(tmp_path: Path, text: str, name: str = "source.csv") -> Path:
 
 
 class TestTheRegistry:
-    """Adding a format is a module, not an edit to a central list."""
+    """Adding a format is a module, not an edit to a central list (#1133: File's)."""
 
-    def test_every_format_registers_itself(self) -> None:
+    def test_every_data_format_registers_itself(self) -> None:
         """Discovery imports the submodules; no module lists them."""
-        assert set(registered_formats()) == {
+        assert set(DataFile.formats()) == {
             "CSV", "DELIMITED_HEADER", "DELIMITED_NO_HEADER",
             "JSON", "JSONL", "NDJSON",
             "XLS", "XLSB", "XLSM", "XLSX",
         }
+
+    def test_the_recognised_formats_with_no_records_are_files_not_data_files(self) -> None:
+        """PYTHON, YAML and TEXT are File formats; DataFile.formats() leaves them out."""
+        everything = set(File.formats())
+
+        assert {"PYTHON", "YAML", "TEXT"} <= everything
+        assert everything - set(DataFile.formats()) == {"PYTHON", "YAML", "TEXT"}
 
     def test_a_new_format_needs_no_change_to_any_existing_module(
         self, tmp_path: Path
@@ -72,9 +71,8 @@ class TestTheRegistry:
         makes it constructible. That is the property the hierarchy exists for:
         a format is added by declaring one, never by editing a branch.
         """
-        from rey_lib.files.data_file import data_file
 
-        @data_file("TEST_ONLY_FORMAT")
+        @file_format("TEST_ONLY_FORMAT")
         class _Throwaway(DataFile):
             @property
             def file_type(self) -> str:
@@ -92,8 +90,7 @@ class TestTheRegistry:
             def read_validated(self, expected_columns=None) -> list[dict]:
                 return self.read()
 
-        built = data_file_for(tmp_path / "x.anything",
-                              file_type="TEST_ONLY_FORMAT")
+        built = DataFile.for_path(tmp_path / "x.anything", file_type="TEST_ONLY_FORMAT")
 
         assert isinstance(built, _Throwaway)
         assert built.read() == [{"a": 1}]
@@ -106,8 +103,8 @@ class TestTheRegistry:
         """
         path = _jsonl(tmp_path, {"a": 1})
 
-        assert type(data_file_for(path, file_type="NDJSON")) is type(
-            data_file_for(path, file_type="JSONL")
+        assert type(File.for_path(path, file_type="NDJSON")) is type(
+            File.for_path(path, file_type="JSONL")
         )
 
 
@@ -118,59 +115,75 @@ class TestConstruction:
         """Configuration knows things a filename does not."""
         path = _csv(tmp_path, "a,b\n1,x\n", name="misnamed.jsonl")
 
-        assert data_file_for(path, file_type="CSV").file_type == "CSV"
+        assert File.for_path(path, file_type="CSV").file_type == "CSV"
 
     def test_the_suffix_answers_when_nothing_is_declared(
         self, tmp_path: Path
     ) -> None:
         """The direct case: someone names one file and that is the whole input."""
-        assert data_file_for(_jsonl(tmp_path, {"a": 1})).file_type == "JSONL"
-        assert data_file_for(_csv(tmp_path, "a\n1\n")).file_type == "CSV"
+        assert File.for_path(_jsonl(tmp_path, {"a": 1})).file_type == "JSONL"
+        assert File.for_path(_csv(tmp_path, "a\n1\n")).file_type == "CSV"
 
-    def test_a_suffix_that_names_nothing_is_refused_by_name(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("name, kind, token", [
+        ("module.py", "PythonFile", "PYTHON"),
+        ("config.yaml", "YamlFile", "YAML"),
+        ("config.yml", "YamlFile", "YAML"),
+        ("notes.txt", "TextFile", "TEXT"),
+    ])
+    def test_a_recognised_format_with_no_records_is_its_own_file(
+        self, tmp_path: Path, name: str, kind: str, token: str,
     ) -> None:
-        """Not defaulted to CSV: an UntypedFile whose content is refused by name.
+        """Not a DataFile: a .py or .yaml file never pretends to hold records."""
+        resolved = File.for_path(tmp_path / name)
 
-        Guessing would pick a reader that fails later and somewhere else,
-        reporting a parse error for what is a configuration mistake. The file
-        is still a DataFile (backlog 624) -- it can be moved and kicked out --
-        but no reader is chosen for it.
+        assert type(resolved).__name__ == kind
+        assert resolved.file_type == token
+        assert not isinstance(resolved, DataFile)
+
+    def test_a_suffix_that_names_nothing_is_a_plain_file(self, tmp_path: Path) -> None:
+        """Not defaulted to CSV and not a pretend DataFile: just a File.
+
+        It can still be moved, kicked out and governed; asked for as a
+        DataFile it is refused by name, never given a guessed reader.
         """
         path = tmp_path / "mystery.dat"
         path.write_text("a,b\n", encoding="utf-8")
 
-        untyped = data_file_for(path)
+        resolved = File.for_path(path)
 
-        assert isinstance(untyped, UntypedFile)
+        assert type(resolved) is File
+        assert resolved.file_type == ""
         with pytest.raises(ConfigError) as raised:
-            untyped.read()
+            DataFile.for_path(path)
         assert ".dat" in str(raised.value)
+
+    def test_a_file_with_no_records_is_refused_as_a_data_file_by_name(
+        self, tmp_path: Path,
+    ) -> None:
+        """DataFile.for_path resolves through File and refuses what has no records."""
+        with pytest.raises(ConfigError) as raised:
+            DataFile.for_path(tmp_path / "module.py")
+
+        assert "PYTHON" in str(raised.value)
 
     def test_an_unknown_declared_type_is_refused_by_name(
         self, tmp_path: Path
     ) -> None:
-        """A declared token no subtype registers is named in the refusal.
-
-        XLSX used to be the case here; it is a DataFile now (row 602), so the
-        refusal is shown with a format the hierarchy still does not have.
-        """
-        untyped = data_file_for(tmp_path / "book.parquet", file_type="PARQUET")
-
-        assert isinstance(untyped, UntypedFile)
+        """A declared token no subclass registers is named in the refusal."""
+        assert type(File.for_path(tmp_path / "book.parquet", file_type="PARQUET")) is File
         with pytest.raises(ConfigError) as raised:
-            untyped.validate()
+            DataFile.for_path(tmp_path / "book.parquet", file_type="PARQUET")
         assert "PARQUET" in str(raised.value)
 
-    def test_an_untyped_file_carries_its_governed_facts(self, tmp_path: Path) -> None:
-        """Every physical file is a DataFile, with every fact a DataFile carries."""
-        untyped = data_file_for(
+    def test_a_plain_file_carries_its_governed_facts(self, tmp_path: Path) -> None:
+        """Every physical file is a File, with every fact a File carries."""
+        plain = File.for_path(
             tmp_path / "notes.unknown", file_manifest_id=3, file_mutation_id=7,
             base_path="/b", inbox=str(tmp_path), original_path="/o/notes.unknown",
             original_mutation_id=5, data_profile_key="feed|notes",
         )
 
-        assert untyped.governed_facts() == {
+        assert plain.governed_facts() == {
             "file_manifest_id": 3, "file_mutation_id": 7, "classification": None,
             "base_path": "/b", "inbox": str(tmp_path),
             "original_path": "/o/notes.unknown", "original_mutation_id": 5,
@@ -179,39 +192,20 @@ class TestConstruction:
 
 
 class TestTheSuffixMapCannotDrift:
-    """It feeds two readers, so it must speak a vocabulary one of them has."""
+    """Every suffix File recognises names a format File registers."""
 
-    def test_every_suffix_maps_to_a_token_something_can_read(
-        self, tmp_path: Path
-    ) -> None:
+    def test_every_suffix_maps_to_a_registered_format(self) -> None:
         """The estate already has several file-type vocabularies that
         disagree. This asserts the suffix map is not another: every token it
-        can yield is one SOME reader actually accepts.
-
-        Two qualify, and either is enough. ``get_reader`` dispatches on a
-        token, or the DataFile registry registers one. Requiring the first
-        alone was right while it was the only reader, and would now refuse
-        JSON -- which is read perfectly well, just not a line at a time.
-
-        Still closed: a token neither can read is still orphan vocabulary.
+        can yield is one a registered File subclass answers to.
         """
-        path = _csv(tmp_path, "a\n1\n", name="probe.csv")
-        registered = set(registered_formats())
+        from rey_lib.files.file import _SUFFIX_FILE_TYPES
 
-        for suffix, token in _SUFFIX_FILE_TYPES.items():
-            if token in registered:
-                continue
-            try:
-                list(get_reader(path, file_type=token))
-            except ValueError as exc:
-                # ONLY get_reader's own refusal says a token is unsupported. A
-                # reader refusing this CSV's content -- pandas' "Excel file
-                # format cannot be determined" for XLSX -- also raises
-                # ValueError, and is wrong content, which is fine here.
-                if str(exc).startswith("Unsupported file_type"):
-                    pytest.fail(f"{suffix} -> {token}: {exc}")
-            except Exception:                    # noqa: BLE001
-                pass                             # wrong CONTENT is fine here
+        registered = set(File.formats())
+        orphans = {suffix: token for suffix, token in _SUFFIX_FILE_TYPES.items()
+                   if token not in registered}
+
+        assert orphans == {}
 
     def test_json_is_carried_by_the_registry_not_by_get_reader(
         self, tmp_path: Path
@@ -222,8 +216,8 @@ class TestTheSuffixMapCannotDrift:
         later teaches ``get_reader`` to dispatch JSON, a document would be
         read a line at a time again -- the original failure.
         """
-        assert file_type_for_suffix(".json") == "JSON"
-        assert "JSON" in set(registered_formats())
+        assert File.type_for_suffix(".json") == "JSON"
+        assert "JSON" in set(DataFile.formats())
 
         path = _csv(tmp_path, "a\n1\n", name="probe.csv")
         with pytest.raises(ConfigError):
@@ -231,22 +225,22 @@ class TestTheSuffixMapCannotDrift:
 
     def test_the_suffix_is_read_forgivingly(self) -> None:
         """Case and a missing dot are not the caller's problem."""
-        assert file_type_for_suffix(".JSONL") == "JSONL"
-        assert file_type_for_suffix("csv") == "CSV"
-        assert file_type_for_suffix("") == ""
-        assert file_type_for_suffix(".nope") == ""
+        assert File.type_for_suffix(".JSONL") == "JSONL"
+        assert File.type_for_suffix("csv") == "CSV"
+        assert File.type_for_suffix("") == ""
+        assert File.type_for_suffix(".nope") == ""
 
 
 class TestDelimitedHeaderFile:
     """Columns named once, in order, before any row is read."""
 
     def test_source_structure_is_the_header(self, tmp_path: Path) -> None:
-        assert data_file_for(
+        assert DataFile.for_path(
             _csv(tmp_path, "a,b,c\n1,2,3\n")
         ).source_structure() == ["a", "b", "c"]
 
     def test_a_matching_header_passes(self, tmp_path: Path) -> None:
-        data_file_for(_csv(tmp_path, "a,b\n1,x\n")).validate(["a", "b"])
+        DataFile.for_path(_csv(tmp_path, "a,b\n1,x\n")).validate(["a", "b"])
 
     def test_column_ORDER_matters_against_a_destination(
         self, tmp_path: Path
@@ -257,17 +251,17 @@ class TestDelimitedHeaderFile:
         incidental.
         """
         with pytest.raises(DataStructureError):
-            data_file_for(_csv(tmp_path, "b,a\n1,x\n")).validate(["a", "b"])
+            DataFile.for_path(_csv(tmp_path, "b,a\n1,x\n")).validate(["a", "b"])
 
     def test_with_no_destination_only_the_header_must_exist(
         self, tmp_path: Path
     ) -> None:
         """Nothing to compare against, so nothing is invented to compare to."""
-        data_file_for(_csv(tmp_path, "a,b\n1,x\n")).validate(None)
+        DataFile.for_path(_csv(tmp_path, "a,b\n1,x\n")).validate(None)
 
     def test_a_file_with_no_header_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(DataStructureError) as raised:
-            data_file_for(_csv(tmp_path, "\n\n")).validate(None)
+            DataFile.for_path(_csv(tmp_path, "\n\n")).validate(None)
 
         assert "no header" in str(raised.value)
 
@@ -277,7 +271,7 @@ class TestDelimitedHeaderFile:
         A wrong file costs one line, not a parse. Asserted by spying on the
         reader: it must never run for a header that does not match.
         """
-        source = data_file_for(_csv(tmp_path, "a,b\n1,x\n"))
+        source = DataFile.for_path(_csv(tmp_path, "a,b\n1,x\n"))
         source.read = lambda: pytest.fail("read before validation")  # type: ignore[method-assign]
 
         with pytest.raises(DataStructureError):
@@ -290,13 +284,13 @@ class TestJsonlFile:
     def test_source_structure_is_the_first_records_keys(
         self, tmp_path: Path
     ) -> None:
-        assert data_file_for(
+        assert DataFile.for_path(
             _jsonl(tmp_path, {"a": 1, "b": "x"})
         ).source_structure() == ["a", "b"]
 
     def test_values_keep_their_json_types(self, tmp_path: Path) -> None:
         """This format carries types; discarding them is a loss."""
-        records = data_file_for(_jsonl(tmp_path, {"a": 1, "b": True})).read()
+        records = DataFile.for_path(_jsonl(tmp_path, {"a": 1, "b": True})).read()
 
         assert records[0]["a"] == 1 and not isinstance(records[0]["a"], str)
         assert records[0]["b"] is True
@@ -305,7 +299,7 @@ class TestJsonlFile:
         """A JSON object's key order is incidental, unlike a CSV header's."""
         path = _jsonl(tmp_path, {"b": "x", "a": 1}, {"a": 2, "b": "y"})
 
-        assert len(data_file_for(path).read_validated(["a", "b"])) == 2
+        assert len(DataFile.for_path(path).read_validated(["a", "b"])) == 2
 
     @pytest.mark.parametrize(
         "records,why",
@@ -325,7 +319,7 @@ class TestJsonlFile:
         table that has none.
         """
         with pytest.raises(DataStructureError):
-            data_file_for(_jsonl(tmp_path, *records)).read_validated(["a", "b"])
+            DataFile.for_path(_jsonl(tmp_path, *records)).read_validated(["a", "b"])
 
     def test_with_no_destination_the_FIRST_record_sets_the_contract(
         self, tmp_path: Path
@@ -339,7 +333,7 @@ class TestJsonlFile:
         path = _jsonl(tmp_path, {"a": 1, "b": "x"}, {"a": 2, "c": "y"})
 
         with pytest.raises(DataStructureError) as raised:
-            data_file_for(path).read_validated(None)
+            DataFile.for_path(path).read_validated(None)
 
         assert "record 2" in str(raised.value)
         assert "first record" in str(raised.value)
@@ -350,7 +344,7 @@ class TestJsonlFile:
         """What the create path asks: is this file coherent? Yes."""
         path = _jsonl(tmp_path, {"a": 1, "b": "x"}, {"b": "y", "a": 2})
 
-        assert len(data_file_for(path).read_validated(None)) == 2
+        assert len(DataFile.for_path(path).read_validated(None)) == 2
 
     def test_the_source_is_parsed_exactly_once(self, tmp_path: Path) -> None:
         """read_validated must not reread to validate.
@@ -360,7 +354,7 @@ class TestJsonlFile:
         that catches a later "tidy-up" reintroducing one.
         """
         path = _jsonl(tmp_path, {"a": 1}, {"a": 2})
-        source = data_file_for(path)
+        source = DataFile.for_path(path)
         reads: list[int] = []
         original = source.read
 
@@ -457,7 +451,7 @@ class TestDelimitedNoHeaderFile:
         """
         source = self._write(tmp_path, "1,x\n2,y\n")
 
-        rows = data_file_for(source, file_type="DELIMITED_NO_HEADER").read()
+        rows = DataFile.for_path(source, file_type="DELIMITED_NO_HEADER").read()
 
         assert rows == [
             {"col001": "1", "col002": "x"},
@@ -481,7 +475,7 @@ class TestDelimitedNoHeaderFile:
         )
 
         assert len(through_the_old_reader) == 1          # the defect, still there
-        assert len(data_file_for(
+        assert len(DataFile.for_path(
             source, file_type="DELIMITED_NO_HEADER"
         ).read()) == 2
 
@@ -494,7 +488,7 @@ class TestDelimitedNoHeaderFile:
         col010, which column_2 and column_10 do not.
         """
         source = self._write(tmp_path, ",".join(str(n) for n in range(12)) + "\n")
-        names = data_file_for(source, file_type="DELIMITED_NO_HEADER").source_structure()
+        names = DataFile.for_path(source, file_type="DELIMITED_NO_HEADER").source_structure()
 
         assert names[:3] == ["col001", "col002", "col003"]
         assert names[-1] == "col012"
@@ -510,7 +504,7 @@ class TestDelimitedNoHeaderFile:
         """
         source = self._write(tmp_path, "1,x\n")
 
-        built = data_file_for(
+        built = DataFile.for_path(
             source, file_type="DELIMITED_NO_HEADER", columns=["id", "name"],
         )
 
@@ -528,7 +522,7 @@ class TestDelimitedNoHeaderFile:
         source = self._write(tmp_path, "1,x\n2\n")
 
         with pytest.raises(DataStructureError) as raised:
-            data_file_for(source, file_type="DELIMITED_NO_HEADER").validate()
+            DataFile.for_path(source, file_type="DELIMITED_NO_HEADER").validate()
 
         assert "row 2" in str(raised.value)
 
@@ -538,7 +532,7 @@ class TestDelimitedNoHeaderFile:
         source = self._write(tmp_path, "1,x\n")
 
         with pytest.raises(DataStructureError) as raised:
-            data_file_for(
+            DataFile.for_path(
                 source, file_type="DELIMITED_NO_HEADER"
             ).read_validated(["a", "b", "c"])
 
@@ -549,7 +543,7 @@ class TestDelimitedNoHeaderFile:
     ) -> None:
         """Consistent with the header file, which answers [] the same way."""
         source = self._write(tmp_path, "")
-        built = data_file_for(source, file_type="DELIMITED_NO_HEADER")
+        built = DataFile.for_path(source, file_type="DELIMITED_NO_HEADER")
 
         assert built.source_structure() == []
         assert built.read() == []
@@ -563,7 +557,7 @@ class TestText:
         source = tmp_path / "module.py"
         source.write_text("x = 1\n", encoding="utf-8")
 
-        shown = data_file_for(source).text(1_000)
+        shown = File.for_path(source).text(1_000)
 
         assert shown == {
             "name": "module.py", "size_bytes": 6, "truncated": False,
@@ -573,7 +567,7 @@ class TestText:
     def test_the_text_is_bounded_and_says_so(self, tmp_path: Path) -> None:
         source = _csv(tmp_path, "a,b\n1,2\n")
 
-        shown = data_file_for(source).text(4)
+        shown = File.for_path(source).text(4)
 
         assert shown["content"] == "a,b\n"
         assert shown["truncated"] is True
@@ -583,7 +577,7 @@ class TestText:
         source = tmp_path / "server.key"
         source.write_text("secret", encoding="utf-8")
 
-        shown = data_file_for(source).text(1_000)
+        shown = File.for_path(source).text(1_000)
 
         assert shown["content"] == ""
         assert shown["blocked_reason"] == "Sensitive file preview is blocked."
@@ -592,7 +586,7 @@ class TestText:
         source = tmp_path / "blob.bin"
         source.write_bytes(b"ab\x00cd")
 
-        shown = data_file_for(source).text(1_000)
+        shown = File.for_path(source).text(1_000)
 
         assert shown["content"] == ""
         assert shown["blocked_reason"] == "Binary file preview is not supported."

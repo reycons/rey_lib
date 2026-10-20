@@ -41,7 +41,7 @@ from typing import Any, Mapping, Optional
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.query_source import QuerySource
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files.data_file import data_file_for
+from rey_lib.files.data_file import DataFile
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.files.file_utils import read_text_file
 from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
@@ -475,7 +475,7 @@ class Source:
         kind = self.selected_kind()
 
         if kind == "file":
-            return data_file_for(
+            return DataFile.for_path(
                 str(held["file"]), file_type=str(held.get("file-type") or ""),
             )
         if kind == "database":

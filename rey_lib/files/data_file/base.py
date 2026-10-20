@@ -27,16 +27,14 @@ describe them.
 
 from __future__ import annotations
 
-import re
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files.file_utils import blocked_display_reason, bounded_text_preview
+from rey_lib.files.file import DEFAULT_ENCODING, File
 
-__all__ = ["DataFile", "RecordShape"]
+__all__ = ["DEFAULT_ENCODING", "DataFile", "RecordShape"]
 
 
 @dataclass(frozen=True)
@@ -69,126 +67,48 @@ class RecordShape:
     holds_records: bool
     record_key: str | None = None
 
-#: What the loader already defaults to, kept so nothing changes by moving.
-DEFAULT_ENCODING = "utf-8-sig"
+class DataFile(File, ABC):
+    """A File whose format has record / data semantics (#1133).
 
-
-class DataFile(ABC):
-    """One source file, and what its format means.
-
-    Construction is a subtype's own; nothing is discovered afterwards.
-
-    **A GOVERNED FILE CARRIES ITS IDENTITY** -- ``file_manifest_id``, the
-    ``file_mutation_id`` of the state it was built from, ``classification`` and
-    ``base_path`` -- as ``ManifestSource.data_file()`` supplies them. All four
-    are None for a file nothing governs. They are facts handed in, never
-    looked up: which state a file is opened at is the caller's selection.
+    Everything a file has as a file -- its path, governed identity, text -- is
+    File's. This adds only what records mean: reading, validating, sampling,
+    the record shape and writing records. Construction is ``File.for_path``'s;
+    ``DataFile.for_path`` is the same resolution, refusing a file that is not
+    a data file.
     """
 
-    def __init__(
-        self,
-        path: Path,
-        *,
-        encoding: str = DEFAULT_ENCODING,
-        file_manifest_id: int | None = None,
-        file_mutation_id: int | None = None,
-        classification: Mapping[str, Any] | None = None,
-        base_path: str | None = None,
-        inbox: str | None = None,
-        original_path: str | None = None,
-        original_mutation_id: int | None = None,
-        record_type: str | None = None,
-        conversion: Mapping[str, Any] | None = None,
-        data_profile_key: str | None = None,
-        **settings: Any,
-    ) -> None:
-        """Hold the file, its format settings and, when governed, its identity.
+    @classmethod
+    def for_path(cls, path: Path | str, *, file_type: str = "", **facts: Any) -> DataFile:
+        """The DataFile this path is, through ``File.for_path``.
+
+        Resolves nothing itself: it asks File, and refuses by name a file whose
+        format has no record semantics.
+
+        Raises:
+            ConfigError: When the file resolves to a File that is not a DataFile.
+        """
+        resolved = File.for_path(path, file_type=file_type, **facts)
+        if not isinstance(resolved, DataFile):
+            raise ConfigError(DataFile.refusal_for(resolved, file_type))
+        return resolved
+
+    @staticmethod
+    def refusal_for(file: File, declared_type: str = "") -> str:
+        """Why ``file`` is not a data file, stated the one way it is stated.
 
         Args:
-            path: The file.
-            encoding: How to decode it. The loader's existing default.
-            file_manifest_id: The governed file this is, or None for a file
-                nothing governs.
-            file_mutation_id: The governed state this object was built from --
-                the mutation the caller selected, never one worked out here.
-            classification: What the governed file was classified as, at that
-                state.
-            base_path: Where the governed file's lifecycle is rooted, at that
-                state.
-            inbox: The directory containing the ORIGINAL file as inventoried
-                (backlog 624). Where its kickouts go: <inbox>/kickouts.
-            original_path: Where the ORIGINAL file physically is now -- what a
-                failure moves to kickouts, which may not be this file (a
-                sanitized copy's original is the delivered file).
-            original_mutation_id: The original's current governed state; None
-                for a file nothing governs.
-            record_type: What the selected state's mutation records (backlog
-                630) -- a fact of THAT state, so a rebuilt file states its own.
-            conversion: The conversion that produced the selected state, where
-                one did; a fact of that state.
-            data_profile_key: The governed file's profile group, as its
-                classification named it -- the manifest's, so it carries over.
-            settings: Format-specific settings a subtype declares -- delimiter,
-                sheet, field widths. Held rather than interpreted here.
+            file: The File that is not a DataFile.
+            declared_type: The format token a caller declared for it, if any.
         """
-        self.path = Path(path)
-        self.encoding = encoding
-        self.file_manifest_id = file_manifest_id
-        self.file_mutation_id = file_mutation_id
-        self.classification = (
-            dict(classification) if classification is not None else None
-        )
-        self.base_path = base_path
-        self.inbox = inbox
-        self.original_path = original_path
-        self.original_mutation_id = original_mutation_id
-        self.record_type = record_type
-        self.conversion = dict(conversion) if conversion is not None else None
-        self.data_profile_key = data_profile_key
-        self.settings = settings
-
-    def governed_facts(self) -> dict[str, Any]:
-        """This file's governed facts, as ``data_file_for`` takes them.
-
-        For building the DataFile an operation leaves behind: the same governed
-        file at a new path and state, so a caller passes these and states only
-        the new ``file_mutation_id``. One list, so a new fact is carried by
-        every rebuild rather than by the ones somebody remembered.
-        """
-        return {
-            "file_manifest_id": self.file_manifest_id,
-            "file_mutation_id": self.file_mutation_id,
-            "classification": self.classification,
-            "base_path": self.base_path,
-            "inbox": self.inbox,
-            "original_path": self.original_path,
-            "original_mutation_id": self.original_mutation_id,
-            "data_profile_key": self.data_profile_key,
-        }
-
-    def template_context(self) -> dict[str, Any]:
-        """The fields a configured template or source field may name, from this
-        file's own facts (backlog 630).
-
-        ``<file_name>`` and ``<base_name>`` are the WORKING names -- this
-        path's last segment, and that without its last extension, by the rule
-        the selectors applied (not ``Path.stem``, which keeps a leading-dot
-        name whole). ``<base_path>`` and ``<classification.*>`` are the
-        governed classification at this state.
-        """
-        path = str(self.path)
-        file_name = re.sub(r"^.*/", "", path)
-        return {
-            "file_manifest_id": self.file_manifest_id,
-            "file_mutation_id": self.file_mutation_id,
-            "path": path,
-            "file_name": file_name,
-            "base_name": re.sub(r"\.[^.]*$", "", file_name),
-            "base_path": self.base_path,
-            "classification": self.classification,
-            "record_type": self.record_type,
-            "conversion": self.conversion,
-        }
+        known = sorted(DataFile.formats())
+        if file.file_type:
+            return (f"'{file.path.name}' is a {file.file_type} file, which holds no "
+                    f"records. Known data formats: {known}.")
+        if declared_type:
+            return f"Unsupported file_type '{declared_type.strip().upper()}'. Known formats: {known}."
+        return (f"Cannot tell what kind of file '{file.path.name}' is: no file_type "
+                f"was declared and '{file.path.suffix}' names no known format. "
+                f"Known formats: {known}.")
 
     @property
     @abstractmethod
@@ -323,43 +243,6 @@ class DataFile(ABC):
             return []
         return self.read()[:limit]
 
-    def text(self, max_bytes: int) -> dict[str, Any]:
-        """This file's text, for LOOKING AT, bounded and display-safe.
-
-        Not format-dependent, so every DataFile answers it -- an UntypedFile
-        too: a file no format claims still has text to show. Display safety is
-        rey_lib's one policy (``blocked_display_reason``); a refused file
-        carries no content and says why.
-
-        Args:
-            max_bytes: How much of the file at most.
-
-        Returns:
-            ``name``, ``size_bytes``, ``truncated``, ``content`` and
-            ``blocked_reason`` (empty when the text may be shown).
-        """
-        refused = blocked_display_reason(self.path)
-        if not refused:
-            preview = bounded_text_preview(self.path, max_bytes, encoding=self.encoding)
-            refused = blocked_display_reason(
-                self.path, preview["content"].encode(self.encoding, "ignore"),
-            )
-            if not refused:
-                return {
-                    "name": preview["name"],
-                    "size_bytes": preview["size_bytes"],
-                    "truncated": preview["truncated"],
-                    "content": preview["content"],
-                    "blocked_reason": "",
-                }
-        return {
-            "name": self.path.name,
-            "size_bytes": self.path.stat().st_size,
-            "truncated": False,
-            "content": "",
-            "blocked_reason": refused,
-        }
-
     def write(self, rows: list[dict[str, Any]]) -> int:
         """Write these records to this file, and say how many.
 
@@ -400,7 +283,3 @@ class DataFile(ABC):
             f"'{self.file_type}' has no writer, so it can be a load's source "
             f"and not its destination."
         )
-
-    def __repr__(self) -> str:
-        """Name the format and the file, for a failure that has to be read."""
-        return f"{type(self).__name__}({self.path.name!r})"

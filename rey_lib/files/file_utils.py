@@ -1032,48 +1032,14 @@ def run_artifact_path(
 #: it instead. What a file_type shares with JSONL is not enough to add it.
 KEYED_FILE_TYPES: frozenset[str] = frozenset({"JSONL", "NDJSON"})
 
-#: Filename suffix -> the file_type token that names the format.
-#:
-#: Here, beside ``get_reader``, rather than in a caller: the estate already has
-#: several file-type vocabularies that disagree, and a suffix map living apart
-#: from the readers it feeds would become another.
-#:
-#: TWO readers now consume it -- ``get_reader``, and the DataFile registry by
-#: way of ``data_file_for``. So the rule a test asserts over the whole map is
-#: that every token is one ``get_reader`` dispatches on OR one the registry
-#: registers. JSON is the case that made the difference visible: a document is
-#: not readable a record at a time, so ``get_reader`` has nothing to offer it,
-#: and only a DataFile can read it.
-#:
-#: Suffixes only, and only where the suffix genuinely names the format. A
-#: caller that knows better declares a file_type and is believed.
-_SUFFIX_FILE_TYPES: dict[str, str] = {
-    ".csv":   "CSV",
-    ".json":  "JSON",
-    ".jsonl": "JSONL",
-    ".ndjson": "NDJSON",
-    ".xls":   "XLS",
-    ".xlsx":  "XLSX",
-    ".xlsb":  "XLSB",
-    ".xlsm":  "XLSM",
-}
-
-
 def file_type_for_suffix(suffix: str) -> str:
-    """Return the file_type a suffix names, or "" when it names none.
+    """Compatibility delegate for Console imports (backlog 1131): ``File.type_for_suffix``.
 
-    Args:
-        suffix: A filename suffix, with or without its dot, any case.
-
-    Returns:
-        The token ``get_reader`` dispatches on, or an empty string. Empty is
-        an answer -- "this suffix says nothing" -- and callers refuse on it
-        rather than guessing a default.
+    Which format a suffix names is File's answer (#1133); this owns none of it.
     """
-    key = str(suffix or "").strip().lower()
-    if key and not key.startswith("."):
-        key = f".{key}"
-    return _SUFFIX_FILE_TYPES.get(key, "")
+    from rey_lib.files.file import File
+
+    return File.type_for_suffix(suffix)
 
 
 def get_reader(

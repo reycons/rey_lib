@@ -38,7 +38,8 @@ from typing import Any, Mapping, Optional
 from rey_lib.db.connection import shared_connection
 from rey_lib.db.database_objects import DatabaseTable
 from rey_lib.errors.error_utils import ConfigError
-from rey_lib.files.data_file import data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.load import load_operation
 from rey_lib.logs import AppLogger
 
@@ -320,12 +321,12 @@ class Target:
             )
         held = self.configuration()
         if self.selected_kind() == "file":
-            destination = data_file_for(str(held["out-file"]))
-            # A destination is WRITTEN, so it must name a format with a writer.
-            # data_file_for represents any physical file (an UntypedFile when
-            # no format claims it, backlog 624); a load target still refuses
-            # one here, before anything is built or read.
-            if not destination.file_type:
+            destination = File.for_path(str(held["out-file"]))
+            # A destination is WRITTEN, so it must be a data format with a
+            # writer. File.for_path represents any physical file (#1133); a
+            # load target refuses one with no record semantics here, before
+            # anything is built or read.
+            if not isinstance(destination, DataFile):
                 raise ConfigError(
                     f"Target (file): '{held['out-file']}' names no writable format."
                 )

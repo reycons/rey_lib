@@ -56,7 +56,8 @@ from rey_lib.logs import (
 )
 
 from rey_lib.errors.error_utils import AppError
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.files.governed_file import FileId
 from rey_lib.load.file_transform import FileTransform, file_transform
 from rey_lib.load.manifest_source import ManifestSource
@@ -200,9 +201,9 @@ def run_create_prepared_files(
         ).resolve(ctx)
         try:
             if apply:
-                preparer.apply(selected.data_file())
+                preparer.apply(selected.file())
             else:
-                preparer.plan(selected.data_file())
+                preparer.plan(selected.file())
         except (PreparationError, RedactionExhausted):
             pass
         results.append(preparer.result)
@@ -906,7 +907,7 @@ class PrepareTransform(FileTransform):
             self._ctx, bound_run_log(), self._config, self._record, apply=True)
         self._result = result
         return tuple(
-            data_file_for(
+            File.for_path(
                 Path(path),
                 **{**data_file.governed_facts(), "file_mutation_id": mutation},
             )

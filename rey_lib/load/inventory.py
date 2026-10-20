@@ -49,7 +49,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from rey_lib.errors.error_utils import AppError, DatabaseError
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.file import File
 from rey_lib.files.file_utils import visible_files
 from rey_lib.files.manifest import FileManifest
 from rey_lib.load.file_transform import FileTransform, file_transform
@@ -177,7 +177,7 @@ def _inventory_source(
         values={"source_name": config.name}, selected="inventory",
     ).resolve(ctx)
     for record in enumeration.accepted:
-        inventory.apply(data_file_for(Path(record["source_file"])))
+        inventory.apply(File.for_path(Path(record["source_file"])))
 
     counts = inventory.counts
     counts.rejected = len(enumeration.rejected)
@@ -222,7 +222,7 @@ class InventoryTransform(FileTransform):
         self._source_name = str(source_name or "").strip()
         self.counts = _InventoryCounts()
 
-    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: File) -> tuple[File, ...]:
         """Inventory the file; return it governed, or nothing when it is not.
 
         Raises:
@@ -255,7 +255,7 @@ class InventoryTransform(FileTransform):
             self.counts.inventory_recorded += 1
         else:
             self.counts.already_inventoried += 1
-        return (data_file_for(
+        return (File.for_path(
             data_file.path,
             encoding=data_file.encoding,
             file_manifest_id=outcome.file_manifest_id,
@@ -263,7 +263,7 @@ class InventoryTransform(FileTransform):
             original_path=path,
         ),)
 
-    def _failed(self, path: str, failure: Any, reason: str) -> tuple[DataFile, ...]:
+    def _failed(self, path: str, failure: Any, reason: str) -> tuple[File, ...]:
         """Handle one failure by what it means. Nothing is moved.
 
         Raises:

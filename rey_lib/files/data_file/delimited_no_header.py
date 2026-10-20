@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.files.data_file import data_file
+from rey_lib.files.file import file_format
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file.base import DataFile
 
@@ -48,7 +48,7 @@ __all__ = ["DelimitedNoHeaderFile"]
 
 
 
-@data_file("DELIMITED_NO_HEADER")
+@file_format("DELIMITED_NO_HEADER")
 class DelimitedNoHeaderFile(DataFile):
     """A delimited file whose fields are identified by position."""
 

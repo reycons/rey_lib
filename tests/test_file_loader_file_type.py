@@ -228,10 +228,10 @@ class TestSupportedFileTypes:
         were. What a load accepts and what the registry implements are now
         the same set, which is what the union was always meant to converge to.
         """
-        from rey_lib.files.data_file import registered_formats
+        from rey_lib.files.data_file import DataFile
         from rey_lib.files.file_loader import supported_file_types
 
-        assert set(supported_file_types()) == set(registered_formats())
+        assert set(supported_file_types()) == set(DataFile.formats())
 
     def test_it_is_sorted_and_free_of_duplicates(self) -> None:
         from rey_lib.files.file_loader import supported_file_types

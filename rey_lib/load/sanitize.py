@@ -44,7 +44,8 @@ from rey_lib.files import (
     sanitize_file,
 )
 from rey_lib.files.csv import CsvReadError, open_csv
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.files.file_routing import FileRoutingError
 from rey_lib.files.sanitization import FileSanitizationError
 from rey_lib.load.file_transform import FileTransform, file_transform
@@ -166,21 +167,13 @@ def run_file_sanitization(
     )
 
 
-def _selected_data_file(source: ManifestSource) -> DataFile:
-    """Open exactly the selected file's governed state as a DataFile.
+def _selected_data_file(source: ManifestSource) -> File:
+    """Open exactly the selected file's governed state, whatever its format (#1133).
 
-    Raises:
-        SanitizationError: If the file resolves to no registered DataFile type.
-            Sanitization has no rejection path, so this stops the step, as every
-            legacy per-row failure does.
+    Every physical file opens as a File, so a file sanitization cannot read
+    fails in sanitizing it -- kicked out, and the batch goes on.
     """
-    try:
-        return source.data_file()
-    except ConfigError as exc:
-        raise SanitizationError(
-            f"Selected mutation {source.file_mutation_id!r} names a file with no "
-            f"registered DataFile type, so it cannot be sanitized: {exc}"
-        ) from exc
+    return source.file()
 
 
 @file_transform("sanitize", fields=("process",))
@@ -368,14 +361,14 @@ class SanitizeTransform(FileTransform):
         return result, tuple(produced)
 
 
-def _governed_output(source: DataFile, path: Path, file_mutation_id: int) -> DataFile:
+def _governed_output(source: File, path: Path, file_mutation_id: int) -> File:
     """A file this step produced, at the mutation that recorded it.
 
     It is the same governed file, so its governed facts -- identity,
     classification, base path and its original's -- are the source's; only the
     path and the state are new.
     """
-    return data_file_for(
+    return File.for_path(
         Path(path),
         **{**source.governed_facts(), "file_mutation_id": file_mutation_id},
     )

@@ -51,7 +51,8 @@ from rey_lib.files import (
     is_supported_workbook,
     LogRunRollbackError,
 )
-from rey_lib.files.data_file import DataFile, data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.logs import (
     bound_run_log,
     AppLogger,
@@ -441,11 +442,11 @@ def run_excel_conversion(
     return 1 if failed else 0
 
 
-def _candidate_data_file(candidate: ConversionCandidate) -> DataFile:
+def _candidate_data_file(candidate: ConversionCandidate) -> File:
     """Open the candidate's workbook at exactly the mutation the selector named.
 
-    Every physical file is a DataFile (an unregistered format is an
-    UntypedFile), so opening refuses only a candidate with no governed object,
+    Every physical file is a File (#1133), whatever its format, so opening
+    refuses only a candidate with no governed object,
     which selection always attaches -- a structural failure that stops the step.
 
     Raises:
@@ -457,7 +458,7 @@ def _candidate_data_file(candidate: ConversionCandidate) -> DataFile:
             f"Governed file {candidate.file_id} was selected with no governed "
             "object to open its workbook from."
         )
-    return selected.data_file()
+    return selected.file()
 
 
 def _application(ctx: Any) -> str:
@@ -550,7 +551,7 @@ class ConvertTransform(FileTransform):
         # The conversion produces CSV by definition, so the type is declared,
         # never derived from the output's name.
         outputs = tuple(
-            data_file_for(
+            DataFile.for_path(
                 Path(path),
                 file_type="CSV",
                 **{**workbook.governed_facts(), "file_mutation_id": mutation},

@@ -61,7 +61,7 @@ from rey_lib.errors.error_utils import (
     DatabaseError,
     build_safe_error_payload,
 )
-from rey_lib.files.data_file import registered_formats
+from rey_lib.files.data_file import DataFile
 from rey_lib.files.file_utils import (
     apply_file_movements,
     input_files,
@@ -1284,7 +1284,8 @@ def resolve_pattern(pickup_pattern: str, version: str, ctx: Any = None) -> str:
 def supported_file_types() -> list[str]:
     """Every format a load accepts today, sorted.
 
-    **The registry, and nothing beside it.** This used to be the registry
+    **The data formats of File's one registry (#1133), and nothing beside
+    it.** This used to be the registry
     UNION a deny-list of formats the pre-DataFile path still read. That path
     is gone: only a data object crosses the load boundary, so a format with no
     DataFile is not loadable and must not be offered as if it were.
@@ -1302,7 +1303,7 @@ def supported_file_types() -> list[str]:
     Returns:
         The accepted tokens, uppercase and sorted.
     """
-    return sorted(registered_formats())
+    return sorted(DataFile.formats())
 
 
 

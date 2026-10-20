@@ -233,14 +233,14 @@ class TestEncodingIsALibraryParameter:
         `jsonl_read_ignores_the_declared_encoding` on the backlog.
         """
         seen: list[str] = []
-        real = configured_load.data_file_for
+        real = configured_load.DataFile.for_path
 
         def _record(path, **kwargs):
             source = real(path, **kwargs)
             seen.append(source.encoding)
             return source
 
-        monkeypatch.setattr(configured_load, "data_file_for", _record)
+        monkeypatch.setattr(configured_load.DataFile, "for_path", _record)
 
         _load(tmp_path, monkeypatch, run_log, _Adapter(exists=True),
               encoding="latin-1")

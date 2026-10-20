@@ -31,7 +31,8 @@ from typing import Any, Mapping, Sequence
 
 from rey_lib.errors.error_utils import AppError, ConfigError, DatabaseError
 from rey_lib.files import FileRoutingError
-from rey_lib.files.data_file import DataFile, UntypedFile
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.file import File
 from rey_lib.files.governed_file import FileId, is_governed_file_id
 from rey_lib.load.file_transform import FileTransform, file_transform
 from rey_lib.load.manifest_source import ManifestSource
@@ -424,7 +425,7 @@ def _classify_selected(
             Transform(
                 values={"source": entry},
                 selected="classify",
-            ).resolve(ctx).apply(selected.data_file())
+            ).resolve(ctx).apply(selected.file())
         )
     except ClassificationRejected:
         return False
@@ -526,9 +527,9 @@ class ClassifyTransform(FileTransform):
     the step validates it. Everything about the file, its record type
     included, is read off the DataFile (backlog 630).
 
-    A file of no registered format (an ``UntypedFile``) is a rejection,
-    ``no_registered_data_file``; the criterion is the DataFile registry, never a
-    list of suffixes. A rejection is recorded, and -- unless the source retries
+    A file that is not a DataFile (#1133: a plain File, or a recognised
+    format with no records) is a rejection, ``no_registered_data_file``; the
+    criterion is the file's own class, never a list of suffixes. A rejection is recorded, and -- unless the source retries
     its rejects -- raised as ``ClassificationRejected``, so the common execution
     path kicks the original out.
     """
@@ -546,13 +547,13 @@ class ClassifyTransform(FileTransform):
         self._config = _classification_source_config(source, name)
         self._rejection: SourceClassificationOutcome | None = None
 
-    def _record_failure(self, data_file: DataFile, error: BaseException) -> None:
+    def _record_failure(self, data_file: File, error: BaseException) -> None:
         """After the kickout: record the terminal rejection, evidence then the
         lifecycle append, exactly as an inline rejection is recorded."""
         if self._rejection is not None:
             _record_rejection(self._ctx, bound_run_log(), self._rejection)
 
-    def _apply(self, data_file: DataFile) -> tuple[DataFile, ...]:
+    def _apply(self, data_file: File) -> tuple[File, ...]:
         """Classify the file; record, plan, move and return it.
 
         Returns:
@@ -570,7 +571,7 @@ class ClassifyTransform(FileTransform):
                 the record names.
         """
         candidate = _candidate(self._config, _selected_record(data_file))
-        if not isinstance(data_file, UntypedFile):
+        if isinstance(data_file, DataFile):
             outcome = _classify_candidate(candidate)
         else:
             outcome = SourceClassificationOutcome(
@@ -578,7 +579,7 @@ class ClassifyTransform(FileTransform):
                 status="rejected",
                 values={},
                 reason_code="no_registered_data_file",
-                reason=f"No registered DataFile type: {data_file.refusal}",
+                reason=f"No registered DataFile type: {DataFile.refusal_for(data_file)}",
             )
         classified = outcome.status == "classified"
         # A TERMINAL REJECTION IS RECORDED AFTER THE KICKOUT (rule 75): raised
@@ -684,7 +685,7 @@ class ClassifyTransform(FileTransform):
         return (recorded,)
 
 
-def _selected_record(data_file: DataFile) -> dict[str, Any]:
+def _selected_record(data_file: File) -> dict[str, Any]:
     """The selected state, in the shape the classification mechanics read.
 
     Built from the DataFile's own facts only (backlog 630): its identity, its
@@ -702,7 +703,7 @@ def _selected_record(data_file: DataFile) -> dict[str, Any]:
     }
 
 
-def _restated(data_file: DataFile, **identity: Any) -> DataFile:
+def _restated(data_file: File, **identity: Any) -> File:
     """The same file, as the same DataFile subtype, with part of its governed
     identity restated."""
     held = {
