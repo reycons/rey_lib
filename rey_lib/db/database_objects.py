@@ -378,6 +378,9 @@ class DatabasePrimaryKey:
     #: Its kind in the canonical vocabulary (backlogs 723, 1102): its own, not
     #: the provider's shared word for every constraint.
     KIND: ClassVar[str] = "primary_keys"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @staticmethod
@@ -456,6 +459,9 @@ class DatabaseForeignKey:
     #: Its kind in the canonical vocabulary (backlogs 723, 1102): its own, not
     #: the provider's shared word for every constraint.
     KIND: ClassVar[str] = "foreign_keys"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @staticmethod
@@ -530,6 +536,9 @@ class DatabaseIndex:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "indexes"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -623,6 +632,9 @@ class DatabaseConstraint:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "constraints"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @staticmethod
@@ -699,6 +711,9 @@ class DatabaseSequence:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "sequences"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -786,6 +801,9 @@ class DatabaseUserDefinedType:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "types"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -873,6 +891,9 @@ class DatabaseTrigger:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "triggers"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -945,6 +966,9 @@ class DatabaseTable:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "tables"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1572,6 +1596,9 @@ class DatabaseView:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "views"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1677,6 +1704,9 @@ class DatabaseProcedure:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "procedures"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1795,6 +1825,9 @@ class DatabaseFunction:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "functions"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
@@ -1913,6 +1946,9 @@ class DatabaseSchema:
 
     #: Its kind in the canonical vocabulary (backlog 723).
     KIND: ClassVar[str] = "schemas"
+    #: What kind of presentation this object requires (#1140): a semantic type;
+    #: which Console panel implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "dataobject"
     reference = property(_reference)
 
     @classmethod
