@@ -2733,6 +2733,10 @@ def _rendered_filters(
     Only the column name and a chosen operator are written. Every value is
     bound, so nothing a reader typed into a filter box reaches the statement as
     text.
+
+    A filter with a ``path`` (#1143) addresses the value nested at those keys
+    inside the column: the keys are bound as one text array, never written,
+    and the nested value is compared as its text.
     """
     if not filters:
         return "", []
@@ -2749,9 +2753,44 @@ def _rendered_filters(
                 f"Unknown filter operator '{operator}'. "
                 f"Known operators: {sorted(_FILTER_OPERATORS)}."
             )
-        clauses.append(template.format(column=quote_identifier(column)))
-        values.append(one.get("value"))
+        path = _filter_path(one)
+        if path:
+            # The path's placeholder precedes the value's in every template:
+            # each one writes its column before its value.
+            clauses.append(template.format(
+                column=f"({quote_identifier(column)} #>> %s::text[])"))
+            values.append(list(path))
+            values.append(_nested_value_text(one.get("value")))
+        else:
+            clauses.append(template.format(column=quote_identifier(column)))
+            values.append(one.get("value"))
     return "\nWHERE  " + "\n   AND ".join(clauses), values
+
+
+def _filter_path(one: dict[str, Any]) -> tuple[str, ...]:
+    """The keys a filter's ``path`` names, or none when it names none.
+
+    Raises:
+        DatabaseError: When the path is not a list of non-empty keys.
+    """
+    path = one.get("path")
+    if path is None:
+        return ()
+    if (not isinstance(path, (list, tuple)) or not path
+            or not all(isinstance(key, str) and key for key in path)):
+        raise DatabaseError("A filter's path must be a list of non-empty keys.")
+    return tuple(path)
+
+
+def _nested_value_text(value: Any) -> Any:
+    """A filter value as the text a nested value is compared with.
+
+    A string is compared as itself; any other value as its JSON text, which is
+    how a nested number or boolean reads as text. None stays None.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value)
 
 
 def _rendered_order(order_by: Optional[list[dict[str, Any]]]) -> str:

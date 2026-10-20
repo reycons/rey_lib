@@ -168,3 +168,48 @@ def test_bounds_are_refused_rather_than_clamped(
     with open_memory_connection() as conn:
         with pytest.raises(DatabaseError):
             execute_page(conn, _select(jsonl_file), offset=offset, limit=limit)
+
+
+@pytest.fixture()
+def nested_file(tmp_path: Path) -> Path:
+    """Records whose ``doc`` holds a structured document as text, as a jsonb column reads."""
+    path = tmp_path / "nested.jsonl"
+    documents = [
+        {"values": {"feed": "alpha"}, "n": 5},
+        {"values": {"feed": "beta"}, "n": 7},
+        {"values": {'odd "key': "alpha"}},
+    ]
+    path.write_text(
+        "".join(json.dumps({"id": index, "doc": json.dumps(doc)}) + "\n"
+                for index, doc in enumerate(documents, start=1)),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _ids(path: Path, filters: list[dict[str, Any]]) -> list[Any]:
+    with open_memory_connection() as conn:
+        page = execute_page(conn, _select(path), offset=0, limit=50, filters=filters)
+    return sorted(row["id"] if isinstance(row, dict) else row[0] for row in page.rows)
+
+
+def test_a_filter_addresses_a_value_nested_inside_a_column(nested_file: Path) -> None:
+    """#1143: a logical key path, rendered by the provider -- not a column name."""
+    assert _ids(nested_file, [{"column": "doc", "path": ["values", "feed"],
+                               "operator": "equals", "value": "alpha"}]) == [1]
+
+
+def test_any_key_is_one_member_name_and_a_number_compares_as_its_text(
+    nested_file: Path,
+) -> None:
+    assert _ids(nested_file, [{"column": "doc", "path": ["values", 'odd "key'],
+                               "operator": "equals", "value": "alpha"}]) == [3]
+    assert _ids(nested_file, [{"column": "doc", "path": ["n"],
+                               "operator": "equals", "value": 7}]) == [2]
+
+
+@pytest.mark.parametrize("path", [[], "values.feed", ["values", ""], ["values", 1]])
+def test_a_path_that_is_not_a_list_of_keys_is_refused(nested_file: Path, path: Any) -> None:
+    with pytest.raises(DatabaseError, match="path must be a list of non-empty keys"):
+        _ids(nested_file, [{"column": "doc", "path": path,
+                            "operator": "equals", "value": "alpha"}])

@@ -158,7 +158,9 @@ class DatabaseQuery:
     current_page: int = 0
     #: The ordering a page applies, as column/direction mappings.
     order_by: list[dict[str, Any]] = field(default_factory=list)
-    #: The filters a page applies, as column/operator/value mappings.
+    #: The filters a page applies, as column/operator/value mappings. A filter
+    #: may also carry ``path``, a list of keys naming a value nested inside the
+    #: column (#1143) -- logical only; the provider renders it.
     filters: list[dict[str, Any]] = field(default_factory=list)
     # One act at a time: an update, or an execution and the answer it gives.
     _acting: threading.RLock = field(

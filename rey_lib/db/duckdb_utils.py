@@ -28,6 +28,7 @@ fetch_sql_rows(conn, sql_text)      Execute SQL and return its columns and rows.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -1420,7 +1421,12 @@ def _page_wrapped(sql_text: str) -> str:
 def _page_filters(
     filters: Optional[list[dict[str, Any]]],
 ) -> tuple[str, list[Any]]:
-    """Return the WHERE clause and the values it binds."""
+    """Return the WHERE clause and the values it binds.
+
+    A filter with a ``path`` (#1143) addresses the value nested at those keys
+    inside the column: the keys are bound as one JSON path, never written, and
+    the nested value is compared as its text.
+    """
     if not filters:
         return "", []
     clauses: list[str] = []
@@ -1436,9 +1442,51 @@ def _page_filters(
                 f"Unknown filter operator '{operator}'. "
                 f"Known operators: {sorted(_PAGE_FILTER_OPERATORS)}."
             )
-        clauses.append(template.format(column=_page_identifier(column)))
-        values.append(one.get("value"))
+        path = _page_filter_path(one)
+        if path:
+            # The path's placeholder precedes the value's in every template:
+            # each one writes its column before its value.
+            clauses.append(template.format(
+                column=f"json_extract_string({_page_identifier(column)}, ?)"))
+            values.append(_page_json_path(path))
+            values.append(_page_nested_value_text(one.get("value")))
+        else:
+            clauses.append(template.format(column=_page_identifier(column)))
+            values.append(one.get("value"))
     return "\nWHERE  " + "\n   AND ".join(clauses), values
+
+
+def _page_filter_path(one: dict[str, Any]) -> tuple[str, ...]:
+    """The keys a filter's ``path`` names, or none when it names none.
+
+    Raises:
+        DatabaseError: When the path is not a list of non-empty keys.
+    """
+    path = one.get("path")
+    if path is None:
+        return ()
+    if (not isinstance(path, (list, tuple)) or not path
+            or not all(isinstance(key, str) and key for key in path)):
+        raise DatabaseError("A filter's path must be a list of non-empty keys.")
+    return tuple(path)
+
+
+def _page_json_path(path: tuple[str, ...]) -> str:
+    """The JSON path of these keys, each quoted so any key is one member name."""
+    return "$" + "".join(
+        '."' + key.replace("\\", "\\\\").replace('"', '\\"') + '"' for key in path
+    )
+
+
+def _page_nested_value_text(value: Any) -> Any:
+    """A filter value as the text a nested value is compared with.
+
+    A string is compared as itself; any other value as its JSON text, which is
+    how a nested number or boolean reads as text. None stays None.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value)
 
 
 def _page_order(order_by: Optional[list[dict[str, Any]]]) -> str:

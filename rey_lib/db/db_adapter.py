@@ -543,7 +543,10 @@ class DBAdapter:
             order_by: The ordering to apply, as column/direction mappings, or
                 None to leave the statement's own ordering alone.
             filters: The filters to apply, as column/operator/value mappings,
-                or None for an unfiltered read.
+                or None for an unfiltered read. A filter may carry ``path``, a
+                list of keys naming a value nested inside its column (#1143);
+                the provider renders that logical path in its own syntax, with
+                the path bound, and compares the nested value as its text.
 
         Returns:
             One :class:`PageResult`.
