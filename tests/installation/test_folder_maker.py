@@ -68,7 +68,8 @@ class TestScaffoldConfigRoot:
 
         assert (cr / "ftp_sync" / "data_feeds").is_dir()
         assert (cr / "rey_loader" / "data_sources").is_dir()
-        assert (cr / "rey_loader" / "sql_configs").is_dir()
+        # No hook SQL folder: the Loader hook mechanism is gone (backlog 243).
+        assert not (cr / "rey_loader" / "sql_configs").exists()
         assert (cr / "rey_loader" / "diagnostics").is_dir()
         assert (cr / "rey_analyzer" / "analysis_configs").is_dir()
         assert (cr / "rey_analyzer" / "llm_configs").is_dir()

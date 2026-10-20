@@ -137,7 +137,6 @@ def transform_files(
     ctx: Any, run_log,
     data_source: Any,
     transform_cfg: Any,
-    sql_dir: Optional[Path] = None,
 ) -> int:
     """
     Find and transform all pending inbox files for one data source.
@@ -154,16 +153,8 @@ def transform_files(
     Runtime values such as batch_id should be modeled as columns with
     inline ``transform.type: context`` or ``transform.type: constant``.
 
-    File-level hook phases
-    ----------------------
-    Before processing each file:
-      ``ctx.current_file_path`` and ``ctx.current_file_name`` are stamped,
-      then any ``transform_hooks`` binding whose ``hook`` field is
-      ``"hooks.pre_file_transform"`` fires. After the file is processed
-      (whether the transform succeeded, was rejected for header mismatch,
-      or otherwise failed), bindings at ``"hooks.post_file_transform"``
-      fire. This lets per-file logging (e.g. a BatchStep row per file)
-      reference the actual filename via ``source: ctx.current_file_name``.
+    Before processing each file, ``ctx.current_file_path`` and
+    ``ctx.current_file_name`` are stamped.
 
     Parameters
     ----------
@@ -171,15 +162,9 @@ def transform_files(
         Application context — ctx.batch_id must be set before calling.
     data_source : Any
         Namespace for one data_sources entry. Provides paths and
-        max_files_per_run. May expose ``transform_hooks`` — a list of
-        binding entries used for both data-source-level and file-level
-        phases (filtered by each binding's ``hook`` field).
+        max_files_per_run.
     transform_cfg : Any
         One transform Namespace or a list of candidate transform Namespaces.
-    sql_dir : Optional[Path]
-        Base directory for ``type: sql_file`` hook configs. Passed through
-        to file-level hook dispatch. May be ``None`` when no sql_file
-        hooks are declared.
 
     Returns
     -------
@@ -485,33 +470,17 @@ def load_files_to_callback(
     return total_rows
 
 
-def run_transform(ctx: Any, run_log, sql_dir: Optional[Path] = None) -> int:
+def run_transform(ctx: Any, run_log) -> int:
     """
     Run the transform stage for every data source declared in ctx.
 
-    Iterates ``ctx.data_sources``, calling :func:`transform_files` for each
-    one. Hooks declared on the data source via ``transform_hooks:`` are
-    dispatched at two phases:
-
-    1. ``hooks.pre_transform``  — fires before transform_files. Output
-       params that declare ``row_column`` are auto-injected as extra
-       columns into every transformed row for this data source.
-    2. ``transform_files``
-    3. ``hooks.post_transform`` — fires after transform_files.
-
-    The library does not interpret phase names — it filters bindings by
-    the ``hook`` field declared on each entry. Add or rename phases by
-    editing the YAML; the dispatcher is shape-agnostic.
+    Iterates ``ctx.data_sources``, calling :func:`transform_files` for each one.
 
     Parameters
     ----------
     ctx : Any
         Application context. Must have a ``data_sources`` iterable where
-        each entry exposes a ``transforms`` attribute. Each data source
-        may declare a ``transform_hooks`` list of binding entries
-        (``{name, sql_config, hook}``); when absent no hooks fire.
-    sql_dir : Optional[Path]
-        Base directory for ``type: sql_file`` hook sql_configs.
+        each entry exposes a ``transforms`` attribute.
 
     Returns
     -------
@@ -531,7 +500,7 @@ def run_transform(ctx: Any, run_log, sql_dir: Optional[Path] = None) -> int:
             )
             continue
         object.__setattr__(ctx, "data_sources", data_source)
-        count = transform_files(ctx, run_log, data_source, data_source.transforms, sql_dir=sql_dir)
+        count = transform_files(ctx, run_log, data_source, data_source.transforms)
         total += count
         if count:
             _logger.info("%s: %d file(s) transformed", data_source.name, count)
@@ -540,12 +509,12 @@ def run_transform(ctx: Any, run_log, sql_dir: Optional[Path] = None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Public per-file APIs (single file, no discovery, no hooks)
+# Public per-file APIs (single file, no discovery)
 #
 # These operate on exactly one already-resolved file using already-loaded
-# config. They never scan the inbox, glob, or call the batch runners, and they
-# execute no transform_hooks / load_hooks. Used by the rey_loader single-file
-# workflow (etl_operation / validate) against ``ctx.current_file``.
+# config. They never scan the inbox, glob, or call the batch runners. Used by
+# the rey_loader single-file workflow (etl_operation / validate) against
+# ``ctx.current_file``.
 # ---------------------------------------------------------------------------
 
 def validate_one(file_path: Path, transform_cfg: Any) -> bool:
@@ -554,7 +523,7 @@ def validate_one(file_path: Path, transform_cfg: Any) -> bool:
 
 
 def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
-    """Transform exactly one file. No discovery, no hooks.
+    """Transform exactly one file. No discovery.
 
     Matches ``file_path`` against the data source's candidate transforms,
     rejects it (per movement config) when no header matches, and otherwise runs
@@ -580,34 +549,6 @@ def transform_one(ctx: Any, run_log, data_source: Any, file_path: Path) -> bool:
     object.__setattr__(ctx, "transforms", matched_cfg)
     return _transform_one_file(ctx, run_log, data_source, matched_cfg, file_path,
                                header_line=header_line)
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Private — sql_config hook execution
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -837,8 +778,8 @@ def _transform_one_file(
             reason="transformed",
         )
 
-        # Write row count to ctx so post_file_transform hooks (e.g. end_batch_step)
-        # can stamp RecordCount on the BatchStep row.
+        # The transformed row count, on ctx. Its only known readers were the removed
+        # Loader hooks (backlog 243); no indexed code reads it now.
         object.__setattr__(ctx, "step_record_count", len(rows))
         log_row_count(run_log,
             count_name="transformed_rows",

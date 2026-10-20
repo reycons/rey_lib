@@ -102,7 +102,7 @@ _APP_DEFS: dict[str, dict] = {
         "extra_files": [],
     },
     "rey_loader": {
-        "subfolders": ["data_sources", "sql_configs", "diagnostics"],
+        "subfolders": ["data_sources", "diagnostics"],
         "extra_files": [],
     },
     "rey_analyzer": {
