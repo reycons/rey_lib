@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 from rey_lib.errors.error_utils import ConfigError
+from rey_lib.files.file_utils import blocked_display_reason, bounded_text_preview
 
 __all__ = ["DataFile", "RecordShape"]
 
@@ -321,6 +322,43 @@ class DataFile(ABC):
         if limit <= 0:
             return []
         return self.read()[:limit]
+
+    def text(self, max_bytes: int) -> dict[str, Any]:
+        """This file's text, for LOOKING AT, bounded and display-safe.
+
+        Not format-dependent, so every DataFile answers it -- an UntypedFile
+        too: a file no format claims still has text to show. Display safety is
+        rey_lib's one policy (``blocked_display_reason``); a refused file
+        carries no content and says why.
+
+        Args:
+            max_bytes: How much of the file at most.
+
+        Returns:
+            ``name``, ``size_bytes``, ``truncated``, ``content`` and
+            ``blocked_reason`` (empty when the text may be shown).
+        """
+        refused = blocked_display_reason(self.path)
+        if not refused:
+            preview = bounded_text_preview(self.path, max_bytes, encoding=self.encoding)
+            refused = blocked_display_reason(
+                self.path, preview["content"].encode(self.encoding, "ignore"),
+            )
+            if not refused:
+                return {
+                    "name": preview["name"],
+                    "size_bytes": preview["size_bytes"],
+                    "truncated": preview["truncated"],
+                    "content": preview["content"],
+                    "blocked_reason": "",
+                }
+        return {
+            "name": self.path.name,
+            "size_bytes": self.path.stat().st_size,
+            "truncated": False,
+            "content": "",
+            "blocked_reason": refused,
+        }
 
     def write(self, rows: list[dict[str, Any]]) -> int:
         """Write these records to this file, and say how many.

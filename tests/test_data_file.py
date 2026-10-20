@@ -554,3 +554,45 @@ class TestDelimitedNoHeaderFile:
         assert built.source_structure() == []
         assert built.read() == []
         built.validate()                       # nothing to disagree with
+
+
+class TestText:
+    """What any file shows when it is looked at: its text, bounded and display-safe."""
+
+    def test_a_file_no_format_claims_still_shows_its_text(self, tmp_path: Path) -> None:
+        source = tmp_path / "module.py"
+        source.write_text("x = 1\n", encoding="utf-8")
+
+        shown = data_file_for(source).text(1_000)
+
+        assert shown == {
+            "name": "module.py", "size_bytes": 6, "truncated": False,
+            "content": "x = 1\n", "blocked_reason": "",
+        }
+
+    def test_the_text_is_bounded_and_says_so(self, tmp_path: Path) -> None:
+        source = _csv(tmp_path, "a,b\n1,2\n")
+
+        shown = data_file_for(source).text(4)
+
+        assert shown["content"] == "a,b\n"
+        assert shown["truncated"] is True
+        assert shown["size_bytes"] == 8
+
+    def test_a_secret_file_shows_no_content(self, tmp_path: Path) -> None:
+        source = tmp_path / "server.key"
+        source.write_text("secret", encoding="utf-8")
+
+        shown = data_file_for(source).text(1_000)
+
+        assert shown["content"] == ""
+        assert shown["blocked_reason"] == "Sensitive file preview is blocked."
+
+    def test_a_binary_file_shows_no_content(self, tmp_path: Path) -> None:
+        source = tmp_path / "blob.bin"
+        source.write_bytes(b"ab\x00cd")
+
+        shown = data_file_for(source).text(1_000)
+
+        assert shown["content"] == ""
+        assert shown["blocked_reason"] == "Binary file preview is not supported."
