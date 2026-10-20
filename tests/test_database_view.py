@@ -221,3 +221,40 @@ def test_a_postgres_view_names_each_target_by_what_it_is_and_never_itself() -> N
         {"object_type": "tables", "schema": "code", "name": "concept"},
         {"object_type": "views", "schema": "code", "name": "concept_vw"},
     ]
+
+
+def test_a_view_reads_itself_by_identity_end_to_end() -> None:
+    """DatabaseView.read: built as a schema read builds it, ddl and initial select (1102)."""
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE TABLE trade (symbol VARCHAR)")
+    conn.execute("CREATE VIEW trade_vw AS SELECT symbol FROM trade")
+    identity = DatabaseObjectIdentity(connection="c", catalog="", schema="main", name="trade_vw")
+
+    view = DatabaseView.read(conn, identity, DBAdapter())
+
+    assert view.identity == identity
+    assert [column.name for column in view.columns] == ["symbol"]
+    assert view.ddl == "CREATE VIEW trade_vw AS SELECT symbol FROM trade;"
+    assert view.initial_select == "SELECT\n    symbol\nFROM main.trade_vw;"
+
+
+def test_a_view_the_schema_does_not_hold_is_refused_by_name() -> None:
+    conn = duckdb.connect(":memory:")
+    identity = DatabaseObjectIdentity(connection="c", catalog="", schema="main", name="absent_vw")
+
+    with pytest.raises(DatabaseError, match="view not found"):
+        DatabaseView.read(conn, identity, DBAdapter())
+
+
+def test_a_schema_read_carries_its_own_create_schema() -> None:
+    """DatabaseSchema carries its DDL as every other canonical object does (backlog 1102)."""
+    schema = DatabaseSchema.read(object(), "c", "rey", "control", _SchemaAdapter("postgres", "x"))
+
+    assert schema.ddl == 'CREATE SCHEMA IF NOT EXISTS "control";'
+    assert schema.to_dict()["ddl"] == schema.ddl
+
+
+def test_a_schema_whose_provider_states_no_create_schema_is_still_read() -> None:
+    schema = DatabaseSchema.read(object(), "c", "rey", "control", _SchemaAdapter("oracle", "x"))
+
+    assert (schema.schema, schema.ddl) == ("control", "")

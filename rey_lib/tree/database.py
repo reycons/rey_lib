@@ -933,7 +933,7 @@ class DatabaseDataObject:
         """
         return {
             field: entry[field]
-            for field in ("connection", "schema_name", "name", "statement", "ddl")
+            for field in ("connection", "schema_name", "name", "signature", "statement", "ddl")
             if field in entry
         }
 
@@ -1185,14 +1185,15 @@ def _addresses(routine: DatabaseProcedure | DatabaseFunction) -> dict[str, str]:
     relation has none. The tree reads ordinary fields, so the ordinary ones are
     lifted alongside -- the same three a relation carries, under the same names.
 
-    The signature stays out: it names the routine among its overloads, and the
-    provider already used it to render the call.
+    The signature is lifted too (backlog 1102): it is identity, naming the
+    routine among its overloads, so a declaration can address exactly this one.
     """
     identity = routine.identity
     addressed = {
         "connection": identity.connection,
         "schema_name": identity.schema,
         "name": identity.name,
+        "signature": identity.signature,
     }
     # The statement that opens a routine is the call its provider rendered, as
     # a relation's is the select written when it was read. Carried, never

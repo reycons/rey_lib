@@ -189,3 +189,28 @@ class TestReadDdlIsOneContract:
     def test_a_child_with_no_table_cannot_address_itself(self) -> None:
         with pytest.raises(DatabaseError, match="carries no table"):
             DatabaseIndex(name="ix").read_ddl(object(), _Adapter([]))
+
+
+def test_keys_and_other_constraints_carry_their_own_canonical_kinds() -> None:
+    """One provider word, three canonical kinds (backlog 1102)."""
+    listing = DatabaseObjectListing.read(object(), None, _Adapter(_INVENTORY))
+
+    kinds = {type(obj).__name__: obj.reference.kind for obj in listing.objects}
+
+    assert kinds["DatabasePrimaryKey"] == "primary_keys"
+    assert kinds["DatabaseForeignKey"] == "foreign_keys"
+    assert kinds["DatabaseConstraint"] == "constraints"
+
+
+def test_every_kind_names_exactly_one_listed_type() -> None:
+    """The kind is the type's own, and no two types share one (backlog 1102)."""
+    listed = database_objects._LISTED
+
+    assert len({owner.KIND for owner in listed}) == len(listed)
+    for owner in listed:
+        assert DatabaseObjectListing.object_type(owner.KIND) is owner
+
+
+def test_a_kind_no_type_states_is_refused() -> None:
+    with pytest.raises(DatabaseError, match="exactly one"):
+        DatabaseObjectListing.object_type("query")

@@ -90,3 +90,31 @@ def test_the_ddl_export_asks_the_function_by_identity(
     assert written.read_text(encoding="utf-8") == (
         "CREATE FUNCTION control.run_total(integer) ...;\n"
     )
+
+
+def test_a_function_reads_itself_by_its_routine_identity() -> None:
+    """DatabaseFunction.read: the functions listing, matched on name and signature (1102)."""
+    from typing import Any as _Any
+
+    from rey_lib.db.database_objects import DatabaseFunction, DatabaseRoutineIdentity
+
+    class _Listing:
+        def provider(self, _conn: _Any) -> str:
+            return "postgres"
+
+        def routine_native_definition(self, *_a: _Any) -> str:
+            return "CREATE FUNCTION control.f(integer) ...;"
+
+        def list_functions(self, _conn: _Any, _schema: str) -> list[dict]:
+            return [{"name": "f", "signature": "integer", "invocation": "",
+                     "parameters": [], "returns_rows": False}]
+
+    identity = DatabaseRoutineIdentity(
+        connection="c", catalog="", schema="control", name="f", signature="integer",
+    )
+
+    function = DatabaseFunction.read(object(), identity, _Listing())
+
+    assert function.identity == identity
+    # An empty invocation is the provider's ordinary answer, kept empty.
+    assert function.invocation == ""

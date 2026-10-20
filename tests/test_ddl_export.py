@@ -98,3 +98,28 @@ def test_the_export_reaches_no_adapter_or_provider() -> None:
                     "postgres_utils", "mysql_utils", "sqlserver_utils", "duckdb_utils",
                     "_CONSTRAINT_OWNER", "CREATE "):
         assert reached not in code, reached
+
+
+def test_keys_are_exported_under_their_own_kinds_in_build_order() -> None:
+    """Primary and foreign keys are their own kinds -- their own folders and order (1102)."""
+    from rey_lib.db.database_objects import (
+        DatabaseConstraint,
+        DatabaseForeignKey,
+        DatabaseObjectIdentity,
+        DatabaseObjectListing,
+        DatabasePrimaryKey,
+    )
+
+    table = DatabaseObjectIdentity(connection="", catalog="", schema="control", name="run")
+    listing = DatabaseObjectListing(provider="postgres", database="rey", objects=(
+        DatabaseForeignKey(name="run_fk", table=table),
+        DatabaseConstraint(name="run_ck", kind="check", table=table),
+        DatabasePrimaryKey(name="run_pk", table=table),
+    ))
+
+    kinds = [entry["object_type"] for entry in ddl_export._entries(listing)]
+
+    assert sorted(kinds) == ["constraints", "foreign_keys", "primary_keys"]
+    order = ddl_export._BUILD_ORDER
+    assert order.index("tables") < order.index("primary_keys") < order.index("constraints")
+    assert order.index("constraints") < order.index("foreign_keys") < order.index("indexes")

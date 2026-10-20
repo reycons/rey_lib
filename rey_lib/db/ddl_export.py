@@ -43,7 +43,9 @@ _BUILD_ORDER: list[str] = [
     "types",
     "sequences",
     "tables",
+    "primary_keys",
     "constraints",
+    "foreign_keys",
     "indexes",
     "views",
     "functions",
@@ -86,7 +88,8 @@ class DatabaseDdlExport:
         # (backlog 695).
         suppressed = set()
         if DatabaseTable.create_includes_constraints(conn, adapter):
-            suppressed.add("constraints")
+            # Every constraint kind (backlog 1102): keys and the rest alike.
+            suppressed.update(("primary_keys", "constraints", "foreign_keys"))
         if DatabaseTable.create_includes_indexes(conn, adapter):
             suppressed.add("indexes")
         entries = [entry for entry in entries if entry["object_type"] not in suppressed]

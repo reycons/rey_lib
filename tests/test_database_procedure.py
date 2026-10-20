@@ -152,3 +152,35 @@ def test_the_ddl_export_asks_the_procedure_by_identity(
     assert written.read_text(encoding="utf-8") == (
         "CREATE PROCEDURE control.load_runs(integer) ...;\n"
     )
+
+
+class _Overloads(_Connector):
+    """Two overloads of one procedure, as a provider lists them."""
+
+    def list_procedures(self, _conn: Any, _schema: str) -> list[dict]:
+        return [
+            {"name": "load_runs", "signature": "integer",
+             "invocation": "CALL control.load_runs(:run_id)", "parameters": []},
+            {"name": "load_runs", "signature": "text",
+             "invocation": "CALL control.load_runs(:label)", "parameters": []},
+        ]
+
+
+def test_an_overload_is_read_as_itself_by_its_signature() -> None:
+    """DatabaseProcedure.read addresses the routine identity, signature included (1102)."""
+    procedure = DatabaseProcedure.read(
+        object(), _IDENTITY, _Overloads("postgres", "CREATE PROCEDURE ...;"),
+    )
+
+    assert procedure.identity == _IDENTITY
+    assert procedure.invocation == "CALL control.load_runs(:run_id)"
+    assert procedure.ddl == "CREATE PROCEDURE ...;"
+
+
+def test_an_identity_no_overload_has_is_refused() -> None:
+    absent = DatabaseRoutineIdentity(
+        connection="c", catalog="rey", schema="control", name="load_runs", signature="date",
+    )
+
+    with pytest.raises(DatabaseError, match=r"procedure not found: control.load_runs\(date\)"):
+        DatabaseProcedure.read(object(), absent, _Overloads("postgres", "x"))

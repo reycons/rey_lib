@@ -638,3 +638,35 @@ class TestInsertingRowsIsTheTablesBehaviour:
 
         assert inserted == 2
         assert conn.execute("SELECT a, b FROM s.t ORDER BY a").fetchall() == [(1, "x"), (2, "y")]
+
+
+class TestChildrenReadThemselvesFromTheirTable:
+    """A key or index is read by its table's identity and its own name (backlog 1102)."""
+
+    def test_a_primary_key_is_built_by_its_tables_read_and_carries_the_table(self) -> None:
+        from rey_lib.db.database_objects import DatabasePrimaryKey
+
+        key = DatabasePrimaryKey.read(
+            _Conn(), _identity(), "trade_pk", _Connector("postgres", keyed=True),
+        )
+
+        assert (key.name, key.columns, key.table) == ("trade_pk", ("trade_id",), _identity())
+
+    def test_an_index_is_built_by_its_tables_read_and_carries_the_table(self) -> None:
+        from rey_lib.db.database_objects import DatabaseIndex
+
+        index = DatabaseIndex.read(
+            _Conn(), _identity(), "trade_ix", _Connector("postgres", keyed=True),
+        )
+
+        assert (index.name, index.columns, index.table) == ("trade_ix", ("symbol",), _identity())
+
+    def test_a_child_the_table_does_not_hold_is_refused_by_name(self) -> None:
+        from rey_lib.db.database_objects import DatabaseForeignKey
+
+        with pytest.raises(
+            DatabaseError, match="DatabaseForeignKey not found: staging.trade.trade_fk",
+        ):
+            DatabaseForeignKey.read(
+                _Conn(), _identity(), "trade_fk", _Connector("postgres", keyed=True),
+            )

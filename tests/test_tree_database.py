@@ -688,3 +688,18 @@ def test_the_feeder_runs_no_code_index_sql_and_holds_no_dbadapter() -> None:
     assert "DBAdapter" not in source
     assert "code.db_" not in source
     assert "IndexedDatabaseObject" in source
+
+
+def test_a_routine_record_carries_its_signature_as_identity() -> None:
+    """The signature names the routine among its overloads, so it travels (backlog 1102)."""
+    from rey_lib.db.database_objects import DatabaseProcedure, DatabaseRoutineIdentity
+    from rey_lib.tree.database import _addresses
+
+    routine = DatabaseProcedure(identity=DatabaseRoutineIdentity(
+        connection="rey_apps", catalog="", schema="control", name="load", signature="integer",
+    ))
+
+    assert _addresses(routine) == {
+        "connection": "rey_apps", "schema_name": "control", "name": "load",
+        "signature": "integer",
+    }

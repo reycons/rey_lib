@@ -270,3 +270,53 @@ def test_a_schema_carries_all_four_collections() -> None:
     assert serialized["views"] == []
     assert serialized["functions"] == []
     assert serialized["procedures"] == [DatabaseProcedure(identity=ROUTINE).to_dict()]
+
+
+class TestObjectsReadThemselvesByIdentity:
+    """Sequence, type and trigger hydrate from their governed identity (backlog 1102)."""
+
+    class _Catalogs:
+        def provider(self, _conn):
+            return "postgres"
+
+        def quote_identifier(self, _conn, name):
+            return f'"{name}"'
+
+        def sequence_catalog(self, _conn, _schema, _name):
+            return {"start": 1, "increment": 1, "minimum": 1, "maximum": 9, "cycle": False}
+
+        def user_type_catalog(self, _conn, _schema, _name):
+            return {"kind": "enum", "labels": ["a", "b"]}
+
+        def trigger_native_definition(self, _conn, _schema, _table, _name):
+            return "CREATE TRIGGER t AFTER INSERT ON control.run EXECUTE FUNCTION f()"
+
+    def _identity(self, name):
+        from rey_lib.db.database_objects import DatabaseObjectIdentity
+
+        return DatabaseObjectIdentity(connection="c", catalog="", schema="control", name=name)
+
+    def test_a_sequence(self):
+        from rey_lib.db.database_objects import DatabaseSequence
+
+        sequence = DatabaseSequence.read(object(), self._identity("run_seq"), self._Catalogs())
+
+        assert sequence.identity == self._identity("run_seq")
+        assert sequence.ddl.startswith('CREATE SEQUENCE IF NOT EXISTS "control"."run_seq"')
+
+    def test_a_user_defined_type_carries_its_variant(self):
+        from rey_lib.db.database_objects import DatabaseUserDefinedType
+
+        udt = DatabaseUserDefinedType.read(object(), self._identity("mood"), self._Catalogs())
+
+        assert udt.kind == "enum"
+        assert udt.ddl == "CREATE TYPE \"control\".\"mood\" AS ENUM ('a', 'b');"
+
+    def test_a_trigger_carries_its_table(self):
+        from rey_lib.db.database_objects import DatabaseTrigger
+
+        table = self._identity("run")
+        trigger = DatabaseTrigger.read(object(), table, "t", self._Catalogs())
+
+        assert (trigger.name, trigger.table) == ("t", table)
+        assert trigger.ddl.startswith("CREATE TRIGGER t AFTER INSERT ON control.run")
