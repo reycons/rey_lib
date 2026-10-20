@@ -25,7 +25,7 @@ import pytest
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file import DataFile
 from rey_lib.files.file import File, file_format
-from rey_lib.files.file_utils import get_reader
+from rey_lib.files.data_file.keyed import JsonFile, JsonlFile
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -207,21 +207,21 @@ class TestTheSuffixMapCannotDrift:
 
         assert orphans == {}
 
-    def test_json_is_carried_by_the_registry_not_by_get_reader(
+    def test_json_is_a_document_file_not_a_line_reader(
         self, tmp_path: Path
     ) -> None:
         """The case that moved the rule, stated so it cannot be lost.
 
-        ``.json`` resolves, and it resolves through the registry. If someone
-        later teaches ``get_reader`` to dispatch JSON, a document would be
-        read a line at a time again -- the original failure.
+        ``.json`` resolves through the registry to JsonFile. Were it ever read
+        a line at a time, a document would yield nothing -- the original
+        failure.
         """
         assert File.type_for_suffix(".json") == "JSON"
         assert "JSON" in set(DataFile.formats())
 
-        path = _csv(tmp_path, "a\n1\n", name="probe.csv")
-        with pytest.raises(ConfigError):
-            list(get_reader(path, file_type="JSON"))
+        resolved = File.for_path(tmp_path / "doc.json")
+        assert isinstance(resolved, JsonFile)
+        assert not isinstance(resolved, JsonlFile)
 
     def test_the_suffix_is_read_forgivingly(self) -> None:
         """Case and a missing dot are not the caller's problem."""
@@ -463,18 +463,15 @@ class TestDelimitedNoHeaderFile:
     ) -> None:
         """Structural, not incidental.
 
-        ``get_reader`` still takes the first line as a header for every
-        delimited token it serves. This format is correct because it does not
-        use it -- so if someone routes it back there, the first row starts
-        disappearing again.
+        The header format takes the first line as a header, as it must. This
+        format is correct because it does not read that way -- so if someone
+        routes it back there, the first row starts disappearing again.
         """
         source = self._write(tmp_path, "1,x\n2,y\n")
 
-        through_the_old_reader = list(
-            get_reader(source, file_type="CSV", encoding="utf-8")
-        )
+        as_a_header_file = DataFile.for_path(source, file_type="CSV", encoding="utf-8").read()
 
-        assert len(through_the_old_reader) == 1          # the defect, still there
+        assert len(as_a_header_file) == 1                # the defect it would bring back
         assert len(DataFile.for_path(
             source, file_type="DELIMITED_NO_HEADER"
         ).read()) == 2

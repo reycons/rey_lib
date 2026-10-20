@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.files import file_utils
 from rey_lib.files.file import file_format
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file.base import DataFile, RecordShape
@@ -214,15 +213,13 @@ class JsonlFile(KeyedFile):
 
         Nothing coerces values to strings and nothing needs to: this format
         carries int, float, bool and null, and discarding that here would be
-        a loss the destination cannot undo.
+        a loss the destination cannot undo. Line parsing is
+        ``rey_lib.files.jsonl``'s, which refuses a line that is not exactly
+        one JSON object.
         """
-        return list(
-            file_utils.get_reader(
-                self.path,
-                file_type=self.file_type,
-                encoding=self.encoding,
-            )
-        )
+        from rey_lib.files.jsonl import read_jsonl_file
+
+        return [dict(line.record) for line in read_jsonl_file(self.path, encoding=self.encoding)]
 
     def write(self, records: list[dict[str, Any]]) -> int:
         """Write one record per line, through this format's own writer.

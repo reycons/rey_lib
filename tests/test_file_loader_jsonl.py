@@ -25,7 +25,8 @@ import pytest
 from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.files.data_file import data_file_for
-from rey_lib.files.file_utils import KEYED_FILE_TYPES, get_reader
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.data_file.keyed import JsonFile, JsonlFile
 from rey_lib.errors.error_utils import ConfigError
 from tests.support.table_primitive import stand_beneath_the_table
 
@@ -231,38 +232,35 @@ class TestItReadsTheFileOnce:
         assert len(reads) == 1
 
 
-class TestTheReaderDelegates:
-    """One branch in the existing dispatch, not a second parser."""
+class TestJsonlReadsItsOwnRecords:
+    """The JSONL file reads its records (#1133); there is no generic dispatch."""
 
-    def test_get_reader_dispatches_every_keyed_type(self, tmp_path: Path) -> None:
-        """The aliases are one set: what get_reader reads one line at a time.
-
-        KEYED_FILE_TYPES is what get_reader dispatches to its LINE reader on.
-        When a file's shape can be checked is KeyedFile's now, not this set's
-        (backlog 302).
-        """
+    def test_both_names_read_one_record_per_line(self, tmp_path: Path) -> None:
+        """JSONL and NDJSON are one format, whatever case they are declared in."""
         path = tmp_path / "x.jsonl"
         path.write_text('{"a": 1}\n', encoding="utf-8")
 
-        for file_type in KEYED_FILE_TYPES:
-            assert list(get_reader(path, file_type=file_type)) == [{"a": 1}]
-            assert list(get_reader(path, file_type=file_type.lower())) == [{"a": 1}]
+        for file_type in ("JSONL", "NDJSON", "jsonl", "ndjson"):
+            assert DataFile.for_path(path, file_type=file_type).read() == [{"a": 1}]
 
-    def test_json_is_keyed_but_never_read_a_line_at_a_time(self) -> None:
+    def test_json_is_keyed_but_never_read_a_line_at_a_time(self, tmp_path: Path) -> None:
         """Backlog 302: the near miss, held by a test rather than a comment.
 
-        JSON carries its names per record, which is what the set's name reads
-        as. But a document is one value: through the line reader it yields
-        nothing, which is the failure the JSON work removed. JsonFile reads it.
+        JSON carries its names per record, but a document is one value: read a
+        line at a time it yields nothing. A JSON file is a JsonFile, never the
+        line-reading JsonlFile.
         """
-        assert "JSON" not in KEYED_FILE_TYPES
+        resolved = DataFile.for_path(tmp_path / "x.json")
+
+        assert isinstance(resolved, JsonFile)
+        assert not isinstance(resolved, JsonlFile)
 
     def test_an_unknown_type_is_still_refused_by_name(self, tmp_path: Path) -> None:
-        """Adding a branch must not turn the dispatch into a fallback."""
+        """An undeclared format is refused by name, never given a fallback reader."""
         path = tmp_path / "x.jsonl"
         path.write_text('{"a": 1}\n', encoding="utf-8")
 
         with pytest.raises(ConfigError) as raised:
-            list(get_reader(path, file_type="NOT_A_FORMAT"))
+            DataFile.for_path(path, file_type="NOT_A_FORMAT")
 
         assert "NOT_A_FORMAT" in str(raised.value)

@@ -18,10 +18,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from rey_lib.files import file_utils
 from rey_lib.load import load_operation
 from rey_lib.db.database_objects import DatabaseObjectIdentity
-from rey_lib.files.data_file import data_file_for
+from rey_lib.files.data_file import DataFile
+from rey_lib.files.data_file.delimited import DelimitedHeaderFile
 from rey_lib.errors.error_utils import ConfigError
 from tests.support.table_primitive import stand_beneath_the_table
 
@@ -64,17 +64,14 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
                             supports_provider_capability=lambda *_a, **_k: False),
     )
 
-    def _reader(_path, **kwargs):
-        spy.append(kwargs.get("file_type"))
+    def _reader(self):
+        spy.append(self.file_type)
         raise _Stop
 
-    # Patched at the DEFINITION site rather than at file_loader's binding of
-    # it. A migrated format now reaches the reader through its DataFile
-    # subtype, an unmigrated one still through file_loader -- and this seam
-    # catches both, which the call-site patch no longer could. The assertions
-    # below are unchanged: what is checked is still the file_type the reader
-    # was handed.
-    monkeypatch.setattr(file_utils, "get_reader", _reader)
+    # Patched on the format that reads the records (#1133): a delimited file
+    # reads its own rows, so the seam is its read. What is checked is still the
+    # file_type the read was made as.
+    monkeypatch.setattr(DelimitedHeaderFile, "read", _reader)
     monkeypatch.setattr(
         load_operation, "shared_connection",
         lambda _ctx, _name: SimpleNamespace(
@@ -86,7 +83,7 @@ def _load(tmp_path: Path, monkeypatch, transform_cfg, *, spy: list) -> None:
 
     with pytest.raises(_Stop):
         load_operation._load_one_file(
-            data_file_for(
+            DataFile.for_path(
                 _csv(tmp_path),
                 file_type=getattr(transform_cfg, "file_type", "") or "CSV",
                 encoding=getattr(transform_cfg, "encoding", "utf-8-sig"),
@@ -120,8 +117,8 @@ class TestTheConfiguredTypeReachesTheReader:
         """
         path = _csv(tmp_path)
 
-        declared = data_file_for(path, file_type="DELIMITED_NO_HEADER")
-        inferred = data_file_for(path)
+        declared = DataFile.for_path(path, file_type="DELIMITED_NO_HEADER")
+        inferred = DataFile.for_path(path)
 
         assert declared.file_type == "DELIMITED_NO_HEADER"
         assert inferred.file_type == "CSV"
@@ -177,9 +174,9 @@ class TestTheConfiguredTypeReachesTheReader:
         )
 
         # The refusal is the REGISTRY's: an unknown token names no format, so
-        # the file is an UntypedFile (backlog 624) and its reader refuses.
+        # the file is a plain File (#1133) and is refused as a DataFile by name.
         with pytest.raises(ConfigError) as raised:
-            data_file_for(_csv(tmp_path), file_type="NO_SUCH_FORMAT").read()
+            DataFile.for_path(_csv(tmp_path), file_type="NO_SUCH_FORMAT").read()
 
         assert "NO_SUCH_FORMAT" in str(raised.value)
 

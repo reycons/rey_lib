@@ -66,7 +66,6 @@ from rey_lib.files.file_utils import (
     apply_file_movements,
     input_files,
     pattern_to_glob,
-    get_reader,
     move_file,
     copy_file,
     write_file,
@@ -431,13 +430,9 @@ def load_files_to_callback(
                 # not the source's, so there is nothing for a config to
                 # declare. The load stage reads a configured source and does
                 # honour the configured type; this does not read one.
-                rows = list(
-                    get_reader(
-                        file_path,
-                        file_type="CSV",
-                        encoding="utf-8-sig",
-                    )
-                )
+                rows = DataFile.for_path(
+                    file_path, file_type="CSV", encoding="utf-8-sig",
+                ).read()
                 rows_loaded = on_load_file(data_source, load_cfg, file_path, rows)
                 if rows_loaded != len(rows):
                     _logger.warning(
@@ -996,13 +991,15 @@ def _read_and_transform(
     errors: list[tuple[int, str, str]] = []
 
     for row_num, raw_row in enumerate(
-        get_reader(
+        # THE FILE READS ITS OWN RECORDS (#1133): the declared type resolves the
+        # DataFile, and the delimiter and header line are its format settings.
+        DataFile.for_path(
             file_path,
             file_type=file_type,
             encoding=encoding,
             header_line=header_line,
             delimiter=delimiter,
-        ),
+        ).read(),
         start=1,
     ):
         if ctx is not None:

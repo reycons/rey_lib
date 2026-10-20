@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from rey_lib.files import file_utils
 from rey_lib.files.file import file_format
 from rey_lib.data.errors import DataStructureError
 from rey_lib.files.data_file.base import DataFile
@@ -68,15 +67,42 @@ class DelimitedHeaderFile(DataFile):
         return []
 
     def read(self) -> list[dict[str, Any]]:
-        """Every row, keyed by the header's column names."""
-        return list(
-            file_utils.get_reader(
-                self.path,
-                file_type=self.file_type,
-                encoding=self.encoding,
-                delimiter=self.settings.get("delimiter", ","),
-            )
+        """Every row, keyed by the header's column names (#1133: this format's own read).
+
+        Parsing and header location belong to ``rey_lib.files.csv``; what this
+        format adds is its reading policy -- blank lines and a header repeated
+        mid-file are not data, and a declared ``header_line`` setting is an
+        exact whole-line contract: the located header must be that line, or
+        there are no rows.
+        """
+        from rey_lib.files.csv import open_csv
+
+        delimiter = self.settings.get("delimiter") or ","
+        header_line = self.settings.get("header_line")
+        stream = open_csv(
+            self.path,
+            encoding=self.encoding,
+            errors="replace",
+            delimiter=delimiter,
+            required_header=[header_line] if header_line else (),
+            skip_blank_lines=True,
         )
+        fieldnames = [name.strip() for name in stream.header_fields]
+        if not fieldnames:
+            return []
+        if header_line is not None and fieldnames != [
+                name.strip() for name in header_line.split(delimiter)]:
+            return []
+        first_column = fieldnames[0]
+        rows: list[dict[str, Any]] = []
+        for row in stream.rows:
+            if not any((value or "").strip() for value in row.fields):
+                continue
+            record = dict(zip(fieldnames, row.fields))
+            if (record.get(first_column, "") or "").strip() == first_column:
+                continue
+            rows.append(record)
+        return rows
 
     def write(self, rows: list[dict[str, Any]]) -> int:
         """Write the rows, header first, through this format's own writer.

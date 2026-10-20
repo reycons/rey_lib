@@ -1,13 +1,9 @@
 """
 Generic file I/O utilities.
 
-Provides readers and writers for CSV and XLSX formats, output path
-construction, and file listing. All functions are format-agnostic and
-have no knowledge of any application's data model or transformation logic.
-
-Row filtering is the caller's responsibility — an optional callable can be
-passed to get_reader() and is applied per row. This module never imports
-application-specific modules.
+Output path construction, file listing and the writers not yet split by
+format. Reading a file's records is the file's own (#1133: each DataFile reads
+its format). This module never imports application-specific modules.
 
 Public API
 ----------
@@ -15,8 +11,6 @@ input_files(folder, pattern)
     Return sorted list of files matching a glob pattern.
 converted_output_path(base_dir, filename_pattern, substitutions)
     Construct an output path by substituting tokens into a filename pattern.
-get_reader(infile, file_type, encoding, row_filter)
-    Return a row iterator for the given file type.
 write_file(outfile, content, file_type)
     Write content to a file and log the creation to the file-operation state.
 move_file(src, dest_dir)
@@ -34,7 +28,7 @@ from datetime import datetime
 from datetime import timezone
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Generator, Iterable, Iterator, Optional, TextIO
+from typing import Any, Iterable, Iterator, Optional, TextIO
 
 from rey_lib.encryption import sha256_file, sha256_text
 from rey_lib.files import primitive_file_io
@@ -42,7 +36,6 @@ from rey_lib.logs import AppLogger, log_run_record, record_file_operation
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
-    "KEYED_FILE_TYPES",
     "blocked_display_reason",
     "bounded_text_preview",
     "capture_path_variables",
@@ -62,7 +55,6 @@ __all__ = [
     "preview_file_for_display",
     "converted_output_path",
     "run_artifact_path",
-    "get_reader",
     "write_file",
     "append_jsonl",
     "delete_file",
@@ -72,7 +64,6 @@ __all__ = [
     "export_build_sql_path",
     "export_relative_posix",
     "cleanup_stale_files",
-    "scan_column_lengths",
     "move_file",
     "copy_file",
     "file_operation_log_path",
@@ -994,15 +985,6 @@ def run_artifact_path(
     return collided.resolve()
 
 
-#: File types that carry their column names on EVERY record rather than once
-#: in a header, AND that ``get_reader`` can read one line at a time.
-#:
-#: Both halves are load-bearing: this is what ``get_reader`` dispatches to its
-#: line reader on. JSON is keyed and is NOT here, because a document is one
-#: value and reading it a line at a time yields nothing -- ``JsonFile`` reads
-#: it instead. What a file_type shares with JSONL is not enough to add it.
-KEYED_FILE_TYPES: frozenset[str] = frozenset({"JSONL", "NDJSON"})
-
 def file_type_for_suffix(suffix: str) -> str:
     """Compatibility delegate for Console imports (backlog 1131): ``File.type_for_suffix``.
 
@@ -1011,67 +993,6 @@ def file_type_for_suffix(suffix: str) -> str:
     from rey_lib.files.file import File
 
     return File.type_for_suffix(suffix)
-
-
-def get_reader(
-    infile: Path,
-    file_type: str = "CSV",
-    encoding: str = "utf-8-sig",
-    row_filter: Optional[Callable[[dict[str, str]], bool]] = None,
-    header_line: Optional[str] = None,
-    delimiter: str = ",",
-) -> Generator[dict[str, str], None, None]:
-    """
-    Return a row iterator for the given file based on file_type.
-
-    Rows for which row_filter returns False are excluded. If row_filter
-    is None, all rows are yielded.
-
-    Parameters
-    ----------
-    infile : Path
-        Source file to read.
-    file_type : str
-        File format — 'CSV' or 'XLSX'. Case-insensitive.
-    encoding : str
-        Character encoding for CSV files. Defaults to 'utf-8-sig' to
-        handle BOM-prefixed files from Windows applications.
-    row_filter : Optional[Callable[[dict[str, str]], bool]]
-        Optional predicate. Called with each raw row dict; rows where
-        this returns False are skipped. None means no filtering.
-    header_line : Optional[str]
-        Exact header line to locate before reading rows. When provided,
-        CSV reading begins only after this header is found in the file.
-    delimiter : str
-        Field delimiter character. Defaults to ','.
-
-    Yields
-    ------
-    dict[str, str]
-        One raw row dict per data row.
-
-    Raises
-    ------
-    ValueError
-        If file_type is not 'CSV' or 'XLSX'.
-    """
-    _DELIMITED = {"CSV", "DELIMITED_HEADER", "DELIMITED_NO_HEADER"}
-
-    fmt = file_type.upper()
-    if fmt in _DELIMITED:
-        yield from _csv_reader(
-            infile,
-            encoding=encoding,
-            row_filter=row_filter,
-            header_line=header_line,
-            delimiter=delimiter,
-        )
-    elif fmt == "XLSX":
-        yield from _xlsx_reader(infile, row_filter=row_filter)
-    elif fmt in KEYED_FILE_TYPES:
-        yield from _jsonl_reader(infile, encoding=encoding, row_filter=row_filter)
-    else:
-        raise ConfigError(f"Unsupported file_type '{file_type}'.")
 
 
 def write_file(
@@ -1688,105 +1609,6 @@ def apply_file_movements(paths: Any, file_movements: Any) -> int:
     return moved
 
 
-def scan_column_lengths(
-    files: list[Path],
-    file_type: str = "CSV",
-    encoding: str = "utf-8-sig",
-) -> dict[str, int]:
-    """
-    Scan a list of files and return the maximum observed length per column.
-
-    Reads every row in every file and tracks the longest value seen for
-    each column name. Used to size VARCHAR columns when auto-creating a
-    staging table — caller adds a buffer before passing to DDL.
-
-    Returns an empty dict if files is empty or no rows are found.
-
-    Parameters
-    ----------
-    files : list[Path]
-        Files to scan. All must share the same column structure.
-    file_type : str
-        File format — 'CSV' or 'XLSX'. Case-insensitive.
-    encoding : str
-        Character encoding for CSV files.
-
-    Returns
-    -------
-    dict[str, int]
-        Mapping of column name → maximum observed value length in characters.
-        Columns with all-blank values have length 0.
-    """
-    max_lengths: dict[str, int] = {}
-
-    for file_path in files:
-        for row in get_reader(file_path, file_type=file_type, encoding=encoding):
-            for col, val in row.items():
-                length = len(val) if val else 0
-                if col not in max_lengths or length > max_lengths[col]:
-                    max_lengths[col] = length
-
-    return max_lengths
-
-# ---------------------------------------------------------------------------
-# Private — CSV reader / writer
-# ---------------------------------------------------------------------------
-
-def _csv_reader(
-    infile: Path,
-    encoding: str,
-    row_filter: Optional[Callable[[dict[str, str]], bool]],
-    header_line: Optional[str],
-    delimiter: str = ",",
-) -> Generator[dict[str, str], None, None]:
-    """
-    Yield data rows from a CSV file.
-
-    Skips blank lines and mid-file header-repeat rows. Applies row_filter
-    when provided. The file handle is managed via a context manager.
-
-    Parsing and header location belong to ``rey_lib.files.csv``; what remains
-    here is this caller's policy — the exact ``header_line`` match, dropping
-    headers repeated mid-file, the ``row_filter`` predicate, and the
-    ``dict[str, str]`` shape. Rows stream, so a large file is never held whole.
-    """
-    # Imported here because rey_lib.files.csv reads through this module; a
-    # module-level import would close the cycle.
-    from rey_lib.files.csv import open_csv
-
-    stream = open_csv(
-        infile,
-        encoding=encoding,
-        errors="replace",
-        delimiter=delimiter,
-        required_header=[header_line] if header_line else (),
-        skip_blank_lines=True,
-    )
-
-    fieldnames = [name.strip() for name in stream.header_fields]
-    if not fieldnames:
-        return
-    if header_line is not None:
-        # An exact whole line is this caller's contract, stricter than the
-        # per-field match the reader reports: the located header must be that
-        # line, or there are no rows.
-        wanted = [name.strip() for name in header_line.split(delimiter)]
-        if fieldnames != wanted:
-            return
-
-    first_column = fieldnames[0]
-    for row in stream.rows:
-        if not any((value or "").strip() for value in row.fields):
-            continue
-        record = dict(zip(fieldnames, row.fields))
-        # A header repeated mid-file is not data.
-        if (record.get(first_column, "") or "").strip() == first_column:
-            continue
-        if row_filter is not None and not row_filter(record):
-            continue
-        yield record
-
-
 def _resolve_path_key(paths: Any, key: str) -> Path:
     """Resolve a named path key from a data-source paths namespace."""
     value = getattr(paths, key, None)
@@ -1897,71 +1719,10 @@ def _display_path(path: Path, environment_root: Path | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Private — XLSX reader / writer
+# Private — XLSX writer
 # ---------------------------------------------------------------------------
 
 
-
-
-def _jsonl_reader(
-    infile: Path,
-    encoding: str,
-    row_filter: Optional[Callable[[dict[str, str]], bool]],
-) -> Generator[dict[str, Any], None, None]:
-    """Yield one row per JSONL record, in physical file order.
-
-    DELEGATES rather than parses. ``rey_lib.files.jsonl`` owns JSONL reading
-    and already returns what this shape needs -- one mapping per line, in
-    order, refusing a line that is not exactly one JSON object. A second
-    parser here would be a second answer to one question.
-
-    Values arrive as their JSON types, not as strings. Unlike the delimited
-    and workbook readers there is nothing to coerce: the format carries them.
-    ``_build_column_defs`` and ``bulk_insert`` both take ``dict[str, Any]``,
-    so they pass through untouched.
-
-    Imported inside the function because ``rey_lib.files.jsonl`` imports from
-    this module, and a module-level import would be circular.
-
-    Args:
-        infile: Source file to read.
-        encoding: Text encoding the file is decoded with, as declared.
-        row_filter: Optional predicate. Rows for which it returns False are
-            skipped, matching every other reader here.
-
-    Yields:
-        One record per line.
-
-    Raises:
-        JsonlReadError: If the path is unreadable or any line is not exactly
-            one JSON object. Parsing stops at the first invalid line rather
-            than returning a partial file.
-    """
-    from rey_lib.files.jsonl import read_jsonl_file
-
-    for record in read_jsonl_file(infile, encoding=encoding):
-        row = dict(record.record)
-        if row_filter is None or row_filter(row):
-            yield row
-
-
-def _xlsx_reader(
-    infile: Path,
-    row_filter: Optional[Callable[[dict[str, str]], bool]],
-) -> Generator[dict[str, str], None, None]:
-    """
-    Yield rows from an XLSX file as string dicts.
-
-    pandas is imported on demand — it is a heavy optional dependency.
-    """
-    import pandas as pd  # noqa: PLC0415
-
-    df = pd.read_excel(infile)
-    for record in df.to_dict(orient="records"):
-        row = {str(k): str(v) if v is not None else "" for k, v in record.items()}
-        if row_filter is not None and not row_filter(row):
-            continue
-        yield row
 
 
 def _xlsx_writer(outfile: Path, rows: list[dict[str, Any]]) -> None:
