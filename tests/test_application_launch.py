@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from rey_lib.config.applications import (
+    JSON_VALUE_TYPE,
     Application,
     ApplicationCommand,
     ApplicationCommandParameter,
@@ -62,6 +63,41 @@ def test_a_missing_required_or_unpublished_input_is_refused() -> None:
         SERVE.arguments({})
     with pytest.raises(ConfigError, match="publishes no parameter for workflow_name"):
         SERVE.arguments({"workflow_id": 15, "workflow_name": "x"})
+
+
+STRUCTURED = ApplicationCommand(name="serve", parameters=(
+    ApplicationCommandParameter(name="subject-kind", required=True),
+    ApplicationCommandParameter(name="filters", value_type=JSON_VALUE_TYPE),
+    ApplicationCommandParameter(name="arguments", value_type=JSON_VALUE_TYPE, required=True),
+))
+
+
+def test_a_json_parameter_is_one_canonical_json_argument() -> None:
+    # #1143: a governed structured value travels as one argument, serialized
+    # canonically -- sorted keys, no spaces -- never as str() or a Python repr.
+    filters = [{"value": 15, "column": "run_id", "operator": "equals"}]
+    assert STRUCTURED.arguments({
+        "subject_kind": "views", "filters": filters, "arguments": {"b": "é", "a": None},
+    }) == [
+        "--subject-kind", "views",
+        "--filters", '[{"column":"run_id","operator":"equals","value":15}]',
+        "--arguments", '{"a":null,"b":"é"}',
+    ]
+
+
+def test_an_empty_structure_is_given_and_none_is_not() -> None:
+    assert STRUCTURED.arguments({"subject_kind": "views", "filters": [], "arguments": {}}) == [
+        "--subject-kind", "views", "--filters", "[]", "--arguments", "{}"]
+    with pytest.raises(ConfigError, match="requires 'arguments'"):
+        STRUCTURED.arguments({"subject_kind": "views", "arguments": None})
+
+
+def test_a_value_that_is_not_json_is_refused() -> None:
+    with pytest.raises(ConfigError, match="parameter 'filters' takes JSON"):
+        STRUCTURED.arguments({"subject_kind": "views", "filters": [object()], "arguments": {}})
+    with pytest.raises(ConfigError, match="parameter 'filters' takes JSON"):
+        STRUCTURED.arguments({"subject_kind": "views", "filters": [float("nan")],
+                              "arguments": {}})
 
 
 def test_the_application_builds_its_invocation_from_its_configuration() -> None:

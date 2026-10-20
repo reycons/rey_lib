@@ -19,6 +19,7 @@ or resolve differently.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -35,8 +36,14 @@ __all__ = [
     "ApplicationModeGroup",
     "ApplicationOperation",
     "ApplicationParameterGroup",
+    "JSON_VALUE_TYPE",
     "build_applications",
 ]
+
+#: The value type of a parameter that carries one governed structured value
+#: (#1143). Transported as one canonical JSON argument; what the structure means
+#: is the receiving application's to validate.
+JSON_VALUE_TYPE = "json"
 
 #: Where a parameter's choices may be resolved from, and how each collection
 #: becomes option values.
@@ -273,9 +280,16 @@ class ApplicationCommand:
         positional parameter gives its value; ``True`` gives ``--name``; a false
         or empty value gives nothing; any other value gives ``--name value``.
 
+        A ``json`` parameter (``JSON_VALUE_TYPE``, #1143) carries one structured
+        value: given whenever its input is not None, and rendered as ONE
+        argument by canonical JSON serialization -- never ``str()`` or a
+        Python repr. Only that it is valid JSON is checked here; what it means
+        is the receiving application's.
+
         Raises:
             ConfigError: When an input names no parameter this command
-                publishes, or a required parameter has no value.
+                publishes, a required parameter has no value, or a json
+                parameter's value cannot be serialized as JSON.
         """
         by_input = {one.name.replace("-", "_"): one for one in self.parameters}
         unpublished = sorted(set(inputs) - set(by_input))
@@ -287,6 +301,26 @@ class ApplicationCommand:
         arguments: list[str] = []
         for key, parameter in by_input.items():
             value = inputs.get(key)
+            if parameter.value_type == JSON_VALUE_TYPE:
+                if value is None:
+                    if parameter.required:
+                        raise ConfigError(
+                            f"command '{self.name}' requires '{parameter.name}'."
+                        )
+                    continue
+                try:
+                    rendered = json.dumps(
+                        value, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False, allow_nan=False,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ConfigError(
+                        f"command '{self.name}' parameter '{parameter.name}' takes "
+                        f"JSON, and its value cannot be serialized: {exc}"
+                    ) from exc
+                arguments += ([rendered] if parameter.positional
+                              else [f"--{parameter.name}", rendered])
+                continue
             given = value is True or (bool(value) and str(value).lower() != "false")
             if not given:
                 if parameter.required:
