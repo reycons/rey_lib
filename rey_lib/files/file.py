@@ -26,10 +26,11 @@ import re
 
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Callable, Final, Mapping
+from typing import Any, Callable, ClassVar, Final, Mapping
 
 from rey_lib.files import primitive_file_io
 from rey_lib.files.file_utils import bounded_text_preview
+from rey_lib.viewers.language import classify_text_language
 
 __all__ = ["DEFAULT_ENCODING", "SECRET_NAME_PATTERNS", "File", "file_format"]
 
@@ -121,6 +122,11 @@ class File:
     are None for a file nothing governs. They are facts handed in, never
     looked up: which state a file is opened at is the caller's selection.
     """
+
+    #: What kind of presentation a file requires (#1129): a semantic type. A
+    #: file is read as a file; DataFile states its own. Which Console panel
+    #: implements it is the Console's, never this object's.
+    PANEL_TYPE: ClassVar[str] = "file"
 
     def __init__(
         self,
@@ -296,8 +302,9 @@ class File:
             max_bytes: How much of the file at most.
 
         Returns:
-            ``name``, ``size_bytes``, ``truncated``, ``content`` and
-            ``blocked_reason`` (empty when the text may be shown).
+            ``name``, ``size_bytes``, ``truncated``, ``content``,
+            ``blocked_reason`` (empty when the text may be shown) and
+            ``language``.
         """
         refused = self.display_refusal()
         if not refused:
@@ -312,6 +319,7 @@ class File:
                     "truncated": preview["truncated"],
                     "content": preview["content"],
                     "blocked_reason": "",
+                    "language": self.language(preview["content"]),
                 }
         return {
             "name": self.path.name,
@@ -319,7 +327,21 @@ class File:
             "truncated": False,
             "content": "",
             "blocked_reason": refused,
+            "language": self.language(),
         }
+
+    def language(self, content: str | None = None) -> str:
+        """The language this file is written in (#1129): what highlighting and
+        default linting act on.
+
+        This File's own answer, from what it is -- its name, then its text where
+        the name says nothing -- so a consumer is told and never derives it.
+        Always one of the approved abstract languages.
+
+        Args:
+            content: The text already read, where the name alone may not say.
+        """
+        return classify_text_language(self.path, content=content)
 
     def write_text(self, text: str) -> Path:
         """Replace this file's content with ``text`` (#1133).

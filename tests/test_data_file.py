@@ -605,7 +605,7 @@ class TestText:
 
         assert shown == {
             "name": "module.py", "size_bytes": 6, "truncated": False,
-            "content": "x = 1\n", "blocked_reason": "",
+            "content": "x = 1\n", "blocked_reason": "", "language": "python",
         }
 
     def test_the_text_is_bounded_and_says_so(self, tmp_path: Path) -> None:
@@ -634,3 +634,38 @@ class TestText:
 
         assert shown["content"] == ""
         assert shown["blocked_reason"] == "Binary file preview is not supported."
+
+
+def test_a_file_presents_as_a_file_and_a_data_file_as_a_dataobject() -> None:
+    """#1129: the canonical object states its semantic presentation type.
+
+    File states "file"; DataFile overrides it with "dataobject"; every format
+    inherits from whichever it is. Which Console panel implements each is the
+    Console's.
+    """
+    formats = File.formats()
+
+    assert (File.PANEL_TYPE, DataFile.PANEL_TYPE) == ("file", "dataobject")
+    assert {token: subtype.PANEL_TYPE for token, subtype in formats.items()} == {
+        token: "dataobject" if issubclass(subtype, DataFile) else "file"
+        for token, subtype in formats.items()}
+    assert formats["PYTHON"].PANEL_TYPE == "file"
+    assert formats["CSV"].PANEL_TYPE == "dataobject"
+
+
+@pytest.mark.parametrize("name, body, language", [
+    ("module.py", "x = 1\n", "python"),
+    ("config.yaml", "a: 1\n", "yaml"),
+    ("query.sql", "select 1\n", "sql"),
+    ("notes", "select a from b\n", "sql"),
+], ids=["python", "yaml", "sql by name", "sql by its text"])
+def test_a_file_states_its_language_with_its_text(
+    tmp_path: Path, name: str, body: str, language: str,
+) -> None:
+    """#1129: the language is the File's answer, carried with its text."""
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+
+    held = File.for_path(path)
+
+    assert held.text(1_000)["language"] == held.language(body) == language
