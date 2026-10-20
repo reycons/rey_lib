@@ -76,6 +76,10 @@ if TYPE_CHECKING:
 
 logger = AppLogger(__name__)
 
+#: The in-process tool server the Claude CLI reaches a task's tools through: its
+#: tools are named ``mcp__rey__<tool>`` to the CLI (backlog 1136).
+_CLAUDE_TOOL_SERVER = "rey"
+
 __all__ = ["AI", "AISnapshot"]
 
 
@@ -447,30 +451,31 @@ class AI:
         operations: Mapping[str, Operation] | None = None,
         observe: Callable[[AIEvent], None] | None = None,
     ) -> AIResult:
-        """Perform one hydrated unit of work through Pydantic AI (backlog 1020).
+        """Perform one hydrated unit of work (backlog 1020).
 
         With ``observe``, the run is streamed and each canonical ``AIEvent`` is
         handed to it as it happens (backlog 1038): started, content as the model
         produces it, each tool call requested and its result, then completed or
-        failed. Pydantic AI's own events stop here. The observer only relays: its
+        failed. An engine's own events stop here. The observer only relays: its
         first failure is reported once and it is detached for the rest of this
         execution, which continues -- a consumer of the events cannot decide the
         task's outcome.
 
-        The task's choices are settled; this builds its model, runs it once and
-        records the outcome through the task's own transitions. The task's
-        governed tools are bound here to ``operations`` -- the runtime's
+        The task's choices are settled; this runs it once through the execution
+        mechanism its engine states (backlog 1136) -- Pydantic AI, or Claude
+        tooling on the user's Claude subscription -- and records the outcome
+        through the task's own transitions. Opening, closing, the transitions,
+        the events and the result are this method's whatever the mechanism; only
+        the run itself is the mechanism's private step. The task's governed
+        tools are bound here to ``operations`` -- the runtime's
         ``capability_key -> operation`` mapping -- as this execution's
         ``AIToolSet`` (backlog 1023); hydration never supplies them. Synchronous:
         every caller runs on a thread without an event loop, and from inside a
         running loop this refuses rather than starting one of its own.
 
-        Structured output asks Pydantic AI for the model's native JSON-schema
-        output where the model's own profile supports it, prompted output
-        otherwise, and never tool-call output -- tools are not this slice's, and
-        a profile's tool flag is not a promise a local engine keeps. Whatever
-        comes back, ``OutputParser`` validates it, and a failure is handed back
-        to the model as a correction within this runtime's allowance.
+        Whatever comes back, ``OutputParser`` validates it, and a failure is
+        handed back to the model as a correction within this runtime's
+        allowance.
 
         Raises:
             AIRequestError: when the task carries input other than text, or is
@@ -480,7 +485,8 @@ class AI:
             AIOutputError: when the output never satisfied its contract.
             AIProviderError: when the engine refused or could not be reached.
             AIConfigurationError: when the engine or the run cannot be set up,
-                or a tool's capability is bound to nothing.
+                its execution mechanism is one AI does not run, or a tool's
+                capability is bound to nothing.
             AICancelled: when :meth:`cancel_task` withdrew the work; the task
                 has recorded cancelled (backlog 1039).
         """
@@ -488,23 +494,7 @@ class AI:
         import uuid
         from datetime import datetime, timezone
 
-        import pydantic_ai
-        from pydantic_ai import (
-            Agent,
-            CancellationToken,
-            ModelRetry,
-            NativeOutput,
-            PromptedOutput,
-            RunCancelled,
-            StructuredDict,
-            UsageLimits,
-        )
-        from pydantic_ai.exceptions import (
-            ModelAPIError,
-            UnexpectedModelBehavior,
-            UsageLimitExceeded,
-            UserError,
-        )
+        from pydantic_ai import CancellationToken
 
         try:
             asyncio.get_running_loop()
@@ -542,13 +532,6 @@ class AI:
                 error.__cause__ = exc
                 error.report(f"AI task '{key}' event notification", source=__name__)
 
-        async def relay(_context: Any, events: Any) -> None:
-            """Pydantic AI's events for this run, told as canonical AIEvents."""
-            async for event in events:
-                translated = self._translated(execution_id, event)
-                if translated is not None:
-                    tell(translated)
-
         # Fresh for this execution: a cancelled token cancels any later run it
         # is given. Held only while this execution runs, whatever ends it.
         token = CancellationToken()
@@ -560,6 +543,114 @@ class AI:
         tell(AIEvent.started(execution_id))
         started = datetime.now(timezone.utc)
         try:
+            steps = {
+                "pydantic_ai": self._run_pydantic_ai,
+                "claude_agent_sdk": self._run_claude_agent_sdk,
+            }
+            step = steps.get(task.execution_mechanism)
+            if step is None:
+                raise AIConfigurationError(
+                    f"AI task '{key}' names execution mechanism "
+                    f"'{task.execution_mechanism or '(none)'}', which AI does not run."
+                )
+            # What the task's governed connection was composed with, then what
+            # this caller binds: the connection selects, the caller may add.
+            bound = {
+                **self._connection_operations.get(task.connection, {}),
+                **(operations or {}),
+            }
+            toolset = AIToolSet(task.tools, bound)
+            # Streamed only for an observer: without one the run is exactly the
+            # unstreamed request it always was.
+            output, usage = step(
+                task, prompt, schema, toolset, token,
+                tell if observe is not None else None, execution_id,
+            )
+        except AICancelled:
+            # A withdrawal, not a fault: the task records it as its own outcome
+            # and nothing is reported at ERROR.
+            task.cancelled()
+            tell(AIEvent.cancelled(execution_id))
+            raise
+        except AIError as error:
+            task.failed(str(error))
+            tell(AIEvent.failed(execution_id, str(error)))
+            raise
+        else:
+            result = AIResult(
+                output=output,
+                execution=AIExecutionInfo(
+                    execution_id=execution_id,
+                    profile_id=task.profile_key,
+                    model=task.model_identifier,
+                    instruction_id=task.instruction_key,
+                    started_at=started.isoformat(),
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    finish_reason=AIFinishReason.COMPLETED,
+                ),
+                usage=usage,
+            )
+            task.answered(result)
+            tell(AIEvent.completed(execution_id, result))
+            return result
+        finally:
+            with self._running_lock:
+                del self._running[task.id]
+
+    def _run_pydantic_ai(
+        self,
+        task: AITask,
+        prompt: str,
+        schema: dict[str, Any] | None,
+        toolset: AIToolSet,
+        token: Any,
+        tell: Callable[[AIEvent], None] | None,
+        execution_id: str,
+    ) -> tuple[AIOutput, AIUsage]:
+        """Run one execution through Pydantic AI: :meth:`execute_task`'s step.
+
+        Builds the task's model, runs it once and returns the validated output
+        and what it used; every failure leaves as its AIError. Structured output
+        asks Pydantic AI for the model's native JSON-schema output where the
+        model's own profile supports it, prompted output otherwise, and never
+        tool-call output -- a profile's tool flag is not a promise a local
+        engine keeps. ``OutputParser``'s rejection goes back to the model as
+        ``ModelRetry`` within the validation allowance.
+
+        Raises:
+            AICancelled: when ``token`` was cancelled. A synchronous tool call
+                already in progress is not interrupted; its owner finishes it
+                and the result is discarded.
+            AIConfigurationError, AIExecutionError, AIOutputError,
+            AIProviderError: as :meth:`execute_task` states them.
+        """
+        import pydantic_ai
+        from pydantic_ai import (
+            Agent,
+            ModelRetry,
+            NativeOutput,
+            PromptedOutput,
+            RunCancelled,
+            StructuredDict,
+            UsageLimits,
+        )
+        from pydantic_ai.exceptions import (
+            ModelAPIError,
+            UnexpectedModelBehavior,
+            UsageLimitExceeded,
+            UserError,
+        )
+
+        key = task.task_key or "(default)"
+
+        async def relay(_context: Any, events: Any) -> None:
+            """Pydantic AI's events for this run, told as canonical AIEvents."""
+            async for event in events:
+                translated = self._translated(execution_id, event)
+                if translated is not None and tell is not None:
+                    tell(translated)
+
+        try:
             model = self._model(task.model_identifier, task.base_url, task.credential_ref)
             output_type: Any = str
             if task.output.is_structured() and schema is not None:
@@ -569,13 +660,6 @@ class AI:
                     if model.profile.get("supports_json_schema_output")
                     else PromptedOutput(shaped)
                 )
-            # What the task's governed connection was composed with, then what
-            # this caller binds: the connection selects, the caller may add.
-            bound = {
-                **self._connection_operations.get(task.connection, {}),
-                **(operations or {}),
-            }
-            toolset = AIToolSet(task.tools, bound)
             agent = Agent(
                 model,
                 output_type=output_type,
@@ -606,74 +690,246 @@ class AI:
             pydantic_ai.BANNER_ENABLED = False
             logger.debug(
                 "executing AI task %s on %s (instruction %s, output %s)",
-                task.task_key or "(default)", task.model_identifier,
+                key, task.model_identifier,
                 task.instruction_key or "(none)", type(output_type).__name__,
             )
             run = agent.run_sync(
                 prompt, model_settings=settings or None,
                 usage_limits=UsageLimits(request_limit=self._policy.budget.max_turns),
-                # Streamed only for an observer: without one the run is exactly
-                # the unstreamed request it always was.
-                event_stream_handler=relay if observe is not None else None,
+                event_stream_handler=relay if tell is not None else None,
                 cancellation_token=token,
             )
             output = self._parse_task_output(task, schema, run.output)
         except RunCancelled as withdrawn:
-            # A withdrawal, not a fault: the task records it as its own outcome
-            # and nothing is reported at ERROR. A synchronous tool call already
-            # in progress is not interrupted; its owner finishes it and the
-            # result is discarded.
-            task.cancelled()
-            tell(AIEvent.cancelled(execution_id))
             raise AICancelled(f"AI task '{key}' was cancelled.", cause=withdrawn) from withdrawn
         except UserError as error:
-            failure: AIError = AIConfigurationError(
-                f"AI task '{task.task_key or '(default)'}' could not be run.", cause=error,
-            )
+            raise AIConfigurationError(
+                f"AI task '{key}' could not be run.", cause=error,
+            ) from error
         except UsageLimitExceeded as error:
-            failure = AIExecutionError(
-                f"AI task '{task.task_key or '(default)'}' reached a usage limit.", cause=error,
-            )
+            raise AIExecutionError(
+                f"AI task '{key}' reached a usage limit.", cause=error,
+            ) from error
         except UnexpectedModelBehavior as error:
-            failure = AIOutputError(
-                f"AI task '{task.task_key or '(default)'}' produced no output that "
-                "satisfies its contract.", cause=error,
-            )
+            raise AIOutputError(
+                f"AI task '{key}' produced no output that satisfies its contract.",
+                cause=error,
+            ) from error
         except ModelAPIError as error:
-            failure = AIProviderError(
-                f"The engine for AI task '{task.task_key or '(default)'}' refused or "
-                "could not be reached.", cause=error,
+            raise AIProviderError(
+                f"The engine for AI task '{key}' refused or could not be reached.",
+                cause=error,
+            ) from error
+        return output, AIUsage(
+            input_tokens=int(run.usage.input_tokens or 0),
+            output_tokens=int(run.usage.output_tokens or 0),
+        )
+
+    def _run_claude_agent_sdk(
+        self,
+        task: AITask,
+        prompt: str,
+        schema: dict[str, Any] | None,
+        toolset: AIToolSet,
+        token: Any,
+        tell: Callable[[AIEvent], None] | None,
+        execution_id: str,
+    ) -> tuple[AIOutput, AIUsage]:
+        """Run one execution through Claude tooling: :meth:`execute_task`'s step.
+
+        The Claude Agent SDK drives the Claude CLI, which authenticates with
+        the user's Claude subscription (backlog 1136). The CLI is isolated to
+        this task: none of Claude Code's own tools and none of its settings
+        files, only the task's governed tools served in-process, its contract
+        as the whole system prompt, and the budget's turn limit. Rey supplies
+        no credential: the CLI authenticates as it is logged in, and its
+        environment is neither inspected nor changed here. The engine's
+        temperature and timeout are not settings this mechanism takes.
+
+        ``OutputParser``'s rejection is sent back in the same session as the
+        next message, at most the validation allowance's number of times.
+        ``token`` is watched while the session runs and its cancellation
+        interrupts the CLI.
+
+        Raises:
+            AICancelled: when ``token`` was cancelled. A synchronous tool call
+                already in progress is not interrupted; its owner finishes it
+                and the result is discarded.
+            AIConfigurationError: when the ``claude`` extra or the CLI is not
+                installed here.
+            AIExecutionError: when the turn limit stopped the session.
+            AIOutputError: when no answer satisfied the contract.
+            AIProviderError: when the CLI refused or could not be reached.
+        """
+        import asyncio
+
+        key = task.task_key or "(default)"
+        try:
+            from claude_agent_sdk import (
+                ClaudeAgentOptions,
+                ClaudeSDKClient,
+                CLIConnectionError,
+                CLINotFoundError,
+                ProcessError,
+                ResultMessage,
+                create_sdk_mcp_server,
             )
-        except AIError as error:
-            task.failed(str(error))
-            tell(AIEvent.failed(execution_id, str(error)))
-            raise
-        else:
-            result = AIResult(
-                output=output,
-                execution=AIExecutionInfo(
-                    execution_id=execution_id,
-                    profile_id=task.profile_key,
-                    model=task.model_identifier,
-                    instruction_id=task.instruction_key,
-                    started_at=started.isoformat(),
-                    ended_at=datetime.now(timezone.utc).isoformat(),
-                    finish_reason=AIFinishReason.COMPLETED,
-                ),
-                usage=AIUsage(
-                    input_tokens=int(run.usage.input_tokens or 0),
-                    output_tokens=int(run.usage.output_tokens or 0),
-                ),
-            )
-            task.answered(result)
-            tell(AIEvent.completed(execution_id, result))
-            return result
-        finally:
-            with self._running_lock:
-                del self._running[task.id]
-        task.failed(str(failure))
-        tell(AIEvent.failed(execution_id, str(failure)))
-        raise failure from failure.cause
+        except ImportError as missing:
+            raise AIConfigurationError(
+                f"AI task '{key}' runs through Claude tooling, and rey_lib's 'claude' "
+                "extra is not installed.", cause=missing,
+            ) from missing
+
+        structured = task.output.is_structured() and schema is not None
+        tools = toolset.sdk_tools()
+        options = ClaudeAgentOptions(
+            model=task.model_identifier,
+            system_prompt=task.contract_body or None,
+            tools=[],
+            setting_sources=[],
+            mcp_servers=(
+                {_CLAUDE_TOOL_SERVER: create_sdk_mcp_server(_CLAUDE_TOOL_SERVER, tools=tools)}
+                if tools else {}
+            ),
+            allowed_tools=[f"mcp__{_CLAUDE_TOOL_SERVER}__{tool.name}" for tool in tools],
+            max_turns=self._policy.budget.max_turns,
+            output_format={"type": "json_schema", "schema": schema} if structured else None,
+            include_partial_messages=tell is not None,
+        )
+
+        async def withdraw(client: Any) -> None:
+            """Interrupt the session once the execution's token is cancelled."""
+            while not token.cancelled:
+                await asyncio.sleep(0.05)
+            await client.interrupt()
+
+        async def converse(client: Any) -> tuple[AIOutput, AIUsage]:
+            """Ask, then correct in the same session until the answer is valid."""
+            corrections = self._policy.validation_correction.max_corrections
+            used = AIUsage()
+            message = prompt
+            while True:
+                await client.query(message)
+                outcome: Any = None
+                async for item in client.receive_response():
+                    if isinstance(item, ResultMessage):
+                        outcome = item
+                    elif tell is not None:
+                        for event in self._sdk_translated(execution_id, item):
+                            tell(event)
+                if token.cancelled:
+                    raise AICancelled(f"AI task '{key}' was cancelled.")
+                if outcome is None:
+                    raise AIProviderError(
+                        f"The engine for AI task '{key}' ended without a result."
+                    )
+                spent = dict(outcome.usage or {})
+                used = AIUsage(
+                    input_tokens=used.input_tokens + int(spent.get("input_tokens") or 0),
+                    output_tokens=used.output_tokens + int(spent.get("output_tokens") or 0),
+                )
+                if outcome.is_error:
+                    if outcome.subtype == "error_max_turns":
+                        raise AIExecutionError(f"AI task '{key}' reached a usage limit.")
+                    raise AIProviderError(
+                        f"The engine for AI task '{key}' refused or could not be reached "
+                        f"({outcome.subtype})."
+                    )
+                answer = (
+                    outcome.structured_output
+                    if structured and outcome.structured_output is not None
+                    else outcome.result or ""
+                )
+                try:
+                    return self._parse_task_output(task, schema, answer), used
+                except AIOutputError as invalid:
+                    if corrections <= 0:
+                        raise AIOutputError(
+                            f"AI task '{key}' produced no output that satisfies its "
+                            "contract.", cause=invalid,
+                        ) from invalid
+                    corrections -= 1
+                    message = str(invalid)
+
+        async def run() -> tuple[AIOutput, AIUsage]:
+            """One session, the token watched for as long as it is open."""
+            async with ClaudeSDKClient(options=options) as client:
+                watcher = asyncio.create_task(withdraw(client))
+                try:
+                    return await converse(client)
+                finally:
+                    watcher.cancel()
+
+        logger.debug(
+            "executing AI task %s on %s through Claude tooling (instruction %s, output %s)",
+            key, task.model_identifier, task.instruction_key or "(none)",
+            "structured" if structured else "text",
+        )
+        try:
+            return asyncio.run(run())
+        except CLINotFoundError as error:
+            raise AIConfigurationError(
+                f"AI task '{key}' runs through Claude tooling, and the Claude CLI is not "
+                "installed here.", cause=error,
+            ) from error
+        except (CLIConnectionError, ProcessError) as error:
+            raise AIProviderError(
+                f"The engine for AI task '{key}' refused or could not be reached.",
+                cause=error,
+            ) from error
+
+    @staticmethod
+    def _sdk_translated(execution_id: str, item: Any) -> list[AIEvent]:
+        """One Claude Agent SDK message as canonical AIEvents.
+
+        Text as the model streams it, each tool call the model makes and each
+        result it is given, and the engine's rate-limit report. A complete
+        assistant message's text is not told again: it arrived as the stream.
+        Anything else tells an observer nothing it does not learn from these.
+        """
+        from claude_agent_sdk import (  # noqa: PLC0415 -- AI's dependency only
+            AssistantMessage,
+            RateLimitEvent,
+            StreamEvent,
+            ToolResultBlock,
+            ToolUseBlock,
+            UserMessage,
+        )
+
+        if isinstance(item, StreamEvent):
+            event = item.event or {}
+            delta = event.get("delta") or {}
+            if event.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                text = str(delta.get("text") or "")
+                return [AIEvent.content(execution_id, text)] if text else []
+            return []
+        if isinstance(item, RateLimitEvent):
+            info = item.rate_limit_info
+            return [AIEvent.rate_limited(execution_id, {
+                "status": info.status,
+                "resets_at": info.resets_at,
+                "rate_limit_type": info.rate_limit_type,
+            })]
+        prefix = f"mcp__{_CLAUDE_TOOL_SERVER}__"
+        if isinstance(item, AssistantMessage):
+            return [
+                AIEvent.tool_requested(execution_id, AIToolCall(
+                    id=block.id, name=block.name.removeprefix(prefix),
+                    arguments=dict(block.input or {}),
+                ))
+                for block in item.content if isinstance(block, ToolUseBlock)
+            ]
+        if isinstance(item, UserMessage) and isinstance(item.content, list):
+            return [
+                AIEvent.tool_accepted(execution_id, AIToolResult(
+                    call_id=block.tool_use_id,
+                    value=None if block.is_error else block.content,
+                    failed=bool(block.is_error),
+                    message=str(block.content) if block.is_error else "",
+                ))
+                for block in item.content if isinstance(block, ToolResultBlock)
+            ]
+        return []
 
     @staticmethod
     def _translated(execution_id: str, event: Any) -> AIEvent | None:

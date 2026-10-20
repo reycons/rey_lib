@@ -124,8 +124,8 @@ class AIToolSet:
 
     It owns the set and coordinates every call: a tool's arguments are validated
     by the tool, a non-replay-safe tool runs at most once per identical
-    arguments -- a repeat receives the first result -- and the set hands Pydantic
-    AI its tools.
+    arguments -- a repeat receives the first result -- and the set hands each
+    execution mechanism its tools: Pydantic AI, and the Claude Agent SDK.
 
     Raises:
         AIConfigurationError: on construction, when two tools share a name or a
@@ -203,5 +203,36 @@ class AIToolSet:
                 json_schema=tool.input_schema or {"type": "object", "properties": {}},
                 sequential=not tool.replay_safe,
             )
+            for tool in self._tools.values()
+        ]
+
+    def sdk_tools(self) -> list[Any]:
+        """The tools as the Claude Agent SDK serves them in-process (backlog 1136).
+
+        Each call is carried out here through :meth:`invoke`, synchronously, so
+        calls run one at a time and a tool that is not replay-safe keeps its
+        once-only guarantee. Rey's outcomes in the SDK's terms: the value as
+        text -- JSON when it is not already text -- or an error result whose
+        message the model reads, whether its arguments broke the schema
+        (``AIToolError``) or the canonical owner refused it.
+        """
+        from claude_agent_sdk import tool as sdk_tool  # noqa: PLC0415 -- AI's dependency only
+
+        def carried(name: str) -> Callable[[dict[str, Any]], Any]:
+            async def run(arguments: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    value = self.invoke(name, arguments)
+                except AppError as refused:
+                    return {"content": [{"type": "text", "text": str(refused)}], "is_error": True}
+                text = value if isinstance(value, str) else json.dumps(value, default=str)
+                return {"content": [{"type": "text", "text": text}]}
+            return run
+
+        return [
+            sdk_tool(
+                tool.name,
+                tool.description,
+                tool.input_schema or {"type": "object", "properties": {}},
+            )(carried(tool.name))
             for tool in self._tools.values()
         ]

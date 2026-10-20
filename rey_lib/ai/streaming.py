@@ -33,6 +33,7 @@ class AIEventKind(str, Enum):
     PROVIDER_CHANGED = "provider_changed"
     ARTIFACT_PRODUCED = "artifact_produced"
     USAGE_UPDATED = "usage_updated"
+    RATE_LIMITED = "rate_limited"
     EXECUTION_COMPLETED = "execution_completed"
     EXECUTION_FAILED = "execution_failed"
     EXECUTION_CANCELLED = "execution_cancelled"
@@ -136,6 +137,18 @@ class AIEvent:
     @staticmethod
     def usage_updated(execution_id: str, usage: AIUsage) -> "AIEvent":
         return AIEvent(kind=AIEventKind.USAGE_UPDATED, execution_id=execution_id, usage=usage)
+
+    @staticmethod
+    def rate_limited(execution_id: str, metadata: dict[str, Any]) -> "AIEvent":
+        """The engine reported its rate limit for this execution (backlog 1136).
+
+        Provider-neutral: what the engine stated -- its status, when the limit
+        resets -- travels as metadata, and the execution goes on or fails on
+        its own outcome. An observer learns the limit; nothing decides on it.
+        """
+        return AIEvent(
+            kind=AIEventKind.RATE_LIMITED, execution_id=execution_id, metadata=dict(metadata),
+        )
 
     @staticmethod
     def completed(execution_id: str, result: AIResult) -> "AIEvent":

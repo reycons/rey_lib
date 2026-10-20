@@ -51,8 +51,11 @@ class AITask:
         composed_first: Whether this task is composed before it runs. An
             interaction fact of the task, carried and not interpreted here.
         profile_key: Which governed engine was chosen, for evidence.
-        model_identifier: The engine as Pydantic AI resolves it,
-            ``<provider>:<model>``. Required: a task reaches one engine.
+        model_identifier: The engine as its execution mechanism names it --
+            ``<provider>:<model>`` for Pydantic AI, the Claude model for the
+            Claude Agent SDK. Required: a task reaches one engine.
+        execution_mechanism: How that engine is run, as its governed row
+            states it: ``pydantic_ai`` or ``claude_agent_sdk`` (backlog 1136).
         base_url: Where that engine is reached; empty is the provider default.
         credential_ref: A reference to the engine's credential, never the value.
         timeout_seconds: How long one call may take; ``None`` is the default.
@@ -104,6 +107,7 @@ class AITask:
 
     profile_key: str = ""
     model_identifier: str
+    execution_mechanism: str = "pydantic_ai"
     base_url: str = ""
     credential_ref: str = ""
     timeout_seconds: float | None = None
@@ -295,6 +299,9 @@ class AITask:
             composed_first=bool(scope.get("composed_first") or False),
             profile_key=str(engine.get("profile_key") or ""),
             model_identifier=str(engine.get("model_identifier") or ""),
+            # The column's own default where a row predates it, so a hydrated
+            # engine runs exactly as its row states.
+            execution_mechanism=str(engine.get("execution_mechanism") or "pydantic_ai"),
             base_url=str(engine.get("base_url") or ""),
             credential_ref=str(engine.get("credential_ref") or ""),
             timeout_seconds=None if timeout is None else float(timeout),
