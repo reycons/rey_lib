@@ -547,6 +547,53 @@ class TestDelimitedNoHeaderFile:
         built.validate()                       # nothing to disagree with
 
 
+class TestDelimitedHeaderDiscovery:
+    """Which line is the header is a CSV setting (#1133): first, exact, or located."""
+
+    def test_by_default_the_located_header_is_used(self, tmp_path: Path) -> None:
+        source = _csv(tmp_path, "\na,b\n1,2\n")
+
+        assert DataFile.for_path(source).read() == [{"a": "1", "b": "2"}]
+
+    def test_a_required_header_is_located_below_a_preamble(self, tmp_path: Path) -> None:
+        """The line holding the named column is the header, wherever it sits."""
+        source = _csv(tmp_path, "Report of trades\nexported today\nid,trade_date\n1,2026-01-02\n")
+
+        rows = DataFile.for_path(source, required_header=["trade_date"]).read()
+
+        assert rows == [{"id": "1", "trade_date": "2026-01-02"}]
+
+    def test_a_none_delimiter_is_detected(self, tmp_path: Path) -> None:
+        source = _csv(tmp_path, "id;trade_date\n1;2026-01-02\n")
+
+        rows = DataFile.for_path(source, delimiter=None, required_header=["trade_date"]).read()
+
+        assert rows == [{"id": "1", "trade_date": "2026-01-02"}]
+
+
+class TestTheDateRangeRuleReadsThroughTheCsvFile:
+    """The movement rule decides the name; the CSV file reads the records (#1133)."""
+
+    def test_it_finds_the_range_below_a_preamble(self, tmp_path: Path) -> None:
+        from datetime import datetime
+
+        from rey_lib.files.file_utils import _read_date_range_from_column
+
+        source = _csv(tmp_path, "Report\nid;day\n1;2026-01-05\n2;2026-01-02\n3;bad\n", name="feed.csv")
+
+        assert _read_date_range_from_column(source, "day", "%Y-%m-%d") == (
+            datetime(2026, 1, 2), datetime(2026, 1, 5))
+
+    def test_a_missing_column_is_refused_by_name(self, tmp_path: Path) -> None:
+        from rey_lib.data.errors import DataStructureError
+        from rey_lib.files.file_utils import _read_date_range_from_column
+
+        source = _csv(tmp_path, "id,other\n1,x\n", name="feed.csv")
+
+        with pytest.raises(DataStructureError, match="Column 'day' not found"):
+            _read_date_range_from_column(source, "day", "%Y-%m-%d")
+
+
 class TestText:
     """What any file shows when it is looked at: its text, bounded and display-safe."""
 

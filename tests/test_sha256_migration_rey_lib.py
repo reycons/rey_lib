@@ -69,22 +69,6 @@ def test_the_bytes_digest_is_unchanged(text: str) -> None:
     assert sha256_bytes(text.encode("utf-8")) == _utf8(text)
 
 
-def test_the_relevant_file_id_keeps_its_length_and_value() -> None:
-    """A truncated digest of the path, not of any content."""
-    from rey_lib.files.file_utils import _relevant_file_id
-
-    path = Path("/data/Ünïcode/feed.csv")
-    expected = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
-
-    identifier = _relevant_file_id(path)
-    assert identifier == expected
-    assert len(identifier) == 16
-
-
-# ---------------------------------------------------------------------------
-# files/csv.py
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize(
     "text",
     ["a,b\n1,2\n", "col,other\nÜnï,café\n", "x,y\r\n1,2\r\n", "a,b\n1,2"],

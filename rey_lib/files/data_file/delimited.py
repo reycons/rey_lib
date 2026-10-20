@@ -71,20 +71,27 @@ class DelimitedHeaderFile(DataFile):
 
         Parsing and header location belong to ``rey_lib.files.csv``; what this
         format adds is its reading policy -- blank lines and a header repeated
-        mid-file are not data, and a declared ``header_line`` setting is an
-        exact whole-line contract: the located header must be that line, or
-        there are no rows.
+        mid-file are not data. Which line is the header is one of three format
+        settings, the first that applies:
+
+            header_line       that exact whole line, or there are no rows
+            required_header   the line holding these column names, wherever
+                              it sits in the opening window
+            neither           the header rey_lib.files.csv locates by its own rule
+
+        A ``delimiter`` setting of None leaves the delimiter to be detected.
         """
         from rey_lib.files.csv import open_csv
 
-        delimiter = self.settings.get("delimiter") or ","
+        delimiter = self.settings.get("delimiter", ",")
         header_line = self.settings.get("header_line")
+        required = [header_line] if header_line else list(self.settings.get("required_header") or ())
         stream = open_csv(
             self.path,
             encoding=self.encoding,
             errors="replace",
             delimiter=delimiter,
-            required_header=[header_line] if header_line else (),
+            required_header=required,
             skip_blank_lines=True,
         )
         fieldnames = [name.strip() for name in stream.header_fields]

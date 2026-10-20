@@ -18,6 +18,7 @@ defined in terms of the other.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from rey_lib.files.file import file_format
@@ -235,6 +236,22 @@ class JsonlFile(KeyedFile):
         write_jsonl_file(self.path, records)
         _logger.debug("Wrote %d record(s) to %r", len(records), self)
         return len(records)
+
+    def append(self, record: dict[str, Any]) -> Path:
+        """Add one record to the end of this file, as one JSON line (#1133).
+
+        The file and its parent directory are created where missing. Recording
+        the append as a run operation is the caller's, through rey_lib.logs.
+
+        Args:
+            record: The record to append.
+
+        Returns:
+            The path appended to.
+        """
+        from rey_lib.files.primitive_file_io import append_jsonl
+
+        return append_jsonl(self.path, record)
 
 
 @file_format("JSON")

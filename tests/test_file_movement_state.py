@@ -11,10 +11,8 @@ from rey_lib.config.config_utils import PathResolver
 from rey_lib.encryption import sha256_file
 from rey_lib.files.file_utils import (
     file_operation_log_path,
-    file_movement_log_path,
     find_original_relative_path,
     iter_file_operations,
-    iter_file_movements,
     move_file,
 )
 from tests.conftest import make_run_log, start_test_run
@@ -46,12 +44,6 @@ def test_configured_log_path_resolves_under_state_file_operations(tmp_path: Path
     ctx = _ctx(tmp_path)
     expected = (tmp_path / "test" / "state" / "v01" / "file_operations.jsonl").resolve()
     assert file_operation_log_path(ctx) == expected
-
-
-def test_file_movement_log_path_is_alias(tmp_path: Path) -> None:
-    """file_movement_log_path is a compatibility alias for file_operation_log_path."""
-    ctx = _ctx(tmp_path)
-    assert file_movement_log_path(ctx) == file_operation_log_path(ctx)
 
 
 def test_missing_paths_raises(tmp_path: Path) -> None:
@@ -92,7 +84,6 @@ def test_move_file_writes_run_log_not_state_file(tmp_path: Path) -> None:
     assert record["file_fingerprint"]["sha256"] == sha256_file(dest_dir / "feed.csv")
 
     assert list(iter_file_operations(ctx)) == []
-    assert list(iter_file_movements(ctx)) == []
     assert not file_operation_log_path(ctx).exists()
 
 

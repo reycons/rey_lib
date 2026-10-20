@@ -18,7 +18,6 @@ from rey_lib.files.file_utils import (
     input_files,
     input_tree_files,
     is_hidden_path,
-    list_relevant_files,
     matched_tree_files,
     matches_file_pattern,
     move_to_failed,
@@ -28,7 +27,6 @@ from rey_lib.files.file_utils import (
     preview_file_for_display,
     read_bytes_file,
     read_text_file,
-    resolve_safe_file,
     visible_children,
     visible_files,
 )
@@ -44,27 +42,6 @@ def _source_cfg(tmp_path: Path, pattern: str | list[str] = "*.jsonl") -> SimpleN
         failed_path=str(tmp_path / "failed"),
     )
     return SimpleNamespace(name="test", file_pattern=pattern, paths=paths)
-
-
-class _Paths:
-    def __init__(self, values: dict[str, Path]) -> None:
-        self._values = {name: Path(path) for name, path in values.items()}
-
-    def resolve(self, name: str) -> Path:
-        return self._values[name]
-
-
-def _relevant_ctx(tmp_path: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        installations_path=tmp_path / "installations",
-        paths=_Paths(
-            {
-                "root": tmp_path,
-                "configs": tmp_path / "configs",
-                "data": tmp_path / "data",
-            }
-        ),
-    )
 
 
 def test_pattern_to_glob_replaces_tokens() -> None:
@@ -177,19 +154,6 @@ def test_folder_children_returns_recursive_tree(tmp_path: Path) -> None:
     assert tree[0]["children"][0]["relative_path"] == "client/feed.csv"
 
 
-def test_resolve_safe_file_rejects_outside_root(tmp_path: Path) -> None:
-    file_path = tmp_path / "allowed.txt"
-    file_path.write_text("x", encoding="utf-8")
-
-    assert resolve_safe_file(file_path, tmp_path) == file_path.resolve()
-
-    outside = tmp_path.parent / "outside.txt"
-    outside.write_text("x", encoding="utf-8")
-    with pytest.raises(FileRoutingError):
-        resolve_safe_file(outside, tmp_path)
-    outside.unlink(missing_ok=True)
-
-
 def test_bounded_text_preview_truncates_content(tmp_path: Path) -> None:
     file_path = tmp_path / "sample.txt"
     file_path.write_text("abcdef", encoding="utf-8")
@@ -221,125 +185,6 @@ def test_discover_inbox_files_uses_source_pattern(tmp_path: Path) -> None:
     files = discover_inbox_files(source_cfg)
 
     assert [path.name for path in files] == ["a.jsonl", "b.yaml"]
-
-
-def test_list_relevant_files_resolves_sources_and_includes(tmp_path: Path) -> None:
-    ctx = _relevant_ctx(tmp_path)
-    workflow_dir = tmp_path / "configs" / "rey_db_admin" / "workflows"
-    workflow_dir.mkdir(parents=True)
-    (workflow_dir / "postgres_version_lint_comment.yaml").write_text("name: wf\n")
-    (workflow_dir / "other.yaml").write_text("name: other\n")
-
-    files = list_relevant_files(
-        ctx=ctx,
-        app_name="rey_db_admin",
-        workflow_name="postgres_version_lint_comment",
-        metadata={
-            "relevant_files": {
-                "sources": ["{configs}/rey_db_admin/workflows"],
-                "include": ["postgres_version_lint_comment.yaml"],
-                "roles": {"workflow_definition": ["*.yaml"]},
-            }
-        },
-    )
-
-    assert [item["display_name"] for item in files] == [
-        "postgres_version_lint_comment.yaml"
-    ]
-    assert files[0]["file_role"] == "workflow_definition"
-    assert files[0]["app_name"] == "rey_db_admin"
-    assert files[0]["workflow_name"] == "postgres_version_lint_comment"
-
-
-def test_list_relevant_files_applies_excludes_and_secret_defaults(tmp_path: Path) -> None:
-    ctx = _relevant_ctx(tmp_path)
-    data = tmp_path / "data"
-    data.mkdir()
-    (data / "SGC_keep.md").write_text("ok\n")
-    (data / "SGC_skip.bak").write_text("old\n")
-    (data / ".env").write_text("SECRET=1\n")
-    (data / "client_credentials.md").write_text("secret\n")
-
-    files = list_relevant_files(
-        ctx=ctx,
-        metadata={
-            "sources": ["{data}"],
-            "include": ["SGC_*", "*.env", "*credentials*"],
-            "exclude": ["*.bak"],
-            "roles": {"contract": ["SGC_*.md"]},
-        },
-    )
-
-    assert [item["display_name"] for item in files] == ["SGC_keep.md"]
-    assert files[0]["file_role"] == "contract"
-
-
-def test_list_relevant_files_orders_deterministically_and_assigns_roles(tmp_path: Path) -> None:
-    ctx = _relevant_ctx(tmp_path)
-    root = tmp_path / "configs"
-    root.mkdir()
-    (root / "b.sql").write_text("select 1;\n")
-    (root / "a.yaml").write_text("name: a\n")
-
-    files = list_relevant_files(
-        ctx=ctx,
-        metadata={
-            "sources": ["{configs}"],
-            "include": ["*.sql", "*.yaml"],
-            "roles": {
-                "sql": ["*.sql"],
-                "app_config": ["*.yaml"],
-            },
-        },
-    )
-
-    assert [(item["file_role"], item["display_name"]) for item in files] == [
-        ("app_config", "a.yaml"),
-        ("sql", "b.sql"),
-    ]
-
-
-def test_list_relevant_files_missing_source_does_not_crash(tmp_path: Path) -> None:
-    ctx = _relevant_ctx(tmp_path)
-
-    files = list_relevant_files(
-        ctx=ctx,
-        metadata={"sources": ["{configs}/missing"], "include": ["*.yaml"]},
-    )
-
-    assert files == []
-
-
-def test_list_relevant_files_rejects_unsafe_sources(tmp_path: Path) -> None:
-    ctx = _relevant_ctx(tmp_path)
-    outside = tmp_path.parent / "outside_relevant"
-    outside.mkdir(exist_ok=True)
-
-    with pytest.raises(FileRoutingError):
-        list_relevant_files(
-            ctx=ctx,
-            metadata={"sources": [str(outside)], "include": ["*.yaml"]},
-        )
-    outside.rmdir()
-
-
-def test_list_relevant_files_returns_metadata_only(tmp_path: Path) -> None:
-    ctx = _relevant_ctx(tmp_path)
-    root = tmp_path / "configs"
-    root.mkdir()
-    (root / "sample.sql").write_text("select secret_column from table;\n")
-
-    files = list_relevant_files(
-        ctx=ctx,
-        pipeline_name="daily",
-        step_id="lint",
-        metadata={"sources": ["{configs}"], "include": ["*.sql"]},
-    )
-
-    assert files[0]["pipeline_name"] == "daily"
-    assert files[0]["step_id"] == "lint"
-    assert "content" not in files[0]
-    assert "select secret_column" not in str(files[0].values())
 
 
 def test_preview_file_for_display_returns_bounded_safe_content(tmp_path: Path) -> None:

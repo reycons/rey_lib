@@ -9,8 +9,6 @@ Public API
 ----------
 input_files(folder, pattern)
     Return sorted list of files matching a glob pattern.
-converted_output_path(base_dir, filename_pattern, substitutions)
-    Construct an output path by substituting tokens into a filename pattern.
 move_file(src, dest_dir)
     Move a file to a destination directory, creating dest_dir if needed.    
 """
@@ -28,8 +26,7 @@ from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Optional, TextIO
 
-from rey_lib.encryption import sha256_file, sha256_text
-from rey_lib.files import primitive_file_io
+from rey_lib.encryption import sha256_file
 from rey_lib.logs import AppLogger, log_run_record, record_file_operation
 from rey_lib.errors.error_utils import ConfigError
 
@@ -44,16 +41,13 @@ __all__ = [
     "is_hidden_path",
     "matched_tree_files",
     "matches_file_pattern",
-    "list_relevant_files",
     "move_to_failed",
     "move_to_processing",
     "move_to_stage",
     "move_to_success",
     "pattern_to_glob",
     "preview_file_for_display",
-    "converted_output_path",
     "run_artifact_path",
-    "append_jsonl",
     "delete_file",
     "export_db_root",
     "export_object_file_path",
@@ -64,16 +58,12 @@ __all__ = [
     "move_file",
     "copy_file",
     "file_operation_log_path",
-    "file_movement_log_path",
     "find_named_files",
     "find_original_relative_path",
     "iter_file_operations",
-    "iter_file_movements",
     "log_file_operation",
-    "log_file_move",
     "open_text_file",
     "apply_file_movements",
-    "resolve_safe_file",
     "read_text_file",
     "read_bytes_file",
     "visible_children",
@@ -377,25 +367,6 @@ def folder_children(path: Path, root_path: Path | None = None) -> list[dict[str,
     return children
 
 
-def resolve_safe_file(raw_path: Path | str, root_path: Path | str) -> Path:
-    """Resolve a file path and require it to live under ``root_path``."""
-    root = Path(root_path).expanduser().resolve()
-    path = Path(raw_path).expanduser().resolve()
-
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
-        raise FileRoutingError(f"Path is outside root: {path}") from exc
-
-    if not path.exists():
-        raise FileNotFoundError(f"Path does not exist: {path}")
-    if not path.is_file():
-        from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
-        raise FileRoutingError(f"Path is not a file: {path}")
-    return path
-
-
 def bounded_text_preview(
     path: Path | str,
     max_bytes: int,
@@ -514,104 +485,6 @@ def discover_inbox_files(source_cfg: Any) -> list[Path]:
     return input_files(inbox, pattern)
 
 
-_RELEVANT_FILE_ROLES = {
-    "workflow_definition",
-    "pipeline_definition",
-    "app_config",
-    "process_config",
-    "contract",
-    "template",
-    "sql",
-    "mapping",
-    "profile",
-    "reference",
-    "unknown",
-}
-
-
-def list_relevant_files(
-    *,
-    ctx: Any,
-    app_name: str | None = None,
-    workflow_name: str | None = None,
-    pipeline_name: str | None = None,
-    step_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """Return metadata for static files relevant to a selected Rey object.
-
-    YAML/metadata declares sources, include/exclude filters, and optional role
-    patterns. This helper resolves those declarations under approved Rey roots
-    and returns metadata only; it does not read file contents and does not cover
-    logs, state files, produced files, or run artifacts.
-    """
-    spec = _relevant_file_spec(metadata)
-    sources = _coerce_str_list(spec.get("sources") or spec.get("source"))
-    if not sources:
-        return []
-
-    includes = _coerce_str_list(spec.get("include")) or ["*"]
-    from rey_lib.files.file import SECRET_NAME_PATTERNS
-
-    excludes = _coerce_str_list(spec.get("exclude")) + list(SECRET_NAME_PATTERNS)
-    roles = {
-        str(role): _coerce_str_list(patterns)
-        for role, patterns in _mapping_items(spec.get("roles"))
-    }
-    allowed_roots = _approved_relevant_roots(ctx)
-    rows: dict[str, dict[str, Any]] = {}
-
-    for source_decl in sources:
-        source = _resolve_relevant_source(source_decl, ctx)
-        _require_under_relevant_root(source, allowed_roots)
-        if not source.exists():
-            continue
-
-        candidates = [source] if source.is_file() else visible_files(source)
-        for path in candidates:
-            if not path.is_file():
-                continue
-            resolved = path.expanduser().resolve()
-            _require_under_relevant_root(resolved, allowed_roots)
-            relative_path = _safe_relative_path(resolved, source)
-            if _matches_any(resolved, relative_path, excludes):
-                continue
-            matched = _matched_pattern(resolved, relative_path, includes)
-            if not matched:
-                continue
-
-            role, role_pattern = _relevant_file_role(resolved, relative_path, roles)
-            stat = resolved.stat()
-            rows[str(resolved)] = {
-                "file_id": _relevant_file_id(resolved),
-                "display_name": resolved.name,
-                "path": str(resolved),
-                "relative_path": relative_path,
-                "file_role": role,
-                "source_decl": source_decl,
-                "matched_filter": role_pattern or matched,
-                "app_name": app_name or "",
-                "workflow_name": workflow_name or "",
-                "pipeline_name": pipeline_name or "",
-                "step_id": step_id or "",
-                "exists": True,
-                "size_bytes": stat.st_size,
-                "modified_at": datetime.fromtimestamp(
-                    stat.st_mtime, timezone.utc
-                ).isoformat(),
-                "actions": ["view", "copy_path", "open_external"],
-            }
-
-    return sorted(
-        rows.values(),
-        key=lambda row: (
-            row["file_role"],
-            row["relative_path"].lower(),
-            row["path"].lower(),
-        ),
-    )
-
-
 def move_to_processing(
     file_path: Path,
     source_cfg: Any,
@@ -720,220 +593,6 @@ def blocked_display_reason(path: Path | str, data: bytes | None = None) -> str:
     return File(Path(path)).display_refusal(data)
 
 
-def _relevant_file_spec(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the relevant_files mapping from metadata, if present."""
-    if not isinstance(metadata, dict):
-        return {}
-    nested = metadata.get("relevant_files")
-    if isinstance(nested, dict):
-        return nested
-    if any(key in metadata for key in ("sources", "source", "include", "exclude", "roles")):
-        return metadata
-    return {}
-
-
-def _coerce_str_list(value: Any) -> list[str]:
-    """Normalize YAML scalar/list values to non-empty strings."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        values = [value]
-    elif isinstance(value, Iterable) and not isinstance(value, (bytes, dict)):
-        values = [str(item) for item in value]
-    else:
-        values = [str(value)]
-    return [item.strip() for item in values if item and item.strip()]
-
-
-def _mapping_items(value: Any) -> list[tuple[str, Any]]:
-    """Return mapping items for plain dicts and Namespace-like objects."""
-    if value is None:
-        return []
-    if isinstance(value, dict):
-        return list(value.items())
-    if hasattr(value, "__dict__"):
-        return list(vars(value).items())
-    return []
-
-
-def _resolve_relevant_source(source_decl: str, ctx: Any) -> Path:
-    """Resolve one relevant-file source declaration against ctx path tokens."""
-    rendered = str(source_decl)
-    tokens = {
-        "config": _ctx_path_value(ctx, "configs"),
-        "configs": _ctx_path_value(ctx, "configs"),
-        "root": _ctx_path_value(ctx, "root"),
-        "data": _ctx_path_value(ctx, "data"),
-        "logs": _ctx_path_value(ctx, "logs"),
-    }
-    for name, value in _ctx_path_map(ctx).items():
-        tokens.setdefault(name, value)
-    for name, value in tokens.items():
-        if value:
-            rendered = rendered.replace("{" + name + "}", str(value))
-    return Path(rendered).expanduser().resolve()
-
-
-def _ctx_path_value(ctx: Any, name: str) -> Path | None:
-    """Resolve a named path from ctx.paths or direct ctx attributes."""
-    paths = getattr(ctx, "paths", None)
-    if paths is not None and hasattr(paths, "resolve"):
-        try:
-            value = paths.resolve(name)
-            if value:
-                return Path(value).expanduser().resolve()
-        except Exception:
-            pass
-    if paths is not None and hasattr(paths, name):
-        try:
-            value = getattr(paths, name)
-            if value:
-                return Path(value).expanduser().resolve()
-        except Exception:
-            pass
-    if hasattr(ctx, name):
-        value = getattr(ctx, name)
-        if value:
-            return Path(value).expanduser().resolve()
-    return None
-
-
-def _ctx_path_map(ctx: Any) -> dict[str, Path]:
-    """Return resolvable ctx path names for token substitution."""
-    paths = getattr(ctx, "paths", None)
-    if paths is None:
-        return {}
-
-    raw = getattr(paths, "_paths", None)
-    if isinstance(raw, dict):
-        return {
-            str(name): Path(value).expanduser().resolve()
-            for name, value in raw.items()
-            if value
-        }
-
-    result: dict[str, Path] = {}
-    for name in dir(paths):
-        if name.startswith("_") or name == "resolve":
-            continue
-        try:
-            value = getattr(paths, name)
-        except Exception:
-            continue
-        if isinstance(value, (str, Path)):
-            result[name] = Path(value).expanduser().resolve()
-    return result
-
-
-def _approved_relevant_roots(ctx: Any) -> list[Path]:
-    """Return roots under which relevant-file discovery is allowed."""
-    roots: list[Path] = []
-    for path in _ctx_path_map(ctx).values():
-        _append_unique_root(roots, path)
-    for name in ("root", "configs", "data", "contracts", "llmcontracts"):
-        path = _ctx_path_value(ctx, name)
-        if path:
-            _append_unique_root(roots, path)
-    installations_path = getattr(ctx, "installations_path", None)
-    if installations_path:
-        root = Path(installations_path).expanduser().resolve()
-        _append_unique_root(roots, root)
-        _append_unique_root(roots, root.parent)
-    return roots
-
-
-def _append_unique_root(roots: list[Path], path: Path) -> None:
-    """Append a resolved root path once."""
-    resolved = path.expanduser().resolve()
-    if resolved not in roots:
-        roots.append(resolved)
-
-
-def _require_under_relevant_root(path: Path, allowed_roots: list[Path]) -> None:
-    """Fail closed when a relevant-file path is outside approved roots."""
-    if not allowed_roots:
-        raise ConfigError("No approved roots configured for relevant-file discovery.")
-    resolved = path.expanduser().resolve()
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root)
-            return
-        except ValueError:
-            continue
-    from rey_lib.files.file_routing import FileRoutingError  # noqa: PLC0415 -- import cycle
-    raise FileRoutingError(f"Relevant file source is outside approved roots: {resolved}")
-
-
-def _safe_relative_path(path: Path, source: Path) -> str:
-    """Return a deterministic relative path for matching/display."""
-    base = source if source.is_dir() else source.parent
-    try:
-        return path.relative_to(base).as_posix()
-    except ValueError:
-        return path.name
-
-
-def _matched_pattern(path: Path, relative_path: str, patterns: list[str]) -> str:
-    """Return the first matching glob pattern, or an empty string."""
-    for pattern in patterns:
-        glob_pattern = pattern_to_glob(pattern)
-        if fnmatch(path.name, glob_pattern) or fnmatch(relative_path, glob_pattern):
-            return pattern
-    return ""
-
-
-def _matches_any(path: Path, relative_path: str, patterns: list[str]) -> bool:
-    """Return true when a file matches any pattern."""
-    return bool(_matched_pattern(path, relative_path, patterns))
-
-
-def _relevant_file_role(
-    path: Path,
-    relative_path: str,
-    roles: dict[str, list[str]],
-) -> tuple[str, str]:
-    """Assign a relevant-file role from configured role patterns."""
-    for role, patterns in sorted(roles.items()):
-        matched = _matched_pattern(path, relative_path, patterns)
-        if matched:
-            normalized = role if role in _RELEVANT_FILE_ROLES else "unknown"
-            return normalized, matched
-    return "unknown", ""
-
-
-def _relevant_file_id(path: Path) -> str:
-    """Return a stable non-content identifier for one relevant file path."""
-    # The path, not the content: this identifies a location, not a file's bytes.
-    return sha256_text(str(path))[:16]
-
-
-def converted_output_path(
-    base_dir: Path,
-    filename_pattern: str,
-    substitutions: dict[str, str],
-) -> Path:
-    """
-    Construct a full output path by substituting tokens into a filename pattern.
-
-    Parameters
-    ----------
-    base_dir : Path
-        Directory where the output file will be written.
-    filename_pattern : str
-        Filename pattern string with {token} placeholders,
-        e.g. '{source}_{name}_{start_date}_{end_date}.csv'.
-    substitutions : dict[str, str]
-        Token values to substitute into the pattern.
-
-    Returns
-    -------
-    Path
-        Absolute path for the output file.
-    """
-    filename = filename_pattern.format(**substitutions)
-    return Path(base_dir) / filename
-
-
 def run_artifact_path(
     base_dir: Path | str,
     artifact_name: str,
@@ -990,31 +649,6 @@ def file_type_for_suffix(suffix: str) -> str:
     from rey_lib.files.file import File
 
     return File.type_for_suffix(suffix)
-
-
-def append_jsonl(path: Path | str, record: dict[str, Any]) -> Path:
-    """
-    Append one record as a JSON line to a JSONL file.
-
-    The single, centralized place JSONL/run-log records are appended
-    (SGC_Rey_System_File_Creation_Standard), so no subsystem opens JSONL files
-    directly. Parent directories are created as needed.
-
-    Parameters
-    ----------
-    path : Path | str
-        Destination JSONL file.
-    record : dict[str, Any]
-        One record, serialised as a single JSON line.
-
-    Returns
-    -------
-    Path
-        The JSONL file path.
-    """
-    result = primitive_file_io.append_jsonl(path, record)
-    record_file_operation("write", target_path=str(result))
-    return result
 
 
 def _path_within(path: Path, root: Path) -> bool:
@@ -1295,11 +929,6 @@ def file_operation_log_path(ctx: Any) -> Path:
     )
 
 
-def file_movement_log_path(ctx: Any) -> Path:
-    """Compatibility alias for the configured file-operation JSONL path."""
-    return file_operation_log_path(ctx)
-
-
 def log_file_operation(
     ctx: Any,
     run_log: Any,
@@ -1345,36 +974,6 @@ def log_file_operation(
     return record
 
 
-def log_file_move(
-    ctx: Any,
-    run_log: Any,
-    *,
-    source: Path | str,
-    destination: Path | str,
-    app: str = "",
-    pipeline: str | None = None,
-    action: str = "move",
-    reason: str = "",
-    original_source: Path | str | None = None,
-    run_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Compatibility alias for ``log_file_operation``."""
-    return log_file_operation(
-        ctx,
-        run_log,
-        source=source,
-        destination=destination,
-        app=app,
-        pipeline=pipeline,
-        action=action,
-        reason=reason,
-        original_source=original_source,
-        run_id=run_id,
-        metadata=metadata,
-    )
-
-
 def iter_file_operations(ctx: Any) -> Iterator[dict[str, Any]]:
     """Yield file-operation state records, skipping blank or malformed lines."""
     path = file_operation_log_path(ctx)
@@ -1393,11 +992,6 @@ def iter_file_operations(ctx: Any) -> Iterator[dict[str, Any]]:
                 if "operation" not in record and "action" in record:
                     record["operation"] = record["action"]
                 yield record
-
-
-def iter_file_movements(ctx: Any) -> Iterator[dict[str, Any]]:
-    """Compatibility alias for file-operation state records."""
-    yield from iter_file_operations(ctx)
 
 
 def _file_operation_fingerprint(path: Path) -> dict[str, Any]:
@@ -1425,7 +1019,7 @@ def find_original_relative_path(ctx: Any, *, pipeline: str, file_name: str) -> P
     suffix = f"data/pipelines/{pipeline}/inbox/"
     found: Path | None = None
 
-    for record in iter_file_movements(ctx):
+    for record in iter_file_operations(ctx):
         if record.get("pipeline") not in {pipeline, None, ""}:
             continue
         for key in ("original_source", "original_source_abs", "source", "source_abs"):
@@ -1549,28 +1143,28 @@ def _read_date_range_from_column(
     source_column: str,
     date_format: str,
 ) -> tuple[datetime, datetime]:
-    """Read CSV rows and return (min_date, max_date) from source_column."""
-    # Imported here because rey_lib.files.csv reads through this module; a
+    """Read CSV rows and return (min_date, max_date) from source_column.
+
+    The movement-naming decision is this rule's; reading the records is the CSV
+    file's own (#1133). Naming the column as the required header locates the
+    header line wherever it sits in the opening window, and the delimiter is
+    detected, as this rule has always read.
+    """
+    # Imported here because the data file package reaches this module; a
     # module-level import would close the cycle.
-    from rey_lib.files.csv import read_csv
+    from rey_lib.files.data_file import DataFile  # noqa: PLC0415 -- import cycle
 
     dates: list[datetime] = []
 
-    # Locating the header is a CSV question: naming the column as required
-    # header text finds the header line wherever it sits, which is what the
-    # previous hand-rolled header scan did.
-    read = read_csv(
-        file_path,
-        encoding="utf-8-sig",
-        errors="replace",
-        required_header=[source_column],
-    )
-    columns = list(read.header_fields)
-    if source_column not in columns:
+    rows = DataFile.for_path(
+        file_path, file_type="CSV", encoding="utf-8-sig",
+        delimiter=None, required_header=[source_column],
+    ).read()
+    if not any(source_column in row for row in rows):
         from rey_lib.data.errors import DataStructureError  # noqa: PLC0415 -- import cycle
         raise DataStructureError(f"Column '{source_column}' not found in file.")
-    for row in read.rows:
-        raw = (dict(zip(columns, row.fields)).get(source_column, "") or "").strip()
+    for row in rows:
+        raw = (row.get(source_column, "") or "").strip()
         if not raw:
             continue
         try:

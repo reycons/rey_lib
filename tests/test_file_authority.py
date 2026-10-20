@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 
 from rey_lib.files.data_file import DataFile
-from rey_lib.files.file_utils import append_jsonl
 
 
 def _json(path: Path):
@@ -49,11 +48,12 @@ def test_the_loader_targets_bytes_are_unchanged(tmp_path: Path) -> None:
     assert out.read_text(encoding="utf-8") == json.dumps(rows, default=str, indent=2, sort_keys=True) + "\n"
 
 
-def test_append_jsonl_writes_one_line_per_record(tmp_path: Path) -> None:
-    """append_jsonl appends one JSON object per line and creates parents."""
+def test_a_jsonl_file_appends_one_line_per_record(tmp_path: Path) -> None:
+    """JsonlFile.append adds one JSON object per line and creates parents (#1133)."""
     out = tmp_path / "deep" / "run_log.20260706_091845.jsonl"
-    append_jsonl(out, {"run_id": "abc", "seq": 1})
-    append_jsonl(out, {"run_id": "abc", "seq": 2})
+    jsonl = DataFile.for_path(out, file_type="JSONL")
+    jsonl.append({"run_id": "abc", "seq": 1})
+    jsonl.append({"run_id": "abc", "seq": 2})
     lines = out.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["seq"] == 1

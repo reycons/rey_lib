@@ -49,7 +49,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from rey_lib.files.file_utils import append_jsonl
+from rey_lib.files.data_file import DataFile
+from rey_lib.logs import record_file_write
 from rey_lib.files.jsonl import read_jsonl_file
 
 __all__ = [
@@ -493,8 +494,9 @@ def load_latest_record(
 # ---------------------------------------------------------------------------
 
 def _append_jsonl(data: dict[str, Any], path: Path) -> None:
-    """Append one JSON object as a line to a JSONL file via the central file authority."""
-    append_jsonl(path, data)
+    """Append one record to a JSONL file through the file itself, and record the write (#1133)."""
+    DataFile.for_path(path, file_type="JSONL").append(data)
+    record_file_write(path)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
