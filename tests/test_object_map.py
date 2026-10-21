@@ -1,7 +1,7 @@
 """The ObjectMap: one live map object, two projections (#1119, #1120).
 
 No database: the five object-map reads and the schema read are stand-ins. What
-is proved is the object -- what it reads, how a press moves its focus, what each
+is proved is the object -- what it reads, how a click or double-click changes it, what each
 focused screen projects, and that opening a claim answers the governed subject
 and nothing else.
 """
@@ -125,16 +125,18 @@ def test_the_map_opens_on_the_estate() -> None:
     assert _ids(projected["nodes"]) == ["area:10", "area:20", "area:30"]
     assert [n["role"] for n in projected["nodes"]] == ["", "", "empty"]
     assert projected["edges"] == [{"id": "link:10:20", "kind": "link", "source": "area:10",
-                                   "target": "area:20", "weight": 1, "direct": False}]
+                                   "target": "area:20", "weight": 1, "direct": False,
+                                   "highlight": []}]
+    assert projected["selected"] is None
     assert projected["path"] == [{"value": "estate", "label": "Estate",
                                   "focus": {"level": "estate"}}]
     assert projected["details"] is None
 
 
-def test_pressing_an_area_focuses_its_claims_and_their_links() -> None:
+def test_double_clicking_an_area_drills_into_its_claims_and_their_links() -> None:
     held = _architecture()
 
-    assert held.press("area:10") is None
+    assert held.double_click("area:10") is None
     projected = held.projection()
 
     assert projected["focus"] == {"level": "area", "area_id": 10}
@@ -149,11 +151,11 @@ def test_pressing_an_area_focuses_its_claims_and_their_links() -> None:
     assert [step["value"] for step in projected["path"]] == ["estate", "area:10"]
 
 
-def test_pressing_a_claim_focuses_it_with_its_neighbours_and_details() -> None:
+def test_double_clicking_a_claim_drills_into_it_with_its_neighbours_and_details() -> None:
     held = _architecture()
-    held.press("area:10")
+    held.double_click("area:10")
 
-    assert held.press("claim:1") is None
+    assert held.double_click("claim:1") is None
     projected = held.projection()
 
     assert projected["focus"] == {"level": "object", "claim_id": 1, "area_id": 10}
@@ -163,26 +165,109 @@ def test_pressing_a_claim_focuses_it_with_its_neighbours_and_details() -> None:
     assert ["Object", "rey_lib:Alpha"] in projected["details"]["rows"]
 
 
-def test_pressing_the_focused_claim_opens_it_as_its_governed_subject() -> None:
+# -- interaction (#1099): click selects, double-click drills, right-click opens a claim --
+
+def test_a_first_click_selects_and_the_projection_highlights_its_connections() -> None:
     held = _architecture()
-    held.press("claim:1")
+    held.double_click("area:10")
 
-    opened = held.press("claim:1")
+    assert held.click("claim:1") is None
+    projected = held.projection()
 
-    assert opened == {"node_type": CLAIM_NODE_TYPE, **READ["claims"][0]}
-    # It answers what the claim is -- nothing about signing, hosts or panels.
-    assert not {"reference", "application", "action", "target"} & set(opened)
+    assert projected["selected"] == "claim:1"
+    marks = {n["id"]: n["highlight"] for n in projected["nodes"]}
+    # 1 links to 2 and (through area 20) out; 4 links to 2 -- the second ring.
+    assert marks == {"claim:1": ["focus", "first"], "claim:2": ["first"],
+                     "area:20": ["first"], "claim:4": ["second"]}
+    edges = {e["id"]: e["highlight"] for e in projected["edges"]}
+    assert edges == {"relationship:1:2": ["first"], "relationship:1:3:area:20": ["first"],
+                     "relationship:4:2:claim:4": ["second"]}
 
 
-def test_open_claim_refuses_a_claim_the_map_does_not_hold() -> None:
-    with pytest.raises(ConfigError, match="no claim"):
-        _architecture().open_claim(99)
+@pytest.mark.parametrize("drill", [[], ["area:10"], ["area:10", "claim:1"]],
+                         ids=["from the estate", "from an area", "from the claim itself"])
+def test_a_right_click_on_a_claim_opens_the_same_record_at_any_focus(drill: list[str]) -> None:
+    held = _architecture()
+    for node in drill:
+        held.double_click(node)
+
+    assert held.context_click("claim:1") == {"node_type": CLAIM_NODE_TYPE, **READ["claims"][0]}
+
+
+def test_a_right_click_on_a_held_non_claim_changes_nothing() -> None:
+    held = _architecture()
+    before = held.projection()
+
+    assert held.context_click("area:10") is None
+    assert held.projection() == before
+
+
+def test_a_click_never_opens_however_often_it_repeats() -> None:
+    held = _architecture()
+    held.double_click("area:10")
+
+    assert held.click("claim:1") is None
+    assert held.click("claim:1") is None
+    assert held.projection()["selected"] == "claim:1"
+
+
+def test_a_click_on_another_node_moves_the_selection() -> None:
+    held = _architecture()
+    held.double_click("area:10")
+    held.click("claim:1")
+
+    held.click("claim:2")
+
+    assert held.projection()["selected"] == "claim:2"
+
+
+def test_a_click_on_no_node_clears_the_selection() -> None:
+    held = _architecture()
+    held.click("area:10")
+
+    assert held.click(None) is None
+    assert held.projection()["selected"] is None
+    assert held.click("area:10") is None  # selected again, not opened
+
+
+def test_a_double_click_drills_clears_the_selection_and_never_opens() -> None:
+    held = _architecture()
+    held.click("claim:1")
+
+    assert held.double_click("claim:1") is None
+    assert held.projection()["focus"]["level"] == "object"
+    assert held.projection()["selected"] is None
+    assert held.double_click("claim:1") is None  # a focused claim is never opened by drilling
+
+
+@pytest.mark.parametrize("node", ["claim:99", "area:99", "claim:x", "table:run"])
+def test_a_click_or_double_click_on_a_node_the_map_does_not_hold_is_refused(node: str) -> None:
+    held = _architecture()
+
+    with pytest.raises(ConfigError, match="no node"):
+        held.click(node)
+    with pytest.raises(ConfigError, match="no node"):
+        held.double_click(node)
+    with pytest.raises(ConfigError, match="no node"):
+        held.context_click(node)
+    assert held.projection()["selected"] is None
+
+
+def test_an_opened_claim_answers_only_what_it_is() -> None:
+    record = _architecture().context_click("claim:1")
+
+    # Its governed record -- nothing about signing, hosts, actions or panels.
+    assert not {"reference", "application", "action", "target", "panel"} & set(record)
+
+
+def test_the_map_has_no_separate_record_lookup() -> None:
+    assert not hasattr(_architecture(), "record")
 
 
 def test_the_path_moves_the_focus_back() -> None:
     held = _architecture()
-    held.press("area:10")
-    held.press("claim:1")
+    held.double_click("area:10")
+    held.double_click("claim:1")
 
     held.focus(level="estate")
 
@@ -234,19 +319,41 @@ def test_a_schema_projects_its_tables_and_foreign_keys_closed() -> None:
         ("table:run_log", "table:run"), ("table:run_log", "external:code.installation")]
 
 
-def test_pressing_a_table_opens_it_to_its_columns_and_again_closes_it() -> None:
+def test_double_clicking_a_table_opens_it_to_its_columns_and_again_closes_it() -> None:
     held = _schema()
 
-    held.press("table:run")
+    held.double_click("table:run")
     run = next(n for n in held.projection()["nodes"] if n["id"] == "table:run")
     assert run["columns"] == [
         {"name": "run_id", "type": "bigint", "nullable": False, "primary_key": True},
         {"name": "note", "type": "text", "nullable": True, "primary_key": False}]
 
-    held.press("table:run")
+    held.double_click("table:run")
     assert held.projection()["focus"] == {"opened": []}
 
 
 def test_a_schema_map_has_no_claims_to_open() -> None:
-    with pytest.raises(ConfigError, match="no claim"):
-        _schema().open_claim(1)
+    with pytest.raises(ConfigError, match="no node"):
+        _schema().context_click("claim:1")
+
+
+def test_a_schema_map_selects_a_table_and_never_opens() -> None:
+    held = _schema()
+
+    assert held.click("table:run") is None
+    assert held.context_click("table:run") is None
+    projected = held.projection()
+    assert projected["selected"] == "table:run"
+    assert {n["id"]: n["highlight"] for n in projected["nodes"]}["table:run_log"] == ["first"]
+
+
+def test_object_map_projects_its_legend_at_every_focus():
+    obj = _architecture()
+    legend = obj.projection()["legend"]
+    assert {entry["label"] for entry in legend} >= {
+        "Architecture area", "Object — supported", "Second-order links",
+    }
+    obj.double_click("area:10")
+    assert obj.projection()["legend"] == legend
+    obj.double_click("claim:1")
+    assert obj.projection()["legend"] == legend

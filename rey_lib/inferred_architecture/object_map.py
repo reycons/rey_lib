@@ -15,11 +15,15 @@ database read (``rey_lib.db.database_objects.DatabaseSchema``): the tables and
 columns stay the database domain's objects; the map owns only how they are
 drawn, related and focused.
 
-A projection is semantic -- nodes, edges, the path back and the focused
-object's details. How it is laid out and styled is the viewer's.
+A projection is semantic -- nodes, edges, the path back, the focused object's
+details, and which node is selected with the connections it highlights. How it
+is laid out and styled is the viewer's.
 
-``open_claim`` answers what a claim IS as a governed subject and stops there:
-signing it, choosing what opens it and where, are not the map's (#1099).
+The map owns what an interaction means (#1099): a ``click`` selects a node; a
+``double_click`` drills; a ``context_click`` (a right-click) on a claim opens
+it. Only the last ever opens, and it answers what the claim IS as a governed
+record and stops there: signing it, choosing what opens it and where, are not
+the map's.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from rey_lib.files import read_text_file
 
 __all__ = ["CLAIM_NODE_TYPE", "OBJECT_PROJECTION", "SCHEMA_PROJECTION", "ObjectMap"]
 
-#: The node type a claim is governed as -- the subject open_claim answers.
+#: The node type a claim is governed as -- the record ``record`` answers.
 CLAIM_NODE_TYPE: Final = "canonical_object"
 
 #: The two projections, named by the subject that opens them.
@@ -75,10 +79,17 @@ class ObjectMap:
             OBJECT_PROJECTION: self._object_projection,
             SCHEMA_PROJECTION: self._schema_projection,
         }
-        self._press: dict[str, Callable[[str], dict[str, Any] | None]] = {
-            OBJECT_PROJECTION: self._object_press,
-            SCHEMA_PROJECTION: self._schema_press,
+        self._drill: dict[str, Callable[[str], None]] = {
+            OBJECT_PROJECTION: self._object_drill,
+            SCHEMA_PROJECTION: self._schema_drill,
         }
+        self._holds: dict[str, Callable[[str], bool]] = {
+            OBJECT_PROJECTION: self._holds_object_node,
+            SCHEMA_PROJECTION: self._holds_schema_node,
+        }
+        #: The selected node (#1099), which a click sets and the projection
+        #: highlights. None when nothing is selected.
+        self._selected: str | None = None
 
     # -- opening ---------------------------------------------------------------
 
@@ -141,37 +152,99 @@ class ObjectMap:
         else:
             raise ConfigError(f"The map has no screen {focus!r}.")
 
-    def press(self, node_id: str) -> dict[str, Any] | None:
-        """What pressing one node means: a new focus, or the claim it opens.
+    def click(self, node_id: str | None) -> None:
+        """Select (#1099): the node becomes the selection; the projection
+        highlights its connections. A click on no node clears it. Never opens.
 
-        Returns:
-            None when the press moved the focus (the projection says where), or
-            the governed subject a pressed, focused claim opens (``open_claim``).
-        """
-        return self._press[self.projection_kind](str(node_id))
-
-    def open_claim(self, claim_id: Any) -> dict[str, Any]:
-        """The claim, as the governed subject it is.
-
-        Only what the claim IS -- its node type and its own fields. Which action
-        that subject offers, and what opens it, are its declaration's.
+        Whether a node is one this map holds is its own inventory's answer,
+        checked before anything changes.
 
         Raises:
-            ConfigError: When this map holds no such claim.
+            ConfigError: When the node is none this map holds.
         """
-        claim = self._claim(claim_id)
-        if claim is None:
-            raise ConfigError(f"The map holds no claim {claim_id!r}.")
-        return {"node_type": CLAIM_NODE_TYPE, **claim}
+        if not node_id:
+            self._selected = None
+            return
+        node_id = str(node_id)
+        if not self._holds[self.projection_kind](node_id):
+            raise ConfigError(f"The map has no node {node_id!r}.")
+        self._selected = node_id
+
+    def context_click(self, node_id: str) -> dict[str, Any] | None:
+        """Open (#1099): a right-click on a claim opens the subject it represents.
+
+        Validity is this map's own inventory's answer, never the screen on show,
+        so the same claim opens from any focus. A node this map holds that is no
+        claim -- an area, a table -- has no context-click behaviour: nothing
+        changes.
+
+        Returns:
+            For a claim, its governed record -- what the claim IS: its node type
+            and its own fields. Which action that record offers, and what opens
+            it, are its declaration's, never the map's. None for any other node.
+
+        Raises:
+            ConfigError: When the node is none this map holds.
+        """
+        node_id = str(node_id or "")
+        if not self._holds[self.projection_kind](node_id):
+            raise ConfigError(f"The map has no node {node_id!r}.")
+        claim = self._claim_keyed(node_id)
+        return {"node_type": CLAIM_NODE_TYPE, **claim} if claim is not None else None
+
+    def double_click(self, node_id: str) -> None:
+        """Drill (#1099): move the focus through the node; the projection says where.
+
+        Never opens. The selection belonged to the screen being left, so it
+        clears.
+
+        Raises:
+            ConfigError: When the node is none this map holds.
+        """
+        node_id = str(node_id or "")
+        if not self._holds[self.projection_kind](node_id):
+            raise ConfigError(f"The map has no node {node_id!r}.")
+        self._selected = None
+        self._drill[self.projection_kind](node_id)
 
     def projection(self) -> dict[str, Any]:
-        """The focused screen: nodes, edges, the path back and the details."""
+        """The focused screen: nodes, edges, the path back, the details, and the
+        selected node with the connections it highlights."""
+        screen = self._project[self.projection_kind]()
+        selected = self._marked(screen["nodes"], screen["edges"])
         return {
             "subject": dict(self.subject),
             "projection": self.projection_kind,
             "focus": dict(self._focus),
-            **self._project[self.projection_kind](),
+            "selected": selected,
+            **screen,
         }
+
+    def _marked(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str | None:
+        """Mark the selected node and its connections on this screen; the selection shown.
+
+        ``highlight`` on every node and edge: ``focus`` the selected node,
+        ``first`` it and what it links to directly (and the links among those),
+        ``second`` what those link to next -- empty when nothing on this screen
+        is selected.
+        """
+        on_screen = {node["id"] for node in nodes}
+        selected = self._selected if self._selected in on_screen else None
+        near: dict[str, set[str]] = {}
+        for edge in edges:
+            near.setdefault(edge["source"], set()).add(edge["target"])
+            near.setdefault(edge["target"], set()).add(edge["source"])
+        first = (near.get(selected, set()) - {selected}) if selected else set()
+        second = set().union(*(near.get(one, set()) for one in first)) - first - {selected}
+        for node in nodes:
+            node["highlight"] = (["focus", "first"] if node["id"] == selected else
+                                 ["first"] if node["id"] in first else
+                                 ["second"] if node["id"] in second else [])
+        for edge in edges:
+            ends = {edge["source"], edge["target"]}
+            edge["highlight"] = (["first"] if selected in ends or ends <= first else
+                                 ["second"] if ends & first and ends & second else [])
+        return selected
 
     # -- the object projection -------------------------------------------------
 
@@ -181,24 +254,32 @@ class ObjectMap:
         return next((c for c in self._read.get("claims", [])
                      if c.get("canonical_object_id") == int(claim_id)), None)
 
+    def _claim_keyed(self, key: str) -> dict[str, Any] | None:
+        """The claim of this map's inventory a ``claim:<id>`` key names, or None."""
+        ident = key[len(_CLAIM):] if key.startswith(_CLAIM) else ""
+        return self._claim(ident) if ident.isdigit() else None
+
+    def _holds_object_node(self, node_id: str) -> bool:
+        """Whether this map's inventory holds the area or claim a node names."""
+        if node_id.startswith(_AREA):
+            ident = node_id[len(_AREA):]
+            return ident.isdigit() and self._area(ident) is not None
+        return self._claim_keyed(node_id) is not None
+
     def _area(self, area_id: Any) -> dict[str, Any] | None:
         if area_id is None:
             return None
         return next((a for a in self._read.get("areas", [])
                      if a.get("inferred_architecture_area_id") == int(area_id)), None)
 
-    def _object_press(self, node_id: str) -> dict[str, Any] | None:
+    def _object_drill(self, node_id: str) -> None:
         if node_id.startswith(_AREA):
             self.focus(level="area", area_id=int(node_id[len(_AREA):]))
-            return None
-        if not node_id.startswith(_CLAIM):
-            raise ConfigError(f"The map has no node {node_id!r}.")
-        claim_id = int(node_id[len(_CLAIM):])
-        if self._focus.get("level") == "object" and self._focus.get("claim_id") == claim_id:
-            return self.open_claim(claim_id)
-        # The object screen remembers the area it was reached from.
-        self.focus(level="object", claim_id=claim_id, area_id=self._focus.get("area_id"))
-        return None
+            return
+        # Into the claim; the object screen remembers the area it was reached
+        # from. Drilling into the focused claim keeps it in focus.
+        self.focus(level="object", claim_id=int(node_id[len(_CLAIM):]),
+                   area_id=self._focus.get("area_id"))
 
     def _object_projection(self) -> dict[str, Any]:
         level = self._focus.get("level")
@@ -209,7 +290,19 @@ class ObjectMap:
         else:
             nodes, edges = self._estate_screen()
         return {"nodes": nodes, "edges": edges, "path": self._path(),
-                "details": self._details()}
+                "details": self._details(), "legend": self._legend()}
+
+    def _legend(self) -> list[dict[str, str]]:
+        """The shape/color key carried with this map's projection."""
+        return [
+            {"label": "Architecture area", "shape": "ellipse", "color": "#4a6fa5"},
+            {"label": "Object — unevaluated", "shape": "round-rectangle", "color": "#7a8794"},
+            {"label": "Object — supported", "shape": "round-rectangle", "color": "#3f9b5f"},
+            {"label": "Object — unprovable", "shape": "round-rectangle", "color": "#c79a2b"},
+            {"label": "Object — contradicted", "shape": "round-rectangle", "color": "#c0453b"},
+            {"label": "Selected / first-order links", "shape": "line", "color": "var(--selected-edge, var(--accent))"},
+            {"label": "Second-order links", "shape": "line", "color": "var(--progress-fill, var(--accent))"},
+        ]
 
     def _estate_screen(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Every area with its counts, and every area-to-area link with its count."""
@@ -353,14 +446,23 @@ class ObjectMap:
     def _table_names(self) -> list[str]:
         return [str(t["identity"]["name"]) for t in self._read.get("tables", [])]
 
-    def _schema_press(self, node_id: str) -> dict[str, Any] | None:
-        """Pressing a table opens it to its columns, or closes it again."""
+    def _holds_schema_node(self, node_id: str) -> bool:
+        """Whether this schema holds the table, or references the external table, a node names."""
+        if node_id.startswith(_TABLE):
+            return node_id[len(_TABLE):] in self._table_names()
+        if node_id.startswith(_EXTERNAL):
+            return any(f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}" == node_id
+                       for table in self._read.get("tables", [])
+                       for key in table.get("foreign_keys") or [])
+        return False
+
+    def _schema_drill(self, node_id: str) -> None:
+        """Drilling into a table opens it to its columns, or closes it again."""
         if not node_id.startswith(_TABLE):
-            return None
+            return
         name = node_id[len(_TABLE):]
         opened = list(self._focus.get("opened") or [])
         self.focus(opened=[t for t in opened if t != name] if name in opened else [*opened, name])
-        return None
 
     def _schema_projection(self) -> dict[str, Any]:
         """The schema's tables and their foreign keys; opened tables show their columns.
