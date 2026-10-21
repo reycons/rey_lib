@@ -187,6 +187,8 @@ class LaunchedApp:
         #: whether this handle has relinquished it (:meth:`detach`).
         self._handoff: Optional[subprocess.Popen] = None
         self._detached = False
+        #: Whether close has released this launch's process transport (#1168).
+        self._released = False
         if attachment is not None and command is not None:
             # A handoff: the application attaches to the other launcher, so this
             # handle needs no channel, no loop and no transport -- nothing whose
@@ -425,6 +427,15 @@ class LaunchedApp:
                 self._mark("killed after the termination grace")
                 self._process.kill()
                 self.wait()
+        if self._process is not None and not self._released:
+            # The process has ended; its transport is released on its own loop now,
+            # not by a collector after the loop is gone, and whatever still writes to
+            # its output -- an application handed off with it -- keeps a reader (#1168).
+            # Once: a second close finds the loop already closed.
+            self._released = True
+            kept = self._loop.call(async_runtime.release_process, self._process)
+            if kept is not None:
+                async_runtime.drain(kept)
         self._loop.close()
         # Its channel is over with the loop, whatever launched it: whatever reads its
         # events is told so, attached or never, and whatever waits for it to attach

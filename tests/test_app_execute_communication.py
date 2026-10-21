@@ -678,6 +678,81 @@ def test_lifetime_the_map_exits_normally_and_the_file_lives_on() -> None:
         launcher.close()
 
 
+#: The File's role, writing far past what a pipe holds when asked (#1168).
+FLOODER = textwrap.dedent("""
+    import sys
+    from rey_lib.run.app_channel import AttachedApp
+
+    channel = AttachedApp.attach(7)
+    channel.emit({"event": "ready"})
+    try:
+        for command in channel.commands():
+            if command.get("command") == "flood":
+                line = "x" * 1023 + "\\n"
+                for _ in range(int(command["kib"])):
+                    sys.stdout.write(line)
+                sys.stdout.flush()
+                channel.emit({"flooded": command["kib"]})
+            if command.get("command") == "close":
+                break
+    finally:
+        channel.close()
+""")
+
+
+@pytest.mark.parametrize("handle", ["held", "dropped and collected"])
+def test_lifetime_the_file_writes_freely_after_the_map_exits(handle: str) -> None:
+    """(#1168) The Map's output pipe keeps a reader for the File it handed off.
+
+    Released on its own loop at close, the Map handle leaves no transport for a
+    collector to close after the loop is gone, and no pipe that fills unread: the
+    File writes megabytes after the Map has exited, whether the closed handle is
+    kept or collected, and nothing is left unraisable.
+    """
+    import gc
+    import threading
+
+    unraisable: list[str] = []
+    previous_hook = sys.unraisablehook
+    sys.unraisablehook = lambda raised: unraisable.append(repr(raised.exc_value))
+    accepted = LaunchedApp.accepting()
+    launcher = LaunchedApp.launch([sys.executable, "-c", LAUNCHER, FLOODER])
+    try:
+        assert launcher.connected(timeout=WAIT)
+        launcher_events = launcher.events(timeout=WAIT)
+        request_id = next(launcher_events)["request_attachment"]
+        launcher.send({"attachment": accepted.attachment, "request_id": request_id})
+        assert next(launcher_events) == {"launched": True}
+        assert accepted.connected(timeout=WAIT)
+        events = accepted.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+
+        launcher.close()
+        if handle == "dropped and collected":
+            launcher = launcher_events = None
+            gc.collect()
+
+        for kib in (16, 2048):
+            accepted.send({"command": "flood", "kib": kib})
+            assert next(events) == {"flooded": kib}
+        drains = [t for t in threading.enumerate() if t.name == "rey-output-drain"]
+        assert drains and all(t.daemon for t in drains)
+
+        accepted.send({"command": "close"})
+        accepted.wait(timeout=WAIT)
+        for drain in drains:
+            # It ends with its last writer: the File has closed its output.
+            drain.join(timeout=WAIT)
+            assert not drain.is_alive()
+        gc.collect()
+        assert unraisable == []
+    finally:
+        sys.unraisablehook = previous_hook
+        accepted.close()
+        if launcher is not None:
+            launcher.close()
+
+
 def test_lifetime_the_file_exits_and_the_map_stays_healthy() -> None:
     """(#1099) The File closes; the Map is told, goes on answering, then exits normally."""
     launcher, launcher_events, accepted, _ = _launcher_with_a_file()

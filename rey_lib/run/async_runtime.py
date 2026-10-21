@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 
 from concurrent.futures import Future
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
@@ -36,10 +37,12 @@ __all__ = [
     "MessageStream",
     "accept_one",
     "connect_local",
+    "drain",
     "hand_off_process",
     "listen_local",
     "open_process",
     "read_chunks",
+    "release_process",
 ]
 
 #: The only host the channel binds or connects to.
@@ -171,6 +174,53 @@ async def accept_one(
 async def connect_local(port: int) -> MessageStream:
     """Connect to the localhost listener on ``port``."""
     return MessageStream(await anyio.connect_tcp(LOCALHOST, port))
+
+
+async def release_process(process: Process) -> Optional[int]:
+    """Release a finished process's transport on its own loop; keep its output pipe readable.
+
+    Run on the loop that owns the transport, before that loop closes, so nothing is
+    left to be closed by a collector after the loop is gone (#1168). Its stdout
+    pipe may still have writers this process never owned -- an application handed
+    off with this one's output shares it -- so a duplicate of the read end is
+    answered first, for :func:`drain`, and only then is the transport closed. The
+    transport kills nothing that has already exited.
+
+    The one place this module reaches under AnyIO, to the asyncio transport it
+    does not expose.
+
+    Returns:
+        The duplicated read end; None when the process has no output pipe, or its
+        read side has already reached its end -- every writer gone, nothing to keep.
+    """
+    transport = process._process._transport  # type: ignore[attr-defined]  # noqa: SLF001
+    reader = transport.get_pipe_transport(1)
+    kept = None
+    if reader is not None and not reader.is_closing():
+        kept = os.dup(reader.get_extra_info("pipe").fileno())
+    transport.close()
+    return kept
+
+
+def drain(fd: int) -> None:
+    """Read ``fd`` to its end and discard it, on a daemon thread; then close it (#1168).
+
+    Keeps a pipe's last reader alive for writers outliving the handle that read it,
+    so they neither block on a full pipe nor fail on a reader-less one. It owns the
+    descriptor only: it waits for and signals nothing, and a daemon thread holds
+    up no shutdown.
+    """
+    def read() -> None:
+        try:
+            # A duplicate shares the original's open file description, which the
+            # loop made non-blocking; its reader is gone, so this one blocks.
+            os.set_blocking(fd, True)
+            while os.read(fd, 65536):
+                pass
+        finally:
+            os.close(fd)
+
+    threading.Thread(target=read, name="rey-output-drain", daemon=True).start()
 
 
 async def read_chunks(process: Process, deliver: Callable[[str], None]) -> None:
