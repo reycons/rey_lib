@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, ClassVar, Mapping
 
 from rey_lib.config.operation_contract import check_contract
 from rey_lib.config.registration import REGISTRATION_GROUP, discover_registrations
@@ -40,6 +40,7 @@ __all__ = [
     "INVOCATION_RUN",
     "JSON_VALUE_TYPE",
     "build_applications",
+    "configured_application",
 ]
 
 #: The value type of a parameter that carries one governed structured value
@@ -454,9 +455,70 @@ class Application:
         default_factory=dict, hash=False,
     )
 
+    #: The presentation an application's settings require (#1150): what the
+    #: Console's registry presents it with. Not :attr:`panel`, the retired
+    #: application -> panel mapping, which only the Loader openings still read
+    #: until #1151.
+    PANEL_TYPE: ClassVar[str] = "application"
+
     def command(self, name: str) -> ApplicationCommand | None:
         """The command of that name, or None where this application has none."""
         return next((one for one in self.commands if one.name == name), None)
+
+    def projection(self) -> dict[str, Any]:
+        """This application's settings, as they are presented (#1150).
+
+        Its identity and the commands a run can start -- each with its exclusive
+        choices and the parameters it takes -- read from what construction
+        already settled; nothing is re-read or normalized here. A hosted
+        command is not offered: it needs the launcher's channel (#1166). Which
+        marks stand for an alternative, which parameters belong to which modes,
+        and which of a load's objects a parameter configures are carried as
+        declared, never interpreted.
+        """
+        return {
+            "panel_type": self.PANEL_TYPE,
+            "application_id": self.name,
+            "label": self.label,
+            "commands": [
+                {
+                    "name": command.name,
+                    "description": command.description,
+                    "mode_groups": [
+                        {
+                            "name": group.name,
+                            "label": group.label,
+                            "default": group.default,
+                            "modes": [
+                                {"name": mode.name, "label": mode.label, "icons": list(mode.icons)}
+                                for mode in group.modes
+                            ],
+                        }
+                        for group in command.mode_groups
+                    ],
+                    "parameters": [
+                        {
+                            "name": parameter.name,
+                            "value_type": parameter.value_type,
+                            "required": parameter.required,
+                            "description": parameter.description,
+                            "possible_values": list(parameter.possible_values),
+                            "mode_membership": {
+                                group: list(modes) for group, modes in parameter.mode_membership
+                            },
+                            "required_when": {
+                                group: list(modes) for group, modes in parameter.required_when
+                            },
+                            "placeholder": parameter.placeholder,
+                            "placement": parameter.placement,
+                            "load_object": parameter.load_object,
+                        }
+                        for parameter in command.parameters
+                    ],
+                }
+                for command in self.commands if command.invocation == INVOCATION_RUN
+            ],
+        }
 
     def command_line(
         self, ctx: Any, operation: str, inputs: Mapping[str, Any],
@@ -501,6 +563,23 @@ class Application:
         from.
         """
         return tuple(one.name for one in self.commands)
+
+
+def configured_application(ctx: Any, name: str) -> Application:
+    """The application this runtime configured as ``name`` (#1150).
+
+    Read off ``ctx.applications``, which the config load built once; nothing is
+    re-read from configuration here.
+
+    Raises:
+        ConfigError: When this runtime configures no application by that name.
+    """
+    found = next(
+        (one for one in getattr(ctx, "applications", None) or () if one.name == name), None,
+    )
+    if found is None:
+        raise ConfigError(f"No application is configured as '{name}'.")
+    return found
 
 
 def build_applications(

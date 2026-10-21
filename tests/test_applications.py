@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from rey_lib.config.applications import Application, build_applications
+from rey_lib.config.applications import Application, build_applications, configured_application
 from rey_lib.errors.error_utils import ConfigError
 
 
@@ -239,6 +239,61 @@ class TestCommandInvocation:
             {"name": "mode", "possible_values": ["one", {"name": "two"}]},
         ])])[0]
         assert built.parameters[0].possible_values == ("one", "two")
+
+
+class TestSettingsProjection:
+    """The application's settings, as the Console presents them (#1150)."""
+
+    def test_the_configured_application_is_found_by_name_or_refused(self) -> None:
+        built = build([declaration(commands=[{"name": "load"}])])
+        runtime = SimpleNamespace(applications=built)
+
+        assert configured_application(runtime, "loader") is built[0]
+        with pytest.raises(ConfigError, match="No application is configured as 'nothing'"):
+            configured_application(runtime, "nothing")
+
+    def test_it_states_the_application_presentation_and_its_identity(self) -> None:
+        built = build([{**declaration(commands=[{"name": "load"}]), "label": "Loader"}])[0]
+
+        projected = built.projection()
+
+        assert (projected["panel_type"], projected["application_id"], projected["label"]) == (
+            "application", "loader", "Loader")
+
+    def test_only_the_commands_a_run_can_start_are_offered(self) -> None:
+        built = build([declaration(commands=[
+            {"name": "load"}, {"name": "serve", "invocation": "hosted"},
+        ])])[0]
+
+        assert [one["name"] for one in built.projection()["commands"]] == ["load"]
+
+    def test_each_command_carries_its_modes_and_parameters_as_declared(self) -> None:
+        built = build([declaration(commands=[{
+            "name": "load", "description": "Load a file.",
+            "mode_groups": [{"name": "load_shape", "label": "Load", "default": "direct",
+                             "modes": [{"name": "configured"}, {"name": "direct", "label": "Direct"}]}],
+            "parameters": [{
+                "name": "table", "value_type": "string", "required": False,
+                "mode_membership": {"load_shape": ["direct"]},
+                "required_when": {"load_shape": ["direct"]},
+                "placeholder": "schema.table",
+            }],
+        }])])[0]
+
+        command = built.projection()["commands"][0]
+
+        assert command["description"] == "Load a file."
+        assert command["mode_groups"] == [{
+            "name": "load_shape", "label": "Load", "default": "direct",
+            "modes": [{"name": "configured", "label": "", "icons": []},
+                      {"name": "direct", "label": "Direct", "icons": []}],
+        }]
+        assert command["parameters"] == [{
+            "name": "table", "value_type": "string", "required": False, "description": "",
+            "possible_values": [], "mode_membership": {"load_shape": ["direct"]},
+            "required_when": {"load_shape": ["direct"]}, "placeholder": "schema.table",
+            "placement": "form", "load_object": "",
+        }]
 
 
 class TestCommandNames:
