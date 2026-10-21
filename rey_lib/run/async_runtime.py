@@ -93,6 +93,16 @@ class MessageStream:
         message = json.loads(line.decode("utf-8"))
         return message if isinstance(message, dict) else None
 
+    async def receive_within(self, seconds: float) -> tuple[bool, Optional[dict[str, Any]]]:
+        """The next message within ``seconds``: ``(True, message)``, or ``(False, None)`` if none.
+
+        A message is never lost to the bound: what was read of one before the
+        bound fell stays buffered for the next receive.
+        """
+        with anyio.move_on_after(seconds):
+            return True, await self.receive()
+        return False, None
+
     async def close(self) -> None:
         """Close the connection."""
         await self._stream.aclose()
@@ -103,13 +113,24 @@ async def open_process(
     *,
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
+    shared_output: bool = False,
 ) -> Process:
     """Start ``command`` with its output piped: stderr joined to stdout, unbuffered.
 
     As the Console's existing launcher starts an application: an application's
     log lines are on stderr, and a Python child block-buffers a piped stdout, so
     both are taken together and line by line. stdin is closed.
+
+    With ``shared_output``, nothing is piped: the process writes to the very
+    stdout and stderr this process writes to. Applications in a launch and
+    attachment relationship share those streams, and none of them may lose its
+    output because another has ended (#1168).
     """
+    if shared_output:
+        return await anyio.open_process(
+            list(command), stdin=subprocess.DEVNULL, stdout=None, stderr=None, cwd=cwd,
+            env={**dict(env if env is not None else os.environ), "PYTHONUNBUFFERED": "1"},
+        )
     return await anyio.open_process(
         list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, cwd=cwd,
@@ -123,10 +144,14 @@ async def listen_local() -> tuple[Listener[SocketStream], int]:
     return listener, int(listener.extra(SocketAttribute.local_port))
 
 
-async def accept_one(listener: Listener[SocketStream]) -> MessageStream:
-    """Accept the next connection on ``listener``."""
-    # A localhost listener on one address family is a single listener underneath.
-    return MessageStream(await listener.listeners[0].accept())  # type: ignore[attr-defined]
+async def accept_one(
+    listener: Listener[SocketStream], timeout: Optional[float] = None,
+) -> Optional[MessageStream]:
+    """Accept the next connection on ``listener``; None when none came within ``timeout``."""
+    with anyio.move_on_after(timeout):
+        # A localhost listener on one address family is a single listener underneath.
+        return MessageStream(await listener.listeners[0].accept())  # type: ignore[attr-defined]
+    return None
 
 
 async def connect_local(port: int) -> MessageStream:

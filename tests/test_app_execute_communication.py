@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -249,3 +250,276 @@ def test_an_emitted_message_arrives_json_safe_and_otherwise_as_sent() -> None:
     finally:
         print("trace:", app.trace)
         app.close()
+
+
+# -- another attachment to the same launcher (#1099) ----------------------------
+
+def _launch_into(attachment, code: str = CHILD, *args: str):
+    return LaunchedApp.launch([sys.executable, "-c", code, *args], attachment=attachment)
+
+
+def _shared_output_says(capfd: pytest.CaptureFixture[str], text: str) -> str:
+    """What the shared stdout/stderr carried, once it carries ``text`` (or WAIT has passed)."""
+    said = ""
+    deadline = time.monotonic() + WAIT
+    while text not in said and time.monotonic() < deadline:
+        out, err = capfd.readouterr()
+        said += out + err
+        time.sleep(0.05)
+    return said
+
+
+def test_an_application_launched_into_an_accepting_attachment_attaches_there(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    accepted = LaunchedApp.accepting()
+    launched = _launch_into(accepted.attachment)
+    try:
+        # Launched into another's attachment, the launch opens none of its own.
+        assert launched.attachment is None
+        assert accepted.connected(timeout=WAIT)
+        assert (accepted.run_id, accepted.state) == (77, CONNECTED)
+
+        events = accepted.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        accepted.send({"command": "echo", "value": "hello"})
+        assert next(events) == {"event": "echoed", "value": "hello"}
+        accepted.send({"command": "finish"})
+
+        # The process is the launch's; the channel, and its end, the accepting handle's.
+        assert launched.wait(timeout=WAIT) == 3
+        assert accepted.wait(timeout=WAIT) == 0 and accepted.state == EXITED
+        assert list(accepted.output(timeout=WAIT)) == []
+        # Its stdout is not piped to the launch: it is this process's own, shared.
+        assert list(launched.output(timeout=WAIT)) == []
+        assert "child started" in _shared_output_says(capfd, "child started")
+    finally:
+        print("trace:", accepted.trace, launched.trace)
+        launched.close()
+        accepted.close()
+
+
+def test_an_attachment_is_spent_by_its_first_attempt_even_when_refused(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    accepted = LaunchedApp.accepting()
+    wrong = _launch_into({**dict(accepted.attachment or {}), "token": "wrong"})
+    try:
+        assert accepted.connected(timeout=WAIT) is False
+        assert (accepted.run_id, accepted.exit_code) == (None, -1)
+        # Refused, the application sees its channel close and ends on its own.
+        assert wrong.wait(timeout=WAIT) == 3
+
+        # The right token, second, finds nothing listening. (A refused attach
+        # does not end its process today, so the refusal is read, then it is stopped.)
+        right = _launch_into(accepted.attachment)
+        try:
+            refusal = "All connection attempts failed"
+            assert refusal in _shared_output_says(capfd, refusal)
+        finally:
+            right.close()
+    finally:
+        print("trace:", accepted.trace)
+        wrong.close()
+        accepted.close()
+
+
+def test_an_attachment_no_application_uses_in_time_ends_refused() -> None:
+    accepted = LaunchedApp.accepting(timeout=0.5)
+
+    assert accepted.connected(timeout=WAIT) is False
+    assert accepted.wait(timeout=WAIT) == -1
+    assert list(accepted.events(timeout=WAIT)) == []
+    accepted.close()
+
+
+def test_close_asks_an_accepted_application_to_close_and_its_channel_ends() -> None:
+    accepted = LaunchedApp.accepting()
+    launched = _launch_into(accepted.attachment)
+    try:
+        assert accepted.connected(timeout=WAIT)
+
+        accepted.close()
+
+        assert _sent(accepted) == 1 and accepted.exit_code == 0
+        assert launched.wait(timeout=WAIT) == 3
+    finally:
+        launched.close()
+
+
+def test_close_of_an_attachment_never_used_ends_it() -> None:
+    accepted = LaunchedApp.accepting()
+
+    accepted.close()
+
+    assert accepted.run_id is None and accepted.exit_code is not None
+
+
+#: An application that asks its launcher for another attachment, then echoes.
+REQUESTER = textwrap.dedent("""
+    import sys
+    from rey_lib.errors.error_utils import AppError
+    from rey_lib.run.app_channel import AttachedApp
+
+    channel = AttachedApp.attach(8)
+    timeout = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
+    try:
+        channel.emit({"granted": channel.request_attachment(timeout=timeout)})
+    except AppError as refusal:
+        print("refused:", refusal, flush=True)
+        channel.emit({"refused": str(refusal)})
+    for command in channel.commands():
+        if command.get("command") == "echo":
+            channel.emit({"echoed": command.get("value")})
+        if command.get("command") == "close":
+            break
+    channel.close()
+""")
+
+
+def test_a_requested_attachment_is_answered_and_commands_meanwhile_keep_their_order() -> None:
+    app = _launch(REQUESTER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        request_id = next(events)["request_attachment"]
+
+        app.send({"command": "echo", "value": "a"})
+        app.send({"command": "echo", "value": "b"})
+        app.send({"attachment": {"port": 5, "token": "x"}, "request_id": request_id})
+        app.send({"command": "echo", "value": "c"})
+
+        assert next(events) == {"granted": {"port": 5, "token": "x"}}
+        assert [next(events) for _ in range(3)] == [
+            {"echoed": "a"}, {"echoed": "b"}, {"echoed": "c"},
+        ]
+    finally:
+        print("trace:", app.trace)
+        app.close()
+
+
+def test_a_request_not_answered_in_time_is_refused_and_the_channel_goes_on() -> None:
+    app = LaunchedApp.launch([sys.executable, "-c", REQUESTER, "0.5"])
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert "request_attachment" in next(events)
+        assert "within 0.5 s" in next(events)["refused"]
+
+        app.send({"command": "echo", "value": "z"})
+        assert next(events) == {"echoed": "z"}
+    finally:
+        print("trace:", app.trace)
+        app.close()
+
+
+def test_a_request_whose_launcher_closes_the_channel_is_refused(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    accepted = LaunchedApp.accepting()
+    launched = _launch_into(accepted.attachment, REQUESTER)
+    try:
+        assert accepted.connected(timeout=WAIT)
+        assert "request_attachment" in next(accepted.events(timeout=WAIT))
+
+        accepted.stop()
+
+        assert launched.wait(timeout=WAIT) == 0
+        assert "closed the channel" in _shared_output_says(capfd, "closed the channel")
+    finally:
+        launched.close()
+        accepted.close()
+
+
+# -- lifetime: an attachment is a channel, never a lifetime of its own (#1099) ----
+
+@pytest.mark.parametrize("ending", ["finishes", "is stopped"])
+def test_an_attachment_ends_with_its_application_and_is_spent(ending: str) -> None:
+    accepted = LaunchedApp.accepting()
+    launched = _launch_into(accepted.attachment)
+    try:
+        assert accepted.connected(timeout=WAIT)
+        if ending == "finishes":
+            accepted.send({"command": "finish"})
+        else:
+            launched.stop()
+        launched.wait(timeout=WAIT)
+
+        assert accepted.wait(timeout=WAIT) == 0 and accepted.state == EXITED
+        with pytest.raises(StateError, match="attachment is spent"):
+            accepted.send({"command": "echo", "value": "late"})
+    finally:
+        launched.close()
+        accepted.close()
+
+
+#: An attached application that asks for another attachment, launches LOGGER (its
+#: first argument) into it, says so, and then serves until it is told to close.
+LAUNCHER = textwrap.dedent("""
+    import sys
+    from rey_lib.run.app_channel import AttachedApp, LaunchedApp
+
+    channel = AttachedApp.attach(6)
+    attachment = channel.request_attachment(timeout=20.0)
+    launched = LaunchedApp.launch([sys.executable, "-c", sys.argv[1]], attachment=attachment)
+    channel.emit({"launched": True})
+    for command in channel.commands():
+        if command.get("command") == "close":
+            break
+    channel.close()
+""")
+
+#: The application launched into that attachment: it logs and answers each echo.
+LOGGER = textwrap.dedent("""
+    from rey_lib.run.app_channel import AttachedApp
+
+    channel = AttachedApp.attach(7)
+    channel.emit({"event": "ready"})
+    for command in channel.commands():
+        if command.get("command") == "echo":
+            print("logged", command.get("value"), flush=True)
+            channel.emit({"echoed": command.get("value")})
+        if command.get("command") == "close":
+            break
+    channel.close()
+""")
+
+
+@pytest.mark.parametrize("ending", ["closed", "stopped"])
+def test_hard_gate_the_launcher_ending_does_not_end_the_application_it_launched(
+    ending: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HARD GATE (#1099): the launched application owns its lifetime, not its launcher.
+
+    One attached application (the Map's role) is granted an attachment here (the
+    Console's role) and launches another into it (file_operator's role). When
+    the first ends -- closed, or stopped -- the second still answers on its
+    channel and still writes its log.
+    """
+    monkeypatch.setattr(app_channel, "_CLOSE_GRACE_SECONDS", 2.0)
+    accepted = LaunchedApp.accepting()
+    launcher = LaunchedApp.launch([sys.executable, "-c", LAUNCHER, LOGGER])
+    try:
+        assert launcher.connected(timeout=WAIT)
+        launcher_events = launcher.events(timeout=WAIT)
+        request_id = next(launcher_events)["request_attachment"]
+        launcher.send({"attachment": accepted.attachment, "request_id": request_id})
+        assert next(launcher_events) == {"launched": True}
+        assert accepted.connected(timeout=WAIT)
+        events = accepted.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+
+        if ending == "closed":
+            launcher.close()
+        else:
+            launcher.stop()
+            launcher.wait(timeout=WAIT)
+        assert launcher.exit_code is not None
+
+        for value in ("after", "and again"):
+            accepted.send({"command": "echo", "value": value})
+            assert next(events) == {"echoed": value}
+    finally:
+        print("trace:", launcher.trace, accepted.trace)
+        accepted.close()
+        launcher.close()
