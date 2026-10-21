@@ -38,7 +38,6 @@ __all__ = [
     "accept_one",
     "connect_local",
     "drain",
-    "hand_off_process",
     "listen_local",
     "open_process",
     "read_chunks",
@@ -101,39 +100,9 @@ class MessageStream:
         message = json.loads(line.decode("utf-8"))
         return message if isinstance(message, dict) else None
 
-    async def receive_within(self, seconds: float) -> tuple[bool, Optional[dict[str, Any]]]:
-        """The next message within ``seconds``: ``(True, message)``, or ``(False, None)`` if none.
-
-        A message is never lost to the bound: what was read of one before the
-        bound fell stays buffered for the next receive.
-        """
-        with anyio.move_on_after(seconds):
-            return True, await self.receive()
-        return False, None
-
     async def close(self) -> None:
         """Close the connection."""
         await self._stream.aclose()
-
-
-def hand_off_process(
-    command: Sequence[str],
-    *,
-    cwd: Optional[str] = None,
-    env: Optional[Mapping[str, str]] = None,
-) -> subprocess.Popen:
-    """Start ``command`` as a handoff: a process this one starts but does not keep (#1099).
-
-    No event loop and no asyncio transport hold it, so nothing here waits for it
-    or ends it when this process's handle on it is dropped, closed or exits --
-    unlike :func:`open_process`, whose transport kills a still-running child
-    when it is closed or collected. It writes to the very stdout and stderr
-    this process writes to, unbuffered; stdin is closed.
-    """
-    return subprocess.Popen(
-        list(command), stdin=subprocess.DEVNULL, cwd=cwd,
-        env={**dict(env if env is not None else os.environ), "PYTHONUNBUFFERED": "1"},
-    )
 
 
 async def open_process(

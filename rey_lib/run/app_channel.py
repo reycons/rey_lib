@@ -6,15 +6,13 @@ The shared app communication every application uses alike -- workflow_app, ai_ap
 -- separated from the Run it used to live on (backlog 1042, user 2026-10-17):
 
     LaunchedApp   the launcher's end: launch / launch_operation, the child process,
-                  the channel, the application's events and stdout, send, close;
-                  or (accepting) the same end for an application launched elsewhere
+                  the channel, the application's events and stdout, send, close
     AttachedApp   the application's end: attach(run_id), commands in, emit out
-                  (its values made JSON-safe), request_attachment
+                  (its values made JSON-safe)
 
-An attachment is one listening port and one one-time token. An attached
-application may ask its launcher for another (``request_attachment``) and launch
-another application into it (``launch(attachment=...)``): that application
-attaches to the same launcher, exactly as one the launcher started itself (#1099).
+An attachment is one listening port and one one-time token, for the one
+application its launcher started. An application never launches, attaches or
+holds another: a subject it opens follows that subject's own binding (#1189).
 
 It carries plain messages and owns no application's behaviour or state. The
 application's Run is not part of it: an application attaches with its Application
@@ -27,28 +25,21 @@ from __future__ import annotations
 import os
 import queue
 import secrets
-import subprocess
 import threading
 import time
-from collections import deque
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
-from rey_lib.errors.error_utils import AppError, ConfigError, StateError
+from rey_lib.errors.error_utils import ConfigError, StateError
 from rey_lib.files.json import json_value
 from rey_lib.run import async_runtime
 
 __all__ = [
-    "ATTACH_SECONDS", "AttachedApp", "CONNECTED", "EXITED", "LaunchedApp", "STARTING",
-    "STOPPED",
+    "AttachedApp", "CONNECTED", "EXITED", "LaunchedApp", "STARTING", "STOPPED",
 ]
 
 #: Where a launched application finds its launcher, and the token it proves itself with.
 _ADDRESS_ENV = "REY_APP_EXECUTE_PORT"
 _TOKEN_ENV = "REY_APP_EXECUTE_TOKEN"
-
-#: How long an attachment is open for its application, and how long a request for
-#: one waits for its answer.
-ATTACH_SECONDS = 30.0
 
 #: How long an application asked to close has to end on its own before it is stopped.
 _CLOSE_GRACE_SECONDS = 10.0
@@ -68,12 +59,6 @@ class LaunchedApp:
     It holds the child process, the channel to it, its stdout and the events it
     sends, and -- once the application has said hello -- that application's
     Application Run id. It is not a Run.
-
-    Launched into an attachment another launcher holds, it is a handoff: the
-    application attaches there, not here, and this handle holds only the
-    process -- no loop, no transport -- until :meth:`detach` relinquishes even
-    that (#1099). Accepting (:meth:`accepting`), it holds only the channel: the
-    application is launched elsewhere, into this handle's ``attachment``.
     """
 
     @classmethod
@@ -83,7 +68,6 @@ class LaunchedApp:
         *,
         cwd: Optional[str] = None,
         env: Optional[Mapping[str, str]] = None,
-        attachment: Optional[Mapping[str, Any]] = None,
     ) -> "LaunchedApp":
         """Start an application and hold the execution and channel to it.
 
@@ -98,16 +82,8 @@ class LaunchedApp:
             command: The application's command line.
             cwd: Its working directory.
             env: Added to this process's environment for it.
-            attachment: ``{"port", "token"}`` of an attachment another launcher
-                holds (:meth:`AttachedApp.request_attachment`). The application
-                attaches there; this handle opens no listener, never attaches,
-                and holds only the process, started as a handoff
-                (``async_runtime.hand_off_process``): no loop and no transport
-                own it. Its stdout and stderr are this process's own, shared,
-                not piped here: :meth:`output` is empty. :meth:`detach` then
-                relinquishes it.
         """
-        return cls(command, cwd=cwd, env=env, attachment=attachment)
+        return cls(command, cwd=cwd, env=env)
 
     @classmethod
     def launch_operation(
@@ -116,14 +92,12 @@ class LaunchedApp:
         application: str,
         operation: str,
         inputs: Mapping[str, Any],
-        attachment: Optional[Mapping[str, Any]] = None,
     ) -> "LaunchedApp":
         """Launch one published operation of a configured application (see :meth:`launch`).
 
         The application builds its own invocation from its configuration and
         the operation's semantic ``inputs``
-        (``Application.command_line``); this launches it, into ``attachment``
-        when one is given.
+        (``Application.command_line``); this launches it.
 
         Raises:
             ConfigError: When ``ctx`` configures no such application, or the
@@ -135,33 +109,14 @@ class LaunchedApp:
         )
         if configured is None:
             raise ConfigError(f"application '{application}' is not configured.")
-        return cls.launch(configured.command_line(ctx, operation, inputs), attachment=attachment)
-
-    @classmethod
-    def accepting(cls, timeout: float = ATTACH_SECONDS) -> "LaunchedApp":
-        """Open one attachment for an application launched elsewhere, and hold its end.
-
-        The same one-shot attachment a launch opens -- one listening port, one
-        one-time token, one accepted connection, one hello checked -- with no
-        process: ``attachment`` is handed to whoever launches the application
-        (``launch(attachment=...)``). The first connection consumes it, whether
-        its token is accepted or refused. One that does not come within
-        ``timeout`` seconds closes it: the handle is then refused and ended.
-
-        The application's events arrive, and commands go to it, exactly as for
-        one launched here. It has no stdout here. It has ended once its channel
-        closes (exit code 0) or it was refused (exit code -1).
-        """
-        return cls(None, cwd=None, env=None, accept_seconds=timeout)
+        return cls.launch(configured.command_line(ctx, operation, inputs))
 
     def __init__(
         self,
-        command: Optional[Sequence[str]],
+        command: Sequence[str],
         *,
         cwd: Optional[str],
         env: Optional[Mapping[str, str]],
-        attachment: Optional[Mapping[str, Any]] = None,
-        accept_seconds: Optional[float] = None,
     ) -> None:
         self._io = async_runtime
         self.state = STARTING
@@ -180,41 +135,14 @@ class LaunchedApp:
         self._connected: queue.Queue[bool] = queue.Queue(maxsize=1)
         self._channel: Any = None
         self._process: Any = None
-        #: This handle's own attachment, ``{"port", "token"}``; None when launched
-        #: into another launcher's.
-        self.attachment: Optional[dict[str, Any]] = None
-        #: Launched into another's attachment: the handed-off process, and
-        #: whether this handle has relinquished it (:meth:`detach`).
-        self._handoff: Optional[subprocess.Popen] = None
-        self._detached = False
         #: Whether close has released this launch's process transport (#1168).
         self._released = False
-        if attachment is not None and command is not None:
-            # A handoff: the application attaches to the other launcher, so this
-            # handle needs no channel, no loop and no transport -- nothing whose
-            # cleanup would wait for the application or end it (#1099).
-            child_env = {**os.environ, **dict(env or {}),
-                         _ADDRESS_ENV: str(attachment.get("port")),
-                         _TOKEN_ENV: str(attachment.get("token"))}
-            self._handoff = async_runtime.hand_off_process(list(command), cwd=cwd, env=child_env)
-            self._mark("process handed off")
-            self._events.put(None)
-            self._output.put(None)
-            self._connected.put(False)
-            return
         self._loop = async_runtime.Loop()
         listener, port = self._loop.call(async_runtime.listen_local)
         #: The attachment's listener, until the first attempt spends it -- held so a
         #: process that ends first can close it: it can no longer attach (#1175).
         self._listener = listener
-        self.attachment = {"port": port, "token": self._token}
-        accepting = self._loop.start(self._accept, listener, accept_seconds)
-        if command is None:
-            # Accepting: the application is launched elsewhere; this end has ended
-            # once its channel has.
-            self._output.put(None)
-            self._exited = accepting
-            return
+        self._loop.start(self._accept, listener)
         child_env = {**os.environ, **dict(env or {}),
                      _ADDRESS_ENV: str(port), _TOKEN_ENV: self._token}
         self._process = self._loop.call(self._open, list(command), cwd, child_env)
@@ -226,7 +154,7 @@ class LaunchedApp:
                     env: Mapping[str, str]) -> Any:
         return await self._io.open_process(command, cwd=cwd, env=env)
 
-    async def _accept(self, listener: Any, timeout: Optional[float]) -> None:
+    async def _accept(self, listener: Any) -> None:
         """Accept the application's attachment, check its token, then relay its events.
 
         One connection is accepted and the listener closed before its hello is
@@ -234,7 +162,7 @@ class LaunchedApp:
         """
         self._mark("accepting")
         try:
-            channel = await self._io.accept_one(listener, timeout)
+            channel = await self._io.accept_one(listener, None)
         except async_runtime.CLOSED_ERRORS:
             # Closed under the accept: the process ended before attaching (#1175).
             channel = None
@@ -262,22 +190,18 @@ class LaunchedApp:
             self._events.put(message)
         self._mark("channel closed")
         self._events.put(None)
-        if self._process is None:
-            self._ended(0)
 
     def _refused(self) -> None:
         """The application did not attach: say so, and end its events.
 
-        Its events end whatever launched it: no channel will carry any (#1175). A
-        handle with no process has ended too; a process's end is its own exit.
+        Its events end: no channel will carry any (#1175). Its process's end is
+        its own exit.
         """
         self._connected.put(False)
         self._events.put(None)
-        if self._process is None:
-            self._ended(-1)
 
     def _ended(self, exit_code: int) -> None:
-        """An accepting handle's end: its channel is over."""
+        """This handle's end, where no exit was observed: its channel is over."""
         self.exit_code = exit_code
         self._mark(f"ended ({exit_code})")
         if self.state != STOPPED:
@@ -305,13 +229,10 @@ class LaunchedApp:
         """Send one plain message -- a command -- to the application.
 
         Raises:
-            StateError: Before the application has attached; or, accepting,
-                once it has ended -- an attachment does not outlive its application.
+            StateError: Before the application has attached.
         """
         if self._channel is None:
             raise StateError("the launched application has not attached yet.")
-        if self._process is None and self.exit_code is not None:
-            raise StateError("the attached application has ended; its attachment is spent.")
         self._loop.call(self._channel.send, message)
         self._mark("command sent")
 
@@ -337,40 +258,10 @@ class LaunchedApp:
                 return
             yield chunk
 
-    def detach(self) -> None:
-        """Relinquish an application launched into another's attachment (#1099).
-
-        The handoff completes: the application lives its own life, attached to
-        the other launcher. After this, :meth:`close`, :meth:`stop` and dropping
-        this handle neither signal the application nor wait for it, and this
-        process may exit while it runs. :meth:`wait` still observes its end --
-        observing it owns nothing.
-
-        Raises:
-            StateError: When this handle launched no application into another's
-                attachment: only a handoff can be relinquished.
-        """
-        if self._handoff is None:
-            raise StateError("only an application launched into an attachment can be detached.")
-        self._detached = True
-        self._mark("detached")
-
     def stop(self) -> None:
-        """Terminate the application; accepting, close its channel instead.
-
-        A detached handoff is not this handle's to stop: nothing is done.
-        """
-        if self._handoff is not None:
-            if not self._detached and self._handoff.poll() is None:
-                self.state = STOPPED
-                self._handoff.terminate()
-            return
+        """Terminate the application."""
         if self.exit_code is None:
             self.state = STOPPED
-            if self._process is None:
-                if self._channel is not None:
-                    self._loop.call(self._channel.close)
-                return
             self._process.terminate()
 
     def wait(self, timeout: Optional[float] = None) -> Optional[int]:
@@ -379,14 +270,6 @@ class LaunchedApp:
         Raises:
             TimeoutError: When it has not ended within ``timeout`` seconds.
         """
-        if self._handoff is not None:
-            try:
-                self.exit_code = self._handoff.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as exc:
-                raise TimeoutError(f"the application did not end within {timeout} s.") from exc
-            if self.state != STOPPED:
-                self.state = EXITED
-            return self.exit_code
         self._exited.result(timeout=timeout)
         return self.exit_code
 
@@ -400,16 +283,8 @@ class LaunchedApp:
         (``{"command": "close"}``) and given ``_CLOSE_GRACE_SECONDS`` to end on its
         own; one that has not ended by then, or never attached, is stopped, and
         killed if it has not ended ``_KILL_GRACE_SECONDS`` after that. One
-        that has already ended is not asked. Accepting, stopping closes the
-        channel, and an attachment not yet used is closed with the loop. A
-        handoff not yet detached is stopped and waited for; a detached one is
-        left alone -- nothing is signalled and nothing waited for.
+        that has already ended is not asked.
         """
-        if self._handoff is not None:
-            if not self._detached:
-                self.stop()
-                self.wait()
-            return
         if self.run_id is not None and self.exit_code is None:
             self.send({"command": "close"})
             try:
@@ -418,7 +293,7 @@ class LaunchedApp:
                 # It did not end when asked; it is stopped below.
                 pass
         self.stop()
-        if self.exit_code is None and self._process is not None:
+        if self.exit_code is None:
             # SIGTERM is cooperative where its application declared a termination
             # policy (#1182): bounded, then killed -- this handle's own process only.
             try:
@@ -427,10 +302,10 @@ class LaunchedApp:
                 self._mark("killed after the termination grace")
                 self._process.kill()
                 self.wait()
-        if self._process is not None and not self._released:
+        if not self._released:
             # The process has ended; its transport is released on its own loop now,
             # not by a collector after the loop is gone, and whatever still writes to
-            # its output -- an application handed off with it -- keeps a reader (#1168).
+            # its output keeps a reader (#1168).
             # Once: a second close finds the loop already closed.
             self._released = True
             kept = self._loop.call(async_runtime.release_process, self._process)
@@ -489,77 +364,11 @@ class AttachedApp:
             raise
         # One sender at a time: an application may emit from more than one thread.
         self._sending = threading.Lock()
-        # One reader at a time, and one order: what the launcher sent while a
-        # request awaited its answer is held here and read first, as it came.
-        self._reading = threading.Lock()
-        self._held: deque[dict[str, Any]] = deque()
 
     def commands(self) -> Iterator[dict[str, Any]]:
         """The launcher's commands, in order, until it closes the channel."""
-        while (message := self._next()) is not None:
+        while (message := self._loop.call(self._channel.receive)) is not None:
             yield message
-
-    def request_attachment(self, timeout: float = ATTACH_SECONDS) -> dict[str, Any]:
-        """Ask the launcher for one more attachment to it, for another application.
-
-        The launcher answers ``{"port", "token"}``: one one-shot attachment, as
-        it opens for an application it launches itself. Launching another
-        application into it (``LaunchedApp.launch(attachment=...)``) attaches
-        that application to the same launcher. Commands that arrive meanwhile
-        are kept, in order, for :meth:`commands`.
-
-        Returns:
-            The attachment, with the ``request_id`` it was granted for: what
-            :meth:`report_ended` names it by.
-
-        Raises:
-            AppError: When no attachment is answered within ``timeout`` seconds,
-                or the launcher closes the channel first.
-        """
-        request_id = secrets.token_hex(8)
-        self.emit({"request_attachment": request_id})
-        deadline = time.monotonic() + timeout
-        with self._reading:
-            while (remaining := deadline - time.monotonic()) > 0:
-                arrived, message = self._loop.call(self._channel.receive_within, remaining)
-                if not arrived:
-                    break
-                if message is None:
-                    raise AppError("The launcher closed the channel before granting an attachment.")
-                if message.get("request_id") == request_id and "attachment" in message:
-                    return {**dict(message["attachment"]), "request_id": request_id}
-                self._held.append(message)
-        raise AppError(f"The launcher granted no attachment within {timeout:g} s.")
-
-    def report_ended(self, attachment: Mapping[str, Any], launched: "LaunchedApp") -> None:
-        """Tell the launcher when the application launched into ``attachment`` ends.
-
-        The launcher holds the attachment but not the process: only this end
-        knows whether the application it launched is still running. When it
-        ends, ``{"attachment_ended": <request_id>, "exit_code"}`` is emitted --
-        so an application that ends before attaching is known at once, not
-        after the attachment's bound. One that attached and ends later is the
-        launcher's to ignore. Watched on a thread of its own; nothing here
-        waits.
-        """
-        request_id = attachment.get("request_id")
-
-        def watch() -> None:
-            exit_code = launched.wait()
-            try:
-                self.emit({"attachment_ended": request_id, "exit_code": exit_code})
-            except async_runtime.CLOSED_ERRORS:
-                # This end has detached: there is no launcher left to tell.
-                return
-
-        threading.Thread(target=watch, daemon=True).start()
-
-    def _next(self) -> Optional[dict[str, Any]]:
-        """The next command: one held while a request waited, else the next one sent."""
-        with self._reading:
-            if self._held:
-                return self._held.popleft()
-            return self._loop.call(self._channel.receive)
 
     def emit(self, message: Mapping[str, Any]) -> None:
         """Send one plain message -- state or an event -- to the launcher.
