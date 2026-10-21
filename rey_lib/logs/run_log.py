@@ -43,10 +43,10 @@ from rey_lib.logs.jsonl_handler import SENSITIVE_FIELD
 from rey_lib.logs.phase_timeline import PhaseTimeline
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from rey_lib.errors.error_utils import ConfigError
 
-__all__ = ["RunLog"]
+__all__ = ["RunLog", "RunLogRecord"]
 
 _MIN_LEVEL = 0
 
@@ -166,6 +166,48 @@ def payload_column(record_type: str) -> str | None:
     if kind in FAILURE_RECORD_TYPES:
         return "error_message"
     return TYPE_PAYLOAD_COLUMNS.get(kind)
+
+
+class RunLogRecord:
+    """One persisted run-log record, and the owner of what it means once read.
+
+    Control retrieves the row (``Control.run_log_record``); what the row means
+    is this object's. Its payload is read where the writer put it -- the column
+    ``payload_column`` names for its type -- so no reader holds the record type
+    to column mapping, and a reader and the writer cannot disagree about where a
+    payload lives. The rest of the row is the envelope, the run it belongs to,
+    and a column for every other record type, all empty here.
+    """
+
+    def __init__(self, row: Mapping[str, Any]) -> None:
+        """Hold one row exactly as the control database answered it.
+
+        Args:
+            row: The persisted record, whole (``Control.run_log_record``).
+        """
+        self._row: dict[str, Any] = dict(row)
+
+    def __repr__(self) -> str:
+        return f"RunLogRecord({self.record_type or 'typeless'})"
+
+    @property
+    def record_type(self) -> str:
+        """The record's type, as the writer names it."""
+        return str(self._row.get("record_type") or "").upper()
+
+    @property
+    def carries_payload(self) -> bool:
+        """Whether a record of this type has a payload of its own at all."""
+        return payload_column(self.record_type) is not None
+
+    def payload(self) -> Any:
+        """The record's own payload, or None when it has none.
+
+        None both for a type that carries no payload and for a record whose
+        payload column is empty; ``carries_payload`` tells the two apart.
+        """
+        column = payload_column(self.record_type)
+        return None if column is None else self._row.get(column)
 
 #: The canonical run lineage every durable record carries.
 LINEAGE_FIELDS: tuple[str, ...] = (
