@@ -10,3 +10,4 @@ build/
 .env.*
 *.zip
 .claude/
+node_modules/
