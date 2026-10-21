@@ -25,6 +25,8 @@ Public API
 
 from __future__ import annotations
 
+import signal
+import threading
 import time
 
 from contextlib import contextmanager
@@ -196,21 +198,24 @@ def build_ctx_for_app(
         from rey_lib.logs.log_writer import build_log_writer
 
         AppLogger._configure(ctx, operation, build_log_writer(ctx, operation))
-    except BaseException:
+    except BaseException as exc:
         if started_here is not None:
-            _finish_failed(started_here)
+            # A termination carries the status its application declared; anything
+            # else ending the run here is a failure.
+            _finish_unhanded(started_here,
+                             exc.status if isinstance(exc, Terminated) else "FAILED")
         raise
     return ctx
 
 
-def _finish_failed(run: Any) -> None:
-    """Record a run that ended before its context was handed on as FAILED.
+def _finish_unhanded(run: Any, status: str) -> None:
+    """Record the terminal status of a run that ended before its context was handed on.
 
     Never replaces the error that ended it: a run whose record cannot be closed is
     reported, and the original failure goes on.
     """
     try:
-        run.finish("FAILED")
+        run.finish(status)
     except Exception as exc:  # noqa: BLE001
         error = exc if isinstance(exc, AppError) else AppError(f"unexpected {type(exc).__name__}")
         if error is not exc:
@@ -1018,8 +1023,67 @@ def _surrender_adopted_fields(ctx: Namespace) -> None:
             pass
 
 
+#: What SIGTERM ends an application's run as -- its entry point's termination
+#: policy (#1182) -- and the exit code that termination leaves with.
+TERMINATION_EXIT_CODES: dict[str, int] = {"SUCCEEDED": 0, "ABORTED": 143}
+
+
+class Terminated(SystemExit):
+    """SIGTERM, read as the application's own termination policy said (#1182).
+
+    A SystemExit, so every ``except Exception`` lets it pass unconverted; it carries
+    the run's terminal status, and leaves the process with that status's exit code.
+    """
+
+    def __init__(self, status: str) -> None:
+        super().__init__(TERMINATION_EXIT_CODES[status])
+        self.status = status
+
+
 @contextmanager
-def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
+def app_runtime(
+    *args: Any, on_terminate: Optional[str] = None, **kwargs: Any,
+) -> Iterator[Any]:
+    """The process boundary (:func:`_app_runtime`), with its termination policy.
+
+    ``on_terminate`` is the entry point's answer to what SIGTERM means for this
+    application -- ``SUCCEEDED`` (a normal stop) or ``ABORTED`` (abandoned): the
+    one mechanism installs it on the main thread BEFORE the run is created and
+    restores what it replaced when the process boundary ends. None installs
+    nothing, and SIGTERM keeps its default meaning.
+
+    Raises:
+        ConfigError: When ``on_terminate`` names no termination status.
+    """
+    restore = _terminate_as(on_terminate)
+    try:
+        with _app_runtime(*args, **kwargs) as opened:
+            yield opened
+    finally:
+        restore()
+
+
+def _terminate_as(policy: Optional[str]) -> Any:
+    """Make SIGTERM raise ``Terminated(policy)``; answer the call that restores it.
+
+    Only on the main thread, where Python runs signal handlers; elsewhere, or with
+    no policy, nothing is installed and nothing needs restoring.
+    """
+    if policy is None or threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    if policy not in TERMINATION_EXIT_CODES:
+        raise ConfigError(
+            f"on_terminate must be one of {sorted(TERMINATION_EXIT_CODES)}, not {policy!r}.")
+
+    def _terminate(_signum: int, _frame: Any) -> None:
+        raise Terminated(policy)
+
+    previous = signal.signal(signal.SIGTERM, _terminate)
+    return lambda: signal.signal(signal.SIGTERM, previous)
+
+
+@contextmanager
+def _app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     """Compose the launch context and collect its shared objects when done.
 
     The standard entry point for an application process:
@@ -1057,6 +1121,8 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     # ends the run (#1182).
     run_log = None
     failed = False
+    # The status a termination declared, which nothing below may override.
+    terminal: Optional[str] = None
     try:
         run_log = open_run_log(ctx, phase_started=phase_started)
         register_runtime_object(ctx, run_log)
@@ -1070,6 +1136,11 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         # an ordinary state, and no consumer may construct one lazily instead.
         open_shared_ai(ctx)
         yield ctx, run_log
+    except Terminated as exc:
+        # SIGTERM, as this application's policy reads it (#1182).
+        terminal = exc.status
+        failed = exc.status != "SUCCEEDED"
+        raise
     except SystemExit as exc:
         # Entry points end with sys.exit(code). A zero exit is a successful run
         # that happens to unwind through an exception, so a cleanup failure is
@@ -1114,7 +1185,7 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
                 # application reported through its own exit code. Either is a
                 # failed run.
                 failed = failed or bool(getattr(ctx, "run_failed", False))
-                run.finish("FAILED" if failed else "SUCCEEDED")
+                run.finish(terminal or ("FAILED" if failed else "SUCCEEDED"))
             except Exception as exc:  # noqa: BLE001
                 # Never replace the error that ended the run, and never turn a
                 # successful run into a failed one because its record could not

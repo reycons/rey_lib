@@ -8,13 +8,17 @@ is never finished here.
 
 from __future__ import annotations
 
+import os
+import signal
+import time
+
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from rey_lib.config import bootstrap
-from rey_lib.errors.error_utils import AppError
+from rey_lib.errors.error_utils import AppError, ConfigError
 
 
 class _Run:
@@ -97,3 +101,81 @@ class TestAppRuntimeHoldsItFromThere:
                 pytest.fail("the block must not run")
 
         assert run.finished == ["FAILED"]
+
+
+class TestTerminationPolicy:
+    """SIGTERM ends a run as its application's entry point declared (#1182)."""
+
+    def _handed(self, monkeypatch, run: _Run, **ctx_values: Any) -> None:
+        ctx = SimpleNamespace(run=run, run_id=run.run_id,
+                              run_timestamp="20261021_000000", **ctx_values)
+        monkeypatch.setattr(bootstrap, "build_ctx_for_app", lambda *a, **k: ctx)
+        monkeypatch.setattr(bootstrap, "open_run_log",
+                            lambda ctx, phase_started=None: SimpleNamespace(close=lambda: None))
+        monkeypatch.setattr(bootstrap, "finalize_run_phases", lambda run_log: None)
+        monkeypatch.setattr(bootstrap, "open_shared_ai", lambda ctx: None)
+
+    @pytest.mark.parametrize("policy, code", [("ABORTED", 143), ("SUCCEEDED", 0)])
+    def test_sigterm_finishes_the_run_as_the_policy_says(
+            self, monkeypatch, policy: str, code: int) -> None:
+        run = _Run()
+        self._handed(monkeypatch, run)
+
+        with pytest.raises(bootstrap.Terminated) as ended:
+            with bootstrap.app_runtime("cfg", "app", "run", on_terminate=policy):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+
+        assert run.finished == [policy]
+        assert ended.value.code == code
+
+    def test_a_failure_the_application_reported_never_overrides_the_termination(
+            self, monkeypatch) -> None:
+        run = _Run()
+        self._handed(monkeypatch, run, run_failed=True)
+
+        with pytest.raises(bootstrap.Terminated):
+            with bootstrap.app_runtime("cfg", "app", "run", on_terminate="ABORTED"):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+
+        assert run.finished == ["ABORTED"]
+
+    def test_the_mechanism_is_in_place_before_the_run_exists(self, monkeypatch) -> None:
+        # A SIGTERM while the run is being composed ends it with the policy's status.
+        run = _Run()
+        _started(monkeypatch, run)
+
+        def _terminated_while_composing(*_a: Any, **_k: Any) -> None:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+
+        monkeypatch.setattr(bootstrap, "establish_run_identity", _terminated_while_composing)
+
+        with pytest.raises(bootstrap.Terminated):
+            with bootstrap.app_runtime(ctx=SimpleNamespace(), app_name="app",
+                                       on_terminate="ABORTED"):
+                pytest.fail("the block must not run")
+
+        assert run.finished == ["ABORTED"]
+
+    def test_what_it_replaced_is_restored(self, monkeypatch) -> None:
+        before = signal.getsignal(signal.SIGTERM)
+        self._handed(monkeypatch, _Run())
+
+        with bootstrap.app_runtime("cfg", "app", "run", on_terminate="ABORTED"):
+            assert signal.getsignal(signal.SIGTERM) is not before
+
+        assert signal.getsignal(signal.SIGTERM) is before
+
+    def test_no_policy_installs_nothing(self, monkeypatch) -> None:
+        before = signal.getsignal(signal.SIGTERM)
+        self._handed(monkeypatch, _Run())
+
+        with bootstrap.app_runtime("cfg", "app", "run"):
+            assert signal.getsignal(signal.SIGTERM) is before
+
+    def test_an_unknown_policy_is_refused(self) -> None:
+        with pytest.raises(ConfigError, match="on_terminate"):
+            with bootstrap.app_runtime("cfg", "app", "run", on_terminate="CANCELLED"):
+                pytest.fail("the block must not run")

@@ -330,6 +330,44 @@ class TestEveryEntryPointAdoptedTheBoundary:
 
         assert missing == []
 
+    #: Every application entry point that enters app_runtime (#1182).
+    _TERMINATING_ENTRY_POINTS = _ENTRY_POINTS + (
+        "ai_app/main.py",
+        "workflow_app/main.py",
+        "rey_repository_map/main.py",
+    )
+
+    def test_every_entry_point_declares_its_termination_policy(self) -> None:
+        """What SIGTERM means is the entry point's to say, at every app_runtime it enters.
+
+        The mechanism is the shared runtime's: no entry point installs a SIGTERM
+        handler of its own (#1182).
+        """
+        from rey_lib.config.bootstrap import TERMINATION_EXIT_CODES
+
+        apps = self._apps()
+        offenders = []
+        for name in self._TERMINATING_ENTRY_POINTS:
+            path = apps / name
+            if not path.exists():
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                called = getattr(node.func, "attr", getattr(node.func, "id", ""))
+                if called == "app_runtime":
+                    policy = next((k.value for k in node.keywords if k.arg == "on_terminate"),
+                                  None)
+                    if not (isinstance(policy, ast.Constant)
+                            and policy.value in TERMINATION_EXIT_CODES):
+                        offenders.append(f"{name}:{node.lineno}: no termination policy")
+                if called == "signal" and getattr(node.func, "value", None) is not None \
+                        and getattr(node.func.value, "id", "") == "signal":
+                    offenders.append(f"{name}:{node.lineno}: installs its own handler")
+
+        assert offenders == []
+
     def test_no_entry_point_performs_its_own_teardown(self) -> None:
         """Collection is the boundary's; an app reaching for it takes it back.
 

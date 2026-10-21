@@ -52,6 +52,8 @@ ATTACH_SECONDS = 30.0
 
 #: How long an application asked to close has to end on its own before it is stopped.
 _CLOSE_GRACE_SECONDS = 10.0
+#: How long an application stopped with SIGTERM is given to end before it is killed.
+_KILL_GRACE_SECONDS = 5.0
 
 #: A launched execution's lifecycle: the launch and its connection, not the Run.
 STARTING = "STARTING"
@@ -394,7 +396,8 @@ class LaunchedApp:
 
         An application that has attached and is still running is asked to close
         (``{"command": "close"}``) and given ``_CLOSE_GRACE_SECONDS`` to end on its
-        own; one that has not ended by then, or never attached, is stopped. One
+        own; one that has not ended by then, or never attached, is stopped, and
+        killed if it has not ended ``_KILL_GRACE_SECONDS`` after that. One
         that has already ended is not asked. Accepting, stopping closes the
         channel, and an attachment not yet used is closed with the loop. A
         handoff not yet detached is stopped and waited for; a detached one is
@@ -414,7 +417,14 @@ class LaunchedApp:
                 pass
         self.stop()
         if self.exit_code is None and self._process is not None:
-            self.wait()
+            # SIGTERM is cooperative where its application declared a termination
+            # policy (#1182): bounded, then killed -- this handle's own process only.
+            try:
+                self.wait(timeout=_KILL_GRACE_SECONDS)
+            except TimeoutError:
+                self._mark("killed after the termination grace")
+                self._process.kill()
+                self.wait()
         self._loop.close()
         # Its channel is over with the loop, whatever launched it: whatever reads its
         # events is told so, attached or never, and whatever waits for it to attach

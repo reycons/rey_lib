@@ -229,6 +229,56 @@ def test_closing_a_launch_ends_its_events_whatever_it_reached() -> None:
     assert app.connected(timeout=0) is False
 
 
+#: A served application whose entry point declared ABORTED for SIGTERM (#1182).
+COOPERATIVE = textwrap.dedent("""
+    from rey_lib.config import bootstrap
+    from rey_lib.run.app_channel import AttachedApp
+
+    bootstrap._terminate_as("ABORTED")
+    channel = AttachedApp.attach(8)
+    channel.emit({"event": "ready"})
+    try:
+        for command in channel.commands():
+            pass
+    finally:
+        print("finalized", flush=True)
+        channel.close()
+""")
+
+
+def test_a_stopped_application_with_a_policy_finalizes_and_exits_143() -> None:
+    app = _launch(COOPERATIVE)
+    try:
+        assert app.connected(timeout=WAIT)
+        assert next(app.events(timeout=WAIT)) == {"event": "ready"}
+
+        app.stop()
+
+        assert app.wait(timeout=WAIT) == 143
+        assert "finalized" in "".join(app.output(timeout=WAIT))
+    finally:
+        print("trace:", app.trace)
+        app.close()
+
+
+def test_close_kills_an_application_that_outlives_its_termination_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_channel, "_CLOSE_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(app_channel, "_KILL_GRACE_SECONDS", 0.5)
+    # Ignores the close command and SIGTERM alike: only a kill ends it.
+    app = _launch(SLEEPER.replace(
+        "import time", "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)"))
+    assert app.connected(timeout=WAIT)
+    started = time.monotonic()
+
+    app.close()
+
+    assert time.monotonic() - started < WAIT / 2
+    assert app.exit_code == -9 and app.state == STOPPED
+    assert any("killed" in point for _, point in app.trace)
+
+
 def test_a_failed_attach_leaves_nothing_keeping_the_process_alive() -> None:
     # Nobody listens on port 1: the attach fails, and the process must still end (#1167).
     code = textwrap.dedent("""
