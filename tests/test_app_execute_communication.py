@@ -353,6 +353,8 @@ def test_close_of_an_attachment_never_used_ends_it() -> None:
     accepted.close()
 
     assert accepted.run_id is None and accepted.exit_code is not None
+    # Whatever reads its events is told they are over, not left waiting.
+    assert list(accepted.events()) == []
 
 
 #: An application that asks its launcher for another attachment, then echoes.

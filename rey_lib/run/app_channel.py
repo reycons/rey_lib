@@ -344,6 +344,10 @@ class LaunchedApp:
         if self.exit_code is None and self._process is not None:
             self.wait()
         self._loop.close()
+        if self._process is None:
+            # Accepting, its channel is over with the loop: whatever reads its
+            # events is told so, attached or never.
+            self._events.put(None)
         if self.exit_code is None:
             self._ended(0)
 
