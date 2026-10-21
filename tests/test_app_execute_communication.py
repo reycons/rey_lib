@@ -353,8 +353,47 @@ def test_close_of_an_attachment_never_used_ends_it() -> None:
     accepted.close()
 
     assert accepted.run_id is None and accepted.exit_code is not None
-    # Whatever reads its events is told they are over, not left waiting.
+    # Whatever reads its events is told they are over, not left waiting --
+    # and whatever waits for it to attach is told it never will, at once.
     assert list(accepted.events()) == []
+    started = time.monotonic()
+    assert accepted.connected(timeout=WAIT) is False
+    assert time.monotonic() - started < 1.0
+
+
+#: An attached application that asks for an attachment, launches its first
+#: argument into it, reports when that ends, and serves until closed.
+REPORTING = textwrap.dedent("""
+    import sys
+    from rey_lib.run.app_channel import AttachedApp, LaunchedApp
+
+    channel = AttachedApp.attach(9)
+    attachment = channel.request_attachment(timeout=20.0)
+    launched = LaunchedApp.launch([sys.executable, "-c", sys.argv[1]], attachment=attachment)
+    channel.report_ended(attachment, launched)
+    for command in channel.commands():
+        if command.get("command") == "close":
+            break
+    channel.close()
+""")
+
+
+def test_an_application_that_ends_before_attaching_is_reported_by_its_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Holding a launch, the reporting application does not end on close: stop it soon.
+    monkeypatch.setattr(app_channel, "_CLOSE_GRACE_SECONDS", 0.5)
+    app = LaunchedApp.launch([sys.executable, "-c", REPORTING, "import sys\nsys.exit(4)\n"])
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        request_id = next(events)["request_attachment"]
+        app.send({"attachment": {"port": 1, "token": "unused"}, "request_id": request_id})
+
+        assert next(events) == {"attachment_ended": request_id, "exit_code": 4}
+    finally:
+        print("trace:", app.trace)
+        app.close()
 
 
 #: An application that asks its launcher for another attachment, then echoes.
@@ -391,7 +430,7 @@ def test_a_requested_attachment_is_answered_and_commands_meanwhile_keep_their_or
         app.send({"attachment": {"port": 5, "token": "x"}, "request_id": request_id})
         app.send({"command": "echo", "value": "c"})
 
-        assert next(events) == {"granted": {"port": 5, "token": "x"}}
+        assert next(events) == {"granted": {"port": 5, "token": "x", "request_id": request_id}}
         assert [next(events) for _ in range(3)] == [
             {"echoed": "a"}, {"echoed": "b"}, {"echoed": "c"},
         ]

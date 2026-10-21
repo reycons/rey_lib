@@ -346,8 +346,14 @@ class LaunchedApp:
         self._loop.close()
         if self._process is None:
             # Accepting, its channel is over with the loop: whatever reads its
-            # events is told so, attached or never.
+            # events is told so, attached or never, and whatever waits for it
+            # to attach is told it never will.
             self._events.put(None)
+            try:
+                self._connected.put_nowait(False)
+            except queue.Full:
+                # It had already attached, or been refused: that answer stands.
+                pass
         if self.exit_code is None:
             self._ended(0)
 
@@ -400,6 +406,10 @@ class AttachedApp:
         that application to the same launcher. Commands that arrive meanwhile
         are kept, in order, for :meth:`commands`.
 
+        Returns:
+            The attachment, with the ``request_id`` it was granted for: what
+            :meth:`report_ended` names it by.
+
         Raises:
             AppError: When no attachment is answered within ``timeout`` seconds,
                 or the launcher closes the channel first.
@@ -415,9 +425,32 @@ class AttachedApp:
                 if message is None:
                     raise AppError("The launcher closed the channel before granting an attachment.")
                 if message.get("request_id") == request_id and "attachment" in message:
-                    return dict(message["attachment"])
+                    return {**dict(message["attachment"]), "request_id": request_id}
                 self._held.append(message)
         raise AppError(f"The launcher granted no attachment within {timeout:g} s.")
+
+    def report_ended(self, attachment: Mapping[str, Any], launched: "LaunchedApp") -> None:
+        """Tell the launcher when the application launched into ``attachment`` ends.
+
+        The launcher holds the attachment but not the process: only this end
+        knows whether the application it launched is still running. When it
+        ends, ``{"attachment_ended": <request_id>, "exit_code"}`` is emitted --
+        so an application that ends before attaching is known at once, not
+        after the attachment's bound. One that attached and ends later is the
+        launcher's to ignore. Watched on a thread of its own; nothing here
+        waits.
+        """
+        request_id = attachment.get("request_id")
+
+        def watch() -> None:
+            exit_code = launched.wait()
+            try:
+                self.emit({"attachment_ended": request_id, "exit_code": exit_code})
+            except async_runtime.CLOSED_ERRORS:
+                # This end has detached: there is no launcher left to tell.
+                return
+
+        threading.Thread(target=watch, daemon=True).start()
 
     def _next(self) -> Optional[dict[str, Any]]:
         """The next command: one held while a request waited, else the next one sent."""

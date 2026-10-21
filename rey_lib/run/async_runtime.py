@@ -45,6 +45,10 @@ __all__ = [
 LOCALHOST = "127.0.0.1"
 #: The longest one message may be, framed as one line.
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+#: What sending on a channel raises once it, or the loop driving it, has closed.
+CLOSED_ERRORS: tuple[type[BaseException], ...] = (
+    anyio.ClosedResourceError, anyio.BrokenResourceError, ConnectionError,
+)
 
 
 class Loop:
