@@ -188,6 +188,68 @@ def test_attaching_outside_a_launch_is_refused(monkeypatch: pytest.MonkeyPatch) 
         AttachedApp.attach(1)
 
 
+def test_a_launch_whose_process_ends_before_attaching_is_over() -> None:
+    # Ends at once, on an error it can only print (#1175, #1171).
+    app = _launch("import sys\nprint('ConfigError: no control', file=sys.stderr)\nsys.exit(1)\n")
+    try:
+        assert app.connected(timeout=WAIT) is False
+        assert app.wait(timeout=WAIT) == 1
+        # Its events end: no channel will ever carry any.
+        assert list(app.events(timeout=WAIT)) == []
+        assert "ConfigError: no control" in "".join(app.output(timeout=WAIT))
+        assert app.run_id is None and app.state == EXITED
+    finally:
+        print("trace:", app.trace)
+    started = time.monotonic()
+    app.close()
+    assert time.monotonic() - started < WAIT
+
+
+def test_a_refused_launch_ends_its_events_while_its_process_runs() -> None:
+    app = _launch(SLEEPER.replace(
+        "import time",
+        "import os, time\nos.environ['REY_APP_EXECUTE_TOKEN'] = 'wrong'",
+    ))
+    try:
+        assert app.connected(timeout=WAIT) is False
+        # Refused: no events will come, whether or not the process lives on.
+        assert list(app.events(timeout=WAIT)) == []
+    finally:
+        print("trace:", app.trace)
+        app.close()
+    assert app.exit_code is not None
+
+
+def test_closing_a_launch_ends_its_events_whatever_it_reached() -> None:
+    app = _launch("import time\ntime.sleep(600)\n")
+
+    app.close()
+
+    assert list(app.events(timeout=WAIT)) == []
+    assert app.connected(timeout=0) is False
+
+
+def test_a_failed_attach_leaves_nothing_keeping_the_process_alive() -> None:
+    # Nobody listens on port 1: the attach fails, and the process must still end (#1167).
+    code = textwrap.dedent("""
+        import os
+        os.environ["REY_APP_EXECUTE_PORT"] = "1"
+        os.environ["REY_APP_EXECUTE_TOKEN"] = "t"
+        from rey_lib.run.app_channel import AttachedApp
+        try:
+            AttachedApp.attach(7)
+        except OSError:
+            print("attach failed", flush=True)
+    """)
+    import subprocess
+
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          timeout=WAIT)
+
+    assert done.returncode == 0
+    assert "attach failed" in done.stdout
+
+
 #: A child that emits from several threads at once, then ends.
 EMITTERS = textwrap.dedent("""
     import threading

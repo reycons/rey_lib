@@ -149,6 +149,7 @@ def build_ctx_for_app(
     # identity: the manifest row generates run_manifest_id and the application
     # carries that value as run_id. A child process arrives with the parent's
     # run_id already set and does not start a second run.
+    started_here = None
     if not getattr(ctx, "run_id", None):
         # What the batch is called. Read off the context by Control, because
         # `operation` is a parameter here and Control is built from the context
@@ -176,6 +177,7 @@ def build_ctx_for_app(
             settings=settings,
         )
         ctx.run_id = ctx.run.run_id
+        started_here = ctx.run
     elif getattr(ctx, "shared_control", None) is None:
         # A process that adopted its run still writes governed records under it.
         # Control was opened only when a run was started, so an adopting child
@@ -183,14 +185,40 @@ def build_ctx_for_app(
         # manifest write refused with "this context exposes no shared Control".
         ctx.shared_control = _open_control(ctx)
 
-    # Display and filing only; the identity above is already settled.
-    establish_run_identity(ctx)
+    # A run started here is this function's until the context is handed on: what
+    # fails before then ends it, rather than leaving it RUNNING with nobody left
+    # to finish it (#1182).
+    try:
+        # Display and filing only; the identity above is already settled.
+        establish_run_identity(ctx)
 
-    _settle_log_level(ctx)
-    from rey_lib.logs.log_writer import build_log_writer
+        _settle_log_level(ctx)
+        from rey_lib.logs.log_writer import build_log_writer
 
-    AppLogger._configure(ctx, operation, build_log_writer(ctx, operation))
+        AppLogger._configure(ctx, operation, build_log_writer(ctx, operation))
+    except BaseException:
+        if started_here is not None:
+            _finish_failed(started_here)
+        raise
     return ctx
+
+
+def _finish_failed(run: Any) -> None:
+    """Record a run that ended before its context was handed on as FAILED.
+
+    Never replaces the error that ended it: a run whose record cannot be closed is
+    reported, and the original failure goes on.
+    """
+    try:
+        run.finish("FAILED")
+    except Exception as exc:  # noqa: BLE001
+        error = exc if isinstance(exc, AppError) else AppError(f"unexpected {type(exc).__name__}")
+        if error is not exc:
+            error.__cause__ = exc
+        error.report(
+            f"recording the terminal status of run {getattr(run, 'run_id', '?')}",
+            source=__name__,
+        )
 
 
 #: What a level may be. Read from the one map that applies it, so this cannot
@@ -1024,19 +1052,23 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
     # and claiming to cover them would overstate what the mark measures.
     phase_started = time.monotonic()
     ctx = build_ctx_for_app(*args, **kwargs)
-    run_log = open_run_log(ctx, phase_started=phase_started)
-    register_runtime_object(ctx, run_log)
-    # The run this process started writes through the run log opened for it;
-    # a child Run started under it writes through the same one.
-    started = getattr(ctx, "run", None)
-    if started is not None:
-        started.log = run_log
-
-    # Optional: present only when this installation configures AI. Absent is an
-    # ordinary state, and no consumer may construct one lazily instead.
-    open_shared_ai(ctx)
+    # From here the run is this block's: everything after it is inside the
+    # boundary below, so a failure opening what the run writes through still
+    # ends the run (#1182).
+    run_log = None
     failed = False
     try:
+        run_log = open_run_log(ctx, phase_started=phase_started)
+        register_runtime_object(ctx, run_log)
+        # The run this process started writes through the run log opened for it;
+        # a child Run started under it writes through the same one.
+        started = getattr(ctx, "run", None)
+        if started is not None:
+            started.log = run_log
+
+        # Optional: present only when this installation configures AI. Absent is
+        # an ordinary state, and no consumer may construct one lazily instead.
+        open_shared_ai(ctx)
         yield ctx, run_log
     except SystemExit as exc:
         # Entry points end with sys.exit(code). A zero exit is a successful run
@@ -1066,8 +1098,10 @@ def app_runtime(*args: Any, **kwargs: Any) -> Iterator[Any]:
         # The run's timeline closes here and nowhere else. A finally is what
         # makes it every termination path rather than the four returns anyone
         # thought to annotate -- an unplanned exception ends a run too, and is
-        # the run whose phases are worth the most.
-        finalize_run_phases(run_log)
+        # the run whose phases are worth the most. None when the run log itself
+        # could not be opened.
+        if run_log is not None:
+            finalize_run_phases(run_log)
         # Terminal status first, before anything this run owns is collected.
         # A poll that arrives after the process is gone is answered from the
         # manifest, so the row has to say how the run ended before the run

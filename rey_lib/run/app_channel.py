@@ -200,6 +200,9 @@ class LaunchedApp:
             return
         self._loop = async_runtime.Loop()
         listener, port = self._loop.call(async_runtime.listen_local)
+        #: The attachment's listener, until the first attempt spends it -- held so a
+        #: process that ends first can close it: it can no longer attach (#1175).
+        self._listener = listener
         self.attachment = {"port": port, "token": self._token}
         accepting = self._loop.start(self._accept, listener, accept_seconds)
         if command is None:
@@ -228,10 +231,13 @@ class LaunchedApp:
         self._mark("accepting")
         try:
             channel = await self._io.accept_one(listener, timeout)
+        except async_runtime.CLOSED_ERRORS:
+            # Closed under the accept: the process ended before attaching (#1175).
+            channel = None
         finally:
             await listener.aclose()
         if channel is None:
-            self._mark("not attached in time")
+            self._mark("not attached")
             self._refused()
             return
         self._mark("attached")
@@ -256,10 +262,14 @@ class LaunchedApp:
             self._ended(0)
 
     def _refused(self) -> None:
-        """The application did not attach: say so, and end a handle with no process."""
+        """The application did not attach: say so, and end its events.
+
+        Its events end whatever launched it: no channel will carry any (#1175). A
+        handle with no process has ended too; a process's end is its own exit.
+        """
         self._connected.put(False)
+        self._events.put(None)
         if self._process is None:
-            self._events.put(None)
             self._ended(-1)
 
     def _ended(self, exit_code: int) -> None:
@@ -274,6 +284,10 @@ class LaunchedApp:
         self._mark(f"exit observed ({self.exit_code})")
         if self.state != STOPPED:
             self.state = EXITED
+        if self._channel is None:
+            # Ended before attaching: it can no longer attach, so the attachment is
+            # closed and its accept refused -- the launch is over (#1175).
+            await self._listener.aclose()
         self._output.put(None)
 
     def connected(self, timeout: Optional[float] = None) -> bool:
@@ -402,16 +416,15 @@ class LaunchedApp:
         if self.exit_code is None and self._process is not None:
             self.wait()
         self._loop.close()
-        if self._process is None:
-            # Accepting, its channel is over with the loop: whatever reads its
-            # events is told so, attached or never, and whatever waits for it
-            # to attach is told it never will.
-            self._events.put(None)
-            try:
-                self._connected.put_nowait(False)
-            except queue.Full:
-                # It had already attached, or been refused: that answer stands.
-                pass
+        # Its channel is over with the loop, whatever launched it: whatever reads its
+        # events is told so, attached or never, and whatever waits for it to attach
+        # is told it never will (#1175). Said again where it was already said.
+        self._events.put(None)
+        try:
+            self._connected.put_nowait(False)
+        except queue.Full:
+            # It had already attached, or been refused: that answer stands.
+            pass
         if self.exit_code is None:
             self._ended(0)
 
@@ -441,8 +454,18 @@ class AttachedApp:
         if not port or not token:
             raise StateError("this application was not launched through LaunchedApp.launch.")
         self._loop = async_runtime.Loop()
-        self._channel = self._loop.call(async_runtime.connect_local, int(port))
-        self._loop.call(self._channel.send, {"hello": run_id, "token": token})
+        self._channel: Any = None
+        try:
+            self._channel = self._loop.call(async_runtime.connect_local, int(port))
+            self._loop.call(self._channel.send, {"hello": run_id, "token": token})
+        except BaseException:
+            # Nothing half-built outlives a failed attach: the channel if one was
+            # made, then the loop, whose thread would otherwise keep this process
+            # alive after the failure that ended it (#1167).
+            if self._channel is not None:
+                self._loop.call(self._channel.close)
+            self._loop.close()
+            raise
         # One sender at a time: an application may emit from more than one thread.
         self._sending = threading.Lock()
         # One reader at a time, and one order: what the launcher sent while a
