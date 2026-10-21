@@ -378,11 +378,7 @@ REPORTING = textwrap.dedent("""
 """)
 
 
-def test_an_application_that_ends_before_attaching_is_reported_by_its_attachment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Holding a launch, the reporting application does not end on close: stop it soon.
-    monkeypatch.setattr(app_channel, "_CLOSE_GRACE_SECONDS", 0.5)
+def test_an_application_that_ends_before_attaching_is_reported_by_its_attachment() -> None:
     app = LaunchedApp.launch([sys.executable, "-c", REPORTING, "import sys\nsys.exit(4)\n"])
     try:
         assert app.connected(timeout=WAIT)
@@ -494,8 +490,9 @@ def test_an_attachment_ends_with_its_application_and_is_spent(ending: str) -> No
         accepted.close()
 
 
-#: An attached application that asks for another attachment, launches LOGGER (its
-#: first argument) into it, says so, and then serves until it is told to close.
+#: An attached application (the Map's role) that asks for another attachment,
+#: launches LOGGER (its first argument) into it, reports its end and detaches it --
+#: exactly the Map's sequence -- then answers pings until it is told to close.
 LAUNCHER = textwrap.dedent("""
     import sys
     from rey_lib.run.app_channel import AttachedApp, LaunchedApp
@@ -503,8 +500,12 @@ LAUNCHER = textwrap.dedent("""
     channel = AttachedApp.attach(6)
     attachment = channel.request_attachment(timeout=20.0)
     launched = LaunchedApp.launch([sys.executable, "-c", sys.argv[1]], attachment=attachment)
+    channel.report_ended(attachment, launched)
+    launched.detach()
     channel.emit({"launched": True})
     for command in channel.commands():
+        if command.get("command") == "ping":
+            channel.emit({"pong": command.get("value")})
         if command.get("command") == "close":
             break
     channel.close()
@@ -526,37 +527,36 @@ LOGGER = textwrap.dedent("""
 """)
 
 
-@pytest.mark.parametrize("ending", ["closed", "stopped"])
-def test_hard_gate_the_launcher_ending_does_not_end_the_application_it_launched(
-    ending: str, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """HARD GATE (#1099): the launched application owns its lifetime, not its launcher.
-
-    One attached application (the Map's role) is granted an attachment here (the
-    Console's role) and launches another into it (file_operator's role). When
-    the first ends -- closed, or stopped -- the second still answers on its
-    channel and still writes its log.
-    """
-    monkeypatch.setattr(app_channel, "_CLOSE_GRACE_SECONDS", 2.0)
+def _launcher_with_a_file() -> tuple[LaunchedApp, Any, LaunchedApp, Any]:
+    """The Map's role launched here, its File attached here: both handles and event streams."""
     accepted = LaunchedApp.accepting()
     launcher = LaunchedApp.launch([sys.executable, "-c", LAUNCHER, LOGGER])
+    assert launcher.connected(timeout=WAIT)
+    launcher_events = launcher.events(timeout=WAIT)
+    request_id = next(launcher_events)["request_attachment"]
+    launcher.send({"attachment": accepted.attachment, "request_id": request_id})
+    assert next(launcher_events) == {"launched": True}
+    assert accepted.connected(timeout=WAIT)
+    events = accepted.events(timeout=WAIT)
+    assert next(events) == {"event": "ready"}
+    return launcher, launcher_events, accepted, events
+
+
+def test_lifetime_the_map_exits_normally_and_the_file_lives_on() -> None:
+    """HARD GATE (#1099): Map closes normally -- no grace, no signal -- and the File lives.
+
+    The Map's role launches the File into an attachment, reports it, detaches
+    it, and is told to close: it exits on its own at once. The File still
+    answers on its channel and still writes its log.
+    """
+    launcher, _, accepted, events = _launcher_with_a_file()
     try:
-        assert launcher.connected(timeout=WAIT)
-        launcher_events = launcher.events(timeout=WAIT)
-        request_id = next(launcher_events)["request_attachment"]
-        launcher.send({"attachment": accepted.attachment, "request_id": request_id})
-        assert next(launcher_events) == {"launched": True}
-        assert accepted.connected(timeout=WAIT)
-        events = accepted.events(timeout=WAIT)
-        assert next(events) == {"event": "ready"}
+        started = time.monotonic()
+        launcher.close()
 
-        if ending == "closed":
-            launcher.close()
-        else:
-            launcher.stop()
-            launcher.wait(timeout=WAIT)
-        assert launcher.exit_code is not None
-
+        # Ended by itself, asked once, well inside the close grace: never stopped.
+        assert time.monotonic() - started < app_channel._CLOSE_GRACE_SECONDS / 2  # noqa: SLF001
+        assert (launcher.exit_code, launcher.state) == (0, EXITED)
         for value in ("after", "and again"):
             accepted.send({"command": "echo", "value": value})
             assert next(events) == {"echoed": value}
@@ -564,3 +564,65 @@ def test_hard_gate_the_launcher_ending_does_not_end_the_application_it_launched(
         print("trace:", launcher.trace, accepted.trace)
         accepted.close()
         launcher.close()
+
+
+def test_lifetime_the_file_exits_and_the_map_stays_healthy() -> None:
+    """(#1099) The File closes; the Map is told, goes on answering, then exits normally."""
+    launcher, launcher_events, accepted, _ = _launcher_with_a_file()
+    try:
+        accepted.close()
+
+        ended = next(launcher_events)
+        assert "attachment_ended" in ended and ended["exit_code"] == 0
+        launcher.send({"command": "ping", "value": 1})
+        assert next(launcher_events) == {"pong": 1}
+
+        started = time.monotonic()
+        launcher.close()
+        assert time.monotonic() - started < app_channel._CLOSE_GRACE_SECONDS / 2  # noqa: SLF001
+        assert (launcher.exit_code, launcher.state) == (0, EXITED)
+    finally:
+        print("trace:", launcher.trace, accepted.trace)
+        launcher.close()
+
+
+def test_a_launcher_stopped_outright_leaves_the_file_alive() -> None:
+    """(#1099) Even a launcher killed with SIGTERM takes nothing of the File with it."""
+    launcher, _, accepted, events = _launcher_with_a_file()
+    try:
+        launcher.stop()
+        launcher.wait(timeout=WAIT)
+
+        accepted.send({"command": "echo", "value": "after"})
+        assert next(events) == {"echoed": "after"}
+    finally:
+        accepted.close()
+        launcher.close()
+
+
+def test_a_detached_handoff_is_neither_signalled_nor_waited_for_on_close() -> None:
+    launched = LaunchedApp.launch([sys.executable, "-c", "import time\ntime.sleep(30)\n"],
+                                  attachment={"port": 1, "token": "unused"})
+    handed_off = launched._handoff  # noqa: SLF001 -- the process itself, to prove it lives
+    try:
+        launched.detach()
+        started = time.monotonic()
+
+        launched.close()
+        launched.stop()
+        del launched
+
+        assert time.monotonic() - started < 1.0
+        assert handed_off.poll() is None
+    finally:
+        handed_off.kill()
+        handed_off.wait(timeout=WAIT)
+
+
+def test_only_a_handoff_can_be_detached() -> None:
+    accepted = LaunchedApp.accepting()
+    try:
+        with pytest.raises(StateError, match="only an application launched into an attachment"):
+            accepted.detach()
+    finally:
+        accepted.close()

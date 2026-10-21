@@ -36,6 +36,7 @@ __all__ = [
     "MessageStream",
     "accept_one",
     "connect_local",
+    "hand_off_process",
     "listen_local",
     "open_process",
     "read_chunks",
@@ -112,29 +113,38 @@ class MessageStream:
         await self._stream.aclose()
 
 
+def hand_off_process(
+    command: Sequence[str],
+    *,
+    cwd: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> subprocess.Popen:
+    """Start ``command`` as a handoff: a process this one starts but does not keep (#1099).
+
+    No event loop and no asyncio transport hold it, so nothing here waits for it
+    or ends it when this process's handle on it is dropped, closed or exits --
+    unlike :func:`open_process`, whose transport kills a still-running child
+    when it is closed or collected. It writes to the very stdout and stderr
+    this process writes to, unbuffered; stdin is closed.
+    """
+    return subprocess.Popen(
+        list(command), stdin=subprocess.DEVNULL, cwd=cwd,
+        env={**dict(env if env is not None else os.environ), "PYTHONUNBUFFERED": "1"},
+    )
+
+
 async def open_process(
     command: Sequence[str],
     *,
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
-    shared_output: bool = False,
 ) -> Process:
     """Start ``command`` with its output piped: stderr joined to stdout, unbuffered.
 
     As the Console's existing launcher starts an application: an application's
     log lines are on stderr, and a Python child block-buffers a piped stdout, so
     both are taken together and line by line. stdin is closed.
-
-    With ``shared_output``, nothing is piped: the process writes to the very
-    stdout and stderr this process writes to. Applications in a launch and
-    attachment relationship share those streams, and none of them may lose its
-    output because another has ended (#1168).
     """
-    if shared_output:
-        return await anyio.open_process(
-            list(command), stdin=subprocess.DEVNULL, stdout=None, stderr=None, cwd=cwd,
-            env={**dict(env if env is not None else os.environ), "PYTHONUNBUFFERED": "1"},
-        )
     return await anyio.open_process(
         list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, cwd=cwd,
