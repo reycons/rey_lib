@@ -9,7 +9,7 @@ and nothing else.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -335,6 +335,16 @@ def test_double_clicking_a_table_opens_it_to_its_columns_and_again_closes_it() -
 def test_a_schema_map_has_no_claims_to_open() -> None:
     with pytest.raises(ConfigError, match="no node"):
         _schema().context_click("claim:1")
+
+
+@pytest.mark.parametrize("held, screen", [(_architecture, "object"), (_schema, "schema")])
+def test_every_map_requires_the_map_presentation_whichever_screen_it_shows(
+    held: Callable[[], ObjectMap], screen: str,
+) -> None:
+    """#1139: one presentation type, map; object or schema is the map's own screen state."""
+    projected = held().projection()
+
+    assert (projected["panel_type"], projected["projection"]) == ("map", screen)
 
 
 def test_a_schema_map_selects_a_table_and_never_opens() -> None:
