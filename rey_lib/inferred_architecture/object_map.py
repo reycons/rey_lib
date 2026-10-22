@@ -50,6 +50,11 @@ _SQL_DIR: Final = Path(__file__).parent / "sql"
 #: The five reads the object projection is built from, in the order they are held.
 _OBJECT_READS: Final = ("claims", "relationships", "placements", "areas", "area_links")
 
+#: One element or relation of the map's semantic scope, beside the source row it
+#: maps (None where it maps none): the row is what a screen may draw from; the
+#: element alone is the map's own identity.
+_Mapped = tuple[dict[str, Any], "dict[str, Any] | None"]
+
 _AREA: Final = "area:"
 _CLAIM: Final = "claim:"
 _TABLE: Final = "table:"
@@ -228,6 +233,35 @@ class ObjectMap:
             **screen,
         }
 
+    def inspect(self) -> dict[str, Any]:
+        """What this map is, where it is focused, and the map structure there (#1199 S4).
+
+        The map's own semantic state, independent of how it is drawn: its subject,
+        which map it is, its focus and the path to it, its selection (under the
+        map's own rule: a selection belongs to its screen), and the elements and
+        relations of the FOCUSED scope as map identities -- id, kind, label, the
+        identity they map and their role relative to the focus. It identifies and
+        relates the mapped things; it does not redefine, evaluate, measure or
+        describe them (no claim details or outcome, counts, weights, direct flags,
+        columns), and it carries no presentation (panel type, legend, highlight).
+        Read only: nothing moves.
+        """
+        elements, relations = self._scope()
+        held = [dict(element) for element, _ in elements]
+        return {
+            "subject": dict(self.subject),
+            "map": self.projection_kind,
+            "focus": dict(self._focus),
+            "path": [{"value": step["value"], "label": step["label"]} for step in self._path()],
+            "selected": self._selection_in({element["id"] for element in held}),
+            "elements": held,
+            "relations": [dict(relation) for relation, _ in relations],
+        }
+
+    def _selection_in(self, ids: set[str]) -> str | None:
+        """The selection, where it is one of ``ids`` -- the scope it belongs to -- else None."""
+        return self._selected if self._selected in ids else None
+
     def _marked(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str | None:
         """Mark the selected node and its connections on this screen; the selection shown.
 
@@ -236,8 +270,7 @@ class ObjectMap:
         ``second`` what those link to next -- empty when nothing on this screen
         is selected.
         """
-        on_screen = {node["id"] for node in nodes}
-        selected = self._selected if self._selected in on_screen else None
+        selected = self._selection_in({node["id"] for node in nodes})
         near: dict[str, set[str]] = {}
         for edge in edges:
             near.setdefault(edge["source"], set()).add(edge["target"])
@@ -289,14 +322,42 @@ class ObjectMap:
         self.focus(level="object", claim_id=int(node_id[len(_CLAIM):]),
                    area_id=self._focus.get("area_id"))
 
-    def _object_projection(self) -> dict[str, Any]:
+    # -- the semantic scope: map identities, shared by inspect and the screens ---
+
+    def _scope(self) -> tuple[list[_Mapped], list[_Mapped]]:
+        """The focused scope's elements and relations, each with the source row it maps.
+
+        The map structure alone -- id, kind, label, the identity it maps, its role
+        relative to the focus. The row is kept beside it, never inside it, so a
+        screen can add what it draws from the row and ``inspect`` can leave it out.
+        """
+        if self.projection_kind == SCHEMA_PROJECTION:
+            return self._schema_scope()
         level = self._focus.get("level")
         if level == "area":
-            nodes, edges = self._area_screen(self._focus["area_id"])
-        elif level == "object":
-            nodes, edges = self._object_screen(self._focus["claim_id"])
+            return self._area_scope(self._focus["area_id"])
+        if level == "object":
+            return self._object_scope(self._focus["claim_id"])
+        return self._estate_scope()
+
+    def _object_projection(self) -> dict[str, Any]:
+        """The focused screen: the scope, with what each element and relation draws."""
+        level = self._focus.get("level")
+        elements, relations = self._scope()
+        if level in ("area", "object"):
+            nodes = [element if row is None or element["kind"] != "claim" else
+                     {**element, "outcome": row.get("evaluation_outcome") or "unevaluated"}
+                     for element, row in elements]
+            edges = [{**relation, "direct": bool(row.get("is_direct"))}
+                     for relation, row in relations]
         else:
-            nodes, edges = self._estate_screen()
+            nodes = [{**element, "claim_count": row["claim_count"],
+                      "internal_relationship_count": row["internal_relationship_count"],
+                      "crossing_relationship_count": row["crossing_relationship_count"]}
+                     for element, row in elements]
+            edges = [{**relation, "weight": row["relationship_count"],
+                      "direct": bool(row["direct_relationship_count"])}
+                     for relation, row in relations]
         return {"nodes": nodes, "edges": edges, "path": self._path(),
                 "details": self._details(), "legend": self._legend()}
 
@@ -312,40 +373,35 @@ class ObjectMap:
             {"label": "Second-order links", "shape": "line", "color": "var(--progress-fill, var(--accent))"},
         ]
 
-    def _estate_screen(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Every area with its counts, and every area-to-area link with its count."""
-        nodes = [{
+    def _estate_scope(self) -> tuple[list[_Mapped], list[_Mapped]]:
+        """Every area, and every area-to-area link -- each beside the row it maps."""
+        elements: list[_Mapped] = [({
             "id": f"{_AREA}{area['inferred_architecture_area_id']}", "kind": "area",
             "area_id": area["inferred_architecture_area_id"], "label": area["area_label"],
-            "claim_count": area["claim_count"],
-            "internal_relationship_count": area["internal_relationship_count"],
-            "crossing_relationship_count": area["crossing_relationship_count"],
             "role": "" if area["claim_count"] else "empty",
-        } for area in self._read.get("areas", [])]
-        edges = [{
+        }, area) for area in self._read.get("areas", [])]
+        relations: list[_Mapped] = [({
             "id": f"link:{link['from_area_id']}:{link['to_area_id']}", "kind": "link",
             "source": f"{_AREA}{link['from_area_id']}", "target": f"{_AREA}{link['to_area_id']}",
-            "weight": link["relationship_count"],
-            "direct": bool(link["direct_relationship_count"]),
-        } for link in self._read.get("area_links", [])]
-        return nodes, edges
+        }, link) for link in self._read.get("area_links", [])]
+        return elements, relations
 
-    def _claim_node(self, claim: dict[str, Any], role: str = "") -> dict[str, Any]:
-        return {
+    @staticmethod
+    def _claim_element(claim: dict[str, Any], role: str = "") -> _Mapped:
+        return ({
             "id": f"{_CLAIM}{claim['canonical_object_id']}", "kind": "claim",
             "claim_id": claim["canonical_object_id"],
             "label": claim.get("owner_qualified_name") or claim.get("object_key"),
-            "outcome": claim.get("evaluation_outcome") or "unevaluated",
             "role": role,
-        }
+        }, claim)
 
     @staticmethod
-    def _relationship_edge(row: dict[str, Any], edge_id: str, source: str,
-                           target: str) -> dict[str, Any]:
-        return {"id": edge_id, "kind": "relationship", "source": source,
-                "target": target, "direct": bool(row.get("is_direct"))}
+    def _relationship(row: dict[str, Any], relation_id: str, source: str,
+                      target: str) -> _Mapped:
+        return ({"id": relation_id, "kind": "relationship", "source": source,
+                 "target": target}, row)
 
-    def _area_screen(self, area_id: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _area_scope(self, area_id: int) -> tuple[list[_Mapped], list[_Mapped]]:
         """One area's claims and their links.
 
         A link with both claims in the area joins them. A link leaving the area
@@ -361,60 +417,68 @@ class ObjectMap:
                   for a in self._read.get("areas", [])}
         inside = {claim_id for claim_id, areas in areas_of.items() if area_id in areas}
 
-        nodes: dict[str, dict[str, Any]] = {}
+        elements: dict[str, _Mapped] = {}
         for claim_id in sorted(inside):
             if claim_id in claims:
-                nodes[f"{_CLAIM}{claim_id}"] = self._claim_node(claims[claim_id])
+                elements[f"{_CLAIM}{claim_id}"] = self._claim_element(claims[claim_id])
 
         def outside(claim_id: int) -> list[str]:
             elsewhere = sorted(areas_of.get(claim_id, set()))
             if not elsewhere:
                 if claim_id in claims:
-                    nodes[f"{_CLAIM}{claim_id}"] = self._claim_node(claims[claim_id], "outside")
+                    elements[f"{_CLAIM}{claim_id}"] = self._claim_element(
+                        claims[claim_id], "outside")
                 return [f"{_CLAIM}{claim_id}"]
             for other in elsewhere:
-                nodes[f"{_AREA}{other}"] = {"id": f"{_AREA}{other}", "kind": "area",
-                                            "area_id": other, "label": labels.get(other, ""),
-                                            "role": "elsewhere"}
+                elements[f"{_AREA}{other}"] = ({"id": f"{_AREA}{other}", "kind": "area",
+                                                "area_id": other, "label": labels.get(other, ""),
+                                                "role": "elsewhere"}, None)
             return [f"{_AREA}{other}" for other in elsewhere]
 
-        edges: list[dict[str, Any]] = []
+        relations: list[_Mapped] = []
         for row in self._read.get("relationships", []):
             source_id, target_id = row["canonical_object_id"], row["linked_canonical_object_id"]
-            edge_id = f"relationship:{source_id}:{target_id}"
+            relation_id = f"relationship:{source_id}:{target_id}"
             if source_id in inside and target_id in inside:
-                edges.append(self._relationship_edge(
-                    row, edge_id, f"{_CLAIM}{source_id}", f"{_CLAIM}{target_id}"))
+                relations.append(self._relationship(
+                    row, relation_id, f"{_CLAIM}{source_id}", f"{_CLAIM}{target_id}"))
             elif source_id in inside:
                 for target in outside(target_id):
-                    edges.append(self._relationship_edge(
-                        row, f"{edge_id}:{target}", f"{_CLAIM}{source_id}", target))
+                    relations.append(self._relationship(
+                        row, f"{relation_id}:{target}", f"{_CLAIM}{source_id}", target))
             elif target_id in inside:
                 for source in outside(source_id):
-                    edges.append(self._relationship_edge(
-                        row, f"{edge_id}:{source}", source, f"{_CLAIM}{target_id}"))
-        return list(nodes.values()), edges
+                    relations.append(self._relationship(
+                        row, f"{relation_id}:{source}", source, f"{_CLAIM}{target_id}"))
+        return list(elements.values()), relations
 
-    def _object_screen(self, claim_id: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _object_scope(self, claim_id: int) -> tuple[list[_Mapped], list[_Mapped]]:
         """One claim and the claims it is directly linked with, in both directions."""
         claims = {c["canonical_object_id"]: c for c in self._read.get("claims", [])}
-        nodes: dict[str, dict[str, Any]] = {}
+        elements: dict[str, _Mapped] = {}
         if claim_id in claims:
-            nodes[f"{_CLAIM}{claim_id}"] = self._claim_node(claims[claim_id], "focus")
-        edges: list[dict[str, Any]] = []
+            elements[f"{_CLAIM}{claim_id}"] = self._claim_element(claims[claim_id], "focus")
+        relations: list[_Mapped] = []
         for row in self._read.get("relationships", []):
             ends = (row["canonical_object_id"], row["linked_canonical_object_id"])
             if claim_id not in ends:
                 continue
             for end in ends:
                 if end != claim_id and end in claims:
-                    nodes[f"{_CLAIM}{end}"] = self._claim_node(claims[end])
-            edges.append(self._relationship_edge(
-                row, f"relationship:{ends[0]}:{ends[1]}", f"{_CLAIM}{ends[0]}", f"{_CLAIM}{ends[1]}"))
-        return list(nodes.values()), edges
+                    elements[f"{_CLAIM}{end}"] = self._claim_element(claims[end])
+            relations.append(self._relationship(
+                row, f"relationship:{ends[0]}:{ends[1]}", f"{_CLAIM}{ends[0]}",
+                f"{_CLAIM}{ends[1]}"))
+        return list(elements.values()), relations
 
     def _path(self) -> list[dict[str, Any]]:
-        """The path to the focused screen, Estate first; each step names its focus."""
+        """The path to the focused screen, Estate first; each step names its focus.
+
+        A schema map's path is its one step, the schema itself.
+        """
+        if self.projection_kind == SCHEMA_PROJECTION:
+            return [{"value": "schema", "label": self.subject["schema"],
+                     "focus": dict(self._focus)}]
         steps = [{"value": "estate", "label": "Estate", "focus": {"level": "estate"}}]
         area_id = self._focus.get("area_id")
         if area_id is not None:
@@ -472,44 +536,57 @@ class ObjectMap:
         opened = list(self._focus.get("opened") or [])
         self.focus(opened=[t for t in opened if t != name] if name in opened else [*opened, name])
 
-    def _schema_projection(self) -> dict[str, Any]:
-        """The schema's tables and their foreign keys; opened tables show their columns.
+    def _schema_scope(self) -> tuple[list[_Mapped], list[_Mapped]]:
+        """The schema's tables, the external tables its foreign keys reach, and those keys.
 
-        A foreign key to a table outside this schema is drawn to that table as
-        an external node.
+        A foreign key to a table outside this schema is related to that table as
+        an external element. Each table and key is beside the row it maps.
         """
         schema = self.subject["schema"]
         tables = self._read.get("tables", [])
         here = set(self._table_names())
-        opened = set(self._focus.get("opened") or [])
-        nodes: dict[str, dict[str, Any]] = {}
+        elements: dict[str, _Mapped] = {}
         for table in tables:
             name = str(table["identity"]["name"])
-            keyed = set((table.get("primary_key") or {}).get("columns") or [])
-            nodes[f"{_TABLE}{name}"] = {
-                "id": f"{_TABLE}{name}", "kind": "table", "table": name, "label": name,
-                "columns": [
-                    {"name": c["name"], "type": c["type"], "nullable": c["nullable"],
-                     "primary_key": c["name"] in keyed}
-                    for c in sorted(table.get("columns") or [], key=lambda c: c["ordinal"])
-                ] if name in opened else [],
-            }
-        edges: list[dict[str, Any]] = []
+            elements[f"{_TABLE}{name}"] = ({"id": f"{_TABLE}{name}", "kind": "table",
+                                            "table": name, "label": name}, table)
+        relations: list[_Mapped] = []
         for table in tables:
             name = str(table["identity"]["name"])
             for index, key in enumerate(table.get("foreign_keys") or []):
                 inside = key["referenced_schema"] == schema and key["referenced_table"] in here
                 target = (f"{_TABLE}{key['referenced_table']}" if inside else
                           f"{_EXTERNAL}{key['referenced_schema']}.{key['referenced_table']}")
-                if not inside and target not in nodes:
-                    nodes[target] = {"id": target, "kind": "external",
-                                     "label": f"{key['referenced_schema']}.{key['referenced_table']}"}
-                edges.append({
+                if not inside and target not in elements:
+                    elements[target] = ({"id": target, "kind": "external",
+                                         "label": f"{key['referenced_schema']}."
+                                                  f"{key['referenced_table']}"}, None)
+                relations.append(({
                     "id": f"fk:{name}:{key['name']}:{index}", "kind": "foreign_key",
                     "source": f"{_TABLE}{name}", "target": target,
-                    "columns": list(key["columns"]),
-                    "referenced_columns": list(key["referenced_columns"]),
-                })
-        return {"nodes": list(nodes.values()), "edges": edges,
-                "path": [{"value": "schema", "label": schema, "focus": dict(self._focus)}],
-                "details": None}
+                }, key))
+        return list(elements.values()), relations
+
+    def _schema_projection(self) -> dict[str, Any]:
+        """The schema's tables and their foreign keys; opened tables show their columns.
+
+        A foreign key to a table outside this schema is drawn to that table as
+        an external node.
+        """
+        opened = set(self._focus.get("opened") or [])
+        elements, relations = self._schema_scope()
+        nodes = []
+        for element, table in elements:
+            if table is None:
+                nodes.append(element)
+                continue
+            keyed = set((table.get("primary_key") or {}).get("columns") or [])
+            nodes.append({**element, "columns": [
+                {"name": c["name"], "type": c["type"], "nullable": c["nullable"],
+                 "primary_key": c["name"] in keyed}
+                for c in sorted(table.get("columns") or [], key=lambda c: c["ordinal"])
+            ] if element["table"] in opened else []})
+        edges = [{**relation, "columns": list(key["columns"]),
+                  "referenced_columns": list(key["referenced_columns"])}
+                 for relation, key in relations]
+        return {"nodes": nodes, "edges": edges, "path": self._path(), "details": None}

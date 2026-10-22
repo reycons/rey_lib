@@ -367,3 +367,96 @@ def test_object_map_projects_its_legend_at_every_focus():
     assert obj.projection()["legend"] == legend
     obj.double_click("claim:1")
     assert obj.projection()["legend"] == legend
+
+
+# -- inspect (#1199 S4): the live map's own semantic state, for the focused scope --
+
+#: What inspect may never carry: presentation, or the mapped things' own figures.
+_NOT_MAP_STATE = {"panel_type", "legend", "highlight", "details", "nodes", "edges",
+                  "projection", "outcome", "claim_count", "internal_relationship_count",
+                  "crossing_relationship_count", "weight", "direct", "columns",
+                  "referenced_columns"}
+
+
+def _keys(value: Any) -> set[str]:
+    """Every key anywhere inside ``value``."""
+    if isinstance(value, dict):
+        return set(value) | set().union(*(_keys(one) for one in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_keys(one) for one in value)) if value else set()
+    return set()
+
+
+def test_inspect_states_the_map_its_focus_and_the_estate_as_map_identities() -> None:
+    assert _architecture().inspect() == {
+        "subject": {"kind": "inferred_architecture", "installation": "admin"},
+        "map": OBJECT_PROJECTION,
+        "focus": {"level": "estate"},
+        "path": [{"value": "estate", "label": "Estate"}],
+        "selected": None,
+        "elements": [
+            {"id": "area:10", "kind": "area", "area_id": 10, "label": "Core", "role": ""},
+            {"id": "area:20", "kind": "area", "area_id": 20, "label": "Edge", "role": ""},
+            {"id": "area:30", "kind": "area", "area_id": 30, "label": "Empty", "role": "empty"},
+        ],
+        "relations": [{"id": "link:10:20", "kind": "link", "source": "area:10",
+                       "target": "area:20"}],
+    }
+
+
+def test_inspect_follows_the_live_focus_and_carries_no_presentation_or_source_figures() -> None:
+    held = _architecture()
+    held.double_click("area:10")
+    area = held.inspect()
+    held.double_click("claim:1")
+    claim = held.inspect()
+
+    assert area["focus"] == {"level": "area", "area_id": 10}
+    assert {e["id"]: e["role"] for e in area["elements"]} == {
+        "claim:1": "", "claim:2": "", "area:20": "elsewhere", "claim:4": "outside"}
+    assert [r["id"] for r in area["relations"]] == [
+        "relationship:1:2", "relationship:1:3:area:20", "relationship:4:2:claim:4"]
+    assert claim["path"] == [{"value": "estate", "label": "Estate"},
+                             {"value": "area:10", "label": "Core"},
+                             {"value": "object:1", "label": "Alpha"}]
+    assert {e["id"]: e["role"] for e in claim["elements"]} == {
+        "claim:1": "focus", "claim:2": "", "claim:3": ""}
+    assert not (_keys(area) | _keys(claim)) & _NOT_MAP_STATE
+
+
+def test_inspect_reports_the_selection_under_the_maps_own_rule() -> None:
+    held = _architecture()
+    held.click("area:10")
+    assert held.inspect()["selected"] == "area:10"
+
+    # A drill clears the selection; the next inspection says so.
+    held.double_click("area:10")
+    assert held.inspect()["selected"] is None
+
+
+def test_inspect_moves_nothing() -> None:
+    held = _architecture()
+    held.click("area:10")
+    before = held.projection()
+
+    held.inspect()
+
+    assert held.projection() == before
+
+
+def test_inspect_of_a_schema_relates_its_tables_and_never_carries_their_columns() -> None:
+    held = _schema()
+    held.double_click("table:run")
+    inspected = held.inspect()
+
+    assert inspected["map"] == SCHEMA_PROJECTION
+    assert inspected["focus"] == {"opened": ["run"]}
+    assert inspected["path"] == [{"value": "schema", "label": "control"}]
+    assert inspected["elements"] == [
+        {"id": "table:run", "kind": "table", "table": "run", "label": "run"},
+        {"id": "table:run_log", "kind": "table", "table": "run_log", "label": "run_log"},
+        {"id": "external:code.installation", "kind": "external", "label": "code.installation"},
+    ]
+    assert [(r["source"], r["target"]) for r in inspected["relations"]] == [
+        ("table:run_log", "table:run"), ("table:run_log", "external:code.installation")]
+    assert not _keys(inspected) & _NOT_MAP_STATE
