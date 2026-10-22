@@ -432,6 +432,10 @@ class AI:
                 {
                     "profile_key": str(row.get("profile_key") or ""),
                     "model_identifier": str(row.get("model_identifier") or ""),
+                    # The representations this engine may be sent, as its
+                    # governed row states (#1189 C5).
+                    "representations": [str(one) for one in (row.get("access_allowed") or ())],
+                    "representation_default": str(row.get("access_default") or ""),
                 }
                 for row in control.ai_engine_profiles()
                 if row.get("is_enabled") is not False
@@ -443,6 +447,85 @@ class AI:
                 }
                 for row in control.ai_instructions()
             ],
+        }
+
+    def task_projection(
+        self, task: AITask, operations: Mapping[str, Operation] | None = None,
+    ) -> dict[str, Any]:
+        """One held task as plain data, with what this runtime settles about running it.
+
+        ``AITask.projection`` states the task. Added here is what only this AI can
+        answer, by the very rules :meth:`execute_task` applies (#1189 C5):
+
+        - ``capabilities``: each governed tool's capability and whether it is
+          bound -- the task's connection's operations, then ``operations``, the
+          same merge an execution binds;
+        - ``readiness``: whether a run would be admitted, and every reason one
+          would be refused -- an execution mechanism AI does not run, or a
+          declared capability bound to nothing;
+        - ``representations``: what the task's engine may be sent, as its
+          governed row states;
+        - ``contract``: the governed instruction the task follows, with its
+          contract body, so a presentation shows the contract it would send.
+
+        Engine credentials stay out, as in ``AITask.projection``.
+        """
+        bound = self._bound_operations(task, operations)
+        capabilities = [
+            {
+                "tool": tool.name,
+                "capability_key": tool.capability_key,
+                "description": tool.description,
+                "bound": bool(tool.capability_key) and tool.capability_key in bound,
+            }
+            for tool in task.tools
+        ]
+        reasons = []
+        if task.execution_mechanism not in self._run_steps():
+            reasons.append(
+                f"Its engine's execution mechanism '{task.execution_mechanism or '(none)'}' "
+                "is not one AI runs."
+            )
+        unbound = [one["capability_key"] or one["tool"]
+                   for one in capabilities if not one["bound"]]
+        if unbound:
+            reasons.append(
+                f"It needs {', '.join(unbound)}, which nothing here can carry out."
+            )
+        return {
+            **task.projection(),
+            "capabilities": capabilities,
+            "readiness": {"ready": not reasons, "reasons": reasons},
+            "representations": {
+                "allowed": list(task.access_allowed),
+                "default": task.access_default,
+            },
+            "contract": {
+                "instruction_kind": task.instruction_kind.value,
+                "contract_key": task.contract_key,
+                "contract_version": task.contract_version,
+                "body": task.contract_body,
+            },
+        }
+
+    def _run_steps(self) -> dict[str, Callable[..., Any]]:
+        """The execution mechanisms AI runs, by the name a governed engine states."""
+        return {
+            "pydantic_ai": self._run_pydantic_ai,
+            "claude_agent_sdk": self._run_claude_agent_sdk,
+        }
+
+    def _bound_operations(
+        self, task: AITask, operations: Mapping[str, Operation] | None,
+    ) -> dict[str, Operation]:
+        """What carries out a task's capabilities: its connection's, then the caller's.
+
+        The connection selects; the caller may add. One merge, used by every
+        execution and by every account of whether one would be admitted.
+        """
+        return {
+            **self._connection_operations.get(task.connection, {}),
+            **(operations or {}),
         }
 
     def execute_task(
@@ -543,23 +626,13 @@ class AI:
         tell(AIEvent.started(execution_id))
         started = datetime.now(timezone.utc)
         try:
-            steps = {
-                "pydantic_ai": self._run_pydantic_ai,
-                "claude_agent_sdk": self._run_claude_agent_sdk,
-            }
-            step = steps.get(task.execution_mechanism)
+            step = self._run_steps().get(task.execution_mechanism)
             if step is None:
                 raise AIConfigurationError(
                     f"AI task '{key}' names execution mechanism "
                     f"'{task.execution_mechanism or '(none)'}', which AI does not run."
                 )
-            # What the task's governed connection was composed with, then what
-            # this caller binds: the connection selects, the caller may add.
-            bound = {
-                **self._connection_operations.get(task.connection, {}),
-                **(operations or {}),
-            }
-            toolset = AIToolSet(task.tools, bound)
+            toolset = AIToolSet(task.tools, self._bound_operations(task, operations))
             # Streamed only for an observer: without one the run is exactly the
             # unstreamed request it always was.
             output, usage = step(
