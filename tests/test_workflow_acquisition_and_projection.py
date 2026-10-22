@@ -267,3 +267,49 @@ class TestTheWorkflowIsOpenedAtOneOfItsParts:
     def test_focus_names_exactly_one_part(self) -> None:
         with pytest.raises(ConfigError, match="exactly one"):
             _focusable().focus(workflow_process_id=150, workflow_step_id=1501)
+
+
+# -- its definition (#1199 S3): the domain read, independent of presentation --
+
+
+def test_the_definition_is_what_the_workflow_is_and_where_it_stands() -> None:
+    assert _workflow().definition() == {
+        "name": "code_index",
+        "enabled": True,
+        "state": "IDLE",
+        "released": None,
+        "processes": [
+            {
+                "ordinal": 1,
+                "name": "p",
+                "application": "app",
+                "steps": [
+                    {"ordinal": 1, "id": "s1", "operation": "load",
+                     "apply_only": True, "always_run": False,
+                     "state": "PENDING", "run_id": None},
+                    {"ordinal": 2, "id": "s2", "operation": "check",
+                     "apply_only": False, "always_run": False,
+                     "state": "PENDING", "run_id": None},
+                ],
+            },
+        ],
+    }
+
+
+def test_the_definition_carries_no_presentation_and_no_configuration() -> None:
+    workflow = _focusable()
+    workflow.focus(workflow_step_id=workflow.steps["s2"].governed_id)
+    definition = workflow.definition()
+
+    assert not {"panel_type", "actions", "relationships", "focus"} & set(definition)
+    step = definition["processes"][0]["steps"][0]
+    assert not {"settings", "contract", "label", "process_name"} & set(step)
+
+
+def test_the_definition_is_a_copy_read_under_one_act() -> None:
+    workflow = _workflow()
+    with workflow.act():
+        definition = workflow.definition()
+    definition["processes"][0]["steps"].clear()
+
+    assert len(workflow.definition()["processes"][0]["steps"]) == 2

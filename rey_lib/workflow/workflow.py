@@ -559,6 +559,49 @@ class Workflow:
                 ],
             }
 
+    def definition(self) -> dict[str, Any]:
+        """What this Workflow is, and where its execution stands (#1199 S3).
+
+        Its domain read, independent of how it is presented: identity, whether it
+        is enabled, its state and the step it released, and each process's
+        Application with its steps and their own states and Runs. No presentation
+        (panel type, display commands, display relationships, focus) and nothing it
+        was configured with (settings, contracts, config). Read from the objects
+        already built, under one act, as copies -- nothing is re-read.
+        """
+        with self._acting:
+            return {
+                "name": self.name,
+                "enabled": self.enabled,
+                "state": self.state,
+                "released": None if self.released is None else {
+                    "step": self.released.id,
+                    "run_id": (self.released.current_run.run_id
+                               if self.released.current_run is not None else None),
+                },
+                "processes": [
+                    {
+                        "ordinal": process.ordinal,
+                        "name": process.name,
+                        "application": process.application.name,
+                        "steps": [
+                            {
+                                "ordinal": step.ordinal,
+                                "id": step.id,
+                                "operation": step.operation.name,
+                                "apply_only": step.apply_only,
+                                "always_run": step.always_run,
+                                "state": step.state,
+                                "run_id": (step.current_run.run_id
+                                           if step.current_run is not None else None),
+                            }
+                            for step in process.steps
+                        ],
+                    }
+                    for process in self.processes
+                ],
+            }
+
     def direct(
         self,
         step: Optional[str] = None,
