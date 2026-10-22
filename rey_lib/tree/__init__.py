@@ -19,6 +19,12 @@ from typing import Any
 
 from rey_lib.tree.collection import CollectionDataObject
 from rey_lib.tree.database import DatabaseDataObject
+from rey_lib.tree.declarations import (
+    NODE_TYPE_ACTION_VIEW_NAME,
+    NodeTypeActionDataObject,
+    declared_fact,
+    offered,
+)
 from rey_lib.tree.folder import FileDataObject, folder_children
 from rey_lib.tree.jsonl import JsonlDataObject
 from rey_lib.tree.inspection import (
@@ -80,6 +86,8 @@ __all__ = [
     "INSPECTED_FIELDS",
     "JSONL_SOURCE",
     "JsonlDataObject",
+    "NODE_TYPE_ACTION_VIEW_NAME",
+    "NodeTypeActionDataObject",
     "TOOL_SOURCE",
     "TREE_CONNECTION",
     "TREE_SCHEMA",
@@ -88,9 +96,11 @@ __all__ = [
     "TreeDataRow",
     "TreeProjection",
     "TreeTraversal",
+    "declared_fact",
     "expand",
     "folder_children",
     "inspected",
+    "offered",
     "persisted_tree",
     "rey_lib_sources",
     "subject",
