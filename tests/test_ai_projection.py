@@ -37,8 +37,7 @@ class _Control:
         self.asked.append("engines")
         return [
             {"profile_key": "local_testing", "model_identifier": "ollama:qwen3-coder-next:latest",
-             "credential_ref": "", "is_enabled": True,
-             "access_allowed": ["redacted", "clear"], "access_default": "redacted"},
+             "credential_ref": "", "is_enabled": True},
             {"profile_key": "switched_off", "model_identifier": "openai-chat:gpt-4o",
              "credential_ref": "", "is_enabled": False},
             {"profile_key": "anthropic", "model_identifier": "anthropic:claude-sonnet-4-6",
@@ -68,12 +67,9 @@ def test_the_projection_offers_the_enabled_governed_tasks_in_order() -> None:
 def test_the_projection_offers_what_a_choice_may_name_and_no_credential() -> None:
     projection = AI(registry=AIRegistry()).projection(_Control(), "local")
 
-    # Each engine with the representations its governed row admits (#1189 C5).
     assert projection["engines"] == [
-        {"profile_key": "local_testing", "model_identifier": "ollama:qwen3-coder-next:latest",
-         "representations": ["redacted", "clear"], "representation_default": "redacted"},
-        {"profile_key": "anthropic", "model_identifier": "anthropic:claude-sonnet-4-6",
-         "representations": [], "representation_default": ""},
+        {"profile_key": "local_testing", "model_identifier": "ollama:qwen3-coder-next:latest"},
+        {"profile_key": "anthropic", "model_identifier": "anthropic:claude-sonnet-4-6"},
     ]
     assert projection["instructions"] == [
         {"instruction_key": "__none__", "kind": "none"},
