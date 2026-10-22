@@ -694,7 +694,6 @@ def _transform_one_file(
                 pipeline=getattr(ctx, "pipeline_name", None) if ctx is not None else None,
                 reason="prepared",
             )
-            object.__setattr__(ctx, "step_record_count", 0)
             log_row_count(run_log,
                 count_name="transformed_rows",
                 count=0,
@@ -772,9 +771,6 @@ def _transform_one_file(
             reason="transformed",
         )
 
-        # The transformed row count, on ctx. Its only known readers were the removed
-        # Loader hooks (backlog 243); no indexed code reads it now.
-        object.__setattr__(ctx, "step_record_count", len(rows))
         log_row_count(run_log,
             count_name="transformed_rows",
             count=len(rows),
