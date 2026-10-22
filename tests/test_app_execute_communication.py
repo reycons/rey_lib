@@ -362,3 +362,115 @@ def test_an_emitted_message_arrives_json_safe_and_otherwise_as_sent() -> None:
     finally:
         print("trace:", app.trace)
         app.close()
+
+
+# -- a request from an application, routed by its execution context (#1196) ----
+
+#: A child that asks another application, through its own channel, when told to;
+#: it keeps answering its own commands meanwhile.
+ASKER = textwrap.dedent("""
+    import threading
+    from rey_lib.errors.error_utils import AppError
+    from rey_lib.run.app_channel import AttachedApp
+    from rey_lib.run.async_runtime import CLOSED_ERRORS
+
+    channel = AttachedApp.attach(11)
+
+    def ask(destination, timeout):
+        try:
+            answer = channel.request(destination, {"command": "projection"}, timeout=timeout)
+            channel.emit({"event": "asked", "answer": answer})
+        except AppError as refused:
+            print("refused:", refused, flush=True)
+            try:
+                channel.emit({"event": "refused", "error": str(refused)})
+            except CLOSED_ERRORS:  # the channel itself may be what closed
+                pass
+
+    channel.emit({"event": "ready"})
+    for command in channel.commands():
+        name = command.get("command")
+        if name == "ask":
+            threading.Thread(target=ask, args=(command["destination"],
+                                               command.get("timeout", 20.0))).start()
+        if name == "echo":
+            channel.emit({"event": "echoed", "value": command.get("value")})
+        if name in ("finish", "close"):
+            break
+    channel.close()
+""")
+
+
+def _routed(events) -> dict:
+    """The next message the application emitted that asks to be routed."""
+    while "route" not in (message := next(events)):
+        pass
+    return message
+
+
+def test_a_request_goes_out_on_the_applications_own_channel_and_its_answer_comes_back() -> None:
+    app = _launch(ASKER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        app.send({"command": "ask", "destination": "transport-b"})
+
+        routed = _routed(events)
+        # The envelope names the destination and the payload; the id is the asker's.
+        assert routed["route"] == {"destination": "transport-b",
+                                   "payload": {"command": "projection"}}
+        request_id = routed["request_id"]
+        assert request_id
+
+        # A command still reaches the application's own loop while the request waits.
+        app.send({"command": "echo", "value": "meanwhile"})
+        assert next(events) == {"event": "echoed", "value": "meanwhile"}
+
+        answer = {"answer": {"projection": {"panel_type": "file"}, "request_id": request_id},
+                  "request_id": request_id}
+        app.send(answer)
+        # The answer went to the waiting request, never to the command loop.
+        assert next(events) == {"event": "asked", "answer": answer}
+        app.send({"command": "finish"})
+        assert app.wait(timeout=WAIT) == 0
+    finally:
+        print("trace:", app.trace)
+        app.close()
+
+
+def test_a_request_with_no_answer_in_time_is_refused_by_name() -> None:
+    app = _launch(ASKER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        app.send({"command": "ask", "destination": "transport-b", "timeout": 0.5})
+        _routed(events)
+
+        refused = next(events)
+        assert refused["event"] == "refused"
+        assert "'transport-b'" in refused["error"] and "0.5 s" in refused["error"]
+        app.send({"command": "finish"})
+        assert app.wait(timeout=WAIT) == 0
+    finally:
+        print("trace:", app.trace)
+        app.close()
+
+
+def test_a_request_still_waiting_when_the_channel_closes_is_refused() -> None:
+    app = _launch(ASKER)
+    try:
+        assert app.connected(timeout=WAIT)
+        events = app.events(timeout=WAIT)
+        assert next(events) == {"event": "ready"}
+        app.send({"command": "ask", "destination": "transport-b"})
+        _routed(events)
+
+        # The launcher ends the conversation; the waiting request is told, not left hanging.
+        app.close()
+        assert "refused: The channel closed before 'transport-b' answered." in "".join(
+            app.output(timeout=WAIT))
+    finally:
+        print("trace:", app.trace)
+        app.close()

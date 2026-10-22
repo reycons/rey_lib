@@ -27,14 +27,16 @@ import queue
 import secrets
 import threading
 import time
+import uuid
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
-from rey_lib.errors.error_utils import ConfigError, StateError
+from rey_lib.errors.error_utils import AppError, ConfigError, StateError
 from rey_lib.files.json import json_value
 from rey_lib.run import async_runtime
 
 __all__ = [
-    "AttachedApp", "CONNECTED", "EXITED", "LaunchedApp", "STARTING", "STOPPED",
+    "AttachedApp", "CONNECTED", "EXITED", "IO_REQUEST_SECONDS", "LaunchedApp", "STARTING",
+    "STOPPED",
 ]
 
 #: Where a launched application finds its launcher, and the token it proves itself with.
@@ -45,6 +47,12 @@ _TOKEN_ENV = "REY_APP_EXECUTE_TOKEN"
 _CLOSE_GRACE_SECONDS = 10.0
 #: How long an application stopped with SIGTERM is given to end before it is killed.
 _KILL_GRACE_SECONDS = 5.0
+#: How long a request waits for its answer: the one bound for every request the IO layer
+#: carries (#1127), whichever end asks -- a launcher of its application, or an application
+#: of another through its execution context's transports (#1196).
+IO_REQUEST_SECONDS = 30.0
+#: How often a waiting request looks to see whether its channel has closed.
+_REQUEST_POLL_SECONDS = 0.2
 
 #: A launched execution's lifecycle: the launch and its connection, not the Run.
 STARTING = "STARTING"
@@ -364,11 +372,91 @@ class AttachedApp:
             raise
         # One sender at a time: an application may emit from more than one thread.
         self._sending = threading.Lock()
+        # The requests this application has sent and not yet had answered, by
+        # request_id: where commands() hands each answer when it arrives.
+        self._pending: dict[str, queue.Queue[Optional[dict[str, Any]]]] = {}
+        self._waiting = threading.Lock()
 
     def commands(self) -> Iterator[dict[str, Any]]:
-        """The launcher's commands, in order, until it closes the channel."""
+        """The launcher's commands, in order, until it closes the channel.
+
+        An answer to one of this application's own requests (:meth:`request`) is
+        not a command: it goes to the request waiting for it, by its request_id,
+        and is never yielded. When the channel closes, every request still waiting
+        is told so.
+        """
         while (message := self._loop.call(self._channel.receive)) is not None:
+            waiter = self._waiter(message)
+            if waiter is not None:
+                _hand(waiter, message)
+                continue
             yield message
+        self._release_waiting()
+
+    def request(
+        self,
+        destination: str,
+        payload: Mapping[str, Any],
+        timeout: float = IO_REQUEST_SECONDS,
+    ) -> dict[str, Any]:
+        """Send one request to another application, and answer what comes back (#1196).
+
+        ``destination`` is the target instance's transport token in this
+        application's execution context; ``payload`` is the command the target
+        answers. The request travels over this application's own channel -- the
+        execution context's transports route it and route the answer back -- under
+        a request_id minted here. The answer is returned exactly as it arrived:
+        ``{"answer": <the target's message>, "request_id": ...}`` or ``{"error":
+        ..., "request_id": ...}``; what it means is the caller's.
+
+        The answer is read by :meth:`commands`, so this must be called from a
+        thread other than the one iterating it, as any work that outlives a
+        command already runs (recipe app.serve_a_live_object_to_a_panel step 4).
+
+        Raises:
+            AppError: When no answer arrives within ``timeout`` seconds, or the
+                channel closes first -- naming the destination asked.
+        """
+        request_id = uuid.uuid4().hex
+        answered: queue.Queue[Optional[dict[str, Any]]] = queue.Queue(maxsize=1)
+        with self._waiting:
+            self._pending[request_id] = answered
+        try:
+            self.emit({"route": {"destination": str(destination), "payload": dict(payload)},
+                       "request_id": request_id})
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AppError(
+                        f"No answer from {destination!r} within {timeout:g} s."
+                    )
+                try:
+                    message = answered.get(timeout=min(_REQUEST_POLL_SECONDS, remaining))
+                except queue.Empty:
+                    continue
+                if message is None:
+                    raise AppError(
+                        f"The channel closed before {destination!r} answered."
+                    )
+                return message
+        finally:
+            with self._waiting:
+                self._pending.pop(request_id, None)
+
+    def _waiter(self, message: Any) -> Optional[queue.Queue[Optional[dict[str, Any]]]]:
+        """The request waiting for this message, or None when it is a command."""
+        if not isinstance(message, dict):
+            return None
+        with self._waiting:
+            return self._pending.get(str(message.get("request_id") or ""))
+
+    def _release_waiting(self) -> None:
+        """Tell every request still waiting that the channel has closed."""
+        with self._waiting:
+            waiting = list(self._pending.values())
+        for answered in waiting:
+            _hand(answered, None)
 
     def emit(self, message: Mapping[str, Any]) -> None:
         """Send one plain message -- state or an event -- to the launcher.
@@ -384,6 +472,20 @@ class AttachedApp:
             self._loop.call(self._channel.send, json_value(message))
 
     def close(self) -> None:
-        """Close the channel and release the loop."""
+        """Close the channel and release the loop; a request still waiting is told so."""
+        self._release_waiting()
         self._loop.call(self._channel.close)
         self._loop.close()
+
+
+def _hand(answered: "queue.Queue[Optional[dict[str, Any]]]",
+          message: Optional[dict[str, Any]]) -> None:
+    """Give a waiting request its answer, or None for a closed channel -- the first one only.
+
+    A request waits for exactly one message; a second (a duplicate answer, or the
+    close arriving after the answer) has no one left to receive it.
+    """
+    try:
+        answered.put_nowait(message)
+    except queue.Full:
+        pass
