@@ -27,9 +27,10 @@ from rey_lib.tree.sources import DECLARED_SOURCES
 
 __all__ = ["TreeTraversal"]
 
-#: The consumer's presentation step: given the records a source produced, give
-#: each what it needs to be drawn. Runs before the cap and before admission, as
-#: it always has.
+#: The consumer's presentation step: given the admitted records, give each what
+#: it needs to be drawn -- updating the records it is handed. Runs after the cap
+#: and after admission, as the tree's expansion path states: the source returns
+#: children, the projection admits them, then the consumer assembles them.
 Assemble = Callable[[Any, list[dict[str, Any]], Any], list[dict[str, Any]]]
 
 
@@ -39,11 +40,11 @@ def _capped(
 ) -> tuple[list[dict[str, Any]], bool]:
     """Cut a list to a ceiling, and say whether cutting it lost anything.
 
-    The count is taken from what was assembled, so nothing past the ceiling has
-    to be admitted in order to discover that it exists.
+    The count is taken from what the source produced, so nothing past the ceiling
+    has to be admitted in order to discover that it exists.
 
     Args:
-        records: What the source produced, already assembled.
+        records: What the source produced.
         limit: The ceiling, or None for no ceiling at all.
 
     Returns:
@@ -130,12 +131,17 @@ class TreeTraversal:
         fresh: bool,
         assemble: Assemble | None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Both callers' one implementation.
+        """Both callers' one implementation: produce, cap, admit, then assemble.
 
-        The cap sits between assembly and admission in both branches, which is
-        the only place it can sit: ``hold`` and ``append`` are what make a
-        record expandable, so anything they are given is reachable whatever is
-        returned afterwards.
+        The cap sits before admission in both branches, which is the only place
+        it can sit: ``hold`` and ``append`` are what make a record expandable,
+        so anything they are given is reachable whatever is returned afterwards.
+
+        Assembly comes last, after admission, as the expansion path states.
+        What is assembled is the record as the projection holds it -- a created
+        record with the identity and explicit parentage ``append`` gave it.
+        Assembly updates the admitted records themselves, so what the
+        projection holds is what was drawn.
 
         Raises:
             ConfigError: when the record names a declared source this process
@@ -155,18 +161,19 @@ class TreeTraversal:
 
         if source is None:
             # Persisted: these arrive with their identity already composed.
-            assembled = presented(self._persisted.children(ctx, record))
-            admitted, truncated = _capped(assembled, limit)
-            if projection is None:
-                return admitted, truncated
-            return projection.hold(admitted, parent_key), truncated
-        assembled = presented(source.children(
+            produced = self._persisted.children(ctx, record)
+            admitted, truncated = _capped(produced, limit)
+            if projection is not None:
+                admitted = projection.hold(admitted, parent_key)
+            return presented(admitted), truncated
+        produced = source.children(
             ctx, record, self._state(ctx, source, record, projection, fresh),
-        ))
-        admitted, truncated = _capped(assembled, limit)
-        if projection is None:
-            return admitted, truncated
-        return projection.append(admitted, parent_key), truncated
+        )
+        admitted, truncated = _capped(produced, limit)
+        if projection is not None:
+            # A created record is given its identity and parentage here.
+            admitted = projection.append(admitted, parent_key)
+        return presented(admitted), truncated
 
     @staticmethod
     def _state(

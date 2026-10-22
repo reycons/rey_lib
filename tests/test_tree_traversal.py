@@ -107,7 +107,8 @@ class TestRouting:
 
 
 class TestCapAndAdmission:
-    def test_assemble_runs_before_the_cap_and_admission(self) -> None:
+    def test_assemble_runs_after_the_cap_and_admission(self) -> None:
+        """Produce, cap, admit, then assemble -- and only what was admitted."""
         seen: list[int] = []
 
         def assemble(ctx: Any, records: list[dict[str, Any]], projection: Any) -> list:
@@ -121,10 +122,37 @@ class TestCapAndAdmission:
             object(), {"node_key": "1:1"}, projection, 2, assemble=assemble,
         )
 
-        assert seen == [5]
+        assert seen == [2]
         assert truncated is True
         assert [c["node_key"] for c in children] == ["1:1:0", "1:1:1"]
+        # The records the projection holds are the assembled ones.
         assert projection.record("1:1:0")["buttons"] == ["open"]
+
+    def test_a_created_record_is_assembled_as_the_projection_admitted_it(self) -> None:
+        """Assembly sees an admitted created record's explicit parentage, and is held.
+
+        A source-produced record is admitted by the projection, which gives it
+        its parentage as a field of its own; assembly comes after, sees that
+        parentage, and what the projection holds is the record as assembled.
+        """
+        parents: list[Any] = []
+
+        def assemble(ctx: Any, records: list[dict[str, Any]], projection: Any) -> list:
+            for record in records:
+                parents.append(record.get("parent_node_key"))
+                record["buttons"] = ["open"]
+            return records
+
+        projection = TreeProjection()
+        children = TreeTraversal(_Persisted(), {FOLDER_SOURCE: _Folder(count=2)}).children(
+            object(), {"node_key": "2:2", "tree_object_key": FOLDER_SOURCE}, projection,
+            assemble=assemble,
+        )
+
+        assert parents == ["2:2", "2:2"]
+        for child in children:
+            assert projection.record(child["node_key"]) is not None
+            assert projection.record(child["node_key"])["buttons"] == ["open"]
 
     def test_only_what_was_returned_is_admitted(self) -> None:
         projection = TreeProjection()
