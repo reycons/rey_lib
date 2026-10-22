@@ -1411,6 +1411,25 @@ class Control:
         }, required=required) or []
         return dict(rows[0]) if rows else None
 
+    def get_application_capabilities(self, application: str,
+                                     required: bool = True) -> list[dict[str, Any]]:
+        """The canonical-object capabilities one application declares, as governed (#1196 D1).
+
+        The governed read boundary and nothing more: ``application`` is the
+        application's own name; each row is one enabled declaration as
+        code.application_capability holds it -- ``capability_key``,
+        ``description``, ``target_kinds``, ``input_contract`` and ``access`` --
+        carried unread. Estate-wide like the application it belongs to, so no
+        installation is passed. Nothing here dispatches a capability, resolves
+        an executable, or judges whether a capability applies: the owner's
+        invocation does, against its registration and its approved catalogue.
+        """
+        return [
+            dict(row) for row in (self._call_rows("get_application_capabilities", {
+                "application": str(application),
+            }, required=required) or [])
+        ]
+
     def data_profile_for_key(self, data_profile_key: str,
                              required: bool = True) -> Optional[int]:
         """The profile this group already has, or None.
