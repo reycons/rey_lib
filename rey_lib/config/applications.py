@@ -20,16 +20,18 @@ or resolve differently.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Mapping
 
-from rey_lib.config.operation_contract import check_contract
+from rey_lib.config.operation_contract import check_contract, check_definition
 from rey_lib.config.registration import REGISTRATION_GROUP, discover_registrations
 from rey_lib.errors.error_utils import ConfigError
 
 __all__ = [
     "Application",
+    "ApplicationCapability",
     "ApplicationCommand",
     "ApplicationCommandParameter",
     "ApplicationMode",
@@ -368,6 +370,32 @@ class ApplicationOperation:
     contract_sample: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
 
+#: How a canonical-object capability is accessed (#1196 D1, #45 step 17).
+CAPABILITY_ACCESS = frozenset({"read", "write"})
+
+#: A canonical, behavior-surface capability key: dotted lower-case segments,
+#: e.g. ``file.text``. The same shape code.application_capability checks.
+_CAPABILITY_KEY = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+
+
+@dataclass(frozen=True)
+class ApplicationCapability:
+    """One canonical-object capability an application publishes (#1196 D1).
+
+    Behavior of the canonical object the application hosts, by its canonical
+    key (``file.text``), the identity kinds it applies to, an input contract
+    (JSON Schema 2020-12, no sample) and whether it reads or writes. A
+    declaration only: what implements it is the owner's own catalogue, and
+    nothing here names, imports or resolves it.
+    """
+
+    key: str
+    description: str
+    target_kinds: tuple[str, ...]
+    input_contract: Mapping[str, Any] = field(default_factory=dict, hash=False)
+    access: str = "read"
+
+
 @dataclass(frozen=True)
 class Application:
     """One configured application.
@@ -454,6 +482,12 @@ class Application:
     approved_implementations: Mapping[str, Callable[..., Any]] = field(
         default_factory=dict, hash=False,
     )
+    #: The canonical-object capabilities this application publishes (#1196 D1).
+    #:
+    #: Beside, not inside, :attr:`workflow_operations`: behavior of the object
+    #: the application hosts, not a workflow step. Empty until published, and
+    #: empty never means everything.
+    capabilities: tuple[ApplicationCapability, ...] = field(default=())
 
     #: The presentation an application's settings require (#1150): what the
     #: Console's registry presents it with. Not :attr:`panel`, the retired
@@ -746,6 +780,9 @@ def _from_registration(
         # From the REGISTRATION, as the operations are: the finished mapping
         # the application built from its own implementations.
         approved_implementations=dict(registration.get("approved_implementations") or {}),
+        # From the REGISTRATION, beside the operations: the canonical-object
+        # capabilities it publishes (#1196 D1).
+        capabilities=_capabilities(registration, name),
     )
 
 
@@ -794,6 +831,58 @@ def _operations(
             contract_sample=sample,
         ))
     return tuple(operations)
+
+
+def _capabilities(
+    registration: dict[str, Any],
+    application: str,
+) -> tuple[ApplicationCapability, ...]:
+    """The canonical-object capabilities an application publishes (#1196 D1).
+
+    Absent means none. Each declaration is checked here, once, when the
+    registration is read, so that only a well-formed declaration can become
+    governed or be invoked.
+
+    Raises:
+        ConfigError: A key that is not a dotted canonical name or is published
+            twice, no target kinds, an empty description, an input contract
+            that is not JSON Schema 2020-12, or access other than read | write.
+    """
+    capabilities: list[ApplicationCapability] = []
+    for one in (_plain(item) for item in (registration.get("capabilities") or [])):
+        if not isinstance(one, dict):
+            continue
+        key = str(one.get("key") or "")
+        if not _CAPABILITY_KEY.match(key):
+            raise ConfigError(
+                f"Application '{application}' publishes capability {key!r}; a "
+                "capability key is a dotted canonical name such as 'file.text'."
+            )
+        label = f"{application}.{key}"
+        if any(capability.key == key for capability in capabilities):
+            raise ConfigError(f"Capability '{label}' is published twice.")
+        kinds = one.get("target_kinds")
+        target_kinds = tuple(str(kind) for kind in (kinds if isinstance(kinds, list) else []))
+        if not target_kinds or not all(target_kinds):
+            raise ConfigError(f"Capability '{label}' publishes no target_kinds.")
+        description = str(one.get("description") or "")
+        if not description.strip():
+            raise ConfigError(f"Capability '{label}' publishes no description.")
+        input_contract = one.get("input_contract")
+        check_definition(input_contract, label)
+        access = str(one.get("access") or "")
+        if access not in CAPABILITY_ACCESS:
+            raise ConfigError(
+                f"Capability '{label}' declares access {access!r}; access is read or write."
+            )
+        capabilities.append(ApplicationCapability(
+            key=key,
+            description=description,
+            target_kinds=target_kinds,
+            input_contract=input_contract,
+            access=access,
+        ))
+    return tuple(capabilities)
 
 
 def _from_declaration(

@@ -23,6 +23,7 @@ Public API
 ----------
 check_contract       Refuse a definition that is not valid JSON Schema 2020-12,
                      or a sample that does not satisfy it.
+check_definition     The definition half alone, for a contract with no sample.
 contract_violations  What settings violate a definition, one message per error.
 contract_review      The same, split into unsupported keys and violations.
 
@@ -42,7 +43,7 @@ from jsonschema.exceptions import SchemaError
 
 from rey_lib.errors.error_utils import ConfigError
 
-__all__ = ["check_contract", "contract_review", "contract_violations"]
+__all__ = ["check_contract", "check_definition", "contract_review", "contract_violations"]
 
 #: The dialect every contract is written in.
 _DIALECT = "https://json-schema.org/draft/2020-12/schema"
@@ -61,10 +62,33 @@ def check_contract(definition: Any, sample: Any, label: str) -> None:
             definition names another dialect or is not valid JSON Schema
             2020-12, or the sample does not satisfy the definition.
     """
-    if not isinstance(definition, Mapping):
-        raise ConfigError(f"Operation '{label}' publishes no contract_definition object.")
+    check_definition(definition, label)
     if not isinstance(sample, Mapping):
         raise ConfigError(f"Operation '{label}' publishes no contract_sample object.")
+    violations = contract_violations(definition, sample)
+    if violations:
+        raise ConfigError(
+            f"Operation '{label}' contract_sample does not satisfy its definition: "
+            + "; ".join(violations)
+        )
+
+
+def check_definition(definition: Any, label: str) -> None:
+    """Refuse a definition that is not a JSON Schema 2020-12 object.
+
+    The half of :func:`check_contract` that needs no sample: a canonical-object
+    capability's input contract publishes a definition alone (#1196 D1).
+
+    Args:
+        definition: The published definition.
+        label: Names what publishes it in a refusal, e.g. ``file_operator.file.text``.
+
+    Raises:
+        ConfigError: The definition is not a JSON object, names another
+            dialect, or is not valid JSON Schema 2020-12.
+    """
+    if not isinstance(definition, Mapping):
+        raise ConfigError(f"Operation '{label}' publishes no contract_definition object.")
     dialect = definition.get("$schema", _DIALECT)
     if dialect != _DIALECT:
         raise ConfigError(
@@ -77,12 +101,6 @@ def check_contract(definition: Any, sample: Any, label: str) -> None:
         raise ConfigError(
             f"Operation '{label}' contract_definition is not valid JSON Schema: {exc.message}"
         ) from exc
-    violations = contract_violations(definition, sample)
-    if violations:
-        raise ConfigError(
-            f"Operation '{label}' contract_sample does not satisfy its definition: "
-            + "; ".join(violations)
-        )
 
 
 def contract_violations(definition: Mapping[str, Any], settings: Any) -> list[str]:
