@@ -306,6 +306,21 @@ class Source:
             return []
         return [name for name in kind.required if not _held(held.get(name))]
 
+    def definition(self) -> dict[str, Any]:
+        """What this Source is (#1199 S5): the kind in force, its configuration, and
+        what it still needs.
+
+        Its own configuration state, under one act, and nothing it would have to
+        read: no records, no governed file's facts, no values said under a kind that
+        is not in force, and none of what an editor offers.
+        """
+        with self._acting:
+            return {
+                "kind": self.selected_kind(),
+                "configuration": dict(self.configuration()),
+                "missing": list(self.validate()),
+            }
+
     # -- changing ------------------------------------------------------------
 
     def select(self, kind: str) -> None:

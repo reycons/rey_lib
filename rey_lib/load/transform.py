@@ -946,6 +946,23 @@ class Transform:
             return None
         return _json_mapping(self._values.get(field))
 
+    def definition(self) -> dict[str, Any]:
+        """What this Transform is (#1199 S5): the kind in force, its configuration, and
+        its declaration as data.
+
+        Its own configuration state, under one act, and nothing it would have to
+        read. No ``missing``: what it lacks is only known against the columns its
+        held Source carries, which would mean reading that Source -- so it is not
+        part of this read. Nor its columns, mapping, HTTP state or what an editor
+        offers.
+        """
+        with self._acting:
+            return {
+                "kind": self.selected_kind(),
+                "configuration": dict(self.configuration()),
+                "declaration": self.in_force_declaration(),
+            }
+
     def columns(self, ctx: Any = None) -> list[dict[str, Any]]:
         """The mapping as it would be authored: every source column represented.
 

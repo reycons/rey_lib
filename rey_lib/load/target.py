@@ -229,6 +229,22 @@ class Target:
                 problems.append(f"one mode, not {', '.join(given)} together")
         return problems
 
+    def definition(self) -> dict[str, Any]:
+        """What this Target is (#1199 S5): the kind in force, its configuration, its
+        write policy, and what it still needs.
+
+        Its own configuration state, under one act, and nothing it would have to
+        read: never the destination table's columns, no values said under a kind
+        that is not in force, and none of what an editor offers.
+        """
+        with self._acting:
+            return {
+                "kind": self.selected_kind(),
+                "configuration": dict(self.configuration()),
+                "write_policy": self.write_policy(),
+                "missing": list(self.validate()),
+            }
+
     # -- its snapshot --------------------------------------------------------
 
     def act(self) -> Any:
