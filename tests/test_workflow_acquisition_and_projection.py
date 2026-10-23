@@ -112,8 +112,8 @@ def test_the_projection_is_the_hydrated_hierarchy_and_reads_nothing() -> None:
     projection.pop("relationships")
     actions = projection.pop("actions")
     assert set(actions) == {"workflow", "process:1", "step:1", "step:2"}
+    # No presentation (#1215): the Workflow's governed subject's, never its own.
     assert projection == {
-        "panel_type": "workflow",
         "name": "code_index",
         "enabled": True,
         "state": "IDLE",
