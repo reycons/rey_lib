@@ -45,23 +45,23 @@ def _table() -> DatabaseTable:
                            ddl='"status" text DEFAULT \'pending\' NULL'),
         ),
         primary_key=DatabasePrimaryKey(
-            name="run_log_pkey", columns=("run_id",),
+            table=IDENTITY, name="run_log_pkey", columns=("run_id",),
             ddl="ALTER TABLE control.run_log ADD CONSTRAINT run_log_pkey PRIMARY KEY (run_id);",
         ),
         foreign_keys=(
             DatabaseForeignKey(
-                name="run_log_batch_fkey", columns=("batch_id",),
+                table=IDENTITY, name="run_log_batch_fkey", columns=("batch_id",),
                 referenced_schema="control", referenced_table="batch",
                 referenced_columns=("batch_id",),
                 ddl="ALTER TABLE control.run_log ADD CONSTRAINT run_log_batch_fkey ...;",
             ),
         ),
         indexes=(DatabaseIndex(
-            name="run_log_status_idx", columns=("status",), unique=False,
+            table=IDENTITY, name="run_log_status_idx", columns=("status",), unique=False,
             ddl="CREATE INDEX run_log_status_idx ON control.run_log (status);",
         ),),
         constraints=(DatabaseConstraint(
-            name="run_log_status_key", columns=("status",), kind="unique",
+            table=IDENTITY, name="run_log_status_key", columns=("status",), kind="unique",
             ddl="ALTER TABLE control.run_log ADD CONSTRAINT run_log_status_key UNIQUE (status);",
         ),),
         ddl="CREATE TABLE control.run_log ();",

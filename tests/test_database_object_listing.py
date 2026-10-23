@@ -186,9 +186,10 @@ class TestReadDdlIsOneContract:
             "CREATE INDEX `ix` ON `s`.`t` (`a`);"
         )
 
-    def test_a_child_with_no_table_cannot_address_itself(self) -> None:
-        with pytest.raises(DatabaseError, match="carries no table"):
-            DatabaseIndex(name="ix").read_ddl(object(), _Adapter([]))
+    def test_a_child_cannot_exist_without_its_table(self) -> None:
+        """#1141: the table is half of a child's identity, so it is always present."""
+        with pytest.raises(TypeError, match="table"):
+            DatabaseIndex(name="ix")  # type: ignore[call-arg]
 
 
 def test_keys_and_other_constraints_carry_their_own_canonical_kinds() -> None:

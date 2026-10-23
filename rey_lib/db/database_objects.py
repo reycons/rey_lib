@@ -232,11 +232,6 @@ def _address(obj: Any) -> tuple[Any, ...]:
     identity = getattr(obj, "identity", None)
     if identity is not None:
         return (identity,)
-    if getattr(obj, "table", None) is None:
-        raise DatabaseError(
-            f"{type(obj).__name__} '{obj.name}' carries no table; "
-            f"ask the type for its DDL with one."
-        )
     return (obj.table, obj.name)
 
 
@@ -251,10 +246,8 @@ def _reference(obj: Any) -> DatabaseObjectReference:
             kind=kind, schema=identity.schema, name=identity.name,
             signature=str(getattr(identity, "signature", "") or ""),
         )
-    table = obj.table
     return DatabaseObjectReference(
-        kind=kind, schema=table.schema if table else "", name=obj.name,
-        table=table.name if table else "",
+        kind=kind, schema=obj.table.schema, name=obj.name, table=obj.table.name,
     )
 
 
@@ -370,9 +363,10 @@ class DatabasePrimaryKey:
     """A relation's primary key. Its columns are ordered and that order means something."""
 
     name: str
+    #: The table it belongs to: half of its identity, always present (#1141).
+    table: DatabaseObjectIdentity
     columns: tuple[str, ...] = ()
     ddl: str = ""
-    table: DatabaseObjectIdentity | None = None
     depends_on: tuple[DatabaseObjectReference, ...] = ()
 
     #: Its kind in the canonical vocabulary (backlogs 723, 1102): its own, not
@@ -448,12 +442,13 @@ class DatabaseForeignKey:
     """
 
     name: str
+    #: The table it belongs to: half of its identity, always present (#1141).
+    table: DatabaseObjectIdentity
     columns: tuple[str, ...] = ()
     referenced_schema: str = ""
     referenced_table: str = ""
     referenced_columns: tuple[str, ...] = ()
     ddl: str = ""
-    table: DatabaseObjectIdentity | None = None
     depends_on: tuple[DatabaseObjectReference, ...] = ()
 
     #: Its kind in the canonical vocabulary (backlogs 723, 1102): its own, not
@@ -528,10 +523,11 @@ class DatabaseIndex:
     """One index, and whether it enforces uniqueness."""
 
     name: str
+    #: The table it belongs to: half of its identity, always present (#1141).
+    table: DatabaseObjectIdentity
     columns: tuple[str, ...] = ()
     unique: bool = False
     ddl: str = ""
-    table: DatabaseObjectIdentity | None = None
     depends_on: tuple[DatabaseObjectReference, ...] = ()
 
     #: Its kind in the canonical vocabulary (backlog 723).
@@ -624,10 +620,11 @@ class DatabaseConstraint:
     """One constraint, in the provider's own word for what kind it is."""
 
     name: str
+    #: The table it belongs to: half of its identity, always present (#1141).
+    table: DatabaseObjectIdentity
     columns: tuple[str, ...] = ()
     kind: str = ""
     ddl: str = ""
-    table: DatabaseObjectIdentity | None = None
     depends_on: tuple[DatabaseObjectReference, ...] = ()
 
     #: Its kind in the canonical vocabulary (backlog 723).
@@ -885,8 +882,9 @@ class DatabaseTrigger:
     """
 
     name: str
+    #: The table it belongs to: half of its identity, always present (#1141).
+    table: DatabaseObjectIdentity
     ddl: str = ""
-    table: DatabaseObjectIdentity | None = None
     depends_on: tuple[DatabaseObjectReference, ...] = ()
 
     #: Its kind in the canonical vocabulary (backlog 723).
@@ -2808,7 +2806,7 @@ def _primary_key(
         return None
     name = str(read.get("name") or "")
     return DatabasePrimaryKey(
-        name=name, columns=columns,
+        name=name, table=table, columns=columns,
         ddl=_child_object_ddl(DatabasePrimaryKey, adapter, handle, table, name, database_name),
     )
 
@@ -2820,7 +2818,7 @@ def _foreign_key(
     """One foreign key, and what it points at."""
     name = str(read.get("name") or "")
     return DatabaseForeignKey(
-        name=name,
+        name=name, table=table,
         columns=_names(read.get("constrained_columns")),
         referenced_schema=str(read.get("referred_schema") or ""),
         referenced_table=str(read.get("referred_table") or ""),
@@ -2836,7 +2834,7 @@ def _index(
     """One index of ``table``, with the DDL it writes itself (backlog 695)."""
     name = str(read.get("name") or "")
     return DatabaseIndex(
-        name=name,
+        name=name, table=table,
         columns=_names(read.get("column_names")),
         unique=bool(read.get("unique", False)),
         ddl=_child_object_ddl(DatabaseIndex, adapter, handle, table, name, database_name),
@@ -2857,7 +2855,7 @@ def _table_child(
     """
     for child in children(DatabaseTable.read(conn, table, adapter)):
         if child.name == name:
-            return replace(child, table=table)
+            return child
     raise DatabaseError(
         f"{owner.__name__} not found: {table.schema}.{table.name}.{name}"
     )
@@ -2886,7 +2884,7 @@ def _constraint(
     """One unique constraint, in the provider's own word for its kind."""
     name = str(read.get("name") or "")
     return DatabaseConstraint(
-        name=name,
+        name=name, table=table,
         columns=_names(read.get("column_names")),
         kind="unique",
         ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name, database_name),
@@ -2900,7 +2898,7 @@ def _check(
     """One check constraint. It constrains an expression, not a column list."""
     name = str(read.get("name") or "")
     return DatabaseConstraint(
-        name=name,
+        name=name, table=table,
         kind="check",
         ddl=_child_object_ddl(DatabaseConstraint, adapter, handle, table, name, database_name),
     )
