@@ -126,7 +126,7 @@ class Workflow:
         ----------
         workflow_id
             The workflow's governed identity, its control.workflow id: an int or a
-            decimal-digit string, held as an int.
+            string of ASCII digits 0-9, held as an int.
         name, enabled
             The workflow's governed name and switch.
         config : Mapping[str, Any] | None
@@ -386,7 +386,7 @@ class Workflow:
         """Whether ``workflow_id`` is this Workflow's governed identity (#1141).
 
         The canonical equality: equal control.workflow ids, as integers. An int or
-        a decimal-digit string denotes one; nothing else -- a bool, a float, any
+        a string of ASCII digits 0-9 denotes one; nothing else -- a bool, a float, any
         other string, a mapping -- identifies a Workflow. It takes a governed id,
         never a reference: what a host's reference names is the host's to say.
         """
@@ -935,12 +935,13 @@ class Workflow:
 def _governed_id(value: Any) -> int | None:
     """The control.workflow id ``value`` denotes, or None when it denotes none.
 
-    An int, or a string of decimal digits; a bool is not an id.
+    An int, or a non-empty string of the ASCII digits 0-9 exactly as given --
+    no surrounding space, sign or other digit script. A bool is not an id.
     """
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip().isdecimal():
-        return int(value.strip())
+    if isinstance(value, str) and value and all(char in "0123456789" for char in value):
+        return int(value)
     return None
