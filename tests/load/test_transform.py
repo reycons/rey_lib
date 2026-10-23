@@ -28,6 +28,7 @@ from rey_lib.load import Transform
 from rey_lib.load import load_operation
 from rey_lib.load import transform as transform_module
 from rey_lib.load.transform import (
+    TRANSFORM_FIELD_METADATA,
     TRANSFORM_FIELDS,
     TRANSFORM_KINDS,
     TRANSFORM_PARAMETERS,
@@ -77,6 +78,12 @@ class TestTheVocabulary:
             "transform", "transform-file", "http-adapter", "http-transform", "http-request",
         )
         assert set(TRANSFORM_PARAMETERS) <= set(TRANSFORM_FIELDS)
+
+    def test_every_typed_field_states_what_it_is(self) -> None:
+        """The Transform's vocabulary describes each typed field, once (#1151)."""
+        assert set(TRANSFORM_FIELD_METADATA) == set(TRANSFORM_PARAMETERS)
+        for name, found in TRANSFORM_FIELD_METADATA.items():
+            assert found["value_type"] and found["description"], name
 
     def test_persistence_is_never_required_to_execute(self) -> None:
         manifest = next(kind for kind in TRANSFORM_KINDS if kind.id == "manifest")

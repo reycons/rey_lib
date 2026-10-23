@@ -69,8 +69,8 @@ from rey_lib.logs import AppLogger
 from rey_lib.web_utils.operation import HttpOperation
 
 __all__ = [
-    "COLUMN_FIELDS", "PREVIEW_ROWS", "Transform", "TRANSFORM_FIELDS", "TRANSFORM_KINDS",
-    "TRANSFORM_PARAMETERS",
+    "COLUMN_FIELDS", "PREVIEW_ROWS", "Transform", "TRANSFORM_FIELD_METADATA",
+    "TRANSFORM_FIELDS", "TRANSFORM_KINDS", "TRANSFORM_PARAMETERS",
 ]
 
 #: How many records a preview carries, unless asked for another number.
@@ -119,6 +119,38 @@ TRANSFORM_KINDS: tuple[_Kind, ...] = (
 TRANSFORM_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
     name for kind in TRANSFORM_KINDS for name in kind.fields
 ))
+
+#: What each externally typed Transform field is: the type of value it holds,
+#: what it means, and -- only where one helps -- an example of its form. The one
+#: statement of these facts: the projection carries them and the loader's CLI
+#: declaration reads them (#1151). No placeholder is a real answer; the manifest
+#: kind's fields are authored, never typed, and state none.
+TRANSFORM_FIELD_METADATA: dict[str, dict[str, str]] = {
+    "transform": {
+        "value_type": "string", "placeholder": "columns: [{name: ..., source: ...}]",
+        "description": "What each output column is and where it comes from. Omit it to "
+                       "load the rows unchanged.",
+    },
+    "transform-file": {
+        "value_type": "path", "placeholder": "/path/to/transform.yaml",
+        "description": "A file holding that declaration, instead of giving it inline.",
+    },
+    "http-adapter": {
+        "value_type": "choice",
+        "description": "The HTTP operation the records are sent through: a governed job "
+                       "of this installation.",
+    },
+    "http-transform": {
+        "value_type": "string", "placeholder": "columns: [{name: ..., source: ...}]",
+        "description": "The column mapping applied to the records before they are sent. "
+                       "Omit it to send them as they are.",
+    },
+    "http-request": {
+        "value_type": "string",
+        "description": "The values set for the HTTP operation's request settings, as "
+                       "{part: {name: value}}. Omit it to send the operation's own.",
+    },
+}
 
 #: The fields the loader declares as parameters -- the externally typed subset.
 TRANSFORM_PARAMETERS: tuple[str, ...] = (
@@ -1210,6 +1242,9 @@ class Transform:
                 # THE FIELDS DRAWN BESIDE THE GRID: never the field its grid
                 # authors (backlog 679).
                 "fields": self.form_fields(),
+                # WHAT EACH FIELD IS, as the Transform's vocabulary states it.
+                "field_metadata": {name: dict(found)
+                                   for name, found in TRANSFORM_FIELD_METADATA.items()},
                 "selected": self.selected_kind(),
                 "values": dict(self.declaration()["values"]),
                 "configuration": dict(self.configuration()),

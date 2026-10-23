@@ -19,7 +19,7 @@ from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.load import Source
 from rey_lib.load import source as source_module
-from rey_lib.load.source import SOURCE_FIELDS
+from rey_lib.load.source import SOURCE_FIELD_METADATA, SOURCE_FIELDS
 
 
 class CountingReader:
@@ -246,6 +246,7 @@ class TestItsSnapshot:
             "values": {"file": "/in.csv"},
             "configuration": dict(source.configuration()),
             "missing": [],
+            "field_metadata": SOURCE_FIELD_METADATA,
             "governed": {
                 "identity": {
                     "file_manifest_id": 3, "file_mutation_id": 12,
@@ -257,9 +258,25 @@ class TestItsSnapshot:
                     "selected": 20,
                 },
             },
-            "choices": {"file-mutation-id": [{"value": "12", "label": "sanitized"}]},
+            "choices": {
+                "file-type": [{"value": one, "label": one} for one in sorted(DataFile.formats())],
+                "file-mutation-id": [{"value": "12", "label": "sanitized"}],
+            },
             "operations": [],
         }
+
+    def test_every_field_states_what_it_is(self) -> None:
+        """The Source's vocabulary describes each of its fields, once (#1151)."""
+        assert set(SOURCE_FIELD_METADATA) == set(SOURCE_FIELDS)
+        for name, found in SOURCE_FIELD_METADATA.items():
+            assert found["value_type"] and found["description"], name
+
+    def test_file_type_is_offered_the_data_formats_of_files_one_registry(self) -> None:
+        """Read from DataFile.formats() (#1133), never a second list."""
+        shown = Source({"file": "/in.csv"}).projection(SimpleNamespace())
+
+        assert [one["value"] for one in shown["choices"]["file-type"]] == sorted(
+            DataFile.formats())
 
     def test_its_governed_context_is_read_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         source = Source({"file": "/in.csv"})
@@ -280,4 +297,5 @@ class TestItsSnapshot:
     def test_ungoverned_it_shows_no_governed_facts(self) -> None:
         shown = Source({"file": "/in.csv"}).projection(SimpleNamespace())
 
-        assert (shown["governed"], shown["choices"]) == (None, {})
+        assert shown["governed"] is None
+        assert "file-mutation-id" not in shown["choices"]

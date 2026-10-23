@@ -20,6 +20,7 @@ from rey_lib.db.database_objects import DatabaseObjectIdentity
 from rey_lib.errors.error_utils import ConfigError
 from rey_lib.files.data_file.base import DataFile
 from rey_lib.load import Source, Target, derived_load_shape
+from rey_lib.load.target import TARGET_FIELD_METADATA, TARGET_FIELDS
 from rey_lib.load import load_operation
 from rey_lib.load import shape as shape_module
 from rey_lib.load import target as target_module
@@ -339,6 +340,13 @@ class TestItsSnapshot:
             "values": dict(target.declaration()["values"]),
             "configuration": dict(target.configuration()),
             "missing": [],
+            "field_metadata": TARGET_FIELD_METADATA,
             "write_policy": "replace",
             "modes": ["create", "replace", "recreate", "append"],
         }
+
+    def test_every_field_states_what_it_is(self) -> None:
+        """The Target's vocabulary describes each of its fields, once (#1151)."""
+        assert set(TARGET_FIELD_METADATA) == set(TARGET_FIELDS)
+        for name, found in TARGET_FIELD_METADATA.items():
+            assert found["value_type"] and found["description"], name

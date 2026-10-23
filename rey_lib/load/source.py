@@ -48,7 +48,7 @@ from rey_lib.load.manifest_source import ManifestSource, SourceContextReader
 from rey_lib.errors.error_utils import StateError
 from rey_lib.logs import AppLogger
 
-__all__ = ["Source", "SOURCE_FIELDS", "SOURCE_KINDS"]
+__all__ = ["Source", "SOURCE_FIELD_METADATA", "SOURCE_FIELDS", "SOURCE_KINDS"]
 
 _logger = AppLogger(__name__)
 
@@ -81,6 +81,53 @@ SOURCE_KINDS: tuple[_Kind, ...] = (
 SOURCE_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
     name for kind in SOURCE_KINDS for name in kind.fields
 ))
+
+#: What each Source field is: the type of value it holds, what it means, and --
+#: only where one helps -- an example of its form. The one statement of these
+#: facts: the projection carries them and the loader's CLI declaration reads
+#: them (#1151). No placeholder is a real answer.
+SOURCE_FIELD_METADATA: dict[str, dict[str, str]] = {
+    "file": {
+        "value_type": "path", "placeholder": "/path/to/file.csv",
+        "description": "The one file to load.",
+    },
+    "file-type": {
+        "value_type": "choice", "placeholder": "Auto detect",
+        "description": "The file's format, where its suffix does not name one.",
+    },
+    "file-manifest-id": {
+        "value_type": "string",
+        "description": "The governed file to load, by its manifest identity. The current "
+                       "state of that file is resolved from it.",
+    },
+    "file-mutation-id": {
+        "value_type": "string",
+        "description": "One specific materialised state of a governed file. Use it to load "
+                       "that state rather than the file's current one.",
+    },
+    "file-type-id": {
+        "value_type": "string",
+        "description": "The file type to work within, where type-level configuration is "
+                       "being edited. Omit it to open the file without a governing scope.",
+    },
+    "source-connection": {
+        "value_type": "choice",
+        "description": "The connection the SOURCE statement runs on. The destination has "
+                       "its own, and they may differ.",
+    },
+    # SQL, SAID BY THE VOCABULARY. A surface gives it a code editor because the
+    # value IS code -- the same way every other value_type decides its control,
+    # and without anything recognising a field called "statement". `sql-file`
+    # stays a path: it is the alternate transport for this text, not the text.
+    "statement": {
+        "value_type": "sql", "placeholder": "select ... from ...",
+        "description": "The SOURCE query, whose result is loaded.",
+    },
+    "sql-file": {
+        "value_type": "path", "placeholder": "/path/to/query.sql",
+        "description": "A file holding the SOURCE query, instead of giving it inline.",
+    },
+}
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in SOURCE_KINDS}
 
@@ -353,6 +400,9 @@ class Source:
                 "values": dict(self.declaration()["values"]),
                 "configuration": dict(self.configuration()),
                 "missing": list(self.validate()),
+                # WHAT EACH FIELD IS, as the Source's vocabulary states it.
+                "field_metadata": {name: dict(found)
+                                   for name, found in SOURCE_FIELD_METADATA.items()},
                 "governed": _governed_projection(governed),
                 "choices": _choices(governed),
                 # WHAT IT CAN DO BEYOND ITS EDITS.
@@ -555,11 +605,14 @@ def _governed_projection(context: Optional[Mapping[str, Any]]) -> Optional[dict[
 def _choices(context: Optional[Mapping[str, Any]]) -> dict[str, list[dict[str, str]]]:
     """The values a Source field may be chosen from, labelled for display.
 
-    The governed file's live mutations offer `file-mutation-id`, each labelled
-    by its `result`. No field is offered anything where there is nothing held.
+    `file-type` is offered the data formats of File's one registry
+    (``DataFile.formats()``, #1133), read now and never copied. The governed
+    file's live mutations offer `file-mutation-id`, each labelled by its
+    `result`; it is offered nothing where there is nothing held.
     """
+    formats = [{"value": one, "label": one} for one in sorted(DataFile.formats())]
     offered = [
         {"value": str(one.get("file_mutation_id")), "label": str(one.get("result") or "")}
         for one in (context or {}).get("mutation_choices") or []
     ]
-    return {"file-mutation-id": offered} if offered else {}
+    return {"file-type": formats, **({"file-mutation-id": offered} if offered else {})}

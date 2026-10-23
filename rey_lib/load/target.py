@@ -44,7 +44,8 @@ from rey_lib.load import load_operation
 from rey_lib.logs import AppLogger
 
 __all__ = [
-    "MODES", "Target", "TARGET_FIELDS", "TARGET_KINDS", "TARGET_PARAMETERS",
+    "MODES", "Target", "TARGET_FIELD_METADATA", "TARGET_FIELDS", "TARGET_KINDS",
+    "TARGET_PARAMETERS",
 ]
 
 _logger = AppLogger(__name__)
@@ -75,6 +76,47 @@ TARGET_FIELDS: tuple[str, ...] = tuple(dict.fromkeys(
 
 #: The fields the loader declares as parameters -- here, every one of them.
 TARGET_PARAMETERS: tuple[str, ...] = TARGET_FIELDS
+
+#: What each Target field is: the type of value it holds, what it means, and --
+#: only where one helps -- an example of its form. The one statement of these
+#: facts: the projection carries them and the loader's CLI declaration reads
+#: them (#1151). No placeholder is a real answer.
+TARGET_FIELD_METADATA: dict[str, dict[str, str]] = {
+    "connection": {
+        "value_type": "choice",
+        "description": "The connection the DESTINATION is reached through.",
+    },
+    "table": {
+        "value_type": "string", "placeholder": "schema.table",
+        "description": "The destination, as schema.table.",
+    },
+    "create": {
+        "value_type": "flag",
+        "description": "Create the destination from the source when it does not exist.",
+    },
+    "replace": {
+        "value_type": "flag",
+        "description": "Replace the destination's contents with what this load carries. Its "
+                       "rows are removed first; the table, its constraints and its grants "
+                       "are not touched.",
+    },
+    "recreate": {
+        "value_type": "flag",
+        "description": "Destroy the destination and build it again from what this load "
+                       "carries. The table is dropped and created, so its indexes, "
+                       "constraints and triggers go with it and are not rebuilt.",
+    },
+    "append": {
+        "value_type": "flag",
+        "description": "Add to the destination's contents. This is what a load does when "
+                       "told nothing.",
+    },
+    "out-file": {
+        "value_type": "path", "placeholder": "/path/to/rows.csv",
+        "description": "The destination file. Its suffix names the format, and it needs no "
+                       "connection.",
+    },
+}
 
 _BY_ID: dict[str, _Kind] = {kind.id: kind for kind in TARGET_KINDS}
 
@@ -212,6 +254,9 @@ class Target:
                 "values": dict(self.declaration()["values"]),
                 "configuration": dict(self.configuration()),
                 "missing": list(self.validate()),
+                # WHAT EACH FIELD IS, as the Target's vocabulary states it.
+                "field_metadata": {name: dict(found)
+                                   for name, found in TARGET_FIELD_METADATA.items()},
                 "write_policy": self.write_policy(),
                 "modes": list(MODES),
             }
