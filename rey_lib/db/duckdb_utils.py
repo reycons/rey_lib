@@ -182,22 +182,32 @@ def get_connection(db_cfg: Any = None, *, ctx: Any = None) -> duckdb.DuckDBPyCon
 
     Raises
     ------
-    RuntimeError
+    StateError
         If no configuration is supplied and init_db() has not been called.
+    DatabaseError
+        If the database cannot be opened: the driver refuses it, or its
+        parent directory cannot be created (backlog 1033).
     """
     database = str(_config_value(db_cfg, "database") or "")
     if database == MEMORY_DATABASE:
-        return duckdb.connect(MEMORY_DATABASE, config=dict(_OFFLINE_CONNECTION_CONFIG))
+        target = MEMORY_DATABASE
+    else:
+        configured = _config_value(db_cfg, "path") or (database or None)
+        if configured:
+            target = str(Path(str(configured)).expanduser().resolve())
+        else:
+            _require_init()
+            target = str(_db_path)
 
-    configured = _config_value(db_cfg, "path") or (database or None)
-    if configured:
-        path = Path(str(configured)).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return duckdb.connect(str(path))
-
-    _require_init()
-    _db_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
-    return duckdb.connect(str(_db_path))
+    # An open failure is the canonical DatabaseError, as postgres_utils raises
+    # it, so callers on the AppError path see a database failure, not a driver's.
+    try:
+        if target == MEMORY_DATABASE:
+            return duckdb.connect(MEMORY_DATABASE, config=dict(_OFFLINE_CONNECTION_CONFIG))
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        return duckdb.connect(target)
+    except (duckdb.Error, OSError) as exc:
+        raise DatabaseError(f"duckdb_utils: failed to open '{target}': {exc}") from exc
 
 
 def execute(
