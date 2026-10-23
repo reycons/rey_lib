@@ -233,9 +233,11 @@ class TestOffers:
 
         assert [one["value"] for one in task.offers["representation"]] == ["redacted"]
 
-    def test_the_projection_states_its_presentation_and_its_offers(self) -> None:
+    def test_the_projection_states_its_offers_and_no_presentation(self) -> None:
+        """#1215: the task does not state how it is presented."""
         projection = _hydrate(task_key="search_index").projection()
 
-        assert projection["panel_type"] == AITask.PANEL_TYPE == "ai_task"
+        assert "panel_type" not in projection
+        assert not hasattr(AITask, "PANEL_TYPE")
         assert set(projection["offers"]) == {"profile_key", "instruction_key", "representation"}
         assert "offers" not in _hydrate(task_key="search_index").definition()

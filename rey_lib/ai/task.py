@@ -88,10 +88,6 @@ class AITask:
             changed only by this task's transitions.
     """
 
-    #: What kind of presentation a task requires (#1141 S2, R5): a semantic type.
-    #: Which Console panel implements it is the Console's, never this object's.
-    PANEL_TYPE: ClassVar[str] = "ai_task"
-
     IDLE: ClassVar[str] = "idle"
     RUNNING: ClassVar[str] = "running"
     COMPLETED: ClassVar[str] = "completed"
@@ -425,12 +421,11 @@ class AITask:
         value with the media type, never rendered. Engine credentials and the
         contract body stay out: they are execution facts, not display.
 
-        With them, how it is presented (#1141 S2): its semantic panel_type, never
-        a Console panel; and what each of its choices may be (``offers``).
+        With them, what each of its choices may be (``offers``). How it is
+        presented is not the task's: Projection.for_subject resolves that (#1215).
         """
         answer = self.answer
         return {
-            "panel_type": self.PANEL_TYPE,
             "id": self.id,
             "task_key": self.task_key,
             "label": self.label,
